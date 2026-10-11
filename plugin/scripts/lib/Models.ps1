@@ -47,6 +47,12 @@ function Get-ModelsConfig {
     return Get-Content -Raw $path | ConvertFrom-Json -AsHashtable
 }
 
+# The short name an Agent tool accepts when it does not take full model ids (haiku, sonnet, opus, fable); '' when the id is not recognised.
+function Get-ModelAlias([string]$Model) {
+    foreach ($a in 'haiku', 'sonnet', 'opus', 'fable') { if ($Model -match "(?i)^claude-$a(-|$)") { return $a } }
+    return ''
+}
+
 # Resolve the model and effort for a role. -Tier overrides the gateway lookup (tests, explicit pins).
 function Resolve-ModelFor([string]$Role, $Tier, $Cfg, [string]$Profile = '') {
     if ($Profile -and $Cfg.ContainsKey('profiles') -and $Cfg.profiles.ContainsKey($Profile)) {

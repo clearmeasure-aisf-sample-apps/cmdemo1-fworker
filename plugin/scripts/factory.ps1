@@ -96,13 +96,17 @@ if ($verb -eq 'model-for') {
     elseif ($m.ContainsKey('item')) {
         try {
             $cc = Get-ClientConfig
-            $resp = Invoke-WebRequest -Uri "$($cc.url)/api/v1/verbs/model-tier" -Method POST -Body (@{ item = $m.item } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = "Bearer $($cc.token)" } -SkipHttpErrorCheck -TimeoutSec 60
+            # An owner-mode worker holds a worker credential, which is refused for item verbs: the item's own token answers the question.
+            . (Join-Path $here 'lib/Client.Own.ps1')
+            $tk = Select-ItemToken $cc $m.item
+            $resp = Invoke-WebRequest -Uri "$($cc.url)/api/v1/verbs/model-tier" -Method POST -Body (@{ item = $m.item } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = "Bearer $tk" } -SkipHttpErrorCheck -TimeoutSec 60
             $j = $resp.Content | ConvertFrom-Json -AsHashtable
             if ($j.ok) { $tier = [int]$j.tier; $why = @($j.reasons); if (-not $profile -and $j.profile) { $profile = "$($j.profile)" } } else { $note = "gateway refused: $($j.code)" }
         } catch { $note = 'gateway unreachable; using the starting tier' }
     }
     $res = Resolve-ModelFor $role $tier (Get-ModelsConfig) $profile
     $res.reasons = $why; if ($note) { $res.note = $note }
+    $res.alias = Get-ModelAlias "$($res.model)"
     Write-Out $res 0
 }
 if ($verb -eq 'subscribe') {
