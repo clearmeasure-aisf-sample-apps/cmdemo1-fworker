@@ -111,7 +111,17 @@ function Get-State([int]$Item) {
     $marker = Get-StateMarker; $login = Get-ServerLogin
     $all = @(Get-Comments $Item)
     $found = $all | Where-Object { $_.user.login -eq $login -and $_.body.StartsWith($marker) } | Select-Object -First 1
-    if (-not $found) { return @{ commentId = $null; state = @{ schema = 1; item = $Item }; comments = $all } }
+    if (-not $found) {
+        # A change of identity (the personal/bot token of a local gateway to a GitHub App) must not orphan the items in flight: with none of its own,
+        # the gateway adopts the newest state written by one of the logins the instance names in stateAuthors, and writes its own comment on the next save.
+        $cfg = Get-Cfg; $trusted = @(if (Test-Has $cfg 'stateAuthors') { $cfg.stateAuthors })
+        $old = if ($trusted.Count -gt 0) { @($all | Where-Object { $_.user.login -in $trusted -and $_.body.StartsWith($marker) }) | Select-Object -Last 1 } else { $null }
+        if ($old) {
+            $m0 = [regex]::Match($old.body, '(?s)```json\s*(.*?)\s*```')
+            if ($m0.Success) { return @{ commentId = $null; state = ($m0.Groups[1].Value | ConvertFrom-Json -AsHashtable -DateKind String); comments = $all; adopted_from = $old.user.login } }
+        }
+        return @{ commentId = $null; state = @{ schema = 1; item = $Item }; comments = $all }
+    }
     $m = [regex]::Match($found.body, '(?s)```json\s*(.*?)\s*```')
     $s = if ($m.Success) { $m.Groups[1].Value | ConvertFrom-Json -AsHashtable -DateKind String } else { @{ schema = 1; item = $Item } }
     return @{ commentId = $found.id; state = $s; comments = $all }

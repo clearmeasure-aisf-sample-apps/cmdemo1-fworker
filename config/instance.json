@@ -188,5 +188,8 @@
   "mergeQueueDepth": 2,
   "ownerSessions": true,
   "idleReleaseMinutes": 60,
-  "assignAckSeconds": 30
+  "assignAckSeconds": 30,
+  "stateAuthors": [
+    "cm-ai-ops-bot"
+  ]
 }
