@@ -18,6 +18,8 @@
 $Rest = [string[]]$args
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib/Paths.ps1')
+if ($IsWindows) { [Console]::Out.WriteLine('{"ok":false,"code":"unsupported-os","reason":"QC environments run on Linux or macOS workers"}'); exit 30 }
 $script:Self = $PSCommandPath
 
 function Write-Out($obj, [int]$code) { $obj.exit = $code; [Console]::Out.WriteLine(($obj | ConvertTo-Json -Depth 8 -Compress)); exit $code }
@@ -39,7 +41,7 @@ $EnvId = $A.env_id
 function Get-ProfilePath {
     if (Test-Has $A 'profile') { return $A.profile }
     if ($env:FACTORY_QC_PROFILE) { return $env:FACTORY_QC_PROFILE }
-    $sd = if ($env:FACTORY_WORKER_STATE_DIR) { $env:FACTORY_WORKER_STATE_DIR } else { Join-Path $HOME '.local/share/factory-worker/state' }
+    $sd = Get-FwSubDir 'state' $env:FACTORY_WORKER_STATE_DIR
     foreach ($n in 'qc-profile.json', 'qc-profile.md') { $p = Join-Path $sd $n; if (Test-Path -LiteralPath $p) { return $p } }
     return (Join-Path $sd 'qc-profile.json')
 }
@@ -60,7 +62,7 @@ function Pf($p, [string]$k, $default) { if ((Test-Has $p $k) -and "$($p[$k])".Le
 function Test-Truthy($v) { "$v".ToLowerInvariant() -in 'true', '1', 'yes' }
 
 function Get-BaseDir($p) {
-    $b = if (Test-Has $A 'base_dir') { $A.base_dir } elseif ($env:FACTORY_QC_BASE_DIR) { $env:FACTORY_QC_BASE_DIR } else { Pf $p 'basedir' (Join-Path $HOME '.local/share/factory-worker/qc') }
+    $b = if (Test-Has $A 'base_dir') { $A.base_dir } elseif ($env:FACTORY_QC_BASE_DIR) { $env:FACTORY_QC_BASE_DIR } else { Pf $p 'basedir' (Join-Path (Get-FwDataDir) 'qc') }
     New-Item -ItemType Directory -Force -Path $b | Out-Null
     return (Resolve-Path -LiteralPath $b).Path
 }
@@ -315,7 +317,7 @@ function Do-Run {
     $rep = @{ item = $item; pr = "$($st.pr)"; sha = $repSha; env_id = $EnvId; url = $url; port = $port; local_health = 'ok' }
     Write-Json (Join-Path $E 'report.json') $rep
     Write-Json (Join-Path $E 'app.json') @{ pid = $appPid; port = $port; bind = $bind; url = $url; health_url = "http://${healthHost}:$port$healthPath"; started = [DateTime]::UtcNow.ToString('o') }
-    $tokDir = if ($env:FACTORY_TOKEN_DIR) { $env:FACTORY_TOKEN_DIR } else { Join-Path $HOME '.local/share/factory-worker/tokens' }
+    $tokDir = Get-FwSubDir 'tokens' $env:FACTORY_TOKEN_DIR
     Write-Json (Join-Path $E 'watch.json') @{ gateway = "$env:FACTORY_URL".TrimEnd('/'); token_dir = $tokDir; item = $item
         interval = [int](Pf $p 'heartbeatseconds' 60); gateway_lost_seconds = [int](Pf $p 'gatewaylostseconds' 900); profile = (Get-ProfilePath) }
     $base = Split-Path -Parent $E

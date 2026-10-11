@@ -35,10 +35,7 @@ function Get-Cfg {
 }
 
 function Get-StateDir {
-    $d = $env:FACTORY_STATE_DIR
-    if (-not $d) { $d = Join-Path $HOME '.local/share/factory-worker/state' }
-    New-Item -ItemType Directory -Force -Path $d | Out-Null
-    return $d
+    return Get-FwSubDir 'state' $env:FACTORY_STATE_DIR
 }
 
 function Get-UtcNow { [DateTime]::UtcNow }
