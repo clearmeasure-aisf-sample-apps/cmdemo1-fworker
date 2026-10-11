@@ -20,20 +20,23 @@ $want = $null
 $gj = Join-Path $repo 'global.json'
 if (Test-Path -LiteralPath $gj) { try { $want = (Get-Content -Raw -LiteralPath $gj | ConvertFrom-Json).sdk.version } catch { $want = $null } }
 
-# 1. a dotnet on the PATH that already has the wanted SDK (or any SDK when none is pinned)
-$have = Get-Command dotnet -ErrorAction SilentlyContinue
-if ($have) {
-    $sdks = @(& $have.Source --list-sdks 2>$null | ForEach-Object { ($_ -split ' ')[0] })
-    if ($sdks.Count -gt 0 -and (-not $want -or $sdks -contains $want)) { Out @{ ok = $true; dotnet = $have.Source; version = $(if ($want) { $want } else { $sdks[-1] }); installed = $false } 0 }
+# 1. a dotnet on the PATH that the repository's global.json accepts: asking `dotnet --version` from inside the repository applies the
+#    pin and its roll-forward policy exactly as the build will, so a newer feature band that the pin allows is used and nothing is downloaded.
+function Test-Dotnet([string]$Exe) {
+    try {
+        Push-Location -LiteralPath $repo
+        try { $out = @(& $Exe --version 2>$null); $code = $LASTEXITCODE } finally { Pop-Location }
+        if ($code -eq 0 -and $out.Count -gt 0) { return "$($out[0])".Trim() }
+    } catch { }
+    return $null
 }
+$have = Get-Command dotnet -ErrorAction SilentlyContinue
+if ($have) { $v = Test-Dotnet $have.Source; if ($v) { Out @{ ok = $true; dotnet = $have.Source; version = $v; installed = $false } 0 } }
 
 # 2. a previous install of ours
 $dir = Join-Path (Get-FwDataDir) 'dotnet'
 $exe = Join-Path $dir $(if ($IsWindows) { 'dotnet.exe' } else { 'dotnet' })
-if (Test-Path -LiteralPath $exe) {
-    $sdks = @(& $exe --list-sdks 2>$null | ForEach-Object { ($_ -split ' ')[0] })
-    if ($sdks.Count -gt 0 -and (-not $want -or $sdks -contains $want)) { Out @{ ok = $true; dotnet = $exe; version = $(if ($want) { $want } else { $sdks[-1] }); installed = $false } 0 }
-}
+if (Test-Path -LiteralPath $exe) { $v = Test-Dotnet $exe; if ($v) { Out @{ ok = $true; dotnet = $exe; version = $v; installed = $false } 0 } }
 
 # 3. install with Microsoft's script
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "dotnet-install-$([guid]::NewGuid().ToString('N').Substring(0,8))"
@@ -53,5 +56,5 @@ try {
 } catch { Out @{ ok = $false; code = 'download-failed'; reason = "$($_.Exception.Message)" } 20 }
 finally { Remove-Item -Recurse -Force -LiteralPath $tmp -ErrorAction SilentlyContinue }
 if (-not (Test-Path -LiteralPath $exe)) { Out @{ ok = $false; code = 'install-failed'; reason = 'the installer finished but no dotnet was installed' } 20 }
-$sdks = @(& $exe --list-sdks 2>$null | ForEach-Object { ($_ -split ' ')[0] })
-Out @{ ok = $true; dotnet = $exe; version = $(if ($sdks.Count) { $sdks[-1] } else { '' }); installed = $true } 0
+$v = Test-Dotnet $exe
+Out @{ ok = $true; dotnet = $exe; version = $(if ($v) { $v } else { '' }); installed = $true } 0
