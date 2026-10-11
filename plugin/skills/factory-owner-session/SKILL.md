@@ -46,4 +46,4 @@ Never: move, merge, close or label an item except through `factory.ps1`; act on 
 Done: `item.complete` arrived, or the item was released or parked and the reason logged.
 
 ## Model for each subagent
-`factory.ps1 model-for --role subagent --item N`: pass `model` to the Agent tool. Never choose a model by judgement; never lower a tier.
+`factory.ps1 model-for --role subagent --item N` returns `{model, alias, effort, ...}`: pass `model` to the Agent tool, or `alias` (haiku, sonnet, opus, fable) when the Agent tool accepts only short names. Never choose a model by judgement; never lower a tier. A `note` in the answer (for example `gateway refused`) means the tier could not be read: stop and report it instead of using the answer.
