@@ -24,7 +24,7 @@ Entry: `factory.ps1 get-item --item N`. The result decides the mode, exclusive:
 6. REVIEWER, only on green checks and `REVIEW: COMPLETE`: ONE call
    `factory.ps1 complete --item N --column Development --review-ref <ref> --comment "PR open, CI green - <PR link>. REVIEW: COMPLETE - <one sentence>"`.
    - exit 0: done. exit 21 (`accepted-checks-pending`): the gateway watches the checks and advances the item; stop.
-   - exit 10: `empty-pr`, `no-open-pr`, `checks-not-green`, `development-docs-only-pr` (only when the item body has `<!-- aisf:docs-only -->`), `reviewer-verdict-missing`: fix the named cause, one more call.
+   - exit 10: `empty-pr`, `no-open-pr`, `checks-not-green`, `development-docs-only-pr` (the pull request changes only documentation and the item body does not carry `<!-- aisf:docs-only -->`; a docs-only item carries it from its technical design), `reviewer-verdict-missing`: fix the named cause, one more call.
    - exit 11: stop at once.
    - unrecoverable: `complete --succeeded false --comment "<summary>"`.
 
