@@ -24,7 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /tmp/pwsh.tgz /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/publish ./
-COPY plugin/scripts/ /app/plugin/scripts/
+COPY plugin/ /app/plugin/
+# the gateway serves this directory to workers (GET /api/v1/plugin): the build fails when the skills or agents are missing from the image
+RUN test -f /app/plugin/scripts/factory.ps1 && test -f /app/plugin/skills/factory-owner-session/SKILL.md && test -f /app/plugin/agents/factory-implementer.md
 COPY config/ /app/config/
 # State (the sweep's seen/refusal caches) lives in the container's file system; the truth is on the board and in the
 # item state comments, so a restart loses only caches and the plant's in-memory registry (workers re-register).
