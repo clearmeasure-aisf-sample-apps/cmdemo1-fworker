@@ -50,6 +50,25 @@ function Get-Delivery([string]$Sha) {
     return $res
 }
 
+# The newest releases to prod that contain the change (releases are cumulative on master): used when the item's own release has
+# scrolled out of the recent list or was never promoted itself because a later release carried it to prod.
+function Get-ProdContaining([string]$Sha) {
+    $o = (Get-Cfg).octopus; $sp = $o.space
+    $proj = Invoke-Octo "api/$sp/projects/$($o.project)"; if (-not $proj) { return $null }
+    $envs = @{}; foreach ($e in (Invoke-Octo "api/$sp/environments?take=1000").Items) { $envs[$e.Id] = $e.Name }
+    $prodName = $o.environments.prod
+    foreach ($d in @((Invoke-Octo "api/$sp/deployments?projects=$($proj.Id)&take=30").Items)) {
+        if (-not $envs[$d.EnvironmentId] -or $envs[$d.EnvironmentId] -ine $prodName) { continue }
+        $task = Invoke-Octo "api/$sp/tasks/$($d.TaskId)"; if (-not $task -or "$($task.State)" -ne 'Success') { continue }
+        $rel = Invoke-Octo "api/$sp/releases/$($d.ReleaseId)"; if (-not $rel) { continue }
+        $c = Get-ReleaseCommit $rel; if (-not $c) { continue }
+        if ($c -eq $Sha.ToLower()) { return "$($rel.Version)" }
+        $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($Sha)...$c" -Allow 404, 422
+        if ($cmp -isnot [hashtable] -and $cmp.status -in 'ahead', 'identical') { return "$($rel.Version)" }
+    }
+    return $null
+}
+
 function Verb_get_delivery($a) {
     $sha = if (Test-Has $a 'commit') { "$($a.commit)" } else {
         $st = Get-State (Get-ItemNumber $a)
@@ -144,6 +163,11 @@ function Invoke-Settle([int]$n) {
         if ($d.prod_success) {
             & $finish "Delivered to **Prod** - moved to **$(Get-LastColumn)**. Release $($m.release)."
             return @{ outcome = 'done'; path = 'prod' }
+        }
+        $later = Get-ProdContaining $sha
+        if ($later) {
+            & $finish "Delivered to **Prod** in release $later, which contains this change - moved to **$(Get-LastColumn)**."
+            return @{ outcome = 'done'; path = 'prod-later-release'; release = $later }
         }
         return @{ outcome = 'waiting'; awaiting = 'release-queue'; deployments = $d.deployments }
     }
