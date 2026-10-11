@@ -224,6 +224,13 @@ app.MapPost("/api/v1/workers/{name}/{action}", (string name, string action, Http
 {
     var who = Who(ctx);
     if (!(who.Kind == "admin" || (who.Kind == "worker" && who.Name == name))) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"a worker may only change itself\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+    if (action == "capacity")
+    {   // operator only: how many items this worker name may own at once
+        if (who.Kind != "admin") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"only the operator sets a worker's capacity\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+        if (!int.TryParse(ctx.Request.Query["value"], out var cv) || cv < 1 || cv > 20) return Results.Text("{\"ok\":false,\"code\":\"usage\",\"reason\":\"value must be 1 to 20\",\"exit\":2}", "application/json", Encoding.UTF8, 400);
+        plant.SetCapacity(name, cv);
+        return Results.Text(JsonSerializer.Serialize(new { ok = true, name, capacity = Math.Clamp(cv, 1, 20) }), "application/json");
+    }
     if (action is not ("drain" or "resume")) return Results.NotFound();
     return plant.SetDraining(name, action == "drain") ? Results.Text(JsonSerializer.Serialize(new { ok = true, name, draining = action == "drain" }), "application/json")
         : Results.Text("{\"ok\":false,\"code\":\"not-found\",\"reason\":\"no such worker\",\"exit\":12}", "application/json", Encoding.UTF8, 404);

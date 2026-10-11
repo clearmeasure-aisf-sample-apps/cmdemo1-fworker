@@ -62,7 +62,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
         lock (gate)
         {
             if (!workers.TryGetValue(name, out var w)) workers[name] = w = new WorkerInfo { Name = name };
-            w.Type = type; w.Caps = new(caps); w.Capacity = Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
+            w.Type = type; w.Caps = new(caps); w.Capacity = capOverride.TryGetValue(name, out var capSet) ? capSet : Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
             w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = false;
             w.Out?.Writer.TryComplete();
@@ -77,6 +77,19 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
     }
 
     public void Disconnect(WorkerInfo w, Channel<(long, string)> ch) { lock (gate) { if (w.Out == ch) { w.Connected = false; w.Out = null; } } }
+    // The operator's capacity for a worker name: it wins over what the session declares at registration, and it holds across the worker's reconnects
+    // (not across a gateway restart: the session's own --capacity applies again then).
+    readonly Dictionary<string, int> capOverride = new();
+    public bool SetCapacity(string name, int capacity)
+    {
+        lock (gate)
+        {
+            capOverride[name] = Math.Clamp(capacity, 1, 20);
+            if (workers.TryGetValue(name, out var w)) w.Capacity = capOverride[name];
+            return true;
+        }
+    }
+
     public bool SetDraining(string name, bool on) { lock (gate) { if (!workers.TryGetValue(name, out var w)) return false; w.Draining = on; return true; } }
 
     long Push(WorkerInfo w, string json, bool toBuffer = true)
