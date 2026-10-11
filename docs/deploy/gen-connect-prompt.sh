@@ -17,7 +17,8 @@ URL=${URL%/}
 TOK=$(secret-tool lookup service factory-worker kind "fworker-dev-token-$ENVN")
 mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"; T=$(mktemp -d -p "${XDG_CACHE_HOME:-$HOME/.cache}"); trap 'rm -rf "$T"' EXIT
 auth() { curl -fsS -H @<(printf 'Authorization: Bearer %s' "$TOK") "$@"; }
-curl -fsS "$URL/dashboard" -o "$T/dashboard.html"
+# RENDER_SOURCE=<path to gateway/Program.cs> renders with the generator of a source tree that is not deployed yet
+if [ -n "${RENDER_SOURCE:-}" ]; then cp "$RENDER_SOURCE" "$T/dashboard.html"; else curl -fsS "$URL/dashboard" -o "$T/dashboard.html"; fi
 auth -X POST "$URL/api/v1/workers/$NAME/credential" -o "$T/cred.json"
 auth "$URL/api/v1/dashboard" -o "$T/info.json"
 auth "$URL/api/v1/qc" -o "$T/qc.json" || echo '{}' > "$T/qc.json"

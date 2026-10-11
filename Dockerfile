@@ -26,7 +26,7 @@ WORKDIR /app
 COPY --from=build /app/publish ./
 COPY plugin/ /app/plugin/
 # the gateway serves this directory to workers (GET /api/v1/plugin): the build fails when the skills or agents are missing from the image
-RUN test -f /app/plugin/scripts/factory.ps1 && test -f /app/plugin/skills/factory-owner-session/SKILL.md && test -f /app/plugin/agents/factory-implementer.md && test -f /app/plugin/scripts/models.default.json && test -f /app/plugin/scripts/ensure-tools.ps1 && test -f /app/plugin/scripts/app-run.ps1
+RUN test -f /app/plugin/scripts/factory.ps1 && test -f /app/plugin/skills/factory-owner-session/SKILL.md && test -f /app/plugin/agents/factory-implementer.md && test -f /app/plugin/scripts/models.default.json && test -f /app/plugin/scripts/ensure-tools.ps1 && test -f /app/plugin/scripts/app-run.ps1 && test -f /app/plugin/scripts/app-shot.ps1 && test -f /app/plugin/tools/shot/Shot.csproj
 COPY config/ /app/config/
 # State (the sweep's seen/refusal caches) lives in the container's file system; the truth is on the board and in the
 # item state comments, so a restart loses only caches and the plant's in-memory registry (workers re-register).

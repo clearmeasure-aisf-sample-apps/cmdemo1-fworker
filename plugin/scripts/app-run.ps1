@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 # app-run.ps1 <check|start|probe|stop> [...]   Runs a built .NET web application and looks at it, on Linux, macOS and Windows, with no shell tools.
-#   check --dotnet D --project P [--port 5199] [--paths "/,/other"] [--wait 90] [--log F]
-#         starts `dotnet run --no-build --project P --urls http://localhost:PORT`, waits for /_healthcheck, fetches each path, stops the whole
+#   check --dotnet D --project P [--port 5199] [--paths "/,/other"] [--wait 90] [--log F] [--configuration Release]
+#         starts `dotnet run --no-build --no-launch-profile -c Release --project P --urls http://localhost:PORT`, waits for /_healthcheck, fetches each path, stops the whole
 #         process tree. One call; prints one JSON line: health status and, per path, the status code and the first 4000 characters of text.
 #   start --dotnet D --project P [--port 5199] [--log F]    starts it detached; prints {pid, url}
 #   probe --url U                                           one GET; prints {status, text}
@@ -25,7 +25,7 @@ function Start-App {
     foreach ($k in 'dotnet', 'project') { if (-not $f.ContainsKey($k)) { Out @{ ok = $false; code = 'usage'; reason = "--$k is required" } 2 } }
     $port = if ($f.ContainsKey('port')) { $f.port } else { '5199' }
     $log = if ($f.ContainsKey('log')) { $f.log } else { Join-Path ([IO.Path]::GetTempPath()) "app-run-$port.log" }
-    $p = Start-Process -FilePath $f.dotnet -ArgumentList @('run', '--no-build', '--project', $f.project, '--urls', "http://localhost:$port") -RedirectStandardOutput $log -RedirectStandardError "$log.err" -PassThru
+    $p = Start-Process -FilePath $f.dotnet -ArgumentList @('run', '--no-build', '--no-launch-profile', '--configuration', $(if ($f.ContainsKey('configuration')) { $f.configuration } else { 'Release' }), '--project', $f.project, '--urls', "http://localhost:$port") -RedirectStandardOutput $log -RedirectStandardError "$log.err" -PassThru
     return @{ pid = $p.Id; url = "http://localhost:$port"; log = $log }
 }
 
@@ -37,7 +37,7 @@ switch ($verb) {
         $a = Start-App; $wait = if ($f.ContainsKey('wait')) { [int]$f.wait } else { 90 }
         $health = 0; $end = (Get-Date).AddSeconds($wait)
         try {
-            do { Start-Sleep -Seconds 2; $health = (Get-Page "$($a.url)/_healthcheck").status } while ($health -ne 200 -and (Get-Date) -lt $end -and -not (Get-Process -Id $a.pid -ErrorAction SilentlyContinue).HasExited)
+            do { Start-Sleep -Seconds 2; $health = (Get-Page "$($a.url)/_healthcheck").status; $alive = Get-Process -Id $a.pid -ErrorAction SilentlyContinue } while ($health -ne 200 -and (Get-Date) -lt $end -and $alive -and -not $alive.HasExited)
             $pages = @()
             if ($health -eq 200) { foreach ($path in @(($(if ($f.ContainsKey('paths')) { $f.paths } else { '/' })) -split ',')) { $g = Get-Page ($a.url + $path.Trim()); $pages += @{ path = $path.Trim(); status = $g.status; text = $g.text } } }
         } finally { Stop-Tree $a.pid }

@@ -36,7 +36,7 @@ function Invoke-Subscribe($a) {
     $max = if ($env:FACTORY_MAX_WORKERS) { [int]$env:FACTORY_MAX_WORKERS } else { 3 }
     $caps = if ($a.ContainsKey('capabilities')) { $a.capabilities } else { 'git,pwsh' }
     $lastId = ''
-    $backoff = 2
+    $backoff = 2; $dropN = 0
     [Console]::Out.WriteLine((@{ provider = 'client'; event = 'session.start'; at = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress)); [Console]::Out.Flush()
     while ($true) {
         $http = [Net.Http.HttpClient]::new(); $http.Timeout = [TimeSpan]::FromHours(24)
@@ -47,7 +47,7 @@ function Invoke-Subscribe($a) {
             $resp = $http.SendAsync($req, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
             if (-not $resp.IsSuccessStatusCode) { throw "gateway answered $([int]$resp.StatusCode)" }
             $reader = [IO.StreamReader]::new($resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
-            $backoff = 2
+            $backoff = 2; $dropN = 0
             while (-not $reader.EndOfStream) {
                 $line = $reader.ReadLine()
                 if ($line.StartsWith('id:')) { $lastId = $line.Substring(3).Trim() }
@@ -57,7 +57,12 @@ function Invoke-Subscribe($a) {
                     if ($spawn) { try { $ev = $json | ConvertFrom-Json; if ($ev.event -eq 'work.offered') { Start-Worker $ev $cfg $max } } catch { [Console]::Error.WriteLine("spawn failed: $($_.Exception.Message)") } }
                 }
             }
-        } catch { [Console]::Error.WriteLine("subscription dropped: $($_.Exception.Message); retrying in ${backoff}s") }
+        } catch {
+            # on stdout, where a Monitor reads: a refused credential or an unreachable gateway must be visible to the session, not only on stderr
+            $dropN++
+            if ($dropN -le 3 -or $dropN % 10 -eq 0) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'stream.error'; reason = "$($_.Exception.Message)"; attempt = $dropN; retry_in_seconds = $backoff } | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
+            [Console]::Error.WriteLine("subscription dropped: $($_.Exception.Message); retrying in ${backoff}s")
+        }
         finally { $http.Dispose() }
         Start-Sleep -Seconds $backoff; $backoff = [Math]::Min(30, $backoff * 2)
     }
