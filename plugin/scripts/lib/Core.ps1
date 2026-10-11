@@ -51,7 +51,9 @@ function Get-RepoPath { $c = Get-Cfg; "repos/$($c.owner)/$($c.repo)" }
 
 function Invoke-GhRaw {
     param([string]$Method = 'GET', [string]$Path, $Body = $null, [string]$Accept = 'application/vnd.github+json')
-    $tok = if ($script:AsToken) { $script:AsToken } else { $env:GH_TOKEN }
+    # The author identity: an organization GitHub App (cloud gateways; FACTORY_AUTHOR_APP=1) or the GH_TOKEN of a local gateway. The value
+    # 'unset' is the vault placeholder written before an identity exists: it counts as no token.
+    $tok = if ($script:AsToken) { $script:AsToken } elseif ($env:FACTORY_AUTHOR_APP -eq '1') { Get-AppToken 'author' } elseif ($env:GH_TOKEN -ne 'unset') { $env:GH_TOKEN } else { $null }
     if (-not $tok) { Reject 30 'secret-missing' 'GH_TOKEN is not set on the gateway' }
     $base = if ($env:GITHUB_API_URL) { $env:GITHUB_API_URL.TrimEnd('/') } else { 'https://api.github.com' }   # tests point this at the fake server
     $uri = if ($Path -match '^https?://') { $Path } else { "$base/$($Path.TrimStart('/'))" }

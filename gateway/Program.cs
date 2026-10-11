@@ -85,6 +85,9 @@ app.Use(async (ctx, next) =>
 
 if (ownerMode) qc.Map(app);
 app.MapGet("/health", () => Results.Text("ok"));
+// liveness for the kit's hourly Health report (it asks every app for /alive, then /): the process answers, nothing else is checked
+app.MapGet("/alive", () => Results.Text("ok"));
+app.MapGet("/", () => Results.Redirect("/dashboard"));
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
 app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
 app.MapGet("/api/v1/status", (HttpContext c) => Who(c).Kind != "admin" ? Results.StatusCode(403)
