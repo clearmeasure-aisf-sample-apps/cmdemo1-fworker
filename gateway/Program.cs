@@ -95,6 +95,21 @@ app.MapGet("/api/v1/status", (HttpContext c) => Who(c).Kind != "admin" ? Results
         ["pendingOffers"] = hub.PendingCount, ["lastSweep"] = hub.LastSweep, ["plant"] = plant.Status() }.ToJsonString(), "application/json"));
 
 app.MapGet("/dashboard", () => Results.Text(DashboardPage.Html, "text/html; charset=utf-8"));
+// The plugin (skills, agents, scripts) as a tar.gz for a worker that cannot reach the source: a hand-made cloud session pulls exactly the
+// version this gateway runs. Needs a worker credential or the operator token; nothing outside the plugin directory is included.
+app.MapGet("/api/v1/plugin", (HttpContext c) =>
+{
+    var who = Who(c);
+    if (who.Kind is not ("admin" or "worker")) return Results.StatusCode(403);
+    var root = Path.GetFullPath(Path.Combine(scriptsDir, ".."));
+    if (!Directory.Exists(root) || !File.Exists(Path.Combine(root, "scripts", "factory.ps1"))) return Results.NotFound();
+    var ms = new MemoryStream();
+    using (var gz = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+        System.Formats.Tar.TarFile.CreateFromDirectory(root, gz, includeBaseDirectory: false);
+    ms.Position = 0;
+    return Results.File(ms, "application/gzip", "factory-worker-plugin.tar.gz");
+});
+
 app.MapGet("/api/v1/dashboard", (HttpContext c) => Who(c).Kind != "admin" ? Results.StatusCode(403)
     : Results.Text(new JsonObject { ["environment"] = environmentName, ["ownerMode"] = ownerMode, ["url"] = publicUrl != "" ? publicUrl : $"http://{c.Request.Host}", ["started"] = started,
         ["lastSweep"] = hub.LastSweep, ["plant"] = plant.Status() }.ToJsonString(), "application/json"));
