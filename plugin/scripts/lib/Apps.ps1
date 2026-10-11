@@ -3,13 +3,13 @@
 # In Tier 1 tests (FACTORY_FAKE_APPS=1) no key exists: the token is the literal 'fake-<kind>', which the fake GitHub maps to the App's bot login.
 
 function Get-AppInfo([string]$Kind) {
-    $f = Join-Path $HOME ".config/factory-worker/apps/$Kind.json"
+    $f = Get-FwConfigPath "apps/$Kind.json"
     if ($env:FACTORY_FAKE_APPS) { return @{ kind = $Kind; id = 0; slug = "factory-worker-$Kind"; installation_id = 0 } }
     # A container has no home directory config: the App's ids come from FACTORY_APP_<KIND>_ID / _INSTALLATION / _SLUG (settings, not secrets).
     $envKind = $Kind.ToUpperInvariant()
     $envId = [Environment]::GetEnvironmentVariable("FACTORY_APP_${envKind}_ID")
     if ($envId) { return @{ kind = $Kind; id = $envId; installation_id = [Environment]::GetEnvironmentVariable("FACTORY_APP_${envKind}_INSTALLATION"); slug = [Environment]::GetEnvironmentVariable("FACTORY_APP_${envKind}_SLUG") } }
-    if (-not (Test-Path $f)) { Reject 30 'app-not-configured' "the '$Kind' GitHub App is not set up on this gateway" }
+    if (-not $f -or -not (Test-Path $f)) { Reject 30 'app-not-configured' "the '$Kind' GitHub App is not set up on this gateway" }
     return Get-Content -Raw $f | ConvertFrom-Json -AsHashtable
 }
 
@@ -31,7 +31,7 @@ function Get-AppToken([string]$Kind) {
     $info = Get-AppInfo $Kind
     if (-not $info.installation_id) { Reject 30 'app-not-installed' "the '$Kind' GitHub App has no installation recorded" }
     # A short-lived installation token is cached on disk (mode 0600) until five minutes before it expires: every verb is a new process.
-    $cacheDir = if ($env:FACTORY_STATE_DIR) { $env:FACTORY_STATE_DIR } else { Join-Path $HOME '.local/share/factory-worker/state' }
+    $cacheDir = Get-FwSubDir 'state' $env:FACTORY_STATE_DIR
     $cache = Join-Path $cacheDir "app-token-$Kind.json"
     if (Test-Path -LiteralPath $cache) {
         try { $c = Get-Content -Raw -LiteralPath $cache | ConvertFrom-Json -AsHashtable -DateKind String; if ($c.token -and [DateTimeOffset]::Parse($c.expires) -gt [DateTimeOffset]::UtcNow.AddMinutes(5)) { return $c.token } } catch { }

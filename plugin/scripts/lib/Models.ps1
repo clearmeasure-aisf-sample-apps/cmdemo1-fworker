@@ -42,8 +42,8 @@ function Verb_model_tier($a) {
 # ---- client half ------------------------------------------------------------------------------------------------------
 function Get-ModelsConfig {
     $path = $env:FACTORY_MODELS_CONFIG
-    if (-not $path) { $user = Join-Path $HOME '.config/factory-worker/models.json'; if (Test-Path $user) { $path = $user } }
-    if (-not $path) { $path = Join-Path $PSScriptRoot '../../../config/models.default.json' }
+    if (-not $path) { $user = Get-FwConfigPath 'models.json'; if ($user -and (Test-Path $user)) { $path = $user } }
+    if (-not $path) { $path = Join-Path $PSScriptRoot '../models.default.json' }
     return Get-Content -Raw $path | ConvertFrom-Json -AsHashtable
 }
 

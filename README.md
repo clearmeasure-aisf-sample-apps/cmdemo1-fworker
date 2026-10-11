@@ -19,7 +19,7 @@ Secrets for a local run sit in `~/.local/share/factory-worker/secrets` (webhook 
 
 ## Choosing models (cost first, automatic)
 
-`config/models.default.json` is the default; a machine overrides it with `~/.config/factory-worker/models.json` (or `FACTORY_MODELS_CONFIG`).
+`plugin/scripts/models.default.json` (shipped inside the plugin) is the default; a machine overrides it with `~/.config/factory-worker/models.json` (or `FACTORY_MODELS_CONFIG`).
 `mode: auto` walks a ladder; `mode: fixed` pins one model for the orchestrating session and one for subagents.
 
 | Rung | Default model | Effort |

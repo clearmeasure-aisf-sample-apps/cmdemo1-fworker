@@ -8,7 +8,7 @@ description: Use when an `item.assigned` line has `job: "qc-env"` (role qc). Bui
 A person asked for a running copy of a pull request. This session builds and runs it on this computer, reports the URL, and ends. Everything is a script call; the model decides only what to do when a step fails. Item tokens are in the token directory: never print, copy or write them anywhere.
 
 Input: `{"event":"item.assigned","item":N,"pr":P,"sha":"...","job":"qc-env","role":"qc","mode":"first|reset|relaunch","assignment":"a-...","env_id":"E"}`.
-Two scripts, always called by their literal path (the prompt gives it; commands that contain a shell variable are refused in the haiku sandbox, so never write `$FACTORY_PLUGIN_SCRIPTS`, `$HOME` or `VAR=value command`):
+Two scripts, always called by their literal path (the connect prompt gives the scripts directory; commands that contain a shell variable are refused in the haiku sandbox, so never write `$FACTORY_PLUGIN_SCRIPTS`, `$HOME` or `VAR=value command`). `qc-local.ps1` needs Linux or macOS, `git` and whatever the operator's profile builds with:
 - `pwsh <scripts>/factory.ps1 <verb> ...` talks to the gateway with the QC item token.
 - `pwsh <scripts>/qc-local.ps1 <prepare|build|run|watch|stop|logs|status> --env-id E ...` works on this machine. It reads the operator's profile (`qc-profile.json` in the worker state directory) and is the only thing that runs the build and run commands.
 

@@ -10,6 +10,7 @@
 $Rest = [string[]]$args
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+. (Join-Path $here 'lib/Paths.ps1')
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'pr-checks',
     'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
@@ -52,12 +53,12 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
 # ---------------------------------------------------------------- client mode
 function Get-ClientConfig {
     $cfg = @{ url = $env:FACTORY_URL; token = $env:FACTORY_TOKEN }
-    $f = Join-Path $HOME '.config/factory-worker/client.json'
-    if ((-not $cfg.url -or -not $cfg.token) -and (Test-Path $f)) {
+    $f = Get-FwConfigPath 'client.json'
+    if ((-not $cfg.url -or -not $cfg.token) -and $f -and (Test-Path $f)) {
         $j = Get-Content -Raw $f | ConvertFrom-Json -AsHashtable
         if (-not $cfg.url) { $cfg.url = $j.url }; if (-not $cfg.token) { $cfg.token = $j.token }
     }
-    if (-not $cfg.url -or -not $cfg.token) { Write-Out @{ ok = $false; code = 'client-not-configured'; reason = 'set FACTORY_URL and FACTORY_TOKEN, or write ~/.config/factory-worker/client.json' } 30 }
+    if (-not $cfg.url -or -not $cfg.token) { Write-Out @{ ok = $false; code = 'client-not-configured'; reason = 'set FACTORY_URL and FACTORY_TOKEN, (the connect prompt exports both)' } 30 }
     $cfg.url = $cfg.url.TrimEnd('/')
     return $cfg
 }
@@ -113,7 +114,7 @@ if ($verb -eq 'plugin-sync') { . (Join-Path $here 'lib/Client.Plugin.ps1'); Invo
 if ($verb -eq 'wait-event') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-WaitEvent (ConvertFrom-Flags $flagTokens) (Get-ClientConfig) }
 
 $a = ConvertFrom-Flags $flagTokens
-if (-not $a.ContainsKey('holder')) { $a.holder = if ($env:FACTORY_HOLDER) { $env:FACTORY_HOLDER } else { "$($env:USER)@$([Net.Dns]::GetHostName())" } }
+if (-not $a.ContainsKey('holder')) { $a.holder = if ($env:FACTORY_HOLDER) { $env:FACTORY_HOLDER } else { "$(Get-FwUserName)@$([Net.Dns]::GetHostName())" } }
 $cfg = Get-ClientConfig
 . (Join-Path $here 'lib/Client.Own.ps1')
 $callRole = if ($a.ContainsKey('role')) { "$($a.role)" } elseif ($verb -like 'qc-*') { 'qc' } else { '' }

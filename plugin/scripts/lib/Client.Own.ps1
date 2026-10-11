@@ -1,7 +1,7 @@
 # Client side of owner mode: register as a worker, receive directed assignments, hold the per-item tokens, wait for an item's triggers.
 # Item tokens are written to the token directory (mode 600) and never printed: stdout carries events a Monitor turns into notifications.
 
-function Get-TokenDir { $d = $env:FACTORY_TOKEN_DIR; if (-not $d) { $d = Join-Path $HOME '.local/share/factory-worker/tokens' }; New-Item -ItemType Directory -Force -Path $d | Out-Null; $d }
+function Get-TokenDir { Get-FwSubDir 'tokens' $env:FACTORY_TOKEN_DIR }
 
 function Save-ItemToken([int]$Item, [string]$Role, [string]$Token) {
     $f = Join-Path (Get-TokenDir) "$Item.$Role"

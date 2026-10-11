@@ -1,7 +1,7 @@
 # Client side: subscribe to the gateway's event stream. One normalized event per stdout line, so a Monitor on this command
 # turns each line into a notification in the Claude session. With --spawn, each work offer starts a headless worker session.
 
-function Get-WorkerDir { $d = $env:FACTORY_WORKER_DIR; if (-not $d) { $d = Join-Path $HOME '.local/share/factory-worker/workers' }; New-Item -ItemType Directory -Force -Path $d | Out-Null; $d }
+function Get-WorkerDir { Get-FwSubDir 'workers' $env:FACTORY_WORKER_DIR }
 
 function Start-Worker($ev, $cfg, [int]$Max) {
     $dir = Get-WorkerDir
