@@ -1,0 +1,88 @@
+# The plant manager's journal on the work item. One helper writes every dispatch-side comment: a visible line, a hidden marker, a dedup ledger
+# in the item's state comment (so redelivered webhooks and repeated sweeps never post twice), redaction, a length cap, and a per-item limit.
+# Best-effort: a failed comment never blocks a dispatch. Design: docs/design/plant-manager.md section 8.
+
+$script:JournalCap = 30
+
+function Protect-JournalText([string]$Text) {
+    if (-not $Text) { return '' }
+    $t = $Text
+    foreach ($p in '-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)', 'gh[pousr]_[A-Za-z0-9]{20,}', 'xox[baprs]-[A-Za-z0-9-]{10,}', 'AKIA[0-9A-Z]{16}',
+        '(?i)(bearer|token|secret|password|api[_-]?key)(\s*[:=]\s*|\s+)[A-Za-z0-9._~+/=-]{12,}', '\b[wi]1\.[A-Za-z0-9_.-]{20,}') { $t = [regex]::Replace($t, $p, '[redacted]') }
+    return $t
+}
+
+function Get-JournalText([string]$Event, [hashtable]$F) {
+    $col = if ($F.ContainsKey('column')) { "**$($F.column)**" } else { '' }
+    $n = $F.item
+    switch ($Event) {
+        'matched' { return "matched $(if ($F.ContainsKey('trigger')) { $F.trigger } else { 'a trigger' }) to work item #$n in $col ($($F.reason)). Needs $(if ($F.ContainsKey('role') -and $F.role) { "a $($F.role) bot" } else { 'an owner session' })." }
+        'offered' { return "offered to **$($F.worker)** ($($F.type)); waiting up to $($F.ackSeconds) s for it to accept." }
+        'assigned' {
+            if ($F.ContainsKey('role') -and $F.role) { return "**$($F.worker)** accepted the $($F.role) job for PR #$($F.pr)$(if ($F.ContainsKey('url') -and $F.url) { " ([session]($($F.url)))" })." }
+            $m = if ($F.ContainsKey('model') -and $F.model) { " Model: $($F.model) ($($F.effort)), tier $($F.tier)." } else { '' }
+            $link = if ($F.ContainsKey('url') -and $F.url) { " [session]($($F.url))" } else { '' }
+            return "**$($F.worker)**$link accepted: it owns this item from $col until it is merged (mode $($F.mode), attempt $($F.attempt)).$m Lease until $($F.lease)."
+        }
+        'routed' { return "told the owner (**$($F.worker)**): $($F.what)." }
+        'reassigned' { return "$($F.reason); offering to the next worker." }
+        'tier' { return "model tier raised to **$($F.name)** ($($F.reasons))." }
+        'waiting' { return "waiting: $($F.reason)." }
+        'skipped' { return "not assigned: $($F.reason)." }
+        'qc-offered' { return "a QC environment is offered for PR #$($F.pr) at head $($F.sha7); nothing runs until a person presses Start." }
+        'qc-requested' { return "a person asked for a QC environment for PR #$($F.pr) at head $($F.sha7) (attempt $($F.attempt))." }
+        'qc-assigned' { return "**$($F.worker)** accepted the QC environment job for PR #$($F.pr) (attempt $($F.attempt))." }
+        'qc-ready' { return "QC environment for PR #$($F.pr) is ready on **$($F.worker)** (attempt $($F.attempt))$(if ($F.ContainsKey('url') -and $F.url) { ": $($F.url)" } else { '' }). Reachable only from networks that can reach that computer." }
+        'qc-failed' { $fence = '```'; return "QC environment for PR #$($F.pr) failed (**$($F.code)**).`n$($fence)text`n$($F.reason)`n$fence" }
+        'qc-reset' { return "QC environment for PR #$($F.pr) was reset by a person (attempt $($F.attempt))." }
+        'qc-torn-down' { return "QC environment for PR #$($F.pr) torn down ($($F.reason))." }
+        'qc-waiting' { return "QC environment for PR #$($F.pr) is waiting: $($F.reason)." }
+        'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
+        default { return "$Event" }
+    }
+}
+
+# Posts one journal comment. $St is the caller's state holder: the ledger is updated in it, and saved here only with -Save.
+function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, [string]$Key = '', [switch]$Save) {
+    try {
+        $own = $false
+        if ($null -eq $St) { $St = Get-State $Item; $own = $true }
+        $s = $St.state
+        if (-not (Test-Has $s 'journal')) { $s.journal = @{ keys = @(); count = 0 } }
+        $k = "$Event|$Key"
+        if (@($s.journal.keys) -contains $k) { return $false }
+        # qc-ready and qc-failed may take a few slots beyond the cap: they are the two lines a person looks for
+        $extra = $Event -in 'qc-ready', 'qc-failed'
+        if ([int]$s.journal.count -ge $script:JournalCap + $(if ($extra) { 4 } else { 1 })) { return $false }
+        $Fields.item = $Item
+        $text = if ([int]$s.journal.count -eq $script:JournalCap -and -not $extra) { "journal full ($script:JournalCap entries); later events are not posted here, see the gateway log." } else { Get-JournalText $Event $Fields }
+        $text = Protect-JournalText $text
+        if ($text.Length -gt 1500) { $text = $text.Substring(0, 1500) + ' [truncated]' }
+        $name = (Get-Cfg).name
+        $body = "🏭 Plant manager: $text`n`n<!-- plant event=$Event key=$Key -->"
+        Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$Item/comments" -Body @{ body = $body } | Out-Null
+        $s.journal.keys = @(@($s.journal.keys) + $k | Select-Object -Last 200)
+        $s.journal.count = [int]$s.journal.count + 1
+        if ($Save -or $own) { Save-State $Item $St }
+        return $true
+    } catch { [Console]::Error.WriteLine("journal $Event for #$Item failed: $($_.Exception.Message)"); return $false }
+}
+
+# Admin verb: the gateway journals the decisions it makes itself (matched, offered, reassigned, waiting, skipped).
+function Verb_journal($a) {
+    $n = Get-ItemNumber $a; $ev = "$(Need $a 'event')"
+    if ($ev -notin 'matched', 'offered', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting') { Reject 2 'usage' "unknown journal event '$ev'" }
+    $f = @{}; if (Test-Has $a 'fields') { foreach ($k in $a.fields.Keys) { $f[$k] = $a.fields[$k] } }
+    # a 'waiting' note is rate-limited: at most one per 30 minutes per item
+    if ($ev -eq 'waiting') {
+        $st = Get-State $n; $last = if ((Test-Has $st.state 'journal') -and (Test-Has $st.state.journal 'waiting_at')) { ConvertFrom-Iso $st.state.journal.waiting_at } else { $null }
+        if ($last -and ((Get-UtcNow) - $last).TotalMinutes -lt 30) { return @{ ok = $true; id = $n; posted = $false; reason = 'rate-limited' } }
+        $key = [string](Get-UtcNow).Ticks
+        $posted = Add-Journal $n $st 'waiting' $f $key
+        if ($posted) { $st.state.journal.waiting_at = ConvertTo-Iso (Get-UtcNow); Save-State $n $st }
+        return @{ ok = $true; id = $n; posted = $posted }
+    }
+    $key = if (Test-Has $a 'key') { "$($a.key)" } else { [string](Get-UtcNow).Ticks }
+    $posted = Add-Journal $n $null $ev $f $key
+    return @{ ok = $true; id = $n; posted = $posted }
+}

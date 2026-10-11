@@ -1,0 +1,192 @@
+{
+  "name": "factory-worker",
+  "label": "factory worker",
+  "rivalLabel": "AI Factory",
+  "owner": "clearmeasure-aisf-sample-apps",
+  "ownerType": "organization",
+  "repo": "cmdemo1-workorders",
+  "project": 679,
+  "defaultBranch": "master",
+  "columns": {
+    "ai": [
+      "Technical Design",
+      "Development",
+      "Functional Testing"
+    ],
+    "development": "Development",
+    "validation": "Functional Testing",
+    "hold": [
+      "Release Queue"
+    ],
+    "done": "Done"
+  },
+  "requiredBodySection": {
+    "Technical Design": "## Technical Design"
+  },
+  "reviewVerdictColumns": [
+    "Technical Design",
+    "Development"
+  ],
+  "ciGates": [
+    "Build result",
+    "secret-scan"
+  ],
+  "autoMergeLabel": "Auto Merge",
+  "videoLabel": "video",
+  "demoLabel": "Demo",
+  "docsOnlyMarker": "<!-- aisf:docs-only -->",
+  "docsOnlyPaths": [
+    "^docs/",
+    "\\.md$",
+    "^LICENSE",
+    "^\\.github/ISSUE_TEMPLATE/"
+  ],
+  "releaseCheckName": "release",
+  "octopus": {
+    "url": "https://clearmeasure.octopus.app",
+    "space": "Spaces-355",
+    "project": "cmdemo1-ui",
+    "environments": {
+      "tdd": "tdd",
+      "uat": "uat",
+      "prod": "prod"
+    }
+  },
+  "timing": {
+    "leaseMinutes": 30,
+    "maxRelaunches": 3,
+    "maxReviewRounds": 3,
+    "maxDemotions": 2,
+    "fixForwardMaxRounds": 4,
+    "sweepSeenCount": 2,
+    "mergeabilityWaitSeconds": 90,
+    "mergeabilityPollSeconds": 4,
+    "preMergeChecksWaitSeconds": 300,
+    "preMergeChecksPollSeconds": 16,
+    "outOfDateMergeAttempts": 4,
+    "updatedHeadWaitSeconds": 60,
+    "masterGreenTimeoutMinutes": 30,
+    "releaseCandidateTimeoutMinutes": 20,
+    "lateReleaseCandidateHours": 24,
+    "devChecksTimeoutMinutes": 30,
+    "verdictTimeoutMinutes": 180,
+    "unprocessedVerdictGraceMinutes": 3,
+    "parkHours": 24,
+    "awaitingChecksParkMinutes": 60,
+    "docsOnlyReleaseGraceSeconds": 120,
+    "qcLinkDays": 7,
+    "qcLeaseMinutes": 5,
+    "qcGraceMinutes": 30,
+    "qcIdleMinutes": 120,
+    "qcLifetimeMinutes": 480,
+    "qcMaxRelaunches": 3,
+    "qcWaitingRepeatMinutes": 30,
+    "qcTokenHours": 16,
+    "qcBuildCapMinutes": 8
+  },
+  "qc": {
+    "trustProxy": false,
+    "knownProxies": [],
+    "rateLimitPerIp": 10,
+    "rateLimitPerPr": 20,
+    "probeTimeoutSeconds": 5,
+    "minFreeMb": 3500,
+    "maxEnvironments": 3,
+    "waitingDelaySeconds": 300,
+    "trustedAuthors": [],
+    "requireRun": null,
+    "requireApproval": null,
+    "allowLoopbackForTests": false
+  },
+  "mergePolicy": "auto",
+  "humanApprovers": [],
+  "escalationMention": "",
+  "apps": {
+    "reviewer": "reviewer",
+    "testperson": "testperson"
+  },
+  "inspector": {
+    "maxFiles": 15,
+    "maxLines": 400,
+    "docsMaxFiles": 30,
+    "holdDays": 7,
+    "protectedPaths": [
+      "^\\.octopus/",
+      "^\\.github/workflows/",
+      "^\\.github/scripts/",
+      "^(build|PrivateBuild|AcceptanceTests|BuildFunctions)\\.ps1$",
+      "^build\\.(sh|bat)$",
+      "^Dockerfile$",
+      "^global\\.json$",
+      "^NuGet\\.Config$",
+      "^\\.gitleaks\\.toml$",
+      "^CODEOWNERS$",
+      "^\\.github/CODEOWNERS$"
+    ],
+    "packagePaths": [
+      "\\.csproj$",
+      "\\.props$",
+      "^packages\\.config$",
+      "package(-lock)?\\.json$"
+    ],
+    "migrationPaths": [
+      "^src/Database/scripts/"
+    ],
+    "binaryExtensions": [
+      "png",
+      "jpg",
+      "jpeg",
+      "gif",
+      "dll",
+      "exe",
+      "zip",
+      "mp4",
+      "pdf",
+      "nupkg",
+      "pfx"
+    ],
+    "secretPatterns": [
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "AKIA[0-9A-Z]{16}",
+      "gh[pousr]_[A-Za-z0-9]{30,}",
+      "xox[baprs]-[A-Za-z0-9-]{10,}",
+      "(?i)(api[_-]?key|secret|password|token)\\s*[:=]\\s*['\\\"][^'\\\"]{8,}['\\\"]"
+    ],
+    "aiDirectedText": [
+      "(?i)ignore (all |any )?(previous|prior|above) (instructions|rules)",
+      "(?i)you (must|should) approve",
+      "(?i)approve this (pull request|pr)",
+      "(?i)system prompt",
+      "(?i)disregard (the )?(rules|gates|inspector)"
+    ]
+  },
+  "escalation": {
+    "comment": "tier = the highest tier any signal reaches; thresholds[i] is the value at which a signal asks for tier i+1. Monotonic within a column.",
+    "launches": [
+      2,
+      3
+    ],
+    "findingsRounds": [
+      2,
+      3
+    ],
+    "demotions": [
+      1,
+      2
+    ],
+    "fixForwardRounds": [
+      1,
+      2
+    ],
+    "refusals": [
+      3,
+      6
+    ],
+    "minTierByColumn": {}
+  },
+  "testLabel": "factory test",
+  "mergeQueueDepth": 2,
+  "ownerSessions": true,
+  "idleReleaseMinutes": 60,
+  "assignAckSeconds": 30
+}

@@ -1,0 +1,64 @@
+# Client side: subscribe to the gateway's event stream. One normalized event per stdout line, so a Monitor on this command
+# turns each line into a notification in the Claude session. With --spawn, each work offer starts a headless worker session.
+
+function Get-WorkerDir { $d = $env:FACTORY_WORKER_DIR; if (-not $d) { $d = Join-Path $HOME '.local/share/factory-worker/workers' }; New-Item -ItemType Directory -Force -Path $d | Out-Null; $d }
+
+function Start-Worker($ev, $cfg, [int]$Max) {
+    $dir = Get-WorkerDir
+    $running = @(Get-ChildItem $dir -Filter '*.pid' -ErrorAction SilentlyContinue | Where-Object {
+            $file = $_; $p = [int](Get-Content $file.FullName)
+            try { $null = Get-Process -Id $p -ErrorAction Stop; $true } catch { Remove-Item $file.FullName -Force; $false } })
+    if ($running | Where-Object { $_.Name -eq "item-$($ev.item).pid" }) { return }
+    if ($running.Count -ge $Max) { return }
+    $holder = "worker-$($ev.item)-$([guid]::NewGuid().ToString('N').Substring(0,6))"
+    $log = Join-Path $dir "item-$($ev.item)-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss')).log"
+    $plugin = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $sandbox = $env:FACTORY_SANDBOX_REPO
+    if (-not $sandbox) { [Console]::Error.WriteLine('FACTORY_SANDBOX_REPO is not set; cannot spawn a worker'); return }
+    $prompt = "A factory event arrived: $($ev | ConvertTo-Json -Compress). Use the factory-dispatch skill and follow it exactly (it says whether to claim the item or to approve or merge it). Your hold identity is already set in your environment as FACTORY_HOLDER: never set it yourself and never put VAR=value in front of a command (run `pwsh $(Join-Path $plugin 'scripts/factory.ps1') ...`; wherever a skill shows `$FACTORY_PLUGIN_SCRIPTS`, use the literal path $(Join-Path $plugin 'scripts') instead: commands that contain a shell variable are refused in this sandbox). Use `git -C <dir>` instead of `cd <dir> && git`. Before starting any subagent run factory.ps1 model-for --role subagent --item $($ev.item) and pass the model it returns."
+    $mf = try { (& pwsh -NoProfile -File (Join-Path $PSScriptRoot '../factory.ps1') model-for --role orchestrator --item $ev.item) | ConvertFrom-Json } catch { $null }
+    $psi = [Diagnostics.ProcessStartInfo]::new('claude')
+    if ($mf -and $mf.model) { foreach ($x in @('--model', $mf.model, '--effort', $mf.effort)) { $psi.ArgumentList.Add($x) } }
+    foreach ($x in @('-p', $prompt, '--plugin-dir', $plugin, '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash(pwsh:*) Bash(git:*) Bash(gh:*) Bash(dotnet:*) Bash(ls:*) Bash(cat:*) Bash(grep:*) Bash(sed:*) Bash(mkdir:*) Bash(printf:*) Bash(echo:*) Bash(head:*) Bash(tail:*) Bash(wc:*) Bash(test:*) Bash(cd:*) Bash(curl:*) Bash(nohup:*) Bash(kill:*) Bash(sleep:*) Bash(ss:*) Bash(pkill:*) Bash(rm:*) Bash(npx:*) Bash(playwright:*) Read Edit Write Grep Glob Agent', '--max-turns', '120')) { $psi.ArgumentList.Add($x) }
+    $psi.WorkingDirectory = $sandbox
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.Environment['FACTORY_URL'] = $cfg.url; $psi.Environment['FACTORY_TOKEN'] = $cfg.token; $psi.Environment['FACTORY_HOLDER'] = $holder
+    $psi.Environment['FACTORY_PLUGIN_SCRIPTS'] = Join-Path $plugin 'scripts'
+    $proc = [Diagnostics.Process]::Start($psi)
+    Set-Content (Join-Path $dir "item-$($ev.item).pid") $proc.Id
+    $null = Start-ThreadJob -ScriptBlock { param($p, $l, $n) $o = $p.StandardOutput.ReadToEnd(); $e = $p.StandardError.ReadToEnd(); Set-Content $l ($o + "`n--- stderr ---`n" + $e); $p.WaitForExit(); $h = $p.StartInfo.Environment['FACTORY_HOLDER']; $ff = $p.StartInfo.Environment['FACTORY_PLUGIN_SCRIPTS']; $env:FACTORY_URL = $p.StartInfo.Environment['FACTORY_URL']; $env:FACTORY_TOKEN = $p.StartInfo.Environment['FACTORY_TOKEN']; $env:FACTORY_HOLDER = $h; & pwsh -NoProfile -File (Join-Path $ff 'factory.ps1') release --item $n --reason worker-exited *> $null } -ArgumentList $proc, $log, $ev.item -ErrorAction SilentlyContinue
+    [Console]::Out.WriteLine((@{ provider = 'client'; event = 'worker.spawned'; item = $ev.item; holder = $holder; log = $log } | ConvertTo-Json -Compress))
+}
+
+function Invoke-Subscribe($a) {
+    $cfg = Get-ClientConfig
+    $spawn = $a.ContainsKey('spawn') -and $a.spawn
+    $max = if ($env:FACTORY_MAX_WORKERS) { [int]$env:FACTORY_MAX_WORKERS } else { 3 }
+    $caps = if ($a.ContainsKey('capabilities')) { $a.capabilities } else { 'git,pwsh' }
+    $lastId = ''
+    $backoff = 2
+    [Console]::Out.WriteLine((@{ provider = 'client'; event = 'session.start'; at = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress)); [Console]::Out.Flush()
+    while ($true) {
+        $http = [Net.Http.HttpClient]::new(); $http.Timeout = [TimeSpan]::FromHours(24)
+        try {
+            $req = [Net.Http.HttpRequestMessage]::new('GET', "$($cfg.url)/api/v1/events?capabilities=$caps")
+            $req.Headers.Add('Authorization', "Bearer $($cfg.token)")
+            if ($lastId) { $req.Headers.Add('Last-Event-ID', $lastId) }
+            $resp = $http.SendAsync($req, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            if (-not $resp.IsSuccessStatusCode) { throw "gateway answered $([int]$resp.StatusCode)" }
+            $reader = [IO.StreamReader]::new($resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+            $backoff = 2
+            while (-not $reader.EndOfStream) {
+                $line = $reader.ReadLine()
+                if ($line.StartsWith('id:')) { $lastId = $line.Substring(3).Trim() }
+                elseif ($line.StartsWith('data:')) {
+                    $json = $line.Substring(5).Trim()
+                    [Console]::Out.WriteLine($json); [Console]::Out.Flush()
+                    if ($spawn) { try { $ev = $json | ConvertFrom-Json; if ($ev.event -eq 'work.offered') { Start-Worker $ev $cfg $max } } catch { [Console]::Error.WriteLine("spawn failed: $($_.Exception.Message)") } }
+                }
+            }
+        } catch { [Console]::Error.WriteLine("subscription dropped: $($_.Exception.Message); retrying in ${backoff}s") }
+        finally { $http.Dispose() }
+        Start-Sleep -Seconds $backoff; $backoff = [Math]::Min(30, $backoff * 2)
+    }
+}
