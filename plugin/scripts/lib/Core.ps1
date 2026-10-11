@@ -96,7 +96,8 @@ function Invoke-GhGraphQL([string]$Query, [hashtable]$Variables = @{}) {
 
 function Get-ServerLogin {
     if ($script:ServerLogin) { return $script:ServerLogin }
-    $script:ServerLogin = (Invoke-Gh -Path 'user').login
+    # An App installation token cannot ask GitHub who it is (GET /user is 403 for it): the login of an App is <slug>[bot].
+    $script:ServerLogin = if ($env:FACTORY_AUTHOR_APP -eq '1') { "$((Get-AppInfo 'author').slug)[bot]" } else { (Invoke-Gh -Path 'user').login }
     return $script:ServerLogin
 }
 

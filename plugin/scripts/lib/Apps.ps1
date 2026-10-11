@@ -38,6 +38,7 @@ function Get-AppToken([string]$Kind) {
     }
     $envKey = [Environment]::GetEnvironmentVariable("FACTORY_APP_$($Kind.ToUpperInvariant())_KEY")
     $pem = if ($envKey) { $envKey } else { (& secret-tool lookup service factory-worker kind github-app-private-key app $Kind 2>$null) -join "`n" }
+    if ($pem -and $pem.Trim() -eq 'unset') { $pem = $null }   # the vault placeholder written before a key exists
     if (-not $pem) { Reject 30 'secret-missing' "no private key for the '$Kind' GitHub App (FACTORY_APP_$($Kind.ToUpperInvariant())_KEY or the keyring)" }
     $base = if ($env:GITHUB_API_URL) { $env:GITHUB_API_URL.TrimEnd('/') } else { 'https://api.github.com' }
     $r = Invoke-RestMethod -Method POST -Uri "$base/app/installations/$($info.installation_id)/access_tokens" -SkipHttpErrorCheck -StatusCodeVariable sc `
