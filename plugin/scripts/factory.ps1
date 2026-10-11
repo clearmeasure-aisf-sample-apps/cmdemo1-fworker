@@ -109,6 +109,7 @@ if ($verb -eq 'subscribe') {
     if ($sf.ContainsKey('own')) { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-SubscribeOwn $sf } else { Invoke-Subscribe $sf }
 }
 if ($verb -eq 'worker-token') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-WorkerToken (ConvertFrom-Flags $flagTokens) }
+if ($verb -eq 'plugin-sync') { . (Join-Path $here 'lib/Client.Plugin.ps1'); Invoke-PluginSync (Get-ClientConfig) }
 if ($verb -eq 'wait-event') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-WaitEvent (ConvertFrom-Flags $flagTokens) (Get-ClientConfig) }
 
 $a = ConvertFrom-Flags $flagTokens

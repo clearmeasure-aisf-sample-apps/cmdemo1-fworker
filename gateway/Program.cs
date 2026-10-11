@@ -64,6 +64,19 @@ var qc = app.Services.GetRequiredService<QcHub>();
 if (qcSettings.TrustProxy) app.UseForwardedHeaders();
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
 var started = DateTime.UtcNow;
+string PluginRoot() => Path.GetFullPath(Path.Combine(scriptsDir, ".."));
+IEnumerable<string> PluginFiles(string root) => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+    .Where(f => { var r = Path.GetRelativePath(root, f).Replace('\\', '/'); return r != ".plugin-version" && r != ".plugin-managed" && !r.Contains("/bin/") && !r.Contains("/obj/"); })
+    .OrderBy(f => f, StringComparer.Ordinal);
+string? pluginHashCache = null;
+string PluginHash()
+{
+    if (pluginHashCache != null) return pluginHashCache;
+    var root = PluginRoot(); var sb = new StringBuilder();
+    foreach (var f in PluginFiles(root)) sb.Append(Path.GetRelativePath(root, f).Replace('\\', '/')).Append('\n').Append(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))).Append('\n');
+    return pluginHashCache = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).ToLowerInvariant();
+}
+
 
 static bool FixedEquals(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
 Principal Who(HttpContext c) => (Principal)c.Items["principal"]!;
@@ -89,23 +102,31 @@ app.MapGet("/health", () => Results.Text("ok"));
 app.MapGet("/alive", () => Results.Text("ok"));
 app.MapGet("/", () => Results.Redirect("/dashboard"));
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
-app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
+app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, pluginHash = PluginHash(), started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
 app.MapGet("/api/v1/status", (HttpContext c) => Who(c).Kind != "admin" ? Results.StatusCode(403)
     : Results.Text(new JsonObject { ["started"] = started, ["sweepSeconds"] = sweepSeconds, ["ownerMode"] = ownerMode, ["subscribers"] = hub.SubscriberCount, ["lastEventId"] = hub.LastId,
         ["pendingOffers"] = hub.PendingCount, ["lastSweep"] = hub.LastSweep, ["plant"] = plant.Status() }.ToJsonString(), "application/json"));
 
 app.MapGet("/dashboard", () => Results.Text(DashboardPage.Html, "text/html; charset=utf-8"));
 // The plugin (skills, agents, scripts) as a tar.gz for a worker that cannot reach the source: a hand-made cloud session pulls exactly the
-// version this gateway runs. Needs a worker credential or the operator token; nothing outside the plugin directory is included.
+// version this gateway runs. Needs a worker credential or the operator token; nothing outside the plugin directory is included. The archive
+// carries .plugin-version (content hash) and .plugin-managed (marks a downloaded copy, the only kind `factory.ps1 plugin-sync` ever updates).
 app.MapGet("/api/v1/plugin", (HttpContext c) =>
 {
     var who = Who(c);
     if (who.Kind is not ("admin" or "worker")) return Results.StatusCode(403);
-    var root = Path.GetFullPath(Path.Combine(scriptsDir, ".."));
+    var root = PluginRoot();
     if (!Directory.Exists(root) || !File.Exists(Path.Combine(root, "scripts", "factory.ps1"))) return Results.NotFound();
     var ms = new MemoryStream();
     using (var gz = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
-        System.Formats.Tar.TarFile.CreateFromDirectory(root, gz, includeBaseDirectory: false);
+    using (var tw = new System.Formats.Tar.TarWriter(gz, leaveOpen: false))
+    {
+        foreach (var f in PluginFiles(root))
+            tw.WriteEntry(f, Path.GetRelativePath(root, f).Replace('\\', '/'));
+        void Add(string name, string text) => tw.WriteEntry(new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, name) { DataStream = new MemoryStream(Encoding.UTF8.GetBytes(text)) });
+        Add(".plugin-version", JsonSerializer.Serialize(new { hash = PluginHash(), gatewayVersion = buildVersion }));
+        Add(".plugin-managed", $"downloaded from this gateway on {DateTime.UtcNow:o}; factory.ps1 plugin-sync may replace it\n");
+    }
     ms.Position = 0;
     return Results.File(ms, "application/gzip", "factory-worker-plugin.tar.gz");
 });

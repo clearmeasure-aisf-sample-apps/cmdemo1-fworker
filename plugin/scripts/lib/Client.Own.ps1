@@ -126,7 +126,10 @@ function Invoke-SubscribeOwn($a) {
     $cred = Get-WorkerCredential $cfg $name
     $lastId = ''; $backoff = 2
     [Console]::Out.WriteLine((@{ provider = 'client'; event = 'session.start'; name = $name; type = $type; at = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress)); [Console]::Out.Flush()
+    . (Join-Path $here 'lib/Client.Plugin.ps1')
     while ($true) {
+        # a downloaded plugin follows the gateway: checked at every (re)connect and again at every assignment; a working copy is never touched
+        try { $ps = Sync-Plugin $cfg; if ($ps.ok -and $ps.updated) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'plugin.updated'; from = $ps.from; to = $ps.to; restart_needed = $true } | ConvertTo-Json -Compress)); [Console]::Out.Flush() } } catch { }
         $http = [Net.Http.HttpClient]::new(); $http.Timeout = [TimeSpan]::FromHours(24)
         try {
             $q = "name=$([uri]::EscapeDataString($name))&type=$type&capabilities=$([uri]::EscapeDataString($caps))&capacity=$cap&roles=$([uri]::EscapeDataString($roles))$qcExtra"
@@ -143,6 +146,7 @@ function Invoke-SubscribeOwn($a) {
                 elseif ($line.StartsWith('data:')) {
                     $ev = try { $line.Substring(5).Trim() | ConvertFrom-Json -AsHashtable } catch { $null }
                     if ($null -eq $ev) { continue }
+                    if ($ev.event -eq 'item.assigned') { try { $ps2 = Sync-Plugin $cfg; if ($ps2.ok -and $ps2.updated) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'plugin.updated'; from = $ps2.from; to = $ps2.to; restart_needed = $true } | ConvertTo-Json -Compress)) } } catch { } }
                     if ($ev.event -eq 'item.assigned' -and $ev.token) {
                         Save-ItemToken ([int]$ev.item) "$($ev.role)" "$($ev.token)"
                         $ev.Remove('token')
