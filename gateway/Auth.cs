@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 //   admin     the gateway's own token (the sweep, tests, the operator)
 //   worker    "w1.<name>.<hmac>"  one per worker, issued once: may register, receive assignments, ask my-items. It cannot act on an item.
 //   item      "i1.<payload>.<hmac>" minted at an assignment for ONE item and ONE role: the only credential that acts on an item.
+//   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs and nothing else (worker-messaging.md 4.6).
 // The secret never leaves the gateway host. Design: docs/design/plant-manager.md section 5.
 
 sealed record Principal(string Kind, string Name = "", int Item = 0, string Role = "", string Assignment = "", long Expires = 0, int Pr = 0, string Sha = "", string Ip = "");
@@ -22,6 +23,12 @@ static class Auth
     };
     public static readonly HashSet<string> InspectorVerbs = new() { "get-item", "inspect-facts", "approve-pr", "accept", "pr-checks", "model-tier" };
     public static readonly HashSet<string> WorkerVerbs = new() { "my-items" };
+    // The supervisor's verbs. The body keeps only the fields listed for the verb, whatever the caller sent.
+    public static readonly HashSet<string> ManagerVerbs = new() { "get-item", "pr-checks", "get-delivery" };
+    static readonly Dictionary<string, string[]> ManagerBodyFields = new()
+    {
+        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["get-delivery"] = ["item", "commit"]
+    };
     // Role "qc": the session that runs a PR's environment. No release, no merge, no comment, no approval: only its own job.
     public static readonly HashSet<string> QcVerbs = new() { "get-item", "accept", "qc-job", "qc-progress", "qc-report", "qc-fail", "qc-heartbeat", "qc-stopped" };
     // Principal "qc-click": a person who holds a link. Not a credential: the /qc handlers build it after checking the link, and /api/v1/verbs never yields one.
@@ -34,8 +41,21 @@ static class Auth
     static byte[] UnB64(string s) { s = s.Replace('-', '+').Replace('_', '/'); return Convert.FromBase64String(s + new string('=', (4 - s.Length % 4) % 4)); }
     static bool Same(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
     public static bool ValidName(string n) => n.Length is > 0 and <= 40 && n.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_');
+    public static bool ValidTag(string s) => s.Length is > 0 and <= 60 && s.All(ch => char.IsAsciiLetterLower(ch) || char.IsAsciiDigit(ch) || ch is '.' or '_' or '-');
+
+    // Compared case-insensitively: "Operator" and "PLANT-MANAGER" name the same thing as the reserved words (worker-messaging.md 4.2).
+    static readonly string[] BaseReservedNames = ["operator", "gateway", "all", "supervisor", "plant-manager"];
+    public static HashSet<string> ReservedNames(IEnumerable<string> managerNames) => new(BaseReservedNames.Concat(managerNames), StringComparer.OrdinalIgnoreCase);
+
+    // Worker registration values (worker-messaging.md 2.2): a fixed type, roles from the plant's set, at most 10 capabilities, and model and effort
+    // in the tag form when they are sent.
+    public static bool ValidRegistration(string type, IEnumerable<string> roles, IReadOnlyCollection<string> caps, string model, string effort) =>
+        type is "persistent-local" or "ephemeral-local" or "claude-cloud" or "cursor-cloud"
+        && roles.All(r => r is "owner" or "inspector" or "qc") && caps.Count <= 10 && caps.All(ValidTag)
+        && (model == "" || ValidTag(model)) && (effort == "" || ValidTag(effort));
 
     public static string WorkerToken(string secret, string name) => $"w1.{name}.{Mac(secret, "worker:" + name)}";
+    public static string ManagerToken(string secret, string name, int generation) => $"m1.{name}.{generation}.{Mac(secret, $"manager:{name}:{generation}")}";
 
     public static string MintItemToken(string secret, int item, string role, string assignment, string worker, TimeSpan ttl)
     {
@@ -45,7 +65,7 @@ static class Auth
     }
 
     // Returns null for an unknown, malformed, forged or expired credential.
-    public static Principal? Authenticate(string? header, string adminToken, string secret)
+    public static Principal? Authenticate(string? header, string adminToken, string secret, MessagingSettings msg)
     {
         if (string.IsNullOrEmpty(header) || !header.StartsWith("Bearer ")) return null;
         var t = header[7..];
@@ -54,8 +74,13 @@ static class Auth
         if (t.StartsWith("w1."))
         {
             var last = t.LastIndexOf('.'); if (last <= 3) return null;
-            var name = t[3..last]; if (!ValidName(name)) return null;
+            var name = t[3..last]; if (!ValidName(name) || msg.Reserved.Contains(name)) return null;
             return Same(t, WorkerToken(secret, name)) ? new Principal("worker", name) : null;
+        }
+        if (t.StartsWith("m1."))
+        {
+            var parts = t.Split('.'); if (parts.Length != 4 || !msg.ManagerEnabled || !msg.ManagerNames.Contains(parts[1])) return null;
+            return Same(t, ManagerToken(secret, parts[1], msg.TokenGeneration)) ? new Principal("manager", parts[1]) : null;
         }
         if (t.StartsWith("i1."))
         {
@@ -94,6 +119,13 @@ static class Auth
     public static (JsonObject? Body, string? Refusal) AuthorizeVerb(Principal p, string verb, JsonObject body)
     {
         if (p.Kind == "admin") return (body, null);
+        if (p.Kind == "manager")
+        {
+            if (!ManagerVerbs.Contains(verb)) return (null, $"the manager role cannot call '{verb}'");
+            var kept = new JsonObject();
+            foreach (var f in ManagerBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
+            return (kept, null);
+        }
         if (p.Kind == "worker")
         {
             if (!WorkerVerbs.Contains(verb)) return (null, $"a worker credential cannot call '{verb}': it can only register, receive assignments and ask my-items; acting on an item needs the item token delivered with an assignment");

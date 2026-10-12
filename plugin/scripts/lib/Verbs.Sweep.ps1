@@ -43,6 +43,9 @@ function Verb_sync_board($a) {
     $seenFile = Get-SeenFile
     $seen = if (Test-Path $seenFile) { Get-Content -Raw $seenFile | ConvertFrom-Json -AsHashtable } else { @{} }
     $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @()
+    # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled, whose
+    # owner still waits for item.complete although the claim ended at the merge
+    $owned = @{}; $settling = @()
     $list = Get-BoardList
     $last = Get-LastColumn
     foreach ($it in $list) {
@@ -59,8 +62,12 @@ function Verb_sync_board($a) {
             $pin = @($it.labels | Where-Object { $_ -like 'worker:*' } | Select-Object -First 1)
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
             if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) { continue }
-            if ((Test-OwnedClaim $s) -and (Test-ClaimLive $s)) { $owners["$n"] = "$($s.claim.holder)" }
+            if ((Test-OwnedClaim $s) -and (Test-ClaimLive $s)) {
+                $owners["$n"] = "$($s.claim.holder)"
+                $owned["$n"] = @{ holder = "$($s.claim.holder)"; column = $col; lease_until = $s.claim.lease_until; heartbeat = $(if (Test-Has $s.claim 'heartbeat') { $s.claim.heartbeat } else { $null }); parked = [bool](Get-Park $s) }
+            }
             if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) {
+                $settling += $n
                 if (-not $dry) { $r = Invoke-Settle $n; $actions += @{ item = $n; action = 'settle'; result = $r } }
                 if (-not $dry -and ($r.outcome -eq 'done' -or ($r.outcome -eq 'advanced' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue'))) { $triggers += @{ item = $n; event = 'item.complete'; path = $(if (Test-Has $r 'path') { "$($r.path)" } else { '' }) } }
                 elseif (-not $dry -and $r.outcome -eq 'parked') { $triggers += @{ item = $n; event = 'item.parked'; reason = $r.reason } }
@@ -97,6 +104,7 @@ function Verb_sync_board($a) {
                         # an owner waiting out a hold for too long gives the item up; the next trigger assigns it again
                         $holderName = "$($s.claim.holder)"; $s.Remove('claim'); [void](Add-Journal $n $st 'released' @{ worker = $holderName; reason = "idle for more than $($c.idleReleaseMinutes) min on a hold" } "idle|$($held.at)"); Save-State $n $st; Remove-ClaimRef $n
                         $actions += @{ item = $n; action = 'owner-released-idle'; worker = $holderName }
+                        $owned.Remove("$n")
                     }
                     continue
                 }
@@ -151,7 +159,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; pins = $pins; triggers = $triggers; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------

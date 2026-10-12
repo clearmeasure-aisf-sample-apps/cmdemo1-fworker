@@ -3,12 +3,18 @@
 # Best-effort: a failed comment never blocks a dispatch. Design: docs/design/plant-manager.md section 8.
 
 $script:JournalCap = 30
+# Used only when config/instance.json has no secrets catalogue (worker-messaging.md 5.4); the catalogue is the source of truth.
+$script:FallbackSecretPatterns = @('-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)', 'gh[pousr]_[A-Za-z0-9]{20,}', 'xox[baprs]-[A-Za-z0-9-]{10,}', 'AKIA[0-9A-Z]{16}',
+    '(?i)(bearer|token|secret|password|api[_-]?key)(\s*[:=]\s*|\s+)[A-Za-z0-9._~+/=-]{12,}', '\b(w1|m1|i1|q1)\.[A-Za-z0-9_.-]{20,}')
 
 function Protect-JournalText([string]$Text) {
     if (-not $Text) { return '' }
     $t = $Text
-    foreach ($p in '-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)', 'gh[pousr]_[A-Za-z0-9]{20,}', 'xox[baprs]-[A-Za-z0-9-]{10,}', 'AKIA[0-9A-Z]{16}',
-        '(?i)(bearer|token|secret|password|api[_-]?key)(\s*[:=]\s*|\s+)[A-Za-z0-9._~+/=-]{12,}', '\b[wi]1\.[A-Za-z0-9_.-]{20,}') { $t = [regex]::Replace($t, $p, '[redacted]') }
+    $secrets = try { (Get-Cfg).secrets } catch { $null }
+    $list = if ($secrets) { @($secrets.patterns) + @($secrets.redactOnly) } else { @() }
+    $list = @($list | Where-Object { $_ })
+    if (-not $list) { $list = $script:FallbackSecretPatterns }
+    foreach ($p in $list) { $t = [regex]::Replace($t, $p, '[redacted]') }
     return $t
 }
 
@@ -37,6 +43,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'qc-reset' { return "QC environment for PR #$($F.pr) was reset by a person (attempt $($F.attempt))." }
         'qc-torn-down' { return "QC environment for PR #$($F.pr) torn down ($($F.reason))." }
         'qc-waiting' { return "QC environment for PR #$($F.pr) is waiting: $($F.reason)." }
+        'question-escalated' { return "a question from **$($F.worker)** has waited $($F.minutes) min for the supervisor (supervisor: $(if ("$($F.supervisor)" -eq 'connected') { 'connected' } else { 'absent' })); a person is asked to look at the dashboard." }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
         default { return "$Event" }
     }
@@ -51,8 +58,8 @@ function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, 
         if (-not (Test-Has $s 'journal')) { $s.journal = @{ keys = @(); count = 0 } }
         $k = "$Event|$Key"
         if (@($s.journal.keys) -contains $k) { return $false }
-        # qc-ready and qc-failed may take a few slots beyond the cap: they are the two lines a person looks for
-        $extra = $Event -in 'qc-ready', 'qc-failed'
+        # qc-ready, qc-failed and question-escalated may take a few slots beyond the cap: they are the lines a person looks for
+        $extra = $Event -in 'qc-ready', 'qc-failed', 'question-escalated'
         if ([int]$s.journal.count -ge $script:JournalCap + $(if ($extra) { 4 } else { 1 })) { return $false }
         $Fields.item = $Item
         $text = if ([int]$s.journal.count -eq $script:JournalCap -and -not $extra) { "journal full ($script:JournalCap entries); later events are not posted here, see the gateway log." } else { Get-JournalText $Event $Fields }
@@ -71,7 +78,7 @@ function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, 
 # Admin verb: the gateway journals the decisions it makes itself (matched, offered, reassigned, waiting, skipped).
 function Verb_journal($a) {
     $n = Get-ItemNumber $a; $ev = "$(Need $a 'event')"
-    if ($ev -notin 'matched', 'offered', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting') { Reject 2 'usage' "unknown journal event '$ev'" }
+    if ($ev -notin 'matched', 'offered', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated') { Reject 2 'usage' "unknown journal event '$ev'" }
     $f = @{}; if (Test-Has $a 'fields') { foreach ($k in $a.fields.Keys) { $f[$k] = $a.fields[$k] } }
     # a 'waiting' note is rate-limited: at most one per 30 minutes per item
     if ($ev -eq 'waiting') {
