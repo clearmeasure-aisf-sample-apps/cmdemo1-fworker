@@ -33,6 +33,10 @@ sealed class Assignment
     public string Sha = "", EnvId = "";            // qc-env only
     public int Attempt;
     public string Only = "";                       // qc-env: the one worker an operator chose (reassign); empty means the usual selection
+    // own-item and bot-job: the worker named by the item's `worker:<name>` label, as the last sweep read it; empty means none. A pinned item is
+    // only ever offered to that worker; PinRetryAt holds the next offer back after the pinned worker let one lapse.
+    public string Pin = "";
+    public DateTime PinRetryAt;
     public DateTime LastWaiting;
     // why no worker was chosen, as an enumerated code, and since when (worker-messaging.md 3.9); cleared by an offer
     public DateTime? WaitingSince;
@@ -50,6 +54,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
     readonly object gate = new();
     readonly MessageStore store = new();
     public MessagingSettings Msg { get; set; } = new();
+    public Revocations Rev { get; set; } = new();
     public string Epoch => store.Epoch;
     readonly Dictionary<string, WorkerInfo> workers = new();
     readonly Dictionary<string, Assignment> assignments = new();
@@ -972,15 +977,27 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
         }
     }
 
-    // from_message (3.8): may this name mark text as derived from this message? Only a message it sent or received. Returns who the text is from:
-    // supervisor or operator, a worker's name, or for the caller's own question whoever answered it (the asker itself while it is unanswered).
-    public (bool Ok, string From) MessageParty(string id, string name)
+    // from_message (3.8): may this name mark text as derived from this message? Only a message it sent or received. The block must name the
+    // message whose text it carries and that message's real sender, so the caller's own question stands for its answer once it has one:
+    // Source is then the answer's id, From who answered, InReplyTo the question. An unanswered question is the asker's own text (its assumption).
+    // An answer the caller received is itself the source, and InReplyTo names its question.
+    public (bool Ok, string Source, string From, string InReplyTo) MessageParty(string id, string name)
     {
         lock (gate)
         {
-            if (!store.Records.TryGetValue(id, out var rec) || !(rec.From == name || rec.Per.ContainsKey(name))) return (false, "");
-            var from = rec.Type == "question" ? (rec.AnsweredBy != "" ? rec.AnsweredBy : rec.From) : rec.FromKind is "supervisor" or "operator" ? rec.FromKind : rec.From;
-            return (true, Auth.ValidName(from) ? from : "unknown");
+            if (!store.Records.TryGetValue(id, out var rec) || !(rec.From == name || rec.Per.ContainsKey(name))) return (false, "", "", "");
+            string source = id, from, re = "";
+            if (rec.Type == "question")
+            {
+                if (rec.QState == "answered" && rec.AnswerId != "") { source = rec.AnswerId; re = id; from = rec.AnsweredBy != "" ? rec.AnsweredBy : store.Records.TryGetValue(rec.AnswerId, out var ans) ? ans.From : rec.From; }
+                else from = rec.From;
+            }
+            else
+            {
+                from = rec.FromKind is "supervisor" or "operator" ? rec.FromKind : rec.From;
+                if (store.Records.Values.FirstOrDefault(q => q.Type == "question" && q.AnswerId == id) is { } asked) re = asked.Id;
+            }
+            return (true, source, Auth.ValidName(from) ? from : "unknown", re);
         }
     }
 
@@ -1257,6 +1274,24 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
         }
     }
 
+    // The operator revoked every credential of this name (the caller has raised its generation already): its open stream ends, as a worker's or as
+    // the supervisor's, and an offer it has not answered goes back to the plan. What it owns stays recorded: its item tokens are refused from now
+    // on, so its claims lapse and the sweep hands the items on, as for any owner that is gone.
+    public bool Revoke(string name)
+    {
+        lock (gate)
+        {
+            var closed = false;
+            if (workers.TryGetValue(name, out var w))
+            {
+                if (w.Out != null) { closed = true; w.Out.Writer.TryComplete(); w.Out = null; w.Connected = false; if (Msg.On) store.Get(name).GoneAt = DateTime.UtcNow; }
+                foreach (var a in assignments.Values.Where(a => a.Worker == name && !a.Accepted)) { a.Worker = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = a.Pin != "" ? "pinned-unavailable" : "no-session"; }
+            }
+            if (store.Slot is { } s && s.Name == name && s.Out != null) { closed = true; s.Out.Writer.TryComplete(); s.Out = null; store.Get(name).GoneAt = DateTime.UtcNow; }
+            return closed;
+        }
+    }
+
     public bool SetDraining(string name, bool on) { lock (gate) { if (!workers.TryGetValue(name, out var w)) return false; w.Draining = on; return true; } }
 
     long Push(WorkerInfo w, string json, bool toBuffer = true)
@@ -1309,11 +1344,17 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
         var withRole = ws.Where(w => w.Roles.Contains(a.Role)).ToList();
         chooseCode = "no-role";
         if (withRole.Count == 0) return (null, $"no subscribed session has the {a.Role} role");
+        // a pinned item goes to its worker or to nobody: not connected, without the role, draining or at capacity all mean it waits. An offer
+        // that worker let lapse does not exclude it (Declined is for the unpinned choice): it is the only one that may take the item.
+        if (!string.IsNullOrEmpty(pin))
+        {
+            chooseCode = "pinned-unavailable";
+            var p = withRole.FirstOrDefault(w => w.Name == pin && !w.Draining);
+            return p != null && Owned(p.Name) < p.Capacity ? (p, "") : (null, $"the pinned worker '{pin}' is not available");
+        }
         var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name)).ToList();
         chooseCode = "all-draining-or-declined";
         if (live.Count == 0) return (null, "every eligible session is draining or has declined");
-        chooseCode = "pinned-unavailable";
-        if (pin != null) { var p = live.FirstOrDefault(w => w.Name == pin); return p != null && Owned(p.Name) < p.Capacity ? (p, "") : (null, $"the pinned worker '{pin}' is not available"); }
         var free = live.Where(w => Owned(w.Name) < w.Capacity).ToList();
         chooseCode = "at-capacity";
         if (free.Count == 0) return (null, "every eligible session is at capacity");
@@ -1326,7 +1367,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
         {
             ["provider"] = "gateway", ["event"] = "item.assigned", ["item"] = a.Item, ["column"] = a.Column, ["job"] = a.Kind, ["role"] = a.Role, ["mode"] = a.Mode, ["reason"] = a.Reason,
             ["pr"] = a.Pr, ["assignment"] = a.Id, ["ackBySeconds"] = ackSeconds,
-            ["token"] = Auth.MintItemToken(secret, a.Item, a.Role, a.Id, a.Worker, IsQc(a) ? TimeSpan.FromHours(QcCfg.TokenHours) : TimeSpan.FromHours(12))
+            ["token"] = Auth.MintItemToken(secret, a.Item, a.Role, a.Id, a.Worker, IsQc(a) ? TimeSpan.FromHours(QcCfg.TokenHours) : TimeSpan.FromHours(12), Rev.Of(a.Worker))
         };
         if (IsQc(a)) { o["sha"] = a.Sha; o["env_id"] = a.EnvId; }
         return o.ToJsonString();
@@ -1470,6 +1511,8 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
                     Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
                 };
                 assignments[key] = a;
+                a.Pin = pin ?? "";
+                if (a.Pin != "" && a.PinRetryAt > planNow) continue;                                      // its worker just let an offer lapse: the tick offers it again
                 var (w, why) = Choose(a, pin);
                 if (w == null) { a.WaitingSince ??= planNow; a.WaitingCode = chooseCode; _ = journal(item, "waiting", new JsonObject { ["reason"] = why }, ""); continue; }
                 var trigText = lastTrigger.TryGetValue(item, out var tt) ? tt : "the sweep";
@@ -1489,12 +1532,26 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
         {
             foreach (var a in assignments.Values.Where(a => !a.Accepted && a.Worker != "" && a.AckBy < DateTime.UtcNow).ToList())
             {
-                var was = a.Worker; a.Declined.Add(was); a.Worker = "";
+                var was = a.Worker;
+                if (!IsQc(a) && a.Pin != "")
+                {   // pinned (the item's worker:<name> label): never offered to another worker. It waits, visibly, and is offered to the same worker
+                    // again after one more window, or as soon as that worker is back.
+                    a.Worker = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "pinned-unavailable"; a.PinRetryAt = DateTime.UtcNow.AddSeconds(ackSeconds);
+                    _ = journal(a.Item, "waiting", new JsonObject { ["reason"] = $"the pinned worker '{a.Pin}' did not confirm within {ackSeconds:0} s; the item waits for it" }, "pinwait|" + a.Id + "|" + a.PinRetryAt.Ticks);
+                    continue;
+                }
+                a.Declined.Add(was); a.Worker = "";
                 _ = journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s" }, "ack|" + a.Id + "|" + was);
                 var (w, why) = IsQc(a) ? ChooseQc(a) : Choose(a, null);
                 if (w == null) { if (!IsQc(a)) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = chooseCode; _ = journal(a.Item, "waiting", new JsonObject { ["reason"] = why }, ""); } continue; }
                 Offer(a, w, null);
                 if (IsQc(a)) placed.Add(a);
+            }
+            // a pinned item that waits is offered to its worker as soon as that worker can take it (it reconnected, or has a free slot again)
+            foreach (var a in assignments.Values.Where(a => !IsQc(a) && !a.Accepted && a.Worker == "" && a.Pin != "" && a.PinRetryAt <= DateTime.UtcNow).ToList())
+            {
+                var (w, _) = Choose(a, a.Pin);
+                if (w != null) Offer(a, w, null);
             }
             // a Start that found no worker keeps its place: it is offered as soon as a qualified worker connects (it is the person's earlier Start, not a new automatic one)
             foreach (var a in assignments.Values.Where(a => IsQc(a) && !a.Accepted && a.Worker == "").ToList())
@@ -1531,6 +1588,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
                     foreach (var a in assignments.Values.Where(a => a.Id == who.Assignment))
                     {
                         a.Accepted = true; a.AcceptedAt = DateTime.UtcNow;
+                        if (a.Pin != "" && a.Worker == "") a.Worker = who.Name;      // a pinned item accepted between two offers: the record names its worker
                         if (IsQc(a)) qcOf[a.Key] = who.Name;            // a QC worker is never the owner of the item
                         else if (a.Kind == "own-item") { ownerOf[item] = who.Name; if (Msg.On) { ownedSince[item] = DateTime.UtcNow; seamOwned.Remove(item); ownedMisses.Remove(item); } } else botOf[item] = who.Name;
                     }

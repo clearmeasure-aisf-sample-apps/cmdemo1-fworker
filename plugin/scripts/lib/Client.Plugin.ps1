@@ -13,7 +13,7 @@ function Sync-Plugin($Cfg) {
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     try {
         $tgz = Join-Path $tmp 'plugin.tgz'
-        Invoke-WebRequest -Uri "$($Cfg.url)/api/v1/plugin" -Headers @{ Authorization = "Bearer $($Cfg.token)" } -OutFile $tgz -TimeoutSec 60 | Out-Null
+        Invoke-WebRequest -Uri "$($Cfg.url)/api/v1/plugin" -Headers @{ Authorization = "Bearer $(Get-ConfigToken $Cfg)" } -OutFile $tgz -TimeoutSec 60 | Out-Null
         $new = Join-Path $tmp 'new'; New-Item -ItemType Directory -Force -Path $new | Out-Null
         & tar -xzf $tgz -C $new
         if ($LASTEXITCODE -ne 0) { return @{ ok = $false; code = 'extract-failed'; reason = 'tar could not extract the plugin archive' } }

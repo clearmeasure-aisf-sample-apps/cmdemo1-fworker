@@ -44,7 +44,7 @@ function Invoke-Subscribe($a) {
         $http = [Net.Http.HttpClient]::new(); $http.Timeout = [TimeSpan]::FromHours(24)
         try {
             $req = [Net.Http.HttpRequestMessage]::new('GET', "$($cfg.url)/api/v1/events?capabilities=$caps")
-            $req.Headers.Add('Authorization', "Bearer $($cfg.token)")
+            $req.Headers.Add('Authorization', "Bearer $(Get-ConfigToken $cfg)")
             if ($lastId) { $req.Headers.Add('Last-Event-ID', $lastId) }
             $resp = $http.SendAsync($req, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
             if (-not $resp.IsSuccessStatusCode) { throw "gateway answered $([int]$resp.StatusCode)" }
