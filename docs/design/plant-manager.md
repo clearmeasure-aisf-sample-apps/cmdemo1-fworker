@@ -103,7 +103,7 @@ Rules: hidden machine marker on every comment (`<!-- plant event=assigned key=�
 
 ## 9. Model selection
 
-- A machine's `models.json` maps ladder rungs to models; the gateway decides when to climb (`model-tier`: relaunches, repeated review findings, demotions, fix-forward rounds, refused gate calls; never lowered within a column). Default: haiku 4.5 `xhigh` → sonnet 5.5 `medium` → opus 5.5 `medium`.
+- A machine's `models.json` maps ladder rungs to models; the gateway decides when to climb (`model-tier`: relaunches, repeated review findings, demotions, fix-forward rounds, refused gate calls; never lowered within a column). Default: haiku 5.5 `xhigh` → sonnet 5.5 `medium` → opus 5.5 `medium`.
 - `profiles.testing` (`claude-haiku-5-5`, `low`) is pinned and never climbs; items labelled `factory test`, or `FACTORY_MODEL_PROFILE=testing`, use it.
 - The inspector uses at least the standard rung for real items, and the testing profile for `factory test` items.
 - A long-lived owner cannot change its own model. When the gateway raises the tier, the owner finishes the step, releases, and a new session resumes on the higher rung.

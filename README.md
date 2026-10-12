@@ -24,7 +24,7 @@ Secrets for a local run sit in `~/.local/share/factory-worker/secrets` (webhook 
 
 | Rung | Default model | Effort |
 |---|---|---|
-| economy (start) | claude-haiku-4-5-20251001 | xhigh |
+| economy (start) | claude-haiku-5-5 | xhigh |
 | standard | claude-sonnet-5-5 | medium |
 | premium | claude-opus-5-5 | medium |
 
