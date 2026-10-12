@@ -22,7 +22,7 @@ function Start-Worker($ev, $cfg, [int]$Max) {
     foreach ($x in @('-p', $prompt, '--plugin-dir', $plugin, '--permission-mode', 'acceptEdits', '--allowedTools', 'Bash(pwsh:*) Bash(git:*) Bash(gh:*) Bash(dotnet:*) Bash(ls:*) Bash(cat:*) Bash(grep:*) Bash(sed:*) Bash(mkdir:*) Bash(printf:*) Bash(echo:*) Bash(head:*) Bash(tail:*) Bash(wc:*) Bash(test:*) Bash(cd:*) Bash(curl:*) Bash(nohup:*) Bash(kill:*) Bash(sleep:*) Bash(ss:*) Bash(pkill:*) Bash(rm:*) Bash(npx:*) Bash(playwright:*) Read Edit Write Grep Glob Agent', '--max-turns', '120')) { $psi.ArgumentList.Add($x) }
     $psi.WorkingDirectory = $sandbox
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
-    $psi.Environment['FACTORY_URL'] = $cfg.url; $psi.Environment['FACTORY_TOKEN'] = $cfg.token; $psi.Environment['FACTORY_HOLDER'] = $holder
+    $psi.Environment['FACTORY_URL'] = $cfg.url; $psi.Environment['FACTORY_TOKEN'] = $cfg.token; $psi.Environment['FACTORY_HOLDER'] = $holder; [void]$psi.Environment.Remove('FACTORY_SUPERVISOR_TOKEN')   # a child never holds the supervisor credential
     $psi.Environment['FACTORY_PLUGIN_SCRIPTS'] = Join-Path $plugin 'scripts'
     $proc = [Diagnostics.Process]::Start($psi)
     Set-Content (Join-Path $dir "item-$($ev.item).pid") $proc.Id
@@ -38,6 +38,8 @@ function Invoke-Subscribe($a) {
     $lastId = ''
     $backoff = 2; $dropN = 0
     [Console]::Out.WriteLine((@{ provider = 'client'; event = 'session.start'; at = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress)); [Console]::Out.Flush()
+    # two credentials in one session (worker-messaging.md 6.4): said once, without either value (the function is in Client.Own.ps1)
+    . (Join-Path $PSScriptRoot 'Client.Own.ps1'); Write-TwoCredentialWarning
     while ($true) {
         $http = [Net.Http.HttpClient]::new(); $http.Timeout = [TimeSpan]::FromHours(24)
         try {

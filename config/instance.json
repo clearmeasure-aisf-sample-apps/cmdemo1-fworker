@@ -82,7 +82,25 @@
     "qcMaxRelaunches": 3,
     "qcWaitingRepeatMinutes": 30,
     "qcTokenHours": 16,
-    "qcBuildCapMinutes": 8
+    "qcBuildCapMinutes": 8,
+    "msgTtlMinutes": 1440,
+    "mgrEscalateMinutes": 10,
+    "mgrPatrolMinutes": 10,
+    "mgrStallMinutes": 45,
+    "mgrLeaseWarnMinutes": 5,
+    "mgrDisconnectGraceMinutes": 5,
+    "mgrWaitingMinutes": 30,
+    "mgrBatchSeconds": 20,
+    "mgrInflightMinutes": 10,
+    "mgrEscalateRetrySeconds": 30,
+    "mgrEscalateRetryMinutes": 10,
+    "mgrOwnedGraceSeconds": 60,
+    "msgOnlineSeconds": 90,
+    "msgAwaySeconds": 600,
+    "msgOfflineListMinutes": 60,
+    "mgrTakeoverSeconds": 90,
+    "mgrBaselineMinutes": 30,
+    "mgrRemindMinutes": 60
   },
   "qc": {
     "trustProxy": false,
@@ -97,6 +115,66 @@
     "requireRun": null,
     "requireApproval": null,
     "allowLoopbackForTests": false
+  },
+  "messaging": {
+    "enabled": true,
+    "allowedWorkers": [
+      "*"
+    ],
+    "allowBroadcast": true,
+    "maxTextChars": 2000,
+    "ratePerMinute": 12,
+    "pairPer10Min": 10,
+    "perSenderQueueCap": 20,
+    "recipientQueueCap": 100,
+    "scaleToZeroEnvironments": [
+      "tdd",
+      "uat"
+    ]
+  },
+  "manager": {
+    "enabled": true,
+    "allowedNames": [
+      "supervisor"
+    ],
+    "allowedAskers": [
+      "*"
+    ],
+    "tokenGeneration": 1,
+    "requiredModelTier": "premium",
+    "requiredEffort": "high",
+    "enforceModel": false,
+    "answerSlaSeconds": 120,
+    "maxOpenQuestionsPerWorker": 3,
+    "batchMax": 5,
+    "asksPerHour": 6,
+    "turnBudgetPerHour": 12,
+    "turnBudgetPerDay": 96,
+    "patrolReservePerHour": 2,
+    "stepBudgetPerHour": 60,
+    "digest": {
+      "refusalCount": 3,
+      "waitCodes": [
+        "qc-not-run",
+        "qc-approval-missing",
+        "held"
+      ],
+      "maxBytes": 4096
+    }
+  },
+  "secrets": {
+    "patterns": [
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)",
+      "gh[pousr]_[A-Za-z0-9]{20,}",
+      "xox[baprs]-[A-Za-z0-9-]{10,}",
+      "AKIA[0-9A-Z]{16}",
+      "\\b(w1|m1|i1|q1)\\.[A-Za-z0-9_.-]{20,}",
+      "(?i)authorization:\\s*bearer\\s+[A-Za-z0-9._~+/=-]{20,}",
+      "(?i)\\b(bearer|token|secret|password|api[_-]?key)\\b\\s*[:=]\\s*([\"'][^\"']{8,}[\"']|[A-Za-z0-9+/_-]{20,}={0,2})"
+    ],
+    "redactOnly": [
+      "(?i)(bearer|token|secret|password|api[_-]?key)(\\s*[:=]\\s*|\\s+)[A-Za-z0-9._~+/=-]{12,}"
+    ]
   },
   "mergePolicy": "auto",
   "humanApprovers": [],

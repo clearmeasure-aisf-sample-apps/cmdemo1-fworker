@@ -2,7 +2,14 @@
 # factory.ps1 <verb> [--flag value ...]        client: sends the verb to the gateway (no GitHub or Octopus secret on this machine)
 # factory.ps1 --server <verb>  < args.json     server: runs the rule script (gateway only; holds GH_TOKEN, OCTOPUS_API_KEY)
 # factory.ps1 subscribe --own --name N [--spawn]  client: register as a worker; assignments arrive as item.assigned (token saved, not printed)
-# factory.ps1 wait-event --item N | worker-token --name N
+# factory.ps1 wait-event --item N [--messages] | worker-token --name N [--role manager]
+# factory.ps1 send --to NAME|operator|--all|--thread item-N --text "..." | --text-file F [--subject S] [--item N] [--in-reply-to ID]   peer message (worker-messaging.md 6.1)
+# factory.ps1 peers [--all] [--text]          the directory of sessions this one may see, with the supervisor block
+# factory.ps1 inbox [--after SEQ] [--wait S] [--id M] [--include delivered] [--ack] | ack --ids a,b | --up-to SEQ | presence [--summary "..."]
+# factory.ps1 ask --text "..." | --text-file F [--item N] [--context "..."] [--wait S] | message-status --id M [--wait S]   question to the supervisor
+# factory.ps1 subscribe --own --supervisor --name N --model ID --effort E   the supervisor session (6.4); its verbs, with FACTORY_SUPERVISOR_TOKEN:
+# factory.ps1 answer --id M --text-file F [--note "..."] | answer --batch-file F | direct --to NAME|--all [--kind directive|announcement] --text-file F [--item N]
+# factory.ps1 questions [--state open|all] | plant-digest | patrol-ack --seq N --note "..." | send --to operator | get-item, pr-checks, get-delivery
 # factory.ps1 subscribe [--spawn]              client: prints one normalized event per line; with --spawn starts a headless worker per offer
 #
 # Exit codes: 0 ok, 2 usage, 10 gate refused, 11 stale, 12 not found, 20 retryable external, 21 accepted/pending, 30 config/secret, 40 claim held.
@@ -52,7 +59,8 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
 
 # ---------------------------------------------------------------- client mode
 function Get-ClientConfig {
-    $cfg = @{ url = $env:FACTORY_URL; token = $env:FACTORY_TOKEN }
+    # the supervisor session's only credential is FACTORY_SUPERVISOR_TOKEN (worker-messaging.md 6.4): it stands in where no FACTORY_TOKEN is set
+    $cfg = @{ url = $env:FACTORY_URL; token = $(if ($env:FACTORY_TOKEN) { $env:FACTORY_TOKEN } else { $env:FACTORY_SUPERVISOR_TOKEN }) }
     $f = Get-FwConfigPath 'client.json'
     if ((-not $cfg.url -or -not $cfg.token) -and $f -and (Test-Path $f)) {
         $j = Get-Content -Raw $f | ConvertFrom-Json -AsHashtable
@@ -116,6 +124,11 @@ if ($verb -eq 'subscribe') {
 if ($verb -eq 'worker-token') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-WorkerToken (ConvertFrom-Flags $flagTokens) }
 if ($verb -eq 'plugin-sync') { . (Join-Path $here 'lib/Client.Plugin.ps1'); Invoke-PluginSync (Get-ClientConfig) }
 if ($verb -eq 'wait-event') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-WaitEvent (ConvertFrom-Flags $flagTokens) (Get-ClientConfig) }
+# peer messaging (worker-messaging.md 6.1, 6.4): client-side verbs with their own request bodies (no holder), not server verbs
+if ($verb -in 'peers', 'send', 'inbox', 'ack', 'ask', 'presence', 'message-status', 'answer', 'direct', 'questions', 'plant-digest', 'patrol-ack') {
+    . (Join-Path $here 'lib/Client.Own.ps1'); . (Join-Path $here 'lib/Client.Messages.ps1')
+    Invoke-MessageVerb $verb (ConvertFrom-Flags $flagTokens) (Get-ClientConfig)
+}
 
 $a = ConvertFrom-Flags $flagTokens
 if (-not $a.ContainsKey('holder')) { $a.holder = if ($env:FACTORY_HOLDER) { $env:FACTORY_HOLDER } else { "$(Get-FwUserName)@$([Net.Dns]::GetHostName())" } }
@@ -123,6 +136,8 @@ $cfg = Get-ClientConfig
 . (Join-Path $here 'lib/Client.Own.ps1')
 $callRole = if ($a.ContainsKey('role')) { "$($a.role)" } elseif ($verb -like 'qc-*') { 'qc' } else { '' }
 $callToken = if ($verb -eq 'my-items') { Get-WorkerCredential $cfg $a.holder } else { Select-ItemToken $cfg $(if ($a.ContainsKey('item')) { $a.item } else { $null }) $callRole }
+# the supervisor session calls its read verbs (get-item, pr-checks, get-delivery) with its own credential and no item token; the gateway refuses every other verb to it
+if ($env:FACTORY_SUPERVISOR_TOKEN -and $env:FACTORY_ITEM_CREDENTIAL -ne '1') { $callToken = $env:FACTORY_SUPERVISOR_TOKEN }
 $resp = $null
 try {
     $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/verbs/$verb" -Method POST -Body ($a | ConvertTo-Json -Depth 10 -Compress) -ContentType 'application/json' `

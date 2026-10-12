@@ -58,7 +58,7 @@ function Verb_inspect_facts($a) {
     $n = Get-ItemNumber $a
     $v = Get-VerdictState $n
     $r = Get-InspectFacts $n $v.info $v.s $v.pr
-    return @{ ok = $true; id = $n; facts = $r.facts; mandatory = $r.mandatory; must_escalate = ($r.mandatory.Count -gt 0); item = @{ title = $v.info.title; body = $v.info.body } }
+    return @{ ok = $true; id = $n; facts = $r.facts; mandatory = $r.mandatory; must_escalate = ($r.mandatory.Count -gt 0); item = @{ title = $v.info.title; body = (Remove-DerivedBlocks "$($v.info.body)") } }
 }
 
 # Reviews of a pull request, latest state per reviewer.

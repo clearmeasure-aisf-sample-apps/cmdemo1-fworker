@@ -40,10 +40,14 @@ rsync -a "$SRC/plugin/" "$DST/plugin/"
 rsync -a "$SRC/config/" "$DST/config/"
 rsync -a "$SRC/docs/" "$DST/docs/"
 cp "$SRC/README.md" "$DST/README.md"
-# the container always runs the plant manager (owner sessions); the queue depth is the tested default for code changes
+# the container always runs the plant manager (owner sessions); the queue depth is the tested default for code changes.
+# Worker messaging and the supervisor are on for every registered worker (owner decision 2026-10-12); the source keeps them off by default.
 python3 - "$DST/config/instance.json" <<'PY'
 import json,sys
-p=sys.argv[1]; c=json.load(open(p)); c["ownerSessions"]=True; c["mergeQueueDepth"]=2; json.dump(c,open(p,"w"),indent=2)
+p=sys.argv[1]; c=json.load(open(p)); c["ownerSessions"]=True; c["mergeQueueDepth"]=2
+c["messaging"]["enabled"]=True; c["messaging"]["allowedWorkers"]=["*"]
+c["manager"]["enabled"]=True; c["manager"]["allowedAskers"]=["*"]
+json.dump(c,open(p,"w"),indent=2)
 PY
 echo "staged from $SRC@$(git -C "$SRC" rev-parse --short HEAD) ($(git -C "$SRC" branch --show-current)) into $DST on $BRANCH"
 git -C "$DST" status --short | head -40
