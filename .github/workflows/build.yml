@@ -15,6 +15,15 @@
 # removed afterwards. A BuildKit secret is in no layer; the step still searches the saved image for each value and
 # fails when it finds one (a Dockerfile that copied it into ARG, ENV or a file).
 # A pull request from a fork gets no secrets from GitHub: its build stops at once and says so.
+#
+# Reusing the pull request's image (opt-in, repository variable REUSE_PR_IMAGE=true). The build after a merge makes
+# the same image again, from the same files. When the commit that arrived on the default branch has exactly the files
+# of the pull request's head (the same git tree: the branch was up to date when it merged, which a ruleset requirement
+# "branches up to date" makes the usual case), and that head's own Build succeeded and kept its image, this build
+# takes that image instead of making a new one, and the release gets the version that image was built as. Anything
+# else (a squash of a branch that was behind, a fork, an expired artifact, an image from before this file wrote its
+# version) builds as before. The files are the same, so the image is the one the integration build would make: its
+# tests and checks ran on the pull request's build of this very content.
 name: Build
 
 on:
@@ -25,6 +34,9 @@ on:
 
 permissions:
   contents: read
+  # Read only, for the opt-in reuse of the pull request's image: the pull request of the commit, and its Build run.
+  actions: read
+  pull-requests: read
 
 env:
   MAJOR_VERSION: 1
@@ -40,7 +52,46 @@ jobs:
       - name: Version
         run: echo "VERSION=${MAJOR_VERSION}.${MINOR_VERSION}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
 
+      - name: Reuse the pull request's image
+        id: reuse
+        if: github.event_name == 'push' && vars.REUSE_PR_IMAGE == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "reused=false" >> "$GITHUB_OUTPUT"
+          api="repos/${GITHUB_REPOSITORY}"
+          pr=$(gh api "$api/commits/${GITHUB_SHA}/pulls" --jq '[.[] | select(.merged_at != null)] | first | .number // empty')
+          if [ -z "$pr" ]; then echo "No merged pull request for ${GITHUB_SHA}: the image is built."; exit 0; fi
+          head_sha=$(gh api "$api/pulls/$pr" --jq .head.sha)
+          head_repo=$(gh api "$api/pulls/$pr" --jq .head.repo.full_name)
+          if [ "$head_repo" != "$GITHUB_REPOSITORY" ]; then echo "Pull request $pr is from another repository: the image is built."; exit 0; fi
+          tree_pushed=$(gh api "$api/git/commits/${GITHUB_SHA}" --jq .tree.sha)
+          tree_head=$(gh api "$api/git/commits/${head_sha}" --jq .tree.sha)
+          if [ "$tree_pushed" != "$tree_head" ]; then
+            echo "The files of ${GITHUB_SHA} are not the files of the head of pull request $pr (${head_sha}): the image is built."
+            exit 0
+          fi
+          run=$(gh api "$api/actions/runs?event=pull_request&head_sha=${head_sha}&status=success&per_page=30" \
+            --jq '[.workflow_runs[] | select(.name == "Build")] | sort_by(.run_number) | last | .id // empty')
+          if [ -z "$run" ]; then echo "Pull request $pr has no successful Build of ${head_sha}: the image is built."; exit 0; fi
+          rm -rf "$RUNNER_TEMP/reuse"
+          if ! gh run download "$run" --repo "$GITHUB_REPOSITORY" --name container-image --dir "$RUNNER_TEMP/reuse" 2>/dev/null; then
+            echo "The image of Build run $run is not there (expired?): the image is built."; exit 0
+          fi
+          if [ ! -s "$RUNNER_TEMP/reuse/container-image.tar.gz" ] || [ ! -s "$RUNNER_TEMP/reuse/container-image.version" ]; then
+            echo "The image of Build run $run has no version file (made before this workflow wrote it): the image is built."; exit 0
+          fi
+          cp "$RUNNER_TEMP/reuse/container-image.tar.gz" container-image.tar.gz
+          cp "$RUNNER_TEMP/reuse/container-image.version" container-image.version
+          version=$(tr -d '[:space:]' < container-image.version)
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "reused=true" >> "$GITHUB_OUTPUT"
+          echo "Image ${version} of Build run $run (pull request $pr, ${head_sha}) is this commit's image: the files are the same, so it is not built again." | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Build the image
+        if: steps.reuse.outputs.reused != 'true'
         env:
           BUILD_SECRETS: ${{ vars.IMAGE_BUILD_SECRETS }}
           # One line per build secret gives this step that Actions secret, by its own name: BUILD_SECRET_<NAME>, with
@@ -110,13 +161,17 @@ jobs:
           done
           gzip --stdout "$RUNNER_TEMP/container-image.tar" > container-image.tar.gz
           rm "$RUNNER_TEMP/container-image.tar"
+          # The version this image was built as: the release of a later Build that reuses the image takes it from here.
+          printf '%s\n' "${VERSION}" > container-image.version
           echo "Image ${VERSION}: $(du -h container-image.tar.gz | cut -f1) compressed" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the image
         uses: actions/upload-artifact@v7
         with:
           name: container-image
-          path: container-image.tar.gz
+          path: |
+            container-image.tar.gz
+            container-image.version
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
