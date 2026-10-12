@@ -499,7 +499,7 @@ sealed class Messenger
     // counters of /status (8): how many messages were accepted, refused per code and flagged; never their text
     long sentCount, flaggedCount;
     readonly Dictionary<string, long> refusedCount = new();
-    void CountRefusal(string code) { lock (leaf) refusedCount[code] = refusedCount.GetValueOrDefault(code) + 1; }
+    public void CountRefusal(string code) { lock (leaf) refusedCount[code] = refusedCount.GetValueOrDefault(code) + 1; }
     public void AddCounters(JsonObject messagingBlock)
     {
         lock (leaf)

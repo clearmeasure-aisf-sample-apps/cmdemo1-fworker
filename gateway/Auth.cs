@@ -8,11 +8,23 @@ using System.Text.Json.Nodes;
 //   item      "i1.<payload>.<hmac>" minted at an assignment for ONE item and ONE role: the only credential that acts on an item.
 //   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs and nothing else (worker-messaging.md 4.6).
 // The secret never leaves the gateway host. Design: docs/design/plant-manager.md section 5.
+// Revocation (operator, POST /workers/{name}/revoke): tokens are stateless, so each name has a generation, 0 until its first revocation. Every
+// token of a name is bound to the generation it was minted at (generation 0 gives exactly the formats above); a revocation raises the generation,
+// so every credential minted before it (worker, supervisor, item) fails here, and one minted afterwards works. The generations are kept in
+// GitHub by the rule scripts (refs/factory/<instance>/revoked/<name>/<generation>) and read back at start, like owners after a restart.
 
 sealed record Principal(string Kind, string Name = "", int Item = 0, string Role = "", string Assignment = "", long Expires = 0, int Pr = 0, string Sha = "", string Ip = "");
 
 // The claims of a "q1." QC link: a capability for ONE pull request at ONE head, carrying no identity.
 sealed record QcClaims(int Pr, string Sha, int Item, string Nonce, long Expires);
+
+sealed class Revocations
+{
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> gen = new(StringComparer.Ordinal);
+    public int Of(string name) => gen.GetValueOrDefault(name);
+    // a generation only rises: a late or repeated write never brings an older credential back
+    public int Raise(string name, int to) => gen.AddOrUpdate(name, to, (_, old) => Math.Max(old, to));
+}
 
 static class Auth
 {
@@ -54,18 +66,22 @@ static class Auth
         && roles.All(r => r is "owner" or "inspector" or "qc") && caps.Count <= 10 && caps.All(ValidTag)
         && (model == "" || ValidTag(model)) && (effort == "" || ValidTag(effort));
 
-    public static string WorkerToken(string secret, string name) => $"w1.{name}.{Mac(secret, "worker:" + name)}";
-    public static string ManagerToken(string secret, string name, int generation) => $"m1.{name}.{generation}.{Mac(secret, $"manager:{name}:{generation}")}";
+    // rev: the name's revocation generation; 0 (never revoked) keeps the original format and MAC input
+    public static string WorkerToken(string secret, string name, int rev = 0) => $"w1.{name}.{Mac(secret, rev == 0 ? "worker:" + name : $"worker:{name}:{rev}")}";
+    public static string ManagerToken(string secret, string name, int generation, int rev = 0) => rev == 0
+        ? $"m1.{name}.{generation}.{Mac(secret, $"manager:{name}:{generation}")}" : $"m1.{name}.{generation}-{rev}.{Mac(secret, $"manager:{name}:{generation}:{rev}")}";
 
-    public static string MintItemToken(string secret, int item, string role, string assignment, string worker, TimeSpan ttl)
+    public static string MintItemToken(string secret, int item, string role, string assignment, string worker, TimeSpan ttl, int rev = 0)
     {
-        var payload = new JsonObject { ["i"] = item, ["r"] = role, ["a"] = assignment, ["w"] = worker, ["x"] = DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds() }.ToJsonString();
+        var o = new JsonObject { ["i"] = item, ["r"] = role, ["a"] = assignment, ["w"] = worker, ["x"] = DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds() };
+        if (rev != 0) o["g"] = rev;
+        var payload = o.ToJsonString();
         var p = B64(Encoding.UTF8.GetBytes(payload));
         return $"i1.{p}.{Mac(secret, p)}";
     }
 
     // Returns null for an unknown, malformed, forged or expired credential.
-    public static Principal? Authenticate(string? header, string adminToken, string secret, MessagingSettings msg)
+    public static Principal? Authenticate(string? header, string adminToken, string secret, MessagingSettings msg, Revocations rev)
     {
         if (string.IsNullOrEmpty(header) || !header.StartsWith("Bearer ")) return null;
         var t = header[7..];
@@ -75,12 +91,12 @@ static class Auth
         {
             var last = t.LastIndexOf('.'); if (last <= 3) return null;
             var name = t[3..last]; if (!ValidName(name) || msg.Reserved.Contains(name)) return null;
-            return Same(t, WorkerToken(secret, name)) ? new Principal("worker", name) : null;
+            return Same(t, WorkerToken(secret, name, rev.Of(name))) ? new Principal("worker", name) : null;
         }
         if (t.StartsWith("m1."))
         {
             var parts = t.Split('.'); if (parts.Length != 4 || !msg.ManagerEnabled || !msg.ManagerNames.Contains(parts[1])) return null;
-            return Same(t, ManagerToken(secret, parts[1], msg.TokenGeneration)) ? new Principal("manager", parts[1]) : null;
+            return Same(t, ManagerToken(secret, parts[1], msg.TokenGeneration, rev.Of(parts[1]))) ? new Principal("manager", parts[1]) : null;
         }
         if (t.StartsWith("i1."))
         {
@@ -90,6 +106,8 @@ static class Auth
             {
                 var j = JsonNode.Parse(Encoding.UTF8.GetString(UnB64(parts[1])))!;
                 var x = j["x"]!.GetValue<long>(); if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
+                // minted before the last revocation of its worker name: refused with everything else of that name
+                if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(j["w"]!.ToString())) return null;
                 return new Principal("item", j["w"]!.ToString(), j["i"]!.GetValue<int>(), j["r"]!.ToString(), j["a"]!.ToString(), x);
             }
             catch { return null; }

@@ -25,7 +25,7 @@ function Get-PublicState($s) {
 
 # Text that a session wrote into an item because of a message (worker-messaging.md 3.8): the gateway wraps it in one block between these markers.
 # get-item labels the blocks as data and inspect-facts leaves them out, so they never read as specification.
-$script:DerivedBlockRx = '(?s)<!-- aisf:assumption source=([A-Za-z0-9-]{1,40}) from=([A-Za-z0-9_-]{1,40}) -->(?:(?!<!-- aisf:assumption ).)*?<!-- /aisf:assumption -->'
+$script:DerivedBlockRx = '(?s)<!-- aisf:assumption source=([A-Za-z0-9-]{1,40}) from=([A-Za-z0-9_-]{1,40})(?: in_reply_to=[A-Za-z0-9-]{1,40})? -->(?:(?!<!-- aisf:assumption ).)*?<!-- /aisf:assumption -->'
 # Blocks exist only where the gateway guards the marker, which it does while messaging or the supervisor is on (the switches of the gateway's loader:
 # the config, overridden by FACTORY_MESSAGING and FACTORY_MANAGER). With both off nothing is labelled or left out: a marker is ordinary text.
 function Test-MessagingOn {

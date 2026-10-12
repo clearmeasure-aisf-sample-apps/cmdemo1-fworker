@@ -21,7 +21,7 @@ $here = $PSScriptRoot
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'pr-checks',
     'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
-    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval')
+    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker')
 $NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job')
 
 function Write-Out($obj, [int]$code) {
@@ -66,9 +66,17 @@ function Get-ClientConfig {
         $j = Get-Content -Raw $f | ConvertFrom-Json -AsHashtable
         if (-not $cfg.url) { $cfg.url = $j.url }; if (-not $cfg.token) { $cfg.token = $j.token }
     }
-    if (-not $cfg.url -or -not $cfg.token) { Write-Out @{ ok = $false; code = 'client-not-configured'; reason = 'set FACTORY_URL and FACTORY_TOKEN, (the connect prompt exports both)' } 30 }
+    # only a missing url is refused here: the credential may still come from FACTORY_WORKER_TOKEN, an item token file or the keyring
+    # (Get-WorkerCredential, Select-ItemToken), and a session whose only credential is in the keyring must run. Get-ConfigToken refuses when
+    # every lookup came back empty.
+    if (-not $cfg.url) { Write-Out @{ ok = $false; code = 'client-not-configured'; reason = 'set FACTORY_URL and FACTORY_TOKEN, (the connect prompt exports both)' } 30 }
     $cfg.url = $cfg.url.TrimEnd('/')
     return $cfg
+}
+# The configured credential, as the last resort of a credential lookup: nothing configured and nothing found is client-not-configured.
+function Get-ConfigToken($Cfg) {
+    if (-not $Cfg.token) { Write-Out @{ ok = $false; code = 'client-not-configured'; reason = 'no credential: set FACTORY_TOKEN (the connect prompt exports it), or keep the credential of this session name in the keyring' } 30 }
+    return $Cfg.token
 }
 
 function ConvertFrom-Flags([string[]]$Tokens) {
@@ -138,6 +146,8 @@ $callRole = if ($a.ContainsKey('role')) { "$($a.role)" } elseif ($verb -like 'qc
 $callToken = if ($verb -eq 'my-items') { Get-WorkerCredential $cfg $a.holder } else { Select-ItemToken $cfg $(if ($a.ContainsKey('item')) { $a.item } else { $null }) $callRole }
 # the supervisor session calls its read verbs (get-item, pr-checks, get-delivery) with its own credential and no item token; the gateway refuses every other verb to it
 if ($env:FACTORY_SUPERVISOR_TOKEN -and $env:FACTORY_ITEM_CREDENTIAL -ne '1') { $callToken = $env:FACTORY_SUPERVISOR_TOKEN }
+# no item token and nothing configured: the session's credential may be in the keyring only (the supervisor's, else the worker's, of this name)
+if (-not $callToken) { $callToken = Get-WorkerCredential $cfg $a.holder -Supervisor }
 $resp = $null
 try {
     $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/verbs/$verb" -Method POST -Body ($a | ConvertTo-Json -Depth 10 -Compress) -ContentType 'application/json' `

@@ -67,3 +67,35 @@ function Verb_my_items($a) {
     }
     return @{ ok = $true; holder = $name; items = $out }
 }
+
+# ---- revoked worker names (gateway/Auth.cs). The gateway keeps one generation per name and nothing on its own disk, so the generation lives in
+# GitHub as a ref beside the claim refs: refs/factory/<instance>/revoked/<name>/<generation>. Admin verbs, called by the gateway only. ----
+function Get-RevokedRefPath { "factory/$((Get-Cfg).name)/revoked" }
+
+# revocations: every revoked name with its highest generation; read once when the gateway starts.
+function Verb_revocations($a) {
+    $out = @{}; $prefix = "refs/$(Get-RevokedRefPath)/"
+    for ($page = 1; $page -le 50; $page++) {
+        $rows = @(Invoke-Gh -Path "$(Get-RepoPath)/git/matching-refs/$(Get-RevokedRefPath)/?per_page=100&page=$page")
+        foreach ($r in $rows) {
+            if ("$($r.ref)".StartsWith($prefix, [StringComparison]::Ordinal) -and "$($r.ref)".Substring($prefix.Length) -match '^([A-Za-z0-9_-]{1,40})/(\d{1,9})$') {
+                $n = $Matches[1]; $g = [int]$Matches[2]
+                if (-not $out.ContainsKey($n) -or $out[$n] -lt $g) { $out[$n] = $g }
+            }
+        }
+        if ($rows.Count -lt 100) { break }
+    }
+    return @{ ok = $true; revoked = $out }
+}
+
+# revoke-worker: records generation G for one name (idempotent).
+function Verb_revoke_worker($a) {
+    $name = "$(Need $a 'name')"; $gen = [int](Need $a 'generation')
+    if ($name -notmatch '^[A-Za-z0-9_-]{1,40}$' -or $gen -lt 1) { Reject 2 'usage' 'name is a worker name and generation is 1 or more' }
+    $c = Get-Cfg
+    $head = (Invoke-Gh -Path "$(Get-RepoPath)/git/ref/heads/$($c.defaultBranch)").object.sha
+    # older generations stay (the reader takes the highest); only "already exists" is an acceptable 422
+    $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/git/refs" -Body @{ ref = "refs/$(Get-RevokedRefPath)/$name/$gen"; sha = $head } -Allow 422
+    if ($r -is [hashtable] -and $r.ContainsKey('status') -and $r.status -eq 422 -and "$($r.body.message)" -notmatch '(?i)already exists') { Reject 20 'github-error' 'GitHub refused the revocation ref' @{ detail = "$($r.body.message)"; retryAfterSeconds = 30 } }
+    return @{ ok = $true; name = $name; generation = $gen }
+}

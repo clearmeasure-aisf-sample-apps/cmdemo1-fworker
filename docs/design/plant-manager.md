@@ -45,15 +45,15 @@ All types share the registry, the assignment protocol, tokens and journaling. On
 - The gateway keeps the registry in memory. Durable truth is the claim in each item's state comment (`claim.holder` = worker name), so a gateway restart is rebuilt as workers reconnect.
 
 ### Choosing a worker
-For each job the plant manager takes the workers that: hold the `owner` (or bot) role, have every capability the item needs, have free capacity, and are not draining. A `worker:<name>` label on the item pins it. Among candidates the order is: persistent-local, then cloud, then ephemeral-local; ties go to the worker with the fewest owned items.
+For each job the plant manager takes the workers that: hold the `owner` (or bot) role, have every capability the item needs, have free capacity, and are not draining. A `worker:<name>` label on the item pins it: the item is offered to that worker and to no other. If that worker is not connected, is draining, is at capacity or lets the accept window pass, the item waits (journal `waiting`, the assignment without a worker on the dashboard) and is offered to the same worker again when it can take it. Among candidates the order is: persistent-local, then cloud, then ephemeral-local; ties go to the worker with the fewest owned items.
 
 ### Directed assignment
 `item.assigned` is sent to **one** worker, not broadcast:
 ```json
 { "event": "item.assigned", "item": 101, "column": "Development", "mode": "first|fix-forward|relaunch|resume",
-  "job": "own-item", "assignment": "a-4f2c", "token": "<item+role scoped>", "ackBySeconds": 30 }
+  "job": "own-item", "assignment": "a-4f2c", "token": "<item+role scoped>", "ackBySeconds": 120 }
 ```
-- The worker confirms with `factory.ps1 accept --item N --assignment a-4f2c` within `ackBySeconds`. `accept` is the claim: it creates the claim ref, writes the claim into the state comment and returns the item-scoped token's details.
+- The worker confirms with `factory.ps1 accept --item N --assignment a-4f2c` within `ackBySeconds` (120 by default: `timing.assignAckSeconds`, overridden by `FACTORY_TIMING_assignAckSeconds` or `FACTORY_ASSIGN_ACK_SECONDS`; an offer nobody confirms goes to the next worker, a pinned one waits for its worker). `accept` is the claim: it creates the claim ref, writes the claim into the state comment and returns the item-scoped token's details.
 - No confirmation in time: the plant manager offers the item to the next candidate and journals it. A worker that accepts late is refused (`assignment-expired`).
 - Verbs: `register` (via `subscribe`), `accept`, `my-items` (everything this worker owns, to rebuild a session after compaction or restart), `drain` (stop new assignments, finish owned items), `resume` (a restarted worker takes back what it owned), `wait-event`.
 
@@ -71,6 +71,8 @@ For each job the plant manager takes the workers that: hold the `owner` (or bot)
 | Item token, role `owner` | The owner of one item | `get-item`, `append-body`, `open-pr`, `complete`, `record-review`, `validation-verdict`, `merge`, `claim` renewal, `comment` — **for that item only** |
 | Item token, role `inspector` | The inspector bot session for one item | `get-item`, `inspect-facts`, `approve-pr` — for that item only |
 | Gateway secrets | The gateway only | The GitHub token, the reviewer and test-person App keys, the Octopus read key |
+
+Revocation: `POST /api/v1/workers/{name}/revoke` (operator token only; the `revoke` button of a session row on the dashboard). Every credential minted so far for that name is refused with 401 on every endpoint: the worker credential, the item tokens issued to it and, for a supervisor name, the supervisor credential. Its open stream ends, an offer it has not answered goes back to the plan, and what it owns is handed on as for any owner that is gone (its claims are no longer renewed). A credential minted afterwards for the same name works. Tokens are stateless, so each name has a generation that every token of it is bound to (0, the original token format, until the first revocation); the generation is kept in GitHub as refs `refs/factory/<instance>/revoked/<name>/<generation>` (the highest counts) and read back when the gateway starts, before any session credential is answered (`GET /ready` says when; until then such a request waits up to 20 s and is then answered 503). The offline `factory.ps1 worker-token` mints the original (generation 0) form only: after a name was revoked, its new credential comes from the dashboard, `POST /api/v1/workers/{name}/credential` or `docs/deploy/gen-connect-prompt.sh`.
 
 An item token is an HMAC of `{item, role, expiry}` made with a gateway secret (the idea of AISF's callback token, with a role added). The gateway refuses a verb when the token's item differs from the call's item or the verb is outside the role. This turns "the author never approves its own work" into a gate.
 
@@ -152,4 +154,4 @@ Local first, in this order: (1) worker registry, `subscribe --own`, `accept`, `m
 
 Open question closed: nobody provisions a cloud environment automatically. A person starts a Claude cloud session (or a Cursor cloud agent) and gives it the connect prompt; from then on it behaves exactly like a persistent local session (`subscribe --own`, same credentials, same skills). The registry only labels it `claude-cloud` / `cursor-cloud` (assignment preference: persistent-local, then cloud, then ephemeral-local). No cloud adapter is built.
 
-The worker dashboard (`GET /dashboard`, data from `GET /api/v1/dashboard`, operator token) shows the connected sessions of one running factory (the gateway's `FACTORY_ENVIRONMENT`: tdd, uat or prod), their state, load and assignments, drain/resume, and generates the connect prompt. Creating the prompt issues a one-time worker credential for the chosen name (`POST /api/v1/workers/{name}/credential`); the gateway does not store it.
+The worker dashboard (`GET /dashboard`, data from `GET /api/v1/dashboard`, operator token) shows the connected sessions of one running factory (the gateway's `FACTORY_ENVIRONMENT`: tdd, uat or prod), their state, load and assignments, drain/resume, and generates the connect prompt. Creating the prompt issues a one-time worker credential for the chosen name (`POST /api/v1/workers/{name}/credential`); the gateway does not store it. `revoke` on a session row refuses every credential issued so far for that name (section 5).

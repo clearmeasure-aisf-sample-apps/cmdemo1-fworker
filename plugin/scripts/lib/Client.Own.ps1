@@ -29,7 +29,7 @@ function Select-ItemToken($Cfg, $Item, [string]$Role) {
 # every call it makes (send --to operator, the three read verbs) uses that credential.
 function Get-WorkerCredential($Cfg, [string]$Name, [switch]$Supervisor) {
     # a headless inspector or QC process holds only its item token (worker-messaging.md 4.3): no other variable, keyring or store is consulted
-    if ($env:FACTORY_ITEM_CREDENTIAL -eq '1') { return $Cfg.token }
+    if ($env:FACTORY_ITEM_CREDENTIAL -eq '1') { return (Get-ConfigToken $Cfg) }
     if ($env:FACTORY_SUPERVISOR_TOKEN) { return $env:FACTORY_SUPERVISOR_TOKEN }
     if ($Supervisor) {
         $st = try { (& secret-tool lookup service factory-worker kind supervisor-token name $Name 2>$null) } catch { $null }
@@ -39,7 +39,7 @@ function Get-WorkerCredential($Cfg, [string]$Name, [switch]$Supervisor) {
     if ($env:FACTORY_WORKER_TOKEN) { return $env:FACTORY_WORKER_TOKEN }
     $t = try { (& secret-tool lookup service factory-worker kind worker-token name $Name 2>$null) } catch { $null }
     if ($t) { return "$t".Trim() }
-    return $Cfg.token
+    return (Get-ConfigToken $Cfg)   # nothing configured and nothing in the keyring: client-not-configured, exit 30
 }
 
 # A session that was started with both FACTORY_TOKEN and FACTORY_SUPERVISOR_TOKEN holds two credentials, and the supervisor one is used for every

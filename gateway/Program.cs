@@ -21,7 +21,21 @@ var ownerMode = Environment.GetEnvironmentVariable("FACTORY_OWNER_MODE") == "1";
 var environmentName = Environment.GetEnvironmentVariable("FACTORY_ENVIRONMENT") ?? "tdd";
 var publicUrl = Environment.GetEnvironmentVariable("FACTORY_PUBLIC_URL") ?? "";
 var tokenSecret = Environment.GetEnvironmentVariable("FACTORY_TOKEN_SECRET") ?? "";
-var ackSeconds = double.TryParse(Environment.GetEnvironmentVariable("FACTORY_ASSIGN_ACK_SECONDS"), out var ak) ? ak : 30;
+// The accept window of an offer: FACTORY_ASSIGN_ACK_SECONDS, else FACTORY_TIMING_assignAckSeconds, else timing.assignAckSeconds of the config, else 120.
+var ackSeconds = AckSeconds(scriptsDir);
+static double AckSeconds(string scriptsDir)
+{
+    bool Good(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v > 0;
+    if (Good(Environment.GetEnvironmentVariable("FACTORY_ASSIGN_ACK_SECONDS"), out var a)) return a;
+    if (Good(Environment.GetEnvironmentVariable("FACTORY_TIMING_assignAckSeconds"), out a)) return a;
+    try
+    {
+        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
+        if (Good(root?["timing"]?["assignAckSeconds"]?.ToString(), out a)) return a;
+    }
+    catch { }
+    return 120;
+}
 if (ownerMode && tokenSecret.Length < 16) throw new InvalidOperationException("FACTORY_TOKEN_SECRET (at least 16 characters) is required in owner mode");
 var qcSettings = QcSettings.Load(scriptsDir, publicUrl, ownerMode);
 var messaging = MessagingSettings.Load(scriptsDir, ownerMode);
@@ -48,6 +62,7 @@ if (qcSettings.TrustProxy)
         foreach (var p in qcSettings.KnownProxies) o.KnownProxies.Add(System.Net.IPAddress.Parse(p));
     });
 builder.Services.AddSingleton(new Runner(entry));
+var revocations = new Revocations();
 builder.Services.AddSingleton(sp =>
 {
     var runner = sp.GetRequiredService<Runner>();
@@ -55,7 +70,7 @@ builder.Services.AddSingleton(sp =>
     {
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
-    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging };
+    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations };
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
 builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, publicUrl, tokenSecret));
@@ -84,6 +99,35 @@ string PluginHash()
 }
 
 
+// Revocations (Auth.cs): the generations are read from GitHub once at start, tried again every 5 s until the read succeeds. Until then no worker,
+// supervisor or item credential is accepted: a request waits up to 20 s for the read and is then answered 503, so a restart never lets a revoked
+// credential back in. The operator token does not wait.
+var revocationsLoaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var revokeGate = new SemaphoreSlim(1, 1);
+// FACTORY_TEST_SKIP_REVOCATIONS=1 (the scenario suites' second gateways, whose GitHub is a port nothing listens on): nothing is read, and revoke is refused.
+var revocationsOff = Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") == "1";
+if (revocationsOff && !messaging.TestHooks) throw new InvalidOperationException("FACTORY_TEST_SKIP_REVOCATIONS is for test gateways only: it needs messaging.testHooks in the configuration");
+if (revocationsOff && ownerMode) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"off\",\"warning\":\"FACTORY_TEST_SKIP_REVOCATIONS is set: revoked credentials are not read and cannot be revoked\"}}");
+if (!ownerMode || tokenSecret.Length == 0 || revocationsOff) revocationsLoaded.SetResult();
+else _ = Task.Run(async () =>
+{
+    while (true)
+    {
+        try
+        {
+            var (code, output) = await runner.RunAsync("revocations", "{}", TimeSpan.FromSeconds(120));
+            if (code == 0 && JsonNode.Parse(output)?["revoked"] is JsonObject list)
+            {
+                foreach (var kv in list) if (Auth.ValidName(kv.Key) && kv.Value is JsonValue gv && gv.TryGetValue<int>(out var g) && g > 0) revocations.Raise(kv.Key, g);
+                revocationsLoaded.SetResult(); return;
+            }
+            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"not-loaded\",\"exit\":{code}}}");
+        }
+        catch (Exception e) { Console.Error.WriteLine($"revocations: {e.Message}"); }
+        await Task.Delay(TimeSpan.FromSeconds(5));
+    }
+});
+
 static bool FixedEquals(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
 Principal Who(HttpContext c) => (Principal)c.Items["principal"]!;
 static async Task Refuse(HttpContext c, int status, string code, string reason, int exit = 30) { c.Response.StatusCode = status; await c.Response.WriteAsJsonAsync(new { ok = false, code, reason, exit }); }
@@ -95,7 +139,13 @@ app.Use(async (ctx, next) =>
     if (port == hookPort && hookPort != apiPort && !(path == "/webhooks/github" && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
     if (port == apiPort && path.StartsWith("/api/"))
     {
-        var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging);
+        var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
+        if (p?.Kind != "admin" && !revocationsLoaded.Task.IsCompleted)
+        {
+            await Task.WhenAny(revocationsLoaded.Task, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
+            if (!revocationsLoaded.Task.IsCompleted) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }); return; }
+            p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
+        }
         if (p == null) { await Refuse(ctx, 401, "unauthorized", "missing, malformed, forged or expired credential"); return; }
         ctx.Items["principal"] = p;
         // presence (worker-messaging.md 2.2, 4.6): every request of a session's own credential is proof of life; a stream write is not. The
@@ -112,6 +162,8 @@ if (ownerMode) qc.Map(app);
 app.MapGet("/health", () => Results.Text("ok"));
 // liveness for the kit's hourly Health report (it asks every app for /alive, then /): the process answers, nothing else is checked
 app.MapGet("/alive", () => Results.Text("ok"));
+// readiness: the revoked credentials are read (at once where there is nothing to read), so a session credential is answered without waiting
+app.MapGet("/ready", () => revocationsLoaded.Task.IsCompleted ? Results.Text("ok") : Results.Text("starting", statusCode: 503));
 app.MapGet("/", () => Results.Redirect("/dashboard"));
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
 app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, pluginHash = PluginHash(), started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
@@ -173,10 +225,37 @@ app.MapPost("/api/v1/workers/{name}/credential", (string name, HttpContext c) =>
     {
         if (!messaging.ManagerEnabled) return Results.Json(new { ok = false, code = "manager-disabled", reason = "the supervisor is not enabled on this gateway (manager.enabled)", exit = 30 }, statusCode: 403);
         if (!messaging.ManagerNames.Contains(name)) return Results.Json(new { ok = false, code = "name-not-allowed", reason = "the name is not in manager.allowedNames", exit = 10 }, statusCode: 409);
-        return Results.Json(new { ok = true, name, token = Auth.ManagerToken(tokenSecret, name, messaging.TokenGeneration) });
+        return Results.Json(new { ok = true, name, token = Auth.ManagerToken(tokenSecret, name, messaging.TokenGeneration, revocations.Of(name)) });
     }
     if (messaging.Reserved.Contains(name)) return Results.Json(new { ok = false, code = "name-reserved", reason = "the name is reserved for the operator, the gateway or the supervisor", exit = 10 }, statusCode: 409);
-    return Results.Json(new { ok = true, name, token = Auth.WorkerToken(tokenSecret, name) });
+    return Results.Json(new { ok = true, name, token = Auth.WorkerToken(tokenSecret, name, revocations.Of(name)) });
+});
+// Revoke (operator only): every credential minted so far for this name (worker, supervisor, item tokens) is refused from now on, on every endpoint;
+// its open stream ends; a credential minted afterwards works. The new generation is written to GitHub before it takes effect here, so it holds
+// across a restart. A name that never connected is revoked all the same (a credential may have been minted for it).
+app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) =>
+{
+    if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator revokes a name's credentials", 30);
+    if (!ownerMode || tokenSecret.Length == 0) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
+    if (!Auth.ValidName(name)) return Fail(400, "usage", "the name may use letters, digits, - and _ only (40 at most)", 2);
+    if (revocationsOff) return Fail(403, "revocations-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot revoke", 30);
+    if (!revocationsLoaded.Task.IsCompleted) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
+    await revokeGate.WaitAsync();
+    try
+    {
+        var next = revocations.Of(name) + 1;
+        var (code, output) = await runner.RunAsync("revoke-worker", new JsonObject { ["name"] = name, ["generation"] = next }.ToJsonString(), TimeSpan.FromSeconds(120));
+        if (code != 0)
+        {
+            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"failed\":{code}}}");
+            return Results.Json(new { ok = false, code = "not-recorded", reason = "the revocation could not be written to GitHub, so nothing was revoked; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
+        }
+        revocations.Raise(name, next);
+        var closed = plant.Revoke(name);
+        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"generation\":{next},\"streamClosed\":{(closed ? "true" : "false")},\"by\":\"operator\"}}");
+        return Results.Json(new { ok = true, name, generation = next, streamClosed = closed, exit = 0 });
+    }
+    finally { revokeGate.Release(); }
 });
 
 app.MapPost("/webhooks/github", async (HttpContext ctx) =>
@@ -227,6 +306,9 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":{JsonSerializer.Serialize(refusal)}}}");
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "forbidden", reason = refusal, exit = 30 }), "application/json", Encoding.UTF8, 403);
     }
+    // the rule scripts of a revocation run only inside POST /workers/{name}/revoke, which keeps the stored generation and this process in step
+    if (verb is "revoke-worker" or "revocations")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/workers/{name}/revoke", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // every verb call of the supervisor is a step of its hourly budget (worker-messaging.md 3.9); at the budget its read verbs answer 429 step-budget
     // (only the active supervisor spends steps: another supervisor name's credential is refused before anything is counted)
     if (ownerMode && who.Kind == "manager" && plant.ActiveSupervisor().Name != who.Name)
@@ -281,7 +363,7 @@ IResult? DerivedText(string verb, JsonObject body, Principal who)
     var mid = body["from_message"]!.ToString();
     if (who.Kind != "item" || text == null || !System.Text.RegularExpressions.Regex.IsMatch(mid, @"^m-[0-9a-f]{8}-\d{4,}\z"))
         return No(400, "usage", "from_message is the id of a message this session sent or received, given with the session's item token and the text", 2);
-    var (known, from) = plant.MessageParty(mid, who.Name);
+    var (known, source, from, inReplyTo) = plant.MessageParty(mid, who.Name);
     if (!known) return No(404, "no-such-message", "from_message names no message that this session sent or received in this run of the gateway", 12);
     var clean = text.Replace("`", "").Replace("\r", "");
     while (clean.Contains("<!--") || clean.Contains("-->")) clean = clean.Replace("<!--", "").Replace("-->", "");
@@ -289,7 +371,8 @@ IResult? DerivedText(string verb, JsonObject body, Principal who)
     foreach (var rune in clean.Trim().EnumerateRunes()) { if (count++ >= 500) break; capped.Append(rune.ToString()); }
     clean = capped.ToString().Trim();
     if (clean.Length == 0) return No(400, "usage", "there is no text left to write: send the assumption or the decision in your own words", 2);
-    body[field] = $"<!-- aisf:assumption source={mid} from={from} -->\n" + string.Join("\n", clean.Split('\n').Select(l => "> " + l)) + "\n<!-- /aisf:assumption -->";
+    // the block names the message whose text it carries and that message's sender; for an answer also the question it answers
+    body[field] = $"<!-- aisf:assumption source={source} from={from}{(inReplyTo == "" ? "" : " in_reply_to=" + inReplyTo)} -->\n" + string.Join("\n", clean.Split('\n').Select(l => "> " + l)) + "\n<!-- /aisf:assumption -->";
     body.Remove("from_message");
     return null;
 }
@@ -434,6 +517,7 @@ app.MapPost("/api/v1/presence", async (HttpContext ctx) =>
     // the summary is shown to every peer (3.2), so it passes the same credential check as a message (5.4)
     if (summary != null && messenger.LooksSecret(summary)) return Fail(409, "secret-in-message", "the summary looks like a credential or token; summaries never carry secrets (worker-messaging.md 5.4)", 10);
     var (presence, retry) = plant.Heartbeat(who.Name, summary);
+    if (retry > 0) messenger.CountRefusal("rate-limited");
     if (retry > 0) return Results.Json(new { ok = false, code = "rate-limited", reason = "the summary changes at most once per 10 seconds", retryAfterSeconds = retry, exit = 20 }, statusCode: 429);
     return Results.Json(new { ok = true, presence, epoch = plant.Epoch, exit = 0 });
 });
@@ -644,7 +728,7 @@ if (messaging.Enabled && messaging.TestHooks)
             if (job is not ("own-item" or "bot-job" or "qc-env")) return Fail(400, "usage", "job is own-item, bot-job or qc-env", 2);
             var jobRole = job == "bot-job" ? "inspector" : job == "qc-env" ? "qc" : "owner";
             var asgEvt = new JsonObject { ["provider"] = "gateway", ["event"] = "item.assigned", ["item"] = asgItem, ["job"] = job, ["role"] = jobRole, ["mode"] = "first", ["assignment"] = "a-test",
-                ["token"] = b["job"] == null || b["tokenless"]?.ToString() == "true" ? "test-placeholder" : Auth.MintItemToken(tokenSecret, asgItem, jobRole, "a-test", to, TimeSpan.FromHours(1)) };
+                ["token"] = b["job"] == null || b["tokenless"]?.ToString() == "true" ? "test-placeholder" : Auth.MintItemToken(tokenSecret, asgItem, jobRole, "a-test", to, TimeSpan.FromHours(1), revocations.Of(to)) };
             if (job == "qc-env") { asgEvt["pr"] = 0; asgEvt["sha"] = "0000000"; asgEvt["env_id"] = "qc-test"; }
             plant.SendTo(to, asgEvt); return Results.Json(new { ok = true, exit = 0 });
         }
@@ -1023,7 +1107,8 @@ const qcPill=s=>s==='ready'?'on':(s==='failed'||s==='torn-down')?'off':s==='avai
 const ghLink=(repo,kind,n,text)=>/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(repo||'')?`<a href="${esc(repo)}/${kind}/${esc(n)}" target="_blank" rel="noopener">${text}</a>`:text;
 function workerRowHtml(x){const qc=(x.roles||[]).includes('qc');
 const qcCell=qc?`${esc(x.qcActive)}/${esc(x.qcCapacity)} <span class="pill ${x.qcProfile?'on':'dr'}">${x.qcProfile?'profile set':'no profile'}</span> <span class="mut">${esc(x.qcAddress||'no address')}</span>`:'<span class="mut">-</span>';
-return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td><span class="pill ${x.connected?(x.draining?'dr':'on'):'off'}">${x.connected?(x.draining?'draining':'connected'):'gone'}</span></td><td>${esc(x.owned)}</td><td>${esc(x.capacity)}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${x.connected?`<button data-n="${esc(x.name)}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button>`:''}</td></tr>`}
+return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td><span class="pill ${x.connected?(x.draining?'dr':'on'):'off'}">${x.connected?(x.draining?'draining':'connected'):'gone'}</span></td><td>${esc(x.owned)}</td><td>${esc(x.capacity)}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${x.connected?`<button data-n="${esc(x.name)}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:''}${revokeButton(esc(x.name))}</td></tr>`}
+function revokeButton(n){return `<button data-n="${n}" data-a="revoke" title="Refuse every credential issued so far for this name and end its stream; a new prompt gives it a new credential">revoke</button>`}
 function qcRowHtml(x,repo){const sha=String(x.sha||'').slice(0,7),head=String(x.head||'').slice(0,7),p=esc(x.pr);
 const env=x.state==='failed'?esc((x.fail&&x.fail.code)||'failed')+(x.fail&&x.fail.reason?` <span class="mut">${esc(x.fail.reason)}</span>`:''):x.url&&/^https?:\/\//i.test(x.url)?`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.url)}</a>`:x.waiting?`<span class="mut">${esc(x.waiting)}</span>`:x.url_note?`<span class="mut">${esc(x.url_note)}</span>`:'-';
 const st=x.stale?` <span class="pill dr" title="the pull request is now at ${esc(head)}">stale</span>`:'';
@@ -1090,7 +1175,7 @@ return out}
 function supervisorRowHtml(m,now){const s=m&&m.supervisor;
 if(!s||!(s.present||s.connected))return '<tr><td colspan="11" class="dr">Supervisor: none connected</td></tr>';
 const age=secsSince(s.lastHeard,now),flag=m.modelCheck&&m.modelCheck!=='ok'?`<span class="pill off">${esc(m.modelCheck)} model</span>`:'';
-return `<tr><td><b>SUPERVISOR</b> ${esc(s.name)}</td><td>manager</td><td>${s.model?esc(s.model)+' '+esc(s.effort||''):'<span class="mut">(not declared)</span>'}</td><td><span class="pill ${s.present?'on':'dr'}">${s.present?'online':'away'}${age==null?'':' '+esc(ageText(age))}</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>${esc(m.openQuestions||0)} open</td><td>${flag}</td></tr>`}
+return `<tr><td><b>SUPERVISOR</b> ${esc(s.name)}</td><td>manager</td><td>${s.model?esc(s.model)+' '+esc(s.effort||''):'<span class="mut">(not declared)</span>'}</td><td><span class="pill ${s.present?'on':'dr'}">${s.present?'online':'away'}${age==null?'':' '+esc(ageText(age))}</span></td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>${esc(m.openQuestions||0)} open</td><td>${flag} ${revokeButton(esc(s.name))}</td></tr>`}
 function sessionRowHtml(x,now,repo,i){const qc=(x.roles||[]).includes('qc')&&x.inPlant,n=esc(x.name);
 const qcCell=qc?`${esc(x.qcActive)}/${esc(x.qcCapacity)} <span class="pill ${x.qcProfile?'on':'dr'}">${x.qcProfile?'profile set':'no profile'}</span> <span class="mut">${esc(x.qcAddress||'no address')}</span>`:'<span class="mut">-</span>';
 const pres=x.presence||(x.connected?'online':'offline'),age=secsSince(x.lastSeen,now);
@@ -1098,7 +1183,7 @@ const items=(x.items||[]).map(o=>ghLink(repo,'issues',o.item,'#'+esc(o.item))+(o
 const mode=MODES.includes(x.messaging)?x.messaging:'on';
 const sel=x.allowed===false?'<span class="mut">not on the allow-list</span>':`<select data-n="${n}" data-a="mode" title="messaging mode">${MODES.map(v=>`<option value="${v}"${v===mode?' selected':''}>${v}</option>`).join('')}</select>`;
 const drain=x.inPlant&&x.connected?`<button data-n="${n}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:'';
-return `<tr><td>${n}</td><td>${esc(x.type||'-')}</td><td>${x.model?esc(x.model):'<span class="mut">(not declared)</span>'}</td><td><span class="pill ${pres==='online'?(x.draining?'dr':'on'):pres==='away'?'dr':'off'}">${esc(pres)}${age==null?'':' '+esc(ageText(age))}${x.via==='poll'?' (poll)':''}${x.draining?', draining':''}</span></td><td>${items}</td>${textCell('s:'+x.name,i)}<td>${x.inPlant?esc(x.owned)+'/'+esc(x.capacity):'-'}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${esc(mode)} ${esc(x.unacked==null?0:x.unacked)}</td><td>${drain}${sel}</td></tr>`}
+return `<tr><td>${n}</td><td>${esc(x.type||'-')}</td><td>${x.model?esc(x.model):'<span class="mut">(not declared)</span>'}</td><td><span class="pill ${pres==='online'?(x.draining?'dr':'on'):pres==='away'?'dr':'off'}">${esc(pres)}${age==null?'':' '+esc(ageText(age))}${x.via==='poll'?' (poll)':''}${x.draining?', draining':''}</span></td><td>${items}</td>${textCell('s:'+x.name,i)}<td>${x.inPlant?esc(x.owned)+'/'+esc(x.capacity):'-'}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${esc(mode)} ${esc(x.unacked==null?0:x.unacked)}</td><td>${drain}${sel} ${revokeButton(n)}</td></tr>`}
 // The cost strip: a plain string, shown with textContent.
 function costText(m){let t=`deliveries ${m.deliveriesHour}/${m.budgetHour} this hour (${m.patrolReserveHour} reserved for patrols), ${m.deliveriesDay}/${m.budgetDay} today | steps ${m.stepsHour}/${m.stepBudgetHour} this hour | patrols sent ${m.patrolsSent}, suppressed ${m.patrolsSuppressed}, dropped ${m.patrolsDropped}, reminded ${m.patrolsReminded}, not acknowledged ${m.patrolsUnacknowledged} | question batches ${m.batches}`;
 if(m.nextPatrolAt){const d=new Date(m.nextPatrolAt);if(!isNaN(d))t+=` | next patrol not before ${d.toTimeString().slice(0,5)} (only if something is new or worse)`}
@@ -1167,7 +1252,7 @@ const w=info.plant.workers||[];if(info.messaging&&info.messaging.enabled)await r
 $('rows').innerHTML=w.length?w.map(workerRowHtml).join(''):'<tr><td colspan="8" class="mut">No session has connected yet.</td></tr>'}
 const a=info.plant.assignments||[];$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';await refreshQc()}catch(e){$('msg').textContent=e.message}}
 $('go').onclick=()=>{tok=$('tok').value.trim();sessionStorage.setItem('ftok',tok);refresh()};
-$('rows').onclick=async e=>{const b=e.target.closest('button');if(!b)return;if(document.activeElement)document.activeElement.blur();try{await api('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/'+b.dataset.a,'POST');refresh()}catch(x){$('msg').textContent=x.message}};
+$('rows').onclick=async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.a==='revoke'&&!confirm('Revoke every credential of '+b.dataset.n+'? Its session stops; create a new prompt to connect it again.'))return;if(document.activeElement)document.activeElement.blur();try{await api('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/'+b.dataset.a,'POST');refresh()}catch(x){$('msg').textContent=x.message}};
 async function qcAction(pr,a,body){const path='/api/v1/qc/'+encodeURIComponent(pr)+'/'+a;let r=await act(path,body);
 if(a==='start'&&r.status===409&&r.json.code==='trust-confirm-needed'){if(!confirm('This run needs your confirmation: '+(r.json.reasons||[]).join(', ')+'. Start anyway?'))return;r=await act(path,{confirm:true})}
 $('msg').textContent=r.status<300?'':(r.json.code||'HTTP '+r.status)+': '+(r.json.reason||'');refresh()}
