@@ -60,17 +60,6 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - name: Version
-        id: version
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $workflow = Get-Content -LiteralPath .github/workflows/build.yml -Raw
-          $major = [regex]::Match($workflow, '(?m)^\s*MAJOR_VERSION:\s*(\d+)').Groups[1].Value
-          $minor = [regex]::Match($workflow, '(?m)^\s*MINOR_VERSION:\s*(\d+)').Groups[1].Value
-          if (-not $major -or -not $minor) { throw 'MAJOR_VERSION and MINOR_VERSION not found in build.yml' }
-          "version=$major.$minor.${{ github.event.workflow_run.run_number }}" >> $env:GITHUB_OUTPUT
-
       - name: Download the build's image
         uses: actions/download-artifact@v8
         with:
@@ -78,6 +67,26 @@ jobs:
           path: ./image
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-id: ${{ github.event.workflow_run.id }}
+
+      # The version is the Build run's MAJOR.MINOR.run_number, or the one the image was built as (container-image.version
+      # in the artifact) when that Build reused a pull request's image (build.yml, REUSE_PR_IMAGE).
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = './image/container-image.version'
+          if ((Test-Path -LiteralPath $file) -and (Get-Content -LiteralPath $file -Raw).Trim() -match '^\d+\.\d+\.\d+$') {
+            $version = (Get-Content -LiteralPath $file -Raw).Trim()
+          }
+          else {
+            $workflow = Get-Content -LiteralPath .github/workflows/build.yml -Raw
+            $major = [regex]::Match($workflow, '(?m)^\s*MAJOR_VERSION:\s*(\d+)').Groups[1].Value
+            $minor = [regex]::Match($workflow, '(?m)^\s*MINOR_VERSION:\s*(\d+)').Groups[1].Value
+            if (-not $major -or -not $minor) { throw 'MAJOR_VERSION and MINOR_VERSION not found in build.yml' }
+            $version = "$major.$minor.${{ github.event.workflow_run.run_number }}"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - uses: azure/login@v2
         with:
@@ -107,10 +116,22 @@ jobs:
           server: ${{ vars.OCTOPUS_URL }}
           service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
 
+      # The commit's time goes into the release with its notes: the system's delivery facts (lead time) read it there
+      # and need not ask this repository for it, which they could not if it were private. Read with this run's own
+      # token, which reads this repository and no other.
+      - name: Read the commit's time
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          committed=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.workflow_run.head_sha }}" --jq .commit.committer.date)
+          echo "committed=$committed" >> "$GITHUB_OUTPUT"
+
       - name: Create the release
         uses: OctopusDeploy/create-release-action@v3
         with:
           project: ${{ vars.SYSTEM_SLUG }}-${{ vars.DEPLOYABLE_NAME }}
           release_number: ${{ steps.version.outputs.version }}
           ignore_existing: true
-          release_notes: "Build ${{ github.event.workflow_run.html_url }} of ${{ github.event.workflow_run.head_sha }}"
+          release_notes: "Build ${{ github.event.workflow_run.html_url }} of ${{ github.event.workflow_run.head_sha }}, committed ${{ steps.commit.outputs.committed }}"
