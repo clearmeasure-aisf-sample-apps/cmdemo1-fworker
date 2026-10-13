@@ -124,5 +124,5 @@ that the workers reconnected. Roll back by reverting the pull request.
 
 `tests/live/run.ps1`, `tests/fullrun/*`, `docs/deploy/activate-prod.sh`, `docs/deploy/create-webhook.sh` and
 `tools/github-app-setup/serve.ps1` use the keyring (`secret-tool`), a signed-in `gh`, a sandbox clone of cmdemo1-workorders
-(`FACTORY_SANDBOX_REPO`, default `~/Projects/factory-worker-sandbox/cmdemo1-workorders`) and, for promotions, the kit under
-`/home/aiops`. They are kept for the operator; a cloud session does not need them for build, test or release.
+(`FACTORY_SANDBOX_REPO`, default `~/Projects/factory-worker-sandbox/cmdemo1-workorders`) and, for promotions, the demo environment kit
+(`FACTORY_KIT_DIR` and `FACTORY_KIT_USER`). They are kept for the operator; a cloud session does not need them for build, test or release.

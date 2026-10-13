@@ -2,7 +2,7 @@
 # Local owner-mode gateway (plant manager + PR QC + dashboard) for this machine. Each secret comes from the environment when it is set
 # there (GH_TOKEN, OCTOPUS_API_KEY, FACTORY_DEV_TOKEN, FACTORY_WEBHOOK_SECRET, FACTORY_TOKEN_SECRET), otherwise from files and the keyring
 # of the maintainer's machine; nothing is printed. Build first (see CLAUDE.md). API and webhook listen on localhost (5500/5501). Open http://127.0.0.1:5500/dashboard on this
-# machine and paste the operator token (`cat ~/.local/share/factory-worker/secrets/dev-token`, do not share it).
+# machine and paste the operator token (do not share it).
 # Only one gateway may sweep the board: stop any other first (tests/fullrun/stop.ps1 stops the full-run services).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"

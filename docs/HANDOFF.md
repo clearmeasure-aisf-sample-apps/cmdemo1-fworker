@@ -65,7 +65,7 @@ Octopus access is read-only for a session: deployments to tdd come from the rele
 
 ## 3. Decisions of the owner (binding)
 
-Jeffrey Palermo, 2026-10-10 to 2026-10-13.
+Made by the owner, 2026-10-10 to 2026-10-13.
 
 - **Source of truth is this repository** (public). Tests, the fake GitHub and the stress script live here, pull request checks run the
   suites, there is no staging step and no local-only copy.
@@ -133,6 +133,8 @@ i. **Worker-to-worker messaging is not yet proven with the owner's own sessions*
 j. **pwsh crashes (exit 134 or 139) under machine load in the test suites.** Not a product answer, but it costs reruns; find out whether
    it is memory, the runtime or the long-lived client host.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
+l. **One flaky check in the manager suite on GitHub's runners**: in the revoke scenario, "it registers again, is offered work" failed once
+   of 702 checks and passed on a re-run. Cause not found.
 
 Smaller, known: the Octopus project's uat and prod run older versions than tdd until the operator promotes; `docs/deploy/MORNING.md` and
 `runbook-add-deployable.md` are records of 2026-10-11 and describe paths that no longer exist; `tests/live` and `tests/fullrun` have not
