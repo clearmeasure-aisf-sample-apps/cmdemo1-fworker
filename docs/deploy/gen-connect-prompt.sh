@@ -6,8 +6,9 @@
 #        gen-connect-prompt.sh <tdd|uat|prod> <name> supervisor - <out-file> [gateway-url]
 #   type supervisor: the supervisor's prompt, as the "Create supervisor prompt" button writes it; the name must be in manager.allowedNames and the
 #   credential is minted with role=manager (the capacity argument is not used).
-# The operator token is read from the keyring (service factory-worker, kind fworker-dev-token-<env>). Needs curl, node and python3 on THIS
-# machine (the operator's); the worker machine needs nothing but what the prompt downloads.
+# The operator token comes from the environment variable FACTORY_OPERATOR_TOKEN (a session without a keyring, such as a cloud session, gets
+# it as an environment secret) or, when that is not set, from the keyring (service factory-worker, kind fworker-dev-token-<env>). It is in no
+# file of this repository. Needs curl and node on THIS machine (the operator's); the worker machine needs nothing but what the prompt downloads.
 set -euo pipefail
 ENVN=$1; NAME=$2; TYPE=$3; CAP=$4; OUT=$5; URL=${6:-}
 if ! printf '%s' "$NAME" | grep -Eq '^[A-Za-z0-9_-]{1,40}$'; then echo "name: letters, digits, - and _ (40 at most)" >&2; exit 2; fi
@@ -19,7 +20,9 @@ if [ -z "$URL" ]; then
   esac
 fi
 URL=${URL%/}
-TOK=$(secret-tool lookup service factory-worker kind "fworker-dev-token-$ENVN")
+TOK=${FACTORY_OPERATOR_TOKEN:-}
+if [ -z "$TOK" ]; then TOK=$(secret-tool lookup service factory-worker kind "fworker-dev-token-$ENVN" 2>/dev/null || true); fi
+[ -n "$TOK" ] || { echo "no operator token: set FACTORY_OPERATOR_TOKEN or store it in the keyring" >&2; exit 2; }
 mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"; T=$(mktemp -d -p "${XDG_CACHE_HOME:-$HOME/.cache}"); trap 'rm -rf "$T"' EXIT
 auth() { curl -fsS -H @<(printf 'Authorization: Bearer %s' "$TOK") "$@"; }
 # RENDER_SOURCE=<path to gateway/Program.cs> renders with the generator of a source tree that is not deployed yet

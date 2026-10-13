@@ -176,10 +176,18 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-  # The one check the default-branch ruleset requires: it reports the outcome of the image job under a fixed name.
+  # The gateway's own tests (tests.yml: smoke and every scenario suite against the fake GitHub; no secret). For a pull request and a Build
+  # started by hand. The push that follows a merge does not run them again: that content passed them as the pull request.
+  tests:
+    if: github.event_name != 'push'
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
+  # The one check the default-branch ruleset requires: it reports the outcome of the image job and of the tests under a fixed name.
   result:
     name: Build result
-    needs: image
+    needs: [image, tests]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -189,3 +197,10 @@ jobs:
         run: |
           echo "image: ${IMAGE_RESULT}"
           test "${IMAGE_RESULT}" = "success"
+      - name: The tests succeeded (skipped only for a push)
+        env:
+          TESTS_RESULT: ${{ needs.tests.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          echo "tests: ${TESTS_RESULT} (${EVENT})"
+          test "${TESTS_RESULT}" = "success" || { test "${EVENT}" = "push" && test "${TESTS_RESULT}" = "skipped"; }

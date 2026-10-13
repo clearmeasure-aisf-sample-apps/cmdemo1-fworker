@@ -1,5 +1,6 @@
 # The factory worker gateway (ASP.NET Core minimal API that runs the PowerShell rule scripts and the sweep), one container.
 # Build context = the root of the repository:  docker build -t fworker .
+# The image holds gateway/, plugin/ and config/ only; tests/, tools/ and docs/ are not copied (.dockerignore keeps them out of the context).
 #
 # What the demo-environment kit expects of a container deployable: this Dockerfile at the root; the port and health path
 # system.json names for it (8080, /health); a non-root process; ARG VERSION for the build version (/_build answers it).
@@ -38,6 +39,10 @@ ENV ASPNETCORE_HTTP_PORTS=8080 \
     FACTORY_PLUGIN_SCRIPTS=/app/plugin/scripts \
     FACTORY_CONFIG=/app/config/instance.json \
     FACTORY_STATE_DIR=/tmp/factory-state
+# The deployed settings: config/deploy.overrides.json merged over config/instance.json (the source defaults, which the tests run on).
+# The build fails on an override that names no existing setting, and when the merged file does not carry the deployed switches.
+RUN pwsh -NoProfile -File /app/config/apply-overrides.ps1 -Base /app/config/instance.json -Overrides /app/config/deploy.overrides.json -Out /app/config/instance.json \
+    && grep -q '"ownerSessions": true' /app/config/instance.json
 EXPOSE 8080
 USER $APP_UID
 ENTRYPOINT ["dotnet", "FactoryWorker.Gateway.dll"]
