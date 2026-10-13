@@ -2001,6 +2001,8 @@ $ManagerScenarios['mgr: questions leave as one batch per window, wait while a ba
         param($g)
         $sup = Mgr-Open
         try {
+            # (the credentials are made before the first ask: making one takes about a second, and three asks must fit one batch window)
+            foreach ($w in 'alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'ivan', 'judy', 'kate') { [void](Msg-Token $w) }
             $q = @('alice', 'bob', 'carol' | ForEach-Object { Mgr-Ask $_ 11 })
             Check 'three asks are accepted as pending, with the answer target' (@($q | Where-Object { $_.status -eq 202 -and $_.code -eq 'pending' -and $_.supervisor -eq 'connected' -and $_.answerSlaSeconds -eq 120 }).Count -eq 3) (($q | ForEach-Object { "$($_.status) $($_.code)" }) -join ',')
             $b = Mgr-WaitBatches $sup 1
@@ -3467,7 +3469,7 @@ $ManagerScenarios['mgr: the dashboard shows sessions with the pinned supervisor,
             else {
                 $el = $run.els
                 Check 'the page''s refresh runs to the end against this gateway without an error or a message' ("$($run.error)" -eq '' -and "$($el.msg.text)" -eq '') "$($run.error) $($el.msg.text)"
-                Check 'it fills the Sessions panel: the new header, the supervisor row first, then the worker with its mode select' ($el.shead.html -match 'Activity \(self-reported\)' -and $el.rows.html -match '^<tr class="grp"><th colspan="11">Plant manager</th></tr><tr><td><b>SUPERVISOR</b> supervisor' -and $el.rows.html -match '<tr class="grp"><th colspan="11">Workers</th></tr><tr><td>alice</td>' -and $el.rows.html -match '<select data-n="alice" data-a="mode"')
+                Check 'it fills the Sessions panel: the new header, the supervisor row first, then the worker with its mode select' ($el.shead.html -match 'Activity \(self-reported\)' -and $el.rows.html -match '^<tr class="grp"><th colspan="11">Plant manager</th></tr><tr><td><b>SUPERVISOR</b> supervisor' -and $el.rows.html -match '<tr class="grp"><th colspan="11">Workers</th></tr><tr><td>alice</td>' -and $el.rows.html -match '<select data-n="alice" data-a="mode"') "$($el.rows.html)"
                 Check 'the summary, the question and the note reach the page through textContent only' (@($el.rows.texts) -contains $evil -and @($el.qrows.texts | Where-Object { $_ -eq $evil }).Count -eq 1 -and @($el.oprows.texts | Where-Object { $_ -like "*$evil" }).Count -eq 1 -and "$($el.rows.html)$($el.qrows.html)$($el.oprows.html)$($el.logrows.html)" -notmatch 'onerror|<img|<script') (@{ rows = $el.rows.texts; q = $el.qrows.texts; op = $el.oprows.texts } | ConvertTo-Json -Compress -Depth 4)
                 Check 'it shows the sections, the cost strip, the digest preview and the supervisor prompt button, and no grant button while the budget lasts' ($el.qsec.hidden -eq $false -and $el.msgsec.hidden -eq $false -and $el.cost.hidden -eq $false -and $el.digestbox.hidden -eq $false -and $el.mksup.hidden -eq $false -and $el.grant.hidden -eq $true -and $el.costtext.text -match '^deliveries \d+/\d+ this hour' -and $el.qcounts.text -match '^open 1 ' -and $el.opbadge.text -eq '1 for the operator' -and $el.qrows.html -match 'data-a="answer">Send</button>' -and $el.logrows.html -match 'alice -&gt; bob')
                 $paths = @($run.calls | ForEach-Object { "$($_.path)" })
