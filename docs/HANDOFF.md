@@ -19,8 +19,10 @@ Technical Design, Development and Functional Testing to a merged pull request, a
   `factory test` selects the cheapest model profile.
 - **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask and reads the gateway's patrol
   digest. It advises; it changes nothing.
-- **Operator**: the person (or session) with the operator token: dashboard, credentials for workers, revoke, messaging on and off,
+- **Operator**: the person (or script) with the operator token: dashboard, credentials for workers, revoke, messaging on and off,
   notes to any session.
+- **Operator session**: one AI session (name `operator-session`) with a credential of its own kind, not the operator token. It watches
+  every item and improves the factory worker and the gateway within its guard rails (`docs/design/operator-session.md`, section 6a).
 - **Messaging**: notes, broadcasts, item threads, questions and answers between workers, the supervisor and the operator
   (`docs/design/worker-messaging.md`). All of it is in the memory of the gateway process.
 
@@ -73,7 +75,7 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   is the goal; this is a demo system.
 - **Review before every commit** by a fresh subagent that reads only the staged diff. Subagents run on Opus 5.5 at low effort unless he
   names another model.
-- **Operator session role** (to be built, backlog b): a third kind of session next to worker and supervisor, with its own connect prompt
+- **Operator session role** (built, 2026-10-13): a third kind of session next to worker and supervisor, with its own connect prompt
   and skill, one slot, on **Opus 5.5 at low effort**.
 - **Autonomy in tdd**: the operator session may fix, merge and redeploy to tdd by itself. Guard rails, all of them:
   1. tests and review before every merge;
@@ -120,8 +122,9 @@ a. **Done (2026-10-13): the plant manager reports problems to the operator proac
    `gateway-restarted`; `docs/design/worker-messaging.md` 3.9 "Reported conditions") and the supervisor's skill sends the operator one
    note per new problem and one reminder when it persists. Not yet seen live: watch the first run on tdd for `item-quiet` notes about
    workers that are busy without calling a verb (raise `timing.mgrQuietMinutes` if they are noise), and run the stress test once.
-b. **The operator session role.** Connect prompt, skill, one slot, Opus 5.5 low, with the guard rails of section 3 built in (quiet-plant
-   check, announced restart, rollback, daily limit and report, an issue per change).
+b. **The operator session role.** Done 2026-10-13: credential kind `o1.`, one slot, connect prompt, skill `factory-operator`, the
+   quiet-plant check and the daily limit enforced by the gateway (`docs/design/operator-session.md`). Open: it has not run live on tdd
+   (section 6a), and nothing on the GitHub side stops a merge into a protected area (the rule is in the skill only).
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
@@ -222,6 +225,31 @@ cmdemo1-workorders: use documentation-only items, and add the label `factory tes
 6. Pass: the pull request is merged by the author App, the item is closed and its card is in Done, no 5xx in the traffic, no item
    left waiting, and (docs-only) about 10 minutes from hand-over to merge.
 7. Record the result in section 4 and the defects as issues in this repository.
+
+## 6a. Starting the operator session
+
+The role is on in the deployed image (`operator.enabled` in `config/deploy.overrides.json`); the source default is off.
+
+1. Write its connect prompt to a private file outside any repository:
+   `FACTORY_OPERATOR_TOKEN=... docs/deploy/gen-connect-prompt.sh tdd operator-session operator - <out-file>`, or use the dashboard
+   ("Connect a new session", kind "Factory operator"). The file holds a credential: never commit, print or post it.
+2. Paste it into a new Claude Code session that runs on Opus at low effort. The session needs two secrets and no other:
+   - its operator session credential, which is in the prompt (`FACTORY_OPERATOR_SESSION_TOKEN`). It is not the operator token: it
+     cannot mint or revoke credentials, and the gateway admits it only at the endpoints listed in the design;
+   - a GitHub connection that can push branches, open issues and pull requests and merge pull requests in `cmdemo1-fworker`.
+   It does not get the operator token, the Octopus key or any GitHub App key.
+3. The prompt clones this repository, has the session read `CLAUDE.md` and this file, and hands over to
+   `plugin/skills/factory-operator/SKILL.md`. The dashboard shows it in the group "Factory operator" with its model check and the
+   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 3).
+4. To stop it: revoke the name `operator-session` on the dashboard, or switch messaging off (both act at once). To stop the role: set
+   `operator.enabled` false in the overrides. Its GitHub connection is removed on GitHub.
+
+Enforced by the gateway: where its credential is admitted; that its notes and answers carry its own name and kind, never the
+operator's; the limits on its notes and budget grants; the quiet-plant check (a question it answered itself does not count as quiet
+for ten minutes); the daily limit; the release records. By the session's skill only: everything about the merge (green checks, review,
+protected areas, announcement, verification, rollback, recording), because merging happens on GitHub. For real enforcement there the
+owner sets: CODEOWNERS plus a required code-owner review on the protected paths, no bypass right for the session's GitHub identity,
+and no push right for it in the work-orders repository (`docs/design/operator-session.md` section 5).
 
 ## 7. History in one paragraph
 

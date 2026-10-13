@@ -7,6 +7,8 @@ using System.Text.Json.Nodes;
 //   worker    "w1.<name>.<hmac>"  one per worker, issued once: may register, receive assignments, ask my-items. It cannot act on an item.
 //   item      "i1.<payload>.<hmac>" minted at an assignment for ONE item and ONE role: the only credential that acts on an item.
 //   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs and nothing else (worker-messaging.md 4.6).
+//   operator  "o1.<name>.<generation>.<hmac>" the factory operator SESSION (Operator.cs, docs/design/operator-session.md): not the admin token. It
+//             calls no verb, mints and revokes nothing, and is admitted only at the endpoints that name it (Program.cs, Admitted).
 // The secret never leaves the gateway host. Design: docs/design/plant-manager.md section 5.
 // Revocation (operator, POST /workers/{name}/revoke): tokens are stateless, so each name has a generation, 0 until its first revocation. Every
 // token of a name is bound to the generation it was minted at (generation 0 gives exactly the formats above); a revocation raises the generation,
@@ -57,6 +59,8 @@ static class Auth
 
     // Compared case-insensitively: "Operator" and "PLANT-MANAGER" name the same thing as the reserved words (worker-messaging.md 4.2).
     static readonly string[] BaseReservedNames = ["operator", "gateway", "all", "supervisor", "plant-manager"];
+    public static string OperatorToken(string secret, string name, int generation, int rev = 0) => rev == 0
+        ? $"o1.{name}.{generation}.{Mac(secret, $"operator:{name}:{generation}")}" : $"o1.{name}.{generation}-{rev}.{Mac(secret, $"operator:{name}:{generation}:{rev}")}";
     public static HashSet<string> ReservedNames(IEnumerable<string> managerNames) => new(BaseReservedNames.Concat(managerNames), StringComparer.OrdinalIgnoreCase);
 
     // Worker registration values (worker-messaging.md 2.2): a fixed type, roles from the plant's set, at most 10 capabilities, and model and effort
@@ -97,6 +101,11 @@ static class Auth
         {
             var parts = t.Split('.'); if (parts.Length != 4 || !msg.ManagerEnabled || !msg.ManagerNames.Contains(parts[1])) return null;
             return Same(t, ManagerToken(secret, parts[1], msg.TokenGeneration, rev.Of(parts[1]))) ? new Principal("manager", parts[1]) : null;
+        }
+        if (t.StartsWith("o1."))
+        {   // only while operator.enabled, only a name of operator.allowedNames, bound to operator.tokenGeneration and the name's revocation generation
+            var parts = t.Split('.'); if (parts.Length != 4 || !msg.OperatorEnabled || !msg.OperatorNames.Contains(parts[1])) return null;
+            return Same(t, OperatorToken(secret, parts[1], msg.OperatorTokenGeneration, rev.Of(parts[1]))) ? new Principal("operator", parts[1]) : null;
         }
         if (t.StartsWith("i1."))
         {
@@ -144,6 +153,7 @@ static class Auth
             foreach (var f in ManagerBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
             return (kept, null);
         }
+        if (p.Kind == "operator") return (null, $"an operator session credential cannot call '{verb}': it calls no verb");
         if (p.Kind == "worker")
         {
             if (!WorkerVerbs.Contains(verb)) return (null, $"a worker credential cannot call '{verb}': it can only register, receive assignments and ask my-items; acting on an item needs the item token delivered with an assignment");

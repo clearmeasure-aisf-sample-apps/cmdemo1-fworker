@@ -19,6 +19,13 @@ sealed class MessagingSettings
     public bool ScaleToZero;               // FACTORY_ENVIRONMENT is one that scales to zero: the loader warns, the dashboard shows a banner (3.6)
     public string[] ManagerNames = Array.Empty<string>();
     public int TokenGeneration = 1;
+    // The factory operator session (Operator.cs): operator.* of the config. Off by default; needs messaging.enabled.
+    public bool OperatorEnabled;
+    public string[] OperatorNames = Array.Empty<string>();
+    public int OperatorTokenGeneration = 1, OperatorMaxSelfMergesPerDay = 3;
+    public string OperatorRequiredModelTier = "premium", OperatorRequiredEffort = "low";
+    // timing.opSelfAnswerMinutes: how long a question the operator session answered itself keeps its release-check from answering quiet
+    public double OperatorSelfAnswerMinutes = 10;
     public HashSet<string> Reserved = Auth.ReservedNames(Array.Empty<string>());
     // Names that may use peer messaging and presence ("*" allows every name: demo and tests only), and names that may ask the supervisor.
     // Both default to nobody: a session that runs pull request code must be able to stay out of both lists (5.5).
@@ -71,12 +78,14 @@ sealed class MessagingSettings
     static readonly string[] Efforts = { "low", "medium", "high", "xhigh", "max" };
     // ok: the declared model is on the required rung or above (or listed in manager.acceptableModels, as an id or a prefix) and the effort is the
     // required one or higher; undeclared: nothing was sent; weak: anything else. Declared, never verified.
-    public string ModelCheck(string model, string effort)
+    public string ModelCheck(string model, string effort) => ModelCheck(model, effort, RequiredModelTier, RequiredEffort);
+    public string OperatorModelCheck(string model, string effort) => ModelCheck(model, effort, OperatorRequiredModelTier, OperatorRequiredEffort);
+    string ModelCheck(string model, string effort, string tier, string needEffort)
     {
         if (model == "" && effort == "") return "undeclared";
-        var need = Array.FindIndex(Ladder, r => r.Name == RequiredModelTier); var have = Array.FindIndex(Ladder, r => r.Model == model);
+        var need = Array.FindIndex(Ladder, r => r.Name == tier); var have = Array.FindIndex(Ladder, r => r.Model == model);
         var modelOk = model != "" && ((need >= 0 && have >= need) || AcceptableModels.Any(a => a.Length > 0 && model.StartsWith(a, StringComparison.Ordinal)));
-        var effortOk = Array.IndexOf(Efforts, effort) is var e && e >= 0 && e >= Math.Max(0, Array.IndexOf(Efforts, RequiredEffort));
+        var effortOk = Array.IndexOf(Efforts, effort) is var e && e >= 0 && e >= Math.Max(0, Array.IndexOf(Efforts, needEffort));
         return modelOk && effortOk ? "ok" : "weak";
     }
     public int MaxTextBytes => MaxTextChars * 3;
@@ -89,7 +98,7 @@ sealed class MessagingSettings
     static readonly string[] BuiltinSecretPatterns =
     {
         @"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)", @"gh[pousr]_[A-Za-z0-9]{20,}", @"xox[baprs]-[A-Za-z0-9-]{10,}", @"AKIA[0-9A-Z]{16}",
-        @"\b(w1|m1|i1|q1)\.[A-Za-z0-9_.-]{20,}", @"(?i)authorization:\s*bearer\s+[A-Za-z0-9._~+/=-]{20,}",
+        @"\b(w1|m1|i1|q1|o1)\.[A-Za-z0-9_.-]{20,}", @"(?i)authorization:\s*bearer\s+[A-Za-z0-9._~+/=-]{20,}",
         @"(?i)\b(bearer|token|secret|password|api[_-]?key)\b\s*[:=]\s*([""'][^""']{8,}[""']|[A-Za-z0-9+/_-]{20,}={0,2})"
     };
 
@@ -167,7 +176,21 @@ sealed class MessagingSettings
         if (s.ManagerEnabled && !s.Enabled)
             throw new InvalidOperationException("manager.enabled needs messaging.enabled");
         s.Configured = s.Enabled;
-        if (s.ManagerEnabled)
+        // the factory operator session: operator.enabled (FACTORY_OPERATOR=0|1 overrides it), only with messaging on; its names are reserved while it is on
+        var op = root?["operator"];
+        s.OperatorEnabled = op?["enabled"]?.GetValue<bool>() ?? false;
+        var opOn = Environment.GetEnvironmentVariable("FACTORY_OPERATOR"); if (opOn is "0" or "1") s.OperatorEnabled = opOn == "1";
+        if (s.OperatorEnabled && !s.Enabled) throw new InvalidOperationException("operator.enabled needs messaging.enabled");
+        if (s.OperatorEnabled)
+        {
+            s.OperatorNames = (op?["allowedNames"] is JsonArray oa ? oa.Select(n => n!.ToString()).ToArray() : new[] { "operator-session" }).Where(Auth.ValidName).ToArray();
+            s.OperatorTokenGeneration = op?["tokenGeneration"]?.GetValue<int>() ?? 1;
+            s.OperatorMaxSelfMergesPerDay = Limit(op, "maxSelfMergesPerDay", 3, 0);
+            s.OperatorRequiredModelTier = op?["requiredModelTier"]?.ToString() ?? "premium"; s.OperatorRequiredEffort = op?["requiredEffort"]?.ToString() ?? "low";
+            s.Reserved = Auth.ReservedNames(names.Concat(s.OperatorNames));
+            s.OperatorSelfAnswerMinutes = Timing("opSelfAnswerMinutes", 10) is var sa && double.IsFinite(sa) && sa > 0 ? sa : 10;
+        }
+        if (s.ManagerEnabled || s.OperatorEnabled)
         {   // the ladder the model check reads (4.7); a host without the file flags every declared model weak unless manager.acceptableModels lists it
             try { s.Ladder = (JsonNode.Parse(File.ReadAllText(Path.Combine(scriptsDir, "models.default.json")))?["ladder"] as JsonArray ?? new JsonArray()).Select(x => (x?["name"]?.ToString() ?? "", x?["model"]?.ToString() ?? "")).ToArray(); }
             catch { }
@@ -684,11 +707,26 @@ sealed class Messenger
 
     static List<DateTime> Win(Dictionary<string, List<DateTime>> d, string key) { if (!d.TryGetValue(key, out var l)) d[key] = l = new(); return l; }
 
+    // The operator session's notes (Operator.cs): the person's routing rules, its own sender kind, name, note type and rate limit.
+    public const string OpSession = "operator-session";
+    const int OpSessionPer10Min = 30;
+    readonly Dictionary<string, List<DateTime>> opWin = new();
+    static bool IsOp(Ctx c) => c.FromKind is "operator" or OpSession;
+    static string NoteType(Ctx c) => c.FromKind == OpSession ? "operator-session-note" : "operator-note";
     // Returns null and a reservation when within the limits, or the refusal code with the seconds to wait. Operators are not limited.
     (string? Code, int Retry, Reservation? Res) Reserve(Ctx c, string? pairOther, bool question, bool broadcast = false, bool supervisorCast = false)
     {
         if (c.FromKind == "operator") return (null, 0, new Reservation());
         var now = DateTime.UtcNow; var res = new Reservation();
+        if (c.FromKind == OpSession)
+        {   // the operator SESSION is a model, not the person: its notes have a limit of their own (30 per 10 minutes, to all sessions together)
+            lock (leaf)
+            {
+                var ow = Win(opWin, c.From);
+                if (Over(ow, now, TimeSpan.FromMinutes(10), OpSessionPer10Min, out var oretry)) return ("rate-limited", oretry, null);
+                ow.Add(now); return (null, 0, res);
+            }
+        }
         lock (leaf)
         {
             if (supervisorCast)
@@ -864,7 +902,8 @@ sealed class Messenger
         var c = new Ctx { Bytes = Encoding.UTF8.GetByteCount(bodyText) };
         switch (who.Kind)
         {
-            case "admin": c.From = "operator"; c.FromKind = "operator"; break;
+            // the admin token is the person: "operator". The operator SESSION (admitted by Program.cs with its name) is never the person: its own kind and name
+            case "admin": if (who.Name != "") { c.From = who.Name; c.FromKind = OpSession; } else { c.From = "operator"; c.FromKind = "operator"; } break;
             case "worker": c.From = who.Name; c.FromKind = "worker"; break;
             case "manager": c.From = who.Name; c.FromKind = "supervisor"; break;
             case "item" when who.Role is "owner" or "inspector": c.From = who.Name; c.FromKind = "worker"; break;
@@ -992,10 +1031,10 @@ sealed class Messenger
                     c.To = to;
                     if (to == c.From) return Refused(c, "usage", "to names another session");
                     // a supervisor name takes a note from the operator only (3.4): for every other sender it stays a name that receives nothing
-                    var operatorToSupervisor = c.FromKind == "operator" && cfg.ManagerEnabled && cfg.ManagerNames.Contains(to);
+                    var operatorToSupervisor = IsOp(c) && cfg.ManagerEnabled && cfg.ManagerNames.Contains(to);
                     if (to != "operator" && cfg.Reserved.Contains(to) && !operatorToSupervisor) return Refused(c, "no-such-peer", "no session of that name receives messages");
-                    if (c.FromKind == "operator" && to == "operator") return Refused(c, "usage", "the operator does not write to itself");
-                    if (c.FromKind != "operator" && to != "operator" && who.Kind == "manager") return Refused(c, "role-cannot-send", "the supervisor's only note target is the operator");
+                    if (IsOp(c) && to == "operator") return Refused(c, "usage", "the operator does not write to itself");
+                    if (!IsOp(c) && to != "operator" && who.Kind == "manager") return Refused(c, "role-cannot-send", "the supervisor's only note target is the operator");
                     if (who.Kind == "item" && who.Role == "inspector" && to != "operator") return Refused(c, "role-cannot-send", "an inspector session may write only to the operator (worker-messaging.md 4.4)");
                 }
             }
@@ -1064,7 +1103,7 @@ sealed class Messenger
         var evt = new JsonObject
         {
             ["provider"] = "peer", ["relay"] = "gateway", ["event"] = "message.received",
-            ["type"] = c.FromKind == "operator" ? "operator-note" : type, ["from"] = c.From, ["fromKind"] = c.FromKind, ["kind"] = c.Kind,
+            ["type"] = IsOp(c) ? NoteType(c) : type, ["from"] = c.From, ["fromKind"] = c.FromKind, ["kind"] = c.Kind,
             ["thread"] = thread != null ? "item-" + thread : null, ["item"] = item, ["inReplyTo"] = inReplyTo, ["subject"] = subject ?? "", ["text"] = text, ["sentAt"] = DateTime.UtcNow.ToString("o"),
             ["flags"] = new JsonArray(flags.Select(f => (JsonNode)f).ToArray())
         };
@@ -1072,8 +1111,8 @@ sealed class Messenger
         if (cast && supModel != "") evt["fromModel"] = supModel;
         var spec = new SendSpec
         {
-            From = c.From, FromKind = c.FromKind, Type = c.FromKind == "operator" ? "operator-note" : type, Kind = c.Kind, ClientId = clientId ?? "", Item = item,
-            To = type == "question" || to == null ? Array.Empty<string>() : new[] { to }, Broadcast = broadcast, Thread = thread, Peer = c.FromKind == "worker" && type == "note", Operator = c.FromKind == "operator", Question = type == "question", Supervisor = cast, Context = context ?? "", Event = evt
+            From = c.From, FromKind = c.FromKind, Type = IsOp(c) ? NoteType(c) : type, Kind = c.Kind, ClientId = clientId ?? "", Item = item,
+            To = type == "question" || to == null ? Array.Empty<string>() : new[] { to }, Broadcast = broadcast, Thread = thread, Peer = c.FromKind == "worker" && type == "note", Operator = IsOp(c), Question = type == "question", Supervisor = cast, Context = context ?? "", Event = evt
         };
         var o = plant.SendMessage(spec, c.Bytes);
         if (!o.Ok) { Rollback(res); return Finish(Refused(c, o.Code, o.Reason)); }
@@ -1243,9 +1282,10 @@ sealed class Messenger
     }
 
     // POST /api/v1/questions/{id}/answer (operator only): delivered to the asker as an operator note in reply to the question; the first answer wins.
-    public MsgResult OperatorAnswer(string id, string bodyText)
+    public MsgResult OperatorAnswer(string id, string bodyText, string session = "")
     {
-        var c = new Ctx { From = "operator", FromKind = "operator", Type = "operator-note", Kind = "direct", Bytes = Encoding.UTF8.GetByteCount(bodyText) };
+        var c = new Ctx { From = session != "" ? session : "operator", FromKind = session != "" ? OpSession : "operator", Kind = "direct", Bytes = Encoding.UTF8.GetByteCount(bodyText) };
+        c.Type = NoteType(c);
         JsonObject body;
         try { body = ParseObject(bodyText); }
         catch (Exception e) when (e is System.Text.Json.JsonException or FormatException or ArgumentException or InvalidOperationException)
@@ -1254,7 +1294,7 @@ sealed class Messenger
         body["inReplyTo"] = id;
         var (it, code, reason) = ReadAnswer(body, new[] { "inReplyTo", "text", "note" });
         if (it == null) return Refused(c, code, reason);
-        var r = Apply(c, it, "operator-note", "");
+        var r = Apply(c, it, NoteType(c), "");
         if (!r.Ok) return new(Map(r.Code).Status, new JsonObject { ["ok"] = false, ["code"] = r.Code, ["reason"] = r.Reason, ["exit"] = Map(r.Code).Exit });
         return new(200, new JsonObject { ["ok"] = true, ["id"] = r.AnswerId, ["inReplyTo"] = id, ["to"] = r.Asker, ["exit"] = 0 });
     }

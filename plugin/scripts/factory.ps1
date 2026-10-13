@@ -10,6 +10,7 @@
 # factory.ps1 subscribe --own --supervisor --name N --model ID --effort E   the supervisor session (6.4); its verbs, with FACTORY_SUPERVISOR_TOKEN:
 # factory.ps1 answer --id M --text-file F [--note "..."] | answer --batch-file F | direct --to NAME|--all [--kind directive|announcement] --text-file F [--item N]
 # factory.ps1 questions [--state open|all] | plant-digest | patrol-ack --seq N --note "..." | send --to operator | get-item, pr-checks, get-delivery
+# factory.ps1 subscribe --own --operator --name N --model ID --effort E | operator <verb>   the factory operator session (lib/Client.Operator.ps1), with FACTORY_OPERATOR_SESSION_TOKEN
 # factory.ps1 subscribe [--spawn]              client: prints one normalized event per line; with --spawn starts a headless worker per offer
 #
 # Exit codes: 0 ok, 2 usage, 10 gate refused, 11 stale, 12 not found, 20 retryable external, 21 accepted/pending, 30 config/secret, 40 claim held.
@@ -21,7 +22,7 @@ $here = $PSScriptRoot
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'update-pr', 'pr-checks',
     'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
-    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker')
+    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release')
 $NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job')
 
 function Write-Out($obj, [int]$code) {
@@ -33,7 +34,7 @@ function Write-Out($obj, [int]$code) {
 # ---------------------------------------------------------------- server mode
 if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
     $verb = $Rest[1]
-    foreach ($f in 'Core', 'Board', 'Prs', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc') { . (Join-Path $here "lib/$f.ps1") }
+    foreach ($f in 'Core', 'Board', 'Prs', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease') { . (Join-Path $here "lib/$f.ps1") }
     $ErrorActionPreference = 'Stop'
     try {
         if ($verb -notin $ServerVerbs) { Reject 2 'unknown-verb' "unknown verb '$verb'" }
@@ -127,7 +128,15 @@ if ($verb -eq 'model-for') {
 }
 if ($verb -eq 'subscribe') {
     . (Join-Path $here 'lib/Client.Subscribe.ps1'); $sf = ConvertFrom-Flags $flagTokens
+    if ($sf.ContainsKey('own') -and $sf.ContainsKey('operator')) { . (Join-Path $here 'lib/Client.Own.ps1'); . (Join-Path $here 'lib/Client.Operator.ps1'); Invoke-OperatorSubscribe $sf }
     if ($sf.ContainsKey('own')) { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-SubscribeOwn $sf } else { Invoke-Subscribe $sf }
+}
+# the factory operator session's verbs: factory.ps1 operator <verb> [--flag value]
+if ($verb -eq 'operator') {
+    . (Join-Path $here 'lib/Client.Operator.ps1')
+    $ot = @($flagTokens)      # (one token alone would be a string, and its first element a character)
+    $ov = if ($ot.Count -gt 0) { "$($ot[0])" } else { '' }
+    Invoke-OperatorVerb $ov (ConvertFrom-Flags ([string[]]@($ot | Select-Object -Skip 1))) (Get-ClientConfig)
 }
 if ($verb -eq 'worker-token') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-WorkerToken (ConvertFrom-Flags $flagTokens) }
 if ($verb -eq 'plugin-sync') { . (Join-Path $here 'lib/Client.Plugin.ps1'); Invoke-PluginSync (Get-ClientConfig) }
