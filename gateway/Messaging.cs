@@ -19,6 +19,11 @@ sealed class MessagingSettings
     public bool ScaleToZero;               // FACTORY_ENVIRONMENT is one that scales to zero: the loader warns, the dashboard shows a banner (3.6)
     public string[] ManagerNames = Array.Empty<string>();
     public int TokenGeneration = 1;
+    // The factory operator session (Operator.cs): operator.* of the config. Off by default; needs messaging.enabled.
+    public bool OperatorEnabled;
+    public string[] OperatorNames = Array.Empty<string>();
+    public int OperatorTokenGeneration = 1, OperatorMaxSelfMergesPerDay = 3;
+    public string OperatorRequiredModelTier = "premium", OperatorRequiredEffort = "low";
     public HashSet<string> Reserved = Auth.ReservedNames(Array.Empty<string>());
     // Names that may use peer messaging and presence ("*" allows every name: demo and tests only), and names that may ask the supervisor.
     // Both default to nobody: a session that runs pull request code must be able to stay out of both lists (5.5).
@@ -65,12 +70,14 @@ sealed class MessagingSettings
     static readonly string[] Efforts = { "low", "medium", "high", "xhigh", "max" };
     // ok: the declared model is on the required rung or above (or listed in manager.acceptableModels, as an id or a prefix) and the effort is the
     // required one or higher; undeclared: nothing was sent; weak: anything else. Declared, never verified.
-    public string ModelCheck(string model, string effort)
+    public string ModelCheck(string model, string effort) => ModelCheck(model, effort, RequiredModelTier, RequiredEffort);
+    public string OperatorModelCheck(string model, string effort) => ModelCheck(model, effort, OperatorRequiredModelTier, OperatorRequiredEffort);
+    string ModelCheck(string model, string effort, string tier, string needEffort)
     {
         if (model == "" && effort == "") return "undeclared";
-        var need = Array.FindIndex(Ladder, r => r.Name == RequiredModelTier); var have = Array.FindIndex(Ladder, r => r.Model == model);
+        var need = Array.FindIndex(Ladder, r => r.Name == tier); var have = Array.FindIndex(Ladder, r => r.Model == model);
         var modelOk = model != "" && ((need >= 0 && have >= need) || AcceptableModels.Any(a => a.Length > 0 && model.StartsWith(a, StringComparison.Ordinal)));
-        var effortOk = Array.IndexOf(Efforts, effort) is var e && e >= 0 && e >= Math.Max(0, Array.IndexOf(Efforts, RequiredEffort));
+        var effortOk = Array.IndexOf(Efforts, effort) is var e && e >= 0 && e >= Math.Max(0, Array.IndexOf(Efforts, needEffort));
         return modelOk && effortOk ? "ok" : "weak";
     }
     public int MaxTextBytes => MaxTextChars * 3;
@@ -83,7 +90,7 @@ sealed class MessagingSettings
     static readonly string[] BuiltinSecretPatterns =
     {
         @"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)", @"gh[pousr]_[A-Za-z0-9]{20,}", @"xox[baprs]-[A-Za-z0-9-]{10,}", @"AKIA[0-9A-Z]{16}",
-        @"\b(w1|m1|i1|q1)\.[A-Za-z0-9_.-]{20,}", @"(?i)authorization:\s*bearer\s+[A-Za-z0-9._~+/=-]{20,}",
+        @"\b(w1|m1|i1|q1|o1)\.[A-Za-z0-9_.-]{20,}", @"(?i)authorization:\s*bearer\s+[A-Za-z0-9._~+/=-]{20,}",
         @"(?i)\b(bearer|token|secret|password|api[_-]?key)\b\s*[:=]\s*([""'][^""']{8,}[""']|[A-Za-z0-9+/_-]{20,}={0,2})"
     };
 
@@ -159,7 +166,20 @@ sealed class MessagingSettings
         if (s.ManagerEnabled && !s.Enabled)
             throw new InvalidOperationException("manager.enabled needs messaging.enabled");
         s.Configured = s.Enabled;
-        if (s.ManagerEnabled)
+        // the factory operator session: operator.enabled (FACTORY_OPERATOR=0|1 overrides it), only with messaging on; its names are reserved while it is on
+        var op = root?["operator"];
+        s.OperatorEnabled = op?["enabled"]?.GetValue<bool>() ?? false;
+        var opOn = Environment.GetEnvironmentVariable("FACTORY_OPERATOR"); if (opOn is "0" or "1") s.OperatorEnabled = opOn == "1";
+        if (s.OperatorEnabled && !s.Enabled) throw new InvalidOperationException("operator.enabled needs messaging.enabled");
+        if (s.OperatorEnabled)
+        {
+            s.OperatorNames = (op?["allowedNames"] is JsonArray oa ? oa.Select(n => n!.ToString()).ToArray() : new[] { "operator-session" }).Where(Auth.ValidName).ToArray();
+            s.OperatorTokenGeneration = op?["tokenGeneration"]?.GetValue<int>() ?? 1;
+            s.OperatorMaxSelfMergesPerDay = Limit(op, "maxSelfMergesPerDay", 3, 0);
+            s.OperatorRequiredModelTier = op?["requiredModelTier"]?.ToString() ?? "premium"; s.OperatorRequiredEffort = op?["requiredEffort"]?.ToString() ?? "low";
+            s.Reserved = Auth.ReservedNames(names.Concat(s.OperatorNames));
+        }
+        if (s.ManagerEnabled || s.OperatorEnabled)
         {   // the ladder the model check reads (4.7); a host without the file flags every declared model weak unless manager.acceptableModels lists it
             try { s.Ladder = (JsonNode.Parse(File.ReadAllText(Path.Combine(scriptsDir, "models.default.json")))?["ladder"] as JsonArray ?? new JsonArray()).Select(x => (x?["name"]?.ToString() ?? "", x?["model"]?.ToString() ?? "")).ToArray(); }
             catch { }

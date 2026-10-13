@@ -23,6 +23,7 @@ if (-not $NoBuild -and -not $ListSuites -and -not $ListScenarios) {
 . (Join-Path $PSScriptRoot 'owner.ps1')
 . (Join-Path $PSScriptRoot 'author.ps1')
 . (Join-Path $PSScriptRoot 'messaging.ps1')   # worker messaging steps 1 to 6: suites 'messaging' and 'manager'
+. (Join-Path $PSScriptRoot 'operator.ps1')    # the factory operator session: suite 'operator' (uses the helpers of messaging.ps1)
 . (Join-Path $PSScriptRoot 'qc.ps1')
 . (Join-Path $PSScriptRoot 'qc-dashboard.ps1')
 . (Join-Path $PSScriptRoot 'qc-worker.ps1')   # S3: own gateway and workers, scenarios named "qc: worker ..."
@@ -69,6 +70,10 @@ $SuiteDefs = @(
     @{ Name = 'manager'; Policy = 'auto'; Set = $ManagerScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor', 'supervisor2'); allowedAskers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'ivan', 'judy', 'kate'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }; runner = $msgPool }; Env = 'owner'; ClientHost = $true
         # the delivery and step budgets are lifted like the other limits (the budget scenarios set their own); an owner the sweep stops listing is dropped after 5 s
         Timing = @{ mgrTakeoverSeconds = 6; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; mgrOwnedGraceSeconds = 5 } }
+    # the factory operator session (operator.ps1): one process per rule-script call, so a verb call is in flight long enough to be seen by release-check
+    @{ Name = 'operator'; Policy = 'auto'; Set = $OperatorScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob'); testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor'); allowedAskers = @('alice', 'bob'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }
+            operator = @{ enabled = $true; allowedNames = @('operator-session', 'operator-two'); tokenGeneration = 1; requiredModelTier = 'premium'; requiredEffort = 'low'; maxSelfMergesPerDay = 2 } }; Env = 'owner'
+        Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000 } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }

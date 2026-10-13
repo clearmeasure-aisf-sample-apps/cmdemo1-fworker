@@ -8,5 +8,8 @@
   "manager": {
     "enabled": true,
     "allowedAskers": ["*"]
+  },
+  "operator": {
+    "enabled": true
   }
 }

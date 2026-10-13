@@ -47,7 +47,7 @@ sealed class Assignment
 // What the sweep reports of one owned item (sync-board `owned`), or what a verb answer said of its lease until the next sweep (worker-messaging.md 3.9).
 sealed record OwnedInfo(string Holder, string Column, DateTime? LeaseUntil, DateTime? Heartbeat, bool Parked, DateTime At);
 
-sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> journal, double ackSeconds)
+sealed partial class Plant(string secret, Func<int, string, JsonObject, string, Task> journal, double ackSeconds)
 {
     // The one lock (worker-messaging.md 3.5): workers, assignments, the directory maps, and the MessageStore (counters, inboxes, presence, modes,
     // the supervisor slot). Lock order: nothing is called under it that takes another lock, except a channel TryWrite and a signal completion,
@@ -330,7 +330,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
             o.Id = rec.Id;
             foreach (var (name, r) in targets)
             {
-                if (r == null) { rec.Per[name] = "queued"; o.Delivered.Add((name, "queued")); o.Queued++; continue; }   // the operator log: no push
+                if (r == null) { rec.Per[name] = "queued"; o.Delivered.Add((name, "queued")); o.Queued++; OperatorNote(s.Event, rec.Id); continue; }   // the operator log: no push (the operator session, if one is connected, gets it on its stream)
                 var e = DeliverEntry(r, s.Event, rec, s.Peer);
                 var pushed = e.State == "pushed";
                 o.Delivered.Add((name, pushed ? "pushed" : "queued"));
@@ -1329,6 +1329,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
                 foreach (var a in assignments.Values.Where(a => a.Worker == name && !a.Accepted)) { a.Worker = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = a.Pin != "" ? "pinned-unavailable" : "no-session"; }
             }
             if (store.Slot is { } s && s.Name == name && s.Out != null) { closed = true; s.Out.Writer.TryComplete(); s.Out = null; store.Get(name).GoneAt = DateTime.UtcNow; }
+            if (RevokeOperator(name)) closed = true;
             return closed;
         }
     }
@@ -1351,6 +1352,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
         lock (gate)
         {
             var json = evt.ToJsonString();
+            OperatorRouted(item, evt);
             if (Msg.On && ownerOf.ContainsKey(item)) lastRouted[item] = evt["event"]?.ToString() ?? "";
             if (Msg.On && evt["event"]?.ToString() == "item.parked") { parks.Add((DateTime.UtcNow, item, GatedCode(evt["reason"]?.ToString()))); if (parks.Count > 200) parks.RemoveAt(0); }
             if (!mailboxes.TryGetValue(item, out var box)) mailboxes[item] = box = new();
@@ -1522,6 +1524,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
             // the repeated "waiting" of a sweep or a tick (no key; the rule script posts one per 30 minutes) is not queued behind one that is still to be written
             var repeat = ev == "waiting" && key == "";
             if (repeat && !waitingQueued.Add(item)) return;
+            if (ev is "matched" or "offered" or "reassigned") OperatorPlantEvent(ev, item, fields["worker"]?.ToString() ?? "", fields["column"]?.ToString() ?? "");
             var prev = journalTail.TryGetValue(item, out var t) ? t : Task.CompletedTask;
             var next = prev.ContinueWith(_ => Write(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
             journalTail[item] = next;
