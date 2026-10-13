@@ -97,9 +97,19 @@ sealed partial class Plant
         var code = verb == "accept" && exit == 0 ? "accepted" : verb == "complete" && exit == 0 ? "column-completed" : verb == "merge" && exit is 10 or 11 ? "merge-refused" : null;
         if (code == null) return;
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
-        string column; lock (gate) column = ownedInfo.TryGetValue(who.Item, out var oi) ? oi.Column : "";
+        // a failure report is a `complete` that answers exit 0 with parked true: the item did not advance, it waits for a person. The sweep routes
+        // no item.parked for it (the worker parked it, not the sweep), so this is the only line the operator session gets.
+        var parked = code == "column-completed" && j?["parked"] is JsonValue pv && pv.TryGetValue<bool>(out var pb) && pb;
+        if (parked) code = "parked";
+        // a `complete` that answered exit 0 has checked the column of its request against the board (stale-column otherwise), and a successful one
+        // answers the board's own spelling. The plant's column is as old as the last sweep: a completion in Development seconds after the one in
+        // Technical Design would still name the latter. Only `complete`: accept and merge do not check the column a session sends, so for them
+        // the plant's own knowledge comes first, as before.
+        var column = "";
+        if (verb == "complete") { column = Gated(j?["column"]?.ToString()); if (column == "") column = Gated(request["column"]?.ToString()?.Trim()); }
+        if (column == "") lock (gate) column = ownedInfo.TryGetValue(who.Item, out var oi) ? oi.Column : "";
         if (column == "") column = j?["column"]?.ToString() ?? request["column"]?.ToString() ?? "";
-        OperatorPlantEvent(code, who.Item, who.Name, column, code == "merge-refused" ? j?["code"]?.ToString() ?? "" : who.Role);
+        OperatorPlantEvent(code, who.Item, who.Name, column, code == "merge-refused" ? j?["code"]?.ToString() ?? "" : parked ? j?["reason"]?.ToString() ?? "" : who.Role);
     }
     public void OperatorQuestionEscalated(EscalationJob job)
     {
