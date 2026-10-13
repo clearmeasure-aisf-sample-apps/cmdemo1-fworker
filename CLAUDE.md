@@ -15,7 +15,7 @@ demo system.
 
 | Path | Content |
 |---|---|
-| `gateway/` | The gateway: `Program.cs` (routes, dashboard, connect prompt), `Plant.cs` (workers, assignments), `Messaging.cs`, `Qc.cs`, `Auth.cs`, `RunnerPool.cs` |
+| `gateway/` | The gateway: `Program.cs` (routes, dashboard, connect prompt), `Plant.cs` (workers, assignments), `Messaging.cs`, `Qc.cs`, `Auth.cs`, `RunnerPool.cs`, `Operator.cs` (the operator session) |
 | `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, `lib/*`), `skills/`, `agents/`, `tools/shot` |
 | `config/instance.json` | The source defaults. The tests run on these: messaging off, supervisor off, `ownerSessions` false |
 | `config/deploy.overrides.json` | The settings of the deployed image, merged over the defaults by `config/apply-overrides.ps1` when the image is built |
@@ -25,7 +25,7 @@ demo system.
 | `tests/stress/` | `messaging-stress.ps1`: 10 minute stress of messaging and the supervisor; run by hand, alone |
 | `tests/live/`, `tests/fullrun/` | Tier 2 and the fully connected run against the real GitHub and board. They need the operator's machine (see below) |
 | `tools/github-app-setup/` | One-page app that creates the test GitHub Apps |
-| `docs/design/` | Designs: `plant-manager.md`, `worker-messaging.md`, `pr-qc-environment.md` and their reviews |
+| `docs/design/` | Designs: `plant-manager.md`, `worker-messaging.md`, `pr-qc-environment.md` and their reviews, `operator-session.md` |
 | `docs/deploy/` | `gen-connect-prompt.sh`, `activate-prod.sh`, `create-webhook.sh`; `MORNING.md` and `runbook-add-deployable.md` are records of 2026-10-11 |
 | `Dockerfile`, `.dockerignore` | The image: `gateway/`, `plugin/`, `config/` only |
 | `.github/workflows/` | `build.yml` (image + tests, the required check `Build result`), `tests.yml`, `release.yml`, `secret-scan.yml`, `architecture.yml` |
