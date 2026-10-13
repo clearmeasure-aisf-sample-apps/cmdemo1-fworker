@@ -885,7 +885,8 @@ $MessagingScenarios = [ordered]@{
     $n = New-Item-Fake 'Untouched item' 'x' @('factory worker') 'Development'
     # what the plant's own sweep does to a new item with no worker (a "waiting" journal line and its ledger) happens first, so that it is not
     # mistaken for an effect of a message
-    [void](Wait-Until -Seconds 20 { (Get-Journal $n) -contains 'waiting' })
+    # (the state is saved after the comment is posted: wait for the save, or a slow gateway writes it between the two readings below)
+    [void](Wait-Until -Seconds 60 { $w0 = Qc-State $n; (Get-Journal $n) -contains 'waiting' -and $w0 -and $w0.ContainsKey('journal') -and $w0.journal.ContainsKey('waiting_at') })
     $facts = {
         $st = Qc-State $n; $copy = @{}
         if ($st) { foreach ($k in ($st.Keys | Sort-Object)) { if ($k -ne 'journal') { $copy[$k] = $st[$k] } } }
