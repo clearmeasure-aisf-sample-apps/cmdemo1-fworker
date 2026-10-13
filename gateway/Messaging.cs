@@ -477,7 +477,7 @@ static class DigestBuilder
 sealed class TrafficEntry
 {
     public DateTime At;
-    public string Id = "", From = "", FromKind = "", To = "", Kind = "", Type = "", Subject = "", Text = "", Code = "";
+    public string Id = "", From = "", FromKind = "", To = "", Kind = "", Type = "", Subject = "", Text = "", Code = "", InReplyTo = "";
     public int? Item;
     public int Bytes;
     public string[] Flags = Array.Empty<string>();
@@ -735,16 +735,24 @@ sealed class Messenger
         return q.Escalations;
     }
 
-    // GET /api/v1/messages?worker=&item=&limit=&ring= (operator only): the log with each message's current state, or the ring of refusals and flags.
-    public JsonObject TrafficLog(string? worker, int? item, int limit, bool refused)
+    // GET /api/v1/messages?worker=&to=&unread=1&item=&limit=&ring= (operator only): the log with each message's current state, or the ring of refusals
+    // and flags. to=NAME keeps the messages addressed to that name (to=operator: the operator's inbox), unread=1 of those the notes to the operator
+    // that are not marked read. A note to the operator carries `read`; the answer then also carries `unread`, the count of all of them.
+    public JsonObject TrafficLog(string? worker, int? item, int limit, bool refused, string? to = null, bool unreadOnly = false)
     {
-        List<TrafficEntry> rows;
+        List<TrafficEntry> rows, forOp;
+        static bool ToOp(TrafficEntry t) => t.Code == "" && t.Id != "" && t.To.Split(',').Contains("operator");
         lock (leaf)
         {
             var now = DateTime.UtcNow;
-            rows = (refused ? ring : log).Where(t => now - t.At <= LogAge).Where(t => worker == null || t.From == worker || t.To.Split(',').Contains(worker)).Where(t => item == null || t.Item == item)
-                .OrderByDescending(t => t.At).Take(limit).ToList();
+            rows = (refused ? ring : log).Where(t => now - t.At <= LogAge).Where(t => worker == null || t.From == worker || t.To.Split(',').Contains(worker)).Where(t => to == null || t.To.Split(',').Contains(to))
+                .Where(t => item == null || t.Item == item).OrderByDescending(t => t.At).ToList();
+            forOp = log.Where(t => now - t.At <= LogAge && ToOp(t)).ToList();
         }
+        var opStates = plant.OperatorStates(forOp.Select(t => t.Id));
+        bool Unread(TrafficEntry t) => ToOp(t) && opStates.TryGetValue(t.Id, out var os) && os != "handled";
+        if (unreadOnly) rows = rows.Where(Unread).ToList();
+        rows = rows.Take(limit).ToList();
         var states = plant.MessageStates(rows.Where(t => t.Id != "").Select(t => t.Id));
         var arr = new JsonArray();
         foreach (var t in rows)
@@ -752,10 +760,42 @@ sealed class Messenger
             var o = new JsonObject { ["at"] = t.At.ToString("o"), ["id"] = t.Id == "" ? null : t.Id, ["from"] = t.From, ["fromKind"] = t.FromKind, ["to"] = t.To, ["kind"] = t.Kind, ["type"] = t.Type, ["item"] = t.Item, ["bytes"] = t.Bytes };
             o["state"] = t.Code != "" ? "refused:" + t.Code : states.TryGetValue(t.Id, out var st) ? st : "unknown";
             o["flags"] = new JsonArray(t.Flags.Select(f => (JsonNode)f).ToArray());
+            if (t.InReplyTo != "") o["inReplyTo"] = t.InReplyTo;
+            if (!refused && ToOp(t)) o["read"] = !Unread(t);
             if (t.Code != "") o["code"] = t.Code; else { o["subject"] = t.Subject; o["text"] = t.Text; }
             arr.Add(o);
         }
-        return new JsonObject { ["ok"] = true, ["ring"] = refused ? "refused" : "traffic", ["count"] = arr.Count, ["messages"] = arr, ["exit"] = 0 };
+        var res = new JsonObject { ["ok"] = true, ["ring"] = refused ? "refused" : "traffic", ["count"] = arr.Count };
+        if (!refused && (to == "operator" || worker == "operator")) res["unread"] = forOp.Count(Unread);
+        res["messages"] = arr; res["exit"] = 0;
+        return res;
+    }
+
+    // POST /api/v1/messages/read { "ids": [...] } or { "all": true } (operator only): marks notes addressed to the operator read, so they leave the
+    // unread list and the dashboard's count; their senders then see the state handled. Idempotent.
+    public MsgResult MarkRead(string bodyText)
+    {
+        var c = new Ctx { From = "operator", FromKind = "operator", Type = "read", To = "operator", Bytes = bodyText.Length };
+        JsonObject body;
+        try { body = ParseObject(bodyText); }
+        catch (Exception e) when (e is System.Text.Json.JsonException or FormatException or ArgumentException or InvalidOperationException)
+        { return Refused(c, "usage", "the body is { \"ids\": [...] } or { \"all\": true }"); }
+        foreach (var kv in body) if (kv.Key is not ("ids" or "all")) return Refused(c, "usage", $"unknown field '{kv.Key}'");
+        var all = body["all"] is JsonValue av && av.TryGetValue<bool>(out var ab) && ab; var hasIds = body.ContainsKey("ids") && body["ids"] is not null;
+        if (all == hasIds) return Refused(c, "usage", "marking read needs exactly one of ids and all: true");
+        List<string>? ids = null;
+        if (hasIds)
+        {
+            if (body["ids"] is not JsonArray arr || arr.Count == 0 || arr.Count > 100) return Refused(c, "usage", "ids is a list of 1 to 100 message ids");
+            ids = new();
+            foreach (var n in arr)
+            {
+                if (n is not JsonValue v || !v.TryGetValue<string>(out var s) || !IdRx.IsMatch(s)) return Refused(c, "usage", "ids holds message ids (m-<epoch>-<number>)");
+                ids.Add(s);
+            }
+        }
+        var (marked, unknown) = plant.MarkOperatorRead(ids);
+        return new(200, new JsonObject { ["ok"] = true, ["read"] = marked, ["unknown"] = unknown, ["epoch"] = plant.Epoch, ["exit"] = 0 });
     }
 
     // ---- POST /api/v1/messages ------------------------------------------------------------------------------------------------------------
@@ -893,7 +933,9 @@ sealed class Messenger
                     else if (!Auth.ValidName(to)) return Refused(c, "usage", "to is a session name of letters, digits, - and _ (40 at most)");
                     c.To = to;
                     if (to == c.From) return Refused(c, "usage", "to names another session");
-                    if (to != "operator" && cfg.Reserved.Contains(to)) return Refused(c, "no-such-peer", "no session of that name receives messages");
+                    // a supervisor name takes a note from the operator only (3.4): for every other sender it stays a name that receives nothing
+                    var operatorToSupervisor = c.FromKind == "operator" && cfg.ManagerEnabled && cfg.ManagerNames.Contains(to);
+                    if (to != "operator" && cfg.Reserved.Contains(to) && !operatorToSupervisor) return Refused(c, "no-such-peer", "no session of that name receives messages");
                     if (c.FromKind == "operator" && to == "operator") return Refused(c, "usage", "the operator does not write to itself");
                     if (c.FromKind != "operator" && to != "operator" && who.Kind == "manager") return Refused(c, "role-cannot-send", "the supervisor's only note target is the operator");
                     if (who.Kind == "item" && who.Role == "inspector" && to != "operator") return Refused(c, "role-cannot-send", "an inspector session may write only to the operator (worker-messaging.md 4.4)");
@@ -1000,7 +1042,7 @@ sealed class Messenger
             body2["refused"] = new JsonArray(o.Refused.Select(r => (JsonNode)new JsonObject { ["name"] = r.Name, ["code"] = r.Code }).ToArray());
             body2["exit"] = 0; status = 200;
         }
-        var traffic = new TrafficEntry { At = DateTime.UtcNow, Id = o.Id, From = c.From, FromKind = c.FromKind, To = broadcast || thread != null ? string.Join(",", o.Delivered.Select(d => d.Name)) : c.To, Kind = c.Kind, Type = spec.Type, Item = item, Bytes = c.Bytes, Subject = subject ?? "", Text = text, Flags = flags.ToArray() };
+        var traffic = new TrafficEntry { At = DateTime.UtcNow, Id = o.Id, From = c.From, FromKind = c.FromKind, To = broadcast || thread != null ? string.Join(",", o.Delivered.Select(d => d.Name)) : c.To, Kind = c.Kind, Type = spec.Type, Item = item, Bytes = c.Bytes, Subject = subject ?? "", Text = text, Flags = flags.ToArray(), InReplyTo = inReplyTo ?? "" };
         AddLog(traffic);
         if (flags.Count > 0) AddRing(traffic);
         LogLine("sent", c, o.Pushed, o.Queued, flags.ToArray());

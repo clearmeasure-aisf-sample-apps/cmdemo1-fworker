@@ -8,7 +8,7 @@ function Get-InspectFacts([int]$n, $info, $state, $pr) {
     $files = @(Get-PrFiles $pr.number)
     $lines = 0; foreach ($f in $files) { $lines += [int](Get-Prop $f 'additions' 0) + [int](Get-Prop $f 'deletions' 0) }
     $docs = Test-DocsOnlyFiles $files
-    $marker = $info.body.Contains($c.docsOnlyMarker)
+    $marker = Test-ItemDocsOnly $state $info
     $chk = Get-ChecksFor $pr.head.sha
     $mand = New-Object System.Collections.ArrayList
     $add = { param($code, $reason, $evidence) [void]$mand.Add(@{ code = $code; reason = $reason; evidence = @($evidence) }) }

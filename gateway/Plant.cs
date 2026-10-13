@@ -29,7 +29,8 @@ sealed class Assignment
     public int Item, Pr;
     public DateTime CreatedAt, AckBy, AcceptedAt;
     public HashSet<string> Declined = new();
-    public bool Accepted;
+    public bool Accepted, AckExtended;   // AckExtended: the offer's window was lengthened once for a journal wait
+    public bool MatchedNoted;                      // its "matched" journal line is queued: once per assignment
     public string Sha = "", EnvId = "";            // qc-env only
     public int Attempt;
     public string Only = "";                       // qc-env: the one worker an operator chose (reassign); empty means the usual selection
@@ -225,13 +226,15 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
 
     // May a message be addressed to this name? An explicit allow-list entry always (the message waits for a name that has not connected since the
     // restart); "*" only for a name that has registered; the operator may also reach a name that only asks the supervisor.
-    bool CanReceive(string name, bool fromOperator)
+    // trusted: the operator or the supervisor is the sender. operatorNote: the operator alone, whose note is the one message that reaches the
+    // supervisor besides question batches and patrols (3.4): the name that holds the slot, or any supervisor name while nobody holds it.
+    bool CanReceive(string name, bool trusted, bool operatorNote)
     {
-        if (Msg.ManagerNames.Contains(name)) return false;     // nothing but question batches and patrols reaches the supervisor (3.4)
+        if (Msg.ManagerNames.Contains(name)) return operatorNote && Msg.ManagerEnabled && (store.Slot == null || store.Slot.Name == name);
         if (Msg.AllowedWorkers.Contains(name)) return true;
         var known = store.Recipients.TryGetValue(name, out var rr) && rr.LastHeard != null;
         if (Msg.AllowedWorkers.Contains("*") && known) return true;
-        return fromOperator && Msg.ManagerEnabled && (Msg.AllowedAskers.Contains(name) || (Msg.AllowedAskers.Contains("*") && known));
+        return trusted && Msg.ManagerEnabled && (Msg.AllowedAskers.Contains(name) || (Msg.AllowedAskers.Contains("*") && known));
     }
 
     // A note (or a question) from an authenticated, allowed sender: everything that depends on live state is decided here, under the one lock:
@@ -282,6 +285,16 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
                     .Concat(workers.Values.Where(w => w.Connected && Msg.AskerAllowed(w.Name) && !Msg.ManagerNames.Contains(w.Name)).Select(w => w.Name))
                     .Distinct().OrderBy(n => n, StringComparer.Ordinal).ToList();
             }
+            else if (s.Broadcast && s.Operator)
+            {   // the operator to everyone: every session that is online or away (a worker on either list, a connected session that may only ask)
+                // and the supervisor that holds the slot, each once. The workers' limits, pairs and the broadcast switch do not apply (3.4).
+                var now = DateTime.UtcNow;
+                var all = store.Recipients.Values.Where(r => r.LastHeard != null && !Msg.ManagerNames.Contains(r.Name) && (Msg.WorkerAllowed(r.Name) || (Msg.ManagerEnabled && Msg.AskerAllowed(r.Name)))
+                    && PresenceOf(r, now) != "offline").Select(r => r.Name)
+                    .Concat(workers.Values.Where(w => w.Connected && Msg.ManagerEnabled && Msg.AskerAllowed(w.Name) && !Msg.ManagerNames.Contains(w.Name)).Select(w => w.Name)).ToList();
+                if (Msg.ManagerEnabled && store.Slot is { } sl && (sl.Out != null || MessageStore.Within(store.Get(sl.Name).LastHeard, now, Msg.OnlineSeconds))) all.Add(sl.Name);
+                names = all.Distinct().OrderBy(n => n, StringComparer.Ordinal).ToList();
+            }
             else if (s.Broadcast)
             {
                 var now = DateTime.UtcNow;
@@ -292,7 +305,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
             foreach (var name in names)
             {
                 if (name == "operator") { targets.Add((name, null)); continue; }
-                if (!CanReceive(name, s.Operator || s.Supervisor)) { o.Refused.Add((name, "no-such-peer")); continue; }
+                if (!CanReceive(name, s.Operator || s.Supervisor, s.Operator)) { o.Refused.Add((name, "no-such-peer")); continue; }
                 // the owner and the inspector of one item do not message each other, in either direction (4.4)
                 if (s.Peer && Paired(s.From, name)) { o.Refused.Add((name, "independence")); continue; }
                 var r = store.Get(name);
@@ -545,6 +558,34 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
             if (!store.Records.TryGetValue(id, out var rec) || (asker != null && rec.From != asker)) return null;
             return new MessageSnapshot { Id = rec.Id, Type = rec.Type, Kind = rec.Kind, State = rec.State(), From = rec.From, AnswerJson = rec.AnswerJson, Item = rec.Item, At = rec.At, Per = new(rec.Per),
                 Late = rec.Type == "question" && rec.QState == "open" && (DateTime.UtcNow - rec.At).TotalSeconds >= Msg.AnswerSlaSeconds, Escalated = rec.Escalated };
+        }
+    }
+
+    // The operator's side of the notes addressed to it (3.3): a note to the operator waits as "queued" in its sender's record until the operator
+    // marks it read ("handled", which is also what the sender then sees). OperatorStates: id -> that state, for the ids that are still held.
+    public Dictionary<string, string> OperatorStates(IEnumerable<string> ids)
+    {
+        lock (gate)
+        {
+            var d = new Dictionary<string, string>();
+            foreach (var id in ids) if (store.Records.TryGetValue(id, out var rec) && rec.Per.TryGetValue("operator", out var st)) d[id] = st;
+            return d;
+        }
+    }
+
+    // ids null: every note to the operator that is not read yet. Idempotent; an id that is unknown or was not addressed to the operator is counted.
+    public (int Marked, int Unknown) MarkOperatorRead(IReadOnlyList<string>? ids)
+    {
+        lock (gate)
+        {
+            int marked = 0, unknown = 0;
+            if (ids == null) { foreach (var rec in store.Records.Values) if (rec.Per.TryGetValue("operator", out var st) && st != "handled") { rec.Per["operator"] = "handled"; marked++; } }
+            else foreach (var id in ids)
+            {
+                if (!store.Records.TryGetValue(id, out var rec) || !rec.Per.ContainsKey("operator")) { unknown++; continue; }
+                if (rec.Per["operator"] != "handled") { rec.Per["operator"] = "handled"; marked++; }
+            }
+            return (marked, unknown);
         }
     }
 
@@ -1411,7 +1452,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
             {
                 a.Worker = restoreWorker;
                 if (restoreAccepted) { a.Accepted = true; a.AcceptedAt = DateTime.UtcNow; qcOf[key] = restoreWorker; }
-                else { a.AckBy = DateTime.UtcNow.AddSeconds(ackSeconds); if (workers.TryGetValue(restoreWorker, out var rw)) Push(rw, AssignedJson(a), false); }
+                else { a.AckBy = DateTime.UtcNow.AddSeconds(ackSeconds); a.AckExtended = false; if (workers.TryGetValue(restoreWorker, out var rw)) Push(rw, AssignedJson(a), false); }
                 return (a, "");
             }
             var (w, why) = ChooseQc(a);
@@ -1467,12 +1508,53 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
     // A directed event for one worker (qc.reset, qc.teardown).
     public void SendTo(string name, JsonObject evt) { lock (gate) { if (workers.TryGetValue(name, out var w)) Push(w, evt.ToJsonString()); } }
 
+    // The journal lines of one item are written one after the other, in the order the plant decided them (matched, offered, waiting, reassigned):
+    // each is a rule-script call of its own that waits for the item lock, and calls started together reach that lock in any order. Called under
+    // gate; only the chaining happens here, the call itself runs on the pool after the line before it has ended (ended, not succeeded: the journal
+    // is best-effort). Nothing waits for it, so an offer is never held back by GitHub.
+    readonly Dictionary<int, Task> journalTail = new();
+    readonly HashSet<int> waitingQueued = new();
+    void Journal(int item, string ev, JsonObject fields, string key)
+    {
+        async Task Write() { try { await journal(item, ev, fields, key); } catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); } }
+        lock (gate)
+        {
+            // the repeated "waiting" of a sweep or a tick (no key; the rule script posts one per 30 minutes) is not queued behind one that is still to be written
+            var repeat = ev == "waiting" && key == "";
+            if (repeat && !waitingQueued.Add(item)) return;
+            var prev = journalTail.TryGetValue(item, out var t) ? t : Task.CompletedTask;
+            var next = prev.ContinueWith(_ => Write(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+            journalTail[item] = next;
+            next.ContinueWith(_ => { lock (gate) { if (repeat) waitingQueued.Remove(item); if (journalTail.TryGetValue(item, out var cur) && ReferenceEquals(cur, next)) journalTail.Remove(item); } }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        }
+    }
+    // For the accept verb, whose own line (assigned) is written by the rule script: the lines decided before it, and how long the acceptance may
+    // wait for them. Never more than 60 s and never more than half of what is left of the offer's window (live, two lines took 40 s on a loaded
+    // gateway; the deployed window is 120 s). The wait is not taken from the window: the offer is accepted only when the rule script returns, so
+    // the time granted here is added to the window of the worker that is answering, or the tick would offer the item again meanwhile.
+    public (Task Written, TimeSpan AtMost) JournalBefore(int item, string assignment, string name)
+    {
+        lock (gate)
+        {
+            if (!journalTail.TryGetValue(item, out var t)) return (Task.CompletedTask, TimeSpan.Zero);
+            var a = assignments.Values.FirstOrDefault(x => x.Id == assignment);
+            var mine = a is { Accepted: false } && a.Worker != "" && a.Worker == name;
+            var wait = Math.Clamp(a is { Accepted: false } && a.Worker != "" ? (a.AckBy - DateTime.UtcNow).TotalSeconds / 2 : 30, 0, 60);
+            if (mine)
+            {   // once per offer: a worker that calls accept again and again must not hold the item by lengthening its own window each time
+                if (a!.AckExtended) return (Task.CompletedTask, TimeSpan.Zero);
+                a.AckExtended = true; a.AckBy = a.AckBy.AddSeconds(wait);
+            }
+            return (t, TimeSpan.FromSeconds(wait));
+        }
+    }
+
     void Offer(Assignment a, WorkerInfo w, string? why)
     {
-        a.Worker = w.Name; a.AckBy = DateTime.UtcNow.AddSeconds(ackSeconds); a.WaitingSince = null; a.WaitingCode = "";
+        a.Worker = w.Name; a.AckBy = DateTime.UtcNow.AddSeconds(ackSeconds); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";
         Push(w, AssignedJson(a), false);
         var trig = lastTrigger.TryGetValue(a.Item, out var t) ? t : "the sweep";
-        _ = journal(a.Item, "offered", new JsonObject { ["worker"] = w.Name, ["type"] = w.Type, ["ackSeconds"] = ackSeconds }, "off|" + a.Id + "|" + w.Name);
+        Journal(a.Item, "offered", new JsonObject { ["worker"] = w.Name, ["type"] = w.Type, ["ackSeconds"] = ackSeconds }, "off|" + a.Id + "|" + w.Name);
     }
 
     // owned and keep (step 5a): what the sweep says of every owned claim, and the items it must not drop an owner of; used only while messaging or the
@@ -1501,7 +1583,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
                     if (ex.Accepted)
                     {   // accepted, yet the item needs a worker again: the session is gone
                         assignments.Remove(key); if (kind == "own-item") DropOwner(item); else botOf.Remove(item);
-                        _ = journal(item, "reassigned", new JsonObject { ["reason"] = $"the session that owned this item ({ex.Worker}) is gone" }, "gone|" + ex.Id);
+                        Journal(item, "reassigned", new JsonObject { ["reason"] = $"the session that owned this item ({ex.Worker}) is gone" }, "gone|" + ex.Id);
                     }
                     else if (ex.Worker != "") continue;                                                     // waiting for an answer
                 }
@@ -1513,10 +1595,15 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
                 assignments[key] = a;
                 a.Pin = pin ?? "";
                 if (a.Pin != "" && a.PinRetryAt > planNow) continue;                                      // its worker just let an offer lapse: the tick offers it again
+                if (!a.MatchedNoted)
+                {   // once per assignment, when the trigger is matched to the job and before a worker is looked for: an item that first waits
+                    // (no worker, or its pinned worker is away) has the line too, and a sweep that finds it still waiting writes nothing again
+                    a.MatchedNoted = true;
+                    var trigText = lastTrigger.TryGetValue(item, out var tt) ? tt : "the sweep";
+                    Journal(item, "matched", new JsonObject { ["trigger"] = trigText, ["reason"] = a.Reason, ["column"] = a.Column, ["role"] = a.Kind == "bot-job" ? a.Role : "" }, "m|" + a.Id);
+                }
                 var (w, why) = Choose(a, pin);
-                if (w == null) { a.WaitingSince ??= planNow; a.WaitingCode = chooseCode; _ = journal(item, "waiting", new JsonObject { ["reason"] = why }, ""); continue; }
-                var trigText = lastTrigger.TryGetValue(item, out var tt) ? tt : "the sweep";
-                _ = journal(item, "matched", new JsonObject { ["trigger"] = trigText, ["reason"] = a.Reason, ["column"] = a.Column, ["role"] = a.Kind == "bot-job" ? a.Role : "" }, "m|" + a.Id);
+                if (w == null) { a.WaitingSince ??= planNow; a.WaitingCode = chooseCode; Journal(item, "waiting", new JsonObject { ["reason"] = why }, ""); continue; }
                 Offer(a, w, null);
             }
             // an unanswered or unwanted assignment that the sweep no longer asks for is dropped
@@ -1537,13 +1624,13 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
                 {   // pinned (the item's worker:<name> label): never offered to another worker. It waits, visibly, and is offered to the same worker
                     // again after one more window, or as soon as that worker is back.
                     a.Worker = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "pinned-unavailable"; a.PinRetryAt = DateTime.UtcNow.AddSeconds(ackSeconds);
-                    _ = journal(a.Item, "waiting", new JsonObject { ["reason"] = $"the pinned worker '{a.Pin}' did not confirm within {ackSeconds:0} s; the item waits for it" }, "pinwait|" + a.Id + "|" + a.PinRetryAt.Ticks);
+                    Journal(a.Item, "waiting", new JsonObject { ["reason"] = $"the pinned worker '{a.Pin}' did not confirm within {ackSeconds:0} s; the item waits for it" }, "pinwait|" + a.Id + "|" + a.PinRetryAt.Ticks);
                     continue;
                 }
                 a.Declined.Add(was); a.Worker = "";
-                _ = journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s" }, "ack|" + a.Id + "|" + was);
+                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s" }, "ack|" + a.Id + "|" + was);
                 var (w, why) = IsQc(a) ? ChooseQc(a) : Choose(a, null);
-                if (w == null) { if (!IsQc(a)) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = chooseCode; _ = journal(a.Item, "waiting", new JsonObject { ["reason"] = why }, ""); } continue; }
+                if (w == null) { if (!IsQc(a)) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = chooseCode; Journal(a.Item, "waiting", new JsonObject { ["reason"] = why }, ""); } continue; }
                 Offer(a, w, null);
                 if (IsQc(a)) placed.Add(a);
             }
@@ -1563,7 +1650,7 @@ sealed class Plant(string secret, Func<int, string, JsonObject, string, Task> jo
                     if ((now - a.CreatedAt).TotalSeconds >= QcCfg.WaitingDelaySeconds && (now - a.LastWaiting).TotalMinutes >= QcCfg.WaitingRepeatMinutes)
                     {
                         a.LastWaiting = now;
-                        _ = journal(a.Item, "qc-waiting", new JsonObject { ["pr"] = a.Pr, ["reason"] = why }, "qcw|" + a.Id + "|" + now.Ticks);
+                        Journal(a.Item, "qc-waiting", new JsonObject { ["pr"] = a.Pr, ["reason"] = why }, "qcw|" + a.Id + "|" + now.Ticks);
                     }
                     continue;
                 }

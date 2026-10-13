@@ -12,7 +12,8 @@ function Verb_open_pr($a) {
     $body = if (Test-Has $a 'body') { "$($a.body)" } else { '' }
     $existing = Find-ItemPr $n
     if ($existing -and $existing.head.ref -eq $head) {
-        return @{ ok = $true; id = $n; created = $false; pullRequest = @{ number = $existing.number; url = $existing.html_url; head_sha = $existing.head.sha; branch = $head } }
+        $bo = Get-BuildOwed $info $existing.number (Get-State $n).state
+        return @{ ok = $true; id = $n; created = $false; pullRequest = @{ number = $existing.number; url = $existing.html_url; head_sha = $existing.head.sha; branch = $head }; build_owed = $bo.build_owed; build_reason = $bo.build_reason }
     }
     $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls" -Allow 422 -Body @{ title = $title; head = $head; base = $base; body = "$body`n`nRefs #$n"; draft = $false }
     if ($r -is [hashtable] -and $r.ContainsKey('status')) {
@@ -20,7 +21,8 @@ function Verb_open_pr($a) {
         Reject 10 'pr-not-created' "GitHub refused to create the pull request: $($r.body.message) $msg. This usually means '$head' has no commits ahead of '$base' or was not pushed. Do not push an empty commit; if the item is already satisfied, report complete with succeeded=false." @{ detail = $msg }
     }
     $st = Get-State $n; $st.state.pr = @{ number = $r.number; branch = $head; url = $r.html_url }; Save-State $n $st
-    return @{ ok = $true; id = $n; created = $true; pullRequest = @{ number = $r.number; url = $r.html_url; head_sha = $r.head.sha; branch = $head } }
+    $bo = Get-BuildOwed $info ([int]$r.number) $st.state
+    return @{ ok = $true; id = $n; created = $true; pullRequest = @{ number = $r.number; url = $r.html_url; head_sha = $r.head.sha; branch = $head }; build_owed = $bo.build_owed; build_reason = $bo.build_reason }
 }
 
 function Verb_pr_checks($a) {

@@ -101,6 +101,8 @@ The plant manager writes a comment on the work item at each decision, as AISF do
 | 7 | waiting | No worker qualifies (none subscribed, no capability, capacity full, merge queue full); at most once per column per 30 minutes after a 5-minute delay |
 | 8 | skipped | A rule excludes the item (ambiguous owner, demo exclusion, not an AI column) |
 
+Order: the lines of one item are written one after the other, in the order the decisions were made (`matched`, then `waiting` if no worker can take it yet, then `offered`, then `assigned`); `matched` is written once per job, also for an item that first waits. The offer itself never waits for its journal line; an acceptance waits for the lines before it, for a bounded time.
+
 Rules: hidden machine marker on every comment (`<!-- plant event=assigned key=â€¦ -->`) and a journal ledger in the state comment, so redelivered webhooks and repeated sweeps never duplicate; best-effort with one retry and never blocks a dispatch; redacts token-like strings; at most ~1,500 characters; never includes item bodies or raw payloads; a per-item cap of 30 comments, then one final "journal full" note; no `@mention`. Worker names and model/effort are shown; machine names and user names are not.
 
 ## 9. Model selection
@@ -113,6 +115,20 @@ Rules: hidden machine marker on every comment (`<!-- plant event=assigned key=â€
 ## 10. Merge queue, policy, and CI rules (already built)
 
 `mergeQueueDepth` limits merged items waiting for their release candidate (the Release workflow keeps one queued run). `mergePolicy` is `auto` or `peer-approved`. A merged docs-only change finishes after master has been green for a grace period even if no release run appears. CI is classified strictly: zero check runs is pending, and each configured gate must be present and successful.
+
+### 10a. Docs-only fast path (owner decision 2026-10-12)
+
+A one-line documentation item should go from accepted to merged in about 10 minutes with small-model subagents. Docs-only is decided once, in Technical Design: the design's `Files:` line names every file; all are under `docs/` or `.md` outside `src/`, and no code, build, workflow or test reads them; the design then carries `docsOnlyMarker`. `append-body` records the decision in the item state (`design.docs_only`) only when the marker arrives inside the design section while the item is in its design column, and refuses the marker anywhere else (`docs-only-marker-not-allowed`); completing the design column writes `false` when no design append set the field. Once the field exists the body text is ignored, so a marker typed into the issue gives nothing; only a state with no field on an item already past its design column (written by an older version) falls back to the marker in the body. Items without the marker are untouched by everything below.
+
+| Stage | Rule | Enforced by |
+|---|---|---|
+| Technical Design | one review round; a second only for a finding that quotes the item (`FINDING: criterion "<text above the design section>" - ...` or `FINDING: file "<path in the design>" - ...`) | `record-review`: `timing.docsOnlyMaxReviewRounds` (2) instead of `maxReviewRounds`; a findings review with no grounded finding is refused with `finding-without-criterion` and uses no round |
+| Development | no private build, no SDK; change, push, pull request; its checks are the gate | `open-pr`, `get-item` and `complete` answer `build_owed` (`Get-BuildOwed`, Prs.ps1): false only when the design recorded docs-only AND every changed file matches `docsOnlyPaths`; a marked item with any other file owes the build. `complete` still refuses a docs pull request without the marker and anything but green checks |
+| Functional Testing | verdict against the acceptance criteria and the diff; nothing is built or started | `get-item` answers `verification: "diff"` under the same two facts (and no video label), otherwise `"app"` |
+
+A command that a subagent's shell refuses inside its worktree is run by the owner session from the worktree path (`factory-development`, "A command refused in a subagent's shell"); the item is not parked for it.
+
+Floor that remains: one design review round; the checks of the pull request (`ciGates`, run by the target repository's workflow, including for documentation); `complete` answers `accepted-checks-pending` while they run and the sweep (every `FACTORY_SWEEP_SECONDS`, default 180) advances the item when they are green; the merge verb waits for mergeability and pre-merge checks (`mergeabilityWaitSeconds` 90, `preMergeChecksWaitSeconds` up to 300); a docs-only change neither waits in the merge queue nor holds a place in it; after the merge the item reaches Done when master is green, at once if the master build skipped its publish step, else `docsOnlyReleaseGraceSeconds` (120) later, on the next sweep.
 
 ## 11. Cloud workers (designed, NOT implemented)
 
