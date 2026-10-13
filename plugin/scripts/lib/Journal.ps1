@@ -54,6 +54,7 @@ function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, 
     try {
         $own = $false
         if ($null -eq $St) { $St = Get-State $Item; $own = $true }
+        if (Test-Has $St 'rejected') { return $false }   # the ledger is in the state, and the state is not read: nothing is posted (Board.ps1)
         $s = $St.state
         if (-not (Test-Has $s 'journal')) { $s.journal = @{ keys = @(); count = 0 } }
         $k = "$Event|$Key"
@@ -81,6 +82,7 @@ function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, 
 function Save-JournalKeys([int]$Item, [string[]]$Keys) {
     Use-ItemLock $Item {
         $f = Get-State $Item; $fs = $f.state; $added = 0
+        if (Test-Has $f 'rejected') { return }
         if (-not (Test-Has $fs 'journal')) { $fs.journal = @{ keys = @(); count = 0 } }
         foreach ($k in $Keys) { if (@($fs.journal.keys) -notcontains $k) { $fs.journal.keys = @(@($fs.journal.keys) + $k | Select-Object -Last 200); $fs.journal.count = [int]$fs.journal.count + 1; $added++ } }
         if ($added -gt 0) { Save-State $Item $f }

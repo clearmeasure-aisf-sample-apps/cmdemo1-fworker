@@ -205,6 +205,8 @@ $OwnerScenarios = [ordered]@{
     $r = & $call $own @{ item = $n; body = '   ' }
     Check 'an empty body is a usage error' ($r.exit -eq 2 -and $r.code -eq 'usage') "$($r | ConvertTo-Json -Compress)"
     Check 'none of the refusals changed the body' ((Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$((Get-FakePr $pr).body)"
+    $td = New-Item-Fake 'Body C' 'x' $lab; $r = & $call (Msg-ItemToken $td 'owner' 'alice') @{ item = $td; body = 'too early' }
+    Check 'outside Development the body is not changed (wrong-column)' ($r.exit -eq 10 -and $r.code -eq 'wrong-column') "$($r | ConvertTo-Json -Compress)"
     Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
     Check 'the pull request is merged' ((Get-FakePr $pr).merged -eq $true)
     $r = & $call $own @{ item = $n; pr = $pr; body = 'after the merge' }
@@ -402,31 +404,58 @@ $OwnerScenarios['state: the state comment is signed, an edit by someone else is 
     $name = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).name; $fence = '```'
     $unsigned = { param($i, $who) "<!-- factory-state:$name v1 -->`nstate`n`n${fence}json`n{`"schema`":1,`"item`":$i,`"claim`":{`"holder`":`"$who`",`"column`":`"Technical Design`",`"owner`":true,`"lease_until`":`"2099-01-01T00:00:00.000Z`"}}`n$fence`n" }
 
+    $other = 'another-test-key-' + '0123456789abcdef'   # a second gateway's secret (a fixture, composed)
+    $kid = { param($sec) ([BitConverter]::ToString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($sec))) -replace '-', '').ToLowerInvariant().Substring(0, 8) }
+    $notes = { param($i, $code) , @((Get-FakeIssue $i).comments | Where-Object { $_.body -match "factory-state-unverifiable comment=\d+ code=$code" }) }
+    $offered = { param($i) @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $i }).Count }
+    $sweeps = { param($k) $b0 = Gate-LastSweep; $seen = 0; $end = (Get-Date).AddSeconds(90); while ($seen -lt $k -and (Get-Date) -lt $end) { Start-Sleep -Milliseconds 300; $cur = Gate-LastSweep; if ($cur -ne $b0) { $seen++; $b0 = $cur } } }
+
     $n = New-Item-Fake 'Signed state' 'x' $lab
     $c1 = Qc-Server 'claim-item' @{ item = $n; holder = 'sig-w'; column = 'Technical Design' }; CheckExit 'a claim writes the state' $c1 0
     $sc = (& $states $n)
-    Check 'the state comment carries the signature of the gateway, and it is read back' ($sc.Count -eq 1 -and "$($sc[0].body)" -match '(?m)^<!-- factory-state-sig v1 [0-9a-f]{64} -->$' -and (& $holder (& $get $n)) -eq 'sig-w') "$($sc | ForEach-Object { $_.body })"
+    Check 'the state comment carries the signature of the gateway with the id of its key, and it is read back' ($sc.Count -eq 1 -and "$($sc[0].body)" -match "(?m)^<!-- factory-state-sig v1 $(& $kid $script:OwnerSecret) [0-9a-f]{64} -->`$" -and (& $holder (& $get $n)) -eq 'sig-w') "$($sc | ForEach-Object { $_.body })"
+    Check 'the claimed item is no longer waiting for a worker' (Wait-Until -Seconds 40 { (& $offered $n) -eq 0 })
     # someone with write access edits the comment: the content changes, the signature is the old one
-    $orig = "$($sc[0].body)"
-    & $edit $sc[0].id ($orig.Replace('"sig-w"', '"mallory"'))
+    $orig = "$($sc[0].body)"; $forged = $orig.Replace('"sig-w"', '"mallory"')
+    & $edit $sc[0].id $forged
     $g = & $get $n
-    Check 'an edited state is treated as absent: the item has no claim, not the one typed in' ($g.exit -eq 0 -and (& $holder $g) -eq '') ($g.state | ConvertTo-Json -Compress -Depth 4)
-    & $edit $sc[0].id (($orig.Replace('"sig-w"', '"mallory"')) -replace '<!-- factory-state-sig v1 [0-9a-f]{64} -->\n?', '')
-    Check 'so is an edited state whose signature was taken off' ((& $holder (& $get $n)) -eq '')
-    Check 'reading alone writes nothing' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'was not the gateway''s own' }).Count -eq 0)
-    $c2 = Qc-Server 'journal' @{ item = $n; event = 'matched'; fields = @{ trigger = 'test'; reason = 'test'; column = 'Technical Design' }; key = 'sig-1' }; CheckExit 'the next write of the gateway starts the state anew' $c2 0
-    $sc2 = (& $states $n)
-    Check 'it is written into the same comment, signed again, and the item says once that the state was not the gateway''s own' ($sc2.Count -eq 1 -and $sc2[0].id -eq $sc[0].id -and "$($sc2[0].body)" -match 'factory-state-sig v1 [0-9a-f]{64}' -and "$($sc2[0].body)" -notmatch 'mallory' -and "$($sc2[0].body)" -match 'matched\|sig-1' -and (& $holder (& $get $n)) -eq '' -and @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'was not the gateway''s own' }).Count -eq 1)
+    Check 'an edited state is not read: the item shows no claim, not the one typed in' ($g.exit -eq 0 -and (& $holder $g) -eq '') ($g.state | ConvertTo-Json -Compress -Depth 4)
+    $c2 = Qc-Server 'claim-item' @{ item = $n; holder = 'sig-w2'; column = 'Technical Design' }
+    CheckExit 'a write is refused: nothing overwrites a state that cannot be verified' $c2 30 'state-unverifiable'
+    & $sweeps 3
+    Check 'after three sweeps the comment is exactly as it was left, the item was not offered again, and the item says so once (edited)' ("$((& $states $n)[0].body)" -eq $forged -and (& $states $n).Count -eq 1 -and (& $offered $n) -eq 0 -and (& $notes $n 'edited').Count -eq 1 -and (& $notes $n 'other-key').Count -eq 0) "offered $(& $offered $n), notes $((& $notes $n 'edited').Count)"
+    # the operator puts the comment back: the item goes on as before
+    & $edit $sc[0].id $orig
+    Check 'the restored comment is read again' ((& $holder (& $get $n)) -eq 'sig-w')
+    # a state signed by another gateway's key (another environment on the same board, or a secret that was changed)
+    $k = New-Item-Fake 'Other key' 'x' $lab
+    $ck = Qc-Server 'claim-item' @{ item = $k; holder = 'other-w'; column = 'Technical Design' } @{ FACTORY_TOKEN_SECRET = $other }; CheckExit 'a gateway with another secret writes a state' $ck 0
+    $ko = "$((& $states $k)[0].body)"
+    Check 'it names the other key' ($ko -match "factory-state-sig v1 $(& $kid $other) " -and (& $kid $other) -ne (& $kid $script:OwnerSecret))
+    $ck2 = Qc-Server 'claim-item' @{ item = $k; holder = 'sig-w2'; column = 'Technical Design' }
+    Check 'this gateway does not read it and does not write over it (state-unverifiable, other-key)' ((& $holder (& $get $k)) -eq '' -and $ck2.exit -eq 30 -and $ck2.code -eq 'state-unverifiable' -and $ck2.state_code -eq 'other-key') ($ck2 | ConvertTo-Json -Compress)
+    & $sweeps 3
+    $nk = & $notes $k 'other-key'
+    Check 'it is left alone and reported once as signed by another key, not as edited' ("$((& $states $k)[0].body)" -eq $ko -and $nk.Count -eq 1 -and "$($nk[0].body)" -match 'signed by another key' -and "$($nk[0].body)" -notmatch 'edited' -and (& $notes $k 'edited').Count -eq 0) "$($nk | ForEach-Object { $_.body })"
+    # the secret was changed and the old one is given as FACTORY_TOKEN_SECRET_PREVIOUS: the state is read, and the next write signs with the current key
+    $prev = @{ FACTORY_TOKEN_SECRET_PREVIOUS = $other }
+    Check 'with the previous key given the state is read' ((& $holder (Qc-Server 'get-item' @{ item = $k } $prev)) -eq 'other-w')
+    $jw = Qc-Server 'journal' @{ item = $k; event = 'matched'; fields = @{ trigger = 'test'; reason = 'test'; column = 'Technical Design' }; key = 'resign-1' } $prev
+    $kn = "$((& $states $k)[0].body)"
+    Check 'the next write keeps the content and signs it with the current key, so it is read without the previous one' ($jw.exit -eq 0 -and $jw.posted -eq $true -and (& $states $k).Count -eq 1 -and $kn -match "factory-state-sig v1 $(& $kid $script:OwnerSecret) " -and $kn -match 'matched\|resign-1' -and (& $holder (& $get $k)) -eq 'other-w') "$($jw | ConvertTo-Json -Compress) $kn"
     # a signed state copied to another item does not count there
     $m = New-Item-Fake 'Copied state' 'x' $lab
-    [void](Gh-As 'fake-operator' "issues/$m/comments" @{ body = "$($sc2[0].body)" })
-    Check 'a signed state copied onto another item is ignored there' ((& $holder (& $get $m)) -eq '')
-    # states from before signing: by the date GitHub gave the comment
-    $o = New-Item-Fake 'Old state' 'x' $lab; $p = New-Item-Fake 'New unsigned state' 'x' $lab
+    [void](Gh-As 'fake-operator' "issues/$m/comments" @{ body = $orig })
+    Check 'a signed state copied onto another item is not read there' ((& $holder (& $get $m)) -eq '')
+    # states from before signing: by the dates GitHub gave the comment
+    $o = New-Item-Fake 'Old state' 'x' $lab; $p = New-Item-Fake 'New unsigned state' 'x' $lab; $q = New-Item-Fake 'Old state, edited' 'x' $lab
     [void](Gh-As 'fake-operator' "issues/$o/comments" @{ body = (& $unsigned $o 'old-w'); _created_at = '2019-05-01T00:00:00Z' })
     [void](Gh-As 'fake-operator' "issues/$p/comments" @{ body = (& $unsigned $p 'new-w') })
-    Check 'an unsigned state whose comment was created before the cutoff is read as before' ((& $holder (& $get $o)) -eq 'old-w')
-    Check 'an unsigned state created after it is ignored' ((& $holder (& $get $p)) -eq '')
+    [void](Gh-As 'fake-operator' "issues/$q/comments" @{ body = (& $unsigned $q 'old-w'); _created_at = '2019-05-01T00:00:00Z' })
+    Check 'an unsigned state whose comment was created and last edited before the cutoff is read as before' ((& $holder (& $get $o)) -eq 'old-w' -and (& $holder (& $get $q)) -eq 'old-w')
+    Check 'an unsigned state created after it is not read' ((& $holder (& $get $p)) -eq '')
+    & $edit (& $states $q)[0].id (& $unsigned $q 'mallory')
+    Check 'an old unsigned state that was edited after the cutoff is not read either (taking a signature off is such an edit)' ((& $holder (& $get $q)) -eq '')
     # the docs-only marker in the body of an item without the state field: only for items created before the cutoff
     $mk = "x`n`n## Technical Design`n<!-- aisf:docs-only -->`n- a sentence."
     $d0 = (Fake 'issue' @{ title = 'Old docs item'; body = $mk; labels = $lab; column = 'Development'; createdAt = '2019-06-01T00:00:00Z' }).number
@@ -435,7 +464,7 @@ $OwnerScenarios['state: the state comment is signed, an edit by someone else is 
     Check 'an item created before the cutoff, past its design and without the field, is docs-only by the marker in its body' ($g0.exit -eq 0 -and $g0.docs_only -eq $true) ($g0 | ConvertTo-Json -Compress -Depth 2)
     Check 'an item created after it is not, whatever its body says' ($g1.exit -eq 0 -and $g1.docs_only -eq $false)
     $ship = (Get-Content -Raw (Join-Path $script:Root 'config/instance.json') | ConvertFrom-Json -AsHashtable -DateKind String).timing.docsOnlyLegacyBefore
-    Check 'the shipped cutoff is 2026-10-14T00:00:00Z' ("$ship" -eq '2026-10-14T00:00:00Z') "$ship"
+    Check 'the shipped cutoff is 2026-10-16T00:00:00Z' ("$ship" -eq '2026-10-16T00:00:00Z') "$ship"
 }
 
 $OwnerScenarios['runner: a second run is refused while one is active, a short disk is refused, -Force overrides, and pwsh exit 139 is reported as a crash'] = {

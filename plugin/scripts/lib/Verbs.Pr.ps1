@@ -14,6 +14,8 @@ function Verb_update_pr($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg
     $body = "$(Need $a 'body')"; if (-not $body.Trim()) { Reject 2 'usage' 'missing argument: body' }
     $info = Get-ItemInfo $n; Assert-Open $info
+    # only while the item is in Development, the owner's column: after that the pull request has been read and approved as it is
+    if ("$($info.column)" -ine "$($c.columns.development)") { Reject 10 'wrong-column' "the body of the pull request is changed only while the item is in '$($c.columns.development)'; it is in '$($info.column)'" }
     $own = Find-ItemPr $n
     if ($own -and $own.head.ref -notmatch "^$([regex]::Escape($c.name))/$n-") { $own = $null }
     if (Test-Has $a 'pr') {

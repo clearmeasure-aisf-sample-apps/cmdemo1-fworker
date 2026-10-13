@@ -126,7 +126,7 @@ function Verb_claim_item($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg; $t = $c.timing
     $holder = if (Test-Has $a 'holder') { "$($a.holder)" } else { 'anonymous' }
     $info = Get-ItemInfo $n
-    $st = Get-State $n; $s = $st.state
+    $st = Get-State $n; Assert-StateReadable $n $st; $s = $st.state
     if ((Test-Has $a 'release') -and $a.release) {
         Remove-ClaimRef $n
         if (Test-Has $s 'claim') { if ($s.claim.holder -eq $holder -or (Test-Has $a 'force')) { $s.Remove('claim'); Save-State $n $st } }

@@ -58,7 +58,7 @@
     "maxRelaunches": 3,
     "maxReviewRounds": 3,
     "docsOnlyMaxReviewRounds": 2,
-    "docsOnlyLegacyBefore": "2026-10-14T00:00:00Z",
+    "docsOnlyLegacyBefore": "2026-10-16T00:00:00Z",
     "maxDemotions": 2,
     "fixForwardMaxRounds": 4,
     "sweepSeenCount": 2,

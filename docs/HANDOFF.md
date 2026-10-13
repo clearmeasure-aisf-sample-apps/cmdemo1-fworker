@@ -131,17 +131,17 @@ i. **Worker-to-worker messaging is not yet proven with the owner's own sessions*
 j. **pwsh crashes (exit 134 or 139) under machine load in the test suites.** Not a product answer, but it costs reruns; find out whether
    it is memory, the runtime or the long-lived client host.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
-m. **The sweep saves a state it read without the item lock** in a few places of `Verb_sync_board` (Verbs.Sweep.ps1: merge-detected,
-   owner-released-idle, the awaiting-checks and settle paths). A verb that writes the same item between the sweep's read and its save loses
-   its write, as the QC offer did (closed entry "qc-gate flaky check"). Each needs the pattern used there: write under `Use-ItemLock` on a
-   fresh read.
+m. **The sweep still saves a state it read without the item lock in two places** of `Verb_sync_board` (Verbs.Sweep.ps1): the
+   awaiting-checks path (`Complete-AwaitingChecks`) and the settle path (`Invoke-Settle`, which reads fresh but holds no lock). They were
+   left because they call GitHub and Octopus for a long time between the read and the save: under the item lock a verb for the same item
+   would wait and be refused `item-busy`. They need the read-decide part outside and a short locked write of their own keys. The
+   merge-detected and owner-released-idle writes are fixed (locked, on a fresh read), as is the QC step.
 n. **Rule scripts run as one `pwsh` per call with no limit on how many at once** (`runner.pool` is 0 in the deployed configuration). A
    burst of verbs is a burst of processes: the likeliest way for the container to run out of memory. Either a concurrency limit in `Runner`
    (Program.cs) or `runner.pool` in `config/deploy.overrides.json` (a protected file: the owner decides).
-o. **A changed `FACTORY_TOKEN_SECRET` makes every signed state comment unreadable** (they are treated as absent: claims, reviews and
-   verdicts of items in flight are gone). Change the secret, or make another environment the acting gateway (`activate-prod.sh`: prod has
-   its own secret), only when no item is in flight, or give both the same secret first.
-
+o. **Changing `FACTORY_TOKEN_SECRET`, or making another environment the acting gateway** (`activate-prod.sh`: prod has its own
+   secret): set `FACTORY_TOKEN_SECRET_PREVIOUS` to the old value (or tdd's) first, or every item in flight stops with
+   `state-unverifiable` (signed by another key) until it is set. Nothing is lost either way; the items wait.
 p. **Two more flaky checks seen on GitHub's runners, causes not found**: qc suite, "the owner assignment is still accepted next to the QC
    one"; manager suite, the "dashboard Sessions panel" scenario. Reproduce with `/_fake/latency` as for entries l and the qc-gate one
    below; look first for a state read before a save and for a start-up sweep of a second gateway that reads the fake GitHub.
@@ -156,14 +156,17 @@ Closed on 2026-10-13 (pull request "hardening"):
 - **(c) One revocation ref per name, paging reader.** A revoke writes the higher generation, reads it back, then removes the name's lower
   refs; a removal that fails leaves a ref and nothing else (the reader takes the highest). The reader reads pages until one is empty.
 - **(d) Fast path fallback and the state comment.** The body marker counts only for items created before `timing.docsOnlyLegacyBefore`
-  (2026-10-14T00:00:00Z). The state comment is signed (HMAC-SHA256 with `FACTORY_TOKEN_SECRET` over the item number and the JSON) and
-  checked on every read; a state that fails is treated as absent, logged, and reported on the item when the gateway writes the state anew.
-  Unsigned states count only when their comment was created before the same cutoff: states that the previous version writes after
-  2026-10-14T00:00Z are NOT read by this version, so deploy it before then or move the cutoff. A gateway without a token secret neither
-  signs nor checks. Not covered: someone with write access putting back an older signed state of the same item; and a state comment
-  created before the cutoff stays editable for the life of its item (take the signature off and it counts as an old unsigned one), so
-  only items whose state comment is created after the cutoff are protected. `.cursor/` is no longer
-  documentation; a finding's quote ends at the first separator; the fake GitHub uses the product's `docsOnlyPaths`.
+  (2026-10-16T00:00:00Z). The state comment is signed (HMAC-SHA256 with `FACTORY_TOKEN_SECRET` over the item number and the JSON; the
+  line names the key by 8 hex of its hash) and checked on every read. A state that cannot be verified is never overwritten or removed:
+  reads see no state, every write answers exit 30 `state-unverifiable`, the sweep leaves the item alone (no offer, owner kept) and says
+  so once on the item, as "edited" or as "signed by another key". The operator resolves it: restore the comment from its edit history,
+  give the gateway the key that signed it (`FACTORY_TOKEN_SECRET_PREVIOUS`, accepted for reading; the next write signs with the current
+  key), or delete the state comment to start the item anew. Unsigned states count only when their comment was created and last edited
+  before the same cutoff: deploy this version before 2026-10-16T00:00Z or move the cutoff, because the previous version writes unsigned.
+  A gateway without a token secret neither signs nor checks (owner mode refuses to start with a secret under 16 characters). Not covered:
+  someone with write access putting back an older signed state of the same item; until the cutoff a signature can still be taken off
+  (the edit is dated before it); and a verb other than `claim-item` may act on GitHub before its save is refused. `.cursor/` is no longer documentation; a finding's
+  quote ends at the first separator; the fake GitHub uses the product's `docsOnlyPaths`.
 - **(e) Dashboard**: an answer that arrives after Disconnect is dropped; Disconnect and a refused token clear every section and hide QC; a
   refused token is forgotten, so the timer stops asking until the next Connect.
 - **(g) Slow first pickup: found.** tdd's webhook is a repository webhook (`create-webhook.sh`: issues, workflow_run, pull_request,
@@ -173,7 +176,8 @@ Closed on 2026-10-13 (pull request "hardening"):
   match" was the first look. Fixed: after a sweep that saw such an item the next one runs 20 s later (`FACTORY_SWEEP_CONFIRM_SECONDS`), so
   the first offer comes at most one interval plus 20 s after the move. To make it seconds: deliver `projects_v2_item` (organization
   webhook); the gateway already turns it into a sweep.
-- **(h) `factory.ps1 update-pr --item N --body-file <file>`** replaces the body of the item's own open pull request (item token, owner role).
+- **(h) `factory.ps1 update-pr --item N --body-file <file>`** replaces the body of the item's own open pull request (item token, owner role),
+  only while the item is in Development (`wrong-column` afterwards).
 - **(l) Manager suite, revoke scenario, flaky on slow runners: a test order assumption.** The scenario's second gateway reads the fake
   GitHub, so its start-up sweep plans the whole board; when that sweep ended between the session's second registration and the scenario's
   own plan, another item was offered first and the session (capacity 1) was not offered the expected one. The scenario now waits for the
