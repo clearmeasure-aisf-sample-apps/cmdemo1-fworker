@@ -181,7 +181,15 @@ The role is on in the deployed image (`operator.enabled` in `config/deploy.overr
 3. The prompt clones this repository, has the session read `CLAUDE.md` and this file, and hands over to
    `plugin/skills/factory-operator/SKILL.md`. The dashboard shows it in the group "Factory operator" with its model check and the
    self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 3).
-4. To stop it: revoke the name `operator-session` on the dashboard. To stop the role: set `operator.enabled` false in the overrides.
+4. To stop it: revoke the name `operator-session` on the dashboard, or switch messaging off (both act at once). To stop the role: set
+   `operator.enabled` false in the overrides. Its GitHub connection is removed on GitHub.
+
+Enforced by the gateway: where its credential is admitted; that its notes and answers carry its own name and kind, never the
+operator's; the limits on its notes and budget grants; the quiet-plant check (a question it answered itself does not count as quiet
+for ten minutes); the daily limit; the release records. By the session's skill only: everything about the merge (green checks, review,
+protected areas, announcement, verification, rollback, recording), because merging happens on GitHub. For real enforcement there the
+owner sets: CODEOWNERS plus a required code-owner review on the protected paths, no bypass right for the session's GitHub identity,
+and no push right for it in the work-orders repository (`docs/design/operator-session.md` section 5).
 
 ## 7. History in one paragraph
 

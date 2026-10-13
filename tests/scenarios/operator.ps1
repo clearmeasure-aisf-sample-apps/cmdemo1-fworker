@@ -116,8 +116,17 @@ $OperatorScenarios = [ordered]@{
         Msg-Read $sup 8 { param($e) @($e | Where-Object { $_.data.event -eq 'message.received' }).Count -ge 1 }
         $atAl = Msg-First @(Msg-Of $al 'message.received' | ForEach-Object { $_.data } | Where-Object { $_.id -eq $a.id })
         $atSup = Msg-First @(Msg-Of $sup 'message.received' | ForEach-Object { $_.data } | Where-Object { $_.id -eq $s.id })
-        Check 'its note reaches a worker as an operator note' ($a.status -eq 200 -and $atAl -and $atAl.fromKind -eq 'operator' -and $atAl.type -eq 'operator-note') ($a | ConvertTo-Json -Compress -Depth 5)
-        Check 'and the supervisor' ($s.status -eq 200 -and $atSup -and $atSup.fromKind -eq 'operator') ($s | ConvertTo-Json -Compress -Depth 5)
+        Check 'its note reaches a worker under its own name and kind, never as the person''s operator note' ($a.status -eq 200 -and $atAl -and $atAl.fromKind -eq 'operator-session' -and $atAl.from -eq 'operator-session' -and $atAl.type -eq 'operator-session-note') ($atAl | ConvertTo-Json -Compress -Depth 5)
+        Check 'and the supervisor, the same way' ($s.status -eq 200 -and $atSup -and $atSup.fromKind -eq 'operator-session' -and $atSup.from -eq 'operator-session' -and $atSup.type -eq 'operator-session-note') ($atSup | ConvertTo-Json -Compress -Depth 5)
+        $pa = Msg-Post '/api/v1/messages' @{ to = 'alice'; text = 'from the person' }; $ps = Msg-Post '/api/v1/messages' @{ to = 'supervisor'; text = 'from the person' }
+        Msg-Read $al 8 { param($e) @($e | Where-Object { $_.data["id"] -eq $pa.id }).Count -ge 1 }; Msg-Read $sup 8 { param($e) @($e | Where-Object { $_.data["id"] -eq $ps.id }).Count -ge 1 }
+        $pAl = Msg-First @(Msg-Of $al 'message.received' | ForEach-Object { $_.data } | Where-Object { $_.id -eq $pa.id }); $pSup = Msg-First @(Msg-Of $sup 'message.received' | ForEach-Object { $_.data } | Where-Object { $_.id -eq $ps.id })
+        Check 'a note sent with the admin token is still the operator''s: from operator, kind operator, type operator-note' ($pAl.fromKind -eq 'operator' -and $pAl.from -eq 'operator' -and $pAl.type -eq 'operator-note' -and $pSup.fromKind -eq 'operator' -and $pSup.type -eq 'operator-note') "$($pAl | ConvertTo-Json -Compress) $($pSup | ConvertTo-Json -Compress)"
+        . (Join-Path $script:Root 'plugin/scripts/lib/Client.Own.ps1')
+        $eS = ConvertTo-MessageEnvelope $atAl; $eSup = ConvertTo-MessageEnvelope $atSup; $eP = ConvertTo-MessageEnvelope $pAl
+        Check 'the client prints the session''s note as operator-session.note with its name and trust operator-session-text, and the person''s as operator.note' ($eS.event -eq 'operator-session.note' -and $eS.from -eq 'operator-session' -and $eS.fromKind -eq 'operator-session' -and $eS.trust -eq 'operator-session-text' -and $eS.warning -match 'not the person' -and $eSup.event -eq 'operator-session.note' -and $eP.event -eq 'operator.note' -and $eP.trust -eq 'operator-note') "$($eS | ConvertTo-Json -Compress) $($eP | ConvertTo-Json -Compress)"
+        $log = @((Msg-Admin '/api/v1/messages?limit=50').messages)
+        Check 'the traffic log tells the two apart' (@($log | Where-Object { $_.id -eq $a.id -and $_.from -eq 'operator-session' -and $_.fromKind -eq 'operator-session' }).Count -eq 1 -and @($log | Where-Object { $_.id -eq $pa.id -and $_.from -eq 'operator' -and $_.fromKind -eq 'operator' }).Count -eq 1)
         $all = Op-Post '/api/v1/messages' @{ to = '*'; text = 'the gateway restarts for a release' }
         Check 'a note to all reaches every connected session' ($all.status -eq 200 -and @($all.recipients | Where-Object { $_ -in 'alice', 'supervisor' }).Count -eq 2) ($all | ConvertTo-Json -Compress -Depth 5)
         $n = Msg-Post '/api/v1/messages' @{ to = 'operator'; text = 'thanks' } (Msg-Token 'alice')
@@ -128,13 +137,19 @@ $OperatorScenarios = [ordered]@{
         $q = Mgr-Ask 'alice' 77
         $qs = Op-Get '/api/v1/questions?state=open'
         $ans = Op-Post "/api/v1/questions/$($q.id)/answer" @{ text = 'take the smaller change' }
-        Check 'it reads the open questions and answers one as the operator' ($qs.status -eq 200 -and @($qs.questions | Where-Object { $_.id -eq $q.id }).Count -eq 1 -and $ans.status -eq 200 -and (Mgr-Questions 'open').count -eq 0) "$($qs.status) $($ans | ConvertTo-Json -Compress)"
+        $qa = Msg-First @((Mgr-Questions 'all').questions | Where-Object { $_.id -eq $q.id })
+        Check 'its answer is recorded as the operator session''s, not the operator''s' ($qa -and $qa.answeredBy -eq 'operator-session') ($qa | ConvertTo-Json -Compress)
+        $self = Op-Get '/api/v1/operator/release-check'
+        Check 'and a question it answered itself keeps its own release-check from answering quiet for a while: answered-by-self' ($self.status -eq 409 -and @($self.reasons | Where-Object { $_.code -eq 'answered-by-self' -and $_.id -eq $q.id }).Count -eq 1) ($self | ConvertTo-Json -Compress -Depth 4)
+        Check 'it reads the open questions and answers one' ($qs.status -eq 200 -and @($qs.questions | Where-Object { $_.id -eq $q.id }).Count -eq 1 -and $ans.status -eq 200 -and (Mgr-Questions 'open').count -eq 0) "$($qs.status) $($ans | ConvertTo-Json -Compress)"
         $peers = Op-Get '/api/v1/peers?all=1'; $dig = Op-Get '/api/v1/digest'; $stat = Op-Get '/api/v1/status'
         Check 'it reads the status, the directory and the digest' ($stat.status -eq 200 -and $stat.ContainsKey('plant') -and $peers.status -eq 200 -and @($peers.peers | Where-Object { $_.name -eq 'alice' }).Count -eq 1 -and $dig.status -eq 200 -and $dig.ContainsKey('digest')) "$($stat.status) $($peers.status) $($dig.status)"
         $mode = Op-Post '/api/v1/workers/alice/messaging?value=mute'
         Check 'it sets a session''s messaging mode' ($mode.status -eq 200 -and (Msg-Post '/api/v1/_test/mode' @{ name = 'alice'; mode = 'on' }).status -eq 200 -and $mode.messaging -eq 'mute') ($mode | ConvertTo-Json -Compress)
         $grant = Op-Post '/api/v1/supervisor/budget?extra=2'
         Check 'and grants supervisor budget' ($grant.status -eq 200 -and $grant.extra -eq 2) ($grant | ConvertTo-Json -Compress)
+        $g2 = Op-Post '/api/v1/supervisor/budget?extra=10'; $g3 = Op-Post '/api/v1/supervisor/budget?extra=1'; $g4 = Msg-Post '/api/v1/supervisor/budget?extra=1' @{}
+        Check 'but at most 12 deliveries in an hour: the next grant is 429 grant-limit, and the operator''s own grant is not capped' ($g2.status -eq 200 -and $g3.status -eq 429 -and $g3.code -eq 'grant-limit' -and $g4.status -eq 200) "$($g2.status) $($g3 | ConvertTo-Json -Compress) $($g4.status)"
         Msg-Close $op
         # the real client: the stream prints a note as an envelope and a milestone as one line; the verbs answer with the gateway's exit codes
         $out = Join-Path $script:Work "op-client-$([guid]::NewGuid().ToString('N').Substring(0, 6)).out"
@@ -166,6 +181,8 @@ $OperatorScenarios = [ordered]@{
             @('POST', '/api/v1/supervisor/patrol?minutes=10'), @('POST', '/api/v1/supervisor/patrol-ack'),
             @('POST', '/api/v1/workers/alice/capacity?value=2'), @('POST', '/api/v1/workers/alice/drain'), @('POST', '/api/v1/workers/alice/resume'),
             @('GET', '/api/v1/dashboard'), @('GET', '/api/v1/qc'), @('POST', '/api/v1/qc/1/start'),
+            @('POST', '/api/v1/_test/fact'), @('GET', '/api/v1/messages/m-00000000-0001'), @('POST', '/api/v1/qc/1/reset'), @('POST', '/api/v1/qc/1/teardown'), @('POST', '/api/v1/qc/1/reassign'),
+            @('POST', '/api/v1/verbs/revoke-worker'), @('GET', '/api/v1/events?name=supervisor&supervisor=1'),
             @('POST', '/api/v1/verbs/get-item'), @('POST', '/api/v1/verbs/merge'), @('POST', '/api/v1/verbs/my-items'), @('POST', '/api/v1/verbs/journal'), @('POST', '/api/v1/verbs/operator-release'),
             @('GET', '/api/v1/wait?item=1&timeout=1'), @('GET', '/api/v1/inbox'), @('POST', '/api/v1/messages/ack'), @('GET', '/api/v1/events'), @('GET', '/api/v1/events?name=alice&type=persistent-local'),
             @('POST', '/api/v1/_test/deliver'), @('POST', '/api/v1/_test/answer'), @('POST', '/api/v1/_test/plan'), @('POST', '/api/v1/_test/refusal'), @('POST', '/api/v1/_test/roles'), @('POST', '/api/v1/_test/mode'), @('POST', '/api/v1/_test/inflight'),
@@ -176,6 +193,8 @@ $OperatorScenarios = [ordered]@{
             if ([int]$r.StatusCode -ne 403) { $bad += "$($c[0]) $($c[1]) answered $([int]$r.StatusCode)" }
         }
         Check "all $($calls.Count) calls outside its list answer 403 to the active operator session" ($bad.Count -eq 0) ($bad -join '; ')
+        $sm = Op-Post '/api/v1/workers/supervisor/messaging?value=mute'; $om = Op-Post '/api/v1/workers/operator-session/messaging?value=off'
+        Check 'it sets no mode for the supervisor or for an operator session name' ($sm.status -eq 400 -and $om.status -eq 400) "$($sm.status) $($om.status)"
         $st = (Get-Plant)
         Check 'and none of them changed anything: messaging is on, alice has no capacity override, no worker named zed' ($st.messaging.enabled -eq $true -and @($st.plant.workers | Where-Object { $_.name -eq 'zed' }).Count -eq 0)
         Check 'the same calls are not refused to the admin token (the list tests the credential, not the routes)' ((Msg-Api 'GET' '/api/v1/dashboard').StatusCode -eq 200 -and (Msg-Api 'GET' '/api/v1/_test/stores').StatusCode -eq 200)
@@ -190,6 +209,9 @@ $OperatorScenarios = [ordered]@{
             $log = Op-Get '/api/v1/messages' $c[1]; $st = Op-Get '/api/v1/status' $c[1]; $mode = Op-Post '/api/v1/workers/bob/messaging?value=mute' @{} $c[1]; $bud = Op-Post '/api/v1/supervisor/budget?extra=1' @{} $c[1]
             Check "$($c[0]) is refused release-check, record-release, the traffic log, the status, a mode and the budget" (@($chk, $rec, $log, $st, $mode, $bud | Where-Object { $_.status -ne 403 }).Count -eq 0) "$($chk.status) $($rec.status) $($log.status) $($st.status) $($mode.status) $($bud.status)"
         }
+        $two = Op-Token 'operator-two'
+        $ns = @((Op-Post '/api/v1/presence' @{} $two), (Op-Get '/api/v1/questions' $two), (Op-Post '/api/v1/questions/m-00000000-0001/answer' @{ text = 'x' } $two), (Op-Get '/api/v1/peers?all=1' $two), (Op-Get '/api/v1/digest' $two), (Op-Post '/api/v1/messages/read' @{ all = $true } $two))
+        Check 'the operator name that does not hold the slot is also refused presence, the questions, an answer, the directory, the digest and mark read' (@($ns | Where-Object { $_.status -ne 403 }).Count -eq 0) (($ns | ForEach-Object { $_.status }) -join ' ')
         Check 'nothing was recorded by the refused calls' (@((Op-Get '/api/v1/status' 'test-token').operator.releases | Where-Object { $_.pr -eq 7 }).Count -eq 0)
     } finally { Msg-Close $op; Msg-Close $sup }
 }
@@ -297,6 +319,10 @@ $OperatorScenarios = [ordered]@{
     try {
         Check 'the second name holds the slot' ($s.status -eq 200) "$($s.status) $($s.body)"
         $old = Op-Token 'operator-two'
+        $al = Op-Worker 'alice'
+        $sent = @(1..31 | ForEach-Object { (Op-Post '/api/v1/messages' @{ to = 'alice'; text = "note $_" } $old) })
+        Msg-Close $al
+        Check 'its notes have a limit of their own: 30 in ten minutes, then 429 rate-limited' (@($sent[0..29] | Where-Object { $_.status -ne 200 }).Count -eq 0 -and $sent[30].status -eq 429 -and $sent[30].code -eq 'rate-limited') (($sent | ForEach-Object { $_.status }) -join ' ')
         $byOp = Op-Post '/api/v1/workers/operator-two/revoke' @{} $old
         Check 'the operator session cannot revoke, not even itself' ($byOp.status -eq 403) "$($byOp.status)"
         $rv = Msg-Post '/api/v1/workers/operator-two/revoke' @{}

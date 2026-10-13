@@ -219,7 +219,10 @@ app.MapGet("/api/v1/plugin", (HttpContext c) =>
 // acts as the operator does (its notes are operator notes). It must hold the operator slot, and messaging must be switched on. Everywhere else its
 // kind is "operator", which no endpoint accepts: it cannot mint or revoke a credential, switch messaging, set a capacity, drain, or call a verb.
 bool OperatorActive(HttpContext c) => Who(c) is { Kind: "operator" } w && ownerMode && messaging.OperatorEnabled && messaging.Enabled && plant.ActiveOperator() == w.Name;
-Principal Admitted(HttpContext c) => OperatorActive(c) ? new Principal("admin") : Who(c);
+// The principal it acts as carries the session's NAME: the admin token's has none. What the session sends is stamped with that name and the kind
+// "operator-session" (Messaging.cs), never as the person's "operator"; log lines name it too (By).
+Principal Admitted(HttpContext c) => OperatorActive(c) ? new Principal("admin", Who(c).Name) : Who(c);
+string By(HttpContext c) => Who(c) is { Kind: "operator" } w ? w.Name : "operator";
 JsonObject MessagingBlocks(bool dashboard) { var b = plant.MessagingStatus(dashboard); messenger.AddCounters((JsonObject)b["messaging"]!); return b; }
 app.MapGet("/api/v1/dashboard", (HttpContext c) =>
 {
@@ -466,7 +469,7 @@ app.MapPost("/api/v1/workers/{name}/{action}", (string name, string action, Http
         if (who.Kind != "admin" && !opMode) return Fail(403, "forbidden", "only the operator sets a session's messaging mode", 30);
         var mode = ctx.Request.Query["value"].ToString();
         if (!Auth.ValidName(name) || messaging.ManagerNames.Contains(name) || messaging.OperatorNames.Contains(name) || !plant.SetMessagingMode(name, mode)) return Fail(400, "usage", "the name is a worker session's and value is on, mute, inbound-off or off", 2);
-        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["message"] = "mode", ["name"] = name, ["mode"] = mode, ["by"] = "operator" }.ToJsonString());
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["message"] = "mode", ["name"] = name, ["mode"] = mode, ["by"] = By(ctx) }.ToJsonString());
         return Results.Json(new { ok = true, name, messaging = mode, exit = 0 });
     }
     if (action is not ("drain" or "resume") || opMode) return Results.NotFound();
@@ -686,7 +689,7 @@ app.MapPost("/api/v1/questions/{id}/answer", async (string id, HttpContext ctx) 
     var who = Admitted(ctx);
     if (who.Kind != "admin") return Fail(403, "forbidden", "a question is answered here by the operator only; the supervisor answers with a message of type answer", 30);
     var (text, tooLarge) = await ReadBody(ctx, messaging.MaxBodyBytes);
-    return AsResult(tooLarge ? messenger.TooLarge(who, "operator-note") : messenger.OperatorAnswer(id, text));
+    return AsResult(tooLarge ? messenger.TooLarge(who, "operator-note") : messenger.OperatorAnswer(id, text, who.Name));
 });
 
 // ---- the patrol and the supervisor's budgets (worker-messaging.md 3.1, 3.9) -------------------------------------------------------------------
@@ -726,8 +729,10 @@ app.MapPost("/api/v1/supervisor/budget", (HttpContext ctx) =>
     if (SupervisorOff() is { } off) return off;
     if (Admitted(ctx).Kind != "admin") return Fail(403, "forbidden", "only the operator grants deliveries", 30);
     if (!int.TryParse(ctx.Request.Query["extra"], NumberStyles.None, CultureInfo.InvariantCulture, out var extra) || extra < 1 || extra > 100) return Fail(400, "usage", "extra is 1 to 100 deliveries", 2);
+    // the operator session may grant at most 12 deliveries in an hour, all its grants together: the person's grants are not capped
+    if (OperatorActive(ctx) && !plant.OperatorGrant(extra)) return Results.Json(new { ok = false, code = "grant-limit", reason = "the operator session grants at most 12 extra deliveries in an hour; more needs the operator", retryAfterSeconds = 600, exit = 20 }, statusCode: 429);
     var total = plant.GrantDeliveries(extra);
-    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["message"] = "budget-granted", ["extra"] = extra, ["by"] = "operator" }.ToJsonString());
+    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["message"] = "budget-granted", ["extra"] = extra, ["by"] = By(ctx) }.ToJsonString());
     return Results.Json(new { ok = true, extra, extraThisHour = total, exit = 0 });
 });
 
@@ -748,6 +753,7 @@ app.MapPost("/api/v1/messaging/{action}", (string action, HttpContext ctx) =>
 // by the rule scripts, because the restart that a release causes would otherwise empty the count; they are read once at start, and until that
 // read succeeded the check answers 503 (it never answers "allowed" on a count it does not know). ---------------------------------------------
 var releasesLoaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var releaseGate = new SemaphoreSlim(1, 1);
 static string ReleaseDay(DateTime d) => d.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
 if (!messaging.OperatorEnabled || revocationsOff) releasesLoaded.SetResult();
 else _ = Task.Run(async () =>
@@ -796,18 +802,20 @@ app.MapPost("/api/v1/operator/record-release", async (HttpContext ctx) =>
     if (!(body["pr"] is JsonValue pv && pv.TryGetValue<int>(out var pr) && pr >= 1 && pr <= 999_999_999) || body["version"]?.ToString() is not { } version || !Plant.ValidVersion(version) || body.Count != 2)
         return Fail(400, "usage", "the body is { \"pr\": <pull request number>, \"version\": \"<the version /_build shows, digits and dots>\" }", 2);
     var now = DateTime.UtcNow;
-    await revokeGate.WaitAsync();
+    // its own gate (a flood of records must never delay a revoke) and a cap on the writes of one day
+    await releaseGate.WaitAsync();
     try
     {
         if (!plant.HasRelease(pr))
         {
+            if (plant.ReleaseRecordsToday() >= Plant.ReleaseWritesPerDay) return Results.Json(new { ok = false, code = "record-limit", reason = $"{Plant.ReleaseWritesPerDay} releases are recorded today; no more are written", retryAfterSeconds = 3600, exit = 20 }, statusCode: 429);
             var (code, _) = await runner.RunAsync("operator-release", new JsonObject { ["day"] = ReleaseDay(now), ["pr"] = pr, ["version"] = version }.ToJsonString(), TimeSpan.FromSeconds(120));
             if (code != 0) return Results.Json(new { ok = false, code = "not-recorded", reason = "the release could not be written to GitHub, so it is not counted; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
             plant.AddRelease(now, pr, version);
-            Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["operatorRelease"] = pr, ["version"] = version, ["by"] = Who(ctx).Kind == "operator" ? Who(ctx).Name : "operator" }.ToJsonString());
+            Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["operatorRelease"] = pr, ["version"] = version, ["by"] = By(ctx) }.ToJsonString());
         }
     }
-    finally { revokeGate.Release(); }
+    finally { releaseGate.Release(); }
     var st = plant.OperatorStatus();
     return Results.Json(new { ok = true, pr, version, releasesToday = st["releasesToday"]!.GetValue<int>(), limit = st["limit"]!.GetValue<int>(), exit = 0 });
 });

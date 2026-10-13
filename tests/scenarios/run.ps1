@@ -75,7 +75,7 @@ $SuiteDefs = @(
     # the factory operator session (operator.ps1): one process per rule-script call, so a verb call is in flight long enough to be seen by release-check
     @{ Name = 'operator'; Policy = 'auto'; Set = $OperatorScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob'); testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor'); allowedAskers = @('alice', 'bob'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }
             operator = @{ enabled = $true; allowedNames = @('operator-session', 'operator-two'); tokenGeneration = 1; requiredModelTier = 'premium'; requiredEffort = 'low'; maxSelfMergesPerDay = 2 } }; Env = 'owner'
-        Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000 } }
+        Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; opSelfAnswerMinutes = 0.1 } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }

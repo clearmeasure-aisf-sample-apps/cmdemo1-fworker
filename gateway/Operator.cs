@@ -111,6 +111,19 @@ sealed partial class Plant
     public long VerbStarted(string name, int item, string verb) { lock (gate) { var t = ++flightNext; inFlight[t] = (name, item, verb, DateTime.UtcNow); return t; } }
     public void VerbEnded(long ticket) { lock (gate) inFlight.Remove(ticket); }
 
+    // the hourly cap of the session's own budget grants, and the cap on release records written in one day
+    readonly List<(DateTime At, int N)> opGrants = new();
+    public const int GrantsPerHour = 12, ReleaseWritesPerDay = 20;
+    public bool OperatorGrant(int n)
+    {
+        lock (gate)
+        {
+            var now = DateTime.UtcNow; opGrants.RemoveAll(g => (now - g.At).TotalHours >= 1);
+            if (opGrants.Sum(g => g.N) + n > GrantsPerHour) return false;
+            opGrants.Add((now, n)); return true;
+        }
+    }
+    public int ReleaseRecordsToday() { lock (gate) return ReleasesToday(DateTime.UtcNow); }
     int ReleasesToday(DateTime now) => opReleases.Count(r => r.At.Date == now.Date);
     public bool HasRelease(int pr) { lock (gate) return opReleases.Any(r => r.Pr == pr); }
     public void AddRelease(DateTime at, int pr, string version)
@@ -133,6 +146,9 @@ sealed partial class Plant
                 reasons.Add(new JsonObject { ["code"] = "owner-mid-verb", ["worker"] = f.Name, ["item"] = f.Item, ["verb"] = f.Verb, ["seconds"] = (int)(now - f.At).TotalSeconds });
             foreach (var q in store.Records.Values.Where(q => q.Type == "question" && q.QState == "open").OrderBy(q => q.At))
                 reasons.Add(new JsonObject { ["code"] = "open-question", ["id"] = q.Id, ["worker"] = q.From, ["item"] = q.Item });
+            // a question the operator session answered itself a moment ago is not a quiet plant of its own making: it counts for timing.opSelfAnswerMinutes
+            foreach (var q in store.Records.Values.Where(q => q.Type == "question" && q.QState == "answered" && q.AnsweredBy == Messenger.OpSession && q.AnsweredAt is { } at && (now - at).TotalMinutes < Msg.OperatorSelfAnswerMinutes).OrderBy(q => q.At))
+                reasons.Add(new JsonObject { ["code"] = "answered-by-self", ["id"] = q.Id, ["worker"] = q.From, ["item"] = q.Item, ["minutesLeft"] = (int)Math.Ceiling(Msg.OperatorSelfAnswerMinutes - (now - q.AnsweredAt!.Value).TotalMinutes) });
             foreach (var a in assignments.Values.Where(a => !a.Accepted && a.Worker != "").OrderBy(a => a.Item))
                 reasons.Add(new JsonObject { ["code"] = "pending-offer", ["worker"] = a.Worker, ["item"] = a.Item });
             var today = ReleasesToday(now); var limit = Msg.OperatorMaxSelfMergesPerDay; var quiet = reasons.Count == 0;

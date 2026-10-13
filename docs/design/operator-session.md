@@ -40,7 +40,11 @@ One slot, like the supervisor's: the same name replaces its older stream (which 
 refused with 409 `operator-active` while the active one was heard within `timing.mgrTakeoverSeconds`, and takes over after. A credential
 whose name does not hold the slot is refused at every endpoint below except the plugin download and the registration itself.
 
-The credential is admitted at exactly these endpoints, where it acts as the operator does (its notes are operator notes):
+The credential is admitted at exactly these endpoints, with the operator's reach but never the operator's identity: what it sends is
+stamped by the gateway with its session name and the kind `operator-session` (type `operator-session-note`). The other sessions' client
+prints it as `operator-session.note` with trust `operator-session-text`: an AI session, authentic, still data, without the authority of
+the person. A note sent with the admin token stays `operator.note`. The traffic log, the question's `answeredBy` and the gateway's log
+lines name the session. Its notes are limited to 30 in ten minutes and its budget grants to 12 deliveries an hour.
 
 | Endpoint | Client verb (`factory.ps1 operator ...`) |
 |---|---|
@@ -85,13 +89,15 @@ Enforced by the gateway:
 
 - The credential's powers (section 3).
 - `release-check`: 200 only when the plant is quiet and the day's limit is not reached. Not quiet (409 `not-quiet`, with every reason):
-  a verb call of an item token in flight (`owner-mid-verb`), an open question (`open-question`), an offer that waits for its answer
-  (`pending-offer`). At the limit: 409 `daily-limit`. The answer lists the connected workers with the items they own, which is what must
+  a verb call of an item token in flight (`owner-mid-verb`), an open question (`open-question`), a question the session answered
+  itself within `timing.opSelfAnswerMinutes` (10; `answered-by-self`, so it cannot make its own quiet), an offer that waits for its
+  answer (`pending-offer`). At the limit: 409 `daily-limit`. The answer lists the connected workers with the items they own, which is what must
   be back after the release.
 - `record-release`: one record per pull request, counted per UTC day. The records are refs in the work-orders repository
   (`refs/factory/<instance>/operator-release/<yyyyMMdd>/<pr>/<version>`), written by the rule scripts and read at start, because the
   restart that a release causes would empty an in-memory count. Until that read succeeded both endpoints answer 503. A release beyond
-  the limit is still recorded. The count and the day's records are in `/status` and on the dashboard row.
+  the limit is still recorded, up to 20 records a day. The count and the day's records are in `/status` and on the dashboard row.
+- The sender identity, the note limit and the grant cap described in section 3.
 
 Instruction only (the skill; nothing in the gateway can stop it):
 
@@ -101,8 +107,18 @@ Instruction only (the skill; nothing in the gateway can stop it):
   the changelog: all of that is the skill. A branch protection rule in GitHub that requires the owner's review for the protected paths
   would turn the protected-areas rule into code; it is not set up.
 
+What the owner must set on GitHub for real enforcement (none of it is set up by this repository):
+
+- a `CODEOWNERS` file that names the owner for the protected paths of the skill (rule c), and a branch protection or ruleset on
+  `master` that requires a code owner's review, with no bypass for the session's GitHub identity;
+- the session's GitHub identity has no admin or bypass right in `cmdemo1-fworker` and no push right in the work-orders repository
+  (where the release records and the revocations are kept as refs).
+
+Kill switches: revoke the operator session's name on the dashboard (its credential dies and its stream ends at once), or switch
+messaging off (`POST /api/v1/messaging/disable`: every operator endpoint then refuses it). Neither stops its GitHub connection:
+remove that on GitHub.
+
 ## 6. Not built
 
 - No GitHub-side enforcement (see above).
 - `question.escalated` and `sweep-failed`, `accepted`, `column-completed`, `merge-refused` have no scenario of their own.
-- The session's notes are indistinguishable from the person's in the traffic log: both are `operator`.

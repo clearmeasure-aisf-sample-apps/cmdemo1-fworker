@@ -643,7 +643,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             // the asker owned the item when it asked and does not now: the answer still goes to the asker, marked, and to nobody else (3.8)
             if (q.OwnedAtAsk && q.Item is int qi && !(ownerOf.TryGetValue(qi, out var ow) && ow == q.From)) answer["itemOwner"] = "changed";
             var e = DeliverEntry(store.Get(q.From), answer, arec, false);
-            q.QState = "answered"; q.AnswerId = arec.Id; q.AnswerJson = e.Json; q.AnsweredAt = DateTime.UtcNow; q.AnsweredBy = by is "supervisor" or "operator" ? by : ""; q.Note = note;
+            q.QState = "answered"; q.AnswerId = arec.Id; q.AnswerJson = e.Json; q.AnsweredAt = DateTime.UtcNow; q.AnsweredBy = by is "supervisor" or "operator" or Messenger.OpSession ? by : ""; q.Note = note;
             if (note != "") { store.Decisions.Add((DateTime.UtcNow, q.Item, q.AnsweredBy, note, q.Id, 0)); if (store.Decisions.Count > 50) store.Decisions.RemoveAt(0); }
             return (true, "", "", arec.Id, q.From, q.Item, e.State == "pushed");
         }
