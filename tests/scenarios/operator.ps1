@@ -246,6 +246,8 @@ $OperatorScenarios = [ordered]@{
         Msg-Close $op
         Restart-Gateway
         $op = Op-Hold
+        # the recorded releases are read once after the start; until then the check answers 503 starting and counts nothing
+        [void](Wait-Until -Seconds 30 { (Op-Get '/api/v1/operator/release-check').status -ne 503 })
         $after = (Op-Get '/api/v1/status').operator
         Check 'after a restart of the gateway (what a release causes) the count is still one' ($op.status -eq 200 -and $after.releasesToday -eq 1 -and $after.releases[0].pr -eq 101) ($after | ConvertTo-Json -Compress -Depth 5)
         $r2 = Op-Post '/api/v1/operator/record-release' @{ pr = 102; version = '1.0.41' }
