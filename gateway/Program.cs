@@ -329,7 +329,7 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "step-budget", reason = "the supervisor's step budget of this hour is spent; keep waiting for events and do not work around it", retryAfterSeconds = noStep.RetryAfter, exit = 20 }), "application/json", Encoding.UTF8, 429);
     }
     // plant data for the digest (worker-messaging.md 3.9): a verb called with an item token is that session's activity on that item
-    if (ownerMode && messaging.On && who.Kind == "item") plant.NoteActivity(who.Name, who.Item);
+    if (ownerMode && messaging.On && who.Kind == "item") plant.NoteActivity(who.Name, who.Item, true);
     // text that a session writes into an item because of a message is marked by the gateway, not by the model (worker-messaging.md 3.8)
     if (ownerMode && messaging.On && verb is "append-body" or "comment" && DerivedText(verb, authorized, who) is { } derivedRefusal) return derivedRefusal;
     if (ownerMode && QcHub.Handled.Contains(verb))
@@ -350,6 +350,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     var status = code switch { 0 => 200, 21 => 202, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, _ => 500 };
     // a gate refusal of one code on one item, for the digest's refusals ring (worker-messaging.md 3.9)
     if (ownerMode && messaging.On && code is 10 or 11 && who.Kind == "item") { try { plant.NoteRefusal(who.Name, who.Item, JsonNode.Parse(output)?["code"]?.ToString() ?? ""); } catch { } }
+    // a verb that failed for an item (the gateway or GitHub could not serve it, or the rule script crashed), for the digest's verb-errors (3.9)
+    if (ownerMode && messaging.On && status is 503 or 500 && who.Kind == "item") { string failed = ""; try { failed = JsonNode.Parse(output)?["code"]?.ToString() ?? ""; } catch { } plant.NoteVerbError(who.Name, who.Item, failed, code); }
     if (ownerMode && code == 0) { try { plant.OnVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"plant hook {verb}: {e.Message}"); } }
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
     if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep();
@@ -409,7 +411,7 @@ app.MapGet("/api/v1/wait", async (HttpContext ctx) =>
         var afterMsg = long.TryParse(ctx.Request.Query["afterMsg"], out var am) && am >= 0 ? am : 0;
         var epochQ = ctx.Request.Query["epoch"].ToString();
         // a cursor of another epoch is void (3.5): the caller's seqs started again, so nothing may be skipped
-        if (epochQ != "" && epochQ != plant.Epoch) afterMsg = 0;
+        if (epochQ != "" && epochQ != plant.Epoch) { afterMsg = 0; plant.NoteStaleEpoch(who.Name, epochQ); }
         var (evs, msgs, lastMsg, noneArrived) = await plant.WaitAny(item, after, who.Name, afterMsg, TimeSpan.FromSeconds(secs), ctx.RequestAborted);
         var changed = epochQ != "" && epochQ != plant.Epoch;
         var both = new JsonObject
@@ -460,7 +462,7 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
         if (!ownerMode) { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"ok\":false,\"code\":\"not-owner-mode\",\"reason\":\"the gateway is not running in owner mode\",\"exit\":30}"); return; }
         if (!Auth.ValidName(name)) { ctx.Response.StatusCode = 400; await ctx.Response.WriteAsync("{\"ok\":false,\"code\":\"usage\",\"reason\":\"the worker name may use letters, digits, - and _ only\",\"exit\":2}"); return; }
         // with messaging or the supervisor on the id is "<epoch>.<seq>"; another epoch, a bare number or no header is no valid cursor and replays all (3.5)
-        if (messaging.On) after = ParseCursor(lastEventId, plant.Epoch);
+        if (messaging.On) { after = ParseCursor(lastEventId, plant.Epoch); if ((who.Kind is "worker" or "manager") && who.Name == name) plant.NoteStaleEpoch(name, lastEventId); }
         if (messaging.ManagerEnabled && ctx.Request.Query["supervisor"].ToString() == "1") { await SupervisorStream(ctx, who, name, after); return; }
         if (who.Kind == "manager") { await Refuse(ctx, 403, "forbidden", "a supervisor session does not open a worker stream"); return; }
         if (!(who.Kind == "admin" || (who.Kind == "worker" && who.Name == name))) { ctx.Response.StatusCode = 403; await ctx.Response.WriteAsync("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"register with the credential issued for this worker name\",\"exit\":30}"); return; }
@@ -632,6 +634,7 @@ app.MapGet("/api/v1/inbox", async (HttpContext ctx) =>
     if (include != "" && include != "delivered") return Fail(400, "usage", "include is delivered", 2);
     var idq = q["id"].ToString();
     var epoch = q["epoch"].ToString();
+    if (epoch != "") plant.NoteStaleEpoch(who.Name, epoch);
     return AsResult(await messenger.InboxAsync(who.Name, after, epoch == "" ? null : epoch, timeout, limit, include == "delivered", idq == "" ? null : idq, ctx.RequestAborted));
 });
 
@@ -808,6 +811,23 @@ if (messaging.Enabled && messaging.TestHooks)
         var rn = b["name"]?.ToString() ?? "";
         if (!Auth.ValidName(rn) || !(b["item"] is JsonValue fv && fv.TryGetValue<int>(out var fItem))) return Fail(400, "usage", "name is a session name and item a work item number", 2);
         plant.NoteRefusal(rn, fItem, b["code"]?.ToString() ?? "");
+        return Results.Json(new { ok = true, exit = 0 });
+    });
+
+    // a fact of the reported conditions (3.9), as the verbs handler records it: a failed verb, a recorded review round, a refused merge
+    app.MapPost("/api/v1/_test/fact", async (HttpContext ctx) =>
+    {
+        var (b, err) = await SeamBody(ctx, "the body is a JSON object with fact (verb-error, review or merge-refused) and item");
+        if (b == null) return err!;
+        if (!(b["item"] is JsonValue fv && fv.TryGetValue<int>(out var fItem) && fItem >= 1)) return Fail(400, "usage", "item is a work item number", 2);
+        int Num(string k, int d) => b[k] is JsonValue v && v.TryGetValue<int>(out var n) ? n : d;
+        switch (b["fact"]?.ToString())
+        {
+            case "verb-error" when Auth.ValidName(b["name"]?.ToString() ?? ""): plant.NoteVerbError(b["name"]!.ToString(), fItem, b["code"]?.ToString() ?? "", Num("exit", 20)); break;
+            case "review": plant.NoteReview(fItem, b["column"]?.ToString() ?? "", b["verdict"]?.ToString() ?? "FINDINGS", Num("round", 1), Num("max", 3)); break;
+            case "merge-refused": plant.NoteMergeRefused(fItem, Num("roundTrip", 1)); break;
+            default: return Fail(400, "usage", "fact is verb-error (with name), review or merge-refused", 2);
+        }
         return Results.Json(new { ok = true, exit = 0 });
     });
 
@@ -1105,7 +1125,7 @@ pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monos
 <div class="wrap"><table><thead id="shead"><tr><th>Name</th><th>Type</th><th>State</th><th>Owns</th><th>Capacity</th><th>Roles</th><th>QC</th><th></th></tr></thead><tbody id="rows"><tr><td colspan="8" class="mut">Enter the operator token.</td></tr></tbody></table></div>
 <div id="cost" class="row mut" hidden><span id="costtext"></span><button id="grant" hidden>Grant 6 more turns</button>
 <label>Patrol every <input id="patrolmin" type="number" min="5" max="240" style="width:5em"> min</label><button id="setpatrol">Set</button></div>
-<details id="digestbox" hidden><summary class="mut">Last digest sent to the supervisor</summary><pre id="digest"></pre></details>
+<details id="digestbox" hidden><summary class="mut">Last digest sent to the supervisor<span id="digestnow"></span></summary><pre id="digest"></pre></details>
 <div id="qsec" hidden><h2>Questions <span id="qbadge" class="pill off" hidden></span></h2><div id="qcounts" class="mut"></div>
 <div class="wrap"><table><thead><tr><th>Age</th><th>From</th><th>Item</th><th>State</th><th>Question (click for full text)</th><th>Answer</th></tr></thead><tbody id="qrows"><tr><td colspan="6" class="mut">none</td></tr></tbody></table></div>
 <details><summary class="mut">Decision log (last 50)</summary><table><tbody id="dlog"><tr><td class="mut">none</td></tr></tbody></table></details></div>
@@ -1242,6 +1262,7 @@ const sel=x.allowed===false?'<span class="mut">not on the allow-list</span>':`<s
 const drain=x.inPlant&&x.connected?`<button data-n="${n}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:'';
 return `<tr><td>${n}</td><td>${esc(x.type||'-')}</td><td>${x.model?esc(x.model):'<span class="mut">(not declared)</span>'}</td><td><span class="pill ${pres==='online'?(x.draining?'dr':'on'):pres==='away'?'dr':'off'}">${esc(pres)}${age==null?'':' '+esc(ageText(age))}${x.via==='poll'?' (poll)':''}${x.draining?', draining':''}</span></td><td>${items}</td>${textCell('s:'+x.name,i)}<td>${x.inPlant?esc(x.owned)+'/'+esc(x.capacity):'-'}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${esc(mode)} ${esc(x.unacked==null?0:x.unacked)}</td><td>${drain}${sel} ${messageButton(n)} ${revokeButton(n)}</td></tr>`}
 // The cost strip: a plain string, shown with textContent.
+function attentionText(a){const l=Object.entries(a||{}).map(([k,n])=>k+' '+Number(n));return l.length?' | now: '+l.join(', '):' | now: nothing to report'}
 function costText(m){let t=`deliveries ${m.deliveriesHour}/${m.budgetHour} this hour (${m.patrolReserveHour} reserved for patrols), ${m.deliveriesDay}/${m.budgetDay} today | steps ${m.stepsHour}/${m.stepBudgetHour} this hour | patrols sent ${m.patrolsSent}, suppressed ${m.patrolsSuppressed}, dropped ${m.patrolsDropped}, reminded ${m.patrolsReminded}, not acknowledged ${m.patrolsUnacknowledged} | question batches ${m.batches}`;
 if(m.nextPatrolAt){const d=new Date(m.nextPatrolAt);if(!isNaN(d))t+=` | next patrol not before ${d.toTimeString().slice(0,5)} (only if something is new or worse)`}
 if(m.budgetExhausted)t='SUPERVISOR BUDGET EXHAUSTED'+(m.budgetResetSeconds?`, resets in ${Math.ceil(m.budgetResetSeconds/60)} min`:'')+' | '+t;return t}
@@ -1288,6 +1309,7 @@ $('cost').hidden=$('digestbox').hidden=$('qsec').hidden=$('mksup').hidden=!sup;$
 if(sup){$('costtext').textContent=costText(m);$('cost').className='row '+(m.budgetExhausted?'off':'mut');$('grant').hidden=!m.budgetExhausted;
 if(document.activeElement!==$('patrolmin'))$('patrolmin').value=m.patrolMinutes;
 $('digest').textContent=m.lastDigest?JSON.stringify(m.lastDigest,null,1):'No digest has been sent yet.';
+$('digestnow').textContent=attentionText(m.attention);
 try{const q=await api('/api/v1/questions?state=all'),c=q.counts||{},l=questionOrder(q.questions);
 $('qcounts').textContent=`open ${c.open||0}   late ${c.late||0}   escalated ${c.escalated||0}   moot ${c.moot||0}   answered ${c.answered||0}   expired ${c.expired||0}`;
 $('qbadge').hidden=!c.escalated;$('qbadge').textContent=(c.escalated||0)+' escalated';
