@@ -139,6 +139,10 @@ o. **A changed `FACTORY_TOKEN_SECRET` makes every signed state comment unreadabl
    verdicts of items in flight are gone). Change the secret, or make another environment the acting gateway (`activate-prod.sh`: prod has
    its own secret), only when no item is in flight, or give both the same secret first.
 
+p. **Two more flaky checks seen on GitHub's runners, causes not found**: qc suite, "the owner assignment is still accepted next to the QC
+   one"; manager suite, the "dashboard Sessions panel" scenario. Reproduce with `/_fake/latency` as for entries l and the qc-gate one
+   below; look first for a state read before a save and for a start-up sweep of a second gateway that reads the fake GitHub.
+
 Closed on 2026-10-13 (pull request "hardening"):
 
 - **(c) One revocation ref per name, paging reader.** A revoke writes the higher generation, reads it back, then removes the name's lower

@@ -2816,7 +2816,10 @@ $ManagerScenarios['mgr: a spent delivery budget drops the patrol of a reported c
             [void](Mgr-Fact @{ fact = 'merge-refused'; item = 9821; roundTrip = 1 })
             $p = Mgr-WaitPatrols $sup 1 12
             Check 'the one delivery of the hour carries the refused merge' ($p.Count -eq 1 -and (Mgr-Att $p[0] 'merge-refused' 9821)) ($p | ConvertTo-Json -Compress -Depth 8)
+            [void](Msg-Post '/api/v1/_test/roles' @{ item = 9822; owner = 'alice'; sweepable = $true })   # verb errors count only for the item's owner
             1..3 | ForEach-Object { [void](Mgr-Fact @{ fact = 'verb-error'; item = 9822; name = 'alice'; code = 'starting' }) }
+            $un = Mgr-Fact @{ fact = 'verb-error'; item = 9823; name = 'alice'; code = 'starting' }; 1..3 | ForEach-Object { [void](Mgr-Fact @{ fact = 'verb-error'; item = 9823; name = 'alice'; code = 'starting' }) }
+            Check 'failed verbs for an item the caller does not own are no condition' ($null -eq (Mgr-Att (Mgr-Digest) 'verb-errors' 9823) -and $null -ne (Mgr-Att (Mgr-Digest) 'verb-errors' 9822))
             $ok = Wait-Until -Seconds 15 { Mgr-Beat; (Mgr-Status).patrolsDropped -ge 1 }
             Msg-Read $sup 2
             Check 'the budget is spent: the patrol of the failed verbs is dropped, not sent' ($ok -and (Mgr-Patrols $sup).Count -eq 1 -and (Mgr-Status).deliveriesHour -eq 1) ((Mgr-Status) | ConvertTo-Json -Compress -Depth 4)

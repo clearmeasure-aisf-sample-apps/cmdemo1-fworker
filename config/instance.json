@@ -104,7 +104,7 @@
     "mgrTakeoverSeconds": 90,
     "mgrBaselineMinutes": 30,
     "mgrRemindMinutes": 60,
-    "mgrQuietMinutes": 10,
+    "mgrQuietMinutes": 20,
     "mgrNoteMinutes": 60,
     "mgrPersistMinutes": 30,
     "mgrVerbErrorMinutes": 10,
