@@ -2477,7 +2477,9 @@ function Mgr-DigestProblems($D) {
     foreach ($k in 'baseline', 'reminder') { if ($D[$k] -isnot [bool]) { $bad += "$k is no flag" } }
     foreach ($k in $D.plant.Keys) { if ($k -notin 'sessions', 'connected', 'itemsOwned', 'openQuestions', 'lateQuestions', 'waiting' -or -not (& $int $D.plant[$k])) { $bad += "plant.$k" } }
     $fields = @{ 'stalled' = 'worker', 'item', 'column', 'idleMinutes', 'leaseLeftMinutes'; 'disconnected-owner' = 'worker', 'item', 'column', 'goneMinutes', 'leaseLeftMinutes'; 'late-question' = 'id', 'worker', 'item', 'ageMinutes'
-        'waiting' = 'item', 'code', 'waitingMinutes'; 'refusals' = 'item', 'code', 'count', 'windowMinutes'; 'parked' = 'item', 'code', 'ageMinutes' }
+        'waiting' = 'item', 'code', 'waitingMinutes'; 'refusals' = 'item', 'code', 'count', 'windowMinutes'; 'parked' = 'item', 'code', 'ageMinutes'
+        'item-quiet' = 'worker', 'item', 'column', 'quietMinutes'; 'last-review-round' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'; 'review-rounds-exhausted' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'
+        'worker-blocked-note' = 'worker', 'item', 'id', 'count', 'ageMinutes'; 'verb-errors' = 'worker', 'item', 'count', 'byCode', 'windowMinutes'; 'merge-refused' = 'item', 'roundTrip', 'ageMinutes'; 'gateway-restarted' = 'reconnected', 'notReconnected', 'upMinutes' }
     foreach ($e in @($D.attention)) {
         if (-not $fields.ContainsKey("$($e.kind)")) { $bad += "kind $($e.kind)"; continue }
         foreach ($k in $e.Keys) {
@@ -2485,7 +2487,8 @@ function Mgr-DigestProblems($D) {
             $v = $e[$k]
             $ok = switch ($k) {
                 'kind' { $true } 'worker' { "$v" -cmatch $nameRx } 'column' { "$v" -eq '' -or "$v" -cmatch $colRx } 'code' { "$v" -cmatch $codeRx } 'id' { "$v" -match '^m-[0-9a-f]{8}-\d{4,}$' }
-                'new' { $v -is [bool] } 'reminder' { $v -eq $true } 'bucket' { $v -in 1, 2, 3 } default { $null -eq $v -or (& $int $v) }
+                'new' { $v -is [bool] } 'reminder' { $v -eq $true } 'bucket' { $v -in 1, 2, 3 }
+                'byCode' { $v -is [System.Collections.IDictionary] -and @($v.Keys).Count -in 1..4 -and @($v.Keys | Where-Object { "$_" -cnotmatch $codeRx -or -not (& $int $v[$_]) }).Count -eq 0 } default { $null -eq $v -or (& $int $v) }
             }
             if (-not $ok) { $bad += "$($e.kind).$k=$v" }
         }
@@ -2685,6 +2688,171 @@ $ManagerScenarios['mgr: the digest reports a disconnected owner, a late question
             Check 'the digest is read by the active supervisor and the operator only' ($wk.StatusCode -eq 403 -and (Msg-Json $wk).code -eq 'forbidden' -and $s2.StatusCode -eq 403 -and (Msg-Json $s2).code -eq 'not-supervisor' -and (Msg-Api 'GET' '/api/v1/digest' (Msg-Supervisor)).StatusCode -eq 200) "$($wk.StatusCode) $($s2.StatusCode)"
             Check 'the gateway log holds none of the hostile text' ((Mgr-Log $g) -notmatch 'DIGESTMARK')
         } finally { Msg-Close $sup; Msg-Close $ws }
+    }
+}
+
+# ---- the conditions the supervisor reports to the operator (3.9 "Reported conditions") ----
+function Mgr-Fact($Body) { Msg-Post '/api/v1/_test/fact' $Body }
+function Mgr-Alive([string[]]$Names) { foreach ($w in $Names) { [void](Msg-Post '/api/v1/presence' @{} (Msg-Token $w)) }; Mgr-Beat }
+function Mgr-Digest { (Msg-Admin '/api/v1/digest').digest }
+# the buckets at which one kind was sent as new for one item, in the order of the patrols
+function Mgr-NewBuckets($St, [string]$Kind, [int]$Item) { , @((Mgr-Attention $St) | Where-Object { $_.kind -eq $Kind -and $_['item'] -eq $Item -and $_.new -eq $true } | ForEach-Object { $_.bucket }) }
+
+$ManagerScenarios['mgr: an owned item without a verb is item-quiet once per bucket; a QC wait, a held item, a pinned item nobody owns and an owner that calls verbs are none'] = {
+    $cfg = Mgr-PatrolConfig 'instance.patrol-q.json'
+    $n = New-Item-Fake 'An item whose owner keeps calling verbs' 'x' @()
+    Msg-OnGateway (Msg-Merge $script:MgrPatrol @{ FACTORY_CONFIG = $cfg; FACTORY_TIMING_mgrQuietMinutes = '0.15'; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)" }) {
+        param($g)
+        Mgr-Alive 'alice', 'bob'
+        $sup = Mgr-Open
+        try {
+            [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = 9804; kind = 'own-item'; column = 'Development' }); pins = @{ '9804' = 'ghost-session' }; owned = @{}; keep = @() })
+            foreach ($i in 9801, 9802, $n) { [void](Msg-Post '/api/v1/_test/roles' @{ item = $i; owner = 'alice'; sweepable = $true }) }
+            [void](Msg-Post '/api/v1/_test/roles' @{ item = 9803; owner = 'bob'; sweepable = $true })
+            [void](Msg-Post '/api/v1/_test/deliver' @{ routeItem = 9802; event = 'qc.requested' })
+            [void](Msg-Post '/api/v1/_test/refusal' @{ name = 'bob'; item = 9803; code = 'held' })
+            Check 'right after the accept nothing is quiet' (@((Mgr-Digest).attention).Count -eq 0 -and @((Mgr-Status).attention.Keys).Count -eq 0) ((Mgr-Digest) | ConvertTo-Json -Compress -Depth 6)
+            $tok = Msg-ItemToken $n 'owner' 'alice'
+            # alice polls for a trigger of 9801 (activity, but no verb) and keeps calling a verb for the other item
+            $until = { param($count, $secs, $verb) $end = (Get-Date).AddSeconds($secs); while ((Get-Date) -lt $end -and (Mgr-Patrols $sup).Count -lt $count) { Mgr-Poll 9801 'alice'; if ($verb) { [void](Msg-Verb 'get-item' $tok @{ item = $n }) }; Mgr-Alive 'alice', 'bob'; Msg-Read $sup 0.4 } }
+            & $until 1 30 $true
+            $p = Mgr-Patrols $sup; $e = if ($p.Count -ge 1) { Mgr-Att $p[0] 'item-quiet' 9801 } else { $null }
+            Check 'after mgrQuietMinutes without a verb one patrol names the item: item-quiet, bucket 1, new, with its worker and the minutes' ($p.Count -eq 1 -and $e -and $e.bucket -eq 1 -and $e.new -eq $true -and $e.worker -eq 'alice' -and ($e.quietMinutes -is [long] -or $e.quietMinutes -is [int])) ($p | ConvertTo-Json -Compress -Depth 8)
+            Check 'the item waiting for QC, the held item, the pinned item nobody owns and the item whose owner calls verbs are not in it' ($p.Count -eq 1 -and @($p[0].attention).Count -eq 1) ($p | ConvertTo-Json -Compress -Depth 8)
+            Check 'the status counts it by its code' ((Mgr-Status).attention['item-quiet'] -eq 1) ((Mgr-Status).attention | ConvertTo-Json -Compress)
+            [void](Msg-Post '/api/v1/_test/roles' @{ item = $n; owner = '' })
+            & $until 2 30 $false
+            $b = Mgr-NewBuckets $sup 'item-quiet' 9801
+            Check 'it persists: nothing is sent until it is worse, then one patrol at bucket 2' ((Mgr-Patrols $sup).Count -eq 2 -and ($b -join ',') -eq '1,2') (($b -join ',') + " of $((Mgr-Patrols $sup).Count)")
+            $end = (Get-Date).AddSeconds(5); while ((Get-Date) -lt $end) { Mgr-Poll 9801 'alice'; Mgr-Alive 'alice', 'bob'; Msg-Read $sup 0.4 }
+            Check 'and the intervals after it send nothing' ((Mgr-Patrols $sup).Count -eq 2 -and (Mgr-Status).patrolsSuppressed -ge 1) "$((Mgr-Patrols $sup).Count)"
+            [void](Msg-Verb 'get-item' (Msg-ItemToken 9801 'owner' 'alice') @{ item = 9801 })
+            Check 'a verb of the owner for the item ends it' ($null -eq (Mgr-Att (Mgr-Digest) 'item-quiet' 9801))
+            Check 'every patrol fits the schema' (@(Mgr-AllValid (Mgr-Patrols $sup)).Count -eq 0) ((Mgr-AllValid (Mgr-Patrols $sup)) -join '; ')
+        } finally { Msg-Close $sup }
+    }
+}
+
+$ManagerScenarios['mgr: the digest reports the last review round, exhausted rounds, a worker''s note to the operator, failed verbs and a refused merge, as codes and numbers only, once and once more when they persist'] = {
+    $cfg = Mgr-PatrolConfig 'instance.patrol-r.json'
+    Msg-OnGateway (Msg-Merge $script:MgrPatrol @{ FACTORY_CONFIG = $cfg; FACTORY_TIMING_mgrPersistMinutes = '0.2' }) {
+        param($g)
+        Mgr-Alive 'alice', 'bob'
+        $sup = Mgr-Open
+        try {
+            foreach ($i in 9811, 9812) { [void](Msg-Post '/api/v1/_test/roles' @{ item = $i; owner = 'alice'; sweepable = $true }) }
+            [void](Msg-Post '/api/v1/_test/roles' @{ item = 9813; owner = 'bob'; sweepable = $true })
+            $kinds = { (Mgr-Digest).attention | ForEach-Object { "$($_.kind)" } }
+            Check 'owned items without any of the conditions: the digest holds nothing' (@(& $kinds).Count -eq 0) ((& $kinds) -join ',')
+            # review rounds, as record-review answers them
+            [void](Mgr-Fact @{ fact = 'review'; item = 9813; round = 1; max = 3; column = 'Technical Design' })
+            Check 'findings on round 1 of 3 are not reported' (@(& $kinds).Count -eq 0) ((& $kinds) -join ',')
+            [void](Mgr-Fact @{ fact = 'review'; item = 9812; round = 2; max = 3; column = 'Technical Design' })
+            $e = Mgr-Att (Mgr-Digest) 'last-review-round' 9812
+            Check 'findings on round 2 of 3: last-review-round with the round, the maximum, the column and the worker' ($e -and $e.round -eq 2 -and $e.maxRounds -eq 3 -and $e.column -eq 'Technical Design' -and $e.worker -eq 'alice' -and $e.bucket -eq 1 -and @(& $kinds).Count -eq 1) ((Mgr-Digest) | ConvertTo-Json -Compress -Depth 6)
+            [void](Mgr-Fact @{ fact = 'review'; item = 9813; round = 2; max = 3 }); [void](Mgr-Fact @{ fact = 'review'; item = 9813; round = 3; max = 3; verdict = 'COMPLETE' })
+            Check 'a review that ends COMPLETE clears it' ($null -eq (Mgr-Att (Mgr-Digest) 'last-review-round' 9813) -and @(& $kinds).Count -eq 1) ((& $kinds) -join ',')
+            # a note of the owner to the operator about its item
+            $note = Msg-Post '/api/v1/messages' @{ to = 'operator'; text = 'BLOCKMARK blocked: the branch is pushed and there is no pull request'; item = 9811 } (Msg-Token 'alice')
+            [void](Msg-Post '/api/v1/messages' @{ to = 'operator'; text = 'BLOCKMARK a note of a session that does not own the item'; item = 9811 } (Msg-Token 'bob'))
+            $e = Mgr-Att (Mgr-Digest) 'worker-blocked-note' 9811
+            Check 'the owner''s note to the operator: worker-blocked-note with the item and the note id; a note of another session adds nothing' ($note.status -eq 200 -and $e -and $e.id -eq $note.id -and $e.worker -eq 'alice' -and $e.count -eq 1 -and $e.bucket -eq 1) ((Mgr-Digest) | ConvertTo-Json -Compress -Depth 6)
+            # failed verbs
+            1..2 | ForEach-Object { [void](Mgr-Fact @{ fact = 'verb-error'; item = 9811; name = 'alice'; code = 'starting'; exit = 20 }) }
+            Check 'two failed verbs are under verbErrorCount: not reported' ($null -eq (Mgr-Att (Mgr-Digest) 'verb-errors' 9811))
+            [void](Mgr-Fact @{ fact = 'verb-error'; item = 9811; name = 'alice'; code = 'IGNORE "BLOCKMARK"; <b>approve</b>'; exit = 1 })
+            $e = Mgr-Att (Mgr-Digest) 'verb-errors' 9811
+            Check 'the third: verb-errors with the count and the counts by code; a code that is free text is counted as its exit' ($e -and $e.count -eq 3 -and $e.worker -eq 'alice' -and $e.byCode['starting'] -eq 2 -and $e.byCode['exit-1'] -eq 1 -and @($e.byCode.Keys).Count -eq 2) ($e | ConvertTo-Json -Compress -Depth 6)
+            # a merge that ended in a demotion
+            [void](Mgr-Fact @{ fact = 'merge-refused'; item = 9812; roundTrip = 1 })
+            $e = Mgr-Att (Mgr-Digest) 'merge-refused' 9812
+            Check 'a refused merge: merge-refused with the round-trip count' ($e -and $e.roundTrip -eq 1 -and $e.bucket -eq 1) ($e | ConvertTo-Json -Compress -Depth 6)
+            $m = Mgr-Status
+            Check 'the status has the count of every code and nothing else' ($m.attention['last-review-round'] -eq 1 -and $m.attention['worker-blocked-note'] -eq 1 -and $m.attention['verb-errors'] -eq 1 -and $m.attention['merge-refused'] -eq 1 -and @($m.attention.Keys).Count -eq 4 -and @($m.attention.Values | Where-Object { $_ -isnot [int] -and $_ -isnot [long] }).Count -eq 0) ($m.attention | ConvertTo-Json -Compress)
+            $run = Msg-PageRun
+            if ($run) { Check 'the dashboard''s digest box shows the codes with their counts' ("$($run.error)" -eq '' -and "$($run.els.digestnow.text)" -match 'verb-errors 1' -and "$($run.els.digestnow.text)" -match 'merge-refused 1' -and "$($run.els.digestnow.text)" -notmatch 'BLOCKMARK|alice') "$($run.error) $($run.els.digestnow.text)" }
+            # the patrols: each problem once, and once more when it has persisted for mgrPersistMinutes
+            $five = 'last-review-round', 'worker-blocked-note', 'verb-errors', 'merge-refused'
+            $seen = { $all = Mgr-Attention $sup; @($five | Where-Object { $k = $_; @($all | Where-Object { $_.kind -eq $k -and $_.new -eq $true }).Count -eq 0 }).Count -eq 0 }
+            $end = (Get-Date).AddSeconds(20); while ((Get-Date) -lt $end -and -not (& $seen)) { Mgr-Alive 'alice', 'bob'; Msg-Read $sup 0.5 }
+            Check 'every one of them reached the supervisor in a patrol, new' (& $seen) (((Mgr-Attention $sup) | ForEach-Object { "$($_.kind):$($_.new)" }) -join ',')
+            foreach ($d in Mgr-Patrols $sup) { [void](Msg-Post '/api/v1/supervisor/patrol-ack' @{ seq = $d.seq; note = 'reported to the operator' } (Msg-Supervisor)) }
+            $worse = { ((Mgr-NewBuckets $sup 'worker-blocked-note' 9811) -join ',') -eq '1,2' -and ((Mgr-NewBuckets $sup 'last-review-round' 9812) -join ',') -eq '1,2' }
+            $end = (Get-Date).AddSeconds(30); while ((Get-Date) -lt $end -and -not (& $worse)) { Mgr-Alive 'alice', 'bob'; Msg-Read $sup 0.5 }
+            Check 'a note nobody read and a last round still open are sent once more, worse, after mgrPersistMinutes' (& $worse) "$((Mgr-NewBuckets $sup 'worker-blocked-note' 9811) -join ',') $((Mgr-NewBuckets $sup 'last-review-round' 9812) -join ',')"
+            foreach ($d in Mgr-Patrols $sup) { [void](Msg-Post '/api/v1/supervisor/patrol-ack' @{ seq = $d.seq } (Msg-Supervisor)) }
+            $count = (Mgr-Patrols $sup).Count
+            $end = (Get-Date).AddSeconds(8); while ((Get-Date) -lt $end) { Mgr-Alive 'alice', 'bob'; Msg-Read $sup 0.5 }
+            Check 'and then never again while nothing changes: no further patrol, and the failed verbs were sent once' ((Mgr-Patrols $sup).Count -eq $count -and ((Mgr-NewBuckets $sup 'verb-errors' 9811) -join ',') -eq '1' -and ((Mgr-NewBuckets $sup 'worker-blocked-note' 9811) -join ',') -eq '1,2') "$((Mgr-Patrols $sup).Count) $count"
+            # worse again, and cleared
+            [void](Mgr-Fact @{ fact = 'review'; item = 9812; round = 3; max = 3; column = 'Technical Design' })
+            $dg = Mgr-Digest; $e = Mgr-Att $dg 'review-rounds-exhausted' 9812
+            Check 'findings on the last round: review-rounds-exhausted replaces last-review-round' ($e -and $e.round -eq 3 -and $e.maxRounds -eq 3 -and $null -eq (Mgr-Att $dg 'last-review-round' 9812)) ($dg | ConvertTo-Json -Compress -Depth 6)
+            [void](Msg-Post '/api/v1/_test/refusal' @{ name = 'bob'; item = 9813; code = 'review-rounds-exhausted' })
+            Check 'a review asked for after the last round says the same' ($null -ne (Mgr-Att (Mgr-Digest) 'review-rounds-exhausted' 9813))
+            [void](Mgr-Fact @{ fact = 'merge-refused'; item = 9812; roundTrip = 2 })
+            $again = { ((Mgr-NewBuckets $sup 'merge-refused' 9812) -join ',') -eq '1,2' -and (Mgr-NewBuckets $sup 'review-rounds-exhausted' 9812).Count -ge 1 }
+            $end = (Get-Date).AddSeconds(15); while ((Get-Date) -lt $end -and -not (& $again)) { Mgr-Alive 'alice', 'bob'; Msg-Read $sup 0.5 }
+            Check 'a second refused merge and the exhausted rounds are new: they are sent' ((& $again) -and (Mgr-Patrols $sup).Count -gt $count) (((Mgr-Attention $sup) | ForEach-Object { "$($_.kind):$($_.bucket):$($_.new)" }) -join ',')
+            $rd = Msg-Post '/api/v1/messages/read' @{ ids = @($note.id) }
+            Check 'when the operator has read the note it leaves the digest' ($rd.status -eq 200 -and $null -eq (Mgr-Att (Mgr-Digest) 'worker-blocked-note' 9811)) ($rd | ConvertTo-Json -Compress)
+            $p = Mgr-Patrols $sup; $dgr = Msg-Api 'GET' '/api/v1/digest'
+            $raw = (($p | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 8 }) -join "`n") + "$($dgr.Content)" + "$((Msg-Api 'GET' '/api/v1/status').Content)"
+            Check 'no note text, no free text of a code and no name beyond session names is in a patrol, the digest or the status' ($raw -notmatch 'BLOCKMARK|IGNORE|approve|blocked:|pull request' -and $raw -match 'worker-blocked-note') ''
+            Check 'every patrol and the digest on demand fit the schema' (@(Mgr-AllValid $p).Count -eq 0 -and @(Mgr-DigestProblems (Msg-Json $dgr).digest).Count -eq 0) (((Mgr-AllValid $p) + (Mgr-DigestProblems (Msg-Json $dgr).digest)) -join '; ')
+        } finally { Msg-Close $sup }
+    }
+}
+
+$ManagerScenarios['mgr: a spent delivery budget drops the patrol of a reported condition until the operator grants more, a restart is reported, and with messaging off none of it exists'] = {
+    $cfg = Mgr-PatrolConfig 'instance.patrol-s.json'
+    Msg-OnGateway (Msg-Merge $script:MgrPatrol @{ FACTORY_CONFIG = $cfg; FACTORY_TIMING_turnBudgetPerHour = '1'; FACTORY_TIMING_patrolReservePerHour = '1' }) {
+        param($g)
+        $sup = Mgr-Open
+        try {
+            [void](Mgr-Fact @{ fact = 'merge-refused'; item = 9821; roundTrip = 1 })
+            $p = Mgr-WaitPatrols $sup 1 12
+            Check 'the one delivery of the hour carries the refused merge' ($p.Count -eq 1 -and (Mgr-Att $p[0] 'merge-refused' 9821)) ($p | ConvertTo-Json -Compress -Depth 8)
+            1..3 | ForEach-Object { [void](Mgr-Fact @{ fact = 'verb-error'; item = 9822; name = 'alice'; code = 'starting' }) }
+            $ok = Wait-Until -Seconds 15 { Mgr-Beat; (Mgr-Status).patrolsDropped -ge 1 }
+            Msg-Read $sup 2
+            Check 'the budget is spent: the patrol of the failed verbs is dropped, not sent' ($ok -and (Mgr-Patrols $sup).Count -eq 1 -and (Mgr-Status).deliveriesHour -eq 1) ((Mgr-Status) | ConvertTo-Json -Compress -Depth 4)
+            [void](Msg-Post '/api/v1/supervisor/budget?extra=1' @{})
+            $p = Mgr-WaitPatrols $sup 2 12
+            Check 'after the operator''s grant it arrives, still new' ($p.Count -eq 2 -and (Mgr-Att $p[1] 'verb-errors' 9822).new -eq $true) ($p | ConvertTo-Json -Compress -Depth 8)
+        } finally { Msg-Close $sup }
+    }
+    # a restart, as the sessions show it: one comes back with a cursor of another process. (Clients that earlier scenarios left running do the same
+    # to every gateway that starts on this port, which is why the suite switches the condition off and the counts here are relative.)
+    Msg-OnGateway (Msg-Merge $script:MgrPatrol @{ FACTORY_CONFIG = $cfg; FACTORY_TIMING_mgrRestartMinutes = '30' }) {
+        param($g)
+        Mgr-Alive 'alice'
+        $sup = Mgr-Open; $streams = @()
+        try {
+            $rs = { Msg-First @((Mgr-Digest).attention | Where-Object { $_.kind -eq 'gateway-restarted' }) }
+            $back = { $x = & $rs; if ($x) { [int]$x.reconnected } else { 0 } }
+            Start-Sleep -Seconds 3
+            $r0 = & $back
+            $streams += Msg-Open 'name=erin&messaging=1' (Msg-Token 'erin') "$(Msg-Epoch).3"; Msg-Registered $streams[-1]
+            Check 'a session that reconnects with a cursor of this process is no restart' ((& $back) -eq $r0) "$r0 $(& $back)"
+            [void](Msg-Post '/api/v1/_test/roles' @{ item = 9824; owner = 'ivan'; sweepable = $true })
+            $streams += Msg-Open 'name=gina&messaging=1' (Msg-Token 'gina') 'e-deadbeef.7'; Msg-Registered $streams[-1]
+            $e = & $rs
+            Check 'a session that comes back with a cursor of another epoch: gateway-restarted, with how many sessions are back and how many owners are not' ($e -and $e.reconnected -ge ($r0 + 1) -and $e.notReconnected -ge 1 -and $e.bucket -eq 2 -and (Mgr-Status).attention['gateway-restarted'] -eq 1) ($e | ConvertTo-Json -Compress -Depth 6)
+            [void](Msg-Post '/api/v1/presence' @{} (Msg-Token 'ivan'))
+            $e2 = & $rs
+            Check 'an owner that is heard again is no longer counted as missing' ($e -and $e2 -and $e2.notReconnected -eq ($e.notReconnected - 1)) ($e2 | ConvertTo-Json -Compress -Depth 6)
+            $got = { @((Mgr-Attention $sup) | Where-Object { $_.kind -eq 'gateway-restarted' -and $_.new -eq $true }).Count -ge 1 }
+            $end = (Get-Date).AddSeconds(15); while ((Get-Date) -lt $end -and -not (& $got)) { Mgr-Beat; Msg-Read $sup 0.5 }
+            Check 'it reaches the supervisor in a patrol that fits the schema' ((& $got) -and @(Mgr-AllValid (Mgr-Patrols $sup)).Count -eq 0) ((Mgr-AllValid (Mgr-Patrols $sup)) -join '; ')
+        } finally { Msg-Close $sup; foreach ($s in $streams) { Msg-Close $s } }
+    }
+    Msg-OnGateway @{ FACTORY_CONFIG = $cfg; FACTORY_MESSAGING = '0'; FACTORY_MANAGER = '0' } {
+        param($g)
+        $f = Msg-Api 'POST' '/api/v1/_test/fact'; $d = Msg-Api 'GET' '/api/v1/digest'; $st = "$((Msg-Api 'GET' '/api/v1/status').Content)"
+        $w = Msg-Open 'name=alice' (Msg-Token 'alice') 'e-deadbeef.7'; Msg-Registered $w; Msg-Close $w
+        $st2 = "$((Msg-Api 'GET' '/api/v1/status').Content)"
+        Check 'with messaging off there is no fact seam, no digest, and the status names no condition, also after a session came back with an old cursor' ($f.StatusCode -eq 404 -and $d.StatusCode -ne 200 -and "$st$st2" -notmatch '"attention"|gateway-restarted|item-quiet|verb-errors') "$($f.StatusCode) $($d.StatusCode)"
     }
 }
 

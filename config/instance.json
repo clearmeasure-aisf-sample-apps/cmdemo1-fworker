@@ -102,7 +102,12 @@
     "msgOfflineListMinutes": 60,
     "mgrTakeoverSeconds": 90,
     "mgrBaselineMinutes": 30,
-    "mgrRemindMinutes": 60
+    "mgrRemindMinutes": 60,
+    "mgrQuietMinutes": 10,
+    "mgrNoteMinutes": 60,
+    "mgrPersistMinutes": 30,
+    "mgrVerbErrorMinutes": 10,
+    "mgrRestartMinutes": 30
   },
   "qc": {
     "trustProxy": false,
@@ -145,7 +150,7 @@
     "turnBudgetPerDay": 96,
     "patrolReservePerHour": 2,
     "stepBudgetPerHour": 60,
-    "digest": { "refusalCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 }
+    "digest": { "refusalCount": 3, "verbErrorCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 }
   },
   "secrets": {
     "patterns": [
