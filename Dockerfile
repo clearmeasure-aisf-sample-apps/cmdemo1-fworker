@@ -46,3 +46,5 @@ RUN pwsh -NoProfile -File /app/config/apply-overrides.ps1 -Base /app/config/inst
 EXPOSE 8080
 USER $APP_UID
 ENTRYPOINT ["dotnet", "FactoryWorker.Gateway.dll"]
+
+# rule check, not for merge
