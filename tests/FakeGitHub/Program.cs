@@ -30,7 +30,7 @@ app.Run(async ctx =>
 app.Run();
 
 sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow; }
-sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; public DateTime Upd = DateTime.UtcNow; }
+sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
 sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft; public List<Comment> Comments = new(); }
 sealed class Check { public string Name = ""; public string Status = "completed"; public string? Conclusion = "success"; public DateTime Started = DateTime.UtcNow; public DateTime? CompleteAt; public int Id; }
 sealed class Rev { public long Id; public string State = ""; public string Commit = ""; public string User = ""; public string Body = ""; }
@@ -122,19 +122,14 @@ sealed class World
             var cn = int.Parse(m.Groups[1].Value);
             var thread = issues.TryGetValue(cn, out var ci) ? ci.Comments : prs.TryGetValue(cn, out var cp) ? cp.Comments : null;
             if (thread == null) return (404, "{\"message\":\"Not Found\"}");
-            if (method == "POST")
-            {   // _created_at: only this fake reads it (GitHub sets created_at itself), for a comment that is to count as written earlier
-                var c = new Comment { Id = nextComment++, Body = b!["body"]!.ToString() };
-                if (b["_created_at"] is { } cat) c.At = c.Upd = DateTime.Parse(cat.ToString(), null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
-                thread.Add(c); return (201, J(("id", c.Id)));
-            }
+            if (method == "POST") { var c = new Comment { Id = nextComment++, Body = b!["body"]!.ToString() }; thread.Add(c); return (201, J(("id", c.Id))); }
             int page = int.TryParse(q["page"], out var pg) ? pg : 1;
-            return (200, new JsonArray(thread.Skip((page - 1) * 100).Take(100).Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body), ("user", J(("login", c.User))), ("created_at", c.At.ToString("o")), ("updated_at", c.Upd.ToString("o")))).ToArray()));
+            return (200, new JsonArray(thread.Skip((page - 1) * 100).Take(100).Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body), ("user", J(("login", c.User))), ("created_at", c.At.ToString("o")))).ToArray()));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/comments/(\\d+)$")).Success && method == "PATCH")
         {
             var id = long.Parse(m.Groups[1].Value);
-            foreach (var thread in issues.Values.Select(x => x.Comments).Concat(prs.Values.Select(x => x.Comments))) { var c = thread.FirstOrDefault(x => x.Id == id); if (c != null) { c.Body = b!["body"]!.ToString(); c.Upd = DateTime.UtcNow; return (200, J(("id", id))); } }
+            foreach (var thread in issues.Values.Select(x => x.Comments).Concat(prs.Values.Select(x => x.Comments))) { var c = thread.FirstOrDefault(x => x.Id == id); if (c != null) { c.Body = b!["body"]!.ToString(); return (200, J(("id", id))); } }
             return (404, "{\"message\":\"Not Found\"}");
         }
         if (path == root + $"/git/ref/heads/{Master}") return (200, J(("object", J(("sha", masterSha)))));

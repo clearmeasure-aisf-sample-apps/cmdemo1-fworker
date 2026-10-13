@@ -139,9 +139,17 @@ m. **The sweep still saves a state it read without the item lock in two places**
 n. **Rule scripts run as one `pwsh` per call with no limit on how many at once** (`runner.pool` is 0 in the deployed configuration). A
    burst of verbs is a burst of processes: the likeliest way for the container to run out of memory. Either a concurrency limit in `Runner`
    (Program.cs) or `runner.pool` in `config/deploy.overrides.json` (a protected file: the owner decides).
-o. **Changing `FACTORY_TOKEN_SECRET`, or making another environment the acting gateway** (`activate-prod.sh`: prod has its own
-   secret): set `FACTORY_TOKEN_SECRET_PREVIOUS` to the old value (or tdd's) first, or every item in flight stops with
-   `state-unverifiable` (signed by another key) until it is set. Nothing is lost either way; the items wait.
+d. **The state comment can be edited by anyone with write access; the gateway trusts it by author login only.** A signed state was
+   built and taken out again on 2026-10-13 (pull request 22, three review rounds). What a next attempt must have from the start:
+   1. one shared guard that refuses every verb that reads the state BEFORE the verb acts on GitHub (claim ref, board move, pull request,
+      body, comment): refusing at the save is too late (`validation-verdict` and its demotion, `open-pr`, `append-body`, `complete`);
+   2. a state that cannot be verified is never overwritten, never adopted (the `stateAuthors` path) and never shadowed by a new state
+      comment beside it; the sweep leaves the item alone and says so once;
+   3. a key id in the signature and a previous key accepted for reading, so "signed by another key" (a changed secret, another
+      environment's gateway on the same board, `activate-prod.sh`) is told apart from "edited" and a rotation orphans nothing;
+   4. unsigned states accepted only when `created_at` and `updated_at` are both before a cutoff, and a deployment order that leaves no
+      window in which the old version still writes unsigned;
+   5. a decided, documented way for the operator to recover an item (restore the comment, supply the key, or start the item anew).
 p. **Two more flaky checks seen on GitHub's runners, causes not found**: qc suite, "the owner assignment is still accepted next to the QC
    one"; manager suite, the "dashboard Sessions panel" scenario. Reproduce with `/_fake/latency` as for entries l and the qc-gate one
    below; look first for a state read before a save and for a start-up sweep of a second gateway that reads the fake GitHub.
@@ -155,18 +163,10 @@ Closed on 2026-10-13 (pull request "hardening"):
 
 - **(c) One revocation ref per name, paging reader.** A revoke writes the higher generation, reads it back, then removes the name's lower
   refs; a removal that fails leaves a ref and nothing else (the reader takes the highest). The reader reads pages until one is empty.
-- **(d) Fast path fallback and the state comment.** The body marker counts only for items created before `timing.docsOnlyLegacyBefore`
-  (2026-10-16T00:00:00Z). The state comment is signed (HMAC-SHA256 with `FACTORY_TOKEN_SECRET` over the item number and the JSON; the
-  line names the key by 8 hex of its hash) and checked on every read. A state that cannot be verified is never overwritten or removed:
-  reads see no state, every write answers exit 30 `state-unverifiable`, the sweep leaves the item alone (no offer, owner kept) and says
-  so once on the item, as "edited" or as "signed by another key". The operator resolves it: restore the comment from its edit history,
-  give the gateway the key that signed it (`FACTORY_TOKEN_SECRET_PREVIOUS`, accepted for reading; the next write signs with the current
-  key), or delete the state comment to start the item anew. Unsigned states count only when their comment was created and last edited
-  before the same cutoff: deploy this version before 2026-10-16T00:00Z or move the cutoff, because the previous version writes unsigned.
-  A gateway without a token secret neither signs nor checks (owner mode refuses to start with a secret under 16 characters). Not covered:
-  someone with write access putting back an older signed state of the same item; until the cutoff a signature can still be taken off
-  (the edit is dated before it); and a verb other than `claim-item` may act on GitHub before its save is refused. `.cursor/` is no longer documentation; a finding's
-  quote ends at the first separator; the fake GitHub uses the product's `docsOnlyPaths`.
+- **(d, first half) Fast path fallback.** The body marker counts only for items created before `timing.docsOnlyLegacyBefore`
+  (2026-10-16T00:00:00Z; it depends on nothing that is deployed, so there is no deadline). `.cursor/` is no longer documentation; a
+  finding's quote ends at the first separator; the fake GitHub uses the product's `docsOnlyPaths`. The editable state comment is open:
+  entry d below.
 - **(e) Dashboard**: an answer that arrives after Disconnect is dropped; Disconnect and a refused token clear every section and hide QC; a
   refused token is forgotten, so the timer stops asking until the next Connect.
 - **(g) Slow first pickup: found.** tdd's webhook is a repository webhook (`create-webhook.sh`: issues, workflow_run, pull_request,

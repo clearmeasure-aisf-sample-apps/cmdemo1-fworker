@@ -76,6 +76,7 @@ function Get-PublicChecks($c) {
 # exists the body text is ignored. Only a state with NO field on an item that is already past its design column AND was created before
 # timing.docsOnlyLegacyBefore (the items an older version designed) falls back to the marker in the body; pass $Info to allow that fallback.
 # A newer item without the field is not docs-only, whatever its body says.
+function Get-LegacyCutoff { $t = (Get-Cfg).timing; if (Test-Has $t 'docsOnlyLegacyBefore') { return ConvertFrom-Iso $t.docsOnlyLegacyBefore }; return $null }
 function Test-ItemDocsOnly($State, $Info = $null) {
     if ((Test-Has $State 'design') -and (Test-Has $State.design 'docs_only')) { return [bool]$State.design.docs_only }
     $c = Get-Cfg

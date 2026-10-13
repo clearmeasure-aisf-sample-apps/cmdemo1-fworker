@@ -45,7 +45,7 @@ function Verb_sync_board($a) {
     $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @()
     # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled, whose
     # owner still waits for item.complete although the claim ended at the merge
-    $owned = @{}; $settling = @(); $unconfirmed = @(); $unverifiable = @()
+    $owned = @{}; $settling = @(); $unconfirmed = @()
     $list = Get-BoardList
     $last = Get-LastColumn
     foreach ($it in $list) {
@@ -59,8 +59,6 @@ function Verb_sync_board($a) {
             $isAi = Test-NameIn $col $c.columns.ai; $isHold = Test-NameIn $col $c.columns.hold
             if (-not $isAi -and -not $isHold) { $seen.Remove("$n"); continue }
             $st = Get-State $n; $s = $st.state
-            # a state that cannot be verified: the item is left exactly as it is (no offer, no write, its owner kept) and reported once
-            if (Test-Has $st 'rejected') { $unverifiable += $n; if (-not $dry) { try { if (Add-StateUnverifiableNote $n $st) { $actions += @{ item = $n; action = 'state-unverifiable'; code = "$($st.rejectedCode)" } } } catch { } }; continue }
             $pin = @($it.labels | Where-Object { $_ -like 'worker:*' } | Select-Object -First 1)
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
             if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) { continue }
@@ -178,7 +176,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; unverifiable = $unverifiable; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------

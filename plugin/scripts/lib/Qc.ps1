@@ -273,7 +273,6 @@ function Invoke-QcSync($List, [bool]$Dry) {
         if (-not $inVal -and $index -notcontains $n) { continue }
         try {
             $st = Get-State $n; $s = $st.state
-            if (Test-Has $st 'rejected') { continue }   # a state that cannot be verified: left alone (Board.ps1)
             $verdictPr = if ((Test-Has $s 'verdict') -and (Test-Has $s.verdict 'pr')) { [int]$s.verdict.pr } else { 0 }
             $live = @(); if (Test-Has $s 'qc') { foreach ($k in $s.qc.Keys) { if (Test-QcLive $s.qc[$k]) { $live += $s.qc[$k] } } }
             $pr = $open | Where-Object { [int]$_.number -eq $verdictPr } | Select-Object -First 1

@@ -2200,7 +2200,7 @@ $ManagerScenarios['mgr: an unanswered question turns late, escalates once with o
     # a state comment whose journal is past its cap of 30 (the "journal full" line included): an ordinary event is no longer posted there
     $name = (Get-Content -Raw (Join-Path $script:Work 'instance.test.json') | ConvertFrom-Json -AsHashtable).name
     $fence = '```'
-    [void](Gh-As 'fake-operator' "issues/$n3/comments" @{ body = "<!-- factory-state:$name v1 -->`nstate`n`n${fence}json`n{`"schema`":1,`"item`":$n3,`"journal`":{`"keys`":[],`"count`":31}}`n$fence`n"; _created_at = '2019-01-01T00:00:00Z' })   # unsigned, so dated before the cutoff (Board.ps1 Test-StateComment)
+    [void](Gh-As 'fake-operator' "issues/$n3/comments" @{ body = "<!-- factory-state:$name v1 -->`nstate`n`n${fence}json`n{`"schema`":1,`"item`":$n3,`"journal`":{`"keys`":[],`"count`":31}}`n$fence`n" })
     Msg-OnGateway (Msg-Merge $script:MgrFast @{ FACTORY_TIMING_mgrEscalateMinutes = '0.1'; FACTORY_TIMING_answerSlaSeconds = '3'; FACTORY_TIMING_mgrEscalateRetrySeconds = '2'; GITHUB_API_URL = $repo }) {
         param($g)
         [void](Msg-Post '/api/v1/_test/roles' @{ item = $n1; owner = 'alice' }); [void](Msg-Post '/api/v1/_test/roles' @{ item = $n3; owner = 'bob' })
@@ -3738,7 +3738,7 @@ $ManagerScenarios['mgr: a real sweep keeps the owner of an item whose merge is s
     $s = New-Item-Fake 'Sweep settling' 'x' @('sweep-two') 'Development'; $e = New-Item-Fake 'Sweep unreadable' 'x' @('sweep-two'); $d = New-Item-Fake 'Sweep omitted' 'x' @('sweep-two')
     # the state of an item whose pull request was merged and whose master build has not finished: no claim, merge.awaiting set
     $fence = '```'; $sha = 'ab' * 20
-    [void](Gh-As 'fake-operator' "issues/$s/comments" @{ body = "<!-- factory-state:sweep-two v1 -->`nstate`n`n${fence}json`n{`"schema`":1,`"item`":$s,`"merge`":{`"sha`":`"$sha`",`"awaiting`":`"master-green`",`"merged_at`":`"$([DateTime]::UtcNow.ToString('o'))`",`"pr`":1}}`n$fence`n"; _created_at = '2019-01-01T00:00:00Z' })   # unsigned, so dated before the cutoff
+    [void](Gh-As 'fake-operator' "issues/$s/comments" @{ body = "<!-- factory-state:sweep-two v1 -->`nstate`n`n${fence}json`n{`"schema`":1,`"item`":$s,`"merge`":{`"sha`":`"$sha`",`"awaiting`":`"master-green`",`"merged_at`":`"$([DateTime]::UtcNow.ToString('o'))`",`"pr`":1}}`n$fence`n" })
     # every read of the second item's comments fails, so every sweep reports an error for it
     Fake 'fault' @{ match = "/issues/$e/comments"; status = 500; count = 100000 } | Out-Null
     Msg-OnGateway (Msg-Merge $script:MgrFast @{ FACTORY_CONFIG = $cfg; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_SWEEP_SECONDS = '2'; FACTORY_TIMING_mgrOwnedGraceSeconds = '1' }) {
