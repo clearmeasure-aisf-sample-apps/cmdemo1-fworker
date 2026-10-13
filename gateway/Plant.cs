@@ -74,9 +74,20 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // the last trigger routed for an item, by its event name: a known wait (item.parked, hold.*, qc.*) is no stall (3.9)
     readonly Dictionary<int, string> lastRouted = new();
     string chooseCode = "";
+    // The facts behind the conditions the supervisor reports (3.9 "Reported conditions"), kept only while messaging or the supervisor is on and all
+    // bounded: the last verb call per (name, item); the verbs that failed (exit 20 or a crash) per item; the notes a worker sent the operator
+    // about an item it owns (the id, never the text); the last review round a FINDINGS verdict recorded per item; the merges that ended in a
+    // demotion; and the names that came back with a cursor of an earlier process, which is how this process knows it is a restart.
+    readonly Dictionary<(string Name, int Item), DateTime> progress = new();
+    readonly List<(DateTime At, int Item, string Name, string Code)> verbErrors = new();
+    readonly List<(DateTime At, int Item, string Name, string Id)> operatorNotes = new();
+    readonly Dictionary<int, (string Column, int Round, int Max, DateTime At)> reviews = new();
+    readonly Dictionary<int, (int RoundTrip, DateTime At)> mergeRefused = new();
+    readonly HashSet<string> returned = new();
+    readonly DateTime startedAt = DateTime.UtcNow;
     // An item loses its owner: everything the plant kept about that ownership goes with it, so the next owner starts clean (it must not inherit a
     // sweep that missed the previous one, nor its lease).
-    void DropOwner(int item) { ownerOf.Remove(item); ownedMisses.Remove(item); ownedSince.Remove(item); ownedInfo.Remove(item); lastRouted.Remove(item); }
+    void DropOwner(int item) { ownerOf.Remove(item); ownedMisses.Remove(item); ownedSince.Remove(item); ownedInfo.Remove(item); lastRouted.Remove(item); reviews.Remove(item); }
     static readonly Regex CodeRx = new(@"^[A-Za-z0-9: ._-]{1,60}\z", RegexOptions.CultureInvariant);
     // A column or code that may enter the digest: the pattern of 3.9, or nothing.
     static string Gated(string? s) => s != null && CodeRx.IsMatch(s) ? s : "";
@@ -330,7 +341,14 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             o.Id = rec.Id;
             foreach (var (name, r) in targets)
             {
-                if (r == null) { rec.Per[name] = "queued"; o.Delivered.Add((name, "queued")); o.Queued++; OperatorNote(s.Event, rec.Id); continue; }   // the operator log: no push (the operator session, if one is connected, gets it on its stream)
+                if (r == null)
+                {   // the operator log: no push. A worker's note about an item it owns is a fact of the digest (3.9): the item and the id only
+                    rec.Per[name] = "queued"; o.Delivered.Add((name, "queued")); o.Queued++;
+                    OperatorNote(s.Event, rec.Id);   // the operator session, if one is connected, gets it on its stream
+                    if (s.FromKind == "worker" && (s.Item ?? (ownerOf.Count(kv => kv.Value == s.From) == 1 ? ownerOf.First(kv => kv.Value == s.From).Key : 0)) is var about && about > 0 && ownerOf.TryGetValue(about, out var noteOwner) && noteOwner == s.From)
+                    { operatorNotes.Add((DateTime.UtcNow, about, s.From, rec.Id)); if (operatorNotes.Count > 200) operatorNotes.RemoveAt(0); }
+                    continue;
+                }
                 var e = DeliverEntry(r, s.Event, rec, s.Peer);
                 var pushed = e.State == "pushed";
                 o.Delivered.Add((name, pushed ? "pushed" : "queued"));
@@ -715,8 +733,23 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             // known waits (3.9): parked, a hold or a QC wait as the last trigger, an inspector job pending, or a refusal the skills define as a wait
             var wait = oi is { Parked: true } || WaitEvents.Contains(routed)
                 || botOf.ContainsKey(item) || assignments.Values.Any(x => x.Item == item && x.Kind == "bot-job") || (lastCode != "" && Msg.WaitCodes.Contains(lastCode));
-            d.Owned.Add(new DigestOwned(item, holder, column, oi?.LeaseUntil, wait, ownedSince.TryGetValue(item, out var sn) ? sn : oi?.At ?? now, activity.TryGetValue((holder, item), out var la) ? la : null));
+            d.Owned.Add(new DigestOwned(item, holder, column, oi?.LeaseUntil, wait, ownedSince.TryGetValue(item, out var sn) ? sn : oi?.At ?? now, activity.TryGetValue((holder, item), out var la) ? la : null,
+                progress.TryGetValue((holder, item), out var lp) ? lp : null, wait || routed == "item.merged"));
         }
+        // the reported conditions (3.9): each only for an item its worker still owns, except a refused merge, which may have cost the claim
+        operatorNotes.RemoveAll(x => (now - x.At).TotalMinutes > Msg.NoteMinutes);
+        foreach (var g in operatorNotes.Where(x => ownerOf.TryGetValue(x.Item, out var h) && h == x.Name
+                     && !(store.Records.TryGetValue(x.Id, out var nrec) && nrec.Per.TryGetValue("operator", out var st) && st == "handled")).GroupBy(x => x.Item).OrderBy(g => g.Key))
+            d.BlockedNotes.Add((g.Key, g.First().Name, g.First().Id, g.Count(), g.First().At));
+        foreach (var (item, rv) in reviews.OrderBy(kv => kv.Key))
+            if (ownerOf.TryGetValue(item, out var h) && Auth.ValidName(h) && rv.Max >= 1 && (rv.Round >= rv.Max || (rv.Max >= 2 && rv.Round == rv.Max - 1))) d.Reviews.Add((item, h, rv.Column, rv.Round, rv.Max, rv.At));
+        verbErrors.RemoveAll(x => (now - x.At).TotalMinutes > Msg.VerbErrorMinutes);
+        foreach (var g in verbErrors.Where(x => Auth.ValidName(x.Name)).GroupBy(x => (x.Item, x.Name)).OrderBy(g => g.Key.Item))
+            d.VerbErrors.Add((g.Key.Item, g.Key.Name, g.Count(), g.GroupBy(x => x.Code).OrderByDescending(c => c.Count()).ThenBy(c => c.Key, StringComparer.Ordinal).Select(c => (c.Key, c.Count())).ToList()));
+        foreach (var k in mergeRefused.Where(kv => (now - kv.Value.At).TotalMinutes > Msg.NoteMinutes).Select(kv => kv.Key).ToList()) mergeRefused.Remove(k);
+        foreach (var (item, mr) in mergeRefused.OrderBy(kv => kv.Key)) d.MergeRefused.Add((item, mr.RoundTrip, mr.At));
+        if (returned.Count > 0 && (now - startedAt).TotalMinutes < Msg.RestartMinutes)
+            d.Restart = (returned.Count, d.Owned.Select(o => o.Holder).Distinct().Count(n => !d.Sessions.Any(x => x.Name == n && x.Connected)), (int)(now - startedAt).TotalMinutes);
         foreach (var a in assignments.Values.Where(a => a.WaitingSince != null && a.Worker == "" && !a.Accepted && !IsQc(a)).OrderBy(a => a.Item)) d.Waiting.Add((a.Item, GatedCode(a.WaitingCode), a.WaitingSince!.Value));
         foreach (var g in refusals.Where(x => (now - x.At).TotalMinutes <= 60).GroupBy(x => (x.Item, x.Code))) d.Refusals.Add((g.Key.Item, GatedCode(g.Key.Code), g.Count()));
         foreach (var g in parks.Where(x => (now - x.At).TotalHours <= 24).GroupBy(x => (x.Item, x.Code))) d.Parks.Add((g.Key.Item, g.Key.Code, g.Min(x => x.At)));
@@ -1044,7 +1077,36 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     // ---- plant data for the digest (3.9, step 5a) ----------------------------------------------------------------------------------------------
     // Every verb that names an item and every /wait poll for it stamps (name, item): activity on one item must not hide a stall on another.
-    public void NoteActivity(string name, int item) { if (!Msg.On || item <= 0) return; lock (gate) activity[(name, item)] = DateTime.UtcNow; }
+    // A verb call is progress as well (the item-quiet condition); a /wait poll is not.
+    public void NoteActivity(string name, int item, bool verb = false) { if (!Msg.On || item <= 0) return; lock (gate) { activity[(name, item)] = DateTime.UtcNow; if (verb) progress[(name, item)] = DateTime.UtcNow; } }
+
+    // A verb that failed for an item (exit 20, a crash, no output): the code the rule script gave, or exit-N. A ring of 500, read over mgrVerbErrorMinutes.
+    public void NoteVerbError(string name, int item, string code, int exit)
+    {
+        if (!Msg.On || item <= 0) return;
+        lock (gate) { verbErrors.Add((DateTime.UtcNow, item, name, GatedCode(code) is { Length: > 0 } c ? c : "exit-" + exit)); if (verbErrors.Count > 500) verbErrors.RemoveAt(0); }
+    }
+
+    // A session presented a cursor of another epoch: it was connected to an earlier process of this gateway, so this process is a restart (3.9).
+    public void NoteStaleEpoch(string name, string cursor)
+    {
+        if (!Msg.On || !Auth.ValidName(name)) return;
+        var epoch = cursor.Split('.')[0];
+        if (epoch == store.Epoch || !Regex.IsMatch(epoch, @"^e-[0-9a-f]{8}\z")) return;
+        lock (gate) { if (returned.Count < 500) returned.Add(name); }
+    }
+
+    // A recorded review round with findings, or a refused merge, as the verbs answer them (also the test seam's way in).
+    public void NoteReview(int item, string column, string verdict, int round, int max)
+    {
+        if (!Msg.On || item <= 0) return;
+        lock (gate) { if (verdict == "FINDINGS" && round >= 1 && max >= 1) reviews[item] = (Gated(column), round, max, DateTime.UtcNow); else reviews.Remove(item); }
+    }
+    public void NoteMergeRefused(int item, int roundTrip)
+    {
+        if (!Msg.On || item <= 0) return;
+        lock (gate) { mergeRefused[item] = (Math.Max(1, roundTrip), DateTime.UtcNow); if (mergeRefused.Count > 200) mergeRefused.Remove(mergeRefused.MinBy(kv => kv.Value.At).Key); }
+    }
 
     // A gate refusal (verb exit 10 or 11) of one code on one item, kept for an hour in a ring of 500.
     public void NoteRefusal(string name, int item, string code)
@@ -1055,6 +1117,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             var now = DateTime.UtcNow;
             refusals.RemoveAll(x => (now - x.At).TotalMinutes > 60);
             refusals.Add((now, item, name, code)); if (refusals.Count > 500) refusals.RemoveAt(0);
+            // a review asked for after the last allowed round: the column has failed, whatever round the plant saw recorded
+            if (code == "review-rounds-exhausted") reviews[item] = reviews.TryGetValue(item, out var rv) ? rv with { Round = Math.Max(rv.Round, rv.Max) } : ("", 1, 1, now);
         }
     }
 
@@ -1111,6 +1175,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         foreach (var k in ownedInfo.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) ownedInfo.Remove(k);
         foreach (var k in ownedSince.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) ownedSince.Remove(k);
         foreach (var k in activity.Where(kv => (now - kv.Value).TotalHours > 24).Select(kv => kv.Key).ToList()) activity.Remove(k);
+        foreach (var k in progress.Where(kv => (now - kv.Value).TotalHours > 24).Select(kv => kv.Key).ToList()) progress.Remove(k);
         parks.RemoveAll(x => (now - x.At).TotalHours > 24);
     }
 
@@ -1274,6 +1339,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     ["patrolMinutes"] = Msg.PatrolMinutes
                 }
             };
+            // what the digest of this moment holds, as counts per code (3.9): no name, no item and no text
+            if (Msg.ManagerEnabled)
+            {
+                var counts = new JsonObject();
+                foreach (var g in DigestBuilder.Attention(DigestInputLocked(now), Msg).GroupBy(e => e.Kind).OrderBy(g => Array.IndexOf(DigestBuilder.Kinds, g.Key))) counts[g.Key] = g.Count();
+                ((JsonObject)res["manager"]!)["attention"] = counts;
+            }
             // the operator's page (7): the banner of a gateway that scales to zero
             if (dashboard) ((JsonObject)res["messaging"]!)["scaleToZero"] = Msg.ScaleToZero;
             if (dashboard && Msg.ManagerEnabled)
@@ -1672,6 +1744,19 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             // the lease as the verb answered it (accept, claim-item, claim-item --renew), until the next sweep says otherwise (3.9)
             if (Msg.On && verb is "accept" or "claim-item" && who.Kind == "item" && who.Role == "owner" && Time(response["lease_until"]) is { } lease)
                 ownedInfo[item] = ownedInfo.TryGetValue(item, out var known) ? known with { LeaseUntil = lease, At = DateTime.UtcNow } : new OwnedInfo(who.Name, "", lease, null, false, DateTime.UtcNow);
+            if (Msg.On) switch (verb)
+            {   // the facts of the reported conditions (3.9), from the verbs' own answers: numbers and gated names only
+                case "record-review":
+                    if (int.TryParse(response["round"]?.ToString(), out var round) && int.TryParse(response["max_rounds"]?.ToString(), out var maxRounds) && response["verdict"]?.ToString() == "FINDINGS" && round >= 1 && maxRounds >= 1)
+                        reviews[item] = (Gated(request["column"]?.ToString()), round, maxRounds, DateTime.UtcNow);
+                    else reviews.Remove(item);
+                    break;
+                case "move-next" or "complete": reviews.Remove(item); break;
+                case "merge" when response["outcome"]?.ToString() == "demoted":
+                    mergeRefused[item] = (int.TryParse(response["detail"]?["round_trip"]?.ToString(), out var trip) ? Math.Max(1, trip) : 1, DateTime.UtcNow);
+                    if (mergeRefused.Count > 200) mergeRefused.Remove(mergeRefused.MinBy(kv => kv.Value.At).Key);
+                    break;
+            }
             switch (verb)
             {
                 case "accept" when who.Kind == "item":

@@ -62,6 +62,12 @@ sealed class MessagingSettings
     public double PatrolMinutes = 10, DigestSeconds = 30, StallMinutes = 45, LeaseWarnMinutes = 5, DisconnectGraceMinutes = 5, WaitingMinutes = 30, BaselineMinutes = 30, RemindMinutes = 60;
     public int StepBudgetPerHour = 60, StepHardPerHour = 90, RefusalCount = 3, DigestMaxBytes = 4096;
     public string[] WaitCodes = { "qc-not-run", "qc-approval-missing", "held" };
+    // The conditions the supervisor reports to the operator (3.9 "Reported conditions"): timing.mgrQuietMinutes (an owned item without a verb),
+    // mgrNoteMinutes (how long a worker's note to the operator, or a refused merge, stays in the digest), mgrPersistMinutes (after which such an
+    // entry is worse once, for the one reminder), mgrVerbErrorMinutes and digest.verbErrorCount (failed verbs of one worker on one item), and
+    // mgrRestartMinutes (how long after its start a gateway reports that sessions came back from an earlier process).
+    public double QuietMinutes = 10, NoteMinutes = 60, PersistMinutes = 30, VerbErrorMinutes = 10, RestartMinutes = 30;
+    public int VerbErrorCount = 3;
     // The model requirement (4.7): the ladder of the gateway host's models.default.json, lowest rung first, as (name, model).
     public string RequiredModelTier = "premium", RequiredEffort = "high";
     public bool EnforceModel;
@@ -155,6 +161,8 @@ sealed class MessagingSettings
         s.StepBudgetPerHour = Limit(g, "stepBudgetPerHour", 60); s.StepHardPerHour = Math.Max(s.StepBudgetPerHour, Limit(g, "stepBudgetHardPerHour", (s.StepBudgetPerHour * 3 + 1) / 2));
         var dg = g?["digest"];
         s.RefusalCount = Limit(dg, "refusalCount", 3); s.DigestMaxBytes = Limit(dg, "maxBytes", 4096, 512);
+        s.QuietMinutes = Span("mgrQuietMinutes", 10); s.NoteMinutes = Span("mgrNoteMinutes", 60); s.PersistMinutes = Span("mgrPersistMinutes", 30);
+        s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3);
         if (dg?["waitCodes"] is JsonArray wc) s.WaitCodes = List(wc);
         s.RequiredModelTier = g?["requiredModelTier"]?.ToString() ?? "premium"; s.RequiredEffort = g?["requiredEffort"]?.ToString() ?? "high";
         s.EnforceModel = g?["enforceModel"]?.GetValue<bool>() ?? false; s.AcceptableModels = List(g?["acceptableModels"]);
@@ -360,7 +368,8 @@ sealed class QuestionEvents
 // worker, a question, GitHub or a label. Every string it writes is a session name (ValidName), a gated column or code, a gateway id or one of the
 // enumerated values below; DigestSchema is the explicit field list the Tier 1 scenario validates every digest against. --------------------------
 sealed record DigestSession(string Name, string Type, bool Connected, DateTime? LastHeard, DateTime? GoneAt);
-sealed record DigestOwned(int Item, string Holder, string Column, DateTime? LeaseUntil, bool KnownWait, DateTime Since, DateTime? LastActivity);
+// LastProgress: the last verb call for the item (a /wait poll is activity, not progress); QuietWait: a known wait, or a merge that is settling.
+sealed record DigestOwned(int Item, string Holder, string Column, DateTime? LeaseUntil, bool KnownWait, DateTime Since, DateTime? LastActivity, DateTime? LastProgress = null, bool QuietWait = false);
 sealed record DigestQuestion(string Id, string From, int? Item, DateTime At, bool Late, bool Escalated);
 sealed class DigestInput
 {
@@ -372,6 +381,12 @@ sealed class DigestInput
     public List<(int Item, string Code, DateTime At)> Parks = new();
     public List<DigestQuestion> Questions = new();
     public int OpenQuestions;
+    // The reported conditions (3.9): numbers, names, gateway ids and gated codes only; never the text of a note, a review or an error.
+    public List<(int Item, string Worker, string Id, int Count, DateTime At)> BlockedNotes = new();
+    public List<(int Item, string Worker, string Column, int Round, int Max, DateTime At)> Reviews = new();
+    public List<(int Item, string Worker, int Count, List<(string Code, int Count)> ByCode)> VerbErrors = new();
+    public List<(int Item, int RoundTrip, DateTime At)> MergeRefused = new();
+    public (int Reconnected, int Missing, int UpMinutes)? Restart;
 }
 sealed class DigestEntry
 {
@@ -384,7 +399,8 @@ sealed class DigestEntry
 static class DigestBuilder
 {
     public const int SchemaVersion = 1;
-    public static readonly string[] Kinds = { "stalled", "disconnected-owner", "late-question", "waiting", "refusals", "parked" };
+    public static readonly string[] Kinds = { "stalled", "disconnected-owner", "late-question", "waiting", "refusals", "parked",
+        "gateway-restarted", "review-rounds-exhausted", "merge-refused", "worker-blocked-note", "verb-errors", "last-review-round", "item-quiet" };
     static int Min(TimeSpan t) => (int)Math.Max(0, Math.Floor(t.TotalMinutes));
     static int Step(double value, double unit) => value >= unit * 4 ? 3 : value >= unit * 2 ? 2 : value >= unit ? 1 : 0;
 
@@ -415,6 +431,13 @@ static class DigestBuilder
             if (lapsed) sb = Math.Max(sb, 2); else if (o.LeaseUntil is { } l3 && (l3 - now).TotalMinutes < cfg.LeaseWarnMinutes) sb = Math.Max(sb, 1);
             if (sb > 0) list.Add(new DigestEntry { Key = $"stalled|{o.Holder}|{o.Item}", Kind = "stalled", Worker = o.Holder, Bucket = sb,
                 Fields = new JsonObject { ["kind"] = "stalled", ["worker"] = o.Holder, ["item"] = o.Item, ["column"] = o.Column, ["bucket"] = sb, ["idleMinutes"] = Min(now - last), ["leaseLeftMinutes"] = leaseLeft } });
+            else if (!o.QuietWait)
+            {   // item-quiet: connected and polling, but no verb for the item (so no journal entry either) for mgrQuietMinutes; a stall replaces it
+                var progress = o.LastProgress is { } lp && lp > o.Since ? lp : o.Since;
+                var qb = Step((now - progress).TotalMinutes, cfg.QuietMinutes);
+                if (qb > 0) list.Add(new DigestEntry { Key = $"item-quiet|{o.Holder}|{o.Item}", Kind = "item-quiet", Worker = o.Holder, Bucket = qb,
+                    Fields = new JsonObject { ["kind"] = "item-quiet", ["worker"] = o.Holder, ["item"] = o.Item, ["column"] = o.Column, ["bucket"] = qb, ["quietMinutes"] = Min(now - progress) } });
+            }
         }
         foreach (var q in d.Questions.Where(q => q.Late || q.Escalated))
         {
@@ -439,6 +462,41 @@ static class DigestBuilder
             var code = p.Code == "" ? "other" : p.Code;
             list.Add(new DigestEntry { Key = $"parked|{p.Item}|{code}", Kind = "parked", Bucket = 1,
                 Fields = new JsonObject { ["kind"] = "parked", ["item"] = p.Item, ["code"] = code, ["bucket"] = 1, ["ageMinutes"] = Min(now - p.At) } });
+        }
+        // The reported conditions. One that is an event (a note, a review round, a refused merge) is worse once, after mgrPersistMinutes: that is
+        // the one reminder of a problem nobody resolved.
+        int Persist(DateTime at) => (now - at).TotalMinutes >= cfg.PersistMinutes ? 2 : 1;
+        foreach (var n in d.BlockedNotes)
+        {
+            var b = Persist(n.At);
+            list.Add(new DigestEntry { Key = $"worker-blocked-note|{n.Item}", Kind = "worker-blocked-note", Worker = n.Worker, Bucket = b,
+                Fields = new JsonObject { ["kind"] = "worker-blocked-note", ["worker"] = n.Worker, ["item"] = n.Item, ["id"] = n.Id, ["bucket"] = b, ["count"] = n.Count, ["ageMinutes"] = Min(now - n.At) } });
+        }
+        foreach (var r in d.Reviews)
+        {
+            var kind = r.Round >= r.Max ? "review-rounds-exhausted" : "last-review-round"; var b = Persist(r.At);
+            list.Add(new DigestEntry { Key = $"{kind}|{r.Item}", Kind = kind, Worker = r.Worker, Bucket = b,
+                Fields = new JsonObject { ["kind"] = kind, ["worker"] = r.Worker, ["item"] = r.Item, ["column"] = r.Column, ["bucket"] = b, ["round"] = r.Round, ["maxRounds"] = r.Max, ["ageMinutes"] = Min(now - r.At) } });
+        }
+        foreach (var v in d.VerbErrors)
+        {
+            var b = Step(v.Count, cfg.VerbErrorCount);
+            if (b == 0) continue;
+            var by = new JsonObject(); foreach (var (code, count) in v.ByCode.Take(4)) by[code] = count;
+            list.Add(new DigestEntry { Key = $"verb-errors|{v.Worker}|{v.Item}", Kind = "verb-errors", Worker = v.Worker, Bucket = b,
+                Fields = new JsonObject { ["kind"] = "verb-errors", ["worker"] = v.Worker, ["item"] = v.Item, ["bucket"] = b, ["count"] = v.Count, ["byCode"] = by, ["windowMinutes"] = (int)Math.Ceiling(cfg.VerbErrorMinutes) } });
+        }
+        foreach (var m in d.MergeRefused)
+        {
+            var b = Math.Clamp(m.RoundTrip, 1, 3);
+            list.Add(new DigestEntry { Key = $"merge-refused|{m.Item}", Kind = "merge-refused", Bucket = b,
+                Fields = new JsonObject { ["kind"] = "merge-refused", ["item"] = m.Item, ["bucket"] = b, ["roundTrip"] = m.RoundTrip, ["ageMinutes"] = Min(now - m.At) } });
+        }
+        if (d.Restart is { } rs)
+        {
+            var b = rs.Missing > 0 ? 2 : 1;
+            list.Add(new DigestEntry { Key = "gateway-restarted", Kind = "gateway-restarted", Bucket = b,
+                Fields = new JsonObject { ["kind"] = "gateway-restarted", ["bucket"] = b, ["reconnected"] = rs.Reconnected, ["notReconnected"] = rs.Missing, ["upMinutes"] = rs.UpMinutes } });
         }
         return list.OrderByDescending(e => e.Bucket).ThenBy(e => Array.IndexOf(Kinds, e.Kind)).ThenBy(e => e.Key, StringComparer.Ordinal).ToList();
     }

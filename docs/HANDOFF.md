@@ -117,8 +117,11 @@ Raw evidence (logs, prompts, traffic) stays on the owner's machine and is not co
 
 ## 5. Open defects and backlog, in priority order
 
-a. **Plant manager reports problems to the operator proactively.** One concise note per new problem: stalled item, last review round,
-   blocked worker note, repeated verb errors. Today it reports only what a patrol digest shows.
+a. **Done (2026-10-13): the plant manager reports problems to the operator proactively.** The patrol digest carries seven more codes
+   (`item-quiet`, `last-review-round`, `review-rounds-exhausted`, `worker-blocked-note`, `verb-errors`, `merge-refused`,
+   `gateway-restarted`; `docs/design/worker-messaging.md` 3.9 "Reported conditions") and the supervisor's skill sends the operator one
+   note per new problem and one reminder when it persists. Not yet seen live: watch the first run on tdd for `item-quiet` notes about
+   workers that are busy without calling a verb (raise `timing.mgrQuietMinutes` if they are noise), and run the stress test once.
 b. **The operator session role.** Done 2026-10-13: credential kind `o1.`, one slot, connect prompt, skill `factory-operator`, the
    quiet-plant check and the daily limit enforced by the gateway (`docs/design/operator-session.md`). Open: it has not run live on tdd
    (section 6a), and nothing on the GitHub side stops a merge into a protected area (the rule is in the skill only).
