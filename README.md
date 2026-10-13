@@ -60,3 +60,5 @@ or `model-for --profile testing`. It wins over both `auto` and `fixed` mode.
 - A worker that ends without finishing released nothing for 30 minutes; the client now releases its claim on exit.
 - Docs-only changes no longer wait in the merge queue; the queue depth for code changes is configurable (`mergeQueueDepth`).
 - Capacity on a 4-core 12 GB machine: 26 read-only haiku workers all succeed; 8 to 9 real edit workers are stable; 26 read-only plus about 6 real workers exhausted memory.
+
+# rule check, not for merge
