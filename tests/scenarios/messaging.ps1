@@ -124,7 +124,7 @@ function Msg-WaitEvent($C, [string]$Event, [int]$Seconds = 20) { Wait-Until -Sec
 function Msg-Supervisor([string]$Name = 'supervisor') { "m1.$Name.1.$(Msg-Mac "manager:${Name}:1")" }
 # A second gateway on this slot's spare ports, with its own environment, that must serve; its GitHub is a port nothing listens on, so its sweep changes nothing.
 # It runs one process per rule-script call (FACTORY_RUNNER_POOL=0): the pool of the suite's own gateway would start three pwsh for every one of them.
-function Msg-StartGateway([hashtable]$Env) {
+function Msg-StartGateway([hashtable]$Env, [int]$ReadySeconds = 40) {
     $dll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'; $tag = [guid]::NewGuid().ToString('N').Substring(0, 6)
     $port = $script:PortBase + 12
     # (merged, so a scenario may point a second gateway at the fake GitHub or give it a state directory it knows)
@@ -133,7 +133,7 @@ function Msg-StartGateway([hashtable]$Env) {
     try { $p = Start-Process dotnet -ArgumentList $dll -PassThru -RedirectStandardOutput (Join-Path $script:Work "second-$tag.out") -RedirectStandardError (Join-Path $script:Work "second-$tag.err") }
     finally { foreach ($k in $all.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
     $script:Procs += $p
-    [void](Wait-Until -Seconds 40 { try { [bool](Invoke-RestMethod "http://127.0.0.1:$port/ready" -TimeoutSec 2) } catch { $false } })
+    [void](Wait-Until -Seconds $ReadySeconds { try { [bool](Invoke-RestMethod "http://127.0.0.1:$port/ready" -TimeoutSec 2) } catch { $false } })
     return @{ proc = $p; base = "http://127.0.0.1:$port"; out = (Join-Path $script:Work "second-$tag.out") }
 }
 # The real client's worker-token with a given config file and environment.
@@ -188,8 +188,8 @@ function Msg-Config([string]$Name, [scriptblock]$Edit) {
     return (TmpFile $Name ($cfg | ConvertTo-Json -Depth 12))
 }
 # Runs a body against a second gateway (this suite's spare ports) and always stops it and points the helpers back at the suite's own.
-function Msg-OnGateway([hashtable]$Env, [scriptblock]$Body) {
-    $g = Msg-StartGateway $Env
+function Msg-OnGateway([hashtable]$Env, [scriptblock]$Body, [int]$ReadySeconds = 40) {
+    $g = Msg-StartGateway $Env $ReadySeconds
     $script:MsgBase = $g.base
     try { & $Body $g } finally { $script:MsgBase = ''; try { Stop-Process -Id $g.proc.Id -Force } catch { } }
 }
@@ -3473,7 +3473,9 @@ $ManagerScenarios['mgr: the dashboard shows sessions with the pinned supervisor,
             else {
                 $el = $run.els
                 Check 'the page''s refresh runs to the end against this gateway without an error or a message' ("$($run.error)" -eq '' -and "$($el.msg.text)" -eq '') "$($run.error) $($el.msg.text)"
-                Check 'it fills the Sessions panel: the new header, the supervisor row first, then the worker with its mode select' ($el.shead.html -match 'Activity \(self-reported\)' -and $el.rows.html -match '^<tr class="grp"><th colspan="11">Plant manager</th></tr><tr><td><b>SUPERVISOR</b> supervisor' -and $el.rows.html -match '<tr class="grp"><th colspan="11">Workers</th></tr><tr><td>alice</td>' -and $el.rows.html -match '<select data-n="alice" data-a="mode"') "$($el.rows.html)"
+                # (the worker need not be the first row of its group: a client that an earlier scenario left running connects to this gateway too, it has
+                # the same port, and is listed before alice. That was the flaky failure of this check on slow runners.)
+                Check 'it fills the Sessions panel: the new header, the supervisor row first, then the worker with its mode select' ($el.shead.html -match 'Activity \(self-reported\)' -and $el.rows.html -match '^<tr class="grp"><th colspan="11">Plant manager</th></tr><tr><td><b>SUPERVISOR</b> supervisor' -and $el.rows.html -match '<tr class="grp"><th colspan="11">Workers</th></tr>.*<tr><td>alice</td>' -and $el.rows.html -match '<select data-n="alice" data-a="mode"') "$($el.rows.html)"
                 Check 'the summary, the question and the note reach the page through textContent only' (@($el.rows.texts) -contains $evil -and @($el.qrows.texts | Where-Object { $_ -eq $evil }).Count -eq 1 -and @($el.oprows.texts | Where-Object { $_ -like "*$evil" }).Count -eq 1 -and "$($el.rows.html)$($el.qrows.html)$($el.oprows.html)$($el.logrows.html)" -notmatch 'onerror|<img|<script') (@{ rows = $el.rows.texts; q = $el.qrows.texts; op = $el.oprows.texts } | ConvertTo-Json -Compress -Depth 4)
                 Check 'it shows the sections, the cost strip, the digest preview and the supervisor prompt button, and no grant button while the budget lasts' ($el.qsec.hidden -eq $false -and $el.msgsec.hidden -eq $false -and $el.cost.hidden -eq $false -and $el.digestbox.hidden -eq $false -and $el.mksup.hidden -eq $false -and $el.grant.hidden -eq $true -and $el.costtext.text -match '^deliveries \d+/\d+ this hour' -and $el.qcounts.text -match '^open 1 ' -and $el.opbadge.text -eq '1 for the operator' -and $el.qrows.html -match 'data-a="answer">Send</button>' -and $el.logrows.html -match 'alice -&gt; bob')
                 $paths = @($run.calls | ForEach-Object { "$($_.path)" })
@@ -4089,7 +4091,7 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
         $dv = Msg-Verb 'revoke-worker' 'test-token' @{ name = 'rev-a'; generation = 9 }; $dl = Msg-Verb 'revocations' 'test-token'
         Check 'the operator calling /verbs/revoke-worker or /verbs/revocations is refused (400 use-endpoint) and no ref is written' ([int]$dv.StatusCode -eq 400 -and (Msg-Json $dv).code -eq 'use-endpoint' -and [int]$dl.StatusCode -eq 400 -and @((Get-FakeState).refs | Where-Object { $_ -match '/revoked/rev-a/9$' }).Count -eq 0 -and (& $verb 'my-items' $r.alice) -eq 200)
     }
-    # the reader pages: GitHub answers one ref a page (three names are revoked), and a gateway that starts still knows every one of them
+    # the reader against a server that does page (GitHub does not, see the next scenario): one ref a page (three names are revoked), and a gateway that starts still knows every one of them
     try {
         Fake 'ref-page' @{ size = 1 } | Out-Null
         Check 'three names are revoked, one ref each' (@((Get-FakeState).refs | Where-Object { $_ -match '/revoked/' }).Count -eq 3) (@((Get-FakeState).refs) -join ',')
@@ -4098,7 +4100,7 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
             $t5 = "$((& $mint 'rev-a').token)"
             Check 'and a credential minted now carries the generation that was read (4) and works' ($t5 -match '^w1\.rev-a\.' -and $t5 -ne $r.t2 -and (& $verb 'my-items' $t5) -eq 200)
         }
-    } finally { Fake 'ref-page' @{ size = 100 } | Out-Null }
+    } finally { Fake 'ref-page' @{ size = 0 } | Out-Null }
     # the test switch of a gateway without GitHub: it revokes nothing
     Msg-OnGateway @{} { Check 'a gateway started with FACTORY_TEST_SKIP_REVOCATIONS refuses to revoke' ((Msg-Post '/api/v1/workers/rev-a/revoke' @{}).status -eq 403) }
     if (Get-Command node -ErrorAction SilentlyContinue) {
@@ -4108,6 +4110,52 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
         Check 'the supervisor row is drawn into the table whose click handler posts the action' ($pg -match "groupedRows\(ss,\(x,i\)=>sessionRowHtml\(x,now,repoUrl,i\),11,\(sup\?groupHead\('Plant manager',11\)\+supervisorRowHtml\(m,now\):''\)\+\(op\?groupHead\('Factory operator',11\)\+operatorRowHtml\(info\.operator,now\):''\)\);\s*setRows\('rows',gr\.html," -and $pg -match "\$\('rows'\)\.onclick=async e=>\{const b=e\.target\.closest\('button'\)")
         Check 'the button asks first and posts to the revoke endpoint with the token in the header' ($pg -match "b\.dataset\.a==='revoke'&&!confirm\(" -and $pg -match "'/api/v1/workers/'\+encodeURIComponent\(b\.dataset\.n\)\+'/'\+b\.dataset\.a,'POST'")
     }
+}
+
+# The outage of 2026-10-13: GitHub's matching-refs takes no page number and answers every ref on every "page", so a reader that went on until
+# an empty page never ended and the gateway never became ready. The fake pages only when a scenario asks it to (/_fake/ref-page).
+$ManagerScenarios['revoke: more revocation refs than one page on a GitHub that does not page: the reader ends and the gateway becomes ready'] = {
+    $inst = "$((Get-Content -Raw (Join-Path $script:Work 'instance.test.json') | ConvertFrom-Json).name)"
+    foreach ($i in 1..130) { Gh-As 'fake-operator' 'git/refs' @{ ref = "refs/factory/$inst/revoked/pg-$i/1"; sha = ('0' * 40) } | Out-Null }
+    Gh-As 'fake-operator' 'git/refs' @{ ref = "refs/factory/$inst/revoked/pg-7/3"; sha = ('0' * 40) } | Out-Null
+    $refsUrl = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/matching-refs/factory/$inst/revoked/"
+    $pages = @(1, 2, 9 | ForEach-Object { @((Invoke-RestMethod "$($refsUrl)?per_page=100&page=$_" -Headers @{ Authorization = 'Bearer fake-operator' }) | ForEach-Object { $_ }).Count })
+    Check 'the fake answers as GitHub does: all 131 refs whatever page is asked for' (($pages -join ',') -eq '131,131,131') ($pages -join ',')
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    Msg-OnGateway @{ GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_TEST_SKIP_REVOCATIONS = $null } {
+        param($g)
+        $rd = Invoke-WebRequest "$($g.base)/ready" -SkipHttpErrorCheck -TimeoutSec 5
+        Check 'the gateway is ready: the read of the revoked credentials ended' ([int]$rd.StatusCode -eq 200) "$([int]$rd.StatusCode) $($rd.Content) after $([int]$sw.Elapsed.TotalSeconds) s"
+        $st = { param($Tok) [int](Msg-Verb 'my-items' $Tok).StatusCode }
+        $got = @((& $st (New-WorkerToken 'pg-1')), (& $st (New-WorkerToken 'pg-130')), (& $st (Msg-Token 'alice')))
+        Check 'the first and the last revoked name are refused, a name that was not revoked is answered' (($got -join ',') -eq '401,401,200') ($got -join ',')
+        $t = "$((Msg-Post '/api/v1/workers/pg-7/credential' @{}).token)"
+        Check 'the highest generation of a name was read: a credential minted now works' ($t -match '^w1\.pg-7\.' -and $t -ne (New-WorkerToken 'pg-7') -and (& $st $t) -eq 200)
+    } 60
+}
+
+# A start that cannot read the revoked credentials is not silent and does not fail open.
+$ManagerScenarios['start: while GitHub does not answer the revocation read /ready is 503 with the reason, /health is 200 and no credential is accepted; when it answers the gateway is ready [full]'] = {
+    Fake 'latency' @{ ms = 300000; match = '^GET \S*/git/matching-refs/' } | Out-Null
+    try {
+        Msg-OnGateway @{ GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_TEST_SKIP_REVOCATIONS = $null; FACTORY_REVOCATIONS_ATTEMPT_SECONDS = '2'; FACTORY_REVOCATIONS_ALARM_SECONDS = '6' } {
+            param($g)
+            $ready = { $r = Invoke-WebRequest "$($g.base)/ready" -SkipHttpErrorCheck -TimeoutSec 5; $j = Msg-Json $r; $j.status = [int]$r.StatusCode; $j.raw = "$($r.Content)"; $j }
+            $alarm = '"level":"error"[^\n]*"waitingFor":"revocations"'
+            Check 'after the alarm time the gateway logs an error line that names the read' (Wait-Until -Seconds 60 { (Mgr-Log $g) -match $alarm }) (Mgr-Log $g)
+            $j = & $ready
+            Check '/ready is 503 and says what it waits for, how many reads failed and since when' ($j.status -eq 503 -and $j.ready -eq $false -and $j.waitingFor -eq 'revocations' -and [int]$j.attempts -ge 2 -and "$($j.since)" -ne '') $j.raw
+            Check '/health and /alive are 200 all the while' ([int](Invoke-WebRequest "$($g.base)/health" -SkipHttpErrorCheck -TimeoutSec 5).StatusCode -eq 200 -and [int](Invoke-WebRequest "$($g.base)/alive" -SkipHttpErrorCheck -TimeoutSec 5).StatusCode -eq 200)
+            $w = Invoke-WebRequest "$($g.base)/api/v1/verbs/my-items" -Method POST -Headers @{ Authorization = "Bearer $(Msg-Token 'alice')" } -Body '{}' -ContentType 'application/json' -SkipHttpErrorCheck -TimeoutSec 40
+            Check 'no worker credential is accepted meanwhile: 503 starting, not 200 (it does not fail open)' ([int]$w.StatusCode -eq 503 -and (Msg-Json $w).code -eq 'starting') "$([int]$w.StatusCode) $($w.Content)"
+            Check 'the operator token is answered' ([int](Msg-Api 'GET' '/api/v1/status').StatusCode -eq 200)
+            $j2 = & $ready
+            Check 'the gateway keeps trying: more failed reads, the same start time, and still one error line' ($j2.status -eq 503 -and [int]$j2.attempts -gt [int]$j.attempts -and "$($j2.since)" -eq "$($j.since)" -and @([regex]::Matches((Mgr-Log $g), $alarm)).Count -eq 1) $j2.raw
+            Fake 'latency' @{ ms = 0 } | Out-Null
+            Check 'when GitHub answers, /ready turns 200' (Wait-Until -Seconds 120 { [int](Invoke-WebRequest "$($g.base)/ready" -SkipHttpErrorCheck -TimeoutSec 5).StatusCode -eq 200 }) (Mgr-Log $g)
+            Check 'and the worker credential is accepted' ([int](Msg-Verb 'my-items' (Msg-Token 'alice')).StatusCode -eq 200 -and (Mgr-Log $g) -match '"revocations":"loaded"')
+        } 1
+    } finally { Fake 'latency' @{ ms = 0 } | Out-Null }
 }
 
 $ManagerScenarios['sweep: an item new on the board is offered after a short second look, not a whole sweep interval later [full]'] = {

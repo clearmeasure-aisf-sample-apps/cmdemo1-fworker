@@ -141,9 +141,13 @@ sealed class World
         }
         if ((m = Regex.Match(path, $"^{root}/git/matching-refs/(.+)$")).Success && method == "GET")
         {
-            // a page holds what was asked for (per_page, 100 at most) or fewer when /_fake/ref-page set a smaller size, as a server may
+            // As GitHub: matching-refs takes no page number. It answers every matching ref whatever "page" says, so a reader that asks for page
+            // after page until one is empty gets the same refs for ever (the outage of 2026-10-13: the fake paged, GitHub did not).
+            // Only /_fake/ref-page { size } makes this a paging server, for the scenario of a reader against one.
+            var match = refs.Where(r => r.StartsWith("refs/" + m.Groups[1].Value, StringComparison.Ordinal)).OrderBy(r => r, StringComparer.Ordinal);
+            if (refPage <= 0) return (200, new JsonArray(match.Select(r => (JsonNode)J(("ref", r))).ToArray()));
             int rp = int.TryParse(q["page"], out var rpg) ? rpg : 1; int per = Math.Min(Math.Clamp(int.TryParse(q["per_page"], out var pp) ? pp : 30, 1, 100), refPage);
-            return (200, new JsonArray(refs.Where(r => r.StartsWith("refs/" + m.Groups[1].Value, StringComparison.Ordinal)).OrderBy(r => r, StringComparer.Ordinal).Skip((rp - 1) * per).Take(per).Select(r => (JsonNode)J(("ref", r))).ToArray()));
+            return (200, new JsonArray(match.Skip((rp - 1) * per).Take(per).Select(r => (JsonNode)J(("ref", r))).ToArray()));
         }
         if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "DELETE")
             return refs.Remove("refs/" + m.Groups[1].Value) ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}");
@@ -314,7 +318,7 @@ sealed class World
         return (404, null);
     }
 
-    int latencyMs; Regex? latencyMatch; int refPage = 100;
+    int latencyMs; Regex? latencyMatch; int refPage;   // refPage 0: matching-refs does not page (GitHub)
     public int LatencyFor(string method, string path, string body) => latencyMs > 0 && !path.StartsWith("/_fake/") && latencyMatch!.IsMatch(method + " " + path + "\n" + body) ? latencyMs : 0;
     (int, object?) Control(string method, string what, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b)
     {
@@ -322,10 +326,10 @@ sealed class World
         {
             case "latency":   // { ms, match }: every request whose "METHOD path" line plus body matches the regular expression waits ms first; ms 0 ends it
                 latencyMs = b?["ms"]?.GetValue<int>() ?? 0; latencyMatch = latencyMs > 0 ? new Regex(b?["match"]?.ToString() ?? ".") : null; return (200, J(("ok", true)));
-            case "ref-page":   // { size }: the most refs one page of matching-refs holds (100 when not set)
-                refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 100, 1, 100); return (200, J(("ok", true)));
+            case "ref-page":   // { size }: matching-refs pages, with at most size refs a page (1 to 100); size 0 or none: it does not page, as GitHub
+                refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":
-                latencyMs = 0; latencyMatch = null; refPage = 100;
+                latencyMs = 0; latencyMatch = null; refPage = 0;
                 issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false; return (200, J(("ok", true)));
             case "issue":
