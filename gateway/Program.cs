@@ -106,32 +106,53 @@ string PluginHash()
 }
 
 
-// Revocations (Auth.cs): the generations are read from GitHub once at start, tried again every 5 s until the read succeeds. Until then no worker,
-// supervisor or item credential is accepted: a request waits up to 20 s for the read and is then answered 503, so a restart never lets a revoked
-// credential back in. The operator token does not wait.
+// Revocations (Auth.cs): the generations are read from GitHub once at start. An attempt has a time limit; a failed or timed-out attempt is tried
+// again after a growing pause (5 s doubling to 60 s), for as long as it takes. Until the read succeeds no worker, supervisor or item credential is
+// accepted (never fail open: a restart must not let a revoked credential back in): a request waits up to 20 s for the read and is then answered 503.
+// The operator token does not wait. A start that cannot read is never silent: /ready says what it waits for, and once the attempts have failed for
+// the alarm time one error line names the read. /health stays 200 throughout.
 var revocationsLoaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var revokeGate = new SemaphoreSlim(1, 1);
 // FACTORY_TEST_SKIP_REVOCATIONS=1 (the scenario suites' second gateways, whose GitHub is a port nothing listens on): nothing is read, and revoke is refused.
 var revocationsOff = Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") == "1";
 if (revocationsOff && !messaging.TestHooks) throw new InvalidOperationException("FACTORY_TEST_SKIP_REVOCATIONS is for test gateways only: it needs messaging.testHooks in the configuration");
 if (revocationsOff && ownerMode) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"off\",\"warning\":\"FACTORY_TEST_SKIP_REVOCATIONS is set: revoked credentials are not read and cannot be revoked\"}}");
+// FACTORY_REVOCATIONS_ATTEMPT_SECONDS (45): the time limit of one read. FACTORY_REVOCATIONS_ALARM_SECONDS (180): failing for this long logs the error line.
+double RevSeconds(string name, double fallback, double min, double max) => double.TryParse(Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? Math.Clamp(v, min, max) : fallback;
+var revAttemptLimit = TimeSpan.FromSeconds(RevSeconds("FACTORY_REVOCATIONS_ATTEMPT_SECONDS", 45, 1, 120));
+var revAlarmAfter = TimeSpan.FromSeconds(RevSeconds("FACTORY_REVOCATIONS_ALARM_SECONDS", 180, 1, 3600));
+var revSince = DateTime.UtcNow; var revAttempts = 0;   // failed or timed-out attempts so far (read by /ready)
 if (!ownerMode || tokenSecret.Length == 0 || revocationsOff) revocationsLoaded.SetResult();
 else _ = Task.Run(async () =>
 {
+    var alarmed = false; var pause = 5.0;
     while (true)
     {
+        var why = "";
         try
         {
-            var (code, output) = await runner.RunAsync("revocations", "{}", TimeSpan.FromSeconds(120));
+            // a read that timed out gets longer the next time (the limit, then twice, then at most 120 s): a slow GitHub must not keep every attempt just short
+            var limit = TimeSpan.FromSeconds(Math.Min(120, revAttemptLimit.TotalSeconds * Math.Min(3, 1 + Volatile.Read(ref revAttempts))));
+            var (code, output) = await runner.RunAsync("revocations", "{}", limit);
             if (code == 0 && JsonNode.Parse(output)?["revoked"] is JsonObject list)
             {
                 foreach (var kv in list) if (Auth.ValidName(kv.Key) && kv.Value is JsonValue gv && gv.TryGetValue<int>(out var g) && g > 0) revocations.Raise(kv.Key, g);
+                if (Volatile.Read(ref revAttempts) > 0) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"loaded\",\"afterFailedAttempts\":{Volatile.Read(ref revAttempts)},\"since\":\"{revSince:o}\"}}");
                 revocationsLoaded.SetResult(); return;
             }
-            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"not-loaded\",\"exit\":{code}}}");
+            string? rc = null; try { rc = JsonNode.Parse(output)?["code"]?.ToString(); } catch { }
+            why = rc == "timeout" ? $"no answer within {revAttemptLimit.TotalSeconds:0} s" : $"exit {code}";
+            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"not-loaded\",\"exit\":{code},\"attempt\":{Volatile.Read(ref revAttempts) + 1}}}");
         }
-        catch (Exception e) { Console.Error.WriteLine($"revocations: {e.Message}"); }
-        await Task.Delay(TimeSpan.FromSeconds(5));
+        catch (Exception e) { why = e.GetType().Name; Console.Error.WriteLine($"revocations: {e.Message}"); }
+        var n = Interlocked.Increment(ref revAttempts);
+        if (!alarmed && DateTime.UtcNow - revSince >= revAlarmAfter)
+        {
+            alarmed = true;   // once: the line an operator searches for
+            Console.WriteLine(JsonSerializer.Serialize(new { at = DateTime.UtcNow.ToString("o"), level = "error", gateway = "not-ready", waitingFor = "revocations", attempts = n, since = revSince.ToString("o"), last = why,
+                reason = "the read of the revoked credentials at start keeps failing or timing out (rule script 'revocations': GET git/matching-refs of the work-orders repository); /ready stays 503 and no session credential is accepted until it succeeds; the gateway keeps retrying" }));
+        }
+        await Task.Delay(TimeSpan.FromSeconds(pause)); pause = Math.Min(60, pause * 2);
     }
 });
 
@@ -180,7 +201,8 @@ app.MapGet("/health", () => Results.Text("ok"));
 // liveness for the kit's hourly Health report (it asks every app for /alive, then /): the process answers, nothing else is checked
 app.MapGet("/alive", () => Results.Text("ok"));
 // readiness: the revoked credentials are read (at once where there is nothing to read), so a session credential is answered without waiting
-app.MapGet("/ready", () => revocationsLoaded.Task.IsCompleted ? Results.Text("ok") : Results.Text("starting", statusCode: 503));
+// (503 says what the start waits for, how many reads have failed and since when: {"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."})
+app.MapGet("/ready", () => revocationsLoaded.Task.IsCompleted ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = Volatile.Read(ref revAttempts), since = revSince.ToString("o") }, statusCode: 503));
 app.MapGet("/", () => Results.Redirect("/dashboard"));
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
 app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, pluginHash = PluginHash(), started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));

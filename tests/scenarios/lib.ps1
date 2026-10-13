@@ -155,6 +155,14 @@ function Check([string]$Name, [bool]$Ok, $Detail = '') {
     $script:Checks++
     if ($Ok) { Write-Host "    ok    $Name" } else { Write-Host "    FAIL  $Name  $Detail"; [void]$script:Failures.Add("$($script:Current): $Name $Detail") }
 }
+# A check that is known to fail now and then for a cause not yet found (docs/HANDOFF.md names it under -Issue). It runs and reports like any
+# check; when it fails it prints QUARANTINED (failed) with the detail and is counted in a total of its own (the suite summary and run-all show it),
+# and it does not fail the suite. When it passes it prints as any check. Use it only for a check with an open backlog entry, and remove it with the cause.
+$script:Quarantined = New-Object System.Collections.ArrayList
+function CheckQuarantined([string]$Name, [bool]$Ok, $Detail = '', [Parameter(Mandatory)][string]$Issue) {
+    $script:Checks++
+    if ($Ok) { Write-Host "    ok    $Name" } else { Write-Host "    QUARANTINED (failed)  $Name  $Detail  [$Issue]"; [void]$script:Quarantined.Add("$($script:Current): $Name $Detail [$Issue]") }
+}
 function CheckExit($Name, $r, [int]$Exit, [string]$Code = '') {
     $got = if ($r.ContainsKey('code')) { "$($r.code)" } else { '' }; $why = if ($r.ContainsKey('reason')) { "$($r.reason)" } else { '' }
     $ok = ($r.exit -eq $Exit) -and ((-not $Code) -or $got -eq $Code)

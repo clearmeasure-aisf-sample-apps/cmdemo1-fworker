@@ -89,7 +89,7 @@ if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
     # Group port ranges lie above every suite slot (6100 + 100 * slot, up to 7899): 10000 + 1000 * slot + 100 * group. TEST_PORT_BASE moves the first group; TEST_FAKE_PORT and TEST_API_PORT name one port each, so they cannot apply to several groups and are not passed on.
     $base0 = $(if ($env:TEST_PORT_BASE) { [int]$env:TEST_PORT_BASE } else { 10000 + 1000 * @($SuiteDefs | ForEach-Object { $_.Name }).IndexOf($Suite) })
     $gDir = Join-Path ([IO.Path]::GetTempPath()) "factory-groups-$([guid]::NewGuid().ToString('N').Substring(0,6))"; New-Item -ItemType Directory -Force -Path $gDir | Out-Null
-    $swAll = [Diagnostics.Stopwatch]::StartNew(); $kids = @(); $tot = 0; $fails = @(); $sc = @(); $skip = [ordered]@{}; $vc = 0; $vs = 0.0; $gv = 0; $cc = 0; $bad = $false
+    $swAll = [Diagnostics.Stopwatch]::StartNew(); $kids = @(); $tot = 0; $fails = @(); $sc = @(); $skip = [ordered]@{}; $vc = 0; $vs = 0.0; $gv = 0; $cc = 0; $bad = $false; $quar = @()
     $oB = $env:TEST_PORT_BASE; $oF = $env:TEST_FAKE_PORT; $oA = $env:TEST_API_PORT
     try {
         try {
@@ -110,15 +110,16 @@ if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
             $code = $k.proc.ExitCode; if ($code -ne 0) { $bad = $true; $fails += "group $($k.g) exited $code" }
             $r = $null; try { if (Test-Path $k.json) { $r = Get-Content -Raw $k.json | ConvertFrom-Json -AsHashtable } } catch { }
             if (-not $r -or -not $r.ContainsKey('checks')) { $bad = $true; $fails += "group $($k.g) produced no readable result file"; continue }
-            $tot += $r.checks; $fails += @($r.failures); $sc += @($r.scenarios); $vc += $r.verbCalls; $vs += $r.verbSeconds; $gv += $r.gatewayVerbLines; if ($r.ContainsKey('clientCrashes')) { $cc += [int]$r.clientCrashes }
+            $tot += $r.checks; $fails += @($r.failures); $sc += @($r.scenarios); $vc += $r.verbCalls; $vs += $r.verbSeconds; $gv += $r.gatewayVerbLines; if ($r.ContainsKey('clientCrashes')) { $cc += [int]$r.clientCrashes }; if ($r.ContainsKey('quarantined')) { $quar += @($r.quarantined | Where-Object { $_ }) }
             foreach ($x in @($r.skipped)) { if ($x) { $skip["$($x.suite)`t$($x.name)"] = $x } }
         }
         if ($tot -eq 0) { $bad = $true; $fails += 'no checks ran' }
         Write-Host ""; Write-Host "$tot checks, $($fails.Count) failed"; $fails | ForEach-Object { Write-Host "  FAILED: $_" }
+        if ($quar.Count) { Write-Host "quarantined failures: $($quar.Count) (reported, not counted as failed)"; $quar | ForEach-Object { Write-Host "  QUARANTINED: $_" } }
         if ($Tier -eq 'fast') { Write-Host "skipped as full-tier: $($skip.Count) scenarios" }
         Write-Host ("verbs: {0} client calls, {1:N1}s in them; groups: {2}; suite took {3:N0}s" -f $vc, $vs, $Groups, $swAll.Elapsed.TotalSeconds)
         if ($cc) { Write-Host "client crashes: $cc client calls ended with pwsh exit 139 (segmentation fault): machine load or the runtime, not a product answer" }
-        if ($ResultFile) { [ordered]@{ suite = $Suite; checks = $tot; failed = $fails.Count; clientCrashes = $cc; failures = @($fails); seconds = [math]::Round($swAll.Elapsed.TotalSeconds, 1); verbCalls = $vc; verbSeconds = [math]::Round($vs, 1); tier = $Tier; skipped = @($skip.Values); scenarios = @($sc); gatewayVerbLines = $gv; groups = $Groups; portBase = $base0 } | ConvertTo-Json -Depth 4 | Set-Content -Path $ResultFile }
+        if ($ResultFile) { [ordered]@{ suite = $Suite; checks = $tot; failed = $fails.Count; quarantined = @($quar); clientCrashes = $cc; failures = @($fails); seconds = [math]::Round($swAll.Elapsed.TotalSeconds, 1); verbCalls = $vc; verbSeconds = [math]::Round($vs, 1); tier = $Tier; skipped = @($skip.Values); scenarios = @($sc); gatewayVerbLines = $gv; groups = $Groups; portBase = $base0 } | ConvertTo-Json -Depth 4 | Set-Content -Path $ResultFile }
     } finally {
         foreach ($k in $kids) { try { if (-not $k.proc.HasExited) { $k.proc.Kill($true) } } catch { } }
         Remove-Item -Recurse -Force $gDir -ErrorAction SilentlyContinue
@@ -202,11 +203,12 @@ $sw.Stop()
 Write-Host ""
 Write-Host "$($script:Checks) checks, $($script:Failures.Count) failed"
 $script:Failures | ForEach-Object { Write-Host "  FAILED: $_" }
+if ($script:Quarantined.Count) { Write-Host "quarantined failures: $($script:Quarantined.Count) (reported, not counted as failed)"; $script:Quarantined | ForEach-Object { Write-Host "  QUARANTINED: $_" } }
 if ($Tier -eq 'fast') { Write-Host "skipped as full-tier: $($script:Skipped.Count) scenarios" }
 if ($script:ClientCrashes) { Write-Host "client crashes: $($script:ClientCrashes) client calls ended with pwsh exit 139 (segmentation fault). That is the machine (load, memory) or the runtime, not an answer of the product: run the failed scenarios again on a quiet machine before reading them as defects." }
 if ($script:VerbCalls) { Write-Host ("verbs: {0} client calls, {1:N1}s in them ({2:N2}s per call); gateway logged {3} verb lines; suite took {4:N0}s" -f $script:VerbCalls, $script:VerbSeconds, ($script:VerbSeconds / $script:VerbCalls), $script:GwVerbs, $sw.Elapsed.TotalSeconds) }
 if ($ResultFile) {
-    [ordered]@{ suite = $label; slot = $slot; checks = $script:Checks; failed = $script:Failures.Count; failures = @($script:Failures); seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    [ordered]@{ suite = $label; slot = $slot; checks = $script:Checks; failed = $script:Failures.Count; quarantined = @($script:Quarantined); failures = @($script:Failures); seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
         verbCalls = $script:VerbCalls; verbSeconds = [math]::Round($script:VerbSeconds, 1); clientCrashes = $script:ClientCrashes; tier = $Tier; skipped = @($script:Skipped); scenarios = @($script:ScenarioStats); gatewayVerbLines = $script:GwVerbs; portBase = $script:PortBase } | ConvertTo-Json -Depth 4 | Set-Content -Path $ResultFile
 }
 exit ([int]($script:Failures.Count -gt 0))

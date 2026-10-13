@@ -99,6 +99,8 @@ Write-Host ("cpu: {0:N0} CPU-seconds in the run's processes = {1:N0}s wall-clock
 Write-Host ("memory: available {0:N0} MB at start, lowest {1:N0} MB (peak use by the run {2:N0} MB), at most {3} suites at once" -f $startAvail, $minAvail, ($startAvail - $minAvail), $peakRunning)
 $crashes = 0; foreach ($n in $results.Keys) { if ($results[$n].Contains('clientCrashes')) { $crashes += [int]$results[$n].clientCrashes } }
 if ($crashes -gt 0) { Write-Host "client crashes: $crashes client calls ended with pwsh exit 139 (segmentation fault): machine load or the runtime, not a product answer; run the failed scenarios again on a quiet machine before reading them as defects" }
+$quar = @(); foreach ($n in $results.Keys) { if ($results[$n].Contains('quarantined')) { foreach ($f in @($results[$n].quarantined | Where-Object { $_ })) { $quar += "[$n] $f" } } }
+Write-Host "quarantined failures: $($quar.Count) (checks with an open backlog entry that failed; reported, not counted as failed)"; $quar | ForEach-Object { Write-Host "  $_" }
 if ($failed -gt 0) { Write-Host ""; Write-Host 'FAILURES:'; foreach ($n in $results.Keys) { foreach ($f in @($results[$n].failures)) { Write-Host "  [$n] $f" } } }
 
 $allRun = @(); foreach ($n in $results.Keys) { $allRun += @($results[$n].scenarios) }

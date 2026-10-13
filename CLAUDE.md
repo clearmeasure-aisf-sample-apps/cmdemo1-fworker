@@ -93,8 +93,12 @@ The same image is promoted to uat and prod, so the settings travel with it.
 5. When every check is green on the head commit: `gh pr merge N --squash --match-head-commit <full sha>`. Pull requests of this
    repository merge without a GitHub review once green (owner decision); the review of step 3 is the review.
 6. The merge is the release to tdd: Build of `master` (image only), then `release.yml` pushes that image to the registry and creates the
-   Octopus release of project `cmdemo1-fworker`, whose lifecycle deploys it to tdd. About 4 minutes from merge to live. Verify with
-   `curl -s <tdd url>/_build` (version `1.0.<Build run number>`, `pluginHash`) and `curl -s -o /dev/null -w '%{http_code}' <tdd url>/ready`.
+   Octopus release of project `cmdemo1-fworker`, whose lifecycle deploys it to tdd. About 4 minutes from merge to live.
+   **A release is done only when both are true**: `curl -s <tdd url>/_build` shows the new version (`1.0.<Build run number>`,
+   `pluginHash`) AND `curl -s -o /dev/null -w '%{http_code}' <tdd url>/ready` answers 200. `/health` 200 is not enough: on 2026-10-13 a
+   release was live and never ready for 49 minutes. A 503 of `/ready` says what the start waits for
+   (`{"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."}`); if it has not turned 200 a few minutes after the
+   deployment, treat it as an outage: find the cause or roll back.
 7. uat and prod are manual promotions by the operator (Octopus sign-off, the demo-environment kit). A session does not promote to them.
 
 A gateway restart drops the in-memory state (below): deploy to tdd only when the plant is quiet, say so beforehand, and check afterwards
@@ -108,6 +112,10 @@ that the workers reconnected. Roll back by reverting the pull request.
 - **Credentials are not here.** The operator token of a gateway, the Octopus key and the GitHub App keys live in the owner's keyring and
   in the environments' vaults. A session gets what it needs as environment secrets (names in `docs/HANDOFF.md`). Never print one.
 - **Tests green before merge**; a red suite is investigated, not retried until green (except a pwsh crash, see above).
+  A check whose failure has an open backlog entry and no known cause may be a `CheckQuarantined` (tests/scenarios/lib.ps1): it reports
+  and is counted as a quarantined failure without failing the suite. Read that count in every summary.
+- **The fake GitHub behaves like GitHub.** Where the product depends on how an endpoint pages, orders, limits or refuses, the default of
+  `tests/FakeGitHub` is what GitHub really does; another behaviour is a test control a scenario switches on.
 - **Messaging state is in memory.** Messages, questions, presence, the worker registry and the supervisor slot live in the gateway process;
   a restart loses them (senders are told what was lost, workers register again). The durable truth is the board, the item state comments
   and the revocation refs in the work-orders repository. Do not design a feature that assumes a message survives a restart.

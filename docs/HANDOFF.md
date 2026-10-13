@@ -39,7 +39,8 @@ Checks that need no credential:
 ```bash
 U=https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io
 curl -s $U/_build                                  # version, pluginHash, started (a new start time means a restart), environment
-curl -s -o /dev/null -w '%{http_code}\n' $U/ready  # 200 when the revoked credentials are read; 503 "starting" before
+curl -s $U/ready                                   # 200 "ok" when the revoked credentials are read; before that 503 and
+                                                   # {"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."}
 curl -s -o /dev/null -w '%{http_code}\n' $U/health # liveness (also /alive)
 # dashboard, in a browser: $U/dashboard  (asks for the operator token)
 ```
@@ -124,7 +125,13 @@ a. **Done (2026-10-13): the plant manager reports problems to the operator proac
    workers that are busy without calling a verb (raise `timing.mgrQuietMinutes` if they are noise), and run the stress test once.
 b. **The operator session role.** Done 2026-10-13: credential kind `o1.`, one slot, connect prompt, skill `factory-operator`, the
    quiet-plant check and the daily limit enforced by the gateway (`docs/design/operator-session.md`). Open: it has not run live on tdd
-   (section 6a), and nothing on the GitHub side stops a merge into a protected area (the rule is in the skill only).
+   (section 6a). Since 2026-10-13 a ruleset of the default branch requires the owner's review for the paths of `.github/CODEOWNERS`.
+   Open items of the review of the role:
+   - a second operator name gets a fresh note allowance (the limit on notes is kept per name, so `operator.allowedNames` with two names
+     doubles it);
+   - the answers of the operator session to questions are not rate limited;
+   - the caps on notes and on budget grants are in memory and start again at every restart of the gateway (a self-merged release is a
+     restart).
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
@@ -150,9 +157,19 @@ d. **The state comment can be edited by anyone with write access; the gateway tr
    4. unsigned states accepted only when `created_at` and `updated_at` are both before a cutoff, and a deployment order that leaves no
       window in which the old version still writes unsigned;
    5. a decided, documented way for the operator to recover an item (restore the comment, supply the key, or start the item anew).
-p. **Two more flaky checks seen on GitHub's runners, causes not found**: qc suite, "the owner assignment is still accepted next to the QC
-   one"; manager suite, the "dashboard Sessions panel" scenario. Reproduce with `/_fake/latency` as for entries l and the qc-gate one
-   below; look first for a state read before a save and for a start-up sweep of a second gateway that reads the fake GitHub.
+p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC accept and a refused release leave the owner of the item
+   alone", check "the owner assignment is still accepted next to the QC one". It failed the first check run of the hotfix of the incident
+   below and so lengthened the outage. It is a `CheckQuarantined` (tests/scenarios/lib.ps1): it runs, a failure prints
+   `QUARANTINED (failed)` with its detail and is counted under "quarantined failures" in the summary of the suite and of `run-all.ps1`,
+   and it does not fail the suite. What is known: in the failed run the plant listed only the QC assignment for the item while `owners`
+   still named the owner; the scenario passes locally also with 25 s added before the check, so time alone is not the cause; no claim is
+   in the item state at that point (the PASS verdict without `Auto Merge` parks the item and ends the claim), so the owner is then kept
+   by the plant's memory only. The one path of `Plant.cs` that removes an accepted own-item assignment without a release or a merge is
+   "the session is gone" in the plan (an offer for an item whose assignment was accepted more than 20 s ago); it also drops the owner, and
+   a later sweep that still reads the live claim names the owner again. Suspected, not shown: a sweep that read the item before the accept
+   was saved and whose plan was applied more than 20 s after it. The check now prints the item's journal: a `reassigned` line in the next
+   failure confirms this. Remove the quarantine with the cause.
+q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
 Closed on 2026-10-13 (pull request "hardening"):
 
@@ -162,7 +179,8 @@ Closed on 2026-10-13 (pull request "hardening"):
   QC assignment" read the plant before the failing call had returned. Each now waits for the condition.
 
 - **(c) One revocation ref per name, paging reader.** A revoke writes the higher generation, reads it back, then removes the name's lower
-  refs; a removal that fails leaves a ref and nothing else (the reader takes the highest). The reader reads pages until one is empty.
+  refs; a removal that fails leaves a ref and nothing else (the reader takes the highest). The reader read pages until one was empty:
+  that was the cause of the incident of 2026-10-13 below, and it now also ends on a page that brings nothing new and after 200 pages.
 - **(d, first half) Fast path fallback.** The body marker counts only for items created before `timing.docsOnlyLegacyBefore`
   (2026-10-16T00:00:00Z; it depends on nothing that is deployed, so there is no deadline). `.cursor/` is no longer documentation; a
   finding's quote ends at the first separator; the fake GitHub uses the product's `docsOnlyPaths`. The editable state comment is open:
@@ -178,6 +196,10 @@ Closed on 2026-10-13 (pull request "hardening"):
   webhook); the gateway already turns it into a sweep.
 - **(h) `factory.ps1 update-pr --item N --body-file <file>`** replaces the body of the item's own open pull request (item token, owner role),
   only while the item is in Development (`wrong-column` afterwards).
+- **Manager suite, "dashboard Sessions panel" check, flaky on slow runners: a test order assumption** (closed in the follow-up of the
+  incident). The check wanted the scenario's worker as the first row of the Workers group. A client that an earlier scenario of the same
+  group left running connects to the scenario's second gateway as well (same port) and is then listed first; the failed run shows such
+  a row before the expected one. The check now accepts other rows before it.
 - **(l) Manager suite, revoke scenario, flaky on slow runners: a test order assumption.** The scenario's second gateway reads the fake
   GitHub, so its start-up sweep plans the whole board; when that sweep ended between the session's second registration and the scenario's
   own plan, another item was offered first and the session (capacity 1) was not offered the expected one. The scenario now waits for the
@@ -199,11 +221,35 @@ new start in the Container Apps console log, and the system log of the revision 
 |---|---|---|
 | Scale-in (tdd and uat scale to zero) or a replica move | The platform's HTTP scale rule decides; whether an open event stream counts as a request for it is not visible in this repository. A new revision or a node drain does the same | Console log ends with `"gateway":"stopping"` (with `upSeconds`); the system log has a scale, revision or replica event at that time. If streams do not count, set a minimum of one replica for tdd (operator, the demo-environment kit) |
 | Out of memory | One `pwsh` per rule-script call, unlimited (entry n) | No `stopping` and no `unhandled-exception` line before the new start; the system log says OOMKilled or exit code 137 |
-| A probe failing | `/health` and `/alive` answer 200 from the first moment and wait on nothing; `/ready` is 503 until the revoked credentials are read (retried every 5 s while GitHub fails). `/ready` must not be the liveness probe | The system log shows failed probes, then a restart; the console log has `stopping` |
+| A probe failing | `/health` and `/alive` answer 200 from the first moment and wait on nothing; `/ready` is 503 until the revoked credentials are read (each read has 45 s, a failed one is tried again after 5 s doubling to 60 s; after 3 minutes one `"level":"error"` line with `"waitingFor":"revocations"`). `/ready` must not be the liveness probe | The system log shows failed probes, then a restart; the console log has `stopping` |
 | An unhandled exception | Fixed here: the sweeper let a cancellation that was not the shutdown escape (the default of .NET then stops the host); the runner pool's exit handler ran unguarded. A background service that throws no longer stops the host | A `"gateway":"unhandled-exception"` or `"unobserved-task-exception"` line, or a `crit:` line of the host |
 
 HTTP 503 after any start is by design: no worker, supervisor or item credential is answered until the revoked credentials are read (a
-request waits up to 20 s, then 503 `starting` with `retryAfterSeconds`). The operator token does not wait.
+request waits up to 20 s, then 503 `starting` with `retryAfterSeconds`). The operator token does not wait. A start that stays there is a
+defect to act on: `/ready` says what it waits for and how many reads failed.
+
+### Incident of 2026-10-13: release 1.0.58 never became ready on tdd (18:09 to 18:58 UTC)
+
+- **What.** After the release `/ready` answered 503 `starting` and no worker, supervisor or item credential was accepted for 49 minutes.
+  `/health` stays 200 in that state, so liveness alone did not show it.
+- **Cause.** The reader of the revocation refs (`Get-RevokedRefs`, plugin/scripts/lib/Owner.ps1, the paging reader of pull request 22) asked GitHub's
+  `git/matching-refs` for page after page until one came back empty. GitHub takes no page number there: it answers the same refs every
+  time, so the loop never ended, every read ran into its time limit and was started again.
+- **Why the tests and the review missed it.** The fake GitHub did page that endpoint, so the scenario of the paging reader passed against a
+  behaviour GitHub does not have. The review read the reader against the fake's behaviour too. Nothing checked `/ready` after the release.
+- **The fix.** Hotfix (pull request 26): the reader ends on an empty page, on a page that brings nothing new, and after 200 pages. Its own
+  first check run failed on an unrelated flaky check (entry p), which lengthened the outage. Follow-up: the fake answers every ref on
+  every page as GitHub does (it pages only for the scenario that asks, `/_fake/ref-page`); a scenario starts a gateway against more than
+  100 refs on the non-paging fake and fails on the reader of 1.0.58; the read at start has a time limit per attempt, backs off, logs one
+  error line after 3 minutes and `/ready` says `waitingFor: revocations` with the number of failed reads; a scenario covers a GitHub that
+  does not answer. The gateway still does not fail open.
+- **The lessons.** (1) A release is done when `/_build` shows the new version AND `/ready` is 200, not before (`CLAUDE.md`, Release).
+  (2) The fake must behave like GitHub wherever the product depends on GitHub's behaviour: before relying on paging, ordering, a status
+  code or a limit of an endpoint, check GitHub's documentation or the real answer, and make the fake do the same by default.
+- **Same pattern elsewhere.** `Verb_operator_releases` (plugin/scripts/lib/OperatorRelease.ps1, a protected path) pages the same endpoint
+  and stops on a page of fewer than 100 rows or after 10 pages. With 100 or more release refs of one day GitHub would answer the same
+  list ten times: nine wasted calls, no endless loop, and the count stays right because a pull request is counted once. Left as it is;
+  the owner may bound it like the revocation reader.
 
 
 Smaller, known: the Octopus project's uat and prod run older versions than tdd until the operator promotes; `docs/deploy/MORNING.md` and
@@ -252,8 +298,12 @@ Enforced by the gateway: where its credential is admitted; that its notes and an
 operator's; the limits on its notes and budget grants; the quiet-plant check (a question it answered itself does not count as quiet
 for ten minutes); the daily limit; the release records. By the session's skill only: everything about the merge (green checks, review,
 protected areas, announcement, verification, rollback, recording), because merging happens on GitHub. For real enforcement there the
-owner sets: CODEOWNERS plus a required code-owner review on the protected paths, no bypass right for the session's GitHub identity,
-and no push right for it in the work-orders repository (`docs/design/operator-session.md` section 5).
+owner sets (`docs/design/operator-session.md` section 5):
+
+- done 2026-10-13: `.github/CODEOWNERS` and a ruleset of the default branch that requires a code-owner review for those paths;
+- for the session's GitHub account: one that is not an organization admin (an admin can bypass the ruleset) and has no bypass right;
+- no push access for that account to the work-orders repository (`cmdemo1-workorders`): the session improves the factory, it never
+  works on the application.
 
 ## 7. History in one paragraph
 
