@@ -64,7 +64,7 @@ function Verb_get_item($a) {
     $out = @{
         ok = $true; id = $n; title = $info.title; body = $info.body; status = $info.column; open = $info.open; labels = $info.labels; url = $info.url
         comments = $comments
-        docs_only = $info.body.Contains($c.docsOnlyMarker)
+        docs_only = (Test-ItemDocsOnly $st.state $info)
         demo_evidence = $(if (Test-Label $info $c.videoLabel) { 'video' } else { 'screenshot' })
         auto_merge = (Test-Label $info $c.autoMergeLabel)
         state = (Get-PublicState $st.state)
@@ -81,7 +81,11 @@ function Verb_get_item($a) {
         $ex = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url }
         if ((Test-Has $st.state 'pr') -and (Test-Has $st.state.pr 'rejection')) { $ex.rejection = $st.state.pr.rejection }
         if ((Test-Has $st.state 'pr') -and (Test-Has $st.state.pr 'failed_checks')) { $ex.failed_checks = $st.state.pr.failed_checks }
+        # docs-only fast path: what the script knows about the build and the way to verify (Get-BuildOwed in Prs.ps1)
+        $bo = Get-BuildOwed $info $pr.number $st.state
+        $ex.docs_only_files = $bo.docs_only_files
         $out.existing_pr = $ex
+        $out.build_owed = $bo.build_owed; $out.build_reason = $bo.build_reason; $out.verification = $bo.verification
     }
     return $out
 }
@@ -90,6 +94,12 @@ function Verb_append_body($a) {
     $n = Get-ItemNumber $a; $content = "$(Need $a 'content')"
     if ($content.Trim() -eq '') { Reject 2 'nothing-to-append' 'There is nothing to append. Send non-blank markdown content.' }
     $info = Get-ItemInfo $n; Assert-Open $info; Assert-ColumnMatches $info $a
+    # The docs-only decision is a fact of the design step, kept in the item state: the marker counts only when it arrives with the design section,
+    # appended in the design column. Marker text anywhere else (typed into the issue, appended from another column) is refused or ignored.
+    $c0 = Get-Cfg; $hasMarker = $content.Contains($c0.docsOnlyMarker)
+    $designCol = Test-Has $c0.requiredBodySection "$($info.column)"
+    $isDesign = $designCol -and $content.IndexOf($c0.requiredBodySection["$($info.column)"], [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if ($hasMarker -and -not $isDesign) { Reject 10 'docs-only-marker-not-allowed' "the marker $($c0.docsOnlyMarker) is accepted only inside the design section, appended while the item is in its design column; remove it from this text" }
     $new = $info.body.TrimEnd() + "`n`n" + $content.Trim() + "`n"
     Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/$n" -Body @{ body = $new } | Out-Null
     $check = Get-ItemInfo $n
@@ -98,6 +108,7 @@ function Verb_append_body($a) {
     $st = Get-State $n
     if (-not (Test-Has $st.state 'last_append')) { $st.state.last_append = @{} }
     $st.state.last_append[$info.column] = ConvertTo-Iso (Get-UtcNow)
+    if ($isDesign) { $st.state.design = @{ docs_only = $hasMarker; at = ConvertTo-Iso (Get-UtcNow) } }   # the latest design section decides
     Save-State $n $st
     return @{ ok = $true; id = $n; appended = $true; bodyLength = $check.body.Length }
 }
@@ -193,12 +204,55 @@ function Verb_record_review($a) {
     $st = Get-State $n; $s = $st.state
     if (-not (Test-Has $s 'reviews')) { $s.reviews = @{} }
     $rv = if (Test-Has $s.reviews $col) { $s.reviews[$col] } else { @{ round = 0 } }
-    if ([int]$rv.round -ge [int]$c.timing.maxReviewRounds) { Reject 10 'review-rounds-exhausted' "the review loop is limited to $($c.timing.maxReviewRounds) rounds; report the failure with succeeded=false" }
+    # Docs-only fast path (plant-manager.md section 10a): the design of an item whose body carries the docs-only marker gets one review round, and a
+    # second one only for a finding that quotes the item. Items without the marker, and every other column, keep maxReviewRounds and the free form.
+    $fast = (Test-DocsOnlyDesignReview $s $col); $max = [int]$c.timing.maxReviewRounds
+    if ($fast) { $max = [Math]::Min($max, $(if (Test-Has $c.timing 'docsOnlyMaxReviewRounds') { [int]$c.timing.docsOnlyMaxReviewRounds } else { 2 })) }
+    if ([int]$rv.round -ge $max) { Reject 10 'review-rounds-exhausted' "the review loop is limited to $max rounds$(if ($fast) { ' for a docs-only design' }); report the failure with succeeded=false" }
+    $grounded = $null
+    if ($fast -and $verdict -eq 'FINDINGS') {
+        $grounded = Get-GroundedFindings $info $col $lines
+        if ($grounded.accepted.Count -eq 0) {
+            Reject 10 'finding-without-criterion' 'this is a docs-only design: a finding counts only as a line `FINDING: criterion "<text copied from the item>" - <what the design fails to do>` or `FINDING: file "<path named in the design>" - outside the scope`, with the quoted text found word for word in the item (criterion: above the design section; file: inside it). No such line was found, so there is no finding and no round was used: record the review again with REVIEW: COMPLETE as its last line, or quote the criterion.' @{ dropped = $grounded.dropped }
+        }
+    }
     $rv.round = [int]$rv.round + 1; $rv.last = $verdict; $rv.at = ConvertTo-Iso (Get-UtcNow)
     $rv.ref = if ($verdict -eq 'COMPLETE') { 'rv-' + [guid]::NewGuid().ToString('N').Substring(0, 10) } else { $null }
     $s.reviews[$col] = $rv
     Save-State $n $st
-    return @{ ok = $true; id = $n; verdict = $verdict; round = $rv.round; review_ref = $rv.ref }
+    $out = @{ ok = $true; id = $n; verdict = $verdict; round = $rv.round; review_ref = $rv.ref; max_rounds = $max }
+    if ($grounded) { $out.findings = $grounded.accepted; $out.dropped = $grounded.dropped }
+    return $out
+}
+
+# The docs-only fast path applies to the review of the design column (the one with a required body section) once the body carries the marker.
+function Test-DocsOnlyDesignReview($State, [string]$Column) {
+    return ((Test-Has (Get-Cfg).requiredBodySection $Column) -and (Test-ItemDocsOnly $State))
+}
+
+# Findings of a docs-only design review that the item itself backs: the quoted text is compared with the body, whitespace folded, case kept.
+# criterion: at least 8 characters, found ABOVE the design section (the item's own text, never the design quoting itself).
+# file: found INSIDE the design section (a file the design names).
+# The quote runs from the first double quote after the keyword to the last one before the " - " separator, so a criterion may itself contain quotes.
+function Get-GroundedFindings($Info, [string]$Column, $Lines) {
+    $fold = { param($t) (("$t" -replace '\s+', ' ').Trim()) }
+    $body = "$($Info.body)"; $sec = (Get-Cfg).requiredBodySection[$Column]
+    $at = $body.IndexOf($sec, [StringComparison]::OrdinalIgnoreCase)
+    $own = & $fold $(if ($at -ge 0) { $body.Substring(0, $at) } else { $body })
+    $design = & $fold $(if ($at -ge 0) { $body.Substring($at) } else { '' })
+    $accepted = @(); $dropped = 0
+    foreach ($l in @($Lines)) {
+        if ("$l" -cnotmatch '^[-*\s]*FINDING:') { continue }
+        $ok = $false
+        if ("$l" -cmatch '^[-*\s]*FINDING:\s*(criterion|file)\s+"(.+)"\s+-\s+\S') {
+            $kind = $Matches[1]; $q = & $fold $Matches[2]
+            if ($kind -eq 'criterion') { $ok = $q.Length -ge 8 -and $own.Contains($q) }
+            else { $ok = $q.Length -ge 3 -and $design.Contains($q) }
+            if ($ok) { $accepted += @{ kind = $kind; quote = $q } }
+        }
+        if (-not $ok) { $dropped++ }
+    }
+    return @{ accepted = @($accepted); dropped = $dropped }
 }
 
 function Move-NextInternal($Info, $Reason) {
@@ -273,6 +327,8 @@ function Verb_complete($a) {
         if (-not $rv -or -not $rv.ref -or $rv.ref -ne $ref) { Reject 10 'review-ref-invalid' 'no recorded REVIEW: COMPLETE matches review_ref; call record-review first' }
     }
     if ($col -ine $c.columns.development) {
+        # leaving the design column always leaves an explicit decision behind: no design append recorded one, so it is not docs-only
+        if ((Test-Has $c.requiredBodySection $col) -and -not ((Test-Has $s 'design') -and (Test-Has $s.design 'docs_only'))) { $s.design = @{ docs_only = $false; at = ConvertTo-Iso (Get-UtcNow) } }
         return Finish-ColumnExit $n $info $st "$comment"
     }
     # 3. Development: a real pull request with green checks
@@ -281,8 +337,8 @@ function Verb_complete($a) {
     $prd = Get-Pr $pr.number
     if ([int]$prd.changed_files -eq 0) { Reject 10 'empty-pr' 'pull request changes no files; an empty pull request is not a delivery' @{ prNumber = $pr.number } }
     $docsOnly = Test-DocsOnlyFiles (Get-PrFiles $pr.number)
-    if ($docsOnly -and -not $info.body.Contains($c.docsOnlyMarker)) {
-        Reject 10 'development-docs-only-pr' "the pull request changes only documentation and the item does not carry $($c.docsOnlyMarker)" @{ prNumber = $pr.number }
+    if ($docsOnly -and -not (Test-ItemDocsOnly $s $info)) {
+        Reject 10 'development-docs-only-pr' "the pull request changes only documentation and the item's technical design did not record it as docs-only ($($c.docsOnlyMarker) inside the design section)" @{ prNumber = $pr.number }
     }
     $chk = Get-ChecksFor $prd.head.sha
     if ($chk.status -eq 'failure') {
@@ -300,5 +356,5 @@ function Verb_complete($a) {
     }
     $s.Remove('fix_forward_rounds')
     if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
-    return Finish-ColumnExit $n $info $st "$comment" @{ prNumber = $pr.number }
+    return Finish-ColumnExit $n $info $st "$comment" @{ prNumber = $pr.number; build_owed = -not ($docsOnly -and (Test-ItemDocsOnly $s $info)) }
 }
