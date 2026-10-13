@@ -76,7 +76,14 @@ builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredServi
 builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, publicUrl, tokenSecret));
 builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode));
 builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()));
+// A background loop that throws must not end the process (the default of .NET stops the host): the loops catch and go on, and this is the net under them.
+builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
+// What ended a process is in its last lines: an exception nobody caught (a crash), or "stopping" (the platform asked: SIGTERM at a scale-in, a new
+// revision, a failed probe). Neither line present means the process was killed outright (out of memory).
+AppDomain.CurrentDomain.UnhandledException += (_, ue) => { try { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"unhandled-exception\",\"terminating\":{(ue.IsTerminating ? "true" : "false")},\"type\":{JsonSerializer.Serialize(ue.ExceptionObject?.GetType().FullName ?? "")},\"message\":{JsonSerializer.Serialize((ue.ExceptionObject as Exception)?.Message ?? "")}}}"); } catch { } };
+TaskScheduler.UnobservedTaskException += (_, te) => { try { te.SetObserved(); Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"unobserved-task-exception\",\"type\":{JsonSerializer.Serialize(te.Exception.InnerException?.GetType().FullName ?? "")},\"message\":{JsonSerializer.Serialize(te.Exception.InnerException?.Message ?? "")}}}"); } catch { } };
 var app = builder.Build();
+app.Lifetime.ApplicationStopping.Register(() => { try { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"stopping\",\"reason\":\"shutdown requested (signal or host)\",\"upSeconds\":{(long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds}}}"); } catch { } });
 var hub = app.Services.GetRequiredService<EventHub>();
 var runner = app.Services.GetRequiredService<Runner>();
 var plant = app.Services.GetRequiredService<Plant>();
@@ -1016,9 +1023,14 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        await Task.Delay(TimeSpan.FromSeconds(3), ct);
+        try { await Task.Delay(TimeSpan.FromSeconds(3), ct); } catch (OperationCanceledException) { return; }
+        // An item new in a working column is offered by the second sweep that sees it there (timing.sweepSeenCount, so a card dragged across the
+        // board starts nothing). That second look must not cost a whole interval: after a sweep that saw such an item the next one runs after
+        // FACTORY_SWEEP_CONFIRM_SECONDS (20). Before, a new item waited up to two intervals (6 minutes at 180 s) for its first offer.
+        var confirmSeconds = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_CONFIRM_SECONDS"), out var cs0) && cs0 > 0 ? cs0 : 20;
         while (!ct.IsCancellationRequested)
         {
+            var soon = false;
             try
             {
                 var (code, output) = await runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(280));
@@ -1026,6 +1038,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 if (code == 0)
                 {
                     var j = JsonNode.Parse(output)!;
+                    soon = j["unconfirmed"] is JsonArray { Count: > 0 };
                     var acts = j["actions"]!.AsArray();
                     if (ownerMode)
                     {
@@ -1057,8 +1070,10 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 }
                 else Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"failed\",\"exit\":{code},\"out\":{JsonSerializer.Serialize(output.Length > 300 ? output[..300] : output)}}}");
             }
-            catch (Exception e) when (e is not OperationCanceledException) { Console.WriteLine($"{{\"sweep\":\"error\",\"message\":{JsonSerializer.Serialize(e.Message)}}}"); }
-            try { await hub.WaitForSweepSignal(TimeSpan.FromSeconds(seconds), ct); await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { }
+            // only the host's own stop ends the loop: a cancellation from anywhere else (a timeout inside a call) is an error of this sweep, not the end of sweeping
+            catch (Exception e) when (!ct.IsCancellationRequested) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"error\",\"type\":{JsonSerializer.Serialize(e.GetType().Name)},\"message\":{JsonSerializer.Serialize(e.Message)}}}"); }
+            catch (Exception) { return; }
+            try { await hub.WaitForSweepSignal(TimeSpan.FromSeconds(soon ? Math.Min(seconds, confirmSeconds) : seconds), ct); await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } catch (Exception e) { Console.Error.WriteLine($"sweep wait: {e.Message}"); try { await Task.Delay(2000, ct); } catch (OperationCanceledException) { } }
         }
     }
 }
@@ -1305,12 +1320,19 @@ $('logbox').ontoggle=()=>refresh();
 // One token entry: Connect stores it (this tab's sessionStorage only, never a URL) and every action below uses it. While connected
 // the token box is hidden; it comes back only when the gateway refuses the token or after Disconnect.
 function showConn(on){$('tokrow').hidden=on;$('conn').hidden=!on}
-async function refresh(){if(!tok)return;try{info=await api('/api/v1/dashboard');showConn(true);$('msg').textContent='';$('env').textContent=info.environment;$('sub').textContent=(info.ownerMode?'Owner mode: ':'Broadcast mode: ')+info.url;
+// What a token showed is taken off the page when that token goes (Disconnect, or the gateway refused it): nothing of it stays readable.
+function clearData(){hideMessaging();$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;
+$('oprows').innerHTML='<tr><td colspan="9" class="mut">Nothing was sent to the operator.</td></tr>';$('qrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('dlog').innerHTML='<tr><td class="mut">none</td></tr>';$('logrows').innerHTML='<tr><td colspan="8" class="mut">none</td></tr>';
+$('qcounts').textContent=$('digest').textContent=$('costtext').textContent='';$('opbadge').hidden=$('qbadge').hidden=true}
+// t: the token this refresh started with. An answer that arrives after Disconnect (or after another token was entered) is dropped, and what the
+// steps in between drew is cleared. A refused token is forgotten, so the 4 second timer asks nothing more until the next Connect.
+async function refresh(){if(!tok)return;const t=tok;try{const d=await api('/api/v1/dashboard');if(tok!==t)return;info=d;showConn(true);$('msg').textContent='';$('env').textContent=info.environment;$('sub').textContent=(info.ownerMode?'Owner mode: ':'Broadcast mode: ')+info.url;
 const w=info.plant.workers||[];if(info.messaging&&info.messaging.enabled)await refreshMessaging(w);else{hideMessaging();
 $('rows').innerHTML=w.length?groupedRows(w,workerRowHtml,8).html:'<tr><td colspan="8" class="mut">No session has connected yet.</td></tr>'}
-const a=info.plant.assignments||[];$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';await refreshQc()}catch(e){if(e.message==='token refused'){info=null;showConn(false)}$('msg').textContent=e.message}}
+if(tok!==t){if(!tok)clearData();return}
+const a=info.plant.assignments||[];$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
 $('go').onclick=()=>{const v=$('tok').value.trim();if(!v){$('msg').textContent='paste the operator token first';return}tok=v;sessionStorage.setItem('ftok',tok);$('tok').value='';refresh()};
-$('bye').onclick=()=>{tok='';info=null;sessionStorage.removeItem('ftok');$('tok').value='';showConn(false);hideMessaging();$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('prompt').value='';$('msg').textContent='Disconnected.'};
+$('bye').onclick=()=>{tok='';info=null;sessionStorage.removeItem('ftok');$('tok').value='';showConn(false);clearData();$('prompt').value='';$('msg').textContent='Disconnected.'};
 $('rows').onclick=async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.a==='message'){askNote(b.dataset.n,b.dataset.n);return}if(b.dataset.a==='revoke'&&!confirm('Revoke every credential of '+b.dataset.n+'? Its session stops; create a new prompt to connect it again.'))return;if(document.activeElement)document.activeElement.blur();try{await api('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/'+b.dataset.a,'POST');refresh()}catch(x){$('msg').textContent=x.message}};
 async function qcAction(pr,a,body){const path='/api/v1/qc/'+encodeURIComponent(pr)+'/'+a;let r=await act(path,body);
 if(a==='start'&&r.status===409&&r.json.code==='trust-confirm-needed'){if(!confirm('This run needs your confirmation: '+(r.json.reasons||[]).join(', ')+'. Start anyway?'))return;r=await act(path,{confirm:true})}

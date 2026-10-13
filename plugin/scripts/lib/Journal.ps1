@@ -75,6 +75,19 @@ function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, 
     } catch { [Console]::Error.WriteLine("journal $Event for #$Item failed: $($_.Exception.Message)"); return $false }
 }
 
+# For a caller that holds no item lock (the sweep): the ledger entries Add-Journal put into the caller's holder are written under the item lock into
+# a state read there, never as a save of the holder itself. The holder was read before whatever a verb recorded meanwhile (an approval, a claim):
+# saving it would undo that (seen on slow runners: an inspector's approval lost to the sweep that was posting the QC offer).
+function Save-JournalKeys([int]$Item, [string[]]$Keys) {
+    Use-ItemLock $Item {
+        $f = Get-State $Item; $fs = $f.state; $added = 0
+        if (-not (Test-Has $fs 'journal')) { $fs.journal = @{ keys = @(); count = 0 } }
+        foreach ($k in $Keys) { if (@($fs.journal.keys) -notcontains $k) { $fs.journal.keys = @(@($fs.journal.keys) + $k | Select-Object -Last 200); $fs.journal.count = [int]$fs.journal.count + 1; $added++ } }
+        if ($added -gt 0) { Save-State $Item $f }
+    }
+}
+function Get-JournalKeys($State) { if (Test-Has $State 'journal') { return @($State.journal.keys) }; return @() }
+
 # Admin verb: the gateway journals the decisions it makes itself (matched, offered, reassigned, waiting, skipped).
 function Verb_journal($a) {
     $n = Get-ItemNumber $a; $ev = "$(Need $a 'event')"

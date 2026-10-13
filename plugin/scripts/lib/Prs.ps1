@@ -73,12 +73,15 @@ function Get-PublicChecks($c) {
 # Docs-only is what the design step recorded in the item state (append-body in the design column); marker text in the body alone proves nothing,
 # because anyone who can edit the issue can type it.
 # The design step always writes the field, true or false (append-body, and complete of the design column when no design append set it), and once it
-# exists the body text is ignored. Only a state with NO field on an item that is already past its design column (written by an older version) falls
-# back to the marker in the body; pass $Info to allow that fallback.
+# exists the body text is ignored. Only a state with NO field on an item that is already past its design column AND was created before
+# timing.docsOnlyLegacyBefore (the items an older version designed) falls back to the marker in the body; pass $Info to allow that fallback.
+# A newer item without the field is not docs-only, whatever its body says.
 function Test-ItemDocsOnly($State, $Info = $null) {
     if ((Test-Has $State 'design') -and (Test-Has $State.design 'docs_only')) { return [bool]$State.design.docs_only }
     $c = Get-Cfg
     if ($null -eq $Info -or (Test-Has $c.requiredBodySection "$($Info.column)")) { return $false }
+    $cut = Get-LegacyCutoff; $made = if (Test-Has $Info 'createdAt') { try { ConvertFrom-Iso $Info.createdAt } catch { $null } } else { $null }
+    if ($null -eq $cut -or $null -eq $made -or $made -ge $cut) { return $false }
     return "$($Info.body)".Contains($c.docsOnlyMarker)
 }
 

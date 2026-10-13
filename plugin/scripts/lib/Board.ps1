@@ -30,7 +30,7 @@ function Get-LastColumn { $cols = Get-BoardColumns; $cols[$cols.Count - 1] }
 function Get-ItemInfo([int]$Item) {
     $c = Get-Cfg
     $q = @'
-query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ id number state title body url
+query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ id number state title body url createdAt
   labels(first:50){ nodes{ name } }
   projectItems(first:20){ nodes{ id project{ number } fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } } } } } } }
 '@
@@ -41,7 +41,7 @@ query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number
     $status = $null; $cardId = $null
     if ($card) { $cardId = $card.id; if ($card.fieldValueByName) { $status = $card.fieldValueByName.name } }
     return @{
-        number = [int]$i.number; nodeId = $i.id; open = ($i.state -eq 'OPEN'); title = $i.title; body = "$($i.body)"; url = $i.url
+        number = [int]$i.number; nodeId = $i.id; open = ($i.state -eq 'OPEN'); title = $i.title; body = "$($i.body)"; url = $i.url; createdAt = $i.createdAt
         labels = @($i.labels.nodes | ForEach-Object { $_.name }); cardId = $cardId; column = $status
     }
 }
@@ -106,7 +106,36 @@ function Get-Comments([int]$Item) {
     return $all
 }
 
-# Returns @{ commentId; state } . Only a comment written by the gateway's own login counts.
+# ---- the state is tamper-evident --------------------------------------------------------------------------------
+# The author login alone proves little: anyone with write access to the repository can edit the gateway's comment. So the gateway signs what it
+# writes (HMAC-SHA256 of the item number and the JSON text, keyed with FACTORY_TOKEN_SECRET) and checks the signature when it reads. A state
+# that fails the check is treated as absent, and that is reported (a line on stderr at every read, a comment on the item when the gateway
+# writes the state anew). States written before signing existed carry no signature: one is accepted only when its comment was created before
+# timing.docsOnlyLegacyBefore (GitHub sets created_at; an edit cannot change it). A gateway without a token secret (local, not in owner mode)
+# cannot sign or check: it writes and reads as before. A changed secret makes every signed state unreadable: change it only when no item is in flight.
+function Get-LegacyCutoff { $t = (Get-Cfg).timing; if (Test-Has $t 'docsOnlyLegacyBefore') { return ConvertFrom-Iso $t.docsOnlyLegacyBefore }; return $null }
+function Get-StateSignature([int]$Item, [string]$Json) {
+    $sec = "$env:FACTORY_TOKEN_SECRET"; if ($sec.Length -lt 16) { return '' }
+    $h = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($sec))
+    try { return ([BitConverter]::ToString($h.ComputeHash([Text.Encoding]::UTF8.GetBytes("factory-state:v1`n$Item`n" + ($Json -replace "`r", '').Trim()))) -replace '-', '').ToLowerInvariant() }
+    finally { $h.Dispose() }
+}
+# '' when the comment's state may be trusted, else the reason it may not.
+function Test-StateComment([int]$Item, $Comment, [string]$Json) {
+    $want = Get-StateSignature $Item $Json
+    if ($want -eq '') { return '' }
+    $m = [regex]::Match("$($Comment.body)", '<!-- factory-state-sig v1 ([0-9a-f]{64}) -->')
+    if ($m.Success) {
+        if ([Security.Cryptography.CryptographicOperations]::FixedTimeEquals([Text.Encoding]::ASCII.GetBytes($m.Groups[1].Value), [Text.Encoding]::ASCII.GetBytes($want))) { return '' }
+        return 'the signature does not match the content'
+    }
+    $cut = Get-LegacyCutoff; if ($null -eq $cut) { return '' }
+    $made = try { ConvertFrom-Iso $Comment.created_at } catch { $null }
+    if ($made -and $made -lt $cut) { return '' }
+    return 'it carries no signature and was not written before signing began'
+}
+
+# Returns @{ commentId; state } . Only a comment written by the gateway's own login counts, and only with a state that passes Test-StateComment.
 function Get-State([int]$Item) {
     $marker = Get-StateMarker; $login = Get-ServerLogin
     $all = @(Get-Comments $Item)
@@ -118,11 +147,19 @@ function Get-State([int]$Item) {
         $old = if ($trusted.Count -gt 0) { @($all | Where-Object { $_.user.login -in $trusted -and $_.body.StartsWith($marker) }) | Select-Object -Last 1 } else { $null }
         if ($old) {
             $m0 = [regex]::Match($old.body, '(?s)```json\s*(.*?)\s*```')
-            if ($m0.Success) { return @{ commentId = $null; state = ($m0.Groups[1].Value | ConvertFrom-Json -AsHashtable -DateKind String); comments = $all; adopted_from = $old.user.login } }
+            $bad0 = if ($m0.Success) { Test-StateComment $Item $old $m0.Groups[1].Value } else { '' }
+            if ($bad0) { [Console]::Error.WriteLine("state of #$Item by $($old.user.login) is not adopted: $bad0") }
+            elseif ($m0.Success) { return @{ commentId = $null; state = ($m0.Groups[1].Value | ConvertFrom-Json -AsHashtable -DateKind String); comments = $all; adopted_from = $old.user.login } }
         }
         return @{ commentId = $null; state = @{ schema = 1; item = $Item }; comments = $all }
     }
     $m = [regex]::Match($found.body, '(?s)```json\s*(.*?)\s*```')
+    $bad = if ($m.Success) { Test-StateComment $Item $found $m.Groups[1].Value } else { '' }
+    if ($bad) {
+        # treated as absent; the comment is the gateway's own, so the next save writes the new state into it
+        [Console]::Error.WriteLine("state of #$Item (comment $($found.id)) is ignored: $bad")
+        return @{ commentId = $found.id; state = @{ schema = 1; item = $Item }; comments = $all; rejected = $bad }
+    }
     $s = if ($m.Success) { $m.Groups[1].Value | ConvertFrom-Json -AsHashtable -DateKind String } else { @{ schema = 1; item = $Item } }
     return @{ commentId = $found.id; state = $s; comments = $all }
 }
@@ -131,12 +168,17 @@ function Save-State([int]$Item, $Holder) {
     $s = $Holder.state; $s.item = $Item; $s.updated = ConvertTo-Iso (Get-UtcNow)
     $json = $s | ConvertTo-Json -Depth 12
     $summary = "state of #$Item for ``$((Get-Cfg).name)`` (machine-read; edits by others are ignored)"
-    $body = "$(Get-StateMarker)`n$summary`n`n``````json`n$json`n```````n"
+    $sig = Get-StateSignature $Item $json
+    $body = "$(Get-StateMarker)`n$summary`n`n``````json`n$json`n```````n$(if ($sig) { "<!-- factory-state-sig v1 $sig -->`n" })"
     if ($Holder.commentId) {
         Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/comments/$($Holder.commentId)" -Body @{ body = $body } | Out-Null
     } else {
         $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$Item/comments" -Body @{ body = $body }
         $Holder.commentId = $r.id
+    }
+    if (Test-Has $Holder 'rejected') {
+        $why = "$($Holder.rejected)"; $Holder.Remove('rejected')
+        try { Add-Comment $Item "the recorded state of this item was not the gateway's own ($why): it was ignored and the state was started anew. Someone other than the gateway edited the state comment." } catch { }
     }
 }
 

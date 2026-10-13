@@ -178,6 +178,37 @@ $OwnerScenarios = [ordered]@{
     Check 'a reconnect with --capacity 1 keeps the operator value' ($w2.capacity -eq 10) ($w2 | ConvertTo-Json -Compress)
 }
 
+'owner: update-pr replaces the body of the item''s own open pull request, and of no other [full]' = {
+    # pinned to a session that does not exist, so the plant offers these items to nobody while the verbs are called
+    $lab = @('factory worker', 'Auto Merge', 'worker:nobody-here')
+    $n = New-Item-Fake 'Body A' 'x' $lab; $m = New-Item-Fake 'Body B' 'x' $lab
+    Do-TechnicalDesign $n; $pr = Do-Development $n
+    Do-TechnicalDesign $m; $prM = Do-Development $m
+    Check 'open-pr wrote the body with the reference to the item' ((Get-FakePr $pr).body -eq "change`n`nRefs #$n") "$((Get-FakePr $pr).body)"
+    $own = Msg-ItemToken $n 'owner' 'alice'; $insp = Msg-ItemToken $n 'inspector' 'alice'
+    $call = { param($Tok, $Body) $r0 = Msg-Verb 'update-pr' $Tok $Body; $j = Msg-Json $r0; $j.status = [int]$r0.StatusCode; $j }
+    $r = & $call $own @{ item = $n; body = "corrected text`n" }
+    Check 'the owner''s item token replaces the body; the reference to the item is kept' ($r.status -eq 200 -and $r.exit -eq 0 -and $r.pullRequest.number -eq $pr -and (Get-FakePr $pr).body -eq "corrected text`n`nRefs #$n") "$($r | ConvertTo-Json -Compress -Depth 4) $((Get-FakePr $pr).body)"
+    $r = F 'w1' @('update-pr', '--item', $n, '--pr', $pr, '--body-file', (TmpFile "upr$n.md" "from a file`n`nRefs #$n"))
+    CheckExit 'the client verb with --body-file and the pull request named' $r 0
+    Check 'a body that already ends with the reference is not given a second one' ((Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$((Get-FakePr $pr).body)"
+    $r = & $call $own @{ item = $n; pr = $prM; body = 'not mine' }
+    Check 'another item''s pull request is refused (pr-not-own) and stays as it was' ($r.exit -eq 10 -and $r.code -eq 'pr-not-own' -and (Get-FakePr $prM).body -eq "change`n`nRefs #$m") "$($r | ConvertTo-Json -Compress) $((Get-FakePr $prM).body)"
+    $r = & $call $own @{ item = $m; body = 'wrong item' }
+    Check 'the token of item A cannot name item B (403)' ($r.status -eq 403 -and (Get-FakePr $prM).body -eq "change`n`nRefs #$m") "$($r | ConvertTo-Json -Compress)"
+    $r = & $call $insp @{ item = $n; body = 'inspector' }
+    Check 'the inspector role is refused (403), as for open-pr' ($r.status -eq 403) "$($r | ConvertTo-Json -Compress)"
+    $r = & $call (Msg-Token 'alice') @{ item = $n; body = 'worker credential' }
+    Check 'a worker credential without the item token is refused (403)' ($r.status -eq 403) "$($r | ConvertTo-Json -Compress)"
+    $r = & $call $own @{ item = $n; body = '   ' }
+    Check 'an empty body is a usage error' ($r.exit -eq 2 -and $r.code -eq 'usage') "$($r | ConvertTo-Json -Compress)"
+    Check 'none of the refusals changed the body' ((Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$((Get-FakePr $pr).body)"
+    Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
+    Check 'the pull request is merged' ((Get-FakePr $pr).merged -eq $true)
+    $r = & $call $own @{ item = $n; pr = $pr; body = 'after the merge' }
+    Check 'a merged pull request is refused (pr-not-open), named or not' ($r.exit -eq 10 -and $r.code -eq 'pr-not-open' -and (& $call $own @{ item = $n; body = 'after the merge' }).code -eq 'pr-not-open' -and (Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$($r | ConvertTo-Json -Compress)"
+}
+
 'msg: messaging and the supervisor are off by default' = {
     $base = "http://127.0.0.1:$($script:ApiPort)"
     $c = Msg-Api 'POST' '/api/v1/workers/alice/credential?role=manager'
@@ -358,6 +389,53 @@ $OwnerScenarios['owner: an item that waits for its pinned worker has matched fir
 }
 
 # The start guards of the test runners (guard.ps1), and how a crashed client process is reported.
+# ---- the state comment is the gateway's own (backlog d): signed when written, checked when read; what came before signing counts by its date ----
+$OwnerScenarios['state: the state comment is signed, an edit by someone else is ignored and reported, and unsigned states and body markers count only from before the cutoff [full]'] = {
+    $lab = @('factory worker', 'worker:nobody-here')   # pinned to a session that does not exist: the plant offers these items to nobody
+    $repo = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+    $get = { param($i) Qc-Server 'get-item' @{ item = $i } }
+    $states = { param($i) , @((Get-FakeIssue $i).comments | Where-Object { $_.body -like '<!-- factory-state:*' }) }
+    $holder = { param($g) if ($g.ContainsKey('state') -and $g.state.ContainsKey('claim')) { "$($g.state.claim.holder)" } else { '' } }
+    $edit = { param($id, $body) Invoke-RestMethod "$repo/issues/comments/$id" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json' | Out-Null }
+    $name = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).name; $fence = '```'
+    $unsigned = { param($i, $who) "<!-- factory-state:$name v1 -->`nstate`n`n${fence}json`n{`"schema`":1,`"item`":$i,`"claim`":{`"holder`":`"$who`",`"column`":`"Technical Design`",`"owner`":true,`"lease_until`":`"2099-01-01T00:00:00.000Z`"}}`n$fence`n" }
+
+    $n = New-Item-Fake 'Signed state' 'x' $lab
+    $c1 = Qc-Server 'claim-item' @{ item = $n; holder = 'sig-w'; column = 'Technical Design' }; CheckExit 'a claim writes the state' $c1 0
+    $sc = (& $states $n)
+    Check 'the state comment carries the signature of the gateway, and it is read back' ($sc.Count -eq 1 -and "$($sc[0].body)" -match '(?m)^<!-- factory-state-sig v1 [0-9a-f]{64} -->$' -and (& $holder (& $get $n)) -eq 'sig-w') "$($sc | ForEach-Object { $_.body })"
+    # someone with write access edits the comment: the content changes, the signature is the old one
+    $orig = "$($sc[0].body)"
+    & $edit $sc[0].id ($orig.Replace('"sig-w"', '"mallory"'))
+    $g = & $get $n
+    Check 'an edited state is treated as absent: the item has no claim, not the one typed in' ($g.exit -eq 0 -and (& $holder $g) -eq '') ($g.state | ConvertTo-Json -Compress -Depth 4)
+    & $edit $sc[0].id (($orig.Replace('"sig-w"', '"mallory"')) -replace '<!-- factory-state-sig v1 [0-9a-f]{64} -->\n?', '')
+    Check 'so is an edited state whose signature was taken off' ((& $holder (& $get $n)) -eq '')
+    Check 'reading alone writes nothing' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'was not the gateway''s own' }).Count -eq 0)
+    $c2 = Qc-Server 'journal' @{ item = $n; event = 'matched'; fields = @{ trigger = 'test'; reason = 'test'; column = 'Technical Design' }; key = 'sig-1' }; CheckExit 'the next write of the gateway starts the state anew' $c2 0
+    $sc2 = (& $states $n)
+    Check 'it is written into the same comment, signed again, and the item says once that the state was not the gateway''s own' ($sc2.Count -eq 1 -and $sc2[0].id -eq $sc[0].id -and "$($sc2[0].body)" -match 'factory-state-sig v1 [0-9a-f]{64}' -and "$($sc2[0].body)" -notmatch 'mallory' -and "$($sc2[0].body)" -match 'matched\|sig-1' -and (& $holder (& $get $n)) -eq '' -and @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'was not the gateway''s own' }).Count -eq 1)
+    # a signed state copied to another item does not count there
+    $m = New-Item-Fake 'Copied state' 'x' $lab
+    [void](Gh-As 'fake-operator' "issues/$m/comments" @{ body = "$($sc2[0].body)" })
+    Check 'a signed state copied onto another item is ignored there' ((& $holder (& $get $m)) -eq '')
+    # states from before signing: by the date GitHub gave the comment
+    $o = New-Item-Fake 'Old state' 'x' $lab; $p = New-Item-Fake 'New unsigned state' 'x' $lab
+    [void](Gh-As 'fake-operator' "issues/$o/comments" @{ body = (& $unsigned $o 'old-w'); _created_at = '2019-05-01T00:00:00Z' })
+    [void](Gh-As 'fake-operator' "issues/$p/comments" @{ body = (& $unsigned $p 'new-w') })
+    Check 'an unsigned state whose comment was created before the cutoff is read as before' ((& $holder (& $get $o)) -eq 'old-w')
+    Check 'an unsigned state created after it is ignored' ((& $holder (& $get $p)) -eq '')
+    # the docs-only marker in the body of an item without the state field: only for items created before the cutoff
+    $mk = "x`n`n## Technical Design`n<!-- aisf:docs-only -->`n- a sentence."
+    $d0 = (Fake 'issue' @{ title = 'Old docs item'; body = $mk; labels = $lab; column = 'Development'; createdAt = '2019-06-01T00:00:00Z' }).number
+    $d1 = (Fake 'issue' @{ title = 'New docs item'; body = $mk; labels = $lab; column = 'Development' }).number
+    $g0 = & $get $d0; $g1 = & $get $d1
+    Check 'an item created before the cutoff, past its design and without the field, is docs-only by the marker in its body' ($g0.exit -eq 0 -and $g0.docs_only -eq $true) ($g0 | ConvertTo-Json -Compress -Depth 2)
+    Check 'an item created after it is not, whatever its body says' ($g1.exit -eq 0 -and $g1.docs_only -eq $false)
+    $ship = (Get-Content -Raw (Join-Path $script:Root 'config/instance.json') | ConvertFrom-Json -AsHashtable -DateKind String).timing.docsOnlyLegacyBefore
+    Check 'the shipped cutoff is 2026-10-14T00:00:00Z' ("$ship" -eq '2026-10-14T00:00:00Z') "$ship"
+}
+
 $OwnerScenarios['runner: a second run is refused while one is active, a short disk is refused, -Force overrides, and pwsh exit 139 is reported as a crash'] = {
     $pwshExe = (Get-Command pwsh).Source
     # a child of this suite is inside a run (FACTORY_TEST_RUN_HELD): the guard is tried as a person's shell would start it, without that variable

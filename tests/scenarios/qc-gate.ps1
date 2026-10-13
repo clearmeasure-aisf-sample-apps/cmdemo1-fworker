@@ -206,6 +206,26 @@ $QcGateScenarios = [ordered]@{
     CheckExit 'requireRun true, requireApproval false: the run is what is missing' $r0 10 'qc-not-run'
 }
 
+'qc: gate a sweep that is still writing the QC offer does not undo an approval recorded meanwhile [full]' = {
+    # the flaky check of the hosted runners, made certain: the sweep read the item's state, GitHub is slow while it posts the two offer comments,
+    # and the inspector's approval is recorded in between. The sweep must not save what it read before.
+    $x = $null
+    try {
+        Fake 'latency' @{ ms = 12000; match = '(?s)^POST /repos/[^\n]+/issues/\d+/comments\n.*qc link pr=' } | Out-Null
+        $x = New-QcPr
+        $inside = Wait-Until -Seconds 90 { (Qc-OfferComments $x.pr).Count -gt 0 -and (Qc-ItemOffer $x.n).Count -eq 0 }
+        Check 'the sweep is between its two offer comments (it read the state before the approval)' $inside
+        Gate-Inspect $x
+        $posted = Wait-Until -Seconds 90 { (Qc-ItemOffer $x.n).Count -gt 0 }
+    } finally { Fake 'latency' @{ ms = 0 } | Out-Null }
+    $key = "qc-offered|$($x.pr)|$(Get-Head $x.pr)"
+    $saved = Wait-Until -Seconds 60 { $s0 = Qc-State $x.n; $s0 -and $s0.ContainsKey('journal') -and (@($s0.journal.keys) -contains $key) }
+    Check 'the sweep finished the offer and recorded its journal line in the state' ($posted -and $saved)
+    $s0 = Qc-State $x.n
+    Check 'the approval recorded during the sweep is still in the state' ($s0.ContainsKey('approval') -and "$($s0.approval.sha)" -eq (Get-Head $x.pr)) ($s0 | ConvertTo-Json -Depth 4 -Compress)
+    $r0 = Gate-Merge $x; CheckExit 'merge is refused for the missing QC run, not for a missing approval' $r0 10 'qc-not-run'
+}
+
 'qc: gate an Auto Merge label added to an item with a live environment tears the environment down [full]' = {
     Ensure-QcWorker
     $x = New-QcOffered

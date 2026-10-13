@@ -37,7 +37,7 @@
   "docsOnlyMarker": "<!-- aisf:docs-only -->",
   "docsOnlyPaths": [
     "^docs/.*\\.(md|txt|png|svg|puml)$",
-    "^(?!src/|\\.github/|\\.claude/|plugin/)(?!(.*/)?(CLAUDE|AGENTS)\\.md$)(.*/)?[^/]+\\.md$",
+    "^(?!src/|\\.github/|\\.claude/|\\.cursor/|plugin/)(?!(.*/)?(CLAUDE|AGENTS)\\.md$)(.*/)?[^/]+\\.md$",
     "^LICENSE(\\.md|\\.txt)?$",
     "^\\.github/ISSUE_TEMPLATE/"
   ],
@@ -58,6 +58,7 @@
     "maxRelaunches": 3,
     "maxReviewRounds": 3,
     "docsOnlyMaxReviewRounds": 2,
+    "docsOnlyLegacyBefore": "2026-10-14T00:00:00Z",
     "maxDemotions": 2,
     "fixForwardMaxRounds": 4,
     "sweepSeenCount": 2,

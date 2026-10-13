@@ -333,15 +333,18 @@ function Invoke-QcSync($List, [bool]$Dry) {
             if ($el.ok) { $el = Get-QcEligibility $c $n $it.labels $it.column $s $pr (@(Get-PrFiles ([int]$pr.number))) }
             if ($el.ok) {
                 if (-not $Dry) {
+                    # this sweep holds no item lock and read the state a while ago: only the journal line of the offer is written, under the lock
+                    # on a fresh read (Save-JournalKeys), never the state as it was read here
+                    $jk0 = Get-JournalKeys $s
                     $o = Update-QcOffer $n $st $pr
-                    if ($o -ne 'unchanged') { Save-State $n $st; $res.actions += @{ item = $n; action = 'qc-offer'; pr = [int]$pr.number; outcome = $o } }
+                    if ($o -ne 'unchanged') { $jk1 = @(Get-JournalKeys $s | Where-Object { $jk0 -notcontains $_ }); if ($jk1.Count -gt 0) { Save-JournalKeys $n $jk1 }; $res.actions += @{ item = $n; action = 'qc-offer'; pr = [int]$pr.number; outcome = $o } }
                 }
             } else {
                 if ($Dry) { continue }
                 $note = @($el.reasons | Where-Object { $_ -notin 'auto-merge', 'docs-only', 'no-pass-verdict', 'not-in-validation' })
                 if ($note.Count -gt 0) {
                     $posted = Add-Journal $n $st 'skipped' @{ reason = "QC is not offered for PR #$($pr.number): $($note -join ', ')" } "qc|$($pr.number)|$($note -join ',')"
-                    if ($posted) { Save-State $n $st }
+                    if ($posted) { Save-JournalKeys $n @("skipped|qc|$($pr.number)|$($note -join ',')") }
                 }
                 $hadOffer = [bool](Find-QcOffer $st.comments ([int]$pr.number) (Get-ServerLogin))
                 if ($hadOffer) { Remove-QcOfferText $n $st ([int]$pr.number) ($el.reasons -join ', '); $res.actions += @{ item = $n; action = 'qc-withdrawn'; pr = [int]$pr.number } }

@@ -30,7 +30,7 @@ static class Auth
 {
     public static readonly HashSet<string> OwnerVerbs = new()
     {
-        "get-item", "append-body", "comment", "accept", "release", "claim-item", "record-review", "complete", "open-pr", "pr-checks",
+        "get-item", "append-body", "comment", "accept", "release", "claim-item", "record-review", "complete", "open-pr", "update-pr", "pr-checks",
         "wait-for-checks", "validation-verdict", "merge", "model-tier", "get-delivery"
     };
     public static readonly HashSet<string> InspectorVerbs = new() { "get-item", "inspect-facts", "approve-pr", "accept", "pr-checks", "model-tier" };

@@ -119,22 +119,73 @@ a. **Plant manager reports problems to the operator proactively.** One concise n
    blocked worker note, repeated verb errors. Today it reports only what a patrol digest shows.
 b. **The operator session role.** Connect prompt, skill, one slot, Opus 5.5 low, with the guard rails of section 3 built in (quiet-plant
    check, announced restart, rollback, daily limit and report, an issue per change).
-c. **One revocation ref per name with a paging reader.** Revocations are refs `refs/factory/<instance>/revoked/<name>/<generation>` in
-   the work-orders repository; the reader stops at 5,000 refs and every generation adds one. Keep one ref per name and page the read.
-d. **Fast path: fallback cutoff by creation date, and the editable state comment.** An item without the docs-only field in its state
-   falls back to reading the body; that fallback should end for items created after the field existed. The state comment can be edited
-   by anyone who can comment; the gateway must not trust an edit it did not write.
-e. **Dashboard nits**: stale data stays visible after Disconnect; a refresh can race a newer answer; a refused token is retried.
-f. **Unknown cause of a gateway restart at 03:56 UTC on 2026-10-13** on tdd (no deployment at that time), and HTTP 503 answers while
-   the gateway starts. Find the cause in the Container Apps logs (operator) and decide what clients see during start-up.
-g. **Slow first pickup after an item is created**: the item waits for a sweep (180 s in tdd) although the webhook arrives at once.
-h. **A worker cannot edit a pull request body through the verbs.**
+f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
+   code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
 j. **pwsh crashes (exit 134 or 139) under machine load in the test suites.** Not a product answer, but it costs reruns; find out whether
    it is memory, the runtime or the long-lived client host.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
-l. **One flaky check in the manager suite on GitHub's runners**: in the revoke scenario, "it registers again, is offered work" failed once
-   of 702 checks and passed on a re-run. Cause not found.
+m. **The sweep saves a state it read without the item lock** in a few places of `Verb_sync_board` (Verbs.Sweep.ps1: merge-detected,
+   owner-released-idle, the awaiting-checks and settle paths). A verb that writes the same item between the sweep's read and its save loses
+   its write, as the QC offer did (closed entry "qc-gate flaky check"). Each needs the pattern used there: write under `Use-ItemLock` on a
+   fresh read.
+n. **Rule scripts run as one `pwsh` per call with no limit on how many at once** (`runner.pool` is 0 in the deployed configuration). A
+   burst of verbs is a burst of processes: the likeliest way for the container to run out of memory. Either a concurrency limit in `Runner`
+   (Program.cs) or `runner.pool` in `config/deploy.overrides.json` (a protected file: the owner decides).
+o. **A changed `FACTORY_TOKEN_SECRET` makes every signed state comment unreadable** (they are treated as absent: claims, reviews and
+   verdicts of items in flight are gone). Change the secret, or make another environment the acting gateway (`activate-prod.sh`: prod has
+   its own secret), only when no item is in flight, or give both the same secret first.
+
+Closed on 2026-10-13 (pull request "hardening"):
+
+- **(c) One revocation ref per name, paging reader.** A revoke writes the higher generation, reads it back, then removes the name's lower
+  refs; a removal that fails leaves a ref and nothing else (the reader takes the highest). The reader reads pages until one is empty.
+- **(d) Fast path fallback and the state comment.** The body marker counts only for items created before `timing.docsOnlyLegacyBefore`
+  (2026-10-14T00:00:00Z). The state comment is signed (HMAC-SHA256 with `FACTORY_TOKEN_SECRET` over the item number and the JSON) and
+  checked on every read; a state that fails is treated as absent, logged, and reported on the item when the gateway writes the state anew.
+  Unsigned states count only when their comment was created before the same cutoff: states that the previous version writes after
+  2026-10-14T00:00Z are NOT read by this version, so deploy it before then or move the cutoff. A gateway without a token secret neither
+  signs nor checks. Not covered: someone with write access putting back an older signed state of the same item; and a state comment
+  created before the cutoff stays editable for the life of its item (take the signature off and it counts as an old unsigned one), so
+  only items whose state comment is created after the cutoff are protected. `.cursor/` is no longer
+  documentation; a finding's quote ends at the first separator; the fake GitHub uses the product's `docsOnlyPaths`.
+- **(e) Dashboard**: an answer that arrives after Disconnect is dropped; Disconnect and a refused token clear every section and hide QC; a
+  refused token is forgotten, so the timer stops asking until the next Connect.
+- **(g) Slow first pickup: found.** tdd's webhook is a repository webhook (`create-webhook.sh`: issues, workflow_run, pull_request,
+  pull_request_review); a card moved on the board is a `projects_v2_item` event, which only an organization webhook or an App delivers, so
+  the gateway never hears of the move. And an item new in a column is offered by the SECOND sweep that sees it (`timing.sweepSeenCount` 2,
+  so a card dragged across starts nothing): up to two intervals, 6 minutes at 180 s. That is the wait seen, and the sweep "that did not
+  match" was the first look. Fixed: after a sweep that saw such an item the next one runs 20 s later (`FACTORY_SWEEP_CONFIRM_SECONDS`), so
+  the first offer comes at most one interval plus 20 s after the move. To make it seconds: deliver `projects_v2_item` (organization
+  webhook); the gateway already turns it into a sweep.
+- **(h) `factory.ps1 update-pr --item N --body-file <file>`** replaces the body of the item's own open pull request (item token, owner role).
+- **(l) Manager suite, revoke scenario, flaky on slow runners: a test order assumption.** The scenario's second gateway reads the fake
+  GitHub, so its start-up sweep plans the whole board; when that sweep ended between the session's second registration and the scenario's
+  own plan, another item was offered first and the session (capacity 1) was not offered the expected one. The scenario now waits for the
+  start-up sweep before a session connects and reads the offer of its own item. Reproduced with `/_fake/latency` (fails before, passes after).
+- **qc-gate suite, flaky on slow runners: a product defect, now fixed.** "requireRun false: the missing person approval stops it" answered
+  `approval-missing` once. The sweep's QC step (`Invoke-QcSync`, Qc.ps1) read the item state without the item lock, posted the two offer
+  comments, then saved the state it had read: an inspector approval recorded in between was lost, and `merge` then rightly said that no
+  approval was recorded. The sweep now writes only its journal line, under the item lock on a fresh read (`Save-JournalKeys`,
+  Journal.ps1). A scenario holds the offer comments back with `/_fake/latency` and records the approval in between. The order of the
+  merge gate is unchanged and deterministic: recorded inspector approval, approval on GitHub, QC run, person's approval. Same pattern
+  elsewhere: entry m.
+
+### Gateway restarts: what can end the process (entry f)
+
+Every start prints `started` in `/_build`. Since this change the console log says how a process ended; read the last lines before the
+new start in the Container Apps console log, and the system log of the revision at that time.
+
+| Cause | In the code or platform | How to confirm |
+|---|---|---|
+| Scale-in (tdd and uat scale to zero) or a replica move | The platform's HTTP scale rule decides; whether an open event stream counts as a request for it is not visible in this repository. A new revision or a node drain does the same | Console log ends with `"gateway":"stopping"` (with `upSeconds`); the system log has a scale, revision or replica event at that time. If streams do not count, set a minimum of one replica for tdd (operator, the demo-environment kit) |
+| Out of memory | One `pwsh` per rule-script call, unlimited (entry n) | No `stopping` and no `unhandled-exception` line before the new start; the system log says OOMKilled or exit code 137 |
+| A probe failing | `/health` and `/alive` answer 200 from the first moment and wait on nothing; `/ready` is 503 until the revoked credentials are read (retried every 5 s while GitHub fails). `/ready` must not be the liveness probe | The system log shows failed probes, then a restart; the console log has `stopping` |
+| An unhandled exception | Fixed here: the sweeper let a cancellation that was not the shutdown escape (the default of .NET then stops the host); the runner pool's exit handler ran unguarded. A background service that throws no longer stops the host | A `"gateway":"unhandled-exception"` or `"unobserved-task-exception"` line, or a `crit:` line of the host |
+
+HTTP 503 after any start is by design: no worker, supervisor or item credential is answered until the revoked credentials are read (a
+request waits up to 20 s, then 503 `starting` with `retryAfterSeconds`). The operator token does not wait.
+
 
 Smaller, known: the Octopus project's uat and prod run older versions than tdd until the operator promotes; `docs/deploy/MORNING.md` and
 `runbook-add-deployable.md` are records of 2026-10-11 and describe paths that no longer exist; `tests/live` and `tests/fullrun` have not

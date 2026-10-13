@@ -45,7 +45,7 @@ function Verb_sync_board($a) {
     $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @()
     # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled, whose
     # owner still waits for item.complete although the claim ended at the merge
-    $owned = @{}; $settling = @()
+    $owned = @{}; $settling = @(); $unconfirmed = @()
     $list = Get-BoardList
     $last = Get-LastColumn
     foreach ($it in $list) {
@@ -144,6 +144,7 @@ function Verb_sync_board($a) {
             $count = if ($prev.column -ieq $col) { [int]$prev.count + 1 } else { 1 }
             $seen["$n"] = @{ column = $col; count = $count }
             if ($count -ge [int]$t.sweepSeenCount) { $offers += @{ item = $n; column = $col; reason = 'board-move' } }
+            else { $unconfirmed += $n }   # seen, not yet offered: the gateway looks again soon instead of a whole interval later
         } catch [FactoryReject] {
             # an item (or its card) that vanished while the sweep was reading it is not an error: the next sweep sees the board as it is
             if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $actions += @{ item = $n; action = 'skip'; reason = 'vanished-during-sweep' } }
@@ -159,7 +160,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------

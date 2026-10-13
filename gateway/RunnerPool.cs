@@ -59,7 +59,8 @@ sealed class RunnerPool
     void Retire(Worker w)
     {
         if (Interlocked.Exchange(ref w.Dead, 1) != 0) return;
-        Kill(w); all.TryRemove(w.P.Id, out _); Interlocked.Decrement(ref live);
+        Kill(w); foreach (var kv in all) if (ReferenceEquals(kv.Value, w)) all.TryRemove(kv.Key, out _);   // not w.P.Id: it throws for a process that could not be read
+        Interlocked.Decrement(ref live);
         try { w.P.Dispose(); } catch { }
         Fill();
     }
@@ -91,7 +92,8 @@ sealed class RunnerPool
             p.ErrorDataReceived += (_, a) => { if (a.Data is not null) lock (w.Err) { if (w.Err.Length < 65536) w.Err.AppendLine(a.Data); } };
             p.BeginErrorReadLine();
             p.EnableRaisingEvents = true; // an idle worker that ends is replaced; one that ends soon after it was ready, before any call, counts as a failed start, so a host that keeps dying is not restarted in a loop
-            p.Exited += (_, _) => { if (w.Busy) return; if (w.Dead == 0 && w.Calls == 0 && w.ReadyAt != default && (DateTime.UtcNow - w.ReadyAt).TotalSeconds < 30) Interlocked.Increment(ref spawnFailures); Retire(w); };
+            // (an exception in this handler would be unhandled on a pool thread and end the gateway: it is caught)
+            p.Exited += (_, _) => { try { if (w.Busy) return; if (w.Dead == 0 && w.Calls == 0 && w.ReadyAt != default && (DateTime.UtcNow - w.ReadyAt).TotalSeconds < 30) Interlocked.Increment(ref spawnFailures); Retire(w); } catch (Exception e) { Console.Error.WriteLine($"runner pool: exit handler: {e.GetType().Name}"); } };
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
             string? line; do { line = await p.StandardOutput.ReadLineAsync(cts.Token); } while (line is not null && !line.StartsWith(w.Mark, StringComparison.Ordinal));
             if (line is null) throw new InvalidOperationException($"the host ended before it was ready: {w.TakeErr().Trim()}");
