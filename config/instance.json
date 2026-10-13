@@ -119,29 +119,20 @@
     "allowLoopbackForTests": false
   },
   "messaging": {
-    "enabled": true,
-    "allowedWorkers": [
-      "*"
-    ],
+    "enabled": false,
+    "allowedWorkers": [],
     "allowBroadcast": true,
     "maxTextChars": 2000,
     "ratePerMinute": 12,
     "pairPer10Min": 10,
     "perSenderQueueCap": 20,
     "recipientQueueCap": 100,
-    "scaleToZeroEnvironments": [
-      "tdd",
-      "uat"
-    ]
+    "scaleToZeroEnvironments": ["tdd", "uat"]
   },
   "manager": {
-    "enabled": true,
-    "allowedNames": [
-      "supervisor"
-    ],
-    "allowedAskers": [
-      "*"
-    ],
+    "enabled": false,
+    "allowedNames": ["supervisor"],
+    "allowedAskers": [],
     "tokenGeneration": 1,
     "requiredModelTier": "premium",
     "requiredEffort": "high",
@@ -154,15 +145,7 @@
     "turnBudgetPerDay": 96,
     "patrolReservePerHour": 2,
     "stepBudgetPerHour": 60,
-    "digest": {
-      "refusalCount": 3,
-      "waitCodes": [
-        "qc-not-run",
-        "qc-approval-missing",
-        "held"
-      ],
-      "maxBytes": 4096
-    }
+    "digest": { "refusalCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 }
   },
   "secrets": {
     "patterns": [
@@ -265,8 +248,8 @@
     "minTierByColumn": {}
   },
   "testLabel": "factory test",
-  "mergeQueueDepth": 2,
-  "ownerSessions": true,
+  "mergeQueueDepth": 0,
+  "ownerSessions": false,
   "idleReleaseMinutes": 60,
   "stateAuthors": [
     "cm-ai-ops-bot"

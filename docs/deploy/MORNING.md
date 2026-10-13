@@ -1,5 +1,7 @@
 # Morning pack (written 2026-10-11, overnight)
 
+> Record of 2026-10-11, kept for its history. The paths it names (`~/Projects/factory-worker-next`, a staged copy in `~/Projects/cmdemo1-fworker`) no longer exist: this repository is the source. Current state: `docs/HANDOFF.md`.
+
 ## Where things stand
 - Live 30-item run on the real board: 25 Done, 5 waiting for a person (see below), 1 stray duplicate card for #107 left in Todo. Releases up to 2.4.218 went tdd, uat, prod with sign-off.
 - Bugs found and fixed in the run: see README "Findings".

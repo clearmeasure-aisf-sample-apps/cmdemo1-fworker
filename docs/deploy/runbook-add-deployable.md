@@ -1,5 +1,7 @@
 # Runbook: add the factory worker gateway as a deployable of cmdemo1
 
+> Record of 2026-10-11 (how the deployable was planned), kept for its history. The source is this repository now; there is no copy or staging step. Current state: `docs/HANDOFF.md`.
+
 Status: research only (2026-10-10). Nothing in this runbook has been run. Every fact below was read from
 `clearmeasure-aisf-sample-apps/cmdemo1-system` (PRs #103, #105, #106, #109, #112, `system.json`), from the private
 `cmdemo1-scorecard` repository, and from the demo-environment kit (`/home/aiops/demo-environment-kit`, HEAD 7705d50:

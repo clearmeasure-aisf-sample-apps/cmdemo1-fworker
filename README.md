@@ -1,21 +1,27 @@
 # factory-worker
 
-A Claude Code plugin that reproduces what the cmdemo1-aisf factory does, with a gateway that holds the GitHub and Octopus secrets.
-Instance key: label `factory worker` (the live factory keys on `AI Factory`). Board: clearmeasure-aisf-sample-apps project 679, repo cmdemo1-workorders.
+The factory worker gateway and plugin: a software factory in which AI sessions carry work items of
+`clearmeasure-aisf-sample-apps/cmdemo1-workorders` from Technical Design to a merged, released change. The gateway holds the GitHub and
+Octopus credentials, runs the rule scripts, sweeps the board and serves a dashboard; workers connect with a prompt and call verbs.
+Instance key: label `factory worker` (the earlier factory keys on `AI Factory`). Board: clearmeasure-aisf-sample-apps project 679.
 
-## Status (2026-10-10, local build, nothing deployed, nothing written to GitHub or Octopus)
+This repository is the single source: gateway, plugin, configuration, tests, the fake GitHub, tools and the container image.
 
-| Part | State |
+- **Build, test, release, rules:** [`CLAUDE.md`](CLAUDE.md)
+- **Project state, environments, decisions, backlog:** [`docs/HANDOFF.md`](docs/HANDOFF.md)
+- **Designs:** [`docs/design/`](docs/design/)
+
+| Part | Where |
 |---|---|
-| `plugin/scripts/factory.ps1` and `lib/*` | Written. Server verbs: get-item, append-body, comment, claim-item, record-review, move-next, complete, open-pr, pr-checks, wait-for-checks, validation-verdict, get-delivery, settle, sync-board, ingest-event, check-secrets. Parse-checked; `tests/smoke.ps1` passes. |
-| Live read-only runs | `check-secrets`, `get-item` (#62), `sync-board --dry`, `get-delivery` (release 2.4.93, found in Octopus with tdd/uat/prod Success) all ran against the real GitHub and Octopus. |
-| `plugin/skills`, `plugin/agents` | Written (dispatch, technical-design, development, functional-testing, follow-through, setup; analyst, implementer, reviewer). Not yet run by a Claude session. |
-| Client `subscribe` | Written, not run. |
-| `merge` verb | NOT written. The permission classifier refused it ("Self-Approval", then without reason). The worker never approves; a person merges, and `sync-board` picks a human merge up and carries on with `settle`. |
-| Gateway host (`gateway/`) | NOT written beyond `Gateway.csproj`. The classifier refused `Program.cs` ("Create Unsafe Agents"). |
-| Tunnel, webhook registration, `factory worker` label, the 10 work items | Not done. `cloudflared` is downloaded to `~/.local/share/factory-worker/bin`. |
+| Gateway (ASP.NET Core, .NET 10) | `gateway/` |
+| Plugin served to workers (rule scripts, skills, agents) | `plugin/` |
+| Source defaults and the deployed settings | `config/instance.json`, `config/deploy.overrides.json` |
+| Tier 1 suites, fake GitHub, smoke, stress, live runs | `tests/` |
+| Container image | `Dockerfile` |
+| Checks and release | `.github/workflows/` |
 
-Secrets for a local run sit in `~/.local/share/factory-worker/secrets` (webhook secret, dev token); the gateway would read the GitHub token from `gh auth token` and the Octopus key from the keyring at start.
+A merge to `master` builds the image and releases it to the tdd environment; uat and prod are manual promotions.
+No secret is in this repository; a local gateway takes its credentials from the environment (see the top of `run-owner-gateway.sh`).
 
 ## Choosing models (cost first, automatic)
 
@@ -38,8 +44,8 @@ pay for a dearer model. An item opts in with the `factory test` label (the live 
 or `model-for --profile testing`. It wins over both `auto` and `fixed` mode.
 
 ## Connect a session (your own AI session as a factory worker)
-1. Start the owner-mode gateway on this machine: `./run-owner-gateway.sh` (API on localhost:5500). Stop any other gateway first; only one may sweep the board.
-2. Open `http://127.0.0.1:5500/dashboard`, paste the operator token, choose a name, press "Create prompt" and paste the generated prompt into a new Claude Code session. The session runs `subscribe --own` under a Monitor and owns each work item it is given until its pull request is merged and master is green.
+1. Use the dashboard of a deployed gateway (`<gateway url>/dashboard`), or start the owner-mode gateway on this machine: build (`CLAUDE.md`), then `./run-owner-gateway.sh` (API on localhost:5500). Only one gateway may sweep the board: do not start a local one while a deployed gateway acts on it.
+2. Open the dashboard, paste the operator token, choose a name, press "Create prompt" and paste the generated prompt into a new Claude Code session. The session runs `subscribe --own` under a Monitor and owns each work item it is given until its pull request is merged and master is green.
 2b. The prompt is self-contained and assumes nothing about the machine (Linux, macOS or Windows; x64 or arm64): it downloads PowerShell 7 and the plugin (exactly the gateway's version, `GET /api/v1/plugin`) into one base directory and uses only literal paths. The machine needs curl, tar, git and a checkout of the work-orders repository; tools a task needs (the .NET SDK) are installed on demand by `plugin/scripts/ensure-tools.ps1`.
 3. A hand-made cloud session connects the same way with the type `claude-cloud` or `cursor-cloud`; it must be able to reach the gateway URL.
 4. To make a work item eligible: label it `factory worker` (and `Auto Merge` if it may merge without a person) and move it to Technical Design on the board.

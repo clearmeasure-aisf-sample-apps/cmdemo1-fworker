@@ -1,0 +1,12 @@
+{
+  "ownerSessions": true,
+  "mergeQueueDepth": 2,
+  "messaging": {
+    "enabled": true,
+    "allowedWorkers": ["*"]
+  },
+  "manager": {
+    "enabled": true,
+    "allowedAskers": ["*"]
+  }
+}
