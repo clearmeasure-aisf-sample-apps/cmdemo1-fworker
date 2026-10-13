@@ -1,0 +1,30 @@
+# Changes to these paths need the owner's approval before they merge (the ruleset of the default branch requires a code owner review).
+# They are the areas the operator session must never merge by itself: plugin/skills/factory-operator/SKILL.md, rule c.
+# Only whole files can be listed here. Files that mix protected and ordinary lines (gateway/Program.cs, gateway/Messaging.cs,
+# gateway/Qc.cs, plugin/scripts/lib/Client.Own.ps1, config/instance.json, CLAUDE.md, docs/HANDOFF.md) are not listed: for those the
+# rule of the skill is the only guard.
+
+# credentials and tokens
+/gateway/Auth.cs                              @jeffreypalermo
+
+# the deployment pipeline and repository rules
+/.github/                                     @jeffreypalermo
+/Dockerfile                                   @jeffreypalermo
+/.dockerignore                                @jeffreypalermo
+/config/deploy.overrides.json                 @jeffreypalermo
+/config/apply-overrides.ps1                   @jeffreypalermo
+
+# the operator session: its powers, its skill and guard rails, and the tests of them
+/gateway/Operator.cs                          @jeffreypalermo
+/plugin/skills/factory-operator/              @jeffreypalermo
+/plugin/scripts/lib/Client.Operator.ps1       @jeffreypalermo
+/plugin/scripts/lib/OperatorRelease.ps1       @jeffreypalermo
+/docs/design/operator-session.md              @jeffreypalermo
+/tests/scenarios/operator.ps1                 @jeffreypalermo
+
+# how sessions weigh what they are told
+/plugin/skills/factory-peer-messaging/        @jeffreypalermo
+/plugin/skills/factory-supervisor/            @jeffreypalermo
+
+# uat and prod
+/docs/deploy/activate-prod.sh                 @jeffreypalermo
