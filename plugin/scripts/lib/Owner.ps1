@@ -75,11 +75,15 @@ function Get-RevokedRefPath { "factory/$((Get-Cfg).name)/revoked" }
 # Every ref under a prefix of the revoked tree, all pages: the read goes on until a page comes back empty, so neither a page smaller than the one
 # asked for nor any number of refs ends it early (a revoked name that is not read would be let in again after a restart).
 function Get-RevokedRefs([string]$Sub = '') {
-    $out = @()
-    for ($page = 1; ; $page++) {
+    # GitHub's matching-refs may ignore the page parameter and answer the same refs again: the loop ends on an empty page, on a page that
+    # brings nothing new, and after 200 pages at the latest. Without that a gateway never finishes starting.
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal); $out = @()
+    for ($page = 1; $page -le 200; $page++) {
         $rows = @(Invoke-Gh -Path "$(Get-RepoPath)/git/matching-refs/$(Get-RevokedRefPath)/$Sub`?per_page=100&page=$page")
         if ($rows.Count -eq 0) { break }
-        foreach ($r in $rows) { $out += "$($r.ref)" }
+        $new = 0
+        foreach ($r in $rows) { if ($seen.Add("$($r.ref)")) { $out += "$($r.ref)"; $new++ } }
+        if ($new -eq 0) { break }
     }
     return , @($out)
 }
