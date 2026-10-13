@@ -373,7 +373,8 @@ $QcGateLeaseScenarios = [ordered]@{
     $failed = Wait-Until -Seconds 60 { (Qc-RecState $x.n $x.pr) -eq 'failed' }
     Check 'after the budget the record is failed' $failed (Qc-RecState $x.n $x.pr)
     Check 'with the code no-worker' ((Qc-Rec $x.n $x.pr).fail.code -eq 'no-worker') "$((Qc-Rec $x.n $x.pr).fail | ConvertTo-Json -Compress)"
-    Check 'the plant holds no QC assignment for it' ((Qc-QcAssignments $x.n).Count -eq 0)
+    # (the record is written by the rule script; the plant lets its assignment go when that call has returned)
+    Check 'the plant holds no QC assignment for it' (Wait-Until -Seconds 30 { (Qc-QcAssignments $x.n).Count -eq 0 })
     Check 'journal: qc-failed once' ((Gate-Journal $x.n 'qc-failed' 'no-worker') -eq 1)
     Check 'the owner mailbox got qc.failed' ((Gate-MailCount $x.n 'qc.failed') -ge 1)
     Qc-Sweeps 2

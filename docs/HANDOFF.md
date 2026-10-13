@@ -145,6 +145,11 @@ p. **Two more flaky checks seen on GitHub's runners, causes not found**: qc suit
 
 Closed on 2026-10-13 (pull request "hardening"):
 
+- **Three more checks that read too early on slow runners** (each failed once in that pull request's own check runs; scenarios only, the
+  product was right): messaging "a message never changes an item" took its first reading between the journal comment and the state save;
+  owner "journal: matched, offered, assigned" read the journal before the gateway had written `offered`; qc-gate-lease "the plant holds no
+  QC assignment" read the plant before the failing call had returned. Each now waits for the condition.
+
 - **(c) One revocation ref per name, paging reader.** A revoke writes the higher generation, reads it back, then removes the name's lower
   refs; a removal that fails leaves a ref and nothing else (the reader takes the highest). The reader reads pages until one is empty.
 - **(d) Fast path fallback and the state comment.** The body marker counts only for items created before `timing.docsOnlyLegacyBefore`

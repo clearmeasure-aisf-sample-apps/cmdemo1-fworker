@@ -52,6 +52,8 @@ $OwnerScenarios = [ordered]@{
     $r = Fo 'alice' @('accept', '--item', $n, '--assignment', $ev.assignment); CheckExit 'accept' $r 0
     Check 'the claim belongs to the worker as owner' ($r.kind -eq 'own-item' -and $r.assignment -eq $ev.assignment)
     $st = Get-Plant; Check 'the plant records the owner' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n" -and $_.Value -eq 'alice' }).Count -eq 1)
+    # (the gateway writes its own lines in order but not inside the accept: wait for them, as the slow-journal scenario below does)
+    [void](Wait-Until -Seconds 30 { $j0 = Get-Journal $n; @(@('matched', 'offered', 'assigned') | Where-Object { $j0 -notcontains $_ }).Count -eq 0 })
     $j = Get-Journal $n
     Check 'journal: matched, offered, assigned, once each' (@(@('matched', 'offered', 'assigned') | Where-Object { $j -notcontains $_ }).Count -eq 0 -and (@($j | Group-Object | Where-Object Count -gt 1).Count -eq 0)) ($j -join ',')
     $all = (Get-FakeIssue $n).comments | ForEach-Object { $_.body }
