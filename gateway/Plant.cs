@@ -346,7 +346,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     rec.Per[name] = "queued"; o.Delivered.Add((name, "queued")); o.Queued++;
                     OperatorNote(s.Event, rec.Id);   // the operator session, if one is connected, gets it on its stream
                     if (s.FromKind == "worker" && (s.Item ?? (ownerOf.Count(kv => kv.Value == s.From) == 1 ? ownerOf.First(kv => kv.Value == s.From).Key : 0)) is var about && about > 0 && ownerOf.TryGetValue(about, out var noteOwner) && noteOwner == s.From)
-                    { operatorNotes.Add((DateTime.UtcNow, about, s.From, rec.Id)); if (operatorNotes.Count > 200) operatorNotes.RemoveAt(0); }
+                    {   // the ring of 200 is shared: one sender keeps at most 10 in it, so a noisy worker cannot push the others' notes out
+                        if (operatorNotes.Count(x => x.Name == s.From) >= 10) operatorNotes.RemoveAt(operatorNotes.FindIndex(x => x.Name == s.From));
+                        operatorNotes.Add((DateTime.UtcNow, about, s.From, rec.Id)); if (operatorNotes.Count > 200) operatorNotes.RemoveAt(0);
+                    }
                     continue;
                 }
                 var e = DeliverEntry(r, s.Event, rec, s.Peer);
@@ -744,7 +747,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         foreach (var (item, rv) in reviews.OrderBy(kv => kv.Key))
             if (ownerOf.TryGetValue(item, out var h) && Auth.ValidName(h) && rv.Max >= 1 && (rv.Round >= rv.Max || (rv.Max >= 2 && rv.Round == rv.Max - 1))) d.Reviews.Add((item, h, rv.Column, rv.Round, rv.Max, rv.At));
         verbErrors.RemoveAll(x => (now - x.At).TotalMinutes > Msg.VerbErrorMinutes);
-        foreach (var g in verbErrors.Where(x => Auth.ValidName(x.Name)).GroupBy(x => (x.Item, x.Name)).OrderBy(g => g.Key.Item))
+        foreach (var g in verbErrors.Where(x => Auth.ValidName(x.Name) && ownerOf.TryGetValue(x.Item, out var eh) && eh == x.Name).GroupBy(x => (x.Item, x.Name)).OrderBy(g => g.Key.Item))
             d.VerbErrors.Add((g.Key.Item, g.Key.Name, g.Count(), g.GroupBy(x => x.Code).OrderByDescending(c => c.Count()).ThenBy(c => c.Key, StringComparer.Ordinal).Select(c => (c.Key, c.Count())).ToList()));
         foreach (var k in mergeRefused.Where(kv => (now - kv.Value.At).TotalMinutes > Msg.NoteMinutes).Select(kv => kv.Key).ToList()) mergeRefused.Remove(k);
         foreach (var (item, mr) in mergeRefused.OrderBy(kv => kv.Key)) d.MergeRefused.Add((item, mr.RoundTrip, mr.At));
@@ -806,7 +809,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     {
         var all = DigestBuilder.Attention(d, Msg);
         var keys = all.Select(e => e.Key).ToHashSet();
-        foreach (var k in store.Reported.Keys.Where(k => !keys.Contains(k)).ToList()) store.Reported.Remove(k);
+        // verb-errors is a count over a sliding window: it may dip under its threshold and come back within minutes. It is forgotten only after a
+        // whole window without it, so the same run of errors is not reported as new at every patrol.
+        foreach (var k in keys) if (store.Reported.TryGetValue(k, out var seen)) seen.Seen = d.Now;
+        foreach (var k in store.Reported.Where(kv => !keys.Contains(kv.Key) && !(kv.Key.StartsWith("verb-errors|", StringComparison.Ordinal) && (d.Now - (kv.Value.Seen == default ? kv.Value.At : kv.Value.Seen)).TotalMinutes < Msg.VerbErrorMinutes)).Select(kv => kv.Key).ToList()) store.Reported.Remove(k);
         foreach (var e in all)
         {
             if (!store.Reported.TryGetValue(e.Key, out var r) || e.Bucket > r.Bucket) e.New = true;
@@ -1174,6 +1180,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
         foreach (var k in ownedInfo.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) ownedInfo.Remove(k);
         foreach (var k in ownedSince.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) ownedSince.Remove(k);
+        foreach (var k in reviews.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) reviews.Remove(k);   // (NoteRefusal may add one for an item nobody owns)
         foreach (var k in activity.Where(kv => (now - kv.Value).TotalHours > 24).Select(kv => kv.Key).ToList()) activity.Remove(k);
         foreach (var k in progress.Where(kv => (now - kv.Value).TotalHours > 24).Select(kv => kv.Key).ToList()) progress.Remove(k);
         parks.RemoveAll(x => (now - x.At).TotalHours > 24);
@@ -1748,7 +1755,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             {   // the facts of the reported conditions (3.9), from the verbs' own answers: numbers and gated names only
                 case "record-review":
                     if (int.TryParse(response["round"]?.ToString(), out var round) && int.TryParse(response["max_rounds"]?.ToString(), out var maxRounds) && response["verdict"]?.ToString() == "FINDINGS" && round >= 1 && maxRounds >= 1)
-                        reviews[item] = (Gated(request["column"]?.ToString()), round, maxRounds, DateTime.UtcNow);
+                        // the column is the plant's own knowledge of the item (the sweep, else the assignment), never what the request names
+                        reviews[item] = (ownedInfo.TryGetValue(item, out var ro) && ro.Column != "" ? ro.Column : Gated(assignments.TryGetValue($"{item}|own-item|owner", out var ra) ? ra.Column : ""), round, maxRounds, DateTime.UtcNow);
                     else reviews.Remove(item);
                     break;
                 case "move-next" or "complete": reviews.Remove(item); break;

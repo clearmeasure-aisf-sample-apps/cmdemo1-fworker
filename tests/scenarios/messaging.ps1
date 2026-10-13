@@ -885,7 +885,8 @@ $MessagingScenarios = [ordered]@{
     $n = New-Item-Fake 'Untouched item' 'x' @('factory worker') 'Development'
     # what the plant's own sweep does to a new item with no worker (a "waiting" journal line and its ledger) happens first, so that it is not
     # mistaken for an effect of a message
-    [void](Wait-Until -Seconds 20 { (Get-Journal $n) -contains 'waiting' })
+    # (the state is saved after the comment is posted: wait for the save, or a slow gateway writes it between the two readings below)
+    [void](Wait-Until -Seconds 60 { $w0 = Qc-State $n; (Get-Journal $n) -contains 'waiting' -and $w0 -and $w0.ContainsKey('journal') -and $w0.journal.ContainsKey('waiting_at') })
     $facts = {
         $st = Qc-State $n; $copy = @{}
         if ($st) { foreach ($k in ($st.Keys | Sort-Object)) { if ($k -ne 'journal') { $copy[$k] = $st[$k] } } }
@@ -2815,7 +2816,10 @@ $ManagerScenarios['mgr: a spent delivery budget drops the patrol of a reported c
             [void](Mgr-Fact @{ fact = 'merge-refused'; item = 9821; roundTrip = 1 })
             $p = Mgr-WaitPatrols $sup 1 12
             Check 'the one delivery of the hour carries the refused merge' ($p.Count -eq 1 -and (Mgr-Att $p[0] 'merge-refused' 9821)) ($p | ConvertTo-Json -Compress -Depth 8)
+            [void](Msg-Post '/api/v1/_test/roles' @{ item = 9822; owner = 'alice'; sweepable = $true })   # verb errors count only for the item's owner
             1..3 | ForEach-Object { [void](Mgr-Fact @{ fact = 'verb-error'; item = 9822; name = 'alice'; code = 'starting' }) }
+            $un = Mgr-Fact @{ fact = 'verb-error'; item = 9823; name = 'alice'; code = 'starting' }; 1..3 | ForEach-Object { [void](Mgr-Fact @{ fact = 'verb-error'; item = 9823; name = 'alice'; code = 'starting' }) }
+            Check 'failed verbs for an item the caller does not own are no condition' ($null -eq (Mgr-Att (Mgr-Digest) 'verb-errors' 9823) -and $null -ne (Mgr-Att (Mgr-Digest) 'verb-errors' 9822))
             $ok = Wait-Until -Seconds 15 { Mgr-Beat; (Mgr-Status).patrolsDropped -ge 1 }
             Msg-Read $sup 2
             Check 'the budget is spent: the patrol of the failed verbs is dropped, not sent' ($ok -and (Mgr-Patrols $sup).Count -eq 1 -and (Mgr-Status).deliveriesHour -eq 1) ((Mgr-Status) | ConvertTo-Json -Compress -Depth 4)
@@ -3475,7 +3479,26 @@ $ManagerScenarios['mgr: the dashboard shows sessions with the pinned supervisor,
                 $paths = @($run.calls | ForEach-Object { "$($_.path)" })
                 Check 'what it asks the gateway: the dashboard, the directory, the questions and the traffic, each with the token in the header and none in the URL' (($paths -contains '/api/v1/dashboard') -and ($paths -contains '/api/v1/peers?all=1') -and ($paths -contains '/api/v1/questions?state=all') -and ($paths -contains '/api/v1/messages?worker=operator&limit=50') -and @($paths | Where-Object { $_ -match 'test-token' }).Count -eq 0 -and @($run.calls | Where-Object { $_.path -like '/api/*' -and $_.auth -ne 'Bearer test-token' }).Count -eq 0) ($paths -join ' ')
                 $wrong = Msg-PageRun 'not-the-token'
-                Check 'with a wrong token the page shows the refusal and nothing else' ("$($wrong.els.msg.text)" -eq 'token refused' -and "$($wrong.els.rows.html)" -eq '' -and "$($wrong.els.qrows.html)" -eq '')
+                Check 'with a wrong token the page shows the refusal and nothing else' ("$($wrong.els.msg.text)" -eq 'token refused' -and "$($wrong.els.rows.html)" -match '>Enter the operator token\.<' -and "$($wrong.els.qrows.html)" -notmatch 'data-q' -and $wrong.els.tokrow.hidden -eq $false -and @($wrong.calls | Where-Object { $_.path -like '/api/*' }).Count -eq 1) (($wrong.calls | ForEach-Object { "$($_.path)" }) -join ' ')
+                # Disconnect, a refresh that was in flight when the token went, and a refused token (backlog e)
+                $afterBye = @'
+const R=global.RES={},n=()=>global.CALLS.filter(c=>c.path.indexOf('/api/')===0).length;
+const snap=()=>({rows:$('rows').innerHTML,asg:$('asg').innerHTML,qc:$('qcrows').innerHTML,qcsec:$('qcsec').hidden,op:$('oprows').innerHTML,q:$('qrows').innerHTML,dlog:$('dlog').innerHTML,log:$('logrows').innerHTML,dig:$('digest').textContent,counts:$('qcounts').textContent,cost:$('costtext').textContent,msgsec:$('msgsec').hidden,qsec:$('qsec').hidden,digbox:$('digestbox').hidden,badge:$('opbadge').hidden,msg:$('msg').textContent,tokrow:$('tokrow').hidden});
+R.before=snap();
+let n0=n();const p=refresh();$('bye').onclick();await p;R.flight=snap();R.flightCalls=n()-n0;
+n0=n();await refresh();await refresh();R.byeCalls=n()-n0;
+tok='test-token';await refresh();R.again=snap();
+tok='not-the-token';n0=n();await refresh();R.refused=snap();R.refusedTok=tok;R.refusedCalls=n()-n0;
+n0=n();await refresh();await refresh();R.pollCalls=n()-n0;
+'@
+                $bye = Msg-PageRun 'test-token' $afterBye; $br = $bye.res
+                $cleared = { param($x) "$($x.rows)" -match '>Enter the operator token\.<' -and "$($x.asg)" -eq '<tr><td class="mut">none</td></tr>' -and $x.qcsec -eq $true -and "$($x.qc)" -notmatch 'data-pr' -and "$($x.op)" -match 'Nothing was sent to the operator' -and "$($x.op)$($x.q)$($x.log)$($x.dlog)" -notmatch 'data-t=|data-q=|alice' -and "$($x.dig)$($x.counts)$($x.cost)" -eq '' -and $x.msgsec -eq $true -and $x.qsec -eq $true -and $x.digbox -eq $true -and $x.badge -eq $true -and $x.tokrow -eq $false }
+                Check 'before Disconnect the page run shows the note to the operator, the question, the traffic and a digest text' ("$($bye.error)" -eq '' -and $br -and "$($br.before.op)" -match 'data-t=' -and "$($br.before.q)" -match 'data-q=' -and "$($br.before.log)" -match 'alice' -and "$($br.before.dig)" -ne '' -and $br.before.tokrow -eq $true) "$($bye.error)"
+                Check 'Disconnect while a refresh is in flight: the answer that arrives afterwards is dropped (one request, nothing drawn), and every section is cleared and the QC section hidden' ($br.flightCalls -eq 1 -and "$($br.flight.msg)" -eq 'Disconnected.' -and (& $cleared $br.flight)) ($br.flight | ConvertTo-Json -Compress)
+                Check 'after Disconnect the timer asks the gateway nothing' ($br.byeCalls -eq 0)
+                Check 'connecting again draws the page again' ("$($br.again.op)" -match 'data-t=' -and $br.again.tokrow -eq $true -and $br.again.msgsec -eq $false)
+                Check 'a refused token: the refusal is shown, what the earlier token showed is cleared, the token is forgotten' ($br.refusedCalls -eq 1 -and "$($br.refused.msg)" -eq 'token refused' -and "$($br.refusedTok)" -eq '' -and (& $cleared $br.refused)) ($br.refused | ConvertTo-Json -Compress)
+                Check 'and the 4 second timer asks nothing more until the next Connect' ($br.pollCalls -eq 0)
             }
             # the operator's answer from the page's endpoint reaches the asker as an operator note, and the question leaves the open list
             $op = Msg-Post "/api/v1/questions/$($q.id)/answer" @{ text = 'Answered from the dashboard.' }
@@ -3981,6 +4004,7 @@ $ManagerScenarios['plant: an offer waits 120 seconds for its accept by default, 
 }
 
 $ManagerScenarios['revoke: the operator revokes a name: every credential of it is refused, its stream ends, a new credential works, and a restart keeps it'] = {
+    $nx = New-Item-Fake 'Revoke other' 'x' @('factory worker')   # a second item on the board, before this one: what the sweep of the start would offer first
     $n = New-Item-Fake 'Revoke item' 'x' @('factory worker')
     $envR = @{ GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_TEST_SKIP_REVOCATIONS = $null }
     $mint = { param($Name, $Role) Msg-Post "/api/v1/workers/$Name/credential$(if ($Role) { "?role=$Role" })" @{} }
@@ -3988,6 +4012,10 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
     $verb = { param($V, $Tok, $Body = @{}) [int](Msg-Verb $V $Tok $Body).StatusCode }
     $script:Rev = @{}
     Msg-OnGateway $envR { param($g)
+        # This gateway reads the suite's fake GitHub, so the sweep it runs at its start sees the board of every scenario before this one and plans
+        # it. That sweep is not the subject here and must be over before a session connects: landing between the second registration and the
+        # plan below (seen on slow runners) it offered another item first, and the session, at capacity, was not offered this one.
+        Check 'the sweep of the start is over before a session connects' (Wait-Until -Seconds 120 { (Mgr-Log $g) -match '"sweep":' })
         $t1 = "$((& $mint 'rev-a').token)"; $alice = Msg-Token 'alice'
         Check 'a name that was never revoked gets the credential it always got' ($t1 -eq (New-WorkerToken 'rev-a'))
         $it1 = Msg-ItemToken $n 'owner' 'rev-a'
@@ -4016,7 +4044,7 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
         $s2 = Msg-Open 'name=rev-a' $t2; Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'worker.registered' }).Count -gt 0 }
         [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design'; reason = 'test' }); owned = @{}; keep = @() })
         Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' }).Count -gt 0 }
-        $as = Msg-First (Msg-Of $s2 'item.assigned')
+        $as = Msg-First @(Msg-Of $s2 'item.assigned' | Where-Object { $_.data.item -eq $n })
         Check 'it registers again, is offered work, and the item token of that offer is answered' ((Msg-Of $s2 'worker.registered').Count -eq 1 -and $as -and "$($as.data.token)" -match '^i1\.' -and (& $verb 'get-item' "$($as.data.token)" @{ item = "$n" }) -eq 200)
         Msg-Close $s2
         # a name nobody has seen: harmless, and revoked all the same
@@ -4047,11 +4075,30 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
         $again = Msg-Post '/api/v1/workers/rev-a/revoke' @{}
         Check 'a second revocation counts on from the stored generation and refuses the second credential' ($again.status -eq 200 -and $again.generation -eq 2 -and (& $verb 'my-items' $r.t2) -eq 401) ($again | ConvertTo-Json -Compress)
         $refs = @((Get-FakeState).refs | Where-Object { $_ -match '/revoked/rev-a/' })
-        Check 'GitHub holds the generations of the name, the current one the highest' ($refs.Count -eq 2 -and @($refs | Where-Object { $_ -match '/revoked/rev-a/2$' }).Count -eq 1) ($refs -join ',')
+        Check 'GitHub holds one ref of the name, the current generation: the lower one was removed' ($refs.Count -eq 1 -and "$($refs[0])" -match '/revoked/rev-a/2$') ($refs -join ',')
+        # one ref per name: a removal that fails leaves a lower ref behind and changes nothing else (the reader takes the highest)
+        Fake 'fault' @{ match = '^DELETE .*/git/refs/factory/.*/revoked/rev-a/'; status = 500; count = 1 } | Out-Null
+        $third = Msg-Post '/api/v1/workers/rev-a/revoke' @{}
+        $refs = @((Get-FakeState).refs | Where-Object { $_ -match '/revoked/rev-a/' })
+        $read = Qc-Server 'revocations' @{}
+        Check 'a removal of the lower ref that fails does not fail the revocation or lower the generation: 200, generation 3, both refs there, the reader answers 3' ($third.status -eq 200 -and $third.generation -eq 3 -and $refs.Count -eq 2 -and @($refs | Where-Object { $_ -match '/revoked/rev-a/3$' }).Count -eq 1 -and $read.exit -eq 0 -and $read.revoked['rev-a'] -eq 3) "$($third | ConvertTo-Json -Compress) $($refs -join ',') $($read | ConvertTo-Json -Compress -Depth 3)"
+        $fourth = Msg-Post '/api/v1/workers/rev-a/revoke' @{}
+        $refs = @((Get-FakeState).refs | Where-Object { $_ -match '/revoked/rev-a/' })
+        Check 'the next revoke of the name removes what was left: one ref again, generation 4' ($fourth.status -eq 200 -and $fourth.generation -eq 4 -and $refs.Count -eq 1 -and "$($refs[0])" -match '/revoked/rev-a/4$') ($refs -join ',')
         # the rule scripts are not a way around the endpoint: a direct call would write a generation this process does not know
         $dv = Msg-Verb 'revoke-worker' 'test-token' @{ name = 'rev-a'; generation = 9 }; $dl = Msg-Verb 'revocations' 'test-token'
         Check 'the operator calling /verbs/revoke-worker or /verbs/revocations is refused (400 use-endpoint) and no ref is written' ([int]$dv.StatusCode -eq 400 -and (Msg-Json $dv).code -eq 'use-endpoint' -and [int]$dl.StatusCode -eq 400 -and @((Get-FakeState).refs | Where-Object { $_ -match '/revoked/rev-a/9$' }).Count -eq 0 -and (& $verb 'my-items' $r.alice) -eq 200)
     }
+    # the reader pages: GitHub answers one ref a page (three names are revoked), and a gateway that starts still knows every one of them
+    try {
+        Fake 'ref-page' @{ size = 1 } | Out-Null
+        Check 'three names are revoked, one ref each' (@((Get-FakeState).refs | Where-Object { $_ -match '/revoked/' }).Count -eq 3) (@((Get-FakeState).refs) -join ',')
+        Msg-OnGateway $envR {
+            Check 'read a page of one ref at a time, every revoked name is still refused after a restart, and the others are not' ((& $verb 'my-items' $r.t2) -eq 401 -and (& $st 'GET' '/api/v1/plugin' $r.m1) -eq 401 -and (& $verb 'my-items' (New-WorkerToken 'never-seen-zz')) -eq 401 -and (& $verb 'my-items' $r.alice) -eq 200)
+            $t5 = "$((& $mint 'rev-a').token)"
+            Check 'and a credential minted now carries the generation that was read (4) and works' ($t5 -match '^w1\.rev-a\.' -and $t5 -ne $r.t2 -and (& $verb 'my-items' $t5) -eq 200)
+        }
+    } finally { Fake 'ref-page' @{ size = 100 } | Out-Null }
     # the test switch of a gateway without GitHub: it revokes nothing
     Msg-OnGateway @{} { Check 'a gateway started with FACTORY_TEST_SKIP_REVOCATIONS refuses to revoke' ((Msg-Post '/api/v1/workers/rev-a/revoke' @{}).status -eq 403) }
     if (Get-Command node -ErrorAction SilentlyContinue) {
@@ -4060,6 +4107,23 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
         Check 'the dashboard has a revoke button on a session row, with and without messaging, and on the supervisor row' (@([regex]::Matches("$rows", 'data-n="(w-x|s-x|supervisor)" data-a="revoke"')).Count -eq 3) "$rows"
         Check 'the supervisor row is drawn into the table whose click handler posts the action' ($pg -match "groupedRows\(ss,\(x,i\)=>sessionRowHtml\(x,now,repoUrl,i\),11,\(sup\?groupHead\('Plant manager',11\)\+supervisorRowHtml\(m,now\):''\)\+\(op\?groupHead\('Factory operator',11\)\+operatorRowHtml\(info\.operator,now\):''\)\);\s*setRows\('rows',gr\.html," -and $pg -match "\$\('rows'\)\.onclick=async e=>\{const b=e\.target\.closest\('button'\)")
         Check 'the button asks first and posts to the revoke endpoint with the token in the header' ($pg -match "b\.dataset\.a==='revoke'&&!confirm\(" -and $pg -match "'/api/v1/workers/'\+encodeURIComponent\(b\.dataset\.n\)\+'/'\+b\.dataset\.a,'POST'")
+    }
+}
+
+$ManagerScenarios['sweep: an item new on the board is offered after a short second look, not a whole sweep interval later [full]'] = {
+    # as deployed an item is offered by the second sweep that sees it in its column (timing.sweepSeenCount 2). The interval here is an hour:
+    # only the early second look (FACTORY_SWEEP_CONFIRM_SECONDS) can offer the item inside this scenario.
+    # (a label of its own, so the sweep of this gateway plans this item and nothing of the other scenarios)
+    $cfg = Msg-Config 'instance.first-pickup.json' { param($c) $c.name = 'first-pickup'; $c.label = 'first-pickup' }
+    $n = New-Item-Fake 'First pickup' 'x' @('first-pickup', 'worker:nobody-here')
+    Msg-OnGateway @{ FACTORY_CONFIG = $cfg; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_TIMING_sweepSeenCount = '2'; FACTORY_SWEEP_CONFIRM_SECONDS = '2' } {
+        param($g)
+        $sweeps = { , @([regex]::Matches((Mgr-Log $g), '"sweep":\{"offers":(\d+)') | ForEach-Object { [int]$_.Groups[1].Value }) }
+        $asg = { @((Msg-Admin '/api/v1/status').plant.assignments | Where-Object { $_.item -eq $n }).Count }
+        Check 'the first sweep sees the item and offers nothing yet' ((Wait-Until -Seconds 60 { (& $sweeps).Count -ge 1 }) -and (& $sweeps)[0] -eq 0 -and ((& $sweeps).Count -gt 1 -or (& $asg) -eq 0)) ((& $sweeps) -join ',')
+        Check 'a second sweep follows within seconds although the interval is an hour, and it offers the item' ((Wait-Until -Seconds 60 { (& $sweeps).Count -ge 2 }) -and (& $sweeps)[1] -ge 1 -and (Wait-Until -Seconds 10 { (& $asg) -eq 1 })) ((& $sweeps) -join ',')
+        Start-Sleep -Seconds 8
+        Check 'with nothing left to confirm the sweeps go back to the interval' ((& $sweeps).Count -eq 2) ((& $sweeps) -join ',')
     }
 }
 

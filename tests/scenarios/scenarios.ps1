@@ -252,7 +252,8 @@ $Scenarios = [ordered]@{
     Check 'a typed section and marker: the build is owed' ((Pv $o 'build_owed') -eq $true) ($o | ConvertTo-Json -Compress -Depth 4)
     $r = F 'w1' @('wait-for-checks', '--item', $h); $r = Do-DevComplete $h; CheckExit 'and the docs pull request is refused' $r 10 'development-docs-only-pr'
     # an item designed by an older version: past the design column, marker in the body, no field in its state: the body marker still counts
-    $old = New-Item-Fake 'Legacy item' "Add docs/a.md`n`n## Technical Design`n`n<!-- aisf:docs-only -->`n- change as described.`n" $L 'Development'
+    # (created before timing.docsOnlyLegacyBefore: only such an item is read by its body)
+    $old = (Fake 'issue' @{ title = 'Legacy item'; body = "Add docs/a.md`n`n## Technical Design`n`n<!-- aisf:docs-only -->`n- change as described.`n"; labels = $L; column = 'Development'; createdAt = '2019-06-01T00:00:00Z' }).number
     $r = F 'w1' @('claim-item', '--item', $old, '--column', 'Development'); CheckExit 'claim (legacy state)' $r 0
     $o = & $open $old @('docs/a.md'); Check 'legacy state: no build owed' ((Pv $o 'build_owed') -eq $false) ($o | ConvertTo-Json -Compress -Depth 4)
     $r = F 'w1' @('wait-for-checks', '--item', $old); $r = Do-DevComplete $old; CheckExit 'legacy state: the docs pull request completes' $r 0

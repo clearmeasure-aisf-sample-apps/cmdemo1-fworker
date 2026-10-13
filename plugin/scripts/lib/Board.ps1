@@ -30,7 +30,7 @@ function Get-LastColumn { $cols = Get-BoardColumns; $cols[$cols.Count - 1] }
 function Get-ItemInfo([int]$Item) {
     $c = Get-Cfg
     $q = @'
-query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ id number state title body url
+query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ id number state title body url createdAt
   labels(first:50){ nodes{ name } }
   projectItems(first:20){ nodes{ id project{ number } fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } } } } } } }
 '@
@@ -41,7 +41,7 @@ query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number
     $status = $null; $cardId = $null
     if ($card) { $cardId = $card.id; if ($card.fieldValueByName) { $status = $card.fieldValueByName.name } }
     return @{
-        number = [int]$i.number; nodeId = $i.id; open = ($i.state -eq 'OPEN'); title = $i.title; body = "$($i.body)"; url = $i.url
+        number = [int]$i.number; nodeId = $i.id; open = ($i.state -eq 'OPEN'); title = $i.title; body = "$($i.body)"; url = $i.url; createdAt = $i.createdAt
         labels = @($i.labels.nodes | ForEach-Object { $_.name }); cardId = $cardId; column = $status
     }
 }

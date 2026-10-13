@@ -233,7 +233,7 @@ function Test-DocsOnlyDesignReview($State, [string]$Column) {
 # Findings of a docs-only design review that the item itself backs: the quoted text is compared with the body, whitespace folded, case kept.
 # criterion: at least 8 characters, found ABOVE the design section (the item's own text, never the design quoting itself).
 # file: found INSIDE the design section (a file the design names).
-# The quote runs from the first double quote after the keyword to the last one before the " - " separator, so a criterion may itself contain quotes.
+# The quote runs from the first double quote after the keyword to the one before a " - " separator: the first separator is tried first, then the last.
 function Get-GroundedFindings($Info, [string]$Column, $Lines) {
     $fold = { param($t) (("$t" -replace '\s+', ' ').Trim()) }
     $body = "$($Info.body)"; $sec = (Get-Cfg).requiredBodySection[$Column]
@@ -244,7 +244,10 @@ function Get-GroundedFindings($Info, [string]$Column, $Lines) {
     foreach ($l in @($Lines)) {
         if ("$l" -cnotmatch '^[-*\s]*FINDING:') { continue }
         $ok = $false
-        if ("$l" -cmatch '^[-*\s]*FINDING:\s*(criterion|file)\s+"(.+)"\s+-\s+\S') {
+        # the shortest quote first (it ends at the first " - ", so a remark that itself holds quotes and a dash is not taken into the quote), then
+        # the longest (a criterion that itself contains " - ")
+        foreach ($pat in '^[-*\s]*FINDING:\s*(criterion|file)\s+"(.+?)"\s+-\s+\S', '^[-*\s]*FINDING:\s*(criterion|file)\s+"(.+)"\s+-\s+\S') {
+            if ($ok -or "$l" -cnotmatch $pat) { continue }
             $kind = $Matches[1]; $q = & $fold $Matches[2]
             if ($kind -eq 'criterion') { $ok = $q.Length -ge 8 -and $own.Contains($q) }
             else { $ok = $q.Length -ge 3 -and $design.Contains($q) }

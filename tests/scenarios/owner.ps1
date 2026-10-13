@@ -52,6 +52,8 @@ $OwnerScenarios = [ordered]@{
     $r = Fo 'alice' @('accept', '--item', $n, '--assignment', $ev.assignment); CheckExit 'accept' $r 0
     Check 'the claim belongs to the worker as owner' ($r.kind -eq 'own-item' -and $r.assignment -eq $ev.assignment)
     $st = Get-Plant; Check 'the plant records the owner' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n" -and $_.Value -eq 'alice' }).Count -eq 1)
+    # (the gateway writes its own lines in order but not inside the accept: wait for them, as the slow-journal scenario below does)
+    [void](Wait-Until -Seconds 30 { $j0 = Get-Journal $n; @(@('matched', 'offered', 'assigned') | Where-Object { $j0 -notcontains $_ }).Count -eq 0 })
     $j = Get-Journal $n
     Check 'journal: matched, offered, assigned, once each' (@(@('matched', 'offered', 'assigned') | Where-Object { $j -notcontains $_ }).Count -eq 0 -and (@($j | Group-Object | Where-Object Count -gt 1).Count -eq 0)) ($j -join ',')
     $all = (Get-FakeIssue $n).comments | ForEach-Object { $_.body }
@@ -176,6 +178,39 @@ $OwnerScenarios = [ordered]@{
     Start-OwnerClient 'cap1' 'claude-cloud' '--capacity 1'
     $w2 = @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'cap1' })[0]
     Check 'a reconnect with --capacity 1 keeps the operator value' ($w2.capacity -eq 10) ($w2 | ConvertTo-Json -Compress)
+}
+
+'owner: update-pr replaces the body of the item''s own open pull request, and of no other [full]' = {
+    # pinned to a session that does not exist, so the plant offers these items to nobody while the verbs are called
+    $lab = @('factory worker', 'Auto Merge', 'worker:nobody-here')
+    $n = New-Item-Fake 'Body A' 'x' $lab; $m = New-Item-Fake 'Body B' 'x' $lab
+    Do-TechnicalDesign $n; $pr = Do-Development $n
+    Do-TechnicalDesign $m; $prM = Do-Development $m
+    Check 'open-pr wrote the body with the reference to the item' ((Get-FakePr $pr).body -eq "change`n`nRefs #$n") "$((Get-FakePr $pr).body)"
+    $own = Msg-ItemToken $n 'owner' 'alice'; $insp = Msg-ItemToken $n 'inspector' 'alice'
+    $call = { param($Tok, $Body) $r0 = Msg-Verb 'update-pr' $Tok $Body; $j = Msg-Json $r0; $j.status = [int]$r0.StatusCode; $j }
+    $r = & $call $own @{ item = $n; body = "corrected text`n" }
+    Check 'the owner''s item token replaces the body; the reference to the item is kept' ($r.status -eq 200 -and $r.exit -eq 0 -and $r.pullRequest.number -eq $pr -and (Get-FakePr $pr).body -eq "corrected text`n`nRefs #$n") "$($r | ConvertTo-Json -Compress -Depth 4) $((Get-FakePr $pr).body)"
+    $r = F 'w1' @('update-pr', '--item', $n, '--pr', $pr, '--body-file', (TmpFile "upr$n.md" "from a file`n`nRefs #$n"))
+    CheckExit 'the client verb with --body-file and the pull request named' $r 0
+    Check 'a body that already ends with the reference is not given a second one' ((Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$((Get-FakePr $pr).body)"
+    $r = & $call $own @{ item = $n; pr = $prM; body = 'not mine' }
+    Check 'another item''s pull request is refused (pr-not-own) and stays as it was' ($r.exit -eq 10 -and $r.code -eq 'pr-not-own' -and (Get-FakePr $prM).body -eq "change`n`nRefs #$m") "$($r | ConvertTo-Json -Compress) $((Get-FakePr $prM).body)"
+    $r = & $call $own @{ item = $m; body = 'wrong item' }
+    Check 'the token of item A cannot name item B (403)' ($r.status -eq 403 -and (Get-FakePr $prM).body -eq "change`n`nRefs #$m") "$($r | ConvertTo-Json -Compress)"
+    $r = & $call $insp @{ item = $n; body = 'inspector' }
+    Check 'the inspector role is refused (403), as for open-pr' ($r.status -eq 403) "$($r | ConvertTo-Json -Compress)"
+    $r = & $call (Msg-Token 'alice') @{ item = $n; body = 'worker credential' }
+    Check 'a worker credential without the item token is refused (403)' ($r.status -eq 403) "$($r | ConvertTo-Json -Compress)"
+    $r = & $call $own @{ item = $n; body = '   ' }
+    Check 'an empty body is a usage error' ($r.exit -eq 2 -and $r.code -eq 'usage') "$($r | ConvertTo-Json -Compress)"
+    Check 'none of the refusals changed the body' ((Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$((Get-FakePr $pr).body)"
+    $td = New-Item-Fake 'Body C' 'x' $lab; $r = & $call (Msg-ItemToken $td 'owner' 'alice') @{ item = $td; body = 'too early' }
+    Check 'outside Development the body is not changed (wrong-column)' ($r.exit -eq 10 -and $r.code -eq 'wrong-column') "$($r | ConvertTo-Json -Compress)"
+    Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
+    Check 'the pull request is merged' ((Get-FakePr $pr).merged -eq $true)
+    $r = & $call $own @{ item = $n; pr = $pr; body = 'after the merge' }
+    Check 'a merged pull request is refused (pr-not-open), named or not' ($r.exit -eq 10 -and $r.code -eq 'pr-not-open' -and (& $call $own @{ item = $n; body = 'after the merge' }).code -eq 'pr-not-open' -and (Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$($r | ConvertTo-Json -Compress)"
 }
 
 'msg: messaging and the supervisor are off by default' = {
@@ -358,6 +393,21 @@ $OwnerScenarios['owner: an item that waits for its pinned worker has matched fir
 }
 
 # The start guards of the test runners (guard.ps1), and how a crashed client process is reported.
+# ---- the docs-only marker in the body counts only for items from before the cutoff (backlog d) ----
+$OwnerScenarios['docs-only: the body marker of an item without the state field counts only for items created before the cutoff [full]'] = {
+    $lab = @('factory worker', 'worker:nobody-here')   # pinned to a session that does not exist: the plant offers these items to nobody
+    $get = { param($i) Qc-Server 'get-item' @{ item = $i } }
+    # the docs-only marker in the body of an item without the state field: only for items created before the cutoff
+    $mk = "x`n`n## Technical Design`n<!-- aisf:docs-only -->`n- a sentence."
+    $d0 = (Fake 'issue' @{ title = 'Old docs item'; body = $mk; labels = $lab; column = 'Development'; createdAt = '2019-06-01T00:00:00Z' }).number
+    $d1 = (Fake 'issue' @{ title = 'New docs item'; body = $mk; labels = $lab; column = 'Development' }).number
+    $g0 = & $get $d0; $g1 = & $get $d1
+    Check 'an item created before the cutoff, past its design and without the field, is docs-only by the marker in its body' ($g0.exit -eq 0 -and $g0.docs_only -eq $true) ($g0 | ConvertTo-Json -Compress -Depth 2)
+    Check 'an item created after it is not, whatever its body says' ($g1.exit -eq 0 -and $g1.docs_only -eq $false)
+    $ship = (Get-Content -Raw (Join-Path $script:Root 'config/instance.json') | ConvertFrom-Json -AsHashtable -DateKind String).timing.docsOnlyLegacyBefore
+    Check 'the shipped cutoff is 2026-10-16T00:00:00Z' ("$ship" -eq '2026-10-16T00:00:00Z') "$ship"
+}
+
 $OwnerScenarios['runner: a second run is refused while one is active, a short disk is refused, -Force overrides, and pwsh exit 139 is reported as a crash'] = {
     $pwshExe = (Get-Command pwsh).Source
     # a child of this suite is inside a run (FACTORY_TEST_RUN_HELD): the guard is tried as a person's shell would start it, without that variable

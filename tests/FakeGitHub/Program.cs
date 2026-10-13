@@ -29,7 +29,7 @@ app.Run(async ctx =>
 });
 app.Run();
 
-sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); }
+sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow; }
 sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
 sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft; public List<Comment> Comments = new(); }
 sealed class Check { public string Name = ""; public string Status = "completed"; public string? Conclusion = "success"; public DateTime Started = DateTime.UtcNow; public DateTime? CompleteAt; public int Id; }
@@ -60,7 +60,18 @@ sealed class World
 
     static string Sha(string seed) => Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(seed))).ToLowerInvariant();
     string NewSha() => Sha("c" + (++counter) + DateTime.UtcNow.Ticks);
-    static bool DocsOnly(IEnumerable<string> files) { var l = files.ToList(); return l.Count > 0 && l.All(f => f.StartsWith("docs/") || f.EndsWith(".md") || f.StartsWith("LICENSE") || f.StartsWith(".github/ISSUE_TEMPLATE/")); }
+    // The product's own documentation rule (docsOnlyPaths of the instance configuration, as Test-DocsOnlyFiles reads it), not a copy that can drift:
+    // from FACTORY_CONFIG when the fake is started with it, else from config/instance.json above the binary.
+    static Regex[]? docPats;
+    static Regex[] DocPats()
+    {
+        if (docPats != null) return docPats;
+        var path = Environment.GetEnvironmentVariable("FACTORY_CONFIG");
+        for (var d = new DirectoryInfo(AppContext.BaseDirectory); (path == null || !File.Exists(path)) && d != null; d = d.Parent) { var c = Path.Combine(d.FullName, "config", "instance.json"); if (File.Exists(c)) path = c; }
+        if (path == null || !File.Exists(path)) throw new InvalidOperationException("the fake needs the instance configuration for docsOnlyPaths: set FACTORY_CONFIG");
+        return docPats = JsonNode.Parse(File.ReadAllText(path))!["docsOnlyPaths"]!.AsArray().Select(x => new Regex(x!.ToString(), RegexOptions.IgnoreCase)).ToArray();
+    }
+    static bool DocsOnly(IEnumerable<string> files) { var l = files.ToList(); var pats = DocPats(); return l.Count > 0 && l.All(f => pats.Any(p => p.IsMatch(f))); }
     static JsonObject J(params (string, JsonNode?)[] kv) { var o = new JsonObject(); foreach (var (k, v) in kv) o[k] = v; return o; }
 
     static string Who(string auth)
@@ -130,8 +141,9 @@ sealed class World
         }
         if ((m = Regex.Match(path, $"^{root}/git/matching-refs/(.+)$")).Success && method == "GET")
         {
-            int rp = int.TryParse(q["page"], out var rpg) ? rpg : 1;
-            return (200, new JsonArray(refs.Where(r => r.StartsWith("refs/" + m.Groups[1].Value, StringComparison.Ordinal)).OrderBy(r => r, StringComparer.Ordinal).Skip((rp - 1) * 100).Take(100).Select(r => (JsonNode)J(("ref", r))).ToArray()));
+            // a page holds what was asked for (per_page, 100 at most) or fewer when /_fake/ref-page set a smaller size, as a server may
+            int rp = int.TryParse(q["page"], out var rpg) ? rpg : 1; int per = Math.Min(Math.Clamp(int.TryParse(q["per_page"], out var pp) ? pp : 30, 1, 100), refPage);
+            return (200, new JsonArray(refs.Where(r => r.StartsWith("refs/" + m.Groups[1].Value, StringComparison.Ordinal)).OrderBy(r => r, StringComparer.Ordinal).Skip((rp - 1) * per).Take(per).Select(r => (JsonNode)J(("ref", r))).ToArray()));
         }
         if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "DELETE")
             return refs.Remove("refs/" + m.Groups[1].Value) ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}");
@@ -166,7 +178,13 @@ sealed class World
                     if (pr.Conflict) return (422, "{\"message\":\"merge conflict between base and head\"}");
                     pr.Behind = 0; pr.Sha = NewSha(); ApplyProfile(pr, pr.Sha); return (202, "{\"message\":\"Updating pull request branch.\"}");
                 case "merge": return Merge(pr, b);
-                default: return (200, PrJson(pr, true));
+                default:
+                    if (method == "PATCH")
+                    {   // title and body only, and only while open (as GitHub: a closed pull request's text can be edited there, the product never does)
+                        if (b?["body"] is { } nb) pr.Body = nb.ToString();
+                        if (b?["title"] is { } nt) pr.Title = nt.ToString();
+                    }
+                    return (200, PrJson(pr, true));
             }
         }
         if ((m = Regex.Match(path, $"^{root}/commits/([0-9a-f]+)/check-runs$")).Success)
@@ -253,7 +271,7 @@ sealed class World
         {
             var n = v["n"]!.GetValue<int>(); if (!issues.TryGetValue(n, out var i)) return (200, Data(J(("repository", J(("issue", null))))));
             var card = i.Card == null ? new JsonArray() : new JsonArray(J(("id", i.Card), ("project", J(("number", 679))), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column)))));
-            return (200, Data(J(("repository", J(("issue", J(("id", i.Node), ("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("url", $"https://fake/issues/{i.Number}"),
+            return (200, Data(J(("repository", J(("issue", J(("id", i.Node), ("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("url", $"https://fake/issues/{i.Number}"), ("createdAt", i.Created.ToString("o")),
                 ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))), ("projectItems", J(("nodes", card))))))))));
         }
         if (q.Contains("items(first"))
@@ -296,7 +314,7 @@ sealed class World
         return (404, null);
     }
 
-    int latencyMs; Regex? latencyMatch;
+    int latencyMs; Regex? latencyMatch; int refPage = 100;
     public int LatencyFor(string method, string path, string body) => latencyMs > 0 && !path.StartsWith("/_fake/") && latencyMatch!.IsMatch(method + " " + path + "\n" + body) ? latencyMs : 0;
     (int, object?) Control(string method, string what, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b)
     {
@@ -304,13 +322,16 @@ sealed class World
         {
             case "latency":   // { ms, match }: every request whose "METHOD path" line plus body matches the regular expression waits ms first; ms 0 ends it
                 latencyMs = b?["ms"]?.GetValue<int>() ?? 0; latencyMatch = latencyMs > 0 ? new Regex(b?["match"]?.ToString() ?? ".") : null; return (200, J(("ok", true)));
+            case "ref-page":   // { size }: the most refs one page of matching-refs holds (100 when not set)
+                refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 100, 1, 100); return (200, J(("ok", true)));
             case "reset":
-                latencyMs = 0; latencyMatch = null;
+                latencyMs = 0; latencyMatch = null; refPage = 100;
                 issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false; return (200, J(("ok", true)));
             case "issue":
             {
                 var i = new Issue { Number = nextNumber++, Title = b!["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Column = b["column"]?.ToString() };
+                if (b["createdAt"] is { } ca) i.Created = DateTime.Parse(ca.ToString(), null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);   // an item of an earlier date
                 i.Node = "I_" + i.Number; foreach (var l in b["labels"]?.AsArray() ?? new JsonArray()) i.Labels.Add(l!.ToString());
                 issues[i.Number] = i; if (i.Column != null || b["onBoard"]?.GetValue<bool>() == true) i.Card = "card_" + i.Number;
                 return (200, J(("number", i.Number)));
@@ -371,7 +392,7 @@ sealed class World
                 return (200, J(
                     ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
                         ("comments", new JsonArray(i.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())))).ToArray())),
-                    ("appMints", appMints), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
+                    ("appMints", appMints), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
                     ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("releases", releases.Count), ("requests", log.Count)));
             case "health": healthStatus = b?["status"]?.GetValue<int>() ?? 200; return (200, J(("ok", true)));
             case "log": return (200, new JsonArray(log.Select(l => (JsonNode)l).ToArray()));

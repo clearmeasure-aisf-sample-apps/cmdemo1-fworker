@@ -1,5 +1,39 @@
-# Verbs on pull requests and the validation flow: open-pr, pr-checks, wait-for-checks, validation-verdict.
+# Verbs on pull requests and the validation flow: open-pr, update-pr, pr-checks, wait-for-checks, validation-verdict.
 # The merge verb is in Verbs.Merge.ps1.
+
+# The body of an item's pull request as the gateway writes it, for open-pr and update-pr alike: the worker's text, then the reference to the item.
+function Get-PrBodyText([string]$Body, [int]$Item) {
+    $t = "$Body".TrimEnd(); $ref = "Refs #$Item"
+    if ($t -match "(^|\n)$([regex]::Escape($ref))\s*$") { return $t }
+    return "$t`n`n$ref"
+}
+
+# update-pr: replaces the body of the item's own open pull request (a worker corrects what open-pr wrote; nothing else of the pull request changes).
+# The pull request is the open one on the item's branch; --pr may name it, and any other number is refused.
+function Verb_update_pr($a) {
+    $n = Get-ItemNumber $a; $c = Get-Cfg
+    $body = "$(Need $a 'body')"; if (-not $body.Trim()) { Reject 2 'usage' 'missing argument: body' }
+    $info = Get-ItemInfo $n; Assert-Open $info
+    # only while the item is in Development, the owner's column: after that the pull request has been read and approved as it is
+    if ("$($info.column)" -ine "$($c.columns.development)") { Reject 10 'wrong-column' "the body of the pull request is changed only while the item is in '$($c.columns.development)'; it is in '$($info.column)'" }
+    $own = Find-ItemPr $n
+    if ($own -and $own.head.ref -notmatch "^$([regex]::Escape($c.name))/$n-") { $own = $null }
+    if (Test-Has $a 'pr') {
+        $want = [int]$a.pr
+        if (-not $own -or [int]$own.number -ne $want) {
+            $p = try { Get-Pr $want } catch [FactoryReject] { $null }
+            if ($p -and "$($p.head.ref)" -match "^$([regex]::Escape($c.name))/$n-") { Reject 10 'pr-not-open' "pull request #$want of this item is $(if ($p.merged) { 'merged' } else { "$($p.state)" }); only an open pull request is changed" }
+            Reject 10 'pr-not-own' "pull request #$want is not the pull request of item #$n"
+        }
+    }
+    if (-not $own) {
+        $s = (Get-State $n).state
+        if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { Reject 10 'pr-not-open' "pull request #$($s.pr.number) of this item is no longer open; only an open pull request is changed" }
+        Reject 10 'no-open-pr' 'no open pull request linked to this work item'
+    }
+    $r = Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($own.number)" -Body @{ body = (Get-PrBodyText $body $n) }
+    return @{ ok = $true; id = $n; updated = $true; pullRequest = @{ number = $own.number; url = $own.html_url; head_sha = $own.head.sha; branch = $own.head.ref } }
+}
 
 function Verb_open_pr($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg
@@ -15,7 +49,7 @@ function Verb_open_pr($a) {
         $bo = Get-BuildOwed $info $existing.number (Get-State $n).state
         return @{ ok = $true; id = $n; created = $false; pullRequest = @{ number = $existing.number; url = $existing.html_url; head_sha = $existing.head.sha; branch = $head }; build_owed = $bo.build_owed; build_reason = $bo.build_reason }
     }
-    $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls" -Allow 422 -Body @{ title = $title; head = $head; base = $base; body = "$body`n`nRefs #$n"; draft = $false }
+    $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls" -Allow 422 -Body @{ title = $title; head = $head; base = $base; body = (Get-PrBodyText $body $n); draft = $false }
     if ($r -is [hashtable] -and $r.ContainsKey('status')) {
         $msg = try { ($r.body.errors | ForEach-Object { $_.message }) -join '; ' } catch { '' }
         Reject 10 'pr-not-created' "GitHub refused to create the pull request: $($r.body.message) $msg. This usually means '$head' has no commits ahead of '$base' or was not pushed. Do not push an empty commit; if the item is already satisfied, report complete with succeeded=false." @{ detail = $msg }

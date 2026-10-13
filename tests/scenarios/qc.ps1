@@ -415,7 +415,9 @@ $QcScenarios = [ordered]@{
         $rel = Fo 'qw1' @('release', '--item', $n); CheckExit 'release with the QC token: refused' $rel 30 'forbidden'
         $own2 = (Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n" }
         Check 'the owner is unchanged after the release attempt' ($own2 -and $own2.Value -eq 'ow1')
-        Check 'the owner assignment is still accepted next to the QC one' (@((Get-Plant).plant.assignments | Where-Object { $_.item -eq $n -and $_.accepted }).Count -ge 2)
+        # (flaky on slow runners, cause not found, docs/HANDOFF.md entry p: the detail says which assignment was missing and who owned the item then)
+        $pl = (Get-Plant).plant
+        Check 'the owner assignment is still accepted next to the QC one' (@($pl.assignments | Where-Object { $_.item -eq $n -and $_.accepted }).Count -ge 2) "assignments: $(@($pl.assignments | Where-Object { $_.item -eq $n }) | ConvertTo-Json -Compress -Depth 4) owners: $($pl.owners | ConvertTo-Json -Compress)"
         $mi = Fo 'ow1' @('get-item', '--item', $n); CheckExit 'the owner can still read the item with its token' $mi 0
         Qc-Sweeps 2
         $own3 = (Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n" }

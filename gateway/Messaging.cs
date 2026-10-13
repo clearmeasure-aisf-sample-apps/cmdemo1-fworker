@@ -68,7 +68,7 @@ sealed class MessagingSettings
     // mgrNoteMinutes (how long a worker's note to the operator, or a refused merge, stays in the digest), mgrPersistMinutes (after which such an
     // entry is worse once, for the one reminder), mgrVerbErrorMinutes and digest.verbErrorCount (failed verbs of one worker on one item), and
     // mgrRestartMinutes (how long after its start a gateway reports that sessions came back from an earlier process).
-    public double QuietMinutes = 10, NoteMinutes = 60, PersistMinutes = 30, VerbErrorMinutes = 10, RestartMinutes = 30;
+    public double QuietMinutes = 20, NoteMinutes = 60, PersistMinutes = 30, VerbErrorMinutes = 10, RestartMinutes = 30;
     public int VerbErrorCount = 3;
     // The model requirement (4.7): the ladder of the gateway host's models.default.json, lowest rung first, as (name, model).
     public string RequiredModelTier = "premium", RequiredEffort = "high";
@@ -163,7 +163,7 @@ sealed class MessagingSettings
         s.StepBudgetPerHour = Limit(g, "stepBudgetPerHour", 60); s.StepHardPerHour = Math.Max(s.StepBudgetPerHour, Limit(g, "stepBudgetHardPerHour", (s.StepBudgetPerHour * 3 + 1) / 2));
         var dg = g?["digest"];
         s.RefusalCount = Limit(dg, "refusalCount", 3); s.DigestMaxBytes = Limit(dg, "maxBytes", 4096, 512);
-        s.QuietMinutes = Span("mgrQuietMinutes", 10); s.NoteMinutes = Span("mgrNoteMinutes", 60); s.PersistMinutes = Span("mgrPersistMinutes", 30);
+        s.QuietMinutes = Span("mgrQuietMinutes", 20); s.NoteMinutes = Span("mgrNoteMinutes", 60); s.PersistMinutes = Span("mgrPersistMinutes", 30);
         s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3);
         if (dg?["waitCodes"] is JsonArray wc) s.WaitCodes = List(wc);
         s.RequiredModelTier = g?["requiredModelTier"]?.ToString() ?? "premium"; s.RequiredEffort = g?["requiredEffort"]?.ToString() ?? "high";
@@ -301,7 +301,7 @@ sealed class MessageStore
     // The patrol (3.9): what was pushed per entry key and at which bucket, the patrols by their seq, when the last one left, the interval slot that
     // counts a suppressed patrol, the last baseline, the session states of the last digest, the last digest for the operator's preview, the
     // supervisor's steps of the sliding hour, and the operator's grants of extra deliveries (each lasts an hour).
-    public sealed class ReportedEntry { public int Bucket; public DateTime At; public bool Acked, Reminded; }
+    public sealed class ReportedEntry { public int Bucket; public DateTime At, Seen; public bool Acked, Reminded; }
     public sealed class PatrolRecord { public long Seq; public DateTime At; public bool Acked; public string MessageId = ""; public List<(string Key, int Bucket)> Entries = new(); }
     public readonly Dictionary<string, ReportedEntry> Reported = new();
     public readonly Dictionary<long, PatrolRecord> Patrols = new();

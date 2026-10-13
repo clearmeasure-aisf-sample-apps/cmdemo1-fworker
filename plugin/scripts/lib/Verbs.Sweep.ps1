@@ -45,7 +45,7 @@ function Verb_sync_board($a) {
     $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @()
     # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled, whose
     # owner still waits for item.complete although the claim ended at the merge
-    $owned = @{}; $settling = @()
+    $owned = @{}; $settling = @(); $unconfirmed = @()
     $list = Get-BoardList
     $last = Get-LastColumn
     foreach ($it in $list) {
@@ -79,8 +79,16 @@ function Verb_sync_board($a) {
             if ($col -ieq $c.columns.validation -and (Test-Has $s 'verdict') -and $s.verdict.passed -and -not $s.verdict.processed) {
                 $pr = try { Get-Pr ([int]$s.verdict.pr) } catch { $null }
                 if ($pr -and $pr.merged -and -not $dry) {
-                    $s.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = $pr.number }
-                    $s.verdict.processed = $true; $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n
+                    # written under the item lock on a fresh read: this sweep read the state a while ago and holds no lock (what a verb recorded
+                    # meanwhile must not be undone); only the keys of this step are set
+                    $did = Use-ItemLock $n {
+                        $f = Get-State $n; $fs = $f.state
+                        if ((Test-Has $fs 'verdict') -and $fs.verdict.passed -and -not $fs.verdict.processed) {
+                            $fs.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = $pr.number }
+                            $fs.verdict.processed = $true; $fs.Remove('claim'); Save-State $n $f; Remove-ClaimRef $n; $true
+                        } else { $false }
+                    }
+                    if (-not $did) { continue }
                     Add-Comment $n "PR #$($pr.number) was merged as ``$($pr.merge_commit_sha.Substring(0,7))``; watching master CI, then the release candidate."
                     $actions += @{ item = $n; action = 'merge-detected'; sha = $pr.merge_commit_sha }
                 }
@@ -102,7 +110,15 @@ function Verb_sync_board($a) {
                     }
                     elseif ((Test-OwnedClaim $s) -and ((Get-UtcNow) - (ConvertFrom-Iso $held.at)).TotalMinutes -gt [double]$c.idleReleaseMinutes -and -not $dry) {
                         # an owner waiting out a hold for too long gives the item up; the next trigger assigns it again
-                        $holderName = "$($s.claim.holder)"; $s.Remove('claim'); [void](Add-Journal $n $st 'released' @{ worker = $holderName; reason = "idle for more than $($c.idleReleaseMinutes) min on a hold" } "idle|$($held.at)"); Save-State $n $st; Remove-ClaimRef $n
+                        $holderName = "$($s.claim.holder)"
+                        # (under the item lock on a fresh read, as above; given up only if the same owner still waits on the same hold)
+                        $did = Use-ItemLock $n {
+                            $f = Get-State $n; $fs = $f.state; $fh = Get-Park $fs
+                            if ((Test-OwnedClaim $fs) -and "$($fs.claim.holder)" -eq $holderName -and $fh -and "$($fh.at)" -eq "$($held.at)") {
+                                $fs.Remove('claim'); [void](Add-Journal $n $f 'released' @{ worker = $holderName; reason = "idle for more than $($c.idleReleaseMinutes) min on a hold" } "idle|$($held.at)"); Save-State $n $f; Remove-ClaimRef $n; $true
+                            } else { $false }
+                        }
+                        if (-not $did) { continue }
                         $actions += @{ item = $n; action = 'owner-released-idle'; worker = $holderName }
                         $owned.Remove("$n")
                     }
@@ -144,6 +160,7 @@ function Verb_sync_board($a) {
             $count = if ($prev.column -ieq $col) { [int]$prev.count + 1 } else { 1 }
             $seen["$n"] = @{ column = $col; count = $count }
             if ($count -ge [int]$t.sweepSeenCount) { $offers += @{ item = $n; column = $col; reason = 'board-move' } }
+            else { $unconfirmed += $n }   # seen, not yet offered: the gateway looks again soon instead of a whole interval later
         } catch [FactoryReject] {
             # an item (or its card) that vanished while the sweep was reading it is not an error: the next sweep sees the board as it is
             if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $actions += @{ item = $n; action = 'skip'; reason = 'vanished-during-sweep' } }
@@ -159,7 +176,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------
