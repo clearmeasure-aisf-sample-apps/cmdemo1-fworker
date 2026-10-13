@@ -131,7 +131,9 @@ else _ = Task.Run(async () =>
         var why = "";
         try
         {
-            var (code, output) = await runner.RunAsync("revocations", "{}", revAttemptLimit);
+            // a read that timed out gets longer the next time (the limit, then twice, then at most 120 s): a slow GitHub must not keep every attempt just short
+            var limit = TimeSpan.FromSeconds(Math.Min(120, revAttemptLimit.TotalSeconds * Math.Min(3, 1 + Volatile.Read(ref revAttempts))));
+            var (code, output) = await runner.RunAsync("revocations", "{}", limit);
             if (code == 0 && JsonNode.Parse(output)?["revoked"] is JsonObject list)
             {
                 foreach (var kv in list) if (Auth.ValidName(kv.Key) && kv.Value is JsonValue gv && gv.TryGetValue<int>(out var g) && g > 0) revocations.Raise(kv.Key, g);
