@@ -86,7 +86,7 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   4. a daily limit of self-merged releases, with a report;
   5. every change is recorded as an issue in this repository.
 - **uat and prod stay manual.**
-- **One work item per worker session** (2026-10-14): when its item ends the session ends, and a launcher loop starts a new session from the
+- **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so; the connect prompt text is unchanged because its hash is pinned by the operator suite, a protected path), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
 - **Messaging and the supervisor are on for every registered worker** (`allowedWorkers` and `allowedAskers` are `*`), set in
   `config/deploy.overrides.json`; the source default stays off.
