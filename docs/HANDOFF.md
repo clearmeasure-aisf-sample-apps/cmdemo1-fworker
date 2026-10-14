@@ -162,6 +162,14 @@ r. **Done (2026-10-13): a session can read why a pull request check failed.** `p
    against the real GitHub with a personal token on this repository; with the App identity of a deployed gateway they are not yet seen. (3) The
    baseline reads the last 5 commits of the base branch, so a check that runs only on pull requests (Qodana may) is `absent` there:
    then `annotationCounts.elsewhere` is the evidence.
+s. **Done (2026-10-13): the standing back-merge trigger** (`docs/design/plant-manager.md` 6a). A pull request merged into master (webhook
+   `pull_request` closed and merged, debounced 20 s; fallback: the sweep compares master's head, at most every 60 s) sends `base.updated`
+   to every owner whose branch is behind, with the overlapping files; the owner merges master into its branch at once (skill rule). After
+   120 s the gateway itself calls GitHub's update branch for a clean pull request the owner has not updated; a conflicting one stays with
+   the owner. Config: `timing.baseUpdateDebounceSeconds`, `baseUpdate.*`; counts in `/status` (`baseUpdate`). Open: (1) whether the
+   installed author App has contents write and pull requests write was not checked from this repository (the manifest has both; without
+   them the update branch call fails and the owners still do the back-merge); (2) the peer-messaging skill (owner review) does not list
+   `base.updated`; it is a plant trigger, not a message, so nothing depends on it; (3) not yet seen live on tdd.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).

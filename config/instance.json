@@ -112,7 +112,15 @@
     "mgrNoteMinutes": 60,
     "mgrPersistMinutes": 30,
     "mgrVerbErrorMinutes": 10,
-    "mgrRestartMinutes": 30
+    "mgrRestartMinutes": 30,
+    "baseUpdateDebounceSeconds": 20
+  },
+  "baseUpdate": {
+    "enabled": true,
+    "autoUpdateBranch": true,
+    "autoUpdateDelaySeconds": 120,
+    "quietSeconds": 60,
+    "sweepCheckSeconds": 60
   },
   "qc": {
     "trustProxy": false,

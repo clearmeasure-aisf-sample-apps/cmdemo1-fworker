@@ -63,6 +63,7 @@ sealed class World
     readonly List<string> log = new();
     readonly List<Artifact> artifacts = new();
     readonly List<string> masterHistory = new();   // the commits of the base branch, oldest first; the last one is masterSha
+    readonly Dictionary<string, List<string>> masterFiles = new();   // the files each commit of the base branch changed (for compare)
     long nextArtifact = 1;
     readonly HashSet<string> labelNames = new() { "factory worker", "AI Factory", "Auto Merge", "video", "Demo", "Ready To Move", "Needs Human Review" };
     string masterSha = Sha("master0");
@@ -173,6 +174,8 @@ sealed class World
         }
         if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "DELETE")
             return refs.Remove("refs/" + m.Groups[1].Value) ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}");
+        if (path == root + "/branches/" + Master && method == "GET") return (200, J(("name", Master), ("commit", J(("sha", masterSha)))));
+        if ((m = Regex.Match(path, $"^{root}/compare/([^.]+)\\.\\.\\.(.+)$")).Success && method == "GET") return Compare(m.Groups[1].Value, m.Groups[2].Value);
         if (path == root + "/pulls" && method == "GET")
             return (200, new JsonArray(prs.Values.Where(x => x.Open).Select(x => (JsonNode)PrJson(x)).ToArray()));
         if (path == root + "/pulls" && method == "POST")
@@ -201,6 +204,8 @@ sealed class World
                     }
                     return (200, new JsonArray(pr.Reviews.Select(r => (JsonNode)J(("id", r.Id), ("state", r.State), ("commit_id", r.Commit), ("user", J(("login", r.User))), ("body", r.Body))).ToArray()));
                 case "update-branch":
+                    // as GitHub: expected_head_sha that is not the head is refused (the head moved meanwhile)
+                    if (b?["expected_head_sha"] is { } ehs && ehs.ToString() != pr.Sha) return (422, "{\"message\":\"expected head sha didn't match current head ref.\"}");
                     if (pr.Conflict) return (422, "{\"message\":\"merge conflict between base and head\"}");
                     if (pr.UpdateNoop) return (202, "{\"message\":\"Updating pull request branch.\"}");   // accepted, not done yet
                     { var old = pr.Sha; pr.Behind = 0; pr.Sha = NewSha(); parents[pr.Sha] = new() { old, History()[^1] }; webFlow.Add(pr.Sha); ApplyProfile(pr, pr.Sha); }
@@ -282,6 +287,22 @@ sealed class World
     // the log of a job nobody wrote a log for: what a runner prints at the least
     static string DefaultLog(Check c) => $"{c.Started:yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[group]Run {c.Name}\n{c.Started.AddSeconds(1):yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[endgroup]\n"
         + (c.Conclusion == "failure" ? $"{c.Started.AddSeconds(2):yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[error]Process completed with exit code 1.\n" : "");
+    // GET compare/base...head. Two commits of the base branch: the files changed between them (ahead_by commits). The base branch against a pull
+    // request's branch: behind_by is the pull request's Behind (what /_fake/master-merge and /_fake/pr set), ahead_by 1, and the pull request's files.
+    (int, object?) Compare(string bas, string head)
+    {
+        var h = History();
+        int bi = bas == Master ? h.Count - 1 : h.IndexOf(bas), hi = head == Master ? h.Count - 1 : h.IndexOf(head);
+        if (bi >= 0 && hi >= 0)
+        {
+            var files = new List<string>(); for (int k = bi + 1; k <= hi; k++) if (masterFiles.TryGetValue(h[k], out var f)) foreach (var x in f) if (!files.Contains(x)) files.Add(x);
+            return (200, J(("status", hi > bi ? "ahead" : "identical"), ("ahead_by", Math.Max(0, hi - bi)), ("behind_by", 0), ("files", new JsonArray(files.Select(x => (JsonNode)J(("filename", x))).ToArray()))));
+        }
+        var pr = prs.Values.Where(x => x.Ref == head).OrderByDescending(x => x.Open).FirstOrDefault();
+        if (bi < 0 || (pr == null && !branches.ContainsKey(head))) return (200, J(("status", "ahead")));   // commits the fake does not track (the release scenarios)
+        var behind = pr?.Behind ?? 0;
+        return (200, J(("status", behind > 0 ? "diverged" : "ahead"), ("ahead_by", 1), ("behind_by", behind), ("files", new JsonArray((pr?.Files ?? branches[head].Files).Select(x => (JsonNode)J(("filename", x))).ToArray()))));
+    }
     List<string> History() { if (masterHistory.Count == 0 || masterHistory[^1] != masterSha) masterHistory.Add(masterSha); return masterHistory; }
 
     JsonObject PrJson(Pr p, bool detail = false)
@@ -327,7 +348,7 @@ sealed class World
             mc.Add(new Check { Id = nextCheck++, Name = "release" });
             releases.Add(new Rel { Id = "Releases-" + (releases.Count + 1), Version = "2.4." + (100 + releases.Count), Notes = $"Build https://fake/run/1 of {masterSha}", At = DateTime.UtcNow, ProdDelay = prodDelay });
         }
-        checks[masterSha] = mc;
+        checks[masterSha] = mc; masterFiles[masterSha] = pr.Files.ToList();
         return (200, J(("merged", true), ("sha", masterSha), ("message", "Pull Request successfully merged")));
     }
 
@@ -406,7 +427,7 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0;
-                artifacts.Clear(); masterHistory.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); log.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false; return (200, J(("ok", true)));
             case "issue":
             {
@@ -447,6 +468,25 @@ sealed class World
                 if (b["mergeableNullReads"] != null) pr.MergeableNullReads = b["mergeableNullReads"]!.GetValue<int>();
                 if (b["delaySeconds"] != null) { pr.DelaySeconds = b["delaySeconds"]!.GetValue<double>(); ApplyProfile(pr, pr.Sha); }
                 return (200, J(("ok", true)));
+            }
+            case "master-merge":
+            {   // { files, ref }: a pull request of someone else is merged into the base branch: a closed merged pull request with those files, a new
+                // head of the base branch, and every open pull request one commit further behind (as GitHub, they are not changed; their branch is behind)
+                History();
+                // { number }: that open pull request is the one merged (its files)
+                if (b?["number"] is { } mn && prs.TryGetValue(mn.GetValue<int>(), out var own))
+                {
+                    own.Merged = true; own.Open = false; masterSha = NewSha(); own.MergeSha = masterSha; History(); masterFiles[masterSha] = own.Files.ToList();
+                    checks[masterSha] = new List<Check> { new() { Id = nextCheck++, Name = "Build result" }, new() { Id = nextCheck++, Name = "secret-scan" } };
+                    foreach (var o in prs.Values.Where(x => x.Open)) o.Behind++;
+                    return (200, J(("number", own.Number), ("sha", masterSha), ("ref", own.Ref)));
+                }
+                var files = (b?["files"]?.AsArray() ?? new JsonArray()).Select(x => x!.ToString()).ToList();
+                var pr = new Pr { Number = nextNumber++, Ref = b?["ref"]?.ToString() ?? $"someone/change-{nextNumber}", Open = false, Merged = true, Files = files, FileObjs = files.Select(f => J(("filename", f), ("additions", 1), ("deletions", 0), ("status", "modified"))).ToList(), Author = "a-person" };
+                masterSha = NewSha(); pr.MergeSha = masterSha; pr.Sha = NewSha(); prs[pr.Number] = pr; History(); masterFiles[masterSha] = files;
+                checks[masterSha] = new List<Check> { new() { Id = nextCheck++, Name = "Build result" }, new() { Id = nextCheck++, Name = "secret-scan" } };
+                foreach (var o in prs.Values.Where(x => x.Open)) o.Behind++;
+                return (200, J(("number", pr.Number), ("sha", masterSha), ("ref", pr.Ref)));
             }
             case "review-state":
             {   // a dismissed review: every review of the PR by that user takes the given state (default DISMISSED)

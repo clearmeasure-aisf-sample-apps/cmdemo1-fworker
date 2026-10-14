@@ -107,6 +107,26 @@ $OperatorScenarios = [ordered]@{
     } finally { Msg-Close $op; Msg-Close $al; Msg-Close $sup }
 }
 
+'op: a failure report of the owner arrives as parked with its reason and the column it was called for, not as a completed column' = {
+    $op = Op-Hold; $al = Op-Worker 'alice'; $item = 0
+    try {
+        # the plant still remembers Technical Design (its column is as old as the last sweep) while the item is in Development on the board
+        $item = New-Item-Fake 'operator failure report item' 'body' @() 'Development'
+        [void](Msg-Post '/api/v1/_test/roles' @{ item = $item; owner = 'alice'; sweepable = $true })
+        [void](Msg-Post '/api/v1/_test/plan' @{ owned = @{ "$item" = @{ holder = 'alice'; column = 'Technical Design'; lease_until = [DateTime]::UtcNow.AddMinutes(30).ToString('o'); heartbeat = [DateTime]::UtcNow.ToString('o'); parked = $false } }; keep = @() })
+        $r = Msg-Json (Msg-Verb 'complete' (Msg-ItemToken $item 'owner' 'alice') @{ item = $item; column = 'Development'; succeeded = 'false'; comment = 'no change needed' })
+        Check 'the failure report is accepted and parks the item' ($r.ok -eq $true -and $r.parked -eq $true -and $r.reason -eq 'worker-failure') ($r | ConvertTo-Json -Compress)
+        $parked = Op-Plant $op 'parked' $item
+        Check 'the operator session gets one parked line with the reason and the worker' ($parked -and $parked.detail -eq 'worker-failure' -and $parked.worker -eq 'alice') ($parked | ConvertTo-Json -Compress)
+        Check 'it names the column the verb was called for, not the one the plant remembers from the last sweep' ($parked -and $parked.column -eq 'Development') ($parked | ConvertTo-Json -Compress)
+        Check 'and no line says the column was completed' (@(Op-Events $op 'plant.event' | Where-Object { $_.item -eq $item -and $_.code -eq 'column-completed' }).Count -eq 0) (@(Op-Events $op 'plant.event') | ConvertTo-Json -Compress)
+    } finally {
+        # the seam made alice the owner: give the item back, or she stays at capacity for the scenarios after this one
+        if ($item) { [void](Msg-Post '/api/v1/_test/roles' @{ item = $item; owner = '' }) }
+        Msg-Close $op; Msg-Close $al
+    }
+}
+
 'op: it sends a note to a worker, to the supervisor and to all, reads the log and the questions, answers, sets a mode and grants budget; the real client does the same' = {
     $op = Op-Hold; $al = Op-Worker 'alice'; $sup = Mgr-Open
     try {

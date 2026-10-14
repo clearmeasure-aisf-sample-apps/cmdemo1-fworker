@@ -88,7 +88,10 @@ builder.Services.AddSingleton(sp =>
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
 builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, publicUrl, tokenSecret));
-builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode));
+// master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs)
+builder.Services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), BaseUpdateSettings.Load(scriptsDir), ownerMode));
+builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
+builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>()));
 builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()));
 // A background loop that throws must not end the process (the default of .NET stops the host): the loops catch and go on, and this is the net under them.
 builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
@@ -103,6 +106,7 @@ var runner = app.Services.GetRequiredService<Runner>();
 var plant = app.Services.GetRequiredService<Plant>();
 var qc = app.Services.GetRequiredService<QcHub>();
 var messenger = app.Services.GetRequiredService<Messenger>();
+var baseWatch = app.Services.GetRequiredService<BaseWatch>();
 if (qcSettings.TrustProxy) app.UseForwardedHeaders();
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
 var started = DateTime.UtcNow;
@@ -228,7 +232,15 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     // the messaging and manager blocks (worker-messaging.md 8) only while either feature is on; a default deployment answers exactly as before
     if (messaging.On) foreach (var kv in MessagingBlocks(false).ToList()) o[kv.Key] = kv.Value?.DeepClone();
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
+    if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     return Results.Text(o.ToJsonString(), "application/json");
+});
+// the switch of the gateway's own back-merges (baseUpdate.autoUpdateBranch) at run time, operator token only; until the next restart
+app.MapPost("/api/v1/base-update", (HttpContext c) =>
+{
+    if (Who(c).Kind != "admin") return Results.StatusCode(403);
+    if (bool.TryParse(c.Request.Query["autoUpdateBranch"].ToString(), out var on)) baseWatch.AutoUpdateBranch = on;
+    return Results.Text(baseWatch.Status().ToJsonString(), "application/json");
 });
 
 app.MapGet("/dashboard", () => Results.Text(DashboardPage.Html, "text/html; charset=utf-8"));
@@ -274,6 +286,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
         ["lastSweep"] = hub.LastSweep, ["plant"] = plant.Status() };
     if (messaging.On) foreach (var kv in MessagingBlocks(true).ToList()) o[kv.Key] = kv.Value?.DeepClone();
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
+    if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // A worker credential is issued here once per session name; the operator pastes it into the connect prompt. It is never stored by the gateway.
@@ -349,6 +362,9 @@ app.MapPost("/webhooks/github", async (HttpContext ctx) =>
         {
             if (e is not JsonObject eo) continue;
             hub.Publish(eo.ToJsonString());
+            // master moved (a pull request merged into the default branch), or an item's branch got a new head: the back-merge trigger (BaseUpdate.cs)
+            if (eo["event"]?.ToString() == "base.merged") baseWatch.OnMerged(eo["pr"] is JsonValue bp && bp.TryGetValue<int>(out var bpn) ? bpn : 0);
+            if (eo["event"]?.ToString() is "pr.head_changed" or "pr.opened" && eo["item"] is JsonValue hv && hv.TryGetValue<int>(out var hn)) baseWatch.NoteHeadChange(hn);
             if (ownerMode && eo["item"] is JsonNode itn && itn.GetValueKind() == JsonValueKind.Number)
             {
                 var item = itn.GetValue<int>();
@@ -1227,7 +1243,7 @@ sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runn
     }
 }
 
-sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int seconds, bool ownerMode) : BackgroundService
+sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int seconds, bool ownerMode, BaseWatch? baseWatch = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -1269,6 +1285,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                                 if (to["event"]?.ToString() == "item.complete") plant.Complete(ti.GetValue<int>());
                                 if (to["event"]?.ToString() == "item.merged") plant.Merged(ti.GetValue<int>());
                             }
+                        // the fallback of the back-merge trigger: master's head compared with the last one seen (not awaited: the sweep goes on)
+                        if (baseWatch != null) _ = Task.Run(baseWatch.AfterSweep);
                         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":{{\"offers\":{j["offers"]!.AsArray().Count},\"actions\":{acts.Count},\"errors\":{j["errors"]!.AsArray().Count}}}}}");
                     }
                     else
@@ -1331,7 +1349,7 @@ pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monos
 <details id="logbox"><summary class="mut">Traffic log (newest first, 200 rows)</summary>
 <div class="row"><label>Session <input id="logworker" size="14" placeholder="any"></label><label>Item <input id="logitem" size="6" placeholder="any"></label><label>Show <select id="logring"><option value="">messages</option><option value="refused">refusals and flags</option></select></label></div>
 <div class="wrap"><table><thead><tr><th>Time</th><th>From -&gt; to</th><th>Role</th><th>Type</th><th>Item</th><th>Size</th><th>State</th><th>Text</th></tr></thead><tbody id="logrows"><tr><td colspan="8" class="mut">none</td></tr></tbody></table></div></details></div>
-<h2>Assignments</h2><table><tbody id="asg"><tr><td class="mut">none</td></tr></tbody></table>
+<h2>Assignments</h2><div id="basecnt" class="mut"></div><table><tbody id="asg"><tr><td class="mut">none</td></tr></tbody></table>
 <div id="qcsec" hidden><h2>Waiting for PR QC</h2>
 <div class="wrap"><table><thead><tr><th>PR</th><th>Title</th><th>Item</th><th>Head</th><th>Author</th><th>Age</th><th>QC state</th><th>Environment</th><th>Worker</th><th>Actions</th></tr></thead><tbody id="qcrows"><tr><td colspan="10" class="mut">none</td></tr></tbody></table></div></div>
 <h2>Connect a new session</h2>
@@ -1569,7 +1587,7 @@ async function refresh(){if(!tok)return;const t=tok;try{const d=await api('/api/
 const w=info.plant.workers||[];if(info.messaging&&info.messaging.enabled)await refreshMessaging(w);else{hideMessaging();
 $('rows').innerHTML=w.length?groupedRows(w,workerRowHtml,8).html:'<tr><td colspan="8" class="mut">No session has connected yet.</td></tr>'}
 if(tok!==t){if(!tok)clearData();return}
-const a=info.plant.assignments||[];$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
+const a=info.plant.assignments||[];const bu=info.baseUpdate||null,bh=bu&&bu.behind||{};$('basecnt').textContent=bu?`master ${esc((bu.head||'').slice(0,7))}: ${esc(bu.itemsBehind)} owned item(s) behind; ${esc(bu.triggers)} trigger(s), ${esc(bu.eventsSent)} sent, ${esc(bu.gatewayUpdates)} branch(es) updated by the gateway, ${esc(bu.workerBackMerges)} back-merged by workers`:'';$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td><td>${x.kind==='own-item'&&bh[x.item]!=null?(bh[x.item]>0?esc(bh[x.item])+' behind master':'up to date with master'):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
 $('go').onclick=()=>{const v=$('tok').value.trim();if(!v){$('msg').textContent='paste the operator token first';return}tok=v;sessionStorage.setItem('ftok',tok);$('tok').value='';refresh()};
 $('bye').onclick=()=>{tok='';info=null;sessionStorage.removeItem('ftok');$('tok').value='';showConn(false);clearData();$('prompt').value='';$('msg').textContent='Disconnected.'};
 $('rows').onclick=async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.a==='message'){askNote(b.dataset.n,b.dataset.n);return}if(b.dataset.a==='revoke'&&!confirm('Revoke every credential of '+b.dataset.n+'? Its session stops; create a new prompt to connect it again.'))return;if(document.activeElement)document.activeElement.blur();try{await api('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/'+b.dataset.a,'POST');refresh()}catch(x){$('msg').textContent=x.message}};
