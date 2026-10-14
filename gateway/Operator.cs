@@ -170,7 +170,7 @@ sealed partial class Plant
             {
                 var offeredAt = a.AckBy == default ? a.AcceptedAt : a.AckBy.AddSeconds(-ackSeconds);
                 var last = a.AcceptedAt > offeredAt ? a.AcceptedAt : offeredAt;
-                var age = (now - last).TotalSeconds;
+                var age = Math.Max(0, (now - last).TotalSeconds);   // a window lengthened past now reads as just offered, never as more than the full wait
                 if (age < RecentOfferSeconds) reasons.Add(new JsonObject { ["code"] = "recent-offer", ["worker"] = a.Worker, ["item"] = a.Item, ["secondsLeft"] = (int)Math.Ceiling(RecentOfferSeconds - age) });
             }
             var today = ReleasesToday(now); var limit = Msg.OperatorMaxSelfMergesPerDay; var quiet = reasons.Count == 0;
