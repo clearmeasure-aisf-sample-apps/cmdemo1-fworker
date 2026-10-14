@@ -134,6 +134,10 @@ b. **The operator session role.** Done 2026-10-13: credential kind `o1.`, one sl
    - the answers of the operator session to questions are not rate limited;
    - the caps on notes and on budget grants are in memory and start again at every restart of the gateway (a self-merged release is a
      restart).
+t. **Done (2026-10-14): escalate earlier** (`docs/design/plant-manager.md` 10b). Two consecutive findings reviews or FAIL verdicts that
+   quote the same acceptance criterion park the item (`same-criterion-repeated`) with a question to the owner; timing or statistical
+   criteria are flagged at Technical Design (a comment and `timing_criteria` in the claim answer). Open: not yet seen live on tdd; the
+   supervisor's digest reports the park as `parked` with that code, and its skill (owner review) does not describe the code yet.
 r. **Done (2026-10-13): a session can read why a pull request check failed.** `pr-checks` (and `wait-for-checks` when it answers
    `checks-red`) returns, next to the status it always returned, `checks`: every check of the head and, for a failed or cancelled one,
    the output title and summary, the annotations split by where they point (`onChangedLines`, `onChangedFiles`, `elsewhere`), for a
@@ -168,6 +172,24 @@ t. **Done (2026-10-14): SSE keepalive** (enhancement 11). Every event stream (wo
    writes a `: ping` comment every 25 s, busy or idle (`FACTORY_SSE_PING_SECONDS`); before, a ping came only after 15 s without an event.
    The stream clients (`Client.Subscribe.ps1`, `Client.Own.ps1`) ignore comment lines and print `stream.error` only from the third failed
    attempt in a row (after a drop by error: the drop and 2 failed reconnects; after a clean end of the stream: 3 failed reconnects). Open: `Client.Operator.ps1` (code-owner path) still reports the first failure.
+u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, `gateway/PlantSnapshot.cs`, `plugin/scripts/lib/PlantSnapshot.ps1`).
+   At SIGTERM the gateway writes its offers, assignments (not QC environments), owners and leases as the message of a parentless commit held by
+   `refs/factory/<instance>/plant-snapshot`; the next start reads it back before its first sweep and restores it (an unanswered offer gets a fresh
+   window and is pushed again when its worker reconnects, or at once to a worker already reconnected). The start removes the ref after reading it,
+   so a snapshot is restored once. A snapshot older than `timing.plantSnapshotMaxAgeMinutes` (30) is ignored, and an
+   outright kill (out of memory) writes none. `/status` shows `plantSnapshot.restore`. `FACTORY_PLANT_SNAPSHOT=0` switches it off. Messages,
+   questions and presence are still in memory only. It assumes one replica that stops before the next starts: a new revision that starts
+   before the old replica gets SIGTERM reads no snapshot (the old one's save comes too late) and the sweep rebuilds as before. Open: check the
+   revision mode of the Container App; not yet seen live on tdd (watch the `plant-snapshot` and `plant-restore` log lines
+   at the next release).
+v. **Done (2026-10-14): lasting cycle-time metrics** (enhancement 13). `GET /api/v1/metrics?since=7d|24h|30m|<ISO>[&max=100][&fresh=1]`
+   (operator token) runs the admin rule script `metrics` (plugin/scripts/lib/Metrics.ps1). It reads the board's `factory worker` items, newest
+   first, and from each item's journal comments (`matched`, `offered`, the owner `assigned`) and state comment (`dispatched_at` per column,
+   `merge.merged_at`, `merge.done_at`) answers per item and in aggregate (count, median, p90, min, max, in seconds): match to accept, accept
+   to merge, match to merge, merge to done, match to done, and the time in each column. Nothing comes from the gateway's memory, so a restart
+   changes nothing. One computation reads every item's comments: answers are cached 120 s per query and computed one at a time. The dashboard
+   section "Cycle times" loads it when opened. Limits: `dispatched_at` keeps the last dispatch of a column (a column visited twice counts from
+   its last visit); items worked before the journal existed have no match or accept time; at most 300 items and 90 days.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
