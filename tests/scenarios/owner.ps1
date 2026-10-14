@@ -49,7 +49,14 @@ $OwnerScenarios = [ordered]@{
     $ev = (Get-Assigned 'alice' $n)[0]
     Check 'the token never appears on the event stream' (-not ((Get-Content $script:Workers['alice'].out -Raw) -match 'i1\.'))
     Check 'the item token is in the token directory' (Test-Path (Join-Path $script:Workers['alice'].dir "$n.owner"))
-    $r = Fo 'alice' @('accept', '--item', $n, '--assignment', $ev.assignment); CheckExit 'accept' $r 0
+    # a loaded runner can answer after the 4 s window: that offer is withdrawn (stale-assignment) and offered again; take the newest
+    for ($try = 0; $try -lt 5; $try++) {
+        $ev = @(Get-Assigned 'alice' $n)[-1]
+        $r = Fo 'alice' @('accept', '--item', $n, '--assignment', $ev.assignment)
+        if ($r.exit -ne 11) { break }
+        $seen = @(Get-Assigned 'alice' $n).Count; [void](Wait-Until -Seconds 30 { @(Get-Assigned 'alice' $n).Count -gt $seen })
+    }
+    CheckExit 'accept' $r 0
     Check 'the claim belongs to the worker as owner' ($r.kind -eq 'own-item' -and $r.assignment -eq $ev.assignment)
     $st = Get-Plant; Check 'the plant records the owner' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n" -and $_.Value -eq 'alice' }).Count -eq 1)
     # (the gateway writes its own lines in order but not inside the accept: wait for them, as the slow-journal scenario below does)
@@ -112,6 +119,7 @@ $OwnerScenarios = [ordered]@{
 }
 
 'owner: the owner continues from Technical Design into Development without a new assignment [full]' = {
+    [void](Fo 'alice' @('my-items'))   # alice let offers of earlier scenarios lapse (cool-down, issue 31): a verb shows it is answering again
     $n = New-Item-Fake 'Continue' 'x' $OwnerLabels
     [void](Wait-Until -Seconds 40 { (Get-Assigned 'alice' $n).Count -gt 0 })
     $ev = (Get-Assigned 'alice' $n)[0]
@@ -243,7 +251,8 @@ $OwnerScenarios = [ordered]@{
     Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
     Check 'the pull request is merged' ((Get-FakePr $pr).merged -eq $true)
     $r = & $call $own @{ item = $n; pr = $pr; body = 'after the merge' }
-    Check 'a merged pull request is refused (pr-not-open), named or not' ($r.exit -eq 10 -and $r.code -eq 'pr-not-open' -and (& $call $own @{ item = $n; body = 'after the merge' }).code -eq 'pr-not-open' -and (Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$($r | ConvertTo-Json -Compress)"
+    # (pr-not-open while the item is still in Development; wrong-column once the sweep has picked the merge up and moved the card on)
+    Check 'a merged pull request is refused (pr-not-open), named or not' ($r.exit -eq 10 -and $r.code -in 'pr-not-open', 'wrong-column' -and (& $call $own @{ item = $n; body = 'after the merge' }).code -in 'pr-not-open', 'wrong-column' -and (Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$($r | ConvertTo-Json -Compress)"
 }
 
 'msg: messaging and the supervisor are off by default' = {
@@ -288,7 +297,7 @@ $OwnerScenarios = [ordered]@{
     $sb = F 'msgoff' @('sync-board', '--dry', 'true')
     Check 'the sweep answers as before, and lists what it owns for a gateway that asks' ($sb.exit -eq 0 -and $sb.ContainsKey('owners') -and $sb.ContainsKey('owned') -and $sb.ContainsKey('settling')) ($sb.Keys -join ',')
     # with messaging off nobody guards the marker, so it marks nothing: get-item labels no block and the inspector gets the whole body
-    $ov = To-Verdict 0 0
+    $ov = To-Verdict 0 0 -HoldMerge
     $ob = "<!-- aisf:assumption source=m-00000000-0001 from=alice -->`n> a closed block`n<!-- /aisf:assumption -->`n<!-- aisf:assumption source=m-00000000-0002 from=alice -->`nACCEPTANCE-AFTER-AN-OPEN-MARKER"
     $oa = F 'msgoff' @('append-body', '--item', $ov.n, '--content-file', (TmpFile "off$($ov.n).md" $ob)); CheckExit 'a body with the markers is appended as it is' $oa 0
     $og = F 'msgoff' @('get-item', '--item', $ov.n); $oi = F 'msgoff' @('inspect-facts', '--item', $ov.n)
@@ -554,6 +563,231 @@ $OwnerScenarios['runner: a second run is refused while one is active, a short di
     $script:ClientCrashes = $crashes     # the stand-in is no crash of this run
 }
 
+# ---- the gateway merges after a PASS (Verbs.Merge.ps1 -Gateway, the sweep), a merge by a person settles the item, and the offer rules of issues 30
+# and 31. The owner suite runs with timing.passMergeGraceSeconds 8 (run.ps1): long enough to see that the sweep waits, short enough to wait for it.
+function Pm-State([int]$n) {
+    $c = @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)".StartsWith('<!-- factory-state:') }) | Select-Object -First 1
+    if (-not $c) { return @{} }
+    $m = [regex]::Match("$($c.body)", '```json\s*([\s\S]*?)```'); if (-not $m.Success) { return @{} }
+    return ($m.Groups[1].Value | ConvertFrom-Json -AsHashtable)
+}
+# An item taken to Functional Testing with an open pull request (checks green), by the scripted holder w1.
+function Pm-ToValidation([string[]]$Labels = $OwnerLabels) {
+    $n = New-Item-Fake 'Gateway merge trial' 'x' $Labels
+    Do-TechnicalDesign $n
+    $pr = Do-Development $n
+    Do-DevComplete $n | Out-Null
+    [void](Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Functional Testing' })
+    return @{ n = $n; pr = $pr }
+}
+# The rule script run directly with a copy of the suite's config (as an older gateway, or one that stopped right after recording, would leave it).
+function Pm-Server([string]$Verb, $Body, [hashtable]$Cfg = @{}) {
+    $cfgObj = Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable; foreach ($k in $Cfg.Keys) { $cfgObj[$k] = $Cfg[$k] }
+    $path = Join-Path $script:Work "pm-$([guid]::NewGuid().ToString('N').Substring(0,6)).json"; $cfgObj | ConvertTo-Json -Depth 12 | Set-Content $path
+    $old = $env:FACTORY_CONFIG; $env:FACTORY_CONFIG = $path
+    try {
+        $out = ($Body | ConvertTo-Json -Depth 8 -Compress) | & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/factory.ps1') --server $Verb 2>$null
+        $j = try { ($out -join "`n") | ConvertFrom-Json -AsHashtable } catch { @{} }; if (-not $j.ContainsKey('exit')) { $j.exit = $LASTEXITCODE }; return $j
+    } finally { $env:FACTORY_CONFIG = $old }
+}
+# A PASS recorded by the rule script alone, with the gateway's merge off for that one call: nothing merged it, as after a session that stopped.
+function Pm-QuietPass($x) {
+    $r = F 'w1' @('claim-item', '--item', $x.n, '--column', 'Functional Testing'); CheckExit 'FT claim' $r 0
+    $rv = F 'w1' @('record-review', '--item', $x.n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "pmrv$($x.n).md" "Criteria exercised.`nREVIEW: COMPLETE"))
+    return Pm-Server 'validation-verdict' @{ item = $x.n; passed = $true; summary = 'Both criteria met.'; pr = $x.pr; review_ref = $rv.review_ref; holder = 'w1' } @{ gatewayMerge = $false }
+}
+function Pm-MergeComments([int]$n, [int]$pr) { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "squash-merged PR #$pr " }).Count }
+
+$OwnerScenarios['pass-merge: a PASS on an Auto Merge item with green checks is merged by the verdict call itself; the session''s merge call answers already-merged'] = {
+    $x = Pm-ToValidation
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'the verdict answer carries the merge: merged, and next is still merge' ((Pv $v 'merge') -and $v.merge.outcome -eq 'merged' -and $v.next -eq 'merge') ($v | ConvertTo-Json -Compress -Depth 5)
+    Check 'the pull request is merged without a further call' ((Get-FakePr $x.pr).merged)
+    $st = Pm-State $x.n
+    Check 'the verdict is processed, the merge recorded and the claim released' ($st.verdict.processed -and $st.merge.awaiting -and -not $st.ContainsKey('claim')) ($st | ConvertTo-Json -Compress -Depth 4)
+    $m = F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
+    Check 'the session''s own merge call is a no-op: exit 0, already-merged' ($m.exit -eq 0 -and $m.outcome -eq 'already-merged') ($m | ConvertTo-Json -Compress)
+    Check 'merged once' ((Pm-MergeComments $x.n $x.pr) -eq 1)
+}
+
+$OwnerScenarios['pass-merge: a PASS nobody merged (the session stopped after the verdict) is merged by the sweep after the grace, with no call'] = {
+    $x = Pm-ToValidation
+    $v = Pm-QuietPass $x
+    Check 'the PASS is recorded and nothing merged it' ($v.exit -eq 0 -and -not (Pv $v 'merge') -and -not (Get-FakePr $x.pr).merged) ($v | ConvertTo-Json -Compress -Depth 4)
+    Start-Sleep -Seconds 3
+    Check 'the sweep leaves it alone during the grace' (-not (Get-FakePr $x.pr).merged)
+    Check 'the sweep merges it after the grace' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
+    [void](Wait-Until -Seconds 20 { (Pm-State $x.n).verdict.processed })
+    Check 'the verdict is processed and the merge comment says the gateway merged it' ((Pm-State $x.n).verdict.processed -and @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match "the gateway squash-merged PR #$($x.pr) " }).Count -eq 1)
+}
+
+$OwnerScenarios['pass-merge: a PASS recorded just before the gateway restarts is merged after the restart [full]'] = {
+    $x = Pm-ToValidation
+    $v = Pm-QuietPass $x; CheckExit 'the PASS verdict' $v 0
+    Restart-Gateway
+    Check 'the restarted gateway merges it' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
+    Check 'merged once' ((Wait-Until -Seconds 20 { (Pm-MergeComments $x.n $x.pr) -eq 1 }))
+}
+
+$OwnerScenarios['pass-merge: checks still running at the verdict: the answer is waiting, the item is not offered to anyone, and it is merged when they go green'] = {
+    Start-OwnerClient 'pmw' 'persistent-local' '--capacity 3'
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; delaySeconds = 20 } | Out-Null    # the checks of the head run again, for 20 s
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'the verdict answer: merge waiting for checks-pending' ((Pv $v 'merge') -and $v.merge.outcome -eq 'waiting' -and $v.merge.reason -eq 'checks-pending') ($v | ConvertTo-Json -Compress -Depth 5)
+    [void](F 'w1' @('claim-item', '--item', $x.n, '--release', 'true'))     # the session is gone: no live claim
+    Start-Sleep -Seconds 6
+    $pu = @((Get-Plant).plant.passUnmerged | Where-Object { $_.item -eq $x.n })
+    Check '/status lists it as pass-unmerged with its reason' ($pu.Count -eq 1 -and $pu[0].code -eq 'checks-pending' -and $pu[0].pr -eq $x.pr) ((Get-Plant).plant.passUnmerged | ConvertTo-Json -Compress)
+    # (an offer before the verdict, while the scripted holder moved the item between columns, is not one of this state)
+    Check 'no offer for it reached a worker (it is the gateway''s to merge)' (@(Get-Assigned 'pmw' $x.n | Where-Object { (Pv $_ 'column') -eq 'Functional Testing' }).Count -eq 0) ((Get-Assigned 'pmw' $x.n) | ConvertTo-Json -Compress)
+    Check 'merged when the checks are green, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
+    $mw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match '<!-- plant event=merge-waiting ' }).Count
+    Check 'journal: merge-waiting once, however many sweeps found it waiting' ($mw -eq 1) "$mw"
+    Check 'merged once' ((Pm-MergeComments $x.n $x.pr) -eq 1)
+    Stop-OwnerClient 'pmw'
+}
+
+$OwnerScenarios['pass-merge: a pull request that cannot be merged takes the existing demote path once, and the sweep does not loop'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; conflict = $true } | Out-Null
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'the verdict answer: demoted, and next says so' ($v.merge.outcome -eq 'demoted' -and $v.next -eq 'demoted') ($v | ConvertTo-Json -Compress -Depth 5)
+    Start-Sleep -Seconds 8
+    $st = Pm-State $x.n
+    Check 'back in Development once, not merged' ((Get-FakeIssue $x.n).column -eq 'Development' -and $st.demotions -eq 1 -and -not (Get-FakePr $x.pr).merged) "$((Get-FakeIssue $x.n).column) $($st.demotions)"
+    Check 'one merge-failed comment after several sweeps' (@((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match 'merge failed' }).Count -eq 1)
+}
+
+$OwnerScenarios['pass-merge: an item without the Auto Merge label, or a verdict under another merge policy, is not merged by the gateway'] = {
+    $x = Pm-ToValidation @('factory worker')
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'no label: parked for a person, no merge attempted' ($v.next -eq 'parked' -and -not (Pv $v 'merge')) ($v | ConvertTo-Json -Compress -Depth 4)
+    $y = Pm-ToValidation
+    $r = F 'w1' @('claim-item', '--item', $y.n, '--column', 'Functional Testing'); CheckExit 'FT claim' $r 0
+    $rv = F 'w1' @('record-review', '--item', $y.n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "pmrv$($y.n).md" "ok`nREVIEW: COMPLETE"))
+    $pv = Pm-Server 'validation-verdict' @{ item = $y.n; passed = $true; summary = 'ok'; pr = $y.pr; review_ref = $rv.review_ref; holder = 'w1' } @{ mergePolicy = 'peer-approved' }
+    Check 'peer-approved: the verdict asks for the approval and merges nothing' ($pv.exit -eq 0 -and $pv.next -eq 'approve' -and -not (Pv $pv 'merge') -and -not (Get-FakePr $y.pr).merged) ($pv | ConvertTo-Json -Compress -Depth 4)
+    Start-Sleep -Seconds 6
+    Check 'the item without the label is still not merged after several sweeps' (-not (Get-FakePr $x.pr).merged)
+}
+
+$OwnerScenarios['pass-merge: a push after the verdict voids it: not merged, the item goes back to Development'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; delaySeconds = 30 } | Out-Null
+    $v = Do-Verdict $x.n $x.pr; Check 'the verdict waits for the checks' ($v.merge.outcome -eq 'waiting') ($v | ConvertTo-Json -Compress -Depth 5)
+    Fake 'push-branch' @{ branch = "factory-worker/$($x.n)-development"; files = @('docs/trial.md', 'docs/later.md'); profile = 'green' } | Out-Null
+    Check 'the sweep sends it back to Development' (Wait-Until -Seconds 40 { (Get-FakeIssue $x.n).column -eq 'Development' })
+    [void](Wait-Until -Seconds 20 { @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match 'changed after the validation verdict' }).Count -ge 1 })
+    $why = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match 'changed after the validation verdict' -and -not "$($_.body)".StartsWith('<!-- factory-state:') }).Count
+    Check 'not merged, and the reason names the change after the verdict, once' (-not (Get-FakePr $x.pr).merged -and $why -eq 1) "merged=$((Get-FakePr $x.pr).merged) comments=$why"
+}
+
+$OwnerScenarios['pass-merge: the session''s merge call racing the sweep merges once [full]'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; delaySeconds = 6 } | Out-Null
+    $v = Pm-QuietPass $x; CheckExit 'the PASS verdict' $v 0
+    Start-Sleep -Seconds 7     # the grace is nearly over: the sweep and the session's call meet while the checks finish
+    $m = F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
+    Check 'the session''s merge: merged or already-merged' ($m.exit -eq 0 -and $m.outcome -in 'merged', 'already-merged') ($m | ConvertTo-Json -Compress -Depth 4)
+    Start-Sleep -Seconds 6
+    Check 'merged once' ((Get-FakePr $x.pr).merged -and (Pm-MergeComments $x.n $x.pr) -eq 1) "$(Pm-MergeComments $x.n $x.pr)"
+}
+
+$OwnerScenarios['pass-merge: a pull request merged by a person settles the item from Development and from a PASS parked for a person'] = {
+    $n = New-Item-Fake 'Merged by hand' 'x' $OwnerLabels
+    Do-TechnicalDesign $n
+    $pr = Do-Development $n
+    Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
+    Check 'the sweep picks the merge up while the item is in Development' (Wait-Until -Seconds 40 { (Pm-State $n).ContainsKey('merge') })
+    $st = Pm-State $n
+    Check 'the merge is recorded, the claim released, the card moved on from Development' ($st.merge.pr -eq $pr -and -not $st.ContainsKey('claim') -and (Get-FakeIssue $n).column -ne 'Development') "$((Get-FakeIssue $n).column) $($st | ConvertTo-Json -Compress -Depth 3)"
+    Check 'the journal says a person merged it' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "PR #$pr was merged as .* by a person" }).Count -eq 1 })
+    $x = Pm-ToValidation @('factory worker')
+    $v = Do-Verdict $x.n $x.pr; Check 'parked for a person' ($v.next -eq 'parked')
+    Fake 'pr' @{ number = $x.pr; merged = $true } | Out-Null
+    Check 'the parked item is settled when the person merges' (Wait-Until -Seconds 40 { $s2 = Pm-State $x.n; $s2.ContainsKey('merge') -and -not $s2.ContainsKey('park') })
+}
+
+$OwnerScenarios['offers: a late accept of a withdrawn offer is refused (stale-assignment) and never takes a worker over its capacity'] = {
+    foreach ($k in @($script:Workers.Keys)) { Stop-OwnerClient $k }
+    Start-OwnerClient 'late1' 'persistent-local' '--capacity 1'
+    $a = New-Item-Fake 'Late accept A' 'x' $OwnerLabels
+    Check 'A is offered to late1' (Wait-Until -Seconds 30 { (Get-Assigned 'late1' $a).Count -gt 0 })
+    $offA = (Get-Assigned 'late1' $a)[0]
+    Check 'the offer of A lapses' (Wait-Until -Seconds 30 { (Get-Journal $a) -contains 'reassigned' })
+    $b = New-Item-Fake 'Late accept B' 'x' $OwnerLabels
+    Check 'B is offered to late1 in the slot A held' (Wait-Until -Seconds 30 { (Get-Assigned 'late1' $b).Count -gt 0 })
+    $late = Fo 'late1' @('accept', '--item', $a, '--assignment', $offA.assignment)
+    Check 'the late accept of A is refused: exit 11 stale-assignment' ($late.exit -eq 11 -and $late.code -eq 'stale-assignment') ($late | ConvertTo-Json -Compress)
+    $rb = Fo 'late1' @('accept', '--item', $b, '--assignment', (Get-Assigned 'late1' $b)[0].assignment); CheckExit 'the standing offer of B is accepted' $rb 0
+    $w = @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'late1' })[0]
+    Check 'late1 owns no more than its capacity' ($w.owned -le $w.capacity) ($w | ConvertTo-Json -Compress)
+    [void](Fo 'late1' @('release', '--item', $b, '--reason', 'scenario done'))
+    Stop-OwnerClient 'late1'
+}
+
+$OwnerScenarios['offers: a session that let two offers in a row lapse is not offered more until it calls a verb, and the status shows the cool-down'] = {
+    foreach ($k in @($script:Workers.Keys)) { Stop-OwnerClient $k }
+    Start-OwnerClient 'cool1' 'persistent-local' '--capacity 3'
+    $x1 = New-Item-Fake 'Cool-down 1' 'x' $OwnerLabels; $x2 = New-Item-Fake 'Cool-down 2' 'x' $OwnerLabels
+    Check 'both are offered to cool1' (Wait-Until -Seconds 30 { (Get-Assigned 'cool1' $x1).Count -gt 0 -and (Get-Assigned 'cool1' $x2).Count -gt 0 })
+    Check 'both offers lapse and the status shows the cool-down' (Wait-Until -Seconds 30 { $w = @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'cool1' })[0]; $w -and $w.coolDownUntil })
+    $x3 = New-Item-Fake 'Cool-down 3' 'x' $OwnerLabels
+    Start-Sleep -Seconds 8
+    Check 'a new item is not offered to it while it cools down' ((Get-Assigned 'cool1' $x3).Count -eq 0)
+    $mi = Fo 'cool1' @('my-items'); CheckExit 'the session calls a verb' $mi 0
+    Check 'the cool-down ends with it' (Wait-Until -Seconds 10 { $w = @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'cool1' })[0]; $w -and -not $w.coolDownUntil })
+    Check 'and the new item is offered to it' (Wait-Until -Seconds 30 { (Get-Assigned 'cool1' $x3).Count -gt 0 })
+    Stop-OwnerClient 'cool1'
+}
+
+$OwnerScenarios['pass-merge: a branch behind its base is brought up to date by the gateway, its merge commit is verified and merged'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; behind = 1 } | Out-Null
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'merged on the gateway''s update commit, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
+    Check 'the verdict now names the update commit' ((Pm-State $x.n).verdict.head_sha -eq (Get-FakePr $x.pr).sha -and -not (Pm-State $x.n).verdict.ContainsKey('updated_from'))
+}
+
+$OwnerScenarios['pass-merge: a push that lands while the gateway''s update of the branch is still pending is not merged: demoted (stale-head)'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; behind = 1; updateNoop = $true } | Out-Null     # GitHub accepts the update and has not made it yet
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'the verdict waits for the update' ($v.merge.outcome -eq 'waiting' -and -not (Get-FakePr $x.pr).merged) ($v | ConvertTo-Json -Compress -Depth 5)
+    Fake 'push-branch' @{ branch = "factory-worker/$($x.n)-development"; files = @('docs/trial.md', 'docs/sneak.md'); profile = 'green' } | Out-Null
+    Check 'the sweep sends it back to Development' (Wait-Until -Seconds 40 { (Get-FakeIssue $x.n).column -eq 'Development' })
+    Check 'the pushed head is not merged' (-not (Get-FakePr $x.pr).merged)
+}
+
+$OwnerScenarios['pass-merge: a PASS for a head other than the current one is refused, and a verdict without a head is never merged by the gateway'] = {
+    $x = Pm-ToValidation
+    $r = F 'w1' @('claim-item', '--item', $x.n, '--column', 'Functional Testing'); CheckExit 'FT claim' $r 0
+    $rv = F 'w1' @('record-review', '--item', $x.n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "hs$($x.n).md" "ok`nREVIEW: COMPLETE"))
+    $bad = F 'w1' @('validation-verdict', '--item', $x.n, '--passed', 'true', '--summary-file', (TmpFile "hsv$($x.n).md" 'ok'), '--pr', $x.pr, '--review-ref', $rv.review_ref, '--head-sha', ('0' * 40))
+    Check 'another head: exit 10 head-mismatch, nothing recorded' ($bad.exit -eq 10 -and $bad.code -eq 'head-mismatch' -and -not (Pm-State $x.n).ContainsKey('verdict')) ($bad | ConvertTo-Json -Compress)
+    $ok = F 'w1' @('validation-verdict', '--item', $x.n, '--passed', 'true', '--summary-file', (TmpFile "hsv2$($x.n).md" 'ok'), '--pr', $x.pr, '--review-ref', $rv.review_ref, '--head-sha', (Get-FakePr $x.pr).sha)
+    Check 'the tested head: merged' ($ok.exit -eq 0 -and $ok.merge.outcome -eq 'merged') ($ok | ConvertTo-Json -Compress -Depth 4)
+    $y = Pm-ToValidation
+    $q = Pm-QuietPass $y; CheckExit 'a PASS recorded quietly' $q 0
+    # a verdict recorded before this change, or whose head GitHub could not tell: the head is missing
+    $st = Pm-State $y.n; $cm = @((Get-FakeIssue $y.n).comments | Where-Object { "$($_.body)".StartsWith('<!-- factory-state:') })[0]
+    $st.verdict.Remove('head_sha'); $json = $st | ConvertTo-Json -Depth 12
+    $nb = "$($cm.body)" -replace '(?s)```json.*```', "``````json`n$json`n``````"
+    Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($cm.id)" -Method PATCH -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body (@{ body = $nb } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+    Check 'the gateway parks it instead of merging (verdict-head-unknown)' (Wait-Until -Seconds 40 { $ps0 = Pm-State $y.n; (Pv $ps0 'park') -and "$($ps0.park.reason)" -eq 'pass-unmerged' })
+    Check 'not merged' (-not (Get-FakePr $y.pr).merged)
+}
+
+$OwnerScenarios['pass-merge: a hand-made two-parent merge pushed by a worker while the gateway''s update is pending is not merged: demoted (stale-head)'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; behind = 1; updateNoop = $true } | Out-Null
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Fake 'push-branch' @{ branch = "factory-worker/$($x.n)-development"; files = @('docs/trial.md', 'docs/sneak.md'); profile = 'green'; parents = @('head', 'base') } | Out-Null
+    Check 'the sweep sends it back to Development' (Wait-Until -Seconds 40 { (Get-FakeIssue $x.n).column -eq 'Development' })
+    Check 'the hand-made merge is not merged' (-not (Get-FakePr $x.pr).merged)
+}
+
 $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'] = {
     # the suite's accept window is 4 s: the offer would lapse before the restart. This scenario runs on a gateway with a 60 s window (started
     # by an outright kill, which writes no snapshot) and the suite's window comes back in finally, the same way.
@@ -602,6 +836,8 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
 $OwnerScenarios['owner: one item per session: a session that held an item is offered no second one; the next session of the name is, and the status counts items per session'] = {
     $oldOne = $env:FACTORY_ONE_ITEM_PER_SESSION
     try {
+        # this scenario's waits are timed for a 4 s accept window (the suite runs with 8)
+        $oldAckOne = $env:FACTORY_ASSIGN_ACK_SECONDS; $env:FACTORY_ASSIGN_ACK_SECONDS = '4'
         $env:FACTORY_ONE_ITEM_PER_SESSION = '1'; Restart-Gateway
         Start-OwnerClient 'fresh1' 'persistent-local' '--capacity 5'      # capacity 5: what holds the second item back is the rule, not the capacity
         $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'fresh1' })[0] }
@@ -644,6 +880,7 @@ $OwnerScenarios['owner: one item per session: a session that held an item is off
         Check 'the new session has one open offer, not two' ($open.Count -eq 1) ($open | ConvertTo-Json -Compress)
     } finally {
         Stop-OwnerClient 'fresh1'
+        $env:FACTORY_ASSIGN_ACK_SECONDS = $oldAckOne
         $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; Restart-Gateway
     }
 }

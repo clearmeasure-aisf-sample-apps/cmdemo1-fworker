@@ -52,6 +52,19 @@ static double AckSeconds(string scriptsDir)
     catch { }
     return 120;
 }
+// timing.<key> of the config, FACTORY_TIMING_<key> first (tests); a value that is not a number of 0 or more is the default
+static double TimingValue(string scriptsDir, string key, double fallback)
+{
+    bool Good(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v >= 0;
+    if (Good(Environment.GetEnvironmentVariable("FACTORY_TIMING_" + key), out var a)) return a;
+    try
+    {
+        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
+        if (Good(root?["timing"]?[key]?.ToString(), out a)) return a;
+    }
+    catch { }
+    return fallback;
+}
 // plant.oneItemPerSession (docs/launcher.md): FACTORY_ONE_ITEM_PER_SESSION (1 or 0), else the config, else on.
 var oneItemPerSession = OneItemPerSession(scriptsDir);
 static bool OneItemPerSession(string scriptsDir)
@@ -108,7 +121,9 @@ builder.Services.AddSingleton(sp =>
     {
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
-    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession, Hosts = HostSettings.Load(scriptsDir) };
+    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), Hosts = HostSettings.Load(scriptsDir) };
+
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
 builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, publicUrl, tokenSecret));
@@ -534,6 +549,18 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     var timeout = TimeSpan.FromSeconds(verb is "wait-for-checks" ? 140 : 580);
     // the journal of an item reads in event order: the lines the plant decided before this acceptance (matched, offered) are written before the
     // rule script writes "assigned". The wait is bounded by the plant, which adds it to the offer's window of this worker.
+    // issue 30: only the offer that stands for this session now can be accepted (a late accept of a withdrawn offer is refused, exit 11)
+    var accepting = false;
+    if (ownerMode && verb == "accept" && who.Kind == "item")
+    {
+        var (ax, acode, areason) = plant.BeginAccept(who);
+        if (ax != 0)
+        {
+            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"accept\",\"item\":\"{who.Item}\",\"caller\":\"{who.Kind}:{who.Role}\",\"refused\":\"{acode}\"}}");
+            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = acode, reason = areason, exit = ax }), "application/json", Encoding.UTF8, 409);
+        }
+        accepting = true;
+    }
     if (ownerMode && verb == "accept" && who.Kind == "item" && plant.JournalBefore(who.Item, who.Assignment, who.Name) is { AtMost.Ticks: > 0 } earlier)
         await Task.WhenAny(earlier.Written, Task.Delay(earlier.AtMost));
     if (ownerMode && who.Role == "qc" && verb is "accept" or "qc-progress" or "qc-fail" or "qc-stopped") qc.Arrived(who);
@@ -548,6 +575,9 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && messaging.On && status is 503 or 500 && who.Kind == "item") { string failed = ""; try { failed = JsonNode.Parse(output)?["code"]?.ToString() ?? ""; } catch { } plant.NoteVerbError(who.Name, who.Item, failed, code); }
     if (ownerMode && messaging.OperatorEnabled) { try { plant.OperatorVerbEvent(verb, code, who, authorized, output); } catch { } }
     if (ownerMode && code == 0) { try { plant.OnVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"plant hook {verb}: {e.Message}"); } }
+    if (accepting) plant.EndAccept(who.Assignment);
+    // issue 31: a session that calls a verb successfully is answering: its count of lapsed offers starts again
+    if (ownerMode && code == 0 && who.Kind is "item" or "worker") plant.NoteAnswered(who.Name);
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
     if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep();
     return Results.Text(output, "application/json", Encoding.UTF8, status);
@@ -1470,6 +1500,11 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                         foreach (var x in j["settling"] as JsonArray ?? new JsonArray()) if (x is JsonValue sv && sv.TryGetValue<int>(out var si)) keep.Add(si);
                         foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
                         plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep);
+                        plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray);
+                        // a merge the gateway made after a PASS and the round-trip of one it could not make (Verbs.Merge.ps1 -Gateway)
+                        foreach (var a in acts)
+                            if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
+                                plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
                         plant.SetReleaseQueue(j["release_queue"] as JsonArray);
                         try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
                         foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
@@ -1477,6 +1512,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                             {
                                 to["provider"] = "gateway"; plant.Route(ti.GetValue<int>(), (JsonObject)JsonNode.Parse(to.ToJsonString())!);
                                 if (to["event"]?.ToString() == "item.complete") plant.Complete(ti.GetValue<int>());
+                                if (to["event"]?.ToString() == "item.merged") plant.Merged(ti.GetValue<int>());
                             }
                         // the fallback of the back-merge trigger: master's head compared with the last one seen (not awaited: the sweep goes on)
                         if (baseWatch != null) _ = Task.Run(baseWatch.AfterSweep);
@@ -1591,7 +1627,7 @@ function groupedRows(list,rowHtml,cols,top){const w=[],q=[];for(const x of list|
 return{order:ord,html:(top||'')+(w.length?groupHead('Workers',cols)+w.map(x=>rowHtml(x,i++)).join(''):'')+(q.length?groupHead('QC: workers that also run pull request environments',cols)+q.map(x=>rowHtml(x,i++)).join(''):'')}}
 function workerRowHtml(x){const qc=(x.roles||[]).includes('qc');
 const qcCell=qc?QC_BADGE+`${esc(x.qcActive)}/${esc(x.qcCapacity)} <span class="pill ${x.qcProfile?'on':'dr'}">${x.qcProfile?'profile set':'no profile'}</span> <span class="mut">${esc(x.qcAddress||'no address')}</span>`:'<span class="mut">-</span>';
-return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td><span class="pill ${x.connected?(x.draining?'dr':'on'):'off'}">${x.connected?(x.draining?'draining':'connected'):'gone'}</span></td><td>${esc(x.owned)}</td><td>${esc(x.capacity)}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${x.connected?`<button data-n="${esc(x.name)}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:''}${revokeButton(esc(x.name))}</td></tr>`}
+return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td><span class="pill ${x.connected?(x.draining?'dr':'on'):'off'}">${x.connected?(x.draining?'draining':'connected'):'gone'}</span>${x.coolDownUntil?` <span class="pill dr" title="it let offers lapse; offered nothing new until ${esc(x.coolDownUntil)} or its next verb">cool-down</span>`:''}</td><td>${esc(x.owned)}</td><td>${esc(x.capacity)}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${x.connected?`<button data-n="${esc(x.name)}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:''}${revokeButton(esc(x.name))}</td></tr>`}
 function revokeButton(n){return `<button data-n="${n}" data-a="revoke" title="Refuse every credential issued so far for this name and end its stream; a new prompt gives it a new credential">revoke</button>`}
 function qcRowHtml(x,repo){const sha=String(x.sha||'').slice(0,7),head=String(x.head||'').slice(0,7),p=esc(x.pr);
 const env=x.state==='failed'?esc((x.fail&&x.fail.code)||'failed')+(x.fail&&x.fail.reason?` <span class="mut">${esc(x.fail.reason)}</span>`:''):x.url&&/^https?:\/\//i.test(x.url)?`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.url)}</a>`:x.waiting?`<span class="mut">${esc(x.waiting)}</span>`:x.url_note?`<span class="mut">${esc(x.url_note)}</span>`:'-';
