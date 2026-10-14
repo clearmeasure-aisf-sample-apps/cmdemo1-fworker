@@ -499,7 +499,8 @@ $OwnerScenarios['runner: a second run is refused while one is active, a short di
 $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'] = {
     try {
         Start-OwnerClient 'sara' 'persistent-local' '--capacity 2'
-        $a = New-Item-Fake 'Snapshot owned' 'x' $OwnerLabels; $b = New-Item-Fake 'Snapshot offered' 'x' $OwnerLabels
+        # pinned: a worker left connected by an earlier scenario must not take them
+        $a = New-Item-Fake 'Snapshot owned' 'x' ($OwnerLabels + 'worker:sara'); $b = New-Item-Fake 'Snapshot offered' 'x' ($OwnerLabels + 'worker:sara')
         [void](Wait-Until -Seconds 40 { (Get-Assigned 'sara' $a).Count -gt 0 -and (Get-Assigned 'sara' $b).Count -gt 0 })
         $ea = (Get-Assigned 'sara' $a)[0]; $eb = (Get-Assigned 'sara' $b)[0]
         $r = Fo 'sara' @('accept', '--item', $a, '--assignment', $ea.assignment); CheckExit 'sara accepts the first item' $r 0
