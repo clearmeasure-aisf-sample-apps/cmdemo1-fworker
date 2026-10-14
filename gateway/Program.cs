@@ -16,6 +16,9 @@ var scriptsDir = Environment.GetEnvironmentVariable("FACTORY_PLUGIN_SCRIPTS") ??
 var entry = Path.Combine(scriptsDir, "factory.ps1");
 var apiToken = Environment.GetEnvironmentVariable("FACTORY_DEV_TOKEN") ?? throw new InvalidOperationException("FACTORY_DEV_TOKEN is not set");
 var webhookSecret = Environment.GetEnvironmentVariable("FACTORY_WEBHOOK_SECRET") ?? throw new InvalidOperationException("FACTORY_WEBHOOK_SECRET is not set");
+// every event stream writes a `: ping` comment at this interval, busy or idle: a proxy or the platform's ingress that sees no byte for a while
+// closes the connection, and a client then sees a drop it did not cause (enhancement 11). Clients ignore comment lines.
+var ssePingSeconds = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SSE_PING_SECONDS"), out var sps) && sps > 0 ? sps : 25;
 var sweepSeconds = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_SECONDS"), out var ss) ? ss : 180;
 var ownerMode = Environment.GetEnvironmentVariable("FACTORY_OWNER_MODE") == "1";
 var environmentName = Environment.GetEnvironmentVariable("FACTORY_ENVIRONMENT") ?? "tdd";
@@ -629,11 +632,13 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
         foreach (var (id, json) in legacyReplay) await ctx.Response.WriteAsync($"id: {id}\ndata: {json}\n\n");
         foreach (var json in pending) await ctx.Response.WriteAsync($"data: {json}\n\n");
         await ctx.Response.Body.FlushAsync();
+        var lastPing = DateTime.UtcNow;
         while (!ctx.RequestAborted.IsCancellationRequested)
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted); cts.CancelAfter(TimeSpan.FromSeconds(15));
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted); cts.CancelAfter(PingDue(lastPing));
             try { var (id, json) = await sub.Reader.ReadAsync(cts.Token); await ctx.Response.WriteAsync($"id: {id}\ndata: {json}\n\n"); }
-            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested) { await ctx.Response.WriteAsync(": ping\n\n"); }
+            catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested) { }
+            if (PingDue(lastPing) == TimeSpan.Zero) { await ctx.Response.WriteAsync(": ping\n\n"); lastPing = DateTime.UtcNow; }
             await ctx.Response.Body.FlushAsync();
         }
     }
@@ -1094,12 +1099,14 @@ async Task Pump(HttpContext ctx, Channel<(long, string)> ch, List<(long, string)
     await ctx.Response.WriteAsync($"data: {registered}\n\n");
     if (snapshot != null) await ctx.Response.WriteAsync($"data: {snapshot}\n\n");
     await ctx.Response.Body.FlushAsync();
+    var lastPing = DateTime.UtcNow;
     while (!ctx.RequestAborted.IsCancellationRequested)
     {
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted); cts.CancelAfter(TimeSpan.FromSeconds(15));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted); cts.CancelAfter(PingDue(lastPing));
         try { var (id, json) = await ch.Reader.ReadAsync(cts.Token); await ctx.Response.WriteAsync(id == 0 ? $"data: {json}\n\n" : $"id: {Sid(id)}\ndata: {json}\n\n"); }
-        catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested) { await ctx.Response.WriteAsync(": ping\n\n"); }
+        catch (OperationCanceledException) when (!ctx.RequestAborted.IsCancellationRequested) { }
         catch (ChannelClosedException) { break; }
+        if (PingDue(lastPing) == TimeSpan.Zero) { await ctx.Response.WriteAsync(": ping\n\n"); lastPing = DateTime.UtcNow; }
         await ctx.Response.Body.FlushAsync();
     }
 }
@@ -1136,6 +1143,8 @@ async Task OperatorStream(HttpContext ctx, Principal who, string name, long afte
     finally { plant.DisconnectOperator(ch!); }
 }
 
+// how long until the next `: ping` of a stream is due (zero: now)
+TimeSpan PingDue(DateTime lastPing) { var left = lastPing.AddSeconds(ssePingSeconds) - DateTime.UtcNow; return left > TimeSpan.Zero ? left : TimeSpan.Zero; }
 string Sid(long id) => messaging.On ? $"{plant.Epoch}.{id}" : id.ToString();
 static long ParseCursor(string header, string epoch)
 {

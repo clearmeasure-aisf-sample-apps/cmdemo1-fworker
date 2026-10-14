@@ -61,9 +61,11 @@ function Invoke-Subscribe($a) {
             }
         } catch {
             # on stdout, where a Monitor reads: a refused credential or an unreachable gateway must be visible to the session, not only on stderr
+            # a drop is reported only after 2 reconnects failed as well (enhancement 11): one lost connection that the next attempt restores is
+            # routine (a proxy, a gateway restart) and says nothing to the session. Comment lines (`: ping`) are never events.
             $dropN++
-            if ($dropN -le 3 -or $dropN % 10 -eq 0) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'stream.error'; reason = "$($_.Exception.Message)"; attempt = $dropN; retry_in_seconds = $backoff } | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
-            [Console]::Error.WriteLine("subscription dropped: $($_.Exception.Message); retrying in ${backoff}s")
+            if ($dropN -ge 3 -and ($dropN -le 5 -or $dropN % 10 -eq 0)) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'stream.error'; reason = "$($_.Exception.Message)"; attempt = $dropN; retry_in_seconds = $backoff } | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
+            if ($dropN -ge 3) { [Console]::Error.WriteLine("subscription dropped: $($_.Exception.Message); retrying in ${backoff}s") }
         }
         finally { $http.Dispose() }
         Start-Sleep -Seconds $backoff; $backoff = [Math]::Min(30, $backoff * 2)

@@ -162,6 +162,10 @@ s. **Done (2026-10-13): the standing back-merge trigger** (`docs/design/plant-ma
    installed author App has contents write and pull requests write was not checked from this repository (the manifest has both; without
    them the update branch call fails and the owners still do the back-merge); (2) the peer-messaging skill (owner review) does not list
    `base.updated`; it is a plant trigger, not a message, so nothing depends on it; (3) not yet seen live on tdd.
+t. **Done (2026-10-14): SSE keepalive** (enhancement 11). Every event stream (worker, supervisor, operator session, the operator's broadcast)
+   writes a `: ping` comment every 25 s, busy or idle (`FACTORY_SSE_PING_SECONDS`); before, a ping came only after 15 s without an event.
+   The stream clients (`Client.Subscribe.ps1`, `Client.Own.ps1`) ignore comment lines and print `stream.error` only from the third failed
+   attempt in a row (the drop and 2 failed reconnects). Open: `Client.Operator.ps1` (code-owner path) still reports the first failure.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
