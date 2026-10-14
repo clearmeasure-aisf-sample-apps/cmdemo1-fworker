@@ -181,6 +181,28 @@ function Start-OwnerWorker($ev, $cfg, [string]$Name, [int]$Max, [bool]$ItemCrede
     [Console]::Out.WriteLine((@{ provider = 'client'; event = 'worker.spawned'; item = $ev.item; holder = $Name; log = $log } | ConvertTo-Json -Compress))
 }
 
+# The client's own acceptance of an owner offer (gateway/Lease.cs, rule 1), on a thread so the stream is read on: POST accept with the item token
+# and accepted_by "client", then one line for the model: item.accepted (the item is this session's now: start it) or item.accept-failed with the
+# gateway's code (then the model accepts by the skill, or not at all). Console.Out is synchronized, so the line never splits another.
+function Start-ClientAccept([string]$Url, [string]$ItemToken, $Ev) {
+    $null = Start-ThreadJob -ThrottleLimit 64 -ScriptBlock {
+        param($u, $t, $item, $asg, $col, $mode)
+        $line = [ordered]@{ provider = 'client'; event = 'item.accept-failed'; item = $item; assignment = $asg }
+        try {
+            $h = [Net.Http.HttpClient]::new(); $h.Timeout = [TimeSpan]::FromSeconds(150)
+            $rq = [Net.Http.HttpRequestMessage]::new('POST', "$u/api/v1/verbs/accept"); $rq.Headers.Add('Authorization', "Bearer $t")
+            $rq.Content = [Net.Http.StringContent]::new((@{ item = $item; accepted_by = 'client' } | ConvertTo-Json -Compress), [Text.Encoding]::UTF8, 'application/json')
+            $r = $h.SendAsync($rq).GetAwaiter().GetResult(); $body = $r.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            $j = try { $body | ConvertFrom-Json -AsHashtable } catch { $null }
+            if ([int]$r.StatusCode -eq 200 -and $j -is [hashtable] -and $j.ok) {
+                $line = [ordered]@{ provider = 'client'; event = 'item.accepted'; item = $item; assignment = $asg; acceptedBy = 'client'; column = $(if ($j.column) { $j.column } else { $col }); mode = $(if ($j.mode) { $j.mode } else { $mode }); lease_until = $j.lease_until
+                    next = "item #$item is yours: the client accepted it. Start it now by the owner-session skill from step 2 (accept again is not needed and does no harm). Until this session calls a verb for it, the gateway takes it back when the lease ends." }
+            } else { $line.code = $(if ($j -is [hashtable] -and $j.code) { "$($j.code)" } else { "http-$([int]$r.StatusCode)" }); $line.exit = $(if ($j -is [hashtable] -and $null -ne $j.exit) { [int]$j.exit } else { 20 }) }
+        } catch { $line.code = 'gateway-unreachable'; $line.reason = "$($_.Exception.Message)" }
+        [Console]::Out.WriteLine(($line | ConvertTo-Json -Compress)); [Console]::Out.Flush()
+    } -ArgumentList $Url, $ItemToken, ([int]$Ev.item), "$($Ev.assignment)", "$($Ev.column)", "$($Ev.mode)"
+}
+
 # The heartbeat of a stream session (worker-messaging.md 4.6, 6.2): POST /presence every 30 s from a background thread, no model turn. Started only when
 # the gateway says messaging is on; it stops by itself on 401, 403 or 404 (feature off, credential refused, older gateway).
 # The thread job takes an explicit -ThrottleLimit: the default of 5 thread jobs is shared with the spawn watchers (one job per spawned worker), so a
@@ -525,7 +547,10 @@ function Invoke-QuestionReask($Cfg, [string]$Cred, [string]$Name, [string]$Epoch
     return @($done)
 }
 
-# subscribe --own --name N [--type persistent-local|ephemeral-local] [--capabilities a,b] [--capacity 1] [--roles owner,inspector,qc] [--qc-capacity 1] [--qc-address HOST] [--qc-profile] [--model ID] [--effort E] [--spawn]
+# subscribe --own --name N [--type persistent-local|ephemeral-local] [--capabilities a,b] [--capacity 1] [--roles owner,inspector,qc] [--qc-capacity 1] [--qc-address HOST] [--qc-profile] [--model ID] [--effort E] [--host H] [--spawn]
+# An owner offer (item.assigned, job own-item) is accepted by this client itself and announced with item.accepted (gateway/Lease.cs); --no-auto-accept or
+# FACTORY_AUTO_ACCEPT=0 leaves the accept to the model, and with --spawn the spawned session accepts.
+# --host (else FACTORY_HOST, else the computer's name) is the host whose limits this session shares (gateway/Hosts.cs).
 # subscribe --own --supervisor --name N --model ID --effort E: the supervisor session (worker-messaging.md 6.4). It registers with the supervisor
 # credential, prints supervisor.questions and supervisor.patrol as the envelopes of 5.2 (and stream.* lines), and heartbeats every 20 s.
 # Exits: 40 when a newer stream of the same name replaced this one (stream.replaced); the body's exit (2, 10, 30, 40) when the gateway refuses the
@@ -553,7 +578,12 @@ function Invoke-SubscribeOwn($a) {
     if ($a.ContainsKey('qc_profile')) { $qcExtra += '&qc_profile=1' }
     if ($a.ContainsKey('model')) { $qcExtra += "&model=$([uri]::EscapeDataString("$($a.model)"))" }
     if ($a.ContainsKey('effort')) { $qcExtra += "&effort=$([uri]::EscapeDataString("$($a.effort)"))" }
+    # the computer this session runs on (gateway/Hosts.cs): sessions of one host share its limits of owned items and private builds
+    $hostName = if ($a.ContainsKey('host')) { "$($a.host)" } elseif ($env:FACTORY_HOST) { $env:FACTORY_HOST } else { [Environment]::MachineName }
+    $hostName = ($hostName.ToLowerInvariant() -replace '[^a-z0-9._-]', '-').TrimStart('.', '_', '-'); if ($hostName.Length -gt 63) { $hostName = $hostName.Substring(0, 63) }
+    if ($hostName) { $qcExtra += "&host=$([uri]::EscapeDataString($hostName))" }
     $qcMax = if ($a.ContainsKey('qc_capacity')) { [Math]::Max(1, [int]$a.qc_capacity) } else { 1 }
+    $autoAccept = -not ($a.ContainsKey('no_auto_accept') -or $env:FACTORY_AUTO_ACCEPT -eq '0')
     $cred = Get-WorkerCredential $cfg $name -Supervisor:$sup
     $beat = if ($sup) { 20 } else { 30 }
     # lastId is opaque (today a number, "<epoch>.<seq>" with messaging on): kept for the life of this process and sent back unchanged. It moves only
@@ -642,11 +672,16 @@ function Invoke-SubscribeOwn($a) {
                     # a replayed event is history: printed, never acted on (no token saved, no worker spawned), so a client restart cannot restart finished work
                     $replayed = $ev['replayed'] -eq $true
                     if ($ev.event -eq 'item.assigned' -and -not $replayed) { try { $ps2 = Sync-Plugin $cfg; if ($ps2.ok -and $ps2.updated) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'plugin.updated'; from = $ps2.from; to = $ps2.to; restart_needed = $true } | ConvertTo-Json -Compress)) } } catch { } }
+                    $itemTok = ''
                     if ($ev.event -eq 'item.assigned' -and $ev.token) {
-                        if (-not $replayed) { Save-ItemToken ([int]$ev.item) "$($ev.role)" "$($ev.token)" }
+                        if (-not $replayed) { Save-ItemToken ([int]$ev.item) "$($ev.role)" "$($ev.token)"; $itemTok = "$($ev.token)" }
                         $ev.Remove('token')
                     }
                     [Console]::Out.WriteLine(($ev | ConvertTo-Json -Compress -Depth 6)); [Console]::Out.Flush()
+                    # the client accepts an owner offer itself (gateway/Lease.cs, rule 1): the gateway offers only into a free slot, and an offer the model
+                    # answers late is offered to the next worker. The model is told with item.accepted; if it does not start within the lease, the
+                    # gateway takes the item back. Not with --spawn (the spawned session accepts) and not with FACTORY_AUTO_ACCEPT=0.
+                    if ($itemTok -and -not $spawn -and $autoAccept -and $ev['job'] -eq 'own-item' -and "$($ev.role)" -eq 'owner') { try { Start-ClientAccept $cfg.url $itemTok $ev } catch { [Console]::Error.WriteLine("client accept not started: $($_.Exception.Message)") } }
                     if ($evId) { $lastId = $evId }
                     if ($replayed) { }
                     elseif ($spawn -and $ev.event -eq 'item.assigned' -and $ev['job'] -eq 'qc-env') { try { Start-QcWorker $ev $cfg $name $qcMax $msgOn } catch { [Console]::Error.WriteLine("qc spawn failed: $($_.Exception.Message)") } }
@@ -709,4 +744,33 @@ function Get-InboxCursor([string]$Name) {
 function Save-InboxCursor([string]$Name, [string]$Epoch, [long]$After) {
     if ($Epoch -notmatch '^e-[0-9a-f]{8}$') { return }
     Set-Content -LiteralPath (Join-Path (Get-WorkerDir) "inbox-$Name.json") -Value (@{ epoch = $Epoch; after = $After } | ConvertTo-Json -Compress) -NoNewline
+}
+
+# end-session --name N [--marker FILE]: one work item per session (docs/launcher.md). After the session's item settled or was
+# released, the session drains its own name (the gateway offers it nothing more; the next registration of the name, a new session, clears that) and
+# writes the end marker: FACTORY_SESSION_END_FILE when a launcher set it, else --marker. A launcher that watches the marker ends this session and
+# starts a new one from the connect prompt. A drain the gateway does not answer is reported and the marker is written all the same: the gateway
+# offers a session that already held an item nothing more in any case.
+function Invoke-EndSession($a, $cfg) {
+    $name = "$($a.name)"
+    if ($name -notmatch '^[A-Za-z0-9_-]{1,40}$') { Write-Out @{ ok = $false; code = 'usage'; reason = '--name is required: the worker name of this session' } 2 }
+    $marker = if ($env:FACTORY_SESSION_END_FILE) { $env:FACTORY_SESSION_END_FILE } elseif ($a.ContainsKey('marker')) { "$($a.marker)" } else { '' }
+    $cred = Get-WorkerCredential $cfg $name
+    $drained = $false; $note = ''
+    try {
+        $r = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/workers/$([uri]::EscapeDataString($name))/drain" -Method POST -Headers @{ Authorization = "Bearer $cred" } -SkipHttpErrorCheck -TimeoutSec 30
+        $drained = [int]$r.StatusCode -eq 200
+        if (-not $drained) { $note = "drain answered $([int]$r.StatusCode)" }
+    } catch { $note = "drain not sent: $($_.Exception.Message)" }
+    $written = $false
+    if ($marker) {
+        try {
+            $dir = Split-Path -Parent $marker; if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+            Set-Content -Path $marker -Value ([DateTime]::UtcNow.ToString('o')) -NoNewline; $written = $true
+        } catch { $note = (($note, "marker not written: $($_.Exception.Message)") | Where-Object { $_ }) -join '; ' }
+    }
+    $o = [ordered]@{ ok = $true; name = $name; drained = $drained; marker = $marker; markerWritten = $written
+        next = $(if ($written) { 'the launcher ends this session and starts a new one' } else { 'no launcher: stop working; a new session is started from the connect prompt' }) }
+    if ($note) { $o.note = $note }
+    Write-Out $o 0
 }

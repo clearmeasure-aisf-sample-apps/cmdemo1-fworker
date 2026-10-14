@@ -52,8 +52,24 @@
       "prod": "prod"
     }
   },
+  "plant": {
+    "oneItemPerSession": true
+  },
+  "schedule": {
+    "hostOwnedDefault": 0,
+    "hostBuildsDefault": 1,
+    "lowEffortCapacity": 1,
+    "buildSlotTtlSeconds": 1800,
+    "buildSlotMaxTtlSeconds": 7200,
+    "hosts": {},
+    "leaseRenewMinutes": 5,
+    "staleItemMinutes": 15,
+    "staleConfirmMinutes": 3,
+    "clientStartMinutes": 5
+  },
   "timing": {
     "assignAckSeconds": 120,
+    "plantSnapshotMaxAgeMinutes": 30,
     "leaseMinutes": 30,
     "redChecksGate": 2,
     "maxRelaunches": 3,
@@ -75,6 +91,10 @@
     "devChecksTimeoutMinutes": 30,
     "verdictTimeoutMinutes": 180,
     "unprocessedVerdictGraceMinutes": 3,
+    "passMergeGraceSeconds": 60,
+    "passUnmergedDigestMinutes": 5,
+    "offerMissLimit": 2,
+    "offerCoolDownMinutes": 5,
     "parkHours": 24,
     "awaitingChecksParkMinutes": 60,
     "docsOnlyReleaseGraceSeconds": 120,
@@ -273,6 +293,7 @@
   },
   "testLabel": "factory test",
   "mergeQueueDepth": 0,
+  "gatewayMerge": true,
   "ownerSessions": false,
   "idleReleaseMinutes": 60,
   "stateAuthors": [

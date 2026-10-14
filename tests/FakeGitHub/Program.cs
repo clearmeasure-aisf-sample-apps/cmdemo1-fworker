@@ -43,7 +43,7 @@ app.Run();
 
 sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow; }
 sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
-sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft; public List<Comment> Comments = new(); }
+sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public List<Comment> Comments = new(); }
 sealed record Redirect(string To);
 sealed record PlainText(string Text);
 // App "github-actions": the check run is a job of a workflow run (its id is the job id), with steps, a log and the artifacts of the run.
@@ -65,6 +65,9 @@ sealed class World
     readonly Dictionary<int, Pr> prs = new();
     readonly Dictionary<string, List<Check>> checks = new();
     readonly HashSet<string> refs = new();
+    // what a ref points at (a ref created before this was kept points at master's head) and the commits written through git/commits (the plant snapshot)
+    readonly Dictionary<string, string> refSha = new();
+    readonly Dictionary<string, (string Message, string Tree)> commits = new();
     readonly Dictionary<string, (string Sha, List<string> Files, List<JsonObject> Objs)> branches = new();
     long nextReview = 1;
     readonly Dictionary<string, (string Profile, double Delay)> branchProfile = new();
@@ -77,6 +80,8 @@ sealed class World
     long nextArtifact = 1;
     readonly HashSet<string> labelNames = new() { "factory worker", "AI Factory", "Auto Merge", "video", "Demo", "Ready To Move", "Needs Human Review" };
     string masterSha = Sha("master0");
+    readonly Dictionary<string, List<string>> parents = new();
+    readonly HashSet<string> webFlow = new();                     // commits GitHub itself made and signed (update-branch)   // commits/{sha}: the parents of the branch commits the fake made
     int nextNumber = 1, nextComment = 1000, nextCheck = 1, nextPr = 1;
     int healthStatus = 200;
     bool masterRed; double prodDelay = 0; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold;
@@ -168,7 +173,35 @@ sealed class World
         {
             var r = b!["ref"]!.ToString();
             if (!refs.Add(r)) return (422, "{\"message\":\"Reference already exists\"}");
+            if (b["sha"]?.ToString() is { } rs) refSha[r] = rs;
             return (201, J(("ref", r)));
+        }
+        // As GitHub: one ref by its path (404 when there is none), an update of an existing ref (422 "Reference does not exist" otherwise), a commit
+        // written with a message, a tree and parents, and a commit read back with its message and tree; an unknown commit is 404.
+        if ((m = Regex.Match(path, $"^{root}/git/ref/(.+)$")).Success && method == "GET")
+        {
+            var r = "refs/" + m.Groups[1].Value;
+            return refs.Contains(r) ? (200, J(("ref", r), ("object", J(("sha", refSha.TryGetValue(r, out var rsha) ? rsha : masterSha), ("type", "commit"))))) : (404, "{\"message\":\"Not Found\"}");
+        }
+        if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "PATCH")
+        {
+            var r = "refs/" + m.Groups[1].Value;
+            if (!refs.Contains(r)) return (422, "{\"message\":\"Reference does not exist\"}");
+            if (b?["sha"]?.ToString() is not { Length: > 0 } ns) return (422, "{\"message\":\"Invalid request.\"}");
+            refSha[r] = ns; return (200, J(("ref", r), ("object", J(("sha", ns), ("type", "commit")))));
+        }
+        if (path == root + "/git/commits" && method == "POST")
+        {
+            if (b?["tree"]?.ToString() is not { Length: > 0 } tree || b["message"] is null) return (422, "{\"message\":\"Invalid request.\"}");
+            var sha = NewSha(); commits[sha] = (b["message"]!.ToString(), tree);
+            return (201, J(("sha", sha), ("message", commits[sha].Message), ("tree", J(("sha", tree)))));
+        }
+        if ((m = Regex.Match(path, $"^{root}/git/commits/([0-9a-f]+)$")).Success && method == "GET")
+        {
+            var sha = m.Groups[1].Value;
+            if (commits.TryGetValue(sha, out var cm)) return (200, J(("sha", sha), ("message", cm.Message), ("tree", J(("sha", cm.Tree)))));
+            if (sha == masterSha || masterFiles.ContainsKey(sha)) return (200, J(("sha", sha), ("message", "master"), ("tree", J(("sha", Sha("tree" + sha))))));
+            return (404, "{\"message\":\"Not Found\"}");
         }
         if ((m = Regex.Match(path, $"^{root}/git/matching-refs/(.+)$")).Success && method == "GET")
         {
@@ -181,7 +214,7 @@ sealed class World
             return (200, new JsonArray(match.Skip((rp - 1) * per).Take(per).Select(r => (JsonNode)J(("ref", r))).ToArray()));
         }
         if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "DELETE")
-            return refs.Remove("refs/" + m.Groups[1].Value) ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}");
+            { refSha.Remove("refs/" + m.Groups[1].Value); return refs.Remove("refs/" + m.Groups[1].Value) ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}"); }
         if (path == root + "/branches/" + Master && method == "GET") return (200, J(("name", Master), ("commit", J(("sha", masterSha)))));
         if ((m = Regex.Match(path, $"^{root}/compare/([^.]+)\\.\\.\\.(.+)$")).Success && method == "GET") return Compare(m.Groups[1].Value, m.Groups[2].Value);
         if (path == root + "/pulls" && method == "GET")
@@ -215,7 +248,9 @@ sealed class World
                     // as GitHub: expected_head_sha that is not the head is refused (the head moved meanwhile)
                     if (b?["expected_head_sha"] is { } ehs && ehs.ToString() != pr.Sha) return (422, "{\"message\":\"expected head sha didn't match current head ref.\"}");
                     if (pr.Conflict) return (422, "{\"message\":\"merge conflict between base and head\"}");
-                    pr.Behind = 0; pr.Sha = NewSha(); ApplyProfile(pr, pr.Sha); return (202, "{\"message\":\"Updating pull request branch.\"}");
+                    if (pr.UpdateNoop) return (202, "{\"message\":\"Updating pull request branch.\"}");   // accepted, not done yet
+                    { var old = pr.Sha; pr.Behind = 0; pr.Sha = NewSha(); parents[pr.Sha] = new() { old, History()[^1] }; webFlow.Add(pr.Sha); ApplyProfile(pr, pr.Sha); }
+                    return (202, "{\"message\":\"Updating pull request branch.\"}");
                 case "merge": return Merge(pr, b);
                 default:
                     if (method == "PATCH")
@@ -225,6 +260,14 @@ sealed class World
                     }
                     return (200, PrJson(pr, true));
             }
+        }
+        if ((m = Regex.Match(path, $"^{root}/commits/([0-9a-f]+)$")).Success)
+        {
+            var ps = parents.TryGetValue(m.Groups[1].Value, out var known) ? known : new List<string> { History()[^1] };
+            var gh = webFlow.Contains(m.Groups[1].Value);
+            var commit = J(("committer", gh ? J(("name", "GitHub"), ("email", "noreply@github.com")) : J(("name", "factory-bot"), ("email", "bot@example.invalid"))),
+                ("verification", J(("verified", gh), ("reason", gh ? "valid" : "unsigned"))));
+            return (200, J(("sha", m.Groups[1].Value), ("commit", commit), ("parents", new JsonArray(ps.Select(p => (JsonNode)J(("sha", p))).ToArray()))));
         }
         if ((m = Regex.Match(path, $"^{root}/commits/([0-9a-f]+)/check-runs$")).Success)
         {
@@ -329,10 +372,10 @@ sealed class World
         if (bi >= 0 && hi >= 0)
         {
             var files = new List<string>(); for (int k = bi + 1; k <= hi; k++) if (masterFiles.TryGetValue(h[k], out var f)) foreach (var x in f) if (!files.Contains(x)) files.Add(x);
-            return (200, J(("status", hi > bi ? "ahead" : "identical"), ("ahead_by", Math.Max(0, hi - bi)), ("behind_by", 0), ("files", new JsonArray(files.Select(x => (JsonNode)J(("filename", x))).ToArray()))));
+            return (200, J(("status", hi > bi ? "ahead" : hi < bi ? "behind" : "identical"), ("ahead_by", Math.Max(0, hi - bi)), ("behind_by", 0), ("files", new JsonArray(files.Select(x => (JsonNode)J(("filename", x))).ToArray()))));
         }
         var pr = prs.Values.Where(x => x.Ref == head).OrderByDescending(x => x.Open).FirstOrDefault();
-        if (bi < 0 || (pr == null && !branches.ContainsKey(head))) return (200, J(("status", "ahead")));   // commits the fake does not track (the release scenarios)
+        if (bi < 0 || (pr == null && !branches.ContainsKey(head))) return (200, J(("status", "ahead"), ("ahead_by", 1), ("behind_by", 0)));   // commits the fake does not track (the release scenarios)
         var behind = pr?.Behind ?? 0;
         return (200, J(("status", behind > 0 ? "diverged" : "ahead"), ("ahead_by", 1), ("behind_by", behind), ("files", new JsonArray((pr?.Files ?? branches[head].Files).Select(x => (JsonNode)J(("filename", x))).ToArray()))));
     }
@@ -460,7 +503,7 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0;
-                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false; return (200, J(("ok", true)));
             case "issue":
             {
@@ -480,6 +523,7 @@ sealed class World
                 }
                 var files = objs.Select(o => o["filename"]!.ToString()).ToList();
                 var sha = NewSha(); branches[br] = (sha, files, objs);
+                { var prev = prs.Values.FirstOrDefault(x => x.Ref == br && x.Open); parents[sha] = b["parents"] is JsonArray hp ? hp.Select(x => x!.ToString() == "base" ? History()[^1] : x.ToString() == "head" ? (prev?.Sha ?? History()[^1]) : x.ToString()).ToList() : new() { prev?.Sha ?? History()[^1] }; }
                 var existing = prs.Values.FirstOrDefault(x => x.Ref == br && x.Open);
                 var prof = b["profile"]?.ToString() ?? "green"; var dly = b["delaySeconds"]?.GetValue<double>() ?? 0; branchProfile[br] = (prof, dly);
                 if (existing != null) { existing.Sha = sha; existing.Files = files; existing.FileObjs = objs; existing.Profile = prof; existing.DelaySeconds = dly; ApplyProfile(existing, sha); }
@@ -495,6 +539,7 @@ sealed class World
                 if (b["fork"] != null) pr.Fork = b["fork"]!.GetValue<bool>();
                 if (b["draft"] != null) pr.Draft = b["draft"]!.GetValue<bool>();
                 if (b["merged"] != null) { pr.Merged = b["merged"]!.GetValue<bool>(); if (pr.Merged) { pr.Open = false; pr.MergeSha ??= NewSha(); } }
+                if (b["updateNoop"] != null) pr.UpdateNoop = b["updateNoop"]!.GetValue<bool>();
                 if (b["conflict"] != null) pr.Conflict = b["conflict"]!.GetValue<bool>();
                 if (b["mergeableNullReads"] != null) pr.MergeableNullReads = b["mergeableNullReads"]!.GetValue<int>();
                 if (b["delaySeconds"] != null) { pr.DelaySeconds = b["delaySeconds"]!.GetValue<double>(); ApplyProfile(pr, pr.Sha); }
