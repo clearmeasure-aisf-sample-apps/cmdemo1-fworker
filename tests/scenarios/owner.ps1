@@ -499,7 +499,8 @@ $OwnerScenarios['runner: a second run is refused while one is active, a short di
 $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'] = {
     # the suite's accept window is 4 s: the offer would lapse before the restart. This scenario runs on a gateway with a 60 s window (started
     # by an outright kill, which writes no snapshot) and the suite's window comes back in finally, the same way.
-    $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $env:FACTORY_ASSIGN_ACK_SECONDS = '60'; Restart-Gateway
+    # The suites run with the snapshot off (run.ps1); it is on for this scenario's gateways.
+    $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $env:FACTORY_ASSIGN_ACK_SECONDS = '60'; $oldSnap = $env:FACTORY_PLANT_SNAPSHOT; $env:FACTORY_PLANT_SNAPSHOT = '1'; Restart-Gateway
     try {
         Start-OwnerClient 'sara' 'persistent-local' '--capacity 2'
         # pinned: a worker left connected by an earlier scenario must not take them
@@ -534,6 +535,6 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
         foreach ($ref in @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' })) {
             try { Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/$ref" -Method DELETE -Headers @{ Authorization = 'Bearer fake-operator' } | Out-Null } catch { }
         }
-        $env:FACTORY_ASSIGN_ACK_SECONDS = $oldAck; Restart-Gateway
+        $env:FACTORY_ASSIGN_ACK_SECONDS = $oldAck; $env:FACTORY_PLANT_SNAPSHOT = $oldSnap; Restart-Gateway
     }
 }
