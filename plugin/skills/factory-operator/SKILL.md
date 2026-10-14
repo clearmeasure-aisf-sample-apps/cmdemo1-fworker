@@ -30,7 +30,7 @@ Enforced by the gateway (code, you cannot get around it):
 - Your credential is admitted only at the endpoints behind the `operator` verbs below and your event stream. It cannot mint or revoke a
   credential, switch messaging on or off, set a capacity, drain a worker, call an item verb, or use a test endpoint.
 - `factory.ps1 operator release-check` answers exit 0 only when the plant is quiet (no item verb call in flight, no open question, no
-  question you answered yourself in the last ten minutes, no offer waiting for an answer) and fewer self-merged releases than `operator.maxSelfMergesPerDay` (default 3) are recorded today. Otherwise
+  question you answered yourself in the last ten minutes, no offer waiting for an answer or answered less than 60 s ago) and fewer self-merged releases than `operator.maxSelfMergesPerDay` (default 3) are recorded today. Otherwise
   it answers exit 10 with code `not-quiet` (and every reason) or `daily-limit`.
 - `factory.ps1 operator record-release --pr N --version V` records one self-merged release. The records are kept outside the gateway
   process, so the restart that a release causes does not empty the count.

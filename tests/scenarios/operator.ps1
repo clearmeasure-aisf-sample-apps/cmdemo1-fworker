@@ -15,7 +15,7 @@ function Op-Get([string]$Path, [string]$Bearer = '') { $r = Msg-Api 'GET' $Path 
 function Op-Post([string]$Path, $Body = @{}, [string]$Bearer = '') { Msg-Post $Path $Body $(if ($Bearer) { $Bearer } else { Op-Token }) }
 # (emits the events one by one: wrap a call in @() where a list is wanted)
 function Op-Events($St, [string]$Event) { $St.events | Where-Object { $_.data.event -eq $Event } | ForEach-Object { $_.data } }
-function Op-WaitQuiet { [void](Wait-Until -Seconds 20 { (Op-Get '/api/v1/operator/release-check').quiet -eq $true }) }
+function Op-WaitQuiet { [void](Wait-Until -Seconds 75 { (Op-Get '/api/v1/operator/release-check').quiet -eq $true }) }
 function Op-Plant($St, [string]$Code, [int]$Item) { Msg-Read $St 12 { param($e) @($e | Where-Object { $_.data.event -eq 'plant.event' -and $_.data.code -eq $Code -and $_.data.item -eq $Item }).Count -gt 0 }; Msg-First @(Op-Events $St 'plant.event' | Where-Object { $_.code -eq $Code -and $_.item -eq $Item }) }
 function Op-Worker([string]$Name) { $s = Msg-Open "name=$Name&type=persistent-local&capacity=1&roles=owner&messaging=1" (Msg-Token $Name); Msg-Registered $s; return $s }
 function Op-F([string[]]$FactoryArgs) { Msg-WithEnv @{ FACTORY_OPERATOR_SESSION_TOKEN = (Op-Token) } { $script:MsgOut = F 'operator-session' (@('operator') + $FactoryArgs) }; return $script:MsgOut }
@@ -266,6 +266,12 @@ $OperatorScenarios = [ordered]@{
         [void](Wait-Until -Seconds 30 { $script:OpChk = Op-Get '/api/v1/operator/release-check'; @($script:OpChk.reasons | Where-Object { $_.code -eq 'pending-offer' -and $_.item -eq $n }).Count -eq 1 })
         $pend = Msg-First @($script:OpChk.reasons | Where-Object { $_.code -eq 'pending-offer' -and $_.item -eq $n })
         Check 'an offer that waits for its answer makes it not quiet, and the answer lists who is connected' ($script:OpChk.status -eq 409 -and $pend -and $pend.worker -eq 'alice' -and @($script:OpChk.connected | Where-Object { $_.name -eq 'alice' }).Count -eq 1) ($script:OpChk | ConvertTo-Json -Compress -Depth 4)
+        # the offer is accepted: a hand-over less than 60 s old still makes it not quiet (a restart now would lose the session's start on it)
+        Msg-Read $al 30 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' -and $_.data.item -eq $n }).Count -gt 0 }
+        $asg = Msg-First @(Msg-Of $al 'item.assigned' | Where-Object { $_.data.item -eq $n })
+        $acc = if ($asg) { Msg-Json (Msg-Verb 'accept' $asg.data.token @{ item = $n; assignment = $asg.data.assignment }) } else { $null }
+        $c3 = Op-Get '/api/v1/operator/release-check'; $rec = Msg-First @($c3.reasons | Where-Object { $_.code -eq 'recent-offer' -and $_.item -eq $n })
+        Check 'an offer accepted a moment ago makes it not quiet: recent-offer with the worker and the seconds left, and no pending-offer for it' ($acc.ok -eq $true -and $c3.status -eq 409 -and $rec -and $rec.worker -eq 'alice' -and $rec.secondsLeft -ge 1 -and $rec.secondsLeft -le 60 -and @($c3.reasons | Where-Object { $_.code -eq 'pending-offer' -and $_.item -eq $n }).Count -eq 0) "$($acc | ConvertTo-Json -Compress) $($c3 | ConvertTo-Json -Compress -Depth 4)"
     } finally { Msg-Close $op; if ($al) { Msg-Close $al } }
 }
 
