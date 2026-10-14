@@ -146,7 +146,9 @@ sealed partial class Plant
     }
     JsonArray ReleaseRows(DateTime now) => new(opReleases.Where(r => r.At.Date == now.Date).Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["pr"] = r.Pr, ["version"] = r.Version }).ToArray());
 
-    // quiet: no item-token verb call in flight, no open question, no offer waiting for its answer. allowed: quiet and under the daily limit.
+    public const int RecentOfferSeconds = 60;
+    // quiet: no item-token verb call in flight, no open question, no offer waiting for its answer, no offer answered in the last RecentOfferSeconds.
+    // allowed: quiet and under the daily limit.
     public JsonObject ReleaseCheck()
     {
         lock (gate)
@@ -161,6 +163,16 @@ sealed partial class Plant
                 reasons.Add(new JsonObject { ["code"] = "answered-by-self", ["id"] = q.Id, ["worker"] = q.From, ["item"] = q.Item, ["minutesLeft"] = (int)Math.Ceiling(Msg.OperatorSelfAnswerMinutes - (now - q.AnsweredAt!.Value).TotalMinutes) });
             foreach (var a in assignments.Values.Where(a => !a.Accepted && a.Worker != "").OrderBy(a => a.Item))
                 reasons.Add(new JsonObject { ["code"] = "pending-offer", ["worker"] = a.Worker, ["item"] = a.Item });
+            // an offer that was answered less than RecentOfferSeconds ago: the session is still starting on it (its first verbs, its claim), and a restart
+            // now loses the hand-over (enhancement 5). The offer's moment is its window's start: AckBy less the window (a window lengthened once for a
+            // journal wait makes it look younger, which only holds the release back longer); an acceptance counts from AcceptedAt when that is later.
+            foreach (var a in assignments.Values.Where(a => a.Accepted && a.Worker != "").OrderBy(a => a.Item))
+            {
+                var offeredAt = a.AckBy == default ? a.AcceptedAt : a.AckBy.AddSeconds(-ackSeconds);
+                var last = a.AcceptedAt > offeredAt ? a.AcceptedAt : offeredAt;
+                var age = Math.Max(0, (now - last).TotalSeconds);   // a window lengthened past now reads as just offered, never as more than the full wait
+                if (age < RecentOfferSeconds) reasons.Add(new JsonObject { ["code"] = "recent-offer", ["worker"] = a.Worker, ["item"] = a.Item, ["secondsLeft"] = (int)Math.Ceiling(RecentOfferSeconds - age) });
+            }
             var today = ReleasesToday(now); var limit = Msg.OperatorMaxSelfMergesPerDay; var quiet = reasons.Count == 0;
             var code = !quiet ? "not-quiet" : today >= limit ? "daily-limit" : "";
             var o = new JsonObject { ["ok"] = code == "", ["quiet"] = quiet, ["allowed"] = code == "", ["reasons"] = reasons, ["releasesToday"] = today, ["limit"] = limit,

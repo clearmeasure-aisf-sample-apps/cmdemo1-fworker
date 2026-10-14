@@ -91,7 +91,8 @@ Enforced by the gateway:
 - `release-check`: 200 only when the plant is quiet and the day's limit is not reached. Not quiet (409 `not-quiet`, with every reason):
   a verb call of an item token in flight (`owner-mid-verb`), an open question (`open-question`), a question the session answered
   itself within `timing.opSelfAnswerMinutes` (10; `answered-by-self`, so it cannot make its own quiet), an offer that waits for its
-  answer (`pending-offer`). At the limit: 409 `daily-limit`. The answer lists the connected workers with the items they own, which is what must
+  answer (`pending-offer`), an offer answered less than 60 s ago (`recent-offer`, with `secondsLeft`: the session is still starting on
+  it, and a restart would lose the hand-over). At the limit: 409 `daily-limit`. The answer lists the connected workers with the items they own, which is what must
   be back after the release.
 - `record-release`: one record per pull request, counted per UTC day. The records are refs in the work-orders repository
   (`refs/factory/<instance>/operator-release/<yyyyMMdd>/<pr>/<version>`), written by the rule scripts and read at start, because the
