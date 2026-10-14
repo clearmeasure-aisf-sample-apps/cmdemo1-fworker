@@ -50,10 +50,11 @@ $msgPool = @{ pool = $(if ($env:TEST_RUNNER_POOL) { [int]$env:TEST_RUNNER_POOL }
 $gateQc = @{ qc = ($qcBase + @{ rateLimitPerIp = 100000; rateLimitPerPr = 100000; minFreeMb = 1 }) }
 function New-Gate([hashtable]$Qc = @{}) { @{ qc = ($gateQc.qc + $Qc) } }
 $SuiteDefs = @(
-    @{ Name = 'auto'; Policy = 'auto'; Set = $Scenarios }
+    # auto and merge-queue test the session's own merge verb, so the gateway's merge after a PASS is off there (owner.ps1 tests that one)
+    @{ Name = 'auto'; Policy = 'auto'; Set = $Scenarios; Extra = @{ gatewayMerge = $false } }
     @{ Name = 'peer-approved'; Policy = 'peer-approved'; Set = $ApprovalScenarios }
-    @{ Name = 'merge-queue'; Policy = 'auto'; Set = $QueueScenarios; Extra = @{ mergeQueueDepth = 1 } }
-    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4 } }
+    @{ Name = 'merge-queue'; Policy = 'auto'; Set = $QueueScenarios; Extra = @{ mergeQueueDepth = 1; gatewayMerge = $false } }
+    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8 } }
     @{ Name = 'qc'; Policy = 'auto'; Set = $QcScenarios; Extra = $qcOpen; Env = 'qc'; ClientHost = $true }   # ClientHost: F runs the client in one long-lived pwsh (lib.ps1)
     @{ Name = 'qc-worker'; Policy = 'auto'; Set = $QcWorkerScenarios; Extra = (New-Gate); Env = 'qc' }
     @{ Name = 'qc-gate'; Policy = 'peer-approved'; Set = $QcGateScenarios; Extra = (New-Gate); Env = 'qc' }
@@ -151,8 +152,9 @@ foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
 
 function Get-SuiteEnv([string]$Kind) {
     switch ($Kind) {
+        # 8 s: a late accept is refused now (stale-assignment), and a loaded runner takes several seconds per client call
         # the plant snapshot (PlantSnapshot.cs) is off in the suites: its read at start would hold every first sweep back; its own scenario switches it on
-        'owner' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '4' } }
+        'owner' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8' } }
         'qc' {
             $adminTokens = Join-Path $script:SuiteRoot 'qc-admin-tokens'; New-Item -ItemType Directory -Force -Path $adminTokens | Out-Null
             return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '60'; FACTORY_PUBLIC_URL = "http://127.0.0.1:$($script:ApiPort)"; FACTORY_TOKEN_DIR = $adminTokens }

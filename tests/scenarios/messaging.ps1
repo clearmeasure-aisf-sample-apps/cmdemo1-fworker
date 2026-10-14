@@ -2347,7 +2347,7 @@ $ManagerScenarios['mgr: a spent delivery budget stops the batches and tells the 
 }
 
 $ManagerScenarios['mgr: text that comes from a message enters an item only as a marked block, which get-item labels and inspect-facts leaves out'] = {
-    $v = To-Verdict 0 0; $n = $v.n
+    $v = To-Verdict 0 0 -HoldMerge; $n = $v.n
     $q = Msg-F 'alice' @('ask', '--text', 'AC 3 and AC 5 disagree: which governs?', '--item', "$n")
     Check 'alice asks about the item' ($q.exit -eq 21 -and "$($q.id)" -match '^m-') ($q | ConvertTo-Json -Compress -Depth 6)
     $tokDir = Join-Path $script:Work 'tokens-alice'; New-Item -ItemType Directory -Force -Path $tokDir | Out-Null
@@ -2527,7 +2527,7 @@ function Mgr-DigestProblems($D) {
         'waiting' = 'item', 'code', 'waitingMinutes'; 'refusals' = 'item', 'code', 'count', 'windowMinutes'; 'parked' = 'item', 'code', 'ageMinutes'
         'item-quiet' = 'worker', 'item', 'column', 'quietMinutes'; 'last-review-round' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'; 'review-rounds-exhausted' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'
         'worker-blocked-note' = 'worker', 'item', 'id', 'count', 'ageMinutes'; 'verb-errors' = 'worker', 'item', 'count', 'byCode', 'windowMinutes'; 'merge-refused' = 'item', 'roundTrip', 'ageMinutes'; 'gateway-restarted' = 'reconnected', 'notReconnected', 'upMinutes'
-        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested' }
+        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'pass-unmerged' = 'item', 'pr', 'code', 'waitingMinutes' }
     foreach ($e in @($D.attention)) {
         if (-not $fields.ContainsKey("$($e.kind)")) { $bad += "kind $($e.kind)"; continue }
         foreach ($k in $e.Keys) {

@@ -1,5 +1,42 @@
 # The merge verb: squash-merges the pull request named by a recorded PASS verdict, only for an item that carries the Auto Merge label.
 # It does not approve the pull request (the default-branch ruleset needs 0 approvals). Authorized by the owner on 2026-10-10 for this demo system.
+#
+# The gateway merges by itself (owner decision of 2026-10-13, config gatewayMerge, default true): under merge policy 'auto' a recorded PASS on an
+# item with the Auto Merge label is merged by validation-verdict in the same call, and by the sweep for whatever that call could not finish
+# (checks still running, a branch behind its base, a gateway restart, a session that stopped). Both run Verb_merge -Gateway: the same checks in
+# the same order, but one step per call and never a long wait. What cannot happen yet is answered as outcome 'waiting' with a reason code,
+# recorded in verdict.wait and journaled once per code; the sweep tries again. The session's own merge call then answers 'already-merged'.
+
+function Test-GatewayMerge { $c = Get-Cfg; return (-not (Test-Has $c 'gatewayMerge')) -or [bool]$c.gatewayMerge }
+
+# Is $Head the merge commit GitHub's update-branch made from the verdict head? Exactly two parents, the first the verdict head, the second the
+# base branch head or an ancestor of it. Anything else (a push by a worker or a person, a rebase, a racing commit) is not covered by the verdict.
+# The parents alone can be forged by a hand-made merge, so the commit must also carry GitHub's own signature (verified, reason valid, committed
+# by GitHub's web-flow identity), and when update-branch named the commit it made, be exactly that one.
+function Test-GatewayUpdateHead([string]$VerdictSha, [string]$Head, [string]$Expected = '') {
+    $c = Get-Cfg
+    if ($Expected -and $Expected -ne $Head) { return $false }
+    $cm = Invoke-Gh -Path "$(Get-RepoPath)/commits/$Head" -Allow 404, 422
+    if ($cm -is [hashtable] -and $cm.ContainsKey('status')) { return $false }
+    $v = $cm.commit.verification; $who = $cm.commit.committer
+    if (-not $v -or $v.verified -ne $true -or "$($v.reason)" -ne 'valid' -or "$($who.name)" -ne 'GitHub' -or "$($who.email)" -ne 'noreply@github.com') { return $false }
+    $ps = @($cm.parents | ForEach-Object { "$($_.sha)" })
+    if ($ps.Count -ne 2 -or $ps[0] -ne $VerdictSha) { return $false }
+    $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($c.defaultBranch)...$($ps[1])" -Allow 404, 422
+    if ($cmp -is [hashtable] -and $cmp.ContainsKey('status')) { return $false }
+    return "$($cmp.status)" -in 'identical', 'behind'
+}
+
+function Get-MergeWaitText([string]$Code) {
+    switch ($Code) {
+        'checks-pending' { return 'its required checks are still running' }
+        'branch-updated' { return 'its branch was behind the base branch and has been brought up to date; the checks of the new head run now' }
+        'mergeability-unknown' { return 'GitHub has not yet said whether it can be merged' }
+        'verdict-head-unknown' { return 'the verdict does not name the head it was given for' }
+        'merge-queue' { return 'the merge queue is full (an earlier merge is still waiting for its release candidate)' }
+        default { return $Code }
+    }
+}
 
 function Wait-HeadChange([int]$Pr, [string]$OldSha, [int]$Seconds) {
     $end = (Get-Date).AddSeconds($Seconds)
@@ -7,11 +44,17 @@ function Wait-HeadChange([int]$Pr, [string]$OldSha, [int]$Seconds) {
     return $p
 }
 
-function Verb_merge($a) {
+function Verb_merge($a, [switch]$Gateway) {
     $n = Get-ItemNumber $a; $c = Get-Cfg; $t = $c.timing
-    $info = Get-ItemInfo $n; Assert-Open $info
-    if ($info.column -ine $c.columns.validation) { Reject 10 'wrong-column' "merging happens only from '$($c.columns.validation)'; the item is in '$($info.column)'" }
+    $info = Get-ItemInfo $n
     $st = Get-State $n; $s = $st.state
+    # Already merged (by the gateway right after the verdict, by the sweep, or by an earlier call): the call is a no-op that says so, wherever the
+    # item is by now (the merged pull request may have closed it, and settle may have moved its card on).
+    if ((Test-Has $s 'verdict') -and $s.verdict.passed -and $s.verdict.processed -and (Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and (Test-Has $s.merge 'pr') -and [int]$s.merge.pr -eq [int]$s.verdict.pr -and (-not (Test-Has $a 'pr') -or [int]$a.pr -eq [int]$s.merge.pr)) {
+        return @{ ok = $true; id = $n; outcome = 'already-merged'; sha = $s.merge.sha }
+    }
+    Assert-Open $info
+    if ($info.column -ine $c.columns.validation) { Reject 10 'wrong-column' "merging happens only from '$($c.columns.validation)'; the item is in '$($info.column)'" }
     if (-not (Test-Has $s 'verdict') -or -not $s.verdict.passed -or $s.verdict.processed) { Reject 10 'no-pass-verdict' 'no unprocessed PASS verdict is recorded for this item' }
     $prNum = if (Test-Has $a 'pr') { [int]$a.pr } else { [int]$s.verdict.pr }
     if ($prNum -ne [int]$s.verdict.pr) { Reject 10 'pr-mismatch' "the verdict names PR #$($s.verdict.pr), not #$prNum" }
@@ -22,6 +65,20 @@ function Verb_merge($a) {
         if (-not (Test-QcGateActive)) { Reject 10 'no-auto-merge-label' "item does not carry '$($c.autoMergeLabel)'" }
         $viaQcGate = $true
     }
+    $park = { param($reason, $text) Set-Park $s $reason ($t.parkHours * 60); $s.verdict.processed = $true; $s.Remove('claim'); Remove-ClaimRef $n; Save-State $n $st; Add-Comment $n $text; return @{ ok = $true; id = $n; outcome = 'parked'; reason = $reason } }
+    # -Gateway only: the merge cannot happen yet. The code is kept in verdict.wait and journaled once per code of this verdict, so a sweep that finds
+    # the same state again writes nothing; a PASS that stays unmerged for timing.verdictTimeoutMinutes is parked for a person instead of waiting forever.
+    $wait = { param($code)
+        $v = $s.verdict; $at = ConvertFrom-Iso $v.at; $limit = if (Test-Has $t 'verdictTimeoutMinutes') { [double]$t.verdictTimeoutMinutes } else { 180 }
+        if ($at -and ((Get-UtcNow) - $at).TotalMinutes -gt $limit) { return & $park 'pass-unmerged' "PR #$prNum has a PASS verdict and could not be merged for $limit min (${code}: $(Get-MergeWaitText $code)); parked for a human." }
+        if (-not (Test-Has $v 'wait') -or "$($v.wait.code)" -ne $code) {
+            $v.wait = @{ code = $code; since = ConvertTo-Iso (Get-UtcNow) }
+            [void](Add-Journal $n $st 'merge-waiting' @{ pr = $prNum; code = $code; reason = (Get-MergeWaitText $code) } "$($v.at)|$code")
+            Save-State $n $st
+        }
+        return @{ ok = $true; id = $n; outcome = 'waiting'; reason = $code; since = $v.wait.since }
+    }
+    if ($Gateway -and (Get-Park $s)) { return @{ ok = $true; id = $n; outcome = 'waiting'; reason = 'held' } }
     # Merge queue: the Release workflow keeps only one queued run, so merging faster than releases are built drops releases.
     # With mergeQueueDepth N, merge only while fewer than N other merged items are still waiting for master CI or their release candidate.
     $depth = if (Test-Has $c 'mergeQueueDepth') { [int]$c.mergeQueueDepth } else { 0 }
@@ -36,9 +93,9 @@ function Verb_merge($a) {
                 if (-not $oDocs) { $busy += $o.number }
             }
         }
+        if ($busy.Count -ge $depth -and $Gateway) { return & $wait 'merge-queue' }
         if ($busy.Count -ge $depth) { Reject 21 'merge-queue' "merge queue is full: waiting for the release candidate of #$($busy -join ', #') before merging this one" @{ waiting_for = $busy; retryAfterSeconds = 60 } }
     }
-    $park = { param($reason, $text) Set-Park $s $reason ($t.parkHours * 60); $s.verdict.processed = $true; $s.Remove('claim'); Remove-ClaimRef $n; Save-State $n $st; Add-Comment $n $text; return @{ ok = $true; id = $n; outcome = 'parked'; reason = $reason } }
     $pr = Get-Pr $prNum
     if (-not (Test-PrBelongs $pr $n)) { return & $park 'pr-mismatch' "PR #$prNum is not a PR belonging to this work item (branch '$($pr.head.ref)'); refusing to merge." }
     if ($pr.merged) {
@@ -66,37 +123,75 @@ function Verb_merge($a) {
         }
     }
     if ($pr.state -ne 'open') { return & $park 'pr-mismatch' "PR #$prNum is $($pr.state), not open; refusing to merge." }
-    $end = (Get-Date).AddSeconds($t.mergeabilityWaitSeconds)
+    # Under 'auto' nobody looks at the change after the verdict, so the PASS covers the head it was given for and no other: a push after the
+    # verdict voids it and the item goes back to Development (under 'peer-approved' the approval of the current head is the same rule). The one
+    # head that is accepted without a new verdict is the one this verb made itself when it brought the branch up to date with its base.
+    $vsha = if (Test-Has $s.verdict 'head_sha') { "$($s.verdict.head_sha)" } else { '' }
+    # fail closed: the gateway never merges a PASS that does not say which head it covers
+    if (-not $vsha) { return & $park 'pass-unmerged' "PR #$prNum has a PASS verdict that does not name the head it was given for (verdict-head-unknown); the gateway does not merge it. Parked for a human." }
+    if ($c.mergePolicy -eq 'auto' -and $vsha -and $vsha -ne "$($pr.head.sha)") {
+        # the one head accepted without a new verdict: the merge commit of the gateway's own update-branch, verified on GitHub (the marker is
+        # cleared once the check has run, pass or fail, so it can never vouch for a later push)
+        $fromUpdate = (Test-Has $s.verdict 'updated_from') -and "$($s.verdict.updated_from)" -eq $vsha
+        $expect = if (Test-Has $s.verdict 'updated_to') { "$($s.verdict.updated_to)" } else { '' }
+        if ($fromUpdate) { $s.verdict.Remove('updated_from'); $s.verdict.Remove('updated_to') }
+        if ($fromUpdate -and (Test-GatewayUpdateHead $vsha "$($pr.head.sha)" $expect)) { $s.verdict.head_sha = "$($pr.head.sha)"; Save-State $n $st }
+        else { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict (verdict for $($vsha.Substring(0, [Math]::Min(7, $vsha.Length))), head now $($pr.head.sha.Substring(0,7))); the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
+    }
+    $end = (Get-Date).AddSeconds($(if ($Gateway) { [Math]::Min([double]$t.mergeabilityWaitSeconds, 12) } else { $t.mergeabilityWaitSeconds }))
     while ($null -eq $pr.mergeable -and (Get-Date) -lt $end) { Start-Sleep -Seconds $t.mergeabilityPollSeconds; $pr = Get-Pr $prNum }
+    if ($Gateway -and $null -eq $pr.mergeable) { return & $wait 'mergeability-unknown' }
     if ($pr.mergeable -eq $false) { $d = Invoke-Demote $n $info $st "GitHub reports PR #$prNum is NOT mergeable (mergeable_state '$($pr.mergeable_state)')" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
     $end = (Get-Date).AddSeconds($t.preMergeChecksWaitSeconds)
     while ($true) {
         $chk = Get-ChecksFor $pr.head.sha
         if ($chk.status -eq 'failure') { $d = Invoke-Demote $n $info $st "PR #$prNum checks are red right before merge ($($chk.failed_checks -join ', '))" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
-        if ($chk.status -eq 'success' -or (Get-Date) -gt $end) { break }
+        if ($chk.status -eq 'success') { break }
+        if ($Gateway) { return & $wait 'checks-pending' }
+        if ((Get-Date) -gt $end) { break }
         Start-Sleep -Seconds $t.preMergeChecksPollSeconds
     }
+    # under 'auto' only the verdict's head may merge; under 'peer-approved' the approval of the current head is the rule (the head may move after the
+    # verdict with a new QC run and approval), so the current head is merged and updated as before
+    $byVerdict = $c.mergePolicy -eq 'auto'
     for ($attempt = 1; $attempt -le [int]$t.outOfDateMergeAttempts; $attempt++) {
-        $r = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/merge" -Body @{ merge_method = 'squash'; sha = $pr.head.sha } -Allow 405, 409, 422
+        $mergeSha = if ($byVerdict) { "$($s.verdict.head_sha)" } else { "$($pr.head.sha)" }
+        $r = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/merge" -Body @{ merge_method = 'squash'; sha = $mergeSha } -Allow 405, 409, 422
         if ($r -is [hashtable] -and $r.ContainsKey('status')) {
             $msg = "$($r.body.message)"
             if ($msg -match 'out of date|out-of-date|Head branch was modified|behind') {
-                $u = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/update-branch" -Body @{ expected_head_sha = $pr.head.sha } -Allow 202, 422, 409
+                # the merge was refused for the verdict's head: if the branch now carries any other head, nothing validated it
+                $pr = Get-Pr $prNum
+                if ($byVerdict -and "$($pr.head.sha)" -ne "$($s.verdict.head_sha)") { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict (stale-head); the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
+                # (bounded: the updates of one verdict are counted in the item state, so the sweep's calls add up to the same limit as this loop)
+                $ups = if (Test-Has $s.verdict 'updates') { [int]$s.verdict.updates } else { 0 }
+                if ($Gateway -and $ups -ge [int]$t.outOfDateMergeAttempts) { break }
+                $s.verdict.updates = $ups + 1; $s.verdict.updated_from = $mergeSha; Save-State $n $st
+                if (-not $byVerdict) { $mergeSha = "$($pr.head.sha)"; $s.verdict.updated_from = $mergeSha }
+                $u = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/update-branch" -Body @{ expected_head_sha = $mergeSha } -Allow 202, 422, 409
+                if ($u -isnot [hashtable] -and $u.PSObject.Properties.Name -contains 'sha' -and $u.sha) { $s.verdict.updated_to = "$($u.sha)"; Save-State $n $st }
                 if ($u -is [hashtable] -and $u.ContainsKey('status') -and $u.status -ne 202) { $d = Invoke-Demote $n $info $st "could not update PR #${prNum}: $($u.body.message)" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
-                $pr = Wait-HeadChange $prNum $pr.head.sha $t.updatedHeadWaitSeconds
+                $pr = Wait-HeadChange $prNum $pr.head.sha $(if ($Gateway) { [Math]::Min([double]$t.updatedHeadWaitSeconds, 12) } else { $t.updatedHeadWaitSeconds })
+                if ("$($pr.head.sha)" -ne "$($s.verdict.updated_from)") {
+                    $ok = Test-GatewayUpdateHead "$($s.verdict.updated_from)" "$($pr.head.sha)" $(if (Test-Has $s.verdict 'updated_to') { "$($s.verdict.updated_to)" } else { '' }); $s.verdict.Remove('updated_from'); $s.verdict.Remove('updated_to')
+                    if (-not $ok) { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict to a commit that is not the gateway's update with the base branch; the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
+                    $s.verdict.head_sha = "$($pr.head.sha)"; Save-State $n $st
+                }
+                if ($Gateway) { return & $wait 'branch-updated' }
                 $end = (Get-Date).AddSeconds($t.preMergeChecksWaitSeconds)
                 while ($true) { $chk = Get-ChecksFor $pr.head.sha; if ($chk.status -ne 'pending' -or (Get-Date) -gt $end) { break }; Start-Sleep -Seconds $t.preMergeChecksPollSeconds }
                 if ($chk.status -eq 'failure') { $d = Invoke-Demote $n $info $st "PR #$prNum checks went red after updating the branch ($($chk.failed_checks -join ', '))" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
                 Start-Sleep -Seconds ([Math]::Min(120, 15 * [Math]::Pow(2, $attempt - 1))); continue
             }
+            if ($Gateway -and $r.status -eq 405 -and $msg -match 'status check') { return & $wait 'checks-pending' }
             if ($r.status -eq 405 -and $msg -match 'status check') { Start-Sleep -Seconds ([Math]::Min(120, 15 * [Math]::Pow(2, $attempt - 1))); $pr = Get-Pr $prNum; continue }
             $d = Invoke-Demote $n $info $st "HTTP $($r.status): $msg" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d }
         }
         if (-not $r.merged -or -not $r.sha) { return & $park 'merge-refused' "merge of PR #$prNum returned no merge SHA; parked for a human." }
         $s.merge = @{ sha = $r.sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = $prNum }
-        $s.verdict.processed = $true; $s.Remove('claim'); Remove-ClaimRef $n; Save-State $n $st
-        Add-Comment $n "$(if ($viaQcGate) { 'validation PASSED, QC run and human approval recorded' } else { "validation PASSED and '$($c.autoMergeLabel)' present" }) - squash-merged PR #$prNum as ``$($r.sha.Substring(0,7))``; watching master CI, then the release candidate."
-        return @{ ok = $true; id = $n; outcome = 'merged'; sha = $r.sha }
+        $s.verdict.processed = $true; $s.verdict.Remove('wait'); $s.Remove('claim'); Remove-ClaimRef $n; Save-State $n $st
+        Add-Comment $n "$(if ($viaQcGate) { 'validation PASSED, QC run and human approval recorded' } else { "validation PASSED and '$($c.autoMergeLabel)' present" }) - $(if ($Gateway) { 'the gateway ' })squash-merged PR #$prNum as ``$($r.sha.Substring(0,7))``; watching master CI, then the release candidate."
+        return @{ ok = $true; id = $n; outcome = 'merged'; sha = $r.sha; by = $(if ($Gateway) { 'gateway' } else { 'session' }) }
     }
     return & $park 'merge-out-of-date' "PR #$prNum kept falling behind master after $($t.outOfDateMergeAttempts) attempts; parked for a human."
 }
