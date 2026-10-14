@@ -41,6 +41,42 @@ $Scenarios = [ordered]@{
     Check 'the young orphan of an open item and the live claim are kept' ("refs/factory/$inst/claims/$o" -in $now -and "refs/factory/$inst/claims/$n" -in $now) ($now -join ',')
 }
 
+# Enhancement 13: cycle times come from the item's journal and state comments on GitHub, so a restarted gateway answers the same.
+'metrics: a merged item has its column times, merge and done; the answer survives a restart; operator token only' = {
+    $n = New-Item-Fake 'Metrics item' 'Add docs/m.md' $L
+    Do-TechnicalDesign $n
+    $pr = Do-Development $n
+    $r = F 'w1' @('wait-for-checks', '--item', $n); CheckExit 'checks green' $r 0
+    $r = Do-DevComplete $n; CheckExit 'development complete' $r 0
+    $v = Do-Verdict $n $pr; CheckExit 'verdict PASS' $v 0
+    $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    Check 'settled to Done' (Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Done' })
+    $h = @{ Authorization = 'Bearer test-token' }; $u = "$(Get-GatewayBase)/api/v1/metrics?since=1d&fresh=1"
+    $a = Invoke-RestMethod $u -Headers $h
+    $it = @($a.items | Where-Object { $_.item -eq $n })
+    Check 'the item is listed' ($it.Count -eq 1) ($a | ConvertTo-Json -Depth 6 -Compress)
+    if ($it.Count -eq 1) {
+        $i = $it[0]
+        Check 'merged and done times, merge to done measured' ($i.times.merged -and $i.times.done -and $null -ne $i.durations.mergeToDone -and $i.durations.mergeToDone -ge 0) ($i | ConvertTo-Json -Depth 5 -Compress)
+        Check 'time in Technical Design and Development measured' ($null -ne $i.columns.'Technical Design' -and $null -ne $i.columns.'Development') ($i.columns | ConvertTo-Json -Compress)
+        Check 'the item is in Done and closed' ($i.column -eq 'Done' -and -not $i.open)
+    }
+    Check 'aggregate merge to done counts the item' ($a.aggregate.mergeToDone.count -ge 1 -and $null -ne $a.aggregate.mergeToDone.median -and $null -ne $a.aggregate.mergeToDone.p90)
+    Check 'per-column aggregate' ($a.columns.'Development'.count -ge 1)
+    Restart-Gateway
+    $b = Invoke-RestMethod $u -Headers $h
+    $ib = @($b.items | Where-Object { $_.item -eq $n })
+    Check 'after a restart the same item and times are answered' ($ib.Count -eq 1 -and $ib[0].times.done -eq $it[0].times.done -and $ib[0].durations.mergeToDone -eq $it[0].durations.mergeToDone)
+    $s = try { Invoke-WebRequest "$(Get-GatewayBase)/api/v1/metrics?since=1d" -SkipHttpErrorCheck -Headers @{ Authorization = 'Bearer nope' } } catch { $null }
+    Check 'refused without the operator token' ($s -and $s.StatusCode -in 401, 403) "$($s.StatusCode)"
+    $s = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/metrics?since=yesterday-ish" -SkipHttpErrorCheck -Headers $h
+    Check 'a since that is no date or duration is a usage error' ($s.StatusCode -eq 400) "$($s.StatusCode) $($s.Content)"
+    $f = Invoke-RestMethod "$(Get-GatewayBase)/api/v1/metrics?since=$([Uri]::EscapeDataString((Get-Date).ToUniversalTime().AddMinutes(5).ToString('o')))&fresh=1" -Headers $h
+    Check 'a since after the last event lists nothing' (@($f.items).Count -eq 0)
+    $d = Invoke-WebRequest "$(Get-GatewayBase)/dashboard"
+    Check 'the dashboard has the cycle-time section' ($d.Content -match 'id="metbox"' -and $d.Content -match '/api/v1/metrics')
+}
+
 'gates refuse what they should [full]' = {
     $n = New-Item-Fake 'Gates' 'x' $L
     $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0

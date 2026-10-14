@@ -63,6 +63,20 @@ $OwnerScenarios = [ordered]@{
     Check 'model-for asks the gateway with the item token, not the worker credential (no refusal note, a model is chosen)' (-not (Pv $mf 'note') -and (Pv $mf 'model')) ($mf | ConvertTo-Json -Compress -Depth 3)
 }
 
+# Enhancement 13: the wait from the gateway's match to the session's accept is read back from the journal comments.
+'metrics: an accepted owner item has its match-to-accept time from the journal' = {
+    Start-OwnerClient 'met-a' 'persistent-local' '--capacity 5'
+    $n = New-Item-Fake 'Metrics owner item' 'x' ($OwnerLabels + 'worker:met-a')
+    Check 'offered' (Wait-Until -Seconds 40 { (Get-Assigned 'met-a' $n).Count -gt 0 })
+    $r = Fo 'met-a' @('accept', '--item', $n, '--assignment', (Get-Assigned 'met-a' $n)[0].assignment); CheckExit 'accept' $r 0
+    [void](Wait-Until -Seconds 30 { $j0 = Get-Journal $n; $j0 -contains 'matched' -and $j0 -contains 'offered' -and $j0 -contains 'assigned' })
+    $a = Invoke-RestMethod "$(Get-GatewayBase)/api/v1/metrics?since=1h&fresh=1" -Headers @{ Authorization = 'Bearer test-token' }
+    $it = @($a.items | Where-Object { $_.item -eq $n })
+    Check 'match, offer and accept times and the wait between them' ($it.Count -eq 1 -and $it[0].times.matched -and $it[0].times.offered -and $it[0].times.accepted -and $it[0].durations.matchToAccept -ge 0) ($a | ConvertTo-Json -Depth 6 -Compress)
+    Check 'the aggregate counts it' ($a.aggregate.matchToAccept.count -ge 1)
+    Stop-OwnerClient 'met-a'
+}
+
 'owner: tokens are scoped to one item, one role, one purpose [full]' = {
     $a = New-Item-Fake 'Scope A' 'x' $OwnerLabels; $b = New-Item-Fake 'Scope B' 'x' $OwnerLabels
     [void](Wait-Until -Seconds 40 { (Get-Assigned 'alice' $a).Count -gt 0 -and (Get-Assigned 'alice' $b).Count -gt 0 })

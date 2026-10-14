@@ -182,6 +182,14 @@ u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, 
    before the old replica gets SIGTERM reads no snapshot (the old one's save comes too late) and the sweep rebuilds as before. Open: check the
    revision mode of the Container App; not yet seen live on tdd (watch the `plant-snapshot` and `plant-restore` log lines
    at the next release).
+v. **Done (2026-10-14): lasting cycle-time metrics** (enhancement 13). `GET /api/v1/metrics?since=7d|24h|30m|<ISO>[&max=100][&fresh=1]`
+   (operator token) runs the admin rule script `metrics` (plugin/scripts/lib/Metrics.ps1). It reads the board's `factory worker` items, newest
+   first, and from each item's journal comments (`matched`, `offered`, the owner `assigned`) and state comment (`dispatched_at` per column,
+   `merge.merged_at`, `merge.done_at`) answers per item and in aggregate (count, median, p90, min, max, in seconds): match to accept, accept
+   to merge, match to merge, merge to done, match to done, and the time in each column. Nothing comes from the gateway's memory, so a restart
+   changes nothing. One computation reads every item's comments: answers are cached 120 s per query and computed one at a time. The dashboard
+   section "Cycle times" loads it when opened. Limits: `dispatched_at` keeps the last dispatch of a column (a column visited twice counts from
+   its last visit); items worked before the journal existed have no match or accept time; at most 300 items and 90 days.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
