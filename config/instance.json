@@ -65,7 +65,8 @@
     "leaseRenewMinutes": 5,
     "staleItemMinutes": 15,
     "staleConfirmMinutes": 3,
-    "clientStartMinutes": 5
+    "clientStartMinutes": 5,
+    "continueMinutes": 3
   },
   "timing": {
     "assignAckSeconds": 120,
