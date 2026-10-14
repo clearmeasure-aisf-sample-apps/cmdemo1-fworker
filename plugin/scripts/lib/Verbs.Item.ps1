@@ -143,6 +143,7 @@ function Verb_claim_item($a) {
     $renew = (Test-Has $a 'renew') -and $a.renew
     if ($renew) {
         if (-not (Test-Has $s 'claim') -or $s.claim.holder -ne $holder) { Reject 40 'claim-not-held' 'this session does not hold the claim' }
+        if (Test-Has $s.claim 'taken_back') { Reject 40 'claim-not-held' "the gateway took this item back ($($s.claim.taken_back)); it is offered again" }
         $s.claim.lease_until = ConvertTo-Iso ((Get-UtcNow).AddMinutes($t.leaseMinutes)); $s.claim.heartbeat = ConvertTo-Iso (Get-UtcNow)
         Save-State $n $st
         return @{ ok = $true; id = $n; renewed = $true; lease_until = $s.claim.lease_until }

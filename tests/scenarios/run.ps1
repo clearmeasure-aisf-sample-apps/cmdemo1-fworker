@@ -37,6 +37,8 @@ foreach ($k in $QcGateAutoScenarios.Keys) { $QcScenarios[$k] = $QcGateAutoScenar
 . (Join-Path $PSScriptRoot 'qc-pool.ps1')     # the rule-script worker pool; scenarios named "qc: runner pool ..."
 foreach ($k in $QcPoolScenarios.Keys) { $QcScenarios[$k] = $QcPoolScenarios[$k] }
 . (Join-Path $PSScriptRoot 'baseupdate.ps1')  # master moved: base.updated and the gateway's update branch; scenarios named "base update: ..." join the owner suite
+. (Join-Path $PSScriptRoot 'lease.ps1')       # owner leases kept by the plant (gateway/Lease.cs): scenarios named "lease: ..." join the manager suite
+foreach ($k in $LeaseScenarios.Keys) { $ManagerScenarios[$k] = $LeaseScenarios[$k] }
 
 # ---- the suites. ORDER IS THE PORT SLOT: append new suites at the end, never reorder (a slot is 100 ports from 6100, see lib.ps1). ----------
 # Env names the environment a suite needs (set before it, removed after it); Timing sets FACTORY_TIMING_* for the suite; Extra is merged into the gateway config.
@@ -54,7 +56,7 @@ $SuiteDefs = @(
     @{ Name = 'auto'; Policy = 'auto'; Set = $Scenarios; Extra = @{ gatewayMerge = $false } }
     @{ Name = 'peer-approved'; Policy = 'peer-approved'; Set = $ApprovalScenarios }
     @{ Name = 'merge-queue'; Policy = 'auto'; Set = $QueueScenarios; Extra = @{ mergeQueueDepth = 1; gatewayMerge = $false } }
-    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8 } }
+    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600 } }
     @{ Name = 'qc'; Policy = 'auto'; Set = $QcScenarios; Extra = $qcOpen; Env = 'qc'; ClientHost = $true }   # ClientHost: F runs the client in one long-lived pwsh (lib.ps1)
     @{ Name = 'qc-worker'; Policy = 'auto'; Set = $QcWorkerScenarios; Extra = (New-Gate); Env = 'qc' }
     @{ Name = 'qc-gate'; Policy = 'peer-approved'; Set = $QcGateScenarios; Extra = (New-Gate); Env = 'qc' }
@@ -72,16 +74,16 @@ $SuiteDefs = @(
     # the limits of the main gateway are lifted, so one scenario's sends never count against another's; the scenarios that test the limits start a
     # second gateway of their own (Msg-OnGateway). "dave" is on no list: it is the name that is refused.
     @{ Name = 'messaging'; Policy = 'auto'; Set = $MessagingScenarios; Extra = @{ messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'hank', 'ivan', 'judy', 'kate', 'liam', 'racer', 'poller'); testHooks = $true }; runner = $msgPool }; Env = 'owner'; ClientHost = $true
-        Timing = @{ ratePerMinute = 100000; pairPer10Min = 100000; perSenderQueueCap = 1000; recipientQueueCap = 1000; broadcastPer10Min = 100000 } }
+        Timing = @{ ratePerMinute = 100000; pairPer10Min = 100000; perSenderQueueCap = 1000; recipientQueueCap = 1000; broadcastPer10Min = 100000; staleItemMinutes = 600 } }
     @{ Name = 'manager'; Policy = 'auto'; Set = $ManagerScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor', 'supervisor2'); allowedAskers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'ivan', 'judy', 'kate'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }; runner = $msgPool }; Env = 'owner'; ClientHost = $true
         # the delivery and step budgets are lifted like the other limits (the budget scenarios set their own); an owner the sweep stops listing is dropped after 5 s
         # (an owner that a scenario leaves behind on the suite's gateway is not reported as quiet, and a client that an earlier scenario left running, which
         # reconnects to the next gateway with the cursor of the last one, is not reported as a restart: the scenarios of those conditions set their own times)
-        Timing = @{ mgrTakeoverSeconds = 6; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; mgrOwnedGraceSeconds = 5; mgrQuietMinutes = 600; mgrRestartMinutes = 0.0001 } }
+        Timing = @{ mgrTakeoverSeconds = 6; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; mgrOwnedGraceSeconds = 5; mgrQuietMinutes = 600; mgrRestartMinutes = 0.0001; staleItemMinutes = 600 } }
     # the factory operator session (operator.ps1): one process per rule-script call, so a verb call is in flight long enough to be seen by release-check
     @{ Name = 'operator'; Policy = 'auto'; Set = $OperatorScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob'); testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor'); allowedAskers = @('alice', 'bob'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }
             operator = @{ enabled = $true; allowedNames = @('operator-session', 'operator-two'); tokenGeneration = 1; requiredModelTier = 'premium'; requiredEffort = 'low'; maxSelfMergesPerDay = 2 } }; Env = 'owner'
-        Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; opSelfAnswerMinutes = 0.1 } }
+        Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; opSelfAnswerMinutes = 0.1; staleItemMinutes = 600 } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
