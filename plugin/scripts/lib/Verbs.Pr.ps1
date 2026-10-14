@@ -200,6 +200,13 @@ function Verb_validation_verdict($a) {
     $res = @{ ok = $true; id = $n; recorded = $true; passed = $passed; downgraded = $downgraded; column = $info.column }
     if (-not $passed) {
         $s.verdict.processed = $true
+        # escalate earlier (enhancement 10): two consecutive FAIL verdicts that cite the same acceptance criterion park the item with a question
+        $repeated = @(Test-RepeatedCriteria $s 'verdict' @(Get-CitedCriteria $info $summary))
+        if ($repeated.Count -gt 0) {
+            Invoke-ParkRepeatedCriterion $n $st 'FAIL verdicts' $repeated
+            $res.next = 'parked'; $res.reason = 'same-criterion-repeated'; $res.criteria = $repeated
+            return $res
+        }
         if ($pr -gt 0) {
             $prd = try { Get-Pr $pr } catch { $null }
             $cause = if ($prd -and $prd.merged) { "PR #$pr already merged as $($prd.merge_commit_sha) - residual gaps only (open a NEW branch from master): $summary" } else { $summary }
@@ -212,6 +219,7 @@ function Verb_validation_verdict($a) {
         }
         return $res
     }
+    [void](Test-RepeatedCriteria $s 'verdict' @() -Clear)
     # Without the Auto Merge label a PASS is parked for a person to merge, except under the QC merge gate (peer-approved): there the item stays on the
     # approval path and the merge verb enforces the QC run and the human approval.
     if (-not (Test-Label $info $c.autoMergeLabel) -and -not (Test-QcGateActive)) {
