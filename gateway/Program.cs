@@ -128,7 +128,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir) };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir) };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -848,6 +848,8 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
             // a stream opened without a cursor is a new session of this name (a reconnect of the same client sends its last id): one item per session
             newSession: lastEventId == "");
         plant.SetHost(name, ctx.Request.Query["host"].ToString(), effort);
+        // a new session can take a work item that waited as session-spent: plan now instead of at the next sweep (issue 72)
+        if (lastEventId == "") hub.RequestSweep();
         var registered = new JsonObject { ["provider"] = "gateway", ["event"] = "worker.registered", ["name"] = name };
         if (messaging.On) { registered["epoch"] = plant.Epoch; registered["messaging"] = messaging.Enabled; }
         // one peers.snapshot per registration (3.2), only for a client that registered with messaging=1 under an allow-listed name

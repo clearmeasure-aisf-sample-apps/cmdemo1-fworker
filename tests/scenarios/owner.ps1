@@ -885,6 +885,35 @@ $OwnerScenarios['owner: one item per session: a session that held an item is off
     }
 }
 
+# Issue 72: a session whose item ended without the model running end-session (taken back, released, demoted, reassigned) is told session.end by
+# the gateway, and its stream client writes the launcher's end marker itself, so the launcher starts a fresh session instead of the name idling.
+$OwnerScenarios['owner: one item per session: a spent session that owns nothing is told session.end and its client writes the launcher marker'] = {
+    $oldOne = $env:FACTORY_ONE_ITEM_PER_SESSION; $oldGrace = $env:FACTORY_TIMING_sessionEndGraceSeconds; $oldEnd = $env:FACTORY_SESSION_END_FILE
+    $mk = Join-Path $script:Work 'spent1-work/session-ended'
+    try {
+        $env:FACTORY_ONE_ITEM_PER_SESSION = '1'; $env:FACTORY_TIMING_sessionEndGraceSeconds = '3'; Restart-Gateway
+        $env:FACTORY_SESSION_END_FILE = $mk
+        Start-OwnerClient 'spent1' 'persistent-local'
+        $env:FACTORY_SESSION_END_FILE = $oldEnd
+        $a = New-Item-Fake 'Spent session' 'x' ($OwnerLabels + 'worker:spent1')
+        Check 'the item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'spent1' $a).Count -gt 0 })
+        $r = Fo 'spent1' @('accept', '--item', $a, '--assignment', (Get-Assigned 'spent1' $a)[-1].assignment)
+        Check 'the session holds the item (the client or the session accepted it)' ($r.exit -eq 0 -or (Wait-Until -Seconds 20 { @(Get-WorkerEvents 'spent1' | Where-Object { $_.event -eq 'item.accepted' }).Count -gt 0 })) ($r | ConvertTo-Json -Compress)
+        Start-Sleep -Seconds 6
+        Check 'while it owns its item the session is not told to end' (@(Get-WorkerEvents 'spent1' | Where-Object { $_.event -eq 'session.end' }).Count -eq 0 -and -not (Test-Path $mk))
+        $r = Fo 'spent1' @('release', '--item', $a, '--reason', 'scenario: the item is taken from this session'); CheckExit 'the item leaves the session' $r 0
+        Check 'the gateway tells the spent session to end' (Wait-Until -Seconds 30 { @(Get-WorkerEvents 'spent1' | Where-Object { $_.event -eq 'session.end' }).Count -gt 0 })
+        $se = @(Get-WorkerEvents 'spent1' | Where-Object { $_.event -eq 'session.end' })
+        Check 'session.end names the session and its item, and the client wrote the marker' ($se.Count -eq 1 -and @($se[0].items) -contains $a -and $se[0].markerWritten -eq $true -and (Test-Path $mk)) ($se | ConvertTo-Json -Compress -Depth 4)
+        Start-Sleep -Seconds 6
+        Check 'it is sent once per session' (@(Get-WorkerEvents 'spent1' | Where-Object { $_.event -eq 'session.end' }).Count -eq 1)
+    } finally {
+        Stop-OwnerClient 'spent1'
+        $env:FACTORY_SESSION_END_FILE = $oldEnd
+        $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; $env:FACTORY_TIMING_sessionEndGraceSeconds = $oldGrace; Restart-Gateway
+    }
+}
+
 # A person releases a park early (POST /api/v1/items/{n}/unpark, operator token): docs/design/plant-manager.md 10d
 $OwnerScenarios['unpark: the operator releases a park early with a reason; the next sweep offers the item again in its column'] = {
     Start-OwnerClient 'una' 'persistent-local' '--capacity 3'
