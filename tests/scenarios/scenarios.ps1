@@ -74,6 +74,38 @@ $Scenarios = [ordered]@{
     Check 'downgraded' ((Pv $r 'downgraded') -eq $true -and (Pv $r 'passed') -eq $false) ($r | ConvertTo-Json -Compress)
 }
 
+'video label: publish-demo creates the release, a second publish replaces the MP4, and the PASS stands' = {
+    $n = New-Item-Fake 'Video published' 'x' ($L + 'video'); Do-TechnicalDesign $n
+    $pr = Do-Development $n; Do-DevComplete $n | Out-Null
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Functional Testing'); CheckExit 'FT claim' $r 0
+    $mp4 = New-TestMp4 'demo-a.mp4' 4096
+    $r = F 'w1' @('publish-demo', '--item', $n, '--file', $mp4); CheckExit 'publish-demo' $r 0
+    Check 'the answer names the release and the asset' ($r.release -eq "demo-$n" -and $r.asset -eq "demo-$n.mp4" -and $r.size -eq 4096 -and $r.created -eq $true -and $r.replaced -eq $false -and "$($r.release_url)" -like "*/releases/tag/demo-$n") ($r | ConvertTo-Json -Compress)
+    $rel = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/tags/demo-$n"
+    Check 'the release has the shape of a demo release' ($rel.prerelease -eq $true -and $rel.target_commitish -eq 'master' -and $rel.name -eq "Demo video for #$n" -and @($rel.assets).Count -eq 1 -and $rel.assets[0].size -eq 4096 -and $rel.assets[0].content_type -eq 'video/mp4') ($rel | ConvertTo-Json -Compress -Depth 4)
+    $r = F 'w1' @('publish-demo', '--item', $n, '--file', (New-TestMp4 'demo-b.mp4' 8192)); CheckExit 'a second publish' $r 0
+    Check 'the second publish reuses the release and replaces the asset' ($r.created -eq $false -and $r.replaced -eq $true -and $r.size -eq 8192) ($r | ConvertTo-Json -Compress)
+    $rel = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/tags/demo-$n"
+    Check 'one asset, the new one' (@($rel.assets).Count -eq 1 -and $rel.assets[0].size -eq 8192) ($rel.assets | ConvertTo-Json -Compress)
+    $bad = TmpFile 'not-a-video.mp4' 'plain text that is named like a video'
+    $r = F 'w1' @('publish-demo', '--item', $n, '--file', $bad); CheckExit 'a file that is not an MP4 is refused by the client' $r 2 'not-mp4'
+    $r = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/demo/$n" -Method POST -InFile $bad -ContentType 'video/mp4' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck
+    Check 'and by the gateway' ([int]$r.StatusCode -eq 415 -and ($r.Content | ConvertFrom-Json).code -eq 'not-mp4') "$([int]$r.StatusCode) $($r.Content)"
+    $big = Join-Path $script:Work 'big.mp4'; $fs = [IO.File]::Create($big); try { $fs.Write([byte[]](0, 0, 0, 24) + [Text.Encoding]::ASCII.GetBytes('ftypisom'), 0, 12); $fs.SetLength(101MB) } finally { $fs.Dispose() }
+    $r = F 'w1' @('publish-demo', '--item', $n, '--file', $big); CheckExit 'a video over 100 MB is refused' $r 2 'too-large'
+    Remove-Item $big -Force
+    $r = F 'w1' @('publish-demo', '--item', $n, '--file', (Join-Path $script:Work 'missing.mp4')); CheckExit 'a missing file' $r 2 'no-file'
+    $r = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/publish-demo" -Method POST -Body (@{ item = $n; file = '/etc/hostname' } | ConvertTo-Json) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck
+    Check 'the verb route does not take a file path' ([int]$r.StatusCode -eq 400 -and ($r.Content | ConvertFrom-Json).code -eq 'use-endpoint') "$([int]$r.StatusCode) $($r.Content)"
+    $rv = F 'w1' @('record-review', '--item', $n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile 'vpr.md' "seen at 00:12`nREVIEW: COMPLETE"))
+    $r = F 'w1' @('validation-verdict', '--item', $n, '--passed', 'true', '--summary-file', (TmpFile 'vpv.md' 'criterion 1 at 00:12'), '--pr', $pr, '--review-ref', $rv.review_ref)
+    Check 'with the MP4 published the PASS is not downgraded' ((Pv $r 'passed') -eq $true -and (Pv $r 'downgraded') -eq $false) ($r | ConvertTo-Json -Compress)
+    $o = New-Item-Fake 'No video label' 'x' $L 'Functional Testing'
+    $r = F 'w1' @('publish-demo', '--item', $o, '--file', $mp4); CheckExit 'an item without the video label owes no video' $r 10 'not-video-item'
+    $t = New-Item-Fake 'Video in design' 'x' ($L + 'video') 'Technical Design'
+    $r = F 'w1' @('publish-demo', '--item', $t, '--file', $mp4); CheckExit 'not in Technical Design' $r 10 'wrong-column'
+}
+
 'merge ladder: out-of-date branch is updated and merged [full]' = {
     $n = New-Item-Fake 'Behind' 'x' $L; Do-TechnicalDesign $n
     $pr = Do-Development $n; Do-DevComplete $n | Out-Null

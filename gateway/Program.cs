@@ -383,6 +383,9 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     // likewise the release records of the operator session: only POST /api/v1/operator/record-release keeps the stored refs and this process in step
     if (verb is "operator-release" or "operator-releases")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/operator/record-release", exit = 2 }), "application/json", Encoding.UTF8, 400);
+    // the demo video arrives as a file: only POST /api/v1/demo/{item} streams it to the place the rule script reads it from
+    if (verb is "publish-demo")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "send the MP4 as the body of POST /api/v1/demo/{item} (client: factory.ps1 publish-demo --item N --file F)", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // every verb call of the supervisor is a step of its hourly budget (worker-messaging.md 3.9); at the budget its read verbs answer 429 step-budget
     // (only the active supervisor spends steps: another supervisor name's credential is refused before anything is counted)
     if (ownerMode && who.Kind == "manager" && plant.ActiveSupervisor().Name != who.Name)
@@ -424,6 +427,61 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
     if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep();
     return Results.Text(output, "application/json", Encoding.UTF8, status);
+});
+
+// The demo video of a `video` item (issue #42): the owner sends the MP4 as the raw request body with its item token; the gateway streams it to a
+// temp file (never into memory, a log or the verb's JSON) and runs the rule verb publish-demo, which creates release demo-<item> if missing and
+// uploads or replaces the asset with the gateway's GitHub credential. Not POST /api/v1/verbs: that route reads the body as text and pipes it to
+// the rule script as JSON, and Kestrel caps a body at about 30 MB by default. The right to publish goes with the right to record the verdict
+// (validation-verdict of the owner role) or an explicit publish-demo in the role's verb list. Not held under the plant's gate; bounded by a timeout.
+const long DemoMaxBytes = 100L * 1024 * 1024;
+app.MapPost("/api/v1/demo/{item:int}", async (int item, HttpContext ctx) =>
+{
+    IResult No(int status, string code, string reason, int exit) => Results.Text(JsonSerializer.Serialize(new { ok = false, verb = "publish-demo", code, reason, exit }), "application/json", Encoding.UTF8, status);
+    var who = Who(ctx);
+    var probe = new JsonObject { ["item"] = item };
+    var (authorized, refusal) = Auth.AuthorizeVerb(who, "publish-demo", probe);
+    if (authorized == null && who.Kind == "item") (authorized, refusal) = Auth.AuthorizeVerb(who, "validation-verdict", new JsonObject { ["item"] = item });
+    if (authorized == null)
+    {
+        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"publish-demo\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":{JsonSerializer.Serialize(refusal)}}}");
+        return No(403, "forbidden", refusal ?? "forbidden", 30);
+    }
+    if (ctx.Request.ContentLength is > DemoMaxBytes) return No(413, "too-large", $"the video is larger than {DemoMaxBytes / 1024 / 1024} MB", 2);
+    if (ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } lim) lim.MaxRequestBodySize = DemoMaxBytes + 1;
+    var tmp = Path.Combine(Path.GetTempPath(), $"demo-{item}-{Guid.NewGuid():N}.mp4");
+    try
+    {
+        long size = 0; var head = new byte[12]; var headLen = 0;
+        using (var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted))
+        {
+            cts.CancelAfter(TimeSpan.FromMinutes(10));
+            await using var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, FileOptions.Asynchronous);
+            var buf = new byte[81920]; int n;
+            try
+            {
+                while ((n = await ctx.Request.Body.ReadAsync(buf, cts.Token)) > 0)
+                {
+                    size += n; if (size > DemoMaxBytes) return No(413, "too-large", $"the video is larger than {DemoMaxBytes / 1024 / 1024} MB", 2);
+                    if (headLen < head.Length) { var k = Math.Min(head.Length - headLen, n); Array.Copy(buf, 0, head, headLen, k); headLen += k; }
+                    await fs.WriteAsync(buf.AsMemory(0, n), cts.Token);
+                }
+            }
+            catch (Microsoft.AspNetCore.Http.BadHttpRequestException) { return No(413, "too-large", $"the video is larger than {DemoMaxBytes / 1024 / 1024} MB", 2); }
+            catch (OperationCanceledException) { return No(408, "upload-timeout", "the video did not arrive within 10 minutes", 20); }
+        }
+        // an MP4 (ISO base media file) starts with a box whose type, bytes 4 to 7, is "ftyp"
+        if (size == 0) return No(400, "empty", "the request body holds no video: send the MP4 file as the body", 2);
+        if (headLen < 8 || Encoding.ASCII.GetString(head, 4, 4) != "ftyp") return No(415, "not-mp4", "the file is not an MP4 (its header has no ftyp box)", 2);
+        authorized["file"] = tmp; authorized["size"] = size;
+        if (ownerMode && who.Kind == "item") plant.NoteActivity(who.Name, who.Item, true);
+        var (code, output) = await runner.RunAsync("publish-demo", authorized.ToJsonString(), TimeSpan.FromMinutes(10));
+        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"publish-demo\",\"item\":\"{item}\",\"holder\":\"{authorized["holder"]}\",\"caller\":\"{who.Kind}:{who.Role}\",\"bytes\":{size},\"exit\":{code}}}");
+        if (string.IsNullOrWhiteSpace(output)) output = JsonSerializer.Serialize(new { ok = false, code = "no-output", reason = "the rule script produced no output", exit = code == 0 ? 20 : code });
+        var status = code switch { 0 => 200, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, 30 => 403, _ => 500 };
+        return Results.Text(output, "application/json", Encoding.UTF8, status);
+    }
+    finally { try { File.Delete(tmp); } catch { } }
 });
 
 // from_message on append-body and comment (worker-messaging.md 3.8): the id must be a message the caller sent or received; the text loses backticks

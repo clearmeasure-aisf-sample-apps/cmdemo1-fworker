@@ -17,6 +17,13 @@ var gate = new object();
 app.Run(async ctx =>
 {
     var method = ctx.Request.Method; var path = ctx.Request.Path.Value ?? "/"; var query = ctx.Request.Query;
+    // the uploads host of GitHub (a release asset): the body is binary, only its length is kept
+    if (path.StartsWith("/_uploads/") && method == "POST")
+    {
+        long len = 0; var buf = new byte[65536]; int k; while ((k = await ctx.Request.Body.ReadAsync(buf)) > 0) len += k;
+        (int, string) up; lock (gate) { up = world.UploadAsset(path, query["name"].ToString(), ctx.Request.ContentType ?? "", len, port); }
+        ctx.Response.StatusCode = up.Item1; ctx.Response.ContentType = "application/json"; await ctx.Response.WriteAsync(up.Item2); return;
+    }
     string body; using (var rd = new StreamReader(ctx.Request.Body)) body = await rd.ReadToEndAsync();
     JsonNode? json = null; try { if (body.Length > 0) json = JsonNode.Parse(body); } catch { }
     (int, object?) res;
@@ -45,6 +52,8 @@ sealed class Check { public string Name = ""; public string Status = "completed"
 sealed class Artifact { public long Id; public long RunId; public string Name = ""; public bool Expired; public long? Size; public byte[] Zip = Array.Empty<byte>(); }
 sealed class Rev { public long Id; public string State = ""; public string Commit = ""; public string User = ""; public string Body = ""; }
 sealed class Fault { public Regex Match = null!; public int Status; public int Remaining; public string Body = "{\"message\":\"injected fault\"}"; }
+sealed class GhRel { public long Id; public string Tag = "", Name = "", Body = "", Target = ""; public bool Prerelease; public List<GhAsset> Assets = new(); }
+sealed class GhAsset { public long Id; public string Name = "", ContentType = ""; public long Size; }
 sealed class Rel { public string Id = ""; public string Version = ""; public string Notes = ""; public DateTime At; public double ProdDelay; }
 
 sealed class World
@@ -261,9 +270,41 @@ sealed class World
             foreach (var l in checks.Values) foreach (var c in l.Where(c => c.Conclusion == "failure")) c.Conclusion = "success";
             return (201, null);
         }
-        if (Regex.IsMatch(path, $"^{root}/releases/tags/demo-\\d+$")) return (404, "{\"message\":\"Not Found\"}");
+        if ((m = Regex.Match(path, $"^{root}/releases/tags/(demo-\\d+)$")).Success && method == "GET")
+            return ghReleases.TryGetValue(m.Groups[1].Value, out var gr) ? (200, GhRelJson(gr)) : (404, "{\"message\":\"Not Found\"}");
+        if (path == root + "/releases" && method == "POST")
+        {
+            var tag = b?["tag_name"]?.ToString() ?? "";
+            if (ghReleases.ContainsKey(tag)) return (422, "{\"message\":\"Validation Failed\",\"errors\":[{\"code\":\"already_exists\",\"field\":\"tag_name\"}]}");
+            var nr = new GhRel { Id = nextGhRel++, Tag = tag, Name = b?["name"]?.ToString() ?? "", Body = b?["body"]?.ToString() ?? "", Target = b?["target_commitish"]?.ToString() ?? "", Prerelease = b?["prerelease"]?.GetValue<bool>() ?? false };
+            ghReleases[tag] = nr; return (201, GhRelJson(nr));
+        }
+        if ((m = Regex.Match(path, $"^{root}/releases/assets/(\\d+)$")).Success && method == "DELETE")
+        {
+            var aid = long.Parse(m.Groups[1].Value);
+            foreach (var r0 in ghReleases.Values) if (r0.Assets.RemoveAll(x => x.Id == aid) > 0) return (204, null);
+            return (404, "{\"message\":\"Not Found\"}");
+        }
         if (Regex.IsMatch(path, $"^{root}/compare/")) return (200, J(("status", "ahead")));
         return (404, "{\"message\":\"fake has no route " + method + " " + path + "\"}");
+    }
+
+    // GitHub releases of the demo videos (issue #42): create, read by tag, delete an asset, upload an asset on the uploads host
+    readonly Dictionary<string, GhRel> ghReleases = new(); long nextGhRel = 1, nextGhAsset = 1;
+    JsonObject GhRelJson(GhRel r) => J(("id", r.Id), ("tag_name", r.Tag), ("name", r.Name), ("body", r.Body), ("target_commitish", r.Target), ("prerelease", r.Prerelease), ("draft", false),
+        ("html_url", $"https://github.com/{Owner}/{Repo}/releases/tag/{r.Tag}"),
+        ("upload_url", $"http://127.0.0.1:{Environment.GetEnvironmentVariable("FAKE_PORT") ?? "5200"}/_uploads/repos/{Owner}/{Repo}/releases/{r.Id}/assets{{?name,label}}"),
+        ("assets", new JsonArray(r.Assets.Select(x => (JsonNode)AssetJson(r, x)).ToArray())));
+    JsonObject AssetJson(GhRel r, GhAsset x) => J(("id", x.Id), ("name", x.Name), ("size", x.Size), ("content_type", x.ContentType), ("browser_download_url", $"https://github.com/{Owner}/{Repo}/releases/download/{r.Tag}/{x.Name}"));
+    public (int, string) UploadAsset(string path, string name, string contentType, long size, int port)
+    {
+        var m = Regex.Match(path, $"^/_uploads/repos/{Owner}/{Repo}/releases/(\\d+)/assets$");
+        var r = m.Success ? ghReleases.Values.FirstOrDefault(x => x.Id == long.Parse(m.Groups[1].Value)) : null;
+        if (r == null) return (404, "{\"message\":\"Not Found\"}");
+        if (name == "" || r.Assets.Any(x => x.Name == name)) return (422, "{\"message\":\"Validation Failed\",\"errors\":[{\"code\":\"already_exists\",\"field\":\"name\"}]}");
+        var a = new GhAsset { Id = nextGhAsset++, Name = name, Size = size, ContentType = contentType }; r.Assets.Add(a);
+        log.Add($"POST {path}");
+        return (201, AssetJson(r, a).ToJsonString());
     }
 
     Check? FindCheck(long id) => checks.Values.SelectMany(x => x).FirstOrDefault(c => c.Id == id);
@@ -410,7 +451,7 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0;
-                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); log.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false; return (200, J(("ok", true)));
             case "issue":
             {
