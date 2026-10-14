@@ -239,6 +239,52 @@ $Scenarios = [ordered]@{
 }
 
 
+'escalate earlier: the same criterion cited twice parks the item with a question; timing criteria are flagged at Technical Design' = {
+    $crit = 'The work order list shows the room number.'
+    $rec = { param($n, $name, $text, $col = 'Technical Design') F 'w1' @('record-review', '--item', $n, '--column', $col, '--role', 'reviewer', '--text-file', (TmpFile "$name.md" $text)) }
+    # two consecutive review rounds that cite the same criterion
+    $n = New-Item-Fake 'Room number' "Acceptance criteria:`n- $crit`n- The list loads within 2 seconds for 500 work orders." $L
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
+    Check 'the timing criterion is named in the claim answer' (@(Pv $r 'timing_criteria').Count -eq 1 -and "$(@(Pv $r 'timing_criteria')[0])" -like '*within 2 seconds*') ($r | ConvertTo-Json -Compress)
+    Check 'and flagged on the item, once' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*Timing or statistical acceptance criteria*' }).Count -eq 1)
+    $r = F 'w1' @('append-body', '--item', $n, '--column', 'Technical Design', '--content-file', (TmpFile 'es.md' "## Technical Design`n`nFiles: src/a.cs`n- add the column.`n")); CheckExit 'design' $r 0
+    $r = & $rec $n 'es1' "REVIEW: FINDINGS`nFINDING: criterion `"$crit`" - the design adds no column"; CheckExit 'round 1 cites the criterion' $r 0
+    $r = & $rec $n 'es2' "REVIEW: FINDINGS`nFINDING: criterion `"The work order list shows the   room number.`" - still missing"
+    CheckExit 'round 2 citing the same criterion is refused' $r 10 'same-criterion-repeated'
+    $g = F 'w1' @('get-item', '--item', $n); $park = Pv $g.state 'park'
+    Check 'the item is parked for the owner' ($park -and $park.reason -eq 'same-criterion-repeated') ($g.state | ConvertTo-Json -Compress -Depth 5)
+    Check 'with a precise question naming the criterion' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*Question for the owner*' -and $_.body -like "*$crit*" }).Count -eq 1)
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'a parked item is not claimed again' $r 10 'parked'
+    $cited = Pv $g.state 'cited'
+    Check 'parking forgets the cited records, so the round after the answer starts fresh' ($null -eq $cited -or @($cited.PSObject.Properties).Count -eq 0) ($g.state | ConvertTo-Json -Compress -Depth 5)
+    # a criterion that itself contains quotes is counted
+    $qc = 'The button reads "Save order" in bold.'
+    $k = New-Item-Fake 'Quoted repeat' "Acceptance criteria:`n- $qc" $L
+    $r = F 'w1' @('claim-item', '--item', $k, '--column', 'Technical Design')
+    $r = F 'w1' @('append-body', '--item', $k, '--column', 'Technical Design', '--content-file', (TmpFile 'esq.md' "## Technical Design`n`nFiles: src/a.cs`n- add the button.`n"))
+    $r = & $rec $k 'esq1' "REVIEW: FINDINGS`nFINDING: criterion `"$qc`" - no bold"; CheckExit 'quoted round 1' $r 0
+    $r = & $rec $k 'esq2' "REVIEW: FINDINGS`nFINDING: criterion `"$qc`" - still no bold"; CheckExit 'quoted round 2 parks' $r 10 'same-criterion-repeated'
+    # different criteria, or a COMPLETE between, do not escalate
+    $m = New-Item-Fake 'Two criteria' "Acceptance criteria:`n- $crit`n- The list is sorted by the created date." $L
+    $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design'); Check 'no timing criterion, no flag' ($null -eq (Pv $r 'timing_criteria'))
+    $r = F 'w1' @('append-body', '--item', $m, '--column', 'Technical Design', '--content-file', (TmpFile 'es3.md' "## Technical Design`n`nFiles: src/a.cs`n- add the column.`n"))
+    $r = & $rec $m 'es4' "REVIEW: FINDINGS`nFINDING: criterion `"$crit`" - missing"; CheckExit 'round 1' $r 0
+    $r = & $rec $m 'es5' "REVIEW: FINDINGS`nFINDING: criterion `"The list is sorted by the created date.`" - missing"; CheckExit 'round 2 cites another criterion' $r 0
+    $r = & $rec $m 'es6' "REVIEW: FINDINGS`nFINDING: criterion `"$crit`" - missing again"; CheckExit 'not consecutive: round 3 goes on' $r 0
+    # two consecutive FAIL verdicts that cite the same criterion
+    $v = New-Item-Fake 'Verdict repeat' "Acceptance criteria:`n- $crit" $L; Do-TechnicalDesign $v
+    $pr = Do-Development $v; Do-DevComplete $v | Out-Null
+    $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Functional Testing'); CheckExit 'FT claim' $r 0
+    $r = F 'w1' @('validation-verdict', '--item', $v, '--passed', 'false', '--summary-file', (TmpFile 'ev1.md' "criterion `"$crit`" is not met: no column"), '--pr', $pr); CheckExit 'FAIL 1' $r 0
+    Check 'FAIL 1 demotes as before' ($r.next -eq 'demoted' -and (Get-FakeIssue $v).column -eq 'Development') ($r | ConvertTo-Json -Compress -Depth 4)
+    $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Development'); CheckExit 'Development claim after the demotion' $r 0
+    $r = Do-DevComplete $v; CheckExit 'development complete again' $r 0
+    $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Functional Testing'); CheckExit 'FT claim 2' $r 0
+    $r = F 'w1' @('validation-verdict', '--item', $v, '--passed', 'false', '--summary-file', (TmpFile 'ev2.md' "criterion `"$crit`" is still not met"), '--pr', $pr); CheckExit 'FAIL 2' $r 0
+    Check 'FAIL 2 on the same criterion parks instead of demoting' ($r.next -eq 'parked' -and $r.reason -eq 'same-criterion-repeated' -and (Get-FakeIssue $v).column -eq 'Functional Testing') ($r | ConvertTo-Json -Compress -Depth 4)
+    Check 'with the question to the owner' (@((Get-FakeIssue $v).comments | Where-Object { $_.body -like '*Question for the owner*FAIL verdicts*' }).Count -eq 1)
+}
+
 'docs-only fast path: one design review round, a second only for a finding that quotes the item' = {
     $crit = 'The README names the health check route /_healthcheck.'
     $rec = { param($n, $name, $text, $col = 'Technical Design') F 'w1' @('record-review', '--item', $n, '--column', $col, '--role', 'reviewer', '--text-file', (TmpFile "$name.md" $text)) }

@@ -134,6 +134,10 @@ b. **The operator session role.** Done 2026-10-13: credential kind `o1.`, one sl
    - the answers of the operator session to questions are not rate limited;
    - the caps on notes and on budget grants are in memory and start again at every restart of the gateway (a self-merged release is a
      restart).
+t. **Done (2026-10-14): escalate earlier** (`docs/design/plant-manager.md` 10b). Two consecutive findings reviews or FAIL verdicts that
+   quote the same acceptance criterion park the item (`same-criterion-repeated`) with a question to the owner; timing or statistical
+   criteria are flagged at Technical Design (a comment and `timing_criteria` in the claim answer). Open: not yet seen live on tdd; the
+   supervisor's digest reports the park as `parked` with that code, and its skill (owner review) does not describe the code yet.
 r. **Done (2026-10-13): a session can read why a pull request check failed.** `pr-checks` (and `wait-for-checks` when it answers
    `checks-red`) returns, next to the status it always returned, `checks`: every check of the head and, for a failed or cancelled one,
    the output title and summary, the annotations split by where they point (`onChangedLines`, `onChangedFiles`, `elsewhere`), for a
