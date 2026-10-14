@@ -1477,6 +1477,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // ---- planning ----------------------------------------------------------------------------------------------------------------------
     int Owned(string name) => ownerOf.Count(kv => kv.Value == name) + botOf.Count(kv => kv.Value == name) + assignments.Values.Count(a => a.Worker == name && !a.Accepted && !IsQc(a));
     int QcActive(string name) => assignments.Values.Count(a => IsQc(a) && a.Worker == name);
+    // pinned items that wait for this worker with no offer out (an offer out is counted by Owned already)
+    int PinnedWaiting(string name) => assignments.Values.Count(a => !IsQc(a) && !a.Accepted && a.Worker == "" && a.Pin == name);
 
     (WorkerInfo? Worker, string Why) Choose(Assignment a, string? pin)
     {
@@ -1498,7 +1500,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name)).ToList();
         chooseCode = "all-draining-or-declined";
         if (live.Count == 0) return (null, "every eligible session is draining or has declined");
-        var free = live.Where(w => Owned(w.Name) < w.Capacity).ToList();
+        // a slot that a pinned item waits for is that item's (issue 46): an unpinned item takes only the slots no waiting pin claims
+        var free = live.Where(w => Owned(w.Name) + PinnedWaiting(w.Name) < w.Capacity).ToList();
         chooseCode = "at-capacity";
         if (free.Count == 0) return (null, "every eligible session is at capacity");
         return (free.OrderBy(w => TypeOrder.GetValueOrDefault(w.Type, 9)).ThenBy(w => Owned(w.Name)).First(), "");
@@ -1675,7 +1678,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow);
             var wanted = new HashSet<string>();
-            foreach (var o in offers)
+            // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can
+            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0))
             {
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
                 var key = $"{item}|{kind}|{role}"; wanted.Add(key);
