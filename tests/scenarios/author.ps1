@@ -51,6 +51,21 @@ $AuthorScenarios = [ordered]@{
     $upd = (& pwsh -NoProfile -File "$dir/scripts/factory.ps1" plugin-sync 2>&1) -join "`n" | ConvertFrom-Json
     Check 'a stale copy is replaced' ($upd.ok -and $upd.updated -and $upd.to -eq $b.pluginHash) ($upd | ConvertTo-Json -Compress)
     Check 'the replaced skill is the gateway version again' ((Get-Content -Raw (Join-Path $dir (Resolve-Path $skill.FullName -Relative -RelativeBasePath $dir)) -ErrorAction SilentlyContinue) -eq $orig -or (Get-Content -Raw $skill.FullName) -eq $orig)
+    # the temp directory on another filesystem than the copy (a tmpfs /tmp is common): the move is then a copy and a removal, and the hidden
+    # .claude-plugin directory must not stop the sync before the stamp is written. Only where such a filesystem exists (Linux: /dev/shm).
+    $shm = '/dev/shm'
+    if ((Test-Path $shm) -and ((& stat -c '%d' $shm) -ne (& stat -c '%d' $dir))) {
+        $tmpOther = Join-Path $shm "fw-author-$([guid]::NewGuid().ToString('N').Substring(0,8))"; New-Item -ItemType Directory -Force -Path $tmpOther | Out-Null
+        try {
+            Set-Content "$dir/.plugin-version" '{"hash":"stale"}'
+            $x = (& env "TMPDIR=$tmpOther" pwsh -NoProfile -File "$dir/scripts/factory.ps1" plugin-sync 2>&1) -join "`n"
+            $xj = try { $x | ConvertFrom-Json } catch { $null }
+            Check 'a stale copy is replaced when the temp directory is on another filesystem' ($xj -and $xj.ok -and $xj.updated -and $xj.to -eq $b.pluginHash) $x
+            Check 'and the stamp and the hidden .claude-plugin directory are in place' ((((Get-Content -Raw "$dir/.plugin-version" | ConvertFrom-Json).hash) -eq $b.pluginHash) -and (Test-Path "$dir/.claude-plugin")) (Get-Content -Raw "$dir/.plugin-version")
+            $again = (& env "TMPDIR=$tmpOther" pwsh -NoProfile -File "$dir/scripts/factory.ps1" plugin-sync 2>&1) -join "`n" | ConvertFrom-Json
+            Check 'and the next sync finds it current' ($again.ok -and -not $again.updated) ($again | ConvertTo-Json -Compress)
+        } finally { Remove-Item -LiteralPath $tmpOther -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 'plugin: the package names no maintainer path and no preinstalled tool' = {

@@ -21,7 +21,9 @@ function Sync-Plugin($Cfg) {
         if (-not (Test-Path -LiteralPath (Join-Path $new 'scripts/factory.ps1')) -or $got -ne $b.pluginHash) { return @{ ok = $false; code = 'archive-mismatch'; reason = 'the downloaded archive is not the version the gateway announced; nothing was replaced' } }
         foreach ($d in 'scripts', 'skills', 'agents', 'hooks', '.claude-plugin') {
             $dst = Join-Path $root $d; if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst -Recurse -Force }
-            $src = Join-Path $new $d; if (Test-Path -LiteralPath $src) { Move-Item -LiteralPath $src -Destination $dst }
+            # -Force: the temp directory is often on another filesystem (a tmpfs /tmp). There a move is a copy and a removal, and without -Force
+            # the removal of a hidden directory (.claude-plugin) throws after the copy, before the version stamp is written.
+            $src = Join-Path $new $d; if (Test-Path -LiteralPath $src) { Move-Item -LiteralPath $src -Destination $dst -Force }
         }
         Copy-Item -LiteralPath (Join-Path $new '.plugin-version') -Destination $vf -Force
         return @{ ok = $true; updated = $true; from = $local; to = $got; restart_needed = $true }
