@@ -59,8 +59,8 @@ $SuiteDefs = @(
     @{ Name = 'qc-gate'; Policy = 'peer-approved'; Set = $QcGateScenarios; Extra = (New-Gate); Env = 'qc' }
     @{ Name = 'qc-gate-idle'; Policy = 'auto'; Set = $QcGateIdleScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcIdleMinutes = 0.1 } }
     @{ Name = 'qc-gate-lifetime'; Policy = 'auto'; Set = $QcGateLifetimeScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcLifetimeMinutes = 0.1 } }
-    @{ Name = 'qc-gate-grace'; Policy = 'auto'; Set = $QcGateGraceScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcGraceMinutes = 0.1 } }
-    @{ Name = 'qc-gate-lease'; Policy = 'auto'; Set = $QcGateLeaseScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcLeaseMinutes = 0.1; qcMaxRelaunches = 2 } }
+    @{ Name = 'qc-gate-grace'; Policy = 'auto'; Set = $QcGateGraceScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcGraceMinutes = 0.25 } }
+    @{ Name = 'qc-gate-lease'; Policy = 'auto'; Set = $QcGateLeaseScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcLeaseMinutes = 0.3; qcMaxRelaunches = 2 } }
     @{ Name = 'qc-gate-waiting'; Policy = 'auto'; Set = $QcGateWaitingScenarios; Extra = (New-Gate @{ waitingDelaySeconds = 3 }); Env = 'qc'; Timing = @{ qcWaitingRepeatMinutes = 0.15 } }
     @{ Name = 'qc-gate-race'; Policy = 'auto'; Set = $QcGateRaceScenarios; Extra = (New-Gate @{ testReconcileDelayMs = 3000 }); Env = 'qc'; Timing = @{} }
     @{ Name = 'qc-rate'; Policy = 'auto'; Set = $QcRateScenarios; Extra = @{ qc = ($qcBase + @{ rateLimitPerIp = 10; rateLimitPerPr = 20 }) }; Env = 'qc' }
