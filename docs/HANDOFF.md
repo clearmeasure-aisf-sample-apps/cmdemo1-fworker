@@ -201,6 +201,16 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Closed on 2026-10-14 (issue #42):
+
+- **#42 A video item could not pass Functional Testing without a person.** `factory.ps1 publish-demo --item N --file <mp4>` (item token,
+  owner role) streams the MP4 as the raw body of `POST /api/v1/demo/{item}`; the gateway writes it to a temp file (at most 100 MB, must
+  start with an `ftyp` box), then the rule verb `publish-demo` creates release `demo-N` if missing (pre-release, default branch, "Demo video
+  for #N") and uploads or replaces `demo-N.mp4` with the author App (contents: write), and answers the release URL and size. Allowed in
+  Development and Functional Testing on items with the `video` label. Not through `/api/v1/verbs` (that route pipes JSON text to the
+  script; Kestrel's default body cap is about 30 MB). The owner's right comes from `validation-verdict` until `publish-demo` is listed in
+  `Auth.OwnerVerbs` (separate pull request, needs the owner).
+
 Closed on 2026-10-13 (pull request "hardening"):
 
 - **Three more checks that read too early on slow runners** (each failed once in that pull request's own check runs; scenarios only, the
