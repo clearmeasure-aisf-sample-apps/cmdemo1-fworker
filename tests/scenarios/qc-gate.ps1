@@ -258,7 +258,7 @@ $QcGateAutoScenarios = [ordered]@{
     Check 'the verdict was parked for a person as before' ($st.verdict.processed -and "$($st.park.reason)" -eq 'pass-without-auto-merge') ($st.park | ConvertTo-Json -Compress)
     $a = New-QcPr @('factory worker', 'Auto Merge')
     $m = F 'w1' @('merge', '--item', $a.n, '--pr', $a.pr); CheckExit 'an Auto Merge item merges without QC' $m 0
-    Check 'merged' ((Pv $m 'outcome') -eq 'merged') "$(Pv $m 'outcome')"
+    Check 'merged (by the gateway at the verdict; the session''s merge confirms it)' ((Pv $m 'outcome') -in 'merged', 'already-merged' -and (Get-FakePr $a.pr).merged) "$(Pv $m 'outcome')"
 }
 
 }
