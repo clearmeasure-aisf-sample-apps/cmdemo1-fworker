@@ -146,6 +146,10 @@ t. **Done (2026-10-14): escalate earlier** (`docs/design/plant-manager.md` 10b).
    quote the same acceptance criterion park the item (`same-criterion-repeated`) with a question to the owner; timing or statistical
    criteria are flagged at Technical Design (a comment and `timing_criteria` in the claim answer). Open: not yet seen live on tdd; the
    supervisor's digest reports the park as `parked` with that code, and its skill (owner review) does not describe the code yet.
+u. **Done (2026-10-14): a person releases a park early** (`docs/design/plant-manager.md` 10d). `POST /api/v1/items/{n}/unpark` with a
+   reason, operator token only (client: `factory.ps1 unpark --item N --reason "..."`); the park leaves the state comment, the journal records
+   the reason, and the sweep offers the item again in its column. Open: not yet used live on tdd; the operator session's credential cannot
+   call it (by design), and the supervisor's and operator session's skills (owner review) do not mention it.
 r. **Done (2026-10-13): a session can read why a pull request check failed.** `pr-checks` (and `wait-for-checks` when it answers
    `checks-red`) returns, next to the status it always returned, `checks`: every check of the head and, for a failed or cancelled one,
    the output title and summary, the annotations split by where they point (`onChangedLines`, `onChangedFiles`, `elsewhere`), for a

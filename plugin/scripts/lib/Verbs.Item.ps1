@@ -122,6 +122,33 @@ function Verb_comment($a) {
     return @{ ok = $true; id = $n; commented = $true }
 }
 
+# Admin verb, reached only through POST /api/v1/items/{n}/unpark (operator token): a person releases a park before its `until`, for example after the
+# owner relaxed or reworded a criterion. The park leaves the state comment (written by the gateway's own author, Save-State), a journal line records
+# who and why, and an item with no live claim gets a handoff to its current column, so the next sweep offers it again there at once instead of after
+# sweepSeenCount sightings. Two parks are waits of the gateway, not holds for a person, and are refused: awaiting checks (the sweep ends it when the
+# checks finish) and the inspector's escalation (only a human approval of the head clears it: clear-hold).
+function Verb_unpark_item($a) {
+    $n = Get-ItemNumber $a; $c = Get-Cfg
+    # one line, no HTML comment markers: the reason goes into a journal comment whose hidden marker is machine-read
+    $reason = ("$(Need $a 'reason')" -replace '<!--|-->', '' -replace '\s+', ' ').Trim()
+    if (-not $reason) { Reject 2 'usage' 'a reason is required: why the park is released early' }
+    if ($reason.Length -gt 500) { Reject 2 'usage' 'the reason is at most 500 characters' }
+    $by = if ((Test-Has $a 'by') -and "$($a.by)".Trim()) { "$($a.by)".Trim() } else { 'the operator' }
+    $info = Get-ItemInfo $n; Assert-Open $info
+    $st = Get-State $n; $s = $st.state
+    if (-not (Test-Has $s 'park')) { Reject 10 'not-parked' "item #$n is not parked" }
+    $park = $s.park; $code = "$($park.reason)"
+    if ($code -eq 'development:awaiting-checks') { Reject 10 'gateway-wait' 'the item waits for its pull request checks, not for a person; the sweep ends that wait by itself' }
+    if ($code -eq 'inspector-escalated') { Reject 10 'needs-approval' 'the inspector''s hold clears only on a human approval of the head commit (clear-hold), not by unpark' }
+    $expired = -not (Get-Park $s)
+    $s.Remove('park')
+    $offered = $false
+    if (-not (Test-ClaimLive $s) -and (Test-NameIn "$($info.column)" $c.columns.ai)) { $s.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $offered = $true }
+    [void](Add-Journal $n $st 'unparked' @{ column = $info.column; code = $code; by = $by; reason = $reason } "$($park.at)")
+    Save-State $n $st
+    return @{ ok = $true; id = $n; unparked = $true; column = $info.column; park = $park; expired = $expired; reoffer = $offered }
+}
+
 function Verb_claim_item($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg; $t = $c.timing
     $holder = if (Test-Has $a 'holder') { "$($a.holder)" } else { 'anonymous' }
@@ -431,7 +458,7 @@ function Invoke-ParkRepeatedCriterion([int]$n, $st, [string]$What, [string[]]$Re
     if (Test-Has $s 'cited') { $s.cited = @{} }
     $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n
     $list = ($Repeated | ForEach-Object { "- ""$_""" }) -join "`n"
-    Add-Comment $n "**Question for the owner:** two consecutive $What cite the same acceptance criterion:`n`n$list`n`nThe factory stopped here instead of trying again, because the same criterion failing twice usually means it is ambiguous, untestable as written, or out of reach of this change. Please answer on this item: should the criterion be reworded (and how), relaxed or dropped, or is the failure a real defect to fix? Then clear the park (move the card or remove the hold) to let the worker resume."
+    Add-Comment $n "**Question for the owner:** two consecutive $What cite the same acceptance criterion:`n`n$list`n`nThe factory stopped here instead of trying again, because the same criterion failing twice usually means it is ambiguous, untestable as written, or out of reach of this change. Please answer on this item: should the criterion be reworded (and how), relaxed or dropped, or is the failure a real defect to fix? Then the operator releases the park (``factory.ps1 unpark --item $n --reason ...``) or moves the card, and the worker resumes."
 }
 
 # Acceptance criteria worded in timing or statistical terms (enhancement 10): they are hard to verify in a functional test and often fail

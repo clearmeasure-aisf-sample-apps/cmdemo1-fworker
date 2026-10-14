@@ -884,3 +884,38 @@ $OwnerScenarios['owner: one item per session: a session that held an item is off
         $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; Restart-Gateway
     }
 }
+
+# A person releases a park early (POST /api/v1/items/{n}/unpark, operator token): docs/design/plant-manager.md 10d
+$OwnerScenarios['unpark: the operator releases a park early with a reason; the next sweep offers the item again in its column'] = {
+    Start-OwnerClient 'una' 'persistent-local' '--capacity 3'
+    $n = New-Item-Fake 'Unpark' 'x' $OwnerLabels
+    [void](Wait-Until -Seconds 40 { (Get-Assigned 'una' $n).Count -gt 0 })
+    for ($try = 0; $try -lt 5; $try++) {
+        $ev = @(Get-Assigned 'una' $n)[-1]
+        $r = Fo 'una' @('accept', '--item', $n, '--assignment', $ev.assignment)
+        if ($r.exit -ne 11) { break }
+        $seen = @(Get-Assigned 'una' $n).Count; [void](Wait-Until -Seconds 30 { @(Get-Assigned 'una' $n).Count -gt $seen })
+    }
+    CheckExit 'accept' $r 0
+    $r = Fo 'una' @('complete', '--item', $n, '--column', 'Technical Design', '--succeeded', 'false', '--comment', 'the criterion cannot be met as written')
+    Check 'a failure report parks the item' ($r.exit -eq 0 -and $r.parked -eq $true) ($r | ConvertTo-Json -Compress)
+    Check 'the park is in the state comment' ((Pm-State $n).ContainsKey('park'))
+    $r = Fo 'una' @('unpark', '--item', $n, '--reason', 'mine'); CheckExit 'a worker credential cannot unpark' $r 30 'forbidden'
+    $r = F 'op' @('unpark', '--item', $n); CheckExit 'a reason is required' $r 2 'usage'
+    $d = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/items/$n/unpark" -Method POST -Body '{"reason":"x"}' -ContentType 'application/json' -SkipHttpErrorCheck
+    Check 'no credential: 401' ([int]$d.StatusCode -eq 401) "$([int]$d.StatusCode)"
+    $d = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/verbs/unpark-item" -Method POST -Body (@{ item = $n; reason = 'x' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck
+    Check 'the rule verb is reached only through the endpoint' ([int]$d.StatusCode -eq 400 -and ($d.Content | ConvertFrom-Json).code -eq 'use-endpoint') "$([int]$d.StatusCode) $($d.Content)"
+    Check 'the refused calls left the park in place' ((Pm-State $n).ContainsKey('park'))
+    $r = F 'op' @('unpark', '--item', $n, '--reason', 'the owner relaxed the criterion')
+    CheckExit 'the operator unparks' $r 0
+    Check 'the answer names the park it released and the column' ($r.unparked -eq $true -and $r.park.reason -eq 'worker-failure' -and $r.column -eq 'Technical Design' -and $r.reoffer -eq $true) ($r | ConvertTo-Json -Compress -Depth 4)
+    $st = Pm-State $n
+    Check 'the park is gone from the state comment' (-not $st.ContainsKey('park')) ($st | ConvertTo-Json -Compress -Depth 4)
+    Check 'a journal line records the release' ((Get-Journal $n) -contains 'unparked')
+    Check 'with the reason and who released it' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=unparked' -and $_.body -like '*the owner relaxed the criterion*' -and $_.body -like '*by the operator*' -and $_.body -like '*worker-failure*' }).Count -eq 1)
+    Check 'the next sweep offers the item again in its column, at once' (Wait-Until -Seconds 30 { $j = [string[]](Get-Journal $n); $u = [array]::LastIndexOf($j, 'unparked'); $u -ge 0 -and $u + 2 -lt $j.Count -and $j[$u + 1] -eq 'matched' -and $j[$u + 2] -eq 'offered' }) ((Get-Journal $n) -join ',')
+    Check 'the item stayed in its column' ((Get-FakeIssue $n).column -eq 'Technical Design')
+    $r = F 'op' @('unpark', '--item', $n, '--reason', 'again'); CheckExit 'an item with no park' $r 10 'not-parked'
+    Stop-OwnerClient 'una'
+}
