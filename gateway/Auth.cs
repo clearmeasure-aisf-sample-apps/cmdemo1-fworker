@@ -33,7 +33,7 @@ static class Auth
     public static readonly HashSet<string> OwnerVerbs = new()
     {
         "get-item", "append-body", "comment", "accept", "release", "claim-item", "record-review", "complete", "open-pr", "update-pr", "pr-checks",
-        "wait-for-checks", "validation-verdict", "merge", "model-tier", "get-delivery"
+        "wait-for-checks", "validation-verdict", "merge", "model-tier", "get-delivery", "publish-demo"
     };
     public static readonly HashSet<string> InspectorVerbs = new() { "get-item", "inspect-facts", "approve-pr", "accept", "pr-checks", "model-tier" };
     public static readonly HashSet<string> WorkerVerbs = new() { "my-items" };
