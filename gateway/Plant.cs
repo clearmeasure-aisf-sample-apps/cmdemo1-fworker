@@ -1743,6 +1743,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
                 };
                 assignments[key] = a;
+                if (!ReferenceEquals(a, ex)) DeclineTakenBack(a);      // a new assignment: not first to the worker it was just taken back from
                 a.Pin = pin ?? "";
                 if (a.Pin != "" && a.PinRetryAt > planNow) continue;                                      // its worker just let an offer lapse: the tick offers it again
                 if (!a.MatchedNoted)

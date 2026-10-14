@@ -122,7 +122,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5) };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), Lease = LeaseSettings.Load(scriptsDir) };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -146,6 +146,26 @@ var plant = app.Services.GetRequiredService<Plant>();
 var qc = app.Services.GetRequiredService<QcHub>();
 var messenger = app.Services.GetRequiredService<Messenger>();
 var baseWatch = app.Services.GetRequiredService<BaseWatch>();
+// owner leases (gateway/Lease.cs): the plant decides, the rule scripts change the claim; a renewal answers the new lease, a take-back is followed by a sweep
+if (ownerMode)
+{
+    plant.OnRenew = async (item, holder) =>
+    {
+        var (rc, ro) = await runner.RunAsync("claim-item", new JsonObject { ["item"] = item, ["holder"] = holder, ["renew"] = true }.ToJsonString(), TimeSpan.FromSeconds(120));
+        DateTime? until = null;
+        if (rc == 0) try { if (DateTime.TryParse(JsonNode.Parse(ro)?["lease_until"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var u)) until = u; } catch { }
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["lease"] = "renew", ["item"] = item, ["holder"] = holder, ["exit"] = rc }.ToJsonString());
+        return until;
+    };
+    plant.OnTakeBack = async (item, holder, reason) =>
+    {
+        var (rc, eo) = await runner.RunAsync("expire-claim", new JsonObject { ["item"] = item, ["holder"] = holder, ["reason"] = reason }.ToJsonString(), TimeSpan.FromSeconds(120));
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["lease"] = "taken-back", ["item"] = item, ["holder"] = holder, ["reason"] = reason, ["exit"] = rc }.ToJsonString());
+        // an answer of "not held by that owner" is no failure: the claim is gone or another owner holds it, so the plant lets go too
+        return rc == 0;
+    };
+    plant.RequestSweepAfterTakeBack = hub.RequestSweep;
+}
 // The restore runs before the first sweep (the Sweeper waits for it, at most 60 s): a sweep that planned first would offer the items of the snapshot
 // anew. One read, bounded; a failure leaves the plant empty, as every restart did before, and the sweep rebuilds from the board.
 if (snapshotOn) _ = Task.Run(async () =>
@@ -305,6 +325,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
+    if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
     return Results.Text(o.ToJsonString(), "application/json");
 });
@@ -393,6 +414,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
+    if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
     return Results.Text(o.ToJsonString(), "application/json");
 });
@@ -576,6 +598,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (accepting) plant.EndAccept(who.Assignment);
     // issue 31: a session that calls a verb successfully is answering: its count of lapsed offers starts again
     if (ownerMode && code == 0 && who.Kind is "item" or "worker") plant.NoteAnswered(who.Name);
+    // any call of the owner for its item is its activity and renews the lease when due (gateway/Lease.cs); after OnVerb, which records an accept
+    if (ownerMode && who.Kind == "item" && who.Role == "owner") { try { JsonObject? vr = null; try { vr = JsonNode.Parse(output) as JsonObject; } catch { } plant.NoteItemCall(who.Name, who.Item, verb, authorized, vr, code == 0); } catch (Exception e) { Console.Error.WriteLine($"lease hook {verb}: {e.Message}"); } }
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
     if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep();
     return Results.Text(output, "application/json", Encoding.UTF8, status);
@@ -683,6 +707,7 @@ app.MapGet("/api/v1/wait", async (HttpContext ctx) =>
     if (who.Kind == "operator") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"an operator session cannot wait for an item's triggers\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     // an owner that waits in wait-event makes no verb call for hours: its poll is its activity on the item (worker-messaging.md 3.9)
     if (ownerMode && messaging.On && who.Kind == "item") plant.NoteActivity(who.Name, item);
+    if (ownerMode && who.Kind == "item" && who.Role == "owner") plant.NoteItemCall(who.Name, item, "");
     long after = long.TryParse(ctx.Request.Query["after"], out var a) ? a : 0;
     var secs = Math.Clamp(double.TryParse(ctx.Request.Query["timeout"], out var t) ? t : 60, 1, 120);
     if (ctx.Request.Query["messages"].ToString() == "1")
@@ -824,6 +849,8 @@ app.MapPost("/api/v1/presence", async (HttpContext ctx) =>
     var (presence, retry) = plant.Heartbeat(who.Name, summary);
     if (retry > 0) messenger.CountRefusal("rate-limited");
     if (retry > 0) return Results.Json(new { ok = false, code = "rate-limited", reason = "the summary changes at most once per 10 seconds", retryAfterSeconds = retry, exit = 20 }, statusCode: 429);
+    // a summary that names owned items ("#N") renews their leases (gateway/Lease.cs)
+    if (who.Kind is "worker" or "item") plant.NoteHeartbeat(who.Name);
     return Results.Json(new { ok = true, presence, epoch = plant.Epoch, exit = 0 });
 });
 
@@ -1437,6 +1464,7 @@ sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runn
         while (!ct.IsCancellationRequested)
         {
             try { plant.Tick(); } catch (Exception e) { Console.Error.WriteLine($"plant tick: {e.Message}"); }
+            try { plant.LeaseTick(); } catch (Exception e) { Console.Error.WriteLine($"lease tick: {e.Message}"); }
             try { await qc.Tick(); } catch (Exception e) { Console.Error.WriteLine($"qc tick: {e.Message}"); }
             // expiry of undelivered messages and open questions, and the pruning of the limit windows (only while a feature is on)
             if (plant.Msg.On) { try { Escalate(messenger.Tick()); } catch (Exception e) { Console.Error.WriteLine($"messenger tick: {e.Message}"); } }

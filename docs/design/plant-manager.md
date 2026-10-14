@@ -131,6 +131,29 @@ GitHub permission: contents write and pull requests write, both in the manifest 
 update), `itemsBehind` and `behind` per owned item (refreshed by each `base-watch`). The dashboard shows a summary line and, per owned
 item in Assignments, how many commits it is behind master.
 
+## 6b. Owner leases kept by the plant (owner decision 2026-10-14)
+
+Code: `gateway/Lease.cs`; settings `schedule.*` in `config/instance.json` (each overridable by `FACTORY_TIMING_<key>`). Counts in `/status` (`lease`).
+
+1. **The client accepts an owner offer itself.** `subscribe --own` answers an `item.assigned` of job `own-item` with `accept` (body `accepted_by: "client"`) on
+   a thread of its own, and prints `item.accepted` (`acceptedBy: "client"`, the lease) or `item.accept-failed` with the gateway's code. The plant offers
+   only into a free slot, so the client does not count slots itself. The journal line `assigned` says "accepted by its client". If the session calls no
+   verb and no `wait` for the item within `schedule.clientStartMinutes` (5; 0 means the lease the accept answered), the item is taken back. A deployed client accepts by itself from this release on unless it is started with `--no-auto-accept` or `FACTORY_AUTO_ACCEPT=0`.
+   `--no-auto-accept`, `FACTORY_AUTO_ACCEPT=0` and `--spawn` leave the accept to the session (the Tier 1 suites run with it off).
+2. **The lease is renewed by the gateway** (issue 48): after any verb call of the owner for the item, and at every heartbeat (`POST /presence`) of the
+   owner while its activity summary names the item as `#N`; at most once per `schedule.leaseRenewMinutes` (5) per item. The renewal is the rule
+   script `claim-item --renew` run as the owner.
+3. **A quiet owner is asked, then replaced.** An owned item with no verb or `wait` of its owner and an unchanged activity summary for
+   `schedule.staleItemMinutes` (15) gets one `item.check` trigger. Any verb for the item (or a new summary) answers it; nothing within
+   `schedule.staleConfirmMinutes` (3) and the item is taken back. Not while the item waits for something else: parked, or its last trigger was
+   `item.parked`, `qc.requested`, `qc.reset`, `item.merged` or `inspector.escalated`. Watched are the owners the plant saw accept, and the owners a
+   sweep listed with a lease; never an owner set by a test seam.
+
+Taking back: the plant lets go only after the rule script `expire-claim` (gateway only) succeeded (a failure keeps the owner and is tried again later). It ends the claim's lease and marks it `taken_back` (journal `lease-expired`), so
+`claim-item --renew` of the old owner is refused; the old owner gets `item.taken_back`; the plant forgets the owner (journal `reassigned`) and asks
+for a sweep, which offers the item again with mode `resume`. That offer goes to another session first when one is connected. A take-back counts as a
+relaunch against `timing.maxRelaunches`, like any lease that lapsed.
+
 ## 7. Bots (separate sessions)
 
 When a PASS verdict is recorded under the `peer-approved` policy, the plant manager creates a `bot-job` of kind `inspector` and assigns it to a worker registered with the `inspector` role. That session has a clean context, gets an inspector-role item token, runs `inspect-facts`, judges, and submits `approve-pr`. The owner is told the result by a trigger. Quality-control and release bots follow the same shape: a job kind, a role, a token scope, a result trigger. The inspector rules (mandatory escalations computed by script, three verdicts, holds cleared only by a named person's approval of the current head) are unchanged; see `plugin/scripts/lib/Verbs.Inspect.ps1`.

@@ -39,6 +39,8 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     $script:Procs += Start-Process dotnet -ArgumentList $fakeDll -PassThru -RedirectStandardOutput (Join-Path $work 'fake.out') -RedirectStandardError (Join-Path $work 'fake.err')
     $env:GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; $env:GH_TOKEN = 'fake-operator'; $env:OCTOPUS_API_KEY = 'fake'
     $env:FACTORY_CONFIG = $cfgPath; $env:FACTORY_STATE_DIR = Join-Path $work 'state'; $(if ($env:TEST_REAL_APPS) { Remove-Item Env:FACTORY_FAKE_APPS -ErrorAction SilentlyContinue } else { $env:FACTORY_FAKE_APPS = '1' })
+    # a stream client does not accept offers by itself in the suites (the scenarios accept, or let an offer lapse); lease.ps1 switches it on
+    $env:FACTORY_AUTO_ACCEPT = '0'
     $env:FACTORY_PLUGIN_SCRIPTS = Join-Path $script:Root 'plugin/scripts'; $env:FACTORY_DEV_TOKEN = 'test-token'; $env:FACTORY_WEBHOOK_SECRET = ('x' * 40)
     $env:FACTORY_API_PORT = "$($script:ApiPort)"; $env:FACTORY_WEBHOOK_PORT = "$($script:HookPort)"; $env:FACTORY_SWEEP_SECONDS = $(if ($env:TEST_SWEEP_SECONDS) { $env:TEST_SWEEP_SECONDS } else { '2' })
     $script:Procs += Start-Process dotnet -ArgumentList $gwDll -PassThru -RedirectStandardOutput (Join-Path $work 'gateway.out') -RedirectStandardError (Join-Path $work 'gateway.err')
