@@ -342,6 +342,30 @@ $OwnerScenarios['owner: a pinned item is only ever offered to its worker: after 
     foreach ($w in 'pin-a', 'pin-b', 'pin-c') { Stop-OwnerClient $w }
 }
 
+# Issue 46: a free slot of a worker that a pinned item waits for is the pinned item's. Live, an unpinned item matched in the same sweep took the only
+# slot of the idle pinned worker, and the pinned item waited for hours. Here the pinned worker (capacity 1) is the only session: it is offered its
+# pinned item first, and while that item waits for it (an offer it let lapse) no unpinned item takes the slot.
+$OwnerScenarios['owner: a pinned item gets its worker''s free slot first, and keeps it while it waits for that worker (issue 46)'] = {
+    foreach ($w in @($script:Workers.Keys)) { Stop-OwnerClient $w }
+    [void](Wait-Until -Seconds 20 { @((Get-Plant).plant.workers | Where-Object { $_.connected }).Count -eq 0 })
+    $u = New-Item-Fake 'Unpinned, matched with a pinned one' 'x' $OwnerLabels
+    $p = New-Item-Fake 'Pinned to the only worker' 'x' ($OwnerLabels + 'worker:pin-r')
+    $asg = { param($Item) @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $Item }) }
+    Check 'both items wait while no session is connected' (Wait-Until -Seconds 40 { @(& $asg $u).Count -eq 1 -and @(& $asg $p).Count -eq 1 }) ((Get-Plant).plant.assignments | ConvertTo-Json -Compress)
+    Start-OwnerClient 'pin-r' 'persistent-local' '--capacity 1'
+    $others = { @(Get-WorkerEvents 'pin-r' | Where-Object { $_.event -eq 'item.assigned' -and $_.item -ne $p }) }
+    Check 'the pinned worker is offered its pinned item' (Wait-Until -Seconds 40 { (Get-Assigned 'pin-r' $p).Count -ge 1 })
+    Check 'and no other item' (@(& $others).Count -eq 0) ((& $others) | ConvertTo-Json -Compress)
+    # the offer lapses (4 s in this suite) and the pinned item waits for the same worker; the sweeps meanwhile (every 2 s) must not fill the slot
+    Check 'after the missed window it is offered to the same worker again' (Wait-Until -Seconds 30 { (Get-Assigned 'pin-r' $p).Count -ge 2 })
+    Start-Sleep -Seconds 8
+    Check 'while it waited, no unpinned item took the slot' (@(& $others).Count -eq 0) ((& $others) | ConvertTo-Json -Compress)
+    $r = Wait-Until -Seconds 30 { $script:PinR = Fo 'pin-r' @('accept', '--item', $p, '--assignment', ((Get-Assigned 'pin-r' $p)[-1]).assignment); $script:PinR.exit -eq 0 }
+    Check 'the pinned worker accepts its item' $r ($script:PinR | ConvertTo-Json -Compress)
+    Check 'the unpinned item was never offered to it' ((Get-Assigned 'pin-r' $u).Count -eq 0)
+    Stop-OwnerClient 'pin-r'
+}
+
 # The journal of one item reads in event order. Each line is a rule-script call of its own (the plant's matched and offered, the worker's accept),
 # and with a GitHub that answers slowly those calls used to reach the item lock in any order: live, "offered" was written 40 s after the offer
 # and after "accepted". The fake holds every matched and offered comment back, and the worker accepts the moment the offer arrives.
