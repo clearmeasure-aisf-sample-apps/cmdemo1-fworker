@@ -70,6 +70,10 @@ sealed class MessagingSettings
     // mgrRestartMinutes (how long after its start a gateway reports that sessions came back from an earlier process).
     public double QuietMinutes = 20, NoteMinutes = 60, PersistMinutes = 30, VerbErrorMinutes = 10, RestartMinutes = 30;
     public int VerbErrorCount = 3;
+    // The Release Queue (enhancement 9): timing.mgrReleaseQueueMinutes (the oldest item waits longer than this) or digest.releaseQueueCount (this many
+    // items wait) makes release-queue-aged: the promotion to uat is the owner's, and the digest only says that it is due.
+    public double ReleaseQueueMinutes = 60;
+    public int ReleaseQueueCount = 3;
     // The model requirement (4.7): the ladder of the gateway host's models.default.json, lowest rung first, as (name, model).
     public string RequiredModelTier = "premium", RequiredEffort = "high";
     public bool EnforceModel;
@@ -165,6 +169,7 @@ sealed class MessagingSettings
         s.RefusalCount = Limit(dg, "refusalCount", 3); s.DigestMaxBytes = Limit(dg, "maxBytes", 4096, 512);
         s.QuietMinutes = Span("mgrQuietMinutes", 20); s.NoteMinutes = Span("mgrNoteMinutes", 60); s.PersistMinutes = Span("mgrPersistMinutes", 30);
         s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3);
+        s.ReleaseQueueMinutes = Span("mgrReleaseQueueMinutes", 60); s.ReleaseQueueCount = Limit(dg, "releaseQueueCount", 3);
         if (dg?["waitCodes"] is JsonArray wc) s.WaitCodes = List(wc);
         s.RequiredModelTier = g?["requiredModelTier"]?.ToString() ?? "premium"; s.RequiredEffort = g?["requiredEffort"]?.ToString() ?? "high";
         s.EnforceModel = g?["enforceModel"]?.GetValue<bool>() ?? false; s.AcceptableModels = List(g?["acceptableModels"]);
@@ -390,6 +395,9 @@ sealed class DigestInput
     public List<(int Item, string Worker, int Count, List<(string Code, int Count)> ByCode)> VerbErrors = new();
     public List<(int Item, int RoundTrip, DateTime At)> MergeRefused = new();
     public (int Reconnected, int Missing, int UpMinutes)? Restart;
+    // the items the sweep found waiting in the Release Queue column for the production deployment, with their release and since when
+    public List<(int Item, string Release, DateTime Since)> ReleaseQueue = new();
+    public bool PromotionRequested;
 }
 sealed class DigestEntry
 {
@@ -403,7 +411,7 @@ static class DigestBuilder
 {
     public const int SchemaVersion = 1;
     public static readonly string[] Kinds = { "stalled", "disconnected-owner", "late-question", "waiting", "refusals", "parked",
-        "gateway-restarted", "review-rounds-exhausted", "merge-refused", "worker-blocked-note", "verb-errors", "last-review-round", "item-quiet" };
+        "gateway-restarted", "review-rounds-exhausted", "merge-refused", "worker-blocked-note", "verb-errors", "last-review-round", "item-quiet", "release-queue-aged" };
     static int Min(TimeSpan t) => (int)Math.Max(0, Math.Floor(t.TotalMinutes));
     static int Step(double value, double unit) => value >= unit * 4 ? 3 : value >= unit * 2 ? 2 : value >= unit ? 1 : 0;
 
@@ -494,6 +502,15 @@ static class DigestBuilder
             var b = Math.Clamp(m.RoundTrip, 1, 3);
             list.Add(new DigestEntry { Key = $"merge-refused|{m.Item}", Kind = "merge-refused", Bucket = b,
                 Fields = new JsonObject { ["kind"] = "merge-refused", ["item"] = m.Item, ["bucket"] = b, ["roundTrip"] = m.RoundTrip, ["ageMinutes"] = Min(now - m.At) } });
+        }
+        if (d.ReleaseQueue.Count > 0)
+        {   // release-queue-aged: one entry for the whole queue; worse as the oldest item ages (60, 120, 240 min by default) or the queue grows
+            var oldest = d.ReleaseQueue.OrderBy(q => q.Since).ThenBy(q => q.Item).First();
+            var age = (now - oldest.Since).TotalMinutes;
+            var b = Math.Max(Step(age, cfg.ReleaseQueueMinutes + 1e-9), d.ReleaseQueue.Count >= cfg.ReleaseQueueCount ? 1 : 0);
+            if (b > 0) list.Add(new DigestEntry { Key = "release-queue-aged", Kind = "release-queue-aged", Bucket = b,
+                Fields = new JsonObject { ["kind"] = "release-queue-aged", ["bucket"] = b, ["count"] = d.ReleaseQueue.Count, ["item"] = oldest.Item, ["oldestMinutes"] = Min(now - oldest.Since),
+                    ["releases"] = d.ReleaseQueue.Select(q => q.Release).Distinct().Count(), ["promotionRequested"] = d.PromotionRequested } });
         }
         if (d.Restart is { } rs)
         {
