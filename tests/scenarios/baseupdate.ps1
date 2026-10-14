@@ -31,7 +31,26 @@ function Bu-MergeHook([int]$Pr, [string]$Ref, [string]$Sha) {
 function Bu-Journal([int]$n, [string]$Event) { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match "<!-- plant event=$Event " }).Count -gt 0 }
 function Bu-Puts([int]$Pr) { @((Fake 'log') | Where-Object { $_ -match "^PUT /repos/[^ ]+/pulls/$Pr/update-branch$" }).Count }
 
+function Bu-SetVerdict([int]$Item, [int]$Pr) {
+    $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
+    $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
+    $st.verdict = @{ passed = $true; processed = $false; pr = $Pr; head_sha = (Get-FakePr $Pr).sha }
+    $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
+    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+}
+
 $BaseUpdateScenarios = [ordered]@{
+
+'base update: a verdict recorded between the trigger and the delayed update stops the gateway''s update [full]' = {
+    Bu-Worker 'bm1'
+    $a = Bu-OwnedPr 'bm1' @('docs/verdict.md')
+    Bu-Synced
+    [void](Fake 'master-merge' @{ files = @('docs/v.md') })
+    Check 'the owner is told' (Wait-Until -Seconds 30 { (Bu-Events 'bm1' $a.item).Count -gt 0 })
+    Bu-SetVerdict $a.item $a.pr
+    Start-Sleep -Seconds 14
+    Check 'the gateway does not update the branch' ((Bu-Puts $a.pr) -eq 0)
+}
 
 'base update: a merge to master tells the other owners of open branches with the overlapping files, not the merged pull request''s own worker' = {
     Bu-Worker 'bm1'; Bu-Worker 'bm2'; Bu-Worker 'bm3'

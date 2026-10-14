@@ -121,7 +121,7 @@ not rebase: an open pull request keeps its history), resolve keeping both change
 **The gateway's own back-merge.** When `baseUpdate.autoUpdateBranch` is on (default), `baseUpdate.autoUpdateDelaySeconds` (120) after the
 trigger the gateway runs `base-update-branch` for each pull request it told an owner about: only when the pull request is open, its head is
 still the one the trigger saw (the owner has not pushed), GitHub reports it mergeable (not `dirty`), it is behind, and no `pr.head_changed`
-webhook came in the last `baseUpdate.quietSeconds` (60). Then `PUT /repos/{o}/{r}/pulls/{n}/update-branch` with `expected_head_sha`
+webhook came in the last `baseUpdate.quietSeconds` (60). The item state is read fresh first: any verdict on record (passed or not), a merge being settled, the item in its validation column, or a QC record for that head means `skip` (moving the head would make a verdict's or a QC run's sha stale); such items get no trigger either. Then `PUT /repos/{o}/{r}/pulls/{n}/update-branch` with `expected_head_sha`
 (journal `branch-updated`, operator `plant.event` `branch-updated`). A conflicting pull request is never touched: it stays the owner's job.
 The switch can be changed at run time: `POST /api/v1/base-update?autoUpdateBranch=false` (operator token; until the next restart).
 GitHub permission: contents write and pull requests write, both in the manifest of the author App (`tools/github-app-setup/serve.ps1`).

@@ -14,6 +14,18 @@ function Get-BehindBy([string]$Branch) {
     return [int]$cmp.behind_by
 }
 
+# Why the gateway must not move this item's branch (and need not trigger a back-merge): a verdict on record, a merge being settled, the item in
+# its validation column, or a QC record for the head. Moving the head would make the verdict's sha (the merge-after-PASS path) or the QC run stale.
+function Get-BackmergeHold([int]$Item, $State, [int]$Pr, [string]$Head) {
+    $c = Get-Cfg; $s = $State
+    if (Test-Has $s 'verdict') { return 'verdict-recorded' }
+    if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { return 'merge-awaiting' }
+    $col = try { "$((Get-ItemInfo $Item).column)" } catch { '' }
+    if ($col -ieq $c.columns.validation) { return 'in-validation' }
+    if ($Pr -gt 0 -and $Head -and (Test-Has $s 'qc') -and $s.qc.Contains("$Pr") -and (($s.qc["$Pr"] | ConvertTo-Json -Depth 8 -Compress) -match [regex]::Escape($Head))) { return 'qc-for-head' }
+    return ''
+}
+
 function Verb_base_watch($a) {
     $c = Get-Cfg
     $known = if (Test-Has $a 'known') { "$($a.known)" } else { '' }
@@ -42,6 +54,7 @@ function Verb_base_watch($a) {
                 elseif ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number') -and $s.pr.number) { if (-not $row.skip) { $row.skip = 'pr-closed' } }
                 elseif ((Test-Has $s 'pr') -and (Test-Has $s.pr 'branch') -and $s.pr.branch) { $row.branch = "$($s.pr.branch)" }
                 elseif (-not $row.skip) { $row.skip = 'no-branch' }
+                if (-not $row.skip) { $row.skip = Get-BackmergeHold $n $s $row.pr $row.head }
                 if (-not $row.skip) {
                     $row.behind = Get-BehindBy $row.branch
                     if ($changed -and $row.pr -gt 0 -and $baseFiles.Count -gt 0) {
@@ -61,6 +74,9 @@ function Verb_base_update_branch($a) {
     $pr = Get-Pr $num
     if ("$($pr.state)" -ne 'open') { return @{ item = $n; pr = $num; outcome = 'not-open' } }
     if ("$($pr.head.sha)" -ne $expected) { return @{ item = $n; pr = $num; outcome = 'head-moved' } }
+    # read fresh: a verdict, a merge or a QC run may have started since the trigger
+    $hold = Get-BackmergeHold $n (Get-State $n).state $num $expected
+    if ($hold) { return @{ item = $n; pr = $num; outcome = 'skip'; reason = $hold } }
     # GitHub computes mergeability after a push to either side: null until then
     for ($i = 0; $i -lt 5 -and $null -eq $pr.mergeable; $i++) { Start-Sleep -Seconds 2; $pr = Get-Pr $num }
     if ($pr.mergeable -eq $false -or "$($pr.mergeable_state)" -eq 'dirty') { return @{ item = $n; pr = $num; outcome = 'conflict' } }
