@@ -30,6 +30,10 @@ sealed class WorkerInfo
     public DateTime SessionStarted;
     public HashSet<int> SessionItems = new();
     public List<(int No, DateTime Started, List<int> Items)> Sessions = new();
+    // issue 72: since when this session is spent and owns nothing (its item was taken back, released, demoted or reassigned), and the session
+    // number a session.end event was sent for; the client writes the launcher's end marker on that event, so the loop does not rely on the model
+    public DateTime? SpentIdleSince;
+    public int SessionEndSent;
 }
 
 sealed class Assignment
@@ -68,6 +72,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     public Revocations Rev { get; set; } = new();
     // plant.oneItemPerSession: a worker session holds at most one work item (own-item) in its life; the next item goes to a new session
     public bool OneItemPerSession { get; set; } = true;
+    // issue 72: how long a spent session may own nothing (and have no offer of its item open) before it is told session.end; the pause covers a
+    // column move in which the same session is offered its item again (timing.sessionEndGraceSeconds, FACTORY_TIMING_sessionEndGraceSeconds)
+    public double SessionEndGraceSeconds { get; set; } = 90;
     public string Epoch => store.Epoch;
     readonly Dictionary<string, WorkerInfo> workers = new();
     readonly Dictionary<string, Assignment> assignments = new();
@@ -147,6 +154,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             w.Type = type; w.Caps = new(caps); w.Capacity = capOverride.TryGetValue(name, out var capSet) ? capSet : Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
             w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = false;
+            w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
             w.Model = model; w.Effort = effort;
             // the older stream of this name is told it was replaced before it ends, so its client exits instead of reconnecting (4.6, failure mode 30)
             if (Msg.On && w.Out != null) w.Out.Writer.TryWrite((0, ReplacedJson(name)));
@@ -1795,6 +1803,21 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             {
                 var (w, _) = Choose(a, a.Pin);
                 if (w != null) Offer(a, w, null);
+            }
+            // issue 72: a session that is spent (it held a work item) and no longer owns it, nor has an offer of it open, is told to end, so the
+            // client writes the launcher's end marker and a fresh session of the name starts; without it the name sat idle as session-spent
+            if (OneItemPerSession) foreach (var w in workers.Values.Where(w => w.Connected && w.Type != "supervisor"))
+            {
+                // a QC or bot job the session holds or is offered keeps it alive: those are outside the one-item rule and run in this client
+                var idle = w.SessionItems.Count > 0 && !ownerOf.Values.Contains(w.Name) && !botOf.Values.Contains(w.Name) && !qcOf.Values.Contains(w.Name)
+                    && !assignments.Values.Any(o => o.Worker == w.Name && (o.Kind != "own-item" || o.Accepted || w.SessionItems.Contains(o.Item)));
+                if (!idle) { w.SpentIdleSince = null; continue; }
+                w.SpentIdleSince ??= DateTime.UtcNow;
+                if (w.SessionEndSent == w.Session || (DateTime.UtcNow - w.SpentIdleSince.Value).TotalSeconds < SessionEndGraceSeconds) continue;
+                w.SessionEndSent = w.Session;
+                Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "session.end", ["name"] = w.Name, ["session"] = w.Session,
+                    ["items"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),
+                    ["reason"] = "this session held its one work item and no longer owns it (completed, taken back, released, demoted or reassigned): end it; a new session takes the next item" }.ToJsonString(), false);
             }
             // a Start that found no worker keeps its place: it is offered as soon as a qualified worker connects (it is the person's earlier Start, not a new automatic one)
             foreach (var a in assignments.Values.Where(a => IsQc(a) && !a.Accepted && a.Worker == "").ToList())
