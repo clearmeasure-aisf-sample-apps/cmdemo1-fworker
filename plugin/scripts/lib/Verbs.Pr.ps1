@@ -151,6 +151,11 @@ function Verb_validation_verdict($a) {
         }
     }
     $headSha = ''; if ($pr -gt 0) { try { $headSha = (Get-Pr $pr).head.sha } catch { } }
+    # the head the validator tested (--head-sha): a PASS for another head than the current one is refused; without it (older skills) the head
+    # read here is recorded, and a head that could not be read leaves the verdict without one, which the gateway never merges
+    if ($passed -and (Test-Has $a 'head_sha') -and "$($a.head_sha)") {
+        if (-not $headSha -or "$($a.head_sha)" -ne $headSha) { Reject 10 'head-mismatch' "the PASS was given for $("$($a.head_sha)".Substring(0, [Math]::Min(7, "$($a.head_sha)".Length))), but the head of PR #$pr is $(if ($headSha) { $headSha.Substring(0,7) } else { 'unknown' }); test the current head. Nothing was recorded." }
+    }
     $s.verdict = @{ passed = $passed; pr = $pr; head_sha = $headSha; summary = $summary; at = ConvertTo-Iso (Get-UtcNow); round = $(if (Test-Has $s 'demotions') { [int]$s.demotions } else { 0 }); processed = $false }
     Add-Comment $n "validation verdict for **$($info.column)**: $(if ($passed) {'PASS'} else {'FAIL'}) - $summary"
     $res = @{ ok = $true; id = $n; recorded = $true; passed = $passed; downgraded = $downgraded; column = $info.column }

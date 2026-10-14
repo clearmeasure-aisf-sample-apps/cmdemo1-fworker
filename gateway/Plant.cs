@@ -127,6 +127,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         lock (gate)
         {
             if (!workers.TryGetValue(name, out var w)) workers[name] = w = new WorkerInfo { Name = name };
+            w.Missed = 0; w.CoolUntil = DateTime.MinValue;   // a (re)registration answers: offers lapsed while the gateway or the session was away do not count
             w.Type = type; w.Caps = new(caps); w.Capacity = capOverride.TryGetValue(name, out var capSet) ? capSet : Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
             w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = false;

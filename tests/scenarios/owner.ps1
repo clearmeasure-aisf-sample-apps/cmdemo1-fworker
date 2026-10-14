@@ -631,3 +631,40 @@ $OwnerScenarios['offers: a session that let two offers in a row lapse is not off
     Check 'and the new item is offered to it' (Wait-Until -Seconds 30 { (Get-Assigned 'cool1' $x3).Count -gt 0 })
     Stop-OwnerClient 'cool1'
 }
+
+$OwnerScenarios['pass-merge: a branch behind its base is brought up to date by the gateway, its merge commit is verified and merged'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; behind = 1 } | Out-Null
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'merged on the gateway''s update commit, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
+    Check 'the verdict now names the update commit' ((Pm-State $x.n).verdict.head_sha -eq (Get-FakePr $x.pr).sha -and -not (Pm-State $x.n).verdict.ContainsKey('updated_from'))
+}
+
+$OwnerScenarios['pass-merge: a push that lands while the gateway''s update of the branch is still pending is not merged: demoted (stale-head)'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; behind = 1; updateNoop = $true } | Out-Null     # GitHub accepts the update and has not made it yet
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'the verdict waits for the update' ($v.merge.outcome -eq 'waiting' -and -not (Get-FakePr $x.pr).merged) ($v | ConvertTo-Json -Compress -Depth 5)
+    Fake 'push-branch' @{ branch = "factory-worker/$($x.n)-development"; files = @('docs/trial.md', 'docs/sneak.md'); profile = 'green' } | Out-Null
+    Check 'the sweep sends it back to Development' (Wait-Until -Seconds 40 { (Get-FakeIssue $x.n).column -eq 'Development' })
+    Check 'the pushed head is not merged' (-not (Get-FakePr $x.pr).merged)
+}
+
+$OwnerScenarios['pass-merge: a PASS for a head other than the current one is refused, and a verdict without a head is never merged by the gateway'] = {
+    $x = Pm-ToValidation
+    $r = F 'w1' @('claim-item', '--item', $x.n, '--column', 'Functional Testing'); CheckExit 'FT claim' $r 0
+    $rv = F 'w1' @('record-review', '--item', $x.n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "hs$($x.n).md" "ok`nREVIEW: COMPLETE"))
+    $bad = F 'w1' @('validation-verdict', '--item', $x.n, '--passed', 'true', '--summary-file', (TmpFile "hsv$($x.n).md" 'ok'), '--pr', $x.pr, '--review-ref', $rv.review_ref, '--head-sha', ('0' * 40))
+    Check 'another head: exit 10 head-mismatch, nothing recorded' ($bad.exit -eq 10 -and $bad.code -eq 'head-mismatch' -and -not (Pm-State $x.n).ContainsKey('verdict')) ($bad | ConvertTo-Json -Compress)
+    $ok = F 'w1' @('validation-verdict', '--item', $x.n, '--passed', 'true', '--summary-file', (TmpFile "hsv2$($x.n).md" 'ok'), '--pr', $x.pr, '--review-ref', $rv.review_ref, '--head-sha', (Get-FakePr $x.pr).sha)
+    Check 'the tested head: merged' ($ok.exit -eq 0 -and $ok.merge.outcome -eq 'merged') ($ok | ConvertTo-Json -Compress -Depth 4)
+    $y = Pm-ToValidation
+    $q = Pm-QuietPass $y; CheckExit 'a PASS recorded quietly' $q 0
+    # a verdict recorded before this change, or whose head GitHub could not tell: the head is missing
+    $st = Pm-State $y.n; $cm = @((Get-FakeIssue $y.n).comments | Where-Object { "$($_.body)".StartsWith('<!-- factory-state:') })[0]
+    $st.verdict.Remove('head_sha'); $json = $st | ConvertTo-Json -Depth 12
+    $nb = "$($cm.body)" -replace '(?s)```json.*```', "``````json`n$json`n``````"
+    Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($cm.id)" -Method PATCH -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body (@{ body = $nb } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+    Check 'the gateway parks it instead of merging (verdict-head-unknown)' (Wait-Until -Seconds 40 { $ps0 = Pm-State $y.n; (Pv $ps0 'park') -and "$($ps0.park.reason)" -eq 'pass-unmerged' })
+    Check 'not merged' (-not (Get-FakePr $y.pr).merged)
+}

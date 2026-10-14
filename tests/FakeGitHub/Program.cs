@@ -35,7 +35,7 @@ app.Run();
 
 sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow; }
 sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
-sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft; public List<Comment> Comments = new(); }
+sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public List<Comment> Comments = new(); }
 sealed record Redirect(string To);
 sealed record PlainText(string Text);
 // App "github-actions": the check run is a job of a workflow run (its id is the job id), with steps, a log and the artifacts of the run.
@@ -66,6 +66,7 @@ sealed class World
     long nextArtifact = 1;
     readonly HashSet<string> labelNames = new() { "factory worker", "AI Factory", "Auto Merge", "video", "Demo", "Ready To Move", "Needs Human Review" };
     string masterSha = Sha("master0");
+    readonly Dictionary<string, List<string>> parents = new();   // commits/{sha}: the parents of the branch commits the fake made
     int nextNumber = 1, nextComment = 1000, nextCheck = 1, nextPr = 1;
     int healthStatus = 200;
     bool masterRed; double prodDelay = 0; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold;
@@ -200,7 +201,9 @@ sealed class World
                     return (200, new JsonArray(pr.Reviews.Select(r => (JsonNode)J(("id", r.Id), ("state", r.State), ("commit_id", r.Commit), ("user", J(("login", r.User))), ("body", r.Body))).ToArray()));
                 case "update-branch":
                     if (pr.Conflict) return (422, "{\"message\":\"merge conflict between base and head\"}");
-                    pr.Behind = 0; pr.Sha = NewSha(); ApplyProfile(pr, pr.Sha); return (202, "{\"message\":\"Updating pull request branch.\"}");
+                    if (pr.UpdateNoop) return (202, "{\"message\":\"Updating pull request branch.\"}");   // accepted, not done yet
+                    { var old = pr.Sha; pr.Behind = 0; pr.Sha = NewSha(); parents[pr.Sha] = new() { old, History()[^1] }; ApplyProfile(pr, pr.Sha); }
+                    return (202, "{\"message\":\"Updating pull request branch.\"}");
                 case "merge": return Merge(pr, b);
                 default:
                     if (method == "PATCH")
@@ -210,6 +213,11 @@ sealed class World
                     }
                     return (200, PrJson(pr, true));
             }
+        }
+        if ((m = Regex.Match(path, $"^{root}/commits/([0-9a-f]+)$")).Success)
+        {
+            var ps = parents.TryGetValue(m.Groups[1].Value, out var known) ? known : new List<string> { History()[^1] };
+            return (200, J(("sha", m.Groups[1].Value), ("parents", new JsonArray(ps.Select(p => (JsonNode)J(("sha", p))).ToArray()))));
         }
         if ((m = Regex.Match(path, $"^{root}/commits/([0-9a-f]+)/check-runs$")).Success)
         {
@@ -257,6 +265,11 @@ sealed class World
             return (201, null);
         }
         if (Regex.IsMatch(path, $"^{root}/releases/tags/demo-\\d+$")) return (404, "{\"message\":\"Not Found\"}");
+        if ((m = Regex.Match(path, $"^{root}/compare/{Master}\\.\\.\\.([0-9a-f]+)$")).Success)
+        {   // the base branch against one commit: identical, behind (an older commit of the base branch) or ahead
+            var h = History(); var x = m.Groups[1].Value;
+            return (200, J(("status", x == h[^1] ? "identical" : h.Contains(x) ? "behind" : "ahead")));
+        }
         if (Regex.IsMatch(path, $"^{root}/compare/")) return (200, J(("status", "ahead")));
         return (404, "{\"message\":\"fake has no route " + method + " " + path + "\"}");
     }
@@ -409,6 +422,7 @@ sealed class World
                 }
                 var files = objs.Select(o => o["filename"]!.ToString()).ToList();
                 var sha = NewSha(); branches[br] = (sha, files, objs);
+                { var prev = prs.Values.FirstOrDefault(x => x.Ref == br && x.Open); parents[sha] = new() { prev?.Sha ?? History()[^1] }; }
                 var existing = prs.Values.FirstOrDefault(x => x.Ref == br && x.Open);
                 var prof = b["profile"]?.ToString() ?? "green"; var dly = b["delaySeconds"]?.GetValue<double>() ?? 0; branchProfile[br] = (prof, dly);
                 if (existing != null) { existing.Sha = sha; existing.Files = files; existing.FileObjs = objs; existing.Profile = prof; existing.DelaySeconds = dly; ApplyProfile(existing, sha); }
@@ -424,6 +438,7 @@ sealed class World
                 if (b["fork"] != null) pr.Fork = b["fork"]!.GetValue<bool>();
                 if (b["draft"] != null) pr.Draft = b["draft"]!.GetValue<bool>();
                 if (b["merged"] != null) { pr.Merged = b["merged"]!.GetValue<bool>(); if (pr.Merged) { pr.Open = false; pr.MergeSha ??= NewSha(); } }
+                if (b["updateNoop"] != null) pr.UpdateNoop = b["updateNoop"]!.GetValue<bool>();
                 if (b["conflict"] != null) pr.Conflict = b["conflict"]!.GetValue<bool>();
                 if (b["mergeableNullReads"] != null) pr.MergeableNullReads = b["mergeableNullReads"]!.GetValue<int>();
                 if (b["delaySeconds"] != null) { pr.DelaySeconds = b["delaySeconds"]!.GetValue<double>(); ApplyProfile(pr, pr.Sha); }

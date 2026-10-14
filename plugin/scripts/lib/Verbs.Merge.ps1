@@ -9,11 +9,25 @@
 
 function Test-GatewayMerge { $c = Get-Cfg; return (-not (Test-Has $c 'gatewayMerge')) -or [bool]$c.gatewayMerge }
 
+# Is $Head the merge commit GitHub's update-branch made from the verdict head? Exactly two parents, the first the verdict head, the second the
+# base branch head or an ancestor of it. Anything else (a push by a worker or a person, a rebase, a racing commit) is not covered by the verdict.
+function Test-GatewayUpdateHead([string]$VerdictSha, [string]$Head) {
+    $c = Get-Cfg
+    $cm = Invoke-Gh -Path "$(Get-RepoPath)/commits/$Head" -Allow 404, 422
+    if ($cm -is [hashtable] -and $cm.ContainsKey('status')) { return $false }
+    $ps = @($cm.parents | ForEach-Object { "$($_.sha)" })
+    if ($ps.Count -ne 2 -or $ps[0] -ne $VerdictSha) { return $false }
+    $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($c.defaultBranch)...$($ps[1])" -Allow 404, 422
+    if ($cmp -is [hashtable] -and $cmp.ContainsKey('status')) { return $false }
+    return "$($cmp.status)" -in 'identical', 'behind'
+}
+
 function Get-MergeWaitText([string]$Code) {
     switch ($Code) {
         'checks-pending' { return 'its required checks are still running' }
         'branch-updated' { return 'its branch was behind the base branch and has been brought up to date; the checks of the new head run now' }
         'mergeability-unknown' { return 'GitHub has not yet said whether it can be merged' }
+        'verdict-head-unknown' { return 'the verdict does not name the head it was given for' }
         'merge-queue' { return 'the merge queue is full (an earlier merge is still waiting for its release candidate)' }
         default { return $Code }
     }
@@ -108,8 +122,14 @@ function Verb_merge($a, [switch]$Gateway) {
     # verdict voids it and the item goes back to Development (under 'peer-approved' the approval of the current head is the same rule). The one
     # head that is accepted without a new verdict is the one this verb made itself when it brought the branch up to date with its base.
     $vsha = if (Test-Has $s.verdict 'head_sha') { "$($s.verdict.head_sha)" } else { '' }
+    # fail closed: the gateway never merges a PASS that does not say which head it covers
+    if ($Gateway -and -not $vsha) { return & $park 'pass-unmerged' "PR #$prNum has a PASS verdict that does not name the head it was given for (verdict-head-unknown); the gateway does not merge it. Parked for a human." }
     if ($c.mergePolicy -eq 'auto' -and $vsha -and $vsha -ne "$($pr.head.sha)") {
-        if ((Test-Has $s.verdict 'updated_from') -and "$($s.verdict.updated_from)" -eq $vsha) { $s.verdict.head_sha = "$($pr.head.sha)"; $s.verdict.Remove('updated_from'); Save-State $n $st }
+        # the one head accepted without a new verdict: the merge commit of the gateway's own update-branch, verified on GitHub (the marker is
+        # cleared once the check has run, pass or fail, so it can never vouch for a later push)
+        $fromUpdate = (Test-Has $s.verdict 'updated_from') -and "$($s.verdict.updated_from)" -eq $vsha
+        if ($fromUpdate) { $s.verdict.Remove('updated_from') }
+        if ($fromUpdate -and (Test-GatewayUpdateHead $vsha "$($pr.head.sha)")) { $s.verdict.head_sha = "$($pr.head.sha)"; Save-State $n $st }
         else { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict (verdict for $($vsha.Substring(0, [Math]::Min(7, $vsha.Length))), head now $($pr.head.sha.Substring(0,7))); the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
     }
     $end = (Get-Date).AddSeconds($(if ($Gateway) { [Math]::Min([double]$t.mergeabilityWaitSeconds, 12) } else { $t.mergeabilityWaitSeconds }))
@@ -137,7 +157,11 @@ function Verb_merge($a, [switch]$Gateway) {
                 $u = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/update-branch" -Body @{ expected_head_sha = $pr.head.sha } -Allow 202, 422, 409
                 if ($u -is [hashtable] -and $u.ContainsKey('status') -and $u.status -ne 202) { $d = Invoke-Demote $n $info $st "could not update PR #${prNum}: $($u.body.message)" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
                 $pr = Wait-HeadChange $prNum $pr.head.sha $(if ($Gateway) { [Math]::Min([double]$t.updatedHeadWaitSeconds, 12) } else { $t.updatedHeadWaitSeconds })
-                if ("$($pr.head.sha)" -ne "$($s.verdict.updated_from)") { $s.verdict.head_sha = "$($pr.head.sha)"; $s.verdict.Remove('updated_from'); Save-State $n $st }
+                if ("$($pr.head.sha)" -ne "$($s.verdict.updated_from)") {
+                    $ok = Test-GatewayUpdateHead "$($s.verdict.updated_from)" "$($pr.head.sha)"; $s.verdict.Remove('updated_from')
+                    if (-not $ok) { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict to a commit that is not the gateway's update with the base branch; the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
+                    $s.verdict.head_sha = "$($pr.head.sha)"; Save-State $n $st
+                }
                 if ($Gateway) { return & $wait 'branch-updated' }
                 $end = (Get-Date).AddSeconds($t.preMergeChecksWaitSeconds)
                 while ($true) { $chk = Get-ChecksFor $pr.head.sha; if ($chk.status -ne 'pending' -or (Get-Date) -gt $end) { break }; Start-Sleep -Seconds $t.preMergeChecksPollSeconds }
