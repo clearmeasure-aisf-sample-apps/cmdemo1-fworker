@@ -165,7 +165,7 @@ s. **Done (2026-10-13): the standing back-merge trigger** (`docs/design/plant-ma
 t. **Done (2026-10-14): SSE keepalive** (enhancement 11). Every event stream (worker, supervisor, operator session, the operator's broadcast)
    writes a `: ping` comment every 25 s, busy or idle (`FACTORY_SSE_PING_SECONDS`); before, a ping came only after 15 s without an event.
    The stream clients (`Client.Subscribe.ps1`, `Client.Own.ps1`) ignore comment lines and print `stream.error` only from the third failed
-   attempt in a row (the drop and 2 failed reconnects). Open: `Client.Operator.ps1` (code-owner path) still reports the first failure.
+   attempt in a row (after a drop by error: the drop and 2 failed reconnects; after a clean end of the stream: 3 failed reconnects). Open: `Client.Operator.ps1` (code-owner path) still reports the first failure.
 u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, `gateway/PlantSnapshot.cs`, `plugin/scripts/lib/PlantSnapshot.ps1`).
    At SIGTERM the gateway writes its offers, assignments (not QC environments), owners and leases as the message of a parentless commit held by
    `refs/factory/<instance>/plant-snapshot`; the next start reads it back before its first sweep and restores it (an unanswered offer gets a fresh
