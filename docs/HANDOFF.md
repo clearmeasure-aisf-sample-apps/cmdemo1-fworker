@@ -167,6 +167,13 @@ f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirm
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
 j. **pwsh crashes (exit 134 or 139) under machine load in the test suites.** Not a product answer, but it costs reruns; find out whether
    it is memory, the runtime or the long-lived client host.
+t. **Done (2026-10-14): the Release Queue age** (enhancement 9). The sweep lists the items waiting in the Release Queue (`release_queue`:
+   item, release, since); the patrol digest carries `release-queue-aged` when the oldest waits over `timing.mgrReleaseQueueMinutes` (60) or
+   `manager.digest.releaseQueueCount` (3) items wait; the operator stream gets one `release.ready` line per release whose items changed
+   ("ready to promote <release> to UAT: items ..."); the dashboard's "Request promotion to UAT" button (`POST /api/v1/release-queue/
+   promotion-request`, operator token only) records the request in memory and announces it (`release.promotion-requested`). Nothing in
+   the gateway promotes: uat and prod stay with the owner and the cmdemo1 session. Open: the supervisor's skill (owner review) does not
+   yet say what to do with `release-queue-aged`; not yet seen live on tdd.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
 m. **The sweep still saves a state it read without the item lock in two places** of `Verb_sync_board` (Verbs.Sweep.ps1): the
    awaiting-checks path (`Complete-AwaitingChecks`) and the settle path (`Invoke-Settle`, which reads fresh but holds no lock). They were

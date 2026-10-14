@@ -2482,7 +2482,8 @@ function Mgr-DigestProblems($D) {
     $fields = @{ 'stalled' = 'worker', 'item', 'column', 'idleMinutes', 'leaseLeftMinutes'; 'disconnected-owner' = 'worker', 'item', 'column', 'goneMinutes', 'leaseLeftMinutes'; 'late-question' = 'id', 'worker', 'item', 'ageMinutes'
         'waiting' = 'item', 'code', 'waitingMinutes'; 'refusals' = 'item', 'code', 'count', 'windowMinutes'; 'parked' = 'item', 'code', 'ageMinutes'
         'item-quiet' = 'worker', 'item', 'column', 'quietMinutes'; 'last-review-round' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'; 'review-rounds-exhausted' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'
-        'worker-blocked-note' = 'worker', 'item', 'id', 'count', 'ageMinutes'; 'verb-errors' = 'worker', 'item', 'count', 'byCode', 'windowMinutes'; 'merge-refused' = 'item', 'roundTrip', 'ageMinutes'; 'gateway-restarted' = 'reconnected', 'notReconnected', 'upMinutes' }
+        'worker-blocked-note' = 'worker', 'item', 'id', 'count', 'ageMinutes'; 'verb-errors' = 'worker', 'item', 'count', 'byCode', 'windowMinutes'; 'merge-refused' = 'item', 'roundTrip', 'ageMinutes'; 'gateway-restarted' = 'reconnected', 'notReconnected', 'upMinutes'
+        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested' }
     foreach ($e in @($D.attention)) {
         if (-not $fields.ContainsKey("$($e.kind)")) { $bad += "kind $($e.kind)"; continue }
         foreach ($k in $e.Keys) {
@@ -2490,7 +2491,7 @@ function Mgr-DigestProblems($D) {
             $v = $e[$k]
             $ok = switch ($k) {
                 'kind' { $true } 'worker' { "$v" -cmatch $nameRx } 'column' { "$v" -eq '' -or "$v" -cmatch $colRx } 'code' { "$v" -cmatch $codeRx } 'id' { "$v" -match '^m-[0-9a-f]{8}-\d{4,}$' }
-                'new' { $v -is [bool] } 'reminder' { $v -eq $true } 'bucket' { $v -in 1, 2, 3 }
+                'new' { $v -is [bool] } 'promotionRequested' { $v -is [bool] } 'reminder' { $v -eq $true } 'bucket' { $v -in 1, 2, 3 }
                 'byCode' { $v -is [System.Collections.IDictionary] -and @($v.Keys).Count -in 1..4 -and @($v.Keys | Where-Object { "$_" -cnotmatch $codeRx -or -not (& $int $v[$_]) }).Count -eq 0 } default { $null -eq $v -or (& $int $v) }
             }
             if (-not $ok) { $bad += "$($e.kind).$k=$v" }
@@ -4339,5 +4340,65 @@ $('kworker').onchange();R.back=snap();
         Check 'each of the three prompts minted one credential with the token of the one Connect in the Authorization header, and nothing asked for it again' ($posts.Count -eq 3 -and @($posts | Where-Object { $_.auth -eq 'Bearer test-token' -and $_.method -eq 'POST' }).Count -eq 3 -and ($posts[2].path -like '*/workers/supervisor/credential?role=manager') -and @($flow.calls | Where-Object { $_.path -eq 'PROMPT' -or $_.path -match 'test-token' }).Count -eq 0) (($flow.calls | ForEach-Object { "$($_.method) $($_.path)" }) -join ' ')
         $in = Msg-Json (Msg-Api 'GET' '/api/v1/inbox?after=0' (Msg-Token 'alice'))
         Check 'the reply waits for the sender as an operator note that names the note it answers' (@($in.messages | Where-Object { $_.fromKind -eq 'operator' -and $_.inReplyTo -eq $note.id -and $_.text -eq 'Seen, thank you.' }).Count -eq 1) ($in | ConvertTo-Json -Compress -Depth 5)
+    }
+}
+
+# Enhancement 9: the Release Queue age in the digest, the operator line per release, and the promotion request that only records and announces.
+function Rq-Events($St, [string]$Event) { $St.events | Where-Object { $_.data.event -eq $Event } | ForEach-Object { $_.data } }
+$ManagerScenarios['mgr: the Release Queue is reported when it ages or grows, each release is announced to the operator once, and a promotion request is only recorded'] = {
+    $cfg = Mgr-PatrolConfig 'instance.patrol-rq.json' { param($c) $c.operator = @{ enabled = $true; allowedNames = @('operator-session'); tokenGeneration = 1; requiredModelTier = 'premium'; requiredEffort = 'low'; maxSelfMergesPerDay = 2 } }
+    Msg-OnGateway (Msg-Merge $script:MgrPatrol @{ FACTORY_CONFIG = $cfg }) {
+        param($g)
+        $ago = { param($m) (Get-Date).ToUniversalTime().AddMinutes(-$m).ToString('o') }
+        $rq = { param($q) [void](Msg-Post '/api/v1/_test/release-queue' @{ queue = @($q) }) }
+        $op = Msg-Open 'name=operator-session&operator=1&model=claude-opus-5-5&effort=low' "o1.operator-session.1.$(Msg-Mac 'operator:operator-session:1')"
+        Msg-Read $op 4 { param($e) @($e | Where-Object { $_.data.event -eq 'operator.registered' }).Count -gt 0 }
+        try {
+            Check 'the operator session is connected for the release lines' ($op.status -eq 200) "$($op.status) $($op.body)"
+            & $rq @(@{ item = 9901; release = '1.0.50'; since = (& $ago 30) })
+            Check 'one item waiting 30 min: no release-queue-aged' ($null -eq (Mgr-Att (Mgr-Digest) 'release-queue-aged' 9901)) ((Mgr-Digest) | ConvertTo-Json -Compress -Depth 6)
+            Msg-Read $op 4 { param($e) @($e | Where-Object { $_.data.event -eq 'release.ready' }).Count -gt 0 }
+            $ready = @(Rq-Events $op 'release.ready')
+            Check 'the operator stream gets one line: ready to promote 1.0.50 to UAT with its items' ($ready.Count -eq 1 -and $ready[0].release -eq '1.0.50' -and $ready[0].line -eq 'ready to promote 1.0.50 to UAT: items #9901' -and @($ready[0].items) -contains 9901) ($ready | ConvertTo-Json -Compress -Depth 5)
+            & $rq @(@{ item = 9901; release = '1.0.50'; since = (& $ago 30) })
+            Msg-Read $op 2
+            Check 'the same queue again is not announced again' (@(Rq-Events $op 'release.ready').Count -eq 1)
+            & $rq @(@{ item = 9901; release = '1.0.50'; since = (& $ago 61) })
+            $e = Mgr-Att (Mgr-Digest) 'release-queue-aged' 9901
+            Check 'the oldest item over 60 min: release-queue-aged with the count, the oldest item and its minutes' ($e -and $e.bucket -eq 1 -and $e.count -eq 1 -and $e.oldestMinutes -ge 60 -and $e.releases -eq 1 -and $e.promotionRequested -eq $false) ($e | ConvertTo-Json -Compress -Depth 6)
+            & $rq @(@{ item = 9902; release = '1.0.51'; since = (& $ago 5) }, @{ item = 9903; release = '1.0.51'; since = (& $ago 4) }, @{ item = 9904; release = '1.0.51'; since = (& $ago 3) })
+            $e = Mgr-Att (Mgr-Digest) 'release-queue-aged' 9902
+            Check 'three young items: release-queue-aged by the count, the oldest of them named' ($e -and $e.bucket -eq 1 -and $e.count -eq 3 -and $e.oldestMinutes -lt 60) ($e | ConvertTo-Json -Compress -Depth 6)
+            Msg-Read $op 4 { param($e) @($e | Where-Object { $_.data.event -eq 'release.ready' -and $_.data.release -eq '1.0.51' }).Count -gt 0 }
+            $r51 = Msg-First @(Rq-Events $op 'release.ready' | Where-Object { $_.release -eq '1.0.51' })
+            Check 'the new release is announced with all its items' ($r51 -and $r51.line -eq 'ready to promote 1.0.51 to UAT: items #9902, #9903, #9904') ($r51 | ConvertTo-Json -Compress -Depth 5)
+            & $rq @(@{ item = 9902; release = '1.0.51'; since = (& $ago 250) }, @{ item = 9903; release = '1.0.51'; since = (& $ago 4) }, @{ item = 9904; release = '1.0.51'; since = (& $ago 3) })
+            Check 'an item waiting more than four times the limit is the worst bucket' ((Mgr-Att (Mgr-Digest) 'release-queue-aged' 9902).bucket -eq 3)
+            # the button: operator token only, records and announces, idempotent, and never promotes
+            $w = Msg-Post '/api/v1/release-queue/promotion-request' @{ release = '1.0.51' } (Msg-Token 'alice')
+            $s = Msg-Post '/api/v1/release-queue/promotion-request' @{ release = '1.0.51' } (Msg-Supervisor)
+            Check 'a worker and the supervisor cannot ask for a promotion' ($w.status -eq 403 -and $s.status -eq 403) "$($w.status) $($s.status)"
+            $no = Msg-Post '/api/v1/release-queue/promotion-request' @{ release = '9.9.9' }
+            $bad = Msg-Post '/api/v1/release-queue/promotion-request' @{ release = 'uat; prod' }
+            Check 'a release that does not wait is refused, and a release that is no version is a usage error' ($no.status -eq 409 -and $no.code -eq 'release-not-queued' -and $bad.status -eq 400) "$($no.status) $($no.code) $($bad.status)"
+            $p = Msg-Post '/api/v1/release-queue/promotion-request' @{ release = '1.0.51' }
+            Check 'the operator''s request is recorded for uat, with the items, and promotes nothing' ($p.status -eq 200 -and $p.release -eq '1.0.51' -and $p.environment -eq 'uat' -and $p.promoted -eq $false -and $p.already -eq $false -and @($p.items).Count -eq 3) ($p | ConvertTo-Json -Compress -Depth 5)
+            $p2 = Msg-Post '/api/v1/release-queue/promotion-request' @{}
+            Check 'without a release it is the oldest waiting one; asking again is the same request' ($p2.status -eq 200 -and $p2.release -eq '1.0.51' -and $p2.already -eq $true) ($p2 | ConvertTo-Json -Compress -Depth 5)
+            Msg-Read $op 4 { param($e) @($e | Where-Object { $_.data.event -eq 'release.promotion-requested' }).Count -gt 0 }
+            Msg-Read $op 1
+            $pr = @(Rq-Events $op 'release.promotion-requested')
+            Check 'the request is announced once on the operator stream, saying that it is recorded only' ($pr.Count -eq 1 -and $pr[0].release -eq '1.0.51' -and $pr[0].by -eq 'operator' -and $pr[0].line -match 'recorded only' -and $pr[0].line -match '#9902, #9903, #9904') ($pr | ConvertTo-Json -Compress -Depth 5)
+            Check 'the digest says that a promotion was requested' ((Mgr-Att (Mgr-Digest) 'release-queue-aged' 9902).promotionRequested -eq $true)
+            $st = (Msg-Admin '/api/v1/status').releaseQueue
+            Check '/status lists the queue oldest first and the request' (@($st.items).Count -eq 3 -and $st.items[0].item -eq 9902 -and @($st.requests).Count -eq 1 -and $st.requests[0].release -eq '1.0.51') ($st | ConvertTo-Json -Compress -Depth 5)
+            Check 'the gateway ran no rule script and no deployment for the request' ((Mgr-Log $g) -match 'promotion-requested' -and (Mgr-Log $g) -notmatch '"verb":"(deploy|promote)') ''
+            $run = Msg-PageRun
+            if ($run) { Check 'the dashboard shows the queue and the request' ("$($run.error)" -eq '' -and "$($run.els.rqtext.text)" -match '3 item\(s\) waiting' -and "$($run.els.rqrows.html)" -match 'promotion requested by operator') "$($run.error) $($run.els.rqtext.text)" }
+            & $rq @()
+            $dg = Mgr-Digest
+            Check 'an empty queue clears the entry and the request' ($null -eq (Msg-First @($dg.attention | Where-Object { $_.kind -eq 'release-queue-aged' })) -and @((Msg-Admin '/api/v1/status').releaseQueue.requests).Count -eq 0) ($dg | ConvertTo-Json -Compress -Depth 6)
+            Check 'every digest fits the schema' (@(Mgr-DigestProblems $dg).Count -eq 0) ((Mgr-DigestProblems $dg) -join '; ')
+        } finally { Msg-Close $op }
     }
 }

@@ -219,6 +219,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (messaging.On) foreach (var kv in MessagingBlocks(false).ToList()) o[kv.Key] = kv.Value?.DeepClone();
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
+    if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // the switch of the gateway's own back-merges (baseUpdate.autoUpdateBranch) at run time, operator token only; until the next restart
@@ -273,7 +274,21 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (messaging.On) foreach (var kv in MessagingBlocks(true).ToList()) o[kv.Key] = kv.Value?.DeepClone();
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
+    if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     return Results.Text(o.ToJsonString(), "application/json");
+});
+// POST /release-queue/promotion-request { "release": "1.2.3" } (enhancement 9): the dashboard's button. Operator token only. It records the request
+// and announces it on the operator stream; it never promotes: uat and prod belong to the owner and the cmdemo1 session.
+app.MapPost("/api/v1/release-queue/promotion-request", async (HttpContext c) =>
+{
+    if (!ownerMode) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
+    if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator asks for a promotion", 30);
+    var (text, tooLarge) = await ReadBody(c, 4096);
+    JsonObject body; try { body = tooLarge || string.IsNullOrWhiteSpace(text) ? new JsonObject() : Messenger.ParseObject(text); } catch { return Fail(400, "usage", "the body is { \"release\": \"<version>\" } or empty", 2); }
+    var (status, res) = plant.RequestPromotion(body["release"]?.ToString(), "operator");
+    if (status == 200 && res["already"]?.GetValue<bool>() == false)
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["message"] = "promotion-requested", ["release"] = res["release"]!.DeepClone(), ["environment"] = "uat", ["by"] = By(c) }.ToJsonString());
+    return Results.Text(res.ToJsonString(), "application/json", Encoding.UTF8, status);
 });
 // A worker credential is issued here once per session name; the operator pastes it into the connect prompt. It is never stored by the gateway.
 // role=manager issues the supervisor's credential (worker-messaging.md 4.6): only while manager.enabled, and only for a name in manager.allowedNames.
@@ -1013,6 +1028,15 @@ if (messaging.Enabled && messaging.TestHooks)
         return Results.Json(new { ok = true, exit = 0 });
     });
 
+    // one sweep's `release_queue`, as the Sweeper hands it to the plant: { "queue": [{ "item": N, "release": "1.0.N", "since": "<iso>" }] }
+    app.MapPost("/api/v1/_test/release-queue", async (HttpContext ctx) =>
+    {
+        var (b, err) = await SeamBody(ctx, "the body is a JSON object with queue");
+        if (b == null) return err!;
+        plant.SetReleaseQueue(b["queue"]?.DeepClone() as JsonArray ?? new JsonArray());
+        return Results.Json(new { ok = true, exit = 0 });
+    });
+
     // a gate refusal of one code on one item, as the /verbs handler records one of a verb that answered exit 10 or 11 (the digest's refusals)
     app.MapPost("/api/v1/_test/refusal", async (HttpContext ctx) =>
     {
@@ -1306,6 +1330,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                         foreach (var x in j["settling"] as JsonArray ?? new JsonArray()) if (x is JsonValue sv && sv.TryGetValue<int>(out var si)) keep.Add(si);
                         foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
                         plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep);
+                        plant.SetReleaseQueue(j["release_queue"] as JsonArray);
                         try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
                         foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
                             if (t is JsonObject to && to["item"] is JsonNode ti)
@@ -1378,6 +1403,8 @@ pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monos
 <div class="row"><label>Session <input id="logworker" size="14" placeholder="any"></label><label>Item <input id="logitem" size="6" placeholder="any"></label><label>Show <select id="logring"><option value="">messages</option><option value="refused">refusals and flags</option></select></label></div>
 <div class="wrap"><table><thead><tr><th>Time</th><th>From -&gt; to</th><th>Role</th><th>Type</th><th>Item</th><th>Size</th><th>State</th><th>Text</th></tr></thead><tbody id="logrows"><tr><td colspan="8" class="mut">none</td></tr></tbody></table></div></details></div>
 <h2>Assignments</h2><div id="basecnt" class="mut"></div><table><tbody id="asg"><tr><td class="mut">none</td></tr></tbody></table>
+<div id="rqsec" hidden><h2>Release Queue</h2><div id="rqtext" class="mut"></div><table><tbody id="rqrows"><tr><td class="mut">none</td></tr></tbody></table>
+<div class="row"><button id="rqreq">Request promotion to UAT</button><span class="mut">Records and announces the request on the operator stream only. The owner and the cmdemo1 session promote to uat and prod.</span></div></div>
 <div id="qcsec" hidden><h2>Waiting for PR QC</h2>
 <div class="wrap"><table><thead><tr><th>PR</th><th>Title</th><th>Item</th><th>Head</th><th>Author</th><th>Age</th><th>QC state</th><th>Environment</th><th>Worker</th><th>Actions</th></tr></thead><tbody id="qcrows"><tr><td colspan="10" class="mut">none</td></tr></tbody></table></div></div>
 <h2>Connect a new session</h2>
@@ -1599,6 +1626,12 @@ if(rb){const k=rb.dataset.q,id=k.slice(2);if(rb.dataset.a==='reply'){const text=
 if(!await sendNote(rb.dataset.n,text,id))return;delete drafts[k]}
 if(id)await act('/api/v1/messages/read',{ids:[id]});if(document.activeElement)document.activeElement.blur();refresh();return}
 const b=e.target.closest('button[data-a="mute"]');if(!b||!confirm('Mute '+b.dataset.n+'? It can still ask the supervisor.'))return;say(await act('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/messaging?value=mute'));refresh()};
+// The Release Queue: the waiting items, oldest first, and the button that only records a promotion request (the gateway never promotes).
+function refreshRq(q){const items=q&&q.items||[],reqs=q&&q.requests||[];$('rqsec').hidden=!q;if(!q)return;const req={};reqs.forEach(r=>req[r.release]=r);
+$('rqtext').textContent=items.length?`${items.length} item(s) waiting; the oldest for ${items[0].minutes} min (aged after ${q.agedMinutes} min or at ${q.agedCount} items)`:'No item waits for production.';
+$('rqrows').innerHTML=items.length?items.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.release||'no release')}</td><td>${esc(x.minutes)} min</td><td>${req[x.release]?'promotion requested by '+esc(req[x.release].by):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';
+const first=items.find(x=>x.release);$('rqreq').disabled=!first;$('rqreq').dataset.r=first?first.release:''}
+$('rqreq').onclick=async()=>{const r=$('rqreq').dataset.r;if(!r||!confirm('Record a request to promote '+r+' to UAT? Nothing is deployed: the owner and the cmdemo1 session promote.'))return;const a=await act('/api/v1/release-queue/promotion-request',{release:r});$('msg').textContent=a.status===200?(a.json.already?'already requested: ':'requested: ')+r+' to UAT, recorded only':'refused: '+(a.json.code||a.status);refresh()};
 $('grant').onclick=async()=>{say(await act('/api/v1/supervisor/budget?extra=6'));refresh()};
 $('setpatrol').onclick=async()=>{const v=parseFloat($('patrolmin').value);if(!(v>=5&&v<=240)){$('msg').textContent='patrol interval: 5 to 240 minutes';return}say(await act('/api/v1/supervisor/patrol?minutes='+encodeURIComponent(v)));$('patrolmin').blur();refresh()};
 $('logbox').ontoggle=()=>refresh();
@@ -1606,7 +1639,7 @@ $('logbox').ontoggle=()=>refresh();
 // the token box is hidden; it comes back only when the gateway refuses the token or after Disconnect.
 function showConn(on){$('tokrow').hidden=on;$('conn').hidden=!on}
 // What a token showed is taken off the page when that token goes (Disconnect, or the gateway refused it): nothing of it stays readable.
-function clearData(){hideMessaging();$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;
+function clearData(){hideMessaging();$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;$('rqsec').hidden=true;$('rqrows').innerHTML='<tr><td class="mut">none</td></tr>';$('rqtext').textContent='';
 $('oprows').innerHTML='<tr><td colspan="9" class="mut">Nothing was sent to the operator.</td></tr>';$('qrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('dlog').innerHTML='<tr><td class="mut">none</td></tr>';$('logrows').innerHTML='<tr><td colspan="8" class="mut">none</td></tr>';
 $('qcounts').textContent=$('digest').textContent=$('costtext').textContent='';$('opbadge').hidden=$('qbadge').hidden=true}
 // t: the token this refresh started with. An answer that arrives after Disconnect (or after another token was entered) is dropped, and what the
@@ -1615,7 +1648,7 @@ async function refresh(){if(!tok)return;const t=tok;try{const d=await api('/api/
 const w=info.plant.workers||[];if(info.messaging&&info.messaging.enabled)await refreshMessaging(w);else{hideMessaging();
 $('rows').innerHTML=w.length?groupedRows(w,workerRowHtml,8).html:'<tr><td colspan="8" class="mut">No session has connected yet.</td></tr>'}
 if(tok!==t){if(!tok)clearData();return}
-const a=info.plant.assignments||[];const bu=info.baseUpdate||null,bh=bu&&bu.behind||{};$('basecnt').textContent=bu?`master ${esc((bu.head||'').slice(0,7))}: ${esc(bu.itemsBehind)} owned item(s) behind; ${esc(bu.triggers)} trigger(s), ${esc(bu.eventsSent)} sent, ${esc(bu.gatewayUpdates)} branch(es) updated by the gateway, ${esc(bu.workerBackMerges)} back-merged by workers`:'';$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td><td>${x.kind==='own-item'&&bh[x.item]!=null?(bh[x.item]>0?esc(bh[x.item])+' behind master':'up to date with master'):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
+const a=info.plant.assignments||[];const bu=info.baseUpdate||null,bh=bu&&bu.behind||{};$('basecnt').textContent=bu?`master ${esc((bu.head||'').slice(0,7))}: ${esc(bu.itemsBehind)} owned item(s) behind; ${esc(bu.triggers)} trigger(s), ${esc(bu.eventsSent)} sent, ${esc(bu.gatewayUpdates)} branch(es) updated by the gateway, ${esc(bu.workerBackMerges)} back-merged by workers`:'';$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td><td>${x.kind==='own-item'&&bh[x.item]!=null?(bh[x.item]>0?esc(bh[x.item])+' behind master':'up to date with master'):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';refreshRq(info.releaseQueue);await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
 $('go').onclick=()=>{const v=$('tok').value.trim();if(!v){$('msg').textContent='paste the operator token first';return}tok=v;sessionStorage.setItem('ftok',tok);$('tok').value='';refresh()};
 $('bye').onclick=()=>{tok='';info=null;sessionStorage.removeItem('ftok');$('tok').value='';showConn(false);clearData();$('prompt').value='';$('msg').textContent='Disconnected.'};
 $('rows').onclick=async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.a==='message'){askNote(b.dataset.n,b.dataset.n);return}if(b.dataset.a==='revoke'&&!confirm('Revoke every credential of '+b.dataset.n+'? Its session stops; create a new prompt to connect it again.'))return;if(document.activeElement)document.activeElement.blur();try{await api('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/'+b.dataset.a,'POST');refresh()}catch(x){$('msg').textContent=x.message}};

@@ -152,6 +152,11 @@ $Scenarios = [ordered]@{
     $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
     $q = Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Release Queue' }
     Check 'waits in Release Queue (hold column)' $q "column $((Get-FakeIssue $n).column)"
+    $sw = F 'w1' @('sync-board')
+    $rq = @(@($sw['release_queue']) | Where-Object { $_ -and $_['item'] -eq $n }) | Select-Object -First 1
+    if (@(@($sw['actions']) | Where-Object { $_ -and $_['item'] -eq $n -and $_['result'] -and $_['result']['outcome'] -eq 'done' }).Count -eq 0) {
+        Check 'the sweep lists it in release_queue with its release and since when (the digest''s Release Queue age)' ($rq -and "$($rq['release'])" -match '^\d' -and $null -ne $rq['since']) ($sw | ConvertTo-Json -Compress -Depth 4)
+    }
     $d = Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Done' }
     Check 'Done only after the production deployment succeeded' $d "column $((Get-FakeIssue $n).column)"
     Check 'issue closed' (-not (Get-FakeIssue $n).open)

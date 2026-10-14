@@ -761,6 +761,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             d.OpenQuestions++;
             if (Auth.ValidName(q.From)) d.Questions.Add(new DigestQuestion(q.Id, q.From, q.Item, q.At, (now - q.At).TotalSeconds >= Msg.AnswerSlaSeconds, q.Escalated));
         }
+        ReleaseQueueDigestLocked(d);
         return d;
     }
 
