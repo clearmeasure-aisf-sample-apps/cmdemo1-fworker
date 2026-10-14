@@ -39,6 +39,21 @@ static double AckSeconds(string scriptsDir)
     catch { }
     return 120;
 }
+// plant.oneItemPerSession (docs/launcher.md): FACTORY_ONE_ITEM_PER_SESSION (1 or 0), else the config, else on.
+var oneItemPerSession = OneItemPerSession(scriptsDir);
+static bool OneItemPerSession(string scriptsDir)
+{
+    var e = Environment.GetEnvironmentVariable("FACTORY_ONE_ITEM_PER_SESSION");
+    if (e is "1" or "true") return true;
+    if (e is "0" or "false") return false;
+    try
+    {
+        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
+        if (root?["plant"]?["oneItemPerSession"] is JsonValue v && v.TryGetValue<bool>(out var b)) return b;
+    }
+    catch { }
+    return true;
+}
 if (ownerMode && tokenSecret.Length < 16) throw new InvalidOperationException("FACTORY_TOKEN_SECRET (at least 16 characters) is required in owner mode");
 var qcSettings = QcSettings.Load(scriptsDir, publicUrl, ownerMode);
 var messaging = MessagingSettings.Load(scriptsDir, ownerMode);
@@ -73,7 +88,7 @@ builder.Services.AddSingleton(sp =>
     {
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
-    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations };
+    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession };
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
 builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, publicUrl, tokenSecret));
@@ -629,7 +644,9 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
         ctx.Response.Headers.ContentType = "text/event-stream"; ctx.Response.Headers.CacheControl = "no-cache";
         var (w, ch, replay) = plant.Register(name, type, caps, int.TryParse(ctx.Request.Query["capacity"], out var cap) ? cap : 1, roles, after,
             int.TryParse(ctx.Request.Query["qc_capacity"], out var qcap) ? qcap : 1, ctx.Request.Query["qc_address"].ToString(), ctx.Request.Query["qc_profile"].ToString() is "1" or "true",
-            messagingClient: ctx.Request.Query["messaging"].ToString() == "1", model: model, effort: effort);
+            messagingClient: ctx.Request.Query["messaging"].ToString() == "1", model: model, effort: effort,
+            // a stream opened without a cursor is a new session of this name (a reconnect of the same client sends its last id): one item per session
+            newSession: lastEventId == "");
         var registered = new JsonObject { ["provider"] = "gateway", ["event"] = "worker.registered", ["name"] = name };
         if (messaging.On) { registered["epoch"] = plant.Epoch; registered["messaging"] = messaging.Enabled; }
         // one peers.snapshot per registration (3.2), only for a client that registered with messaging=1 under an allow-listed name
