@@ -197,7 +197,7 @@ if ($verb -eq 'publish-demo') {
     $hd = [byte[]]::new(8); $fs = [IO.File]::OpenRead($file); try { $got = $fs.Read($hd, 0, 8) } finally { $fs.Dispose() }
     if ($got -lt 8 -or [Text.Encoding]::ASCII.GetString($hd, 4, 4) -ne 'ftyp') { Write-Out @{ ok = $false; verb = $verb; code = 'not-mp4'; reason = 'the file is not an MP4 (its header has no ftyp box): convert it, for example ffmpeg -i flow.webm demo.mp4' } 2 }
     try {
-        $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/demo/$([int]$a.item)" -Method POST -InFile $file -ContentType 'video/mp4' -Headers @{ Authorization = "Bearer $callToken" } -SkipHttpErrorCheck -TimeoutSec 660
+        $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/demo/$([int]$a.item)" -Method POST -InFile $file -ContentType 'video/mp4' -Headers @{ Authorization = "Bearer $callToken" } -SkipHttpErrorCheck -TimeoutSec 1260
     } catch { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 30 } 20 }
     $j = $null; try { $j = $resp.Content | ConvertFrom-Json -AsHashtable } catch { }
     if (-not $j) { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)" } $(if ([int]$resp.StatusCode -in 401, 403) { 30 } else { 20 }) }

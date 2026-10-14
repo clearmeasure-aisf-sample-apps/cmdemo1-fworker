@@ -97,6 +97,16 @@ $Scenarios = [ordered]@{
     $r = F 'w1' @('publish-demo', '--item', $n, '--file', (Join-Path $script:Work 'missing.mp4')); CheckExit 'a missing file' $r 2 'no-file'
     $r = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/publish-demo" -Method POST -Body (@{ item = $n; file = '/etc/hostname' } | ConvertTo-Json) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck
     Check 'the verb route does not take a file path' ([int]$r.StatusCode -eq 400 -and ($r.Content | ConvertFrom-Json).code -eq 'use-endpoint') "$([int]$r.StatusCode) $($r.Content)"
+    # three uploads at once: the gateway takes two, the third is refused busy, and the first two complete
+    Fake 'latency' @{ ms = 5000; match = '^POST /_uploads/' } | Out-Null
+    $u = "http://127.0.0.1:$($script:ApiPort)/api/v1/demo/$n"; $f1 = New-TestMp4 'demo-c.mp4' 1024
+    $n2 = New-Item-Fake 'Video two' 'x' ($L + 'video') 'Functional Testing'
+    $jobs = @($n, $n2) | ForEach-Object { $ui = "http://127.0.0.1:$($script:ApiPort)/api/v1/demo/$_"; Start-ThreadJob { Invoke-WebRequest $using:ui -Method POST -InFile $using:f1 -ContentType 'video/mp4' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck } }
+    Start-Sleep -Seconds 2
+    $r3 = Invoke-WebRequest $u -Method POST -InFile $f1 -ContentType 'video/mp4' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck
+    Check 'a third concurrent upload is refused busy' ([int]$r3.StatusCode -eq 429 -and ($r3.Content | ConvertFrom-Json).code -eq 'busy') "$([int]$r3.StatusCode) $($r3.Content)"
+    $done = @($jobs | Wait-Job -Timeout 120 | Receive-Job); Fake 'latency' @{ ms = 0 } | Out-Null
+    Check 'the uploads in progress complete' ($done.Count -eq 2 -and @($done | Where-Object { [int]$_.StatusCode -eq 200 }).Count -eq 2) (($done | ForEach-Object { "$([int]$_.StatusCode)" }) -join ',')
     $rv = F 'w1' @('record-review', '--item', $n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile 'vpr.md' "seen at 00:12`nREVIEW: COMPLETE"))
     $r = F 'w1' @('validation-verdict', '--item', $n, '--passed', 'true', '--summary-file', (TmpFile 'vpv.md' 'criterion 1 at 00:12'), '--pr', $pr, '--review-ref', $rv.review_ref)
     Check 'with the MP4 published the PASS is not downgraded' ((Pv $r 'passed') -eq $true -and (Pv $r 'downgraded') -eq $false) ($r | ConvertTo-Json -Compress)

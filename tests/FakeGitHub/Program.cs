@@ -20,6 +20,7 @@ app.Run(async ctx =>
     // the uploads host of GitHub (a release asset): the body is binary, only its length is kept
     if (path.StartsWith("/_uploads/") && method == "POST")
     {
+        int uw; lock (gate) { uw = world.LatencyFor(method, path, ""); } if (uw > 0) await Task.Delay(uw);
         long len = 0; var buf = new byte[65536]; int k; while ((k = await ctx.Request.Body.ReadAsync(buf)) > 0) len += k;
         (int, string) up; lock (gate) { up = world.UploadAsset(path, query["name"].ToString(), ctx.Request.ContentType ?? "", len, port); }
         ctx.Response.StatusCode = up.Item1; ctx.Response.ContentType = "application/json"; await ctx.Response.WriteAsync(up.Item2); return;

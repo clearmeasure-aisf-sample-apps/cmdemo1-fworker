@@ -435,6 +435,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
 // the rule script as JSON, and Kestrel caps a body at about 30 MB by default. The right to publish goes with the right to record the verdict
 // (validation-verdict of the owner role) or an explicit publish-demo in the role's verb list. Not held under the plant's gate; bounded by a timeout.
 const long DemoMaxBytes = 100L * 1024 * 1024;
+// at most two uploads at once (disk: 2 x 100 MB, two runner slots); a third is refused busy, not queued
+var demoGate = new SemaphoreSlim(2, 2);
 app.MapPost("/api/v1/demo/{item:int}", async (int item, HttpContext ctx) =>
 {
     IResult No(int status, string code, string reason, int exit) => Results.Text(JsonSerializer.Serialize(new { ok = false, verb = "publish-demo", code, reason, exit }), "application/json", Encoding.UTF8, status);
@@ -449,9 +451,11 @@ app.MapPost("/api/v1/demo/{item:int}", async (int item, HttpContext ctx) =>
     }
     if (ctx.Request.ContentLength is > DemoMaxBytes) return No(413, "too-large", $"the video is larger than {DemoMaxBytes / 1024 / 1024} MB", 2);
     if (ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } lim) lim.MaxRequestBodySize = DemoMaxBytes + 1;
+    if (!await demoGate.WaitAsync(0)) return Results.Text(JsonSerializer.Serialize(new { ok = false, verb = "publish-demo", code = "busy", reason = "another demo upload is running; retry", retryAfterSeconds = 30, exit = 20 }), "application/json", Encoding.UTF8, 429);
     var tmp = Path.Combine(Path.GetTempPath(), $"demo-{item}-{Guid.NewGuid():N}.mp4");
     try
     {
+        try { if (new DriveInfo(Path.GetTempPath()).AvailableFreeSpace < 2 * DemoMaxBytes) return No(507, "no-space", "the gateway has too little free space for a video now; retry later", 20); } catch (Exception) { }
         long size = 0; var head = new byte[12]; var headLen = 0;
         using (var cts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted))
         {
@@ -481,7 +485,7 @@ app.MapPost("/api/v1/demo/{item:int}", async (int item, HttpContext ctx) =>
         var status = code switch { 0 => 200, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, 30 => 403, _ => 500 };
         return Results.Text(output, "application/json", Encoding.UTF8, status);
     }
-    finally { try { File.Delete(tmp); } catch { } }
+    finally { try { File.Delete(tmp); } catch { } demoGate.Release(); }
 });
 
 // from_message on append-body and comment (worker-messaging.md 3.8): the id must be a message the caller sent or received; the text loses backticks
