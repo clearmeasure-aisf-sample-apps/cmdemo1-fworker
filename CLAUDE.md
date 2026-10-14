@@ -16,7 +16,7 @@ demo system.
 | Path | Content |
 |---|---|
 | `gateway/` | The gateway: `Program.cs` (routes, dashboard, connect prompt), `Plant.cs` (workers, assignments), `Messaging.cs`, `Qc.cs`, `Auth.cs`, `RunnerPool.cs`, `Operator.cs` (the operator session) |
-| `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, `lib/*`), `skills/`, `agents/`, `tools/shot` |
+| `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, `lib/*`), `skills/`, `agents/`, `tools/shot`, `launcher/` (the session loop, `docs/launcher.md`) |
 | `config/instance.json` | The source defaults. The tests run on these: messaging off, supervisor off, `ownerSessions` false |
 | `config/deploy.overrides.json` | The settings of the deployed image, merged over the defaults by `config/apply-overrides.ps1` when the image is built |
 | `tests/scenarios/` | Tier 1: scenario suites against the fake GitHub (`run.ps1`, `run-all.ps1`, one file per area) |

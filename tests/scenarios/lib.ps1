@@ -27,6 +27,9 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     $t.mergeabilityWaitSeconds = 3; $t.mergeabilityPollSeconds = 1; $t.preMergeChecksWaitSeconds = 12; $t.preMergeChecksPollSeconds = 1
     $t.docsOnlyLegacyBefore = '2020-01-01T00:00:00Z'   # every item and state of a test is new; the legacy scenarios date theirs before it
     $t.updatedHeadWaitSeconds = 10; $t.sweepSeenCount = 1; $t.docsOnlyReleaseGraceSeconds = 4; $t.releaseCandidateTimeoutMinutes = 1; $t.masterGreenTimeoutMinutes = 2
+    # one item per session (plant.oneItemPerSession) is on in the source defaults; the suites let one scripted session take many items, so it is off here
+    # unless a suite sets it. The scenarios of the rule turn it on for their own gateway (FACTORY_ONE_ITEM_PER_SESSION, owner.ps1).
+    $cfg.plant = @{ oneItemPerSession = $false }
     foreach ($k in $Config.Keys) { $cfg[$k] = $Config[$k] }
     $cfgPath = Join-Path $work 'instance.test.json'; $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
     $fakeDll = Join-Path $script:Root 'tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll'

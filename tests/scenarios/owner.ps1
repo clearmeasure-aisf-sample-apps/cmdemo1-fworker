@@ -538,3 +538,54 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
         $env:FACTORY_ASSIGN_ACK_SECONDS = $oldAck; $env:FACTORY_PLANT_SNAPSHOT = $oldSnap; Restart-Gateway
     }
 }
+
+# One work item per worker session (docs/launcher.md): a session that held an item is offered no other, even after that item is
+# released; a new registration of the same name (a stream without a cursor, as the launcher's next session opens it) is a new session and is offered one.
+$OwnerScenarios['owner: one item per session: a session that held an item is offered no second one; the next session of the name is, and the status counts items per session'] = {
+    $oldOne = $env:FACTORY_ONE_ITEM_PER_SESSION
+    try {
+        $env:FACTORY_ONE_ITEM_PER_SESSION = '1'; Restart-Gateway
+        Start-OwnerClient 'fresh1' 'persistent-local' '--capacity 5'      # capacity 5: what holds the second item back is the rule, not the capacity
+        $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'fresh1' })[0] }
+        $w0 = & $me
+        Check 'the status says the rule is on and shows the session of the worker, with no item yet' ((Get-Plant).plant.oneItemPerSession -eq $true -and $w0.session -ge 1 -and @($w0.sessionItems).Count -eq 0 -and $w0.sessionSpent -eq $false) ($w0 | ConvertTo-Json -Compress -Depth 4)
+        $s0 = [int]$w0.session
+        # pinned: clients of earlier scenarios reconnect to the restarted gateway and must not take these items
+        $a = New-Item-Fake 'Fresh session A' 'x' ($OwnerLabels + 'worker:fresh1')
+        Check 'the first item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'fresh1' $a).Count -gt 0 })
+        $b = New-Item-Fake 'Fresh session B' 'x' ($OwnerLabels + 'worker:fresh1')
+        Start-Sleep -Seconds 6
+        $openOffers = @((Get-Plant).plant.assignments | Where-Object { $_.worker -eq 'fresh1' -and -not $_.accepted })
+        Check 'the session has at most one open offer at a time' ($openOffers.Count -le 1) ($openOffers | ConvertTo-Json -Compress)
+        $r = Fo 'fresh1' @('accept', '--item', $a, '--assignment', (Get-Assigned 'fresh1' $a)[-1].assignment); CheckExit 'the session accepts the first item' $r 0
+        $sinceAccept = @(Get-Assigned 'fresh1' $b).Count
+        $w1 = & $me
+        Check 'the status lists the item under this session and marks it spent' (@($w1.sessionItems) -contains $a -and $w1.sessionSpent -eq $true -and [int]$w1.session -eq $s0) ($w1 | ConvertTo-Json -Compress -Depth 4)
+        Start-Sleep -Seconds 6
+        $ob = @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $b })
+        Check 'the second item is not offered to the session that holds the first (an offer sent before the accept is taken back)' ((Get-Assigned 'fresh1' $b).Count -eq $sinceAccept -and $ob.Count -eq 1 -and "$($ob[0].worker)" -eq '') ($ob | ConvertTo-Json -Compress)
+        $r = Fo 'fresh1' @('release', '--item', $a, '--reason', 'scenario: the item ends'); CheckExit 'the session releases its item' $r 0
+        Start-Sleep -Seconds 8     # sweeps and ticks: the session is no longer at any capacity
+        Check 'after its item was released the same session is still offered no other item' ((Get-Assigned 'fresh1' $b).Count -eq $sinceAccept)
+        $wb = @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $b })
+        Check 'the second item waits, without a worker' ($wb.Count -eq 1 -and "$($wb[0].worker)" -eq '') ($wb | ConvertTo-Json -Compress)
+        $mk = Join-Path $script:Work 'fresh1-session-ended'
+        $e = Fo 'fresh1' @('end-session', '--name', 'fresh1', '--marker', $mk); CheckExit 'end-session' $e 0
+        Check 'end-session drains the name and writes the end marker for the launcher' ($e.drained -eq $true -and $e.markerWritten -eq $true -and (Test-Path $mk) -and (& $me).draining -eq $true) ($e | ConvertTo-Json -Compress)
+        # the launcher's next session: a new process registers the same name without a cursor
+        Stop-OwnerClient 'fresh1'
+        [void](Wait-Until -Seconds 20 { -not (& $me).connected })
+        Start-OwnerClient 'fresh1' 'persistent-local' '--capacity 5'
+        $got = Wait-Until -Seconds 40 { (Get-Assigned 'fresh1' $b).Count -gt 0 -or (Get-Assigned 'fresh1' $a).Count -gt 1 }
+        $w2 = & $me
+        Check 'a new registration of the name is a new session, no longer draining, offered a work item again' ($got -and [int]$w2.session -eq $s0 + 1 -and $w2.draining -eq $false) ($w2 | ConvertTo-Json -Compress -Depth 4)
+        $prev = @($w2.itemsPerSession | Where-Object { [int]$_.session -eq $s0 })
+        Check 'itemsPerSession keeps the earlier session with its one item' ($prev.Count -eq 1 -and @($prev[0].items).Count -eq 1 -and @($prev[0].items)[0] -eq $a) ($w2.itemsPerSession | ConvertTo-Json -Compress -Depth 4)
+        Start-Sleep -Seconds 6
+        $open = @((Get-Plant).plant.assignments | Where-Object { $_.worker -eq 'fresh1' -and -not $_.accepted })
+        Check 'the new session has one open offer, not two' ($open.Count -eq 1) ($open | ConvertTo-Json -Compress)
+    } finally {
+        Stop-OwnerClient 'fresh1'
+        $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; Restart-Gateway
+    }
+}

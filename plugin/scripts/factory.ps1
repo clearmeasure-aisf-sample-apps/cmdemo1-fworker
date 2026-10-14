@@ -4,6 +4,7 @@
 # factory.ps1 pr-checks --item N [--check NAME] [--tail N] [--brief] | --full-log [--save FILE] | --artifact NAME [--entry PATH] [--save FILE]   why a check failed
 # factory.ps1 subscribe --own --name N [--spawn]  client: register as a worker; assignments arrive as item.assigned (token saved, not printed)
 # factory.ps1 wait-event --item N [--messages] | worker-token --name N [--role manager]
+# factory.ps1 end-session --name N [--marker FILE]   after its one item: drain the name and write the launcher's end marker (docs/launcher.md)
 # factory.ps1 send --to NAME|operator|--all|--thread item-N --text "..." | --text-file F [--subject S] [--item N] [--in-reply-to ID]   peer message (worker-messaging.md 6.1)
 # factory.ps1 peers [--all] [--text]          the directory of sessions this one may see, with the supervisor block
 # factory.ps1 inbox [--after SEQ] [--wait S] [--id M] [--include delivered] [--ack] | ack --ids a,b | --up-to SEQ | presence [--summary "..."]
@@ -140,6 +141,7 @@ if ($verb -eq 'operator') {
     Invoke-OperatorVerb $ov (ConvertFrom-Flags ([string[]]@($ot | Select-Object -Skip 1))) (Get-ClientConfig)
 }
 if ($verb -eq 'worker-token') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-WorkerToken (ConvertFrom-Flags $flagTokens) }
+if ($verb -eq 'end-session') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-EndSession (ConvertFrom-Flags $flagTokens) (Get-ClientConfig) }
 if ($verb -eq 'plugin-sync') { . (Join-Path $here 'lib/Client.Plugin.ps1'); Invoke-PluginSync (Get-ClientConfig) }
 if ($verb -eq 'wait-event') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-WaitEvent (ConvertFrom-Flags $flagTokens) (Get-ClientConfig) }
 # peer messaging (worker-messaging.md 6.1, 6.4): client-side verbs with their own request bodies (no holder), not server verbs

@@ -52,6 +52,9 @@
       "prod": "prod"
     }
   },
+  "plant": {
+    "oneItemPerSession": true
+  },
   "timing": {
     "assignAckSeconds": 120,
     "plantSnapshotMaxAgeMinutes": 30,
