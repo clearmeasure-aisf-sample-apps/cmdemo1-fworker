@@ -69,7 +69,7 @@ sealed class MessagingSettings
     // entry is worse once, for the one reminder), mgrVerbErrorMinutes and digest.verbErrorCount (failed verbs of one worker on one item), and
     // mgrRestartMinutes (how long after its start a gateway reports that sessions came back from an earlier process).
     public double QuietMinutes = 20, NoteMinutes = 60, PersistMinutes = 30, VerbErrorMinutes = 10, RestartMinutes = 30;
-    public int VerbErrorCount = 3;
+    public int VerbErrorCount = 3, ChecksRedCount = 2;
     // The model requirement (4.7): the ladder of the gateway host's models.default.json, lowest rung first, as (name, model).
     public string RequiredModelTier = "premium", RequiredEffort = "high";
     public bool EnforceModel;
@@ -164,7 +164,7 @@ sealed class MessagingSettings
         var dg = g?["digest"];
         s.RefusalCount = Limit(dg, "refusalCount", 3); s.DigestMaxBytes = Limit(dg, "maxBytes", 4096, 512);
         s.QuietMinutes = Span("mgrQuietMinutes", 20); s.NoteMinutes = Span("mgrNoteMinutes", 60); s.PersistMinutes = Span("mgrPersistMinutes", 30);
-        s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3);
+        s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3); s.ChecksRedCount = Limit(dg, "checksRedCount", 2);
         if (dg?["waitCodes"] is JsonArray wc) s.WaitCodes = List(wc);
         s.RequiredModelTier = g?["requiredModelTier"]?.ToString() ?? "premium"; s.RequiredEffort = g?["requiredEffort"]?.ToString() ?? "high";
         s.EnforceModel = g?["enforceModel"]?.GetValue<bool>() ?? false; s.AcceptableModels = List(g?["acceptableModels"]);
@@ -456,7 +456,7 @@ static class DigestBuilder
         }
         foreach (var r in d.Refusals.Where(r => r.Code != "" && !cfg.WaitCodes.Contains(r.Code)))
         {
-            var b = Step(r.Count, cfg.RefusalCount);
+            var b = Step(r.Count, r.Code is "checks-red" or "checks-not-green" or "private-build-required" ? cfg.ChecksRedCount : cfg.RefusalCount);   // red checks are reported at 2
             if (b > 0) list.Add(new DigestEntry { Key = $"refusals|{r.Item}|{r.Code}", Kind = "refusals", Bucket = b,
                 Fields = new JsonObject { ["kind"] = "refusals", ["item"] = r.Item, ["code"] = r.Code, ["bucket"] = b, ["count"] = r.Count, ["windowMinutes"] = 60 } });
         }

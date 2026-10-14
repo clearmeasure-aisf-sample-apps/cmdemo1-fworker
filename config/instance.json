@@ -55,6 +55,7 @@
   "timing": {
     "assignAckSeconds": 120,
     "leaseMinutes": 30,
+    "redChecksGate": 2,
     "maxRelaunches": 3,
     "maxReviewRounds": 3,
     "docsOnlyMaxReviewRounds": 2,
