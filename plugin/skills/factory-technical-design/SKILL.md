@@ -17,6 +17,8 @@ Read-only: no branches, code or commits. Roles run in order in THIS session and 
    Record it: `factory.ps1 record-review --item N --column "Technical Design" --role reviewer --text-file <file>`; the file's LAST line is exactly `REVIEW: COMPLETE` or `REVIEW: FINDINGS`.
    - FINDINGS: the analyst rules VALID/INVALID on each, the implementer applies the valid ones, back to step 3.
    - exit 10 `review-rounds-exhausted`: go to step 6 with `--succeeded false`.
+   - A finding against an acceptance criterion is written `FINDING: criterion "<text copied from the item>" - <what the design fails to do>`. Two consecutive findings rounds that quote the same criterion end in exit 10 `same-criterion-repeated`: the item is parked with a question to the owner; go to step 6 with `--succeeded false`.
+   - When the answer to `claim-item` carries `timing_criteria` (criteria worded in time or statistics), the design says for each exactly how it is measured: environment, sample size, threshold, what counts as a pass.
    - exit 10 `finding-without-criterion` (docs-only only): the script found no finding that quotes the item, and no round was used. Record the review once more ending in `REVIEW: COMPLETE`, unless a criterion can be quoted word for word.
 5. REVIEWER, only after `record-review` returned `review_ref`: ONE final call
    `factory.ps1 complete --item N --column "Technical Design" --review-ref <ref> --comment "Technical design: analyst, implementer, reviewer. REVIEW: COMPLETE - <one sentence>"`.

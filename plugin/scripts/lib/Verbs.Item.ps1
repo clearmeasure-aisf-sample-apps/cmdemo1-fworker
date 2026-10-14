@@ -191,9 +191,20 @@ function Verb_claim_item($a) {
     $s.claim = @{ holder = $holder; column = $info.column; started = ConvertTo-Iso (Get-UtcNow); heartbeat = ConvertTo-Iso (Get-UtcNow)
         lease_until = ConvertTo-Iso ((Get-UtcNow).AddMinutes($t.leaseMinutes)); launches = $launches + 1 }
     if ((Test-Has $a 'owner') -and $a.owner) { $s.claim.owner = $true; $s.claim.worker = "$($a.worker)"; $s.claim.assignment = "$($a.assignment)"; if ($mode -eq 'relaunch') { $mode = 'resume' } }
+    # timing or statistical criteria are flagged once, at Technical Design (the design column), on the item and in the answer; never a block
+    $timing = @()
+    if (Test-Has $c.requiredBodySection "$($info.column)") {
+        $timing = @(Get-TimingCriteria $info)
+        if ($timing.Count -gt 0 -and -not ((Test-Has $s 'timing_flagged') -and $s.timing_flagged)) {
+            $s.timing_flagged = $true
+            $list = ($timing | ForEach-Object { "- $_" }) -join "`n"
+            Add-Comment $n "**Timing or statistical acceptance criteria** (flagged at $($info.column)):`n`n$list`n`nThese are hard to verify in one functional test and often fail twice. The design should say exactly how each is measured (environment, sample size, threshold, what counts as a pass), or the owner should reword it. Two consecutive failures that cite the same criterion park the item with a question to the owner."
+        }
+    }
     Save-State $n $st
     $out = @{ ok = $true; id = $n; claimed = $true; column = $info.column; mode = $mode; launches = $launches + 1; lease_until = $s.claim.lease_until }
     if ($tookOver) { $out.orphan_ref_taken_over = $true }
+    if ($timing.Count -gt 0) { $out.timing_criteria = @($timing) }
     return $out
 }
 
@@ -231,6 +242,12 @@ function Verb_record_review($a) {
     $rv.round = [int]$rv.round + 1; $rv.last = $verdict; $rv.at = ConvertTo-Iso (Get-UtcNow)
     $rv.ref = if ($verdict -eq 'COMPLETE') { 'rv-' + [guid]::NewGuid().ToString('N').Substring(0, 10) } else { $null }
     $s.reviews[$col] = $rv
+    # escalate earlier (enhancement 10): two consecutive FINDINGS rounds of this column that cite the same acceptance criterion park the item
+    $repeated = if ($verdict -eq 'COMPLETE') { Test-RepeatedCriteria $s "review|$col" @() -Clear } else { Test-RepeatedCriteria $s "review|$col" @(Get-CitedCriteria $info $text) }
+    if (@($repeated).Count -gt 0) {
+        Invoke-ParkRepeatedCriterion $n $st "review rounds in **$col** (rounds $($rv.round - 1) and $($rv.round))" @($repeated)
+        Reject 10 'same-criterion-repeated' 'two consecutive review rounds cite the same acceptance criterion: the item is parked with a question to the owner; stop work on it and report the failure with succeeded=false' @{ criteria = @($repeated); round = $rv.round }
+    }
     Save-State $n $st
     $out = @{ ok = $true; id = $n; verdict = $verdict; round = $rv.round; review_ref = $rv.ref; max_rounds = $max }
     if ($grounded) { $out.findings = $grounded.accepted; $out.dropped = $grounded.dropped }
@@ -372,4 +389,57 @@ function Verb_complete($a) {
     $s.Remove('fix_forward_rounds')
     if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
     return Finish-ColumnExit $n $info $st "$comment" @{ prNumber = $pr.number; build_owed = -not ($docsOnly -and (Test-ItemDocsOnly $s $info)) }
+}
+
+# Escalate earlier (enhancement 10). The acceptance criteria a review or a FAIL verdict cites: every `criterion "<text>"` quote (the
+# `FINDING: criterion "..." - ...` form of a review line, or the same phrase inside a verdict summary) whose text, whitespace folded, is found
+# word for word in the item ABOVE its design section and is at least 8 characters long. Returned folded, distinct, in order.
+function Get-CitedCriteria($Info, [string]$Text) {
+    $fold = { param($t) (("$t" -replace '\s+', ' ').Trim()) }
+    $body = "$($Info.body)"; $own = $body
+    foreach ($sec in @((Get-Cfg).requiredBodySection.Values)) { $at = $own.IndexOf("$sec", [StringComparison]::OrdinalIgnoreCase); if ($at -ge 0) { $own = $own.Substring(0, $at) } }
+    $own = & $fold $own
+    $out = [System.Collections.Generic.List[string]]::new()
+    # a criterion may itself contain double quotes: try every closing quote after the opening one, shortest first, and take the first grounded
+    foreach ($m in [regex]::Matches("$Text", 'criterion\s+"', 'IgnoreCase')) {
+        $start = $m.Index + $m.Length; $end = "$Text".IndexOf('"', $start)
+        while ($end -ge 0) {
+            $q = & $fold "$Text".Substring($start, $end - $start)
+            if ($q.Length -ge 8 -and $own.Contains($q)) { if (-not $out.Contains($q)) { $out.Add($q) }; break }
+            $end = "$Text".IndexOf('"', $end + 1)
+        }
+    }
+    return @($out)
+}
+
+# Records the criteria of one failing round (a review with FINDINGS in a column, or a FAIL verdict) and answers the criteria that the previous
+# failing round of the same source also cited. A passing round (REVIEW: COMPLETE, a PASS) clears the source with -Clear, so "consecutive" holds.
+function Test-RepeatedCriteria($State, [string]$Source, [string[]]$Cited, [switch]$Clear) {
+    if (-not (Test-Has $State 'cited')) { $State.cited = @{} }
+    $prev = if (Test-Has $State.cited $Source) { @($State.cited[$Source]) } else { @() }
+    if ($Clear) { $State.cited.Remove($Source); return @() }
+    $State.cited[$Source] = @($Cited)
+    return @($Cited | Where-Object { $prev -contains $_ })
+}
+
+# Parks the item over a repeated criterion and puts one precise question to the owner on the item.
+function Invoke-ParkRepeatedCriterion([int]$n, $st, [string]$What, [string[]]$Repeated) {
+    $s = $st.state; $c = Get-Cfg
+    Set-Park $s 'same-criterion-repeated' ($c.timing.parkHours * 60)
+    $s.park.criteria = @($Repeated)
+    # forget the record of every source so the first round after the owner's answer (or the park's expiry) gets a fresh attempt
+    if (Test-Has $s 'cited') { $s.cited = @{} }
+    $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n
+    $list = ($Repeated | ForEach-Object { "- ""$_""" }) -join "`n"
+    Add-Comment $n "**Question for the owner:** two consecutive $What cite the same acceptance criterion:`n`n$list`n`nThe factory stopped here instead of trying again, because the same criterion failing twice usually means it is ambiguous, untestable as written, or out of reach of this change. Please answer on this item: should the criterion be reworded (and how), relaxed or dropped, or is the failure a real defect to fix? Then clear the park (move the card or remove the hold) to let the worker resume."
+}
+
+# Acceptance criteria worded in timing or statistical terms (enhancement 10): they are hard to verify in a functional test and often fail
+# twice. Each list item or checkbox of the item above its design section that matches the wording; context bullets are flagged too, so the
+# design reviewer sees every timing claim the item makes.
+function Get-TimingCriteria($Info) {
+    $body = "$($Info.body)"
+    foreach ($sec in @((Get-Cfg).requiredBodySection.Values)) { $at = $body.IndexOf("$sec", [StringComparison]::OrdinalIgnoreCase); if ($at -ge 0) { $body = $body.Substring(0, $at) } }
+    $pat = '(?i)\b\d+(\.\d+)?\s*(ms|milliseconds?|s|secs?|seconds?|minutes?|mins?)\b|\bp(50|9\d|99\.9)\b|\d\s*%|\bpercent(age|ile)?\b|\baverage\b|\bmedian\b|\bmean\b|\blatency\b|\bthroughput\b|\bper (second|minute|hour)\b|\brequests? per\b|\bunder load\b|\bconcurrent users?\b|\bat least \d+ (times|out of)\b|\b\d+ out of \d+\b|\bstatistic(al|ally)?\b|\bprobability\b|\bon average\b|\bresponse time\b'
+    return @($body -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^([-*+]|\d+[.)])\s+' -and $_ -match $pat } | ForEach-Object { ($_ -replace '^([-*+]|\d+[.)])\s+(\[[ xX]\]\s+)?', '').Trim() })
 }

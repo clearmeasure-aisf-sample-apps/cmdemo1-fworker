@@ -141,7 +141,10 @@ sealed partial class Plant
                 if (ownedInfo.TryGetValue(item, out var info) && info.Parked) { checks.Remove(item); continue; }
                 if (lastRouted.TryGetValue(item, out var ev) && LeaseWaits.Contains(ev)) { checks.Remove(item); continue; }
                 var summaryAt = store.Recipients.TryGetValue(owner, out var r) ? r.SummaryAt : default;
-                var lastAct = lastCall.TryGetValue(item, out var lc) ? lc : ownedSince.TryGetValue(item, out var os) ? os : now;
+                // an owner the plant starts watching without a call it saw (restored from a snapshot, or listed by a sweep after a restart) gets a
+                // full quiet window from now, not from when it took the item
+                if (!lastCall.TryGetValue(item, out var lc)) { lastCall[item] = now; continue; }
+                var lastAct = lc;
                 var since = summaryAt > lastAct ? summaryAt : lastAct;   // quiet since the later of the last call and the last change of the summary
                 if (checks.TryGetValue(item, out var ck))
                 {

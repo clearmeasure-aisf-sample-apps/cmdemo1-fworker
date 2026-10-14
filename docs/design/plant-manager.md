@@ -202,6 +202,18 @@ A command that a subagent's shell refuses inside its worktree is run by the owne
 
 Floor that remains: one design review round; the checks of the pull request (`ciGates`, run by the target repository's workflow, including for documentation); `complete` answers `accepted-checks-pending` while they run and the sweep (every `FACTORY_SWEEP_SECONDS`, default 180) advances the item when they are green; the merge verb waits for mergeability and pre-merge checks (`mergeabilityWaitSeconds` 90, `preMergeChecksWaitSeconds` up to 300); a docs-only change neither waits in the merge queue nor holds a place in it; after the merge the item reaches Done when master is green, at once if the master build skipped its publish step, else `docsOnlyReleaseGraceSeconds` (120) later, on the next sweep.
 
+### 10b. Escalate earlier (owner decision 2026-10-14)
+
+A criterion that fails twice in a row is usually ambiguous or untestable as written; another round costs time and finds nothing new.
+
+| Rule | Enforced by |
+|---|---|
+| Two consecutive findings reviews of one column that quote the same acceptance criterion (`FINDING: criterion "<text above the design section>" - ...`) park the item (`same-criterion-repeated`) with a question to the owner on the item | `record-review` (`Test-RepeatedCriteria`, Verbs.Item.ps1): the round is recorded, the claim released, exit 10 `same-criterion-repeated`. A `REVIEW: COMPLETE` clears the column's record |
+| Two consecutive FAIL verdicts whose summaries quote the same criterion (`criterion "<text>"`) park the item instead of demoting it, with the same question | `validation-verdict` (Verbs.Pr.ps1): answers `next: "parked"`, `reason: "same-criterion-repeated"`. A PASS clears the record |
+| Acceptance criteria worded in time or statistics (`within 2 seconds`, `p95`, `%`, `average`, `latency`, `under load`, `at least N times`, ...) are flagged at Technical Design: one comment on the item and `timing_criteria` in the claim answer; nothing is blocked | `claim-item` in the design column (`Get-TimingCriteria`) |
+
+A quote counts only when, whitespace folded, it is found word for word in the item above its design section and is at least 8 characters long. The records live in the item state (`cited`, `timing_flagged`), so they survive a restart of the gateway. Parking clears every `cited` record, so the first round after the owner answers (or after the park expires on `parkHours`) starts fresh. Timing flags cover every list item above the design section that matches the wording, context bullets included.
+
 ## 11. Cloud workers (designed, NOT implemented)
 
 ### Shape

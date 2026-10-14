@@ -26,6 +26,19 @@ var publicUrl = Environment.GetEnvironmentVariable("FACTORY_PUBLIC_URL") ?? "";
 var tokenSecret = Environment.GetEnvironmentVariable("FACTORY_TOKEN_SECRET") ?? "";
 // The accept window of an offer: FACTORY_ASSIGN_ACK_SECONDS, else FACTORY_TIMING_assignAckSeconds, else timing.assignAckSeconds of the config, else 120.
 var ackSeconds = AckSeconds(scriptsDir);
+// timing.<name> of the config (FACTORY_TIMING_<name> first), a positive number, else the fallback
+static double TimingNumber(string scriptsDir, string name, double fallback)
+{
+    bool Good(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v > 0;
+    if (Good(Environment.GetEnvironmentVariable("FACTORY_TIMING_" + name), out var a)) return a;
+    try
+    {
+        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
+        if (Good(root?["timing"]?[name]?.ToString(), out a)) return a;
+    }
+    catch { }
+    return fallback;
+}
 static double AckSeconds(string scriptsDir)
 {
     bool Good(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v > 0;
@@ -80,6 +93,13 @@ if (qcSettings.TrustProxy)
         foreach (var p in qcSettings.KnownProxies) o.KnownProxies.Add(System.Net.IPAddress.Parse(p));
     });
 builder.Services.AddSingleton(new Runner(entry));
+// The plant snapshot (PlantSnapshot.cs, enhancement 5): written at SIGTERM, read back before the first sweep. Owner mode only, and not for the suites'
+// second gateways (FACTORY_TEST_SKIP_REVOCATIONS: their GitHub is a port nothing listens on). FACTORY_PLANT_SNAPSHOT=0 switches it off.
+var snapshotOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_PLANT_SNAPSHOT") != "0";
+var snapshotMaxAge = TimingNumber(scriptsDir, "plantSnapshotMaxAgeMinutes", 30);
+var plantRestored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+if (!snapshotOn) plantRestored.SetResult();
+var snapshotState = new JsonObject { ["enabled"] = snapshotOn, ["maxAgeMinutes"] = snapshotMaxAge };
 var revocations = new Revocations();
 builder.Services.AddSingleton(sp =>
 {
@@ -95,7 +115,7 @@ builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), s
 // master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs)
 builder.Services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), BaseUpdateSettings.Load(scriptsDir), ownerMode));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
-builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>()));
+builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task));
 builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()));
 // A background loop that throws must not end the process (the default of .NET stops the host): the loops catch and go on, and this is the net under them.
 builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
@@ -131,6 +151,38 @@ if (ownerMode)
     };
     plant.RequestSweepAfterTakeBack = hub.RequestSweep;
 }
+// The restore runs before the first sweep (the Sweeper waits for it, at most 60 s): a sweep that planned first would offer the items of the snapshot
+// anew. One read, bounded; a failure leaves the plant empty, as every restart did before, and the sweep rebuilds from the board.
+if (snapshotOn) _ = Task.Run(async () =>
+{
+    try
+    {
+        var (code, output) = await runner.RunAsync("plant-snapshot-load", "{}", TimeSpan.FromSeconds(45));
+        var j = code == 0 ? JsonNode.Parse(output) : null;
+        var found = j?["found"] is JsonValue fv && fv.TryGetValue<bool>(out var fb) && fb;
+        var (na, no, skipped) = code != 0 ? (0, 0, "load-failed") : !found ? (0, 0, "none") : plant.Restore(j?["snapshot"], snapshotMaxAge);
+        lock (snapshotState) snapshotState["restore"] = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["assignments"] = na, ["owners"] = no, ["skipped"] = skipped, ["snapshotAt"] = j?["snapshot"]?["at"]?.ToString() };
+        // the snapshot is used once: a later start after an outright kill (no SIGTERM, so no new snapshot) must not bring this plant back
+        if (found) { var (cc, _) = await runner.RunAsync("plant-snapshot-clear", "{}", TimeSpan.FromSeconds(30)); if (cc != 0) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"clear\":\"failed\",\"exit\":{cc}}}"); }
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-restore", ["exit"] = code, ["assignments"] = na, ["owners"] = no, ["skipped"] = skipped }.ToJsonString());
+    }
+    catch (Exception e) { Console.Error.WriteLine($"plant snapshot load: {e.Message}"); }
+    finally { plantRestored.TrySetResult(); }
+});
+// At SIGTERM (a release, a scale-in, a replica move) the plant is written before the process ends. The host waits for this callback; the platform's
+// grace period (30 s on Container Apps) bounds it, so the write has 20 s. A snapshot is written only after the restore has run: a process stopped
+// during its start must not overwrite the snapshot it has not read yet with an empty plant.
+if (snapshotOn) app.Lifetime.ApplicationStopping.Register(() =>
+{
+    try
+    {
+        if (!plantRestored.Task.IsCompleted) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"not-restored-yet\"}}"); return; }
+        var snap = plant.Snapshot();
+        var (code, output) = runner.RunAsync("plant-snapshot-save", new JsonObject { ["snapshot"] = snap }.ToJsonString(), TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["exit"] = code, ["assignments"] = (snap["assignments"] as JsonArray)?.Count ?? 0, ["owners"] = (snap["owners"] as JsonObject)?.Count ?? 0 }.ToJsonString());
+    }
+    catch (Exception e) { try { Console.Error.WriteLine($"plant snapshot save: {e.Message}"); } catch { } }
+});
 if (qcSettings.TrustProxy) app.UseForwardedHeaders();
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
 var started = DateTime.UtcNow;
@@ -259,6 +311,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
+    if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // the switch of the gateway's own back-merges (baseUpdate.autoUpdateBranch) at run time, operator token only; until the next restart
@@ -267,6 +320,38 @@ app.MapPost("/api/v1/base-update", (HttpContext c) =>
     if (Who(c).Kind != "admin") return Results.StatusCode(403);
     if (bool.TryParse(c.Request.Query["autoUpdateBranch"].ToString(), out var on)) baseWatch.AutoUpdateBranch = on;
     return Results.Text(baseWatch.Status().ToJsonString(), "application/json");
+});
+
+// Cycle-time metrics (enhancement 13), operator token only: computed by the rule script `metrics` from the items' journal comments and state
+// comments on GitHub, so they survive a restart. since: an ISO date or 30m, 24h, 7d (default 7d, at most 90d); max: items read, newest first
+// (default 100, at most 300); fresh=1 skips the cache. One computation reads every item's comments: answers are cached for metricsCacheSeconds and
+// computed one at a time.
+var metricsCache = new Dictionary<string, (DateTime At, int Code, string Json)>();
+var metricsGate = new SemaphoreSlim(1, 1);
+const int metricsCacheSeconds = 120;
+app.MapGet("/api/v1/metrics", async (HttpContext c) =>
+{
+    if (Who(c).Kind != "admin") return Results.StatusCode(403);
+    var since = c.Request.Query["since"].ToString().Trim(); var maxText = c.Request.Query["max"].ToString().Trim();
+    if (since.Length > 40 || maxText.Length > 4 || (maxText != "" && !int.TryParse(maxText, out _))) return Results.Json(new { ok = false, code = "usage", reason = "since is an ISO date or 30m, 24h, 7d; max a number", exit = 2 }, statusCode: 400);
+    var key = since + "|" + maxText;
+    var fresh = c.Request.Query["fresh"].ToString() == "1";
+    // a cached answer does not wait behind a computation that is running
+    lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit0) && (DateTime.UtcNow - hit0.At).TotalSeconds < metricsCacheSeconds) return Results.Text(hit0.Json, "application/json", Encoding.UTF8, hit0.Code == 0 ? 200 : 400);
+    await metricsGate.WaitAsync(c.RequestAborted);
+    try
+    {
+        lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit) && (DateTime.UtcNow - hit.At).TotalSeconds < metricsCacheSeconds) return Results.Text(hit.Json, "application/json", Encoding.UTF8, hit.Code == 0 ? 200 : 400);
+        var args = new JsonObject(); if (since != "") args["since"] = since; if (maxText != "") args["max"] = int.Parse(maxText);
+        var (code, output) = await runner.RunAsync("metrics", args.ToJsonString(), TimeSpan.FromMinutes(3));
+        lock (metricsCache)
+        {
+            foreach (var k in metricsCache.Where(kv => (DateTime.UtcNow - kv.Value.At).TotalSeconds >= metricsCacheSeconds).Select(kv => kv.Key).ToList()) metricsCache.Remove(k);
+            if (code == 0 || code == 2) metricsCache[key] = (DateTime.UtcNow, code, output);
+        }
+        return Results.Text(output, "application/json", Encoding.UTF8, code == 0 ? 200 : code == 2 ? 400 : 502);
+    }
+    finally { metricsGate.Release(); }
 });
 
 app.MapGet("/dashboard", () => Results.Text(DashboardPage.Html, "text/html; charset=utf-8"));
@@ -315,6 +400,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
+    if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // POST /release-queue/promotion-request { "release": "1.2.3" } (enhancement 9): the dashboard's button. Operator token only. It records the request
@@ -436,6 +522,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (verb is "revoke-worker" or "revocations")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/workers/{name}/revoke", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // likewise the release records of the operator session: only POST /api/v1/operator/record-release keeps the stored refs and this process in step
+    if (verb is "plant-snapshot-save" or "plant-snapshot-load" or "plant-snapshot-clear")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the plant snapshot is written and read by the gateway itself, at its stop and its start", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "operator-release" or "operator-releases")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/operator/record-release", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // the demo video arrives as a file: only POST /api/v1/demo/{item} streams it to the place the rule script reads it from
@@ -1355,11 +1443,13 @@ sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runn
     }
 }
 
-sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int seconds, bool ownerMode, BaseWatch? baseWatch = null) : BackgroundService
+sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int seconds, bool ownerMode, BaseWatch? baseWatch = null, Task? restored = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         try { await Task.Delay(TimeSpan.FromSeconds(3), ct); } catch (OperationCanceledException) { return; }
+        // the plant snapshot is restored before the first plan (PlantSnapshot.cs); a read that hangs holds the sweep back 60 s at most
+        if (restored != null) try { await Task.WhenAny(restored, Task.Delay(TimeSpan.FromSeconds(60), ct)); } catch (OperationCanceledException) { return; }
         // An item new in a working column is offered by the second sweep that sees it there (timing.sweepSeenCount, so a card dragged across the
         // board starts nothing). That second look must not cost a whole interval: after a sweep that saw such an item the next one runs after
         // FACTORY_SWEEP_CONFIRM_SECONDS (20). Before, a new item waited up to two intervals (6 minutes at 180 s) for its first offer.
@@ -1461,6 +1551,10 @@ pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monos
 <div class="row"><button id="rqreq">Request promotion to UAT</button><span class="mut">Records and announces the request on the operator stream only. The owner and the cmdemo1 session promote to uat and prod.</span></div></div>
 <div id="qcsec" hidden><h2>Waiting for PR QC</h2>
 <div class="wrap"><table><thead><tr><th>PR</th><th>Title</th><th>Item</th><th>Head</th><th>Author</th><th>Age</th><th>QC state</th><th>Environment</th><th>Worker</th><th>Actions</th></tr></thead><tbody id="qcrows"><tr><td colspan="10" class="mut">none</td></tr></tbody></table></div></div>
+<details id="metbox"><summary><b>Cycle times</b> <span class="mut">(from the item journals on GitHub; survives a restart)</span></summary>
+<div class="row"><label>Since <select id="metsince"><option value="24h">24 hours</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="90d">90 days</option></select></label> <span id="metinfo" class="mut"></span></div>
+<div class="wrap"><table><thead><tr><th>Measure</th><th>Items</th><th>Median</th><th>p90</th><th>Max</th></tr></thead><tbody id="metagg"><tr><td colspan="5" class="mut">open to load</td></tr></tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Item</th><th>Column</th><th>Match to accept</th><th>Accept to merge</th><th>Merge to done</th><th>Match to done</th></tr></thead><tbody id="metrows"><tr><td colspan="6" class="mut">none</td></tr></tbody></table></div></details>
 <h2>Connect a new session</h2>
 <div class="card"><div><b>1. What kind of session?</b></div><div class="kinds">
 <label class="kind"><input type="radio" name="kind" id="kworker" value="worker" checked> <b>Worker</b><span>Owns work items (design, development, testing) until merged.</span></label>
@@ -1693,7 +1787,7 @@ $('logbox').ontoggle=()=>refresh();
 // the token box is hidden; it comes back only when the gateway refuses the token or after Disconnect.
 function showConn(on){$('tokrow').hidden=on;$('conn').hidden=!on}
 // What a token showed is taken off the page when that token goes (Disconnect, or the gateway refused it): nothing of it stays readable.
-function clearData(){hideMessaging();$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;$('rqsec').hidden=true;$('rqrows').innerHTML='<tr><td class="mut">none</td></tr>';$('rqtext').textContent='';
+function clearData(){hideMessaging();$('metagg').innerHTML='<tr><td colspan="5" class="mut">open to load</td></tr>';$('metrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('metinfo').textContent='';metAt=0;$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;$('rqsec').hidden=true;$('rqrows').innerHTML='<tr><td class="mut">none</td></tr>';$('rqtext').textContent='';
 $('oprows').innerHTML='<tr><td colspan="9" class="mut">Nothing was sent to the operator.</td></tr>';$('qrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('dlog').innerHTML='<tr><td class="mut">none</td></tr>';$('logrows').innerHTML='<tr><td colspan="8" class="mut">none</td></tr>';
 $('qcounts').textContent=$('digest').textContent=$('costtext').textContent='';$('opbadge').hidden=$('qbadge').hidden=true}
 // t: the token this refresh started with. An answer that arrives after Disconnect (or after another token was entered) is dropped, and what the
@@ -1740,6 +1834,16 @@ try{$('prompt').value=opk?buildPrompt({env:info.environment,url:info.url,token:r
 :buildPrompt({env:info.environment,url:info.url,token:r.json.token,name:n,type:type,cap:String(cap),qcProfile:profile,qcAddress:address,qcCapacity:$('qccap').value,repo:repoUrl,messaging:!!(info.messaging&&info.messaging.enabled),asking:!!(info.messaging&&info.messaging.enabled&&info.manager&&info.manager.enabled)});
 $('pastehint').textContent='Paste it into a new session of '+whereText(kind,type)+'.';$('msg').textContent=''}catch(e){$('msg').textContent=e.message}};
 $('copy').onclick=()=>{$('prompt').select();navigator.clipboard&&navigator.clipboard.writeText($('prompt').value)};
+const MET_NAMES={matchToAccept:'Match to accept',acceptToMerge:'Accept to merge',matchToMerge:'Match to merge',mergeToDone:'Merge to done',matchToDone:'Match to done'};
+function dur(sec){if(sec==null)return'-';sec=Number(sec);if(sec<90)return sec+' s';if(sec<5400)return Math.round(sec/60)+' min';if(sec<172800)return (sec/3600).toFixed(1)+' h';return (sec/86400).toFixed(1)+' d'}
+function statRow(name,st){st=st||{};return `<tr><td>${esc(name)}</td><td>${esc(st.count||0)}</td><td>${dur(st.median)}</td><td>${dur(st.p90)}</td><td>${dur(st.max)}</td></tr>`}
+let metAt=0;async function refreshMetrics(force){if(!tok||!$('metbox').open)return;if(!force&&Date.now()-metAt<60000)return;metAt=Date.now();const t=tok;
+try{const m=await api('/api/v1/metrics?since='+encodeURIComponent($('metsince').value));if(tok!==t||!$('metbox').open)return;const g=m.aggregate||{},c=m.columns||{};
+$('metinfo').textContent=`${(m.items||[]).length} item(s) since ${m.since}; ${m.scanned} read; computed ${m.computedAt}`+((m.unreadable||[]).length?`; unreadable: #${m.unreadable.join(', #')}`:'');
+$('metagg').innerHTML=Object.keys(MET_NAMES).map(k=>statRow(MET_NAMES[k],g[k])).join('')+Object.keys(c).sort().map(k=>statRow('In '+k,c[k])).join('');
+const it=m.items||[];$('metrows').innerHTML=it.length?it.map(x=>{const d=x.durations||{};return `<tr><td>#${esc(x.item)}</td><td>${esc(x.column)}</td><td>${dur(d.matchToAccept)}</td><td>${dur(d.acceptToMerge)}</td><td>${dur(d.mergeToDone)}</td><td>${dur(d.matchToDone)}</td></tr>`}).join(''):'<tr><td colspan="6" class="mut">No item in this period.</td></tr>'}
+catch(e){$('metinfo').textContent=e.message}}
+$('metbox').ontoggle=()=>refreshMetrics(true);$('metsince').onchange=()=>refreshMetrics(true);setInterval(()=>refreshMetrics(false),15000);
 setInterval(refresh,4000);refresh();
 </script></body></html>
 """;
