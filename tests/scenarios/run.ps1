@@ -152,7 +152,8 @@ foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
 
 function Get-SuiteEnv([string]$Kind) {
     switch ($Kind) {
-        'owner' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '4' } }
+        # 8 s: a late accept is refused now (stale-assignment), and a loaded runner takes several seconds per client call
+        'owner' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8' } }
         'qc' {
             $adminTokens = Join-Path $script:SuiteRoot 'qc-admin-tokens'; New-Item -ItemType Directory -Force -Path $adminTokens | Out-Null
             return @{ FACTORY_OWNER_MODE = '1'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '60'; FACTORY_PUBLIC_URL = "http://127.0.0.1:$($script:ApiPort)"; FACTORY_TOKEN_DIR = $adminTokens }

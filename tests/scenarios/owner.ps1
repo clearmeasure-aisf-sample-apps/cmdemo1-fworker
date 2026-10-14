@@ -620,7 +620,7 @@ $OwnerScenarios['pass-merge: a pull request merged by a person settles the item 
     Check 'the sweep picks the merge up while the item is in Development' (Wait-Until -Seconds 40 { (Pm-State $n).ContainsKey('merge') })
     $st = Pm-State $n
     Check 'the merge is recorded, the claim released, the card moved on from Development' ($st.merge.pr -eq $pr -and -not $st.ContainsKey('claim') -and (Get-FakeIssue $n).column -ne 'Development') "$((Get-FakeIssue $n).column) $($st | ConvertTo-Json -Compress -Depth 3)"
-    Check 'the journal says a person merged it' (@((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "PR #$pr was merged as .* by a person" }).Count -eq 1)
+    Check 'the journal says a person merged it' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "PR #$pr was merged as .* by a person" }).Count -eq 1 })
     $x = Pm-ToValidation @('factory worker')
     $v = Do-Verdict $x.n $x.pr; Check 'parked for a person' ($v.next -eq 'parked')
     Fake 'pr' @{ number = $x.pr; merged = $true } | Out-Null

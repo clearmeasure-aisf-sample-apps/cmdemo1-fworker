@@ -151,19 +151,24 @@ function Verb_merge($a, [switch]$Gateway) {
         if ((Get-Date) -gt $end) { break }
         Start-Sleep -Seconds $t.preMergeChecksPollSeconds
     }
+    # under 'auto' only the verdict's head may merge; under 'peer-approved' the approval of the current head is the rule (the head may move after the
+    # verdict with a new QC run and approval), so the current head is merged and updated as before
+    $byVerdict = $c.mergePolicy -eq 'auto'
     for ($attempt = 1; $attempt -le [int]$t.outOfDateMergeAttempts; $attempt++) {
-        $r = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/merge" -Body @{ merge_method = 'squash'; sha = "$($s.verdict.head_sha)" } -Allow 405, 409, 422
+        $mergeSha = if ($byVerdict) { "$($s.verdict.head_sha)" } else { "$($pr.head.sha)" }
+        $r = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/merge" -Body @{ merge_method = 'squash'; sha = $mergeSha } -Allow 405, 409, 422
         if ($r -is [hashtable] -and $r.ContainsKey('status')) {
             $msg = "$($r.body.message)"
             if ($msg -match 'out of date|out-of-date|Head branch was modified|behind') {
                 # the merge was refused for the verdict's head: if the branch now carries any other head, nothing validated it
                 $pr = Get-Pr $prNum
-                if ("$($pr.head.sha)" -ne "$($s.verdict.head_sha)") { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict (stale-head); the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
+                if ($byVerdict -and "$($pr.head.sha)" -ne "$($s.verdict.head_sha)") { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict (stale-head); the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
                 # (bounded: the updates of one verdict are counted in the item state, so the sweep's calls add up to the same limit as this loop)
                 $ups = if (Test-Has $s.verdict 'updates') { [int]$s.verdict.updates } else { 0 }
                 if ($Gateway -and $ups -ge [int]$t.outOfDateMergeAttempts) { break }
-                $s.verdict.updates = $ups + 1; $s.verdict.updated_from = "$($s.verdict.head_sha)"; Save-State $n $st
-                $u = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/update-branch" -Body @{ expected_head_sha = "$($s.verdict.head_sha)" } -Allow 202, 422, 409
+                $s.verdict.updates = $ups + 1; $s.verdict.updated_from = $mergeSha; Save-State $n $st
+                if (-not $byVerdict) { $mergeSha = "$($pr.head.sha)"; $s.verdict.updated_from = $mergeSha }
+                $u = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/update-branch" -Body @{ expected_head_sha = $mergeSha } -Allow 202, 422, 409
                 if ($u -isnot [hashtable] -and $u.PSObject.Properties.Name -contains 'sha' -and $u.sha) { $s.verdict.updated_to = "$($u.sha)"; Save-State $n $st }
                 if ($u -is [hashtable] -and $u.ContainsKey('status') -and $u.status -ne 202) { $d = Invoke-Demote $n $info $st "could not update PR #${prNum}: $($u.body.message)" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
                 $pr = Wait-HeadChange $prNum $pr.head.sha $(if ($Gateway) { [Math]::Min([double]$t.updatedHeadWaitSeconds, 12) } else { $t.updatedHeadWaitSeconds })
