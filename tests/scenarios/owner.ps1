@@ -495,3 +495,40 @@ $OwnerScenarios['runner: a second run is refused while one is active, a short di
     Check 'a client call that ends with exit 139 is reported as a crash of the process, not as an answer' ($x.exit -eq 139 -and $x.code -eq 'client-crashed' -and "$($x.reason)" -match 'EXIT 139 \(SEGMENTATION FAULT\)' -and "$($x.reason)" -match 'not a product answer' -and $script:ClientCrashes -eq $crashes + 1) ($x | ConvertTo-Json -Compress)
     $script:ClientCrashes = $crashes     # the stand-in is no crash of this run
 }
+
+$OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'] = {
+    try {
+        Start-OwnerClient 'sara' 'persistent-local' '--capacity 2'
+        $a = New-Item-Fake 'Snapshot owned' 'x' $OwnerLabels; $b = New-Item-Fake 'Snapshot offered' 'x' $OwnerLabels
+        [void](Wait-Until -Seconds 40 { (Get-Assigned 'sara' $a).Count -gt 0 -and (Get-Assigned 'sara' $b).Count -gt 0 })
+        $ea = (Get-Assigned 'sara' $a)[0]; $eb = (Get-Assigned 'sara' $b)[0]
+        $r = Fo 'sara' @('accept', '--item', $a, '--assignment', $ea.assignment); CheckExit 'sara accepts the first item' $r 0
+        $before = Get-Plant
+        Restart-Gateway -Graceful
+        $logs = Get-ChildItem -Path $script:Work -File -Filter 'gateway*.out' | ForEach-Object { Get-Content $_.FullName } | Where-Object { $_ -match '"gateway":"plant-(snapshot|restore)"' }
+        $saved = $logs | Where-Object { $_ -match '"gateway":"plant-snapshot"' -and $_ -match '"exit":0' }
+        Check 'at SIGTERM the gateway wrote its plant to GitHub: exit 0' (@($saved).Count -ge 1) (($logs -join "`n") + ' ' + (((Get-FakeState).refs) -join ' '))
+        [void](Wait-Until -Seconds 60 { $null -ne (Get-Plant).plantSnapshot.restore })
+        $st = Get-Plant; $rs = $st.plantSnapshot.restore
+        Check 'the next start restored it before its first sweep: assignments and the owner' ($rs.skipped -eq '' -and $rs.assignments -ge 2 -and $rs.owners -ge 1) ($rs | ConvertTo-Json -Compress)
+        Check 'the snapshot is used once: the start removed the ref after reading it' ((Wait-Until -Seconds 30 { @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' }).Count -eq 0 })) (((Get-FakeState).refs) -join ' ')
+        Check 'the owner of the accepted item is the same' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$a" -and $_.Value -eq 'sara' }).Count -eq 1) ($st.plant.owners | ConvertTo-Json -Compress)
+        $ra = @($st.plant.assignments | Where-Object { $_.item -eq $a }); $rb = @($st.plant.assignments | Where-Object { $_.item -eq $b })
+        Check 'the accepted assignment keeps its id and stays accepted' ($ra.Count -eq 1 -and $ra[0].id -eq $ea.assignment -and $ra[0].accepted -eq $true -and $ra[0].worker -eq 'sara') ($ra | ConvertTo-Json -Compress)
+        Check 'the unanswered offer keeps its id and its worker' ($rb.Count -eq 1 -and $rb[0].id -eq $eb.assignment -and $rb[0].accepted -eq $false -and $rb[0].worker -eq 'sara') "$($rb | ConvertTo-Json -Compress) before: $(@($before.plant.assignments | Where-Object { $_.item -eq $b }) | ConvertTo-Json -Compress)"
+        # the client reconnects by itself; its registration pushes the offer again, with the same assignment
+        [void](Wait-Until -Seconds 45 { (Get-Assigned 'sara' $b).Count -ge 2 })
+        $eb2 = @(Get-Assigned 'sara' $b)[-1]
+        Check 'the reconnected worker is offered the item again, the same assignment' ((Get-Assigned 'sara' $b).Count -ge 2 -and $eb2.assignment -eq $eb.assignment) (@(Get-Assigned 'sara' $b) | ConvertTo-Json -Compress)
+        $r2 = Fo 'sara' @('accept', '--item', $b, '--assignment', $eb2.assignment); CheckExit 'and accepts it' $r2 0
+        $st2 = Get-Plant
+        Check 'both items are owned by sara after the restart' (@($st2.plant.owners.PSObject.Properties | Where-Object { $_.Name -in "$a", "$b" -and $_.Value -eq 'sara' }).Count -eq 2) ($st2.plant.owners | ConvertTo-Json -Compress)
+        Check 'the journal has one matched line for the offered item: the restore wrote none' (@(Get-Journal $b | Where-Object { $_ -eq 'matched' }).Count -eq 1) ((Get-Journal $b) -join ',')
+    } finally {
+        Stop-OwnerClient 'sara'
+        # the next restart of this suite must not restore this scenario's plant
+        foreach ($ref in @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' })) {
+            try { Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/$ref" -Method DELETE -Headers @{ Authorization = 'Bearer fake-operator' } | Out-Null } catch { }
+        }
+    }
+}

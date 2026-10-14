@@ -101,7 +101,7 @@ The same image is promoted to uat and prod, so the settings travel with it.
    deployment, treat it as an outage: find the cause or roll back.
 7. uat and prod are manual promotions by the operator (Octopus sign-off, the demo-environment kit). A session does not promote to them.
 
-A gateway restart drops the in-memory state (below): deploy to tdd only when the plant is quiet, say so beforehand, and check afterwards
+A gateway restart drops the in-memory state (below) except the plant, which a graceful stop snapshots to GitHub and the next start restores: deploy to tdd only when the plant is quiet, say so beforehand, and check afterwards
 that the workers reconnected. Roll back by reverting the pull request.
 
 ## Rules
