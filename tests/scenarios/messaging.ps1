@@ -350,6 +350,50 @@ $MessagingScenarios = [ordered]@{
     try { Stop-Process -Id $b.proc.Id -Force } catch { }
 }
 
+# Enhancement 11: every stream writes a `: ping` comment at FACTORY_SSE_PING_SECONDS (25 s by default), busy or idle, so an ingress that closes a
+# connection without traffic never cuts a healthy stream. Read raw from a second gateway with a 2 s interval.
+'msg: every event stream writes a ping comment at the configured interval, and the client shows none of them' = {
+    $g = Msg-StartGateway @{ FACTORY_SSE_PING_SECONDS = '2' }
+    function Count-Pings([string]$Url, [string]$Bearer, [double]$Seconds) {
+        $h = [Net.Http.HttpClient]::new(); $h.Timeout = [TimeSpan]::FromMinutes(2)
+        try {
+            $rq = [Net.Http.HttpRequestMessage]::new('GET', $Url); $rq.Headers.Add('Authorization', "Bearer $Bearer")
+            $resp = $h.SendAsync($rq, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            if (-not $resp.IsSuccessStatusCode) { return -1 }
+            $r = [IO.StreamReader]::new($resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult())
+            $end = (Get-Date).AddSeconds($Seconds); $n = 0; $pending = $null
+            while ($true) {
+                $left = ($end - (Get-Date)).TotalMilliseconds; if ($left -le 0) { break }
+                if (-not $pending) { $pending = $r.ReadLineAsync() }
+                if (-not $pending.Wait([int]$left)) { break }
+                $line = $pending.Result; $pending = $null; if ($null -eq $line) { break }
+                if ($line -eq ': ping') { $n++ }
+            }
+            return $n
+        } finally { $h.Dispose() }
+    }
+    $w = Count-Pings "$($g.base)/api/v1/events?name=alice&type=persistent-local&roles=owner" (Msg-Token 'alice') 7.5
+    Check 'a worker stream carries a ping about every 2 s' ($w -ge 3 -and $w -le 4) "pings $w"
+    $b = Count-Pings "$($g.base)/api/v1/events" 'test-token' 7.5
+    Check 'the operator broadcast stream carries a ping about every 2 s' ($b -ge 3 -and $b -le 4) "pings $b"
+    $c = Msg-Client 'bob' 'ping' '' @{ FACTORY_URL = $g.base }
+    Check 'the client registers' (Msg-WaitEvent $c 'worker.registered')
+    Start-Sleep -Seconds 5
+    $raw = Get-Content -Raw $c.out
+    Check 'the client printed no ping and no stream.error' ($raw -notmatch 'ping' -and @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'stream.error' }).Count -eq 0) $raw
+    try { Stop-Process -Id $c.proc.Id -Force } catch { }; try { Stop-Process -Id $g.proc.Id -Force } catch { }
+}
+
+# Enhancement 11: one lost connection that the next attempt restores is routine; the drop is reported after 2 reconnects failed as well.
+'msg: the client reports a lost stream only after 2 failed reconnects' = {
+    $c = Msg-Client 'carol' 'dead' '' @{ FACTORY_URL = "http://127.0.0.1:$($script:DeadPort)" }
+    [void](Msg-WaitEvent $c 'stream.error' 30)
+    $errs = @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'stream.error' })
+    Check 'a stream.error is printed once the attempts keep failing' ($errs.Count -ge 1) (Get-Content -Raw $c.out)
+    Check 'the first one is the third failed attempt: none for the drop and the first reconnect' ($errs.Count -ge 1 -and [int]$errs[0].attempt -eq 3) (($errs | ForEach-Object { $_.attempt }) -join ',')
+    try { Stop-Process -Id $c.proc.Id -Force } catch { }
+}
+
 'msg: the client stops on a refusal instead of retrying' = {
     $c = Msg-Client 'bob' 'wrongtoken' (New-WorkerToken 'alice')
     Check 'a stream for another name ends the client with exit 30' ($c.proc.WaitForExit(20000) -and $c.proc.ExitCode -eq 30) "exit $(if ($c.proc.HasExited) { $c.proc.ExitCode } else { 'still running' })"
