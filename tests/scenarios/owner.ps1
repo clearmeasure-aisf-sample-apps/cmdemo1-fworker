@@ -210,7 +210,8 @@ $OwnerScenarios = [ordered]@{
     Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
     Check 'the pull request is merged' ((Get-FakePr $pr).merged -eq $true)
     $r = & $call $own @{ item = $n; pr = $pr; body = 'after the merge' }
-    Check 'a merged pull request is refused (pr-not-open), named or not' ($r.exit -eq 10 -and $r.code -eq 'pr-not-open' -and (& $call $own @{ item = $n; body = 'after the merge' }).code -eq 'pr-not-open' -and (Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$($r | ConvertTo-Json -Compress)"
+    # (pr-not-open while the item is still in Development; wrong-column once the sweep has picked the merge up and moved the card on)
+    Check 'a merged pull request is refused (pr-not-open), named or not' ($r.exit -eq 10 -and $r.code -in 'pr-not-open', 'wrong-column' -and (& $call $own @{ item = $n; body = 'after the merge' }).code -in 'pr-not-open', 'wrong-column' -and (Get-FakePr $pr).body -eq "from a file`n`nRefs #$n") "$($r | ConvertTo-Json -Compress)"
 }
 
 'msg: messaging and the supervisor are off by default' = {
