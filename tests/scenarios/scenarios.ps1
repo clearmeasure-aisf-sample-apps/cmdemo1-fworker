@@ -20,6 +20,27 @@ $Scenarios = [ordered]@{
     Check 'issue closed' (-not (Get-FakeIssue $n).open)
 }
 
+'orphan claim refs: an accept takes one over, the sweep removes those of closed items and keeps a young one (issue 47)' = {
+    $inst = "$((Get-Content -Raw (Join-Path $script:Work 'instance.test.json') | ConvertFrom-Json).name)"
+    $repo = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+    $refs = { @((Invoke-RestMethod "$repo/git/matching-refs/factory/$inst/claims/" -Headers @{ Authorization = 'Bearer fake-operator' }) | ForEach-Object { $_ } | ForEach-Object { "$($_.ref)" }) }
+    # a ref left by an accept cut off between the ref and the state: the item state holds no claim
+    $n = New-Item-Fake 'Orphan ref' 'x' $L
+    Gh-As 'fake-operator' 'git/refs' @{ ref = "refs/factory/$inst/claims/$n"; sha = ('0' * 40) } | Out-Null
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'the claim takes the orphan ref over' $r 0
+    Check 'and says so' ($r.orphan_ref_taken_over -eq $true) ($r | ConvertTo-Json -Compress)
+    $r = F 'w2' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'a ref behind a live claim is still refused' $r 40 'claim-held'
+    # a closed item's ref goes at the next sweep; an open item's orphan is kept until it is older than a lease (30 min here)
+    $c = New-Item-Fake 'Closed with a ref' 'x' $L; $o = New-Item-Fake 'Young orphan' 'x' $L
+    Gh-As 'fake-operator' 'git/refs' @{ ref = "refs/factory/$inst/claims/$c"; sha = ('0' * 40) } | Out-Null
+    Gh-As 'fake-operator' 'git/refs' @{ ref = "refs/factory/$inst/claims/$o"; sha = ('0' * 40) } | Out-Null
+    Invoke-RestMethod "$repo/issues/$c" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+    $gone = Wait-Until -Seconds 30 { "refs/factory/$inst/claims/$c" -notin (& $refs) }
+    Check 'the sweep removed the claim ref of the closed item' $gone ((& $refs) -join ',')
+    $now = & $refs
+    Check 'the young orphan of an open item and the live claim are kept' ("refs/factory/$inst/claims/$o" -in $now -and "refs/factory/$inst/claims/$n" -in $now) ($now -join ',')
+}
+
 'gates refuse what they should [full]' = {
     $n = New-Item-Fake 'Gates' 'x' $L
     $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
