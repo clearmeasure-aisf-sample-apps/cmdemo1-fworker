@@ -15,3 +15,5 @@ The post-merge flow (master green, release candidate, docs-only skip, Release Qu
 A `merge` refused before the merge with exit 10 `qc-not-run` or `qc-approval-missing` (item without `Auto Merge`, policy `peer-approved`) is not a park: the item waits for a person to run a QC environment for the current head and approve it on GitHub, then the owner gets a `qc.approved` event and retries `merge`. Report it as waiting for QC (which of the two is missing); do not park the item and do not ask anyone to retry. The QC environments themselves are torn down by the gateway when the pull request merges or closes, at the idle or lifetime cap, after a head change, or when the `Auto Merge` label is added; those teardowns only stop things and never start a new one.
 
 Never: move an item, retry a merge, clear a park, or edit the state comment.
+
+`base.updated` does not concern a merged item: the gateway does not send it after the merge. If one arrives before `item.merged` (the item went back to Development, fix-forward), the back-merge rule of `factory-owner-session` applies.

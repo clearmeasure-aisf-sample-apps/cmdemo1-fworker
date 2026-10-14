@@ -45,6 +45,10 @@ DOCS-ONLY FAST PATH (script-verified; target: change to open pull request in a f
 
 Never: merge, approve, force-push, rebase pushed history, open a pull request on a red build, or call `complete` before the checks report success.
 
+## Master moved during Development (`base.updated`)
+
+Follow the standing rule of `factory-owner-session` at once, at the next point where no subagent is editing: merge `origin/master` into the branch (merge, not rebase), resolve keeping both changes where they do not contradict, rerun the private build (not for the docs-only fast path), push, comment one line on the item. A push restarts the pull request's checks; that is expected.
+
 ## A command refused in a subagent's shell
 When a subagent reports that its shell refused a command inside its worktree (a sandbox or permission guard answered instead of the program: "not permitted", "denied", "blocked", a request for approval, or the program never started), the subagent stops retrying and returns the exact command, the worktree path and the refusal text. The orchestrator (the owner session) then runs that same command itself, with the worktree path as its working directory, and carries on from the step that was interrupted, handing the output to the subagent if more work follows. This is not a failure of the item: do not park it, do not call `complete --succeeded false`, do not ask and do not wait for the operator. Only when the orchestrator's own shell refuses the same command too is it a failure: `complete --succeeded false --comment "<the command and the refusal>"`. Scope, exact: only build, test and tool commands that act inside the item's own worktree: the repo's build script, `dotnet`, `ensure-tools.ps1`, `app-shot.ps1`, `app-run.ps1`, and `git fetch`, `git merge` and `git push` of the item's branch. Never a `factory.ps1` verb, never a read of a credential or token, never anything outside the worktree: those refusals are deliberate (QC and item-credential isolation) and are a failure of the step, reported as such. The rule covers running a command; it never widens what the skill allows (no merge, no force-push, no skipped build).
 

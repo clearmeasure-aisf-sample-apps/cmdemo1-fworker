@@ -1442,6 +1442,27 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
     }
 
+    // base.updated (BaseUpdate.cs): routed like a trigger (the owner's stream and the item's mailbox, so wait-event sees it and it works with
+    // messaging off), but a newer one replaces the older one of the same item in the replay buffer and the mailbox: a session that reconnects
+    // gets the latest master, not a backlog. It is not recorded as the item's last trigger: the digest's waits (a park, a hold) stay what they were.
+    public bool RouteBaseUpdated(int item, JsonObject evt)
+    {
+        lock (gate)
+        {
+            if (!ownerOf.TryGetValue(item, out var o)) return false;
+            static bool Old(string j, int n) { try { var x = JsonNode.Parse(j); return x?["event"]?.ToString() == "base.updated" && x?["item"]?.GetValue<int>() == n; } catch { return false; } }
+            var json = evt.ToJsonString();
+            if (!mailboxes.TryGetValue(item, out var box)) mailboxes[item] = box = new();
+            box.RemoveAll(b => Old(b.Json, item));
+            var id = mailboxNext.TryGetValue(item, out var mn) ? mn : 1; mailboxNext[item] = id + 1;
+            box.Add((id, json)); if (box.Count > 100) box.RemoveAt(0);
+            if (workers.TryGetValue(o, out var w)) { w.Buffer.RemoveAll(b => Old(b.Json, item)); Push(w, json); }
+            try { mailboxSignal.Release(); } catch { }
+            return true;
+        }
+    }
+    public List<(int Item, string Owner)> OwnersSnapshot() { lock (gate) return ownerOf.Select(kv => (kv.Key, kv.Value)).ToList(); }
+
     public async Task<(List<(long, string)> Events, bool Timeout)> Wait(int item, long after, TimeSpan timeout, CancellationToken ct)
     {
         var end = DateTime.UtcNow + timeout;

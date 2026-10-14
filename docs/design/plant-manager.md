@@ -82,6 +82,55 @@ The plant manager routes every trigger that concerns an item to **that item's ow
 
 Delivery per type: persistent-local receives them on its stream (the same `Monitor` that delivered the assignment); ephemeral-local and cloud sessions call `wait-event --item N [--timeout S]`, an outbound long-poll that costs no tokens while idle. Each owner has its own buffer with `Last-Event-ID` replay, so a dropped connection loses nothing. Triggers are hints; the session re-reads the item before acting.
 
+## 6a. Master moved: the standing back-merge trigger (owner decision 2026-10-13)
+
+Owner's words: "there needs to be a standing rule and standing trigger. workers need to receive the trigger when a PR is merged to the master
+branch so that they can backmerge from master into the feature branch to avoid difficult merge conflicts." Code: `gateway/BaseUpdate.cs`,
+`plugin/scripts/lib/BaseUpdate.ps1`.
+
+**Detection.** (1) The webhook: every `pull_request` delivery with `action: closed`, `merged: true` and `base.ref` the default branch
+becomes the event `base.merged` (`ingest-event`, any branch, not only factory branches). The repository webhook already delivers
+`pull_request` (`docs/deploy/create-webhook.sh`) and the gateway verifies its HMAC; `push` is not needed and not subscribed. (2) The
+fallback: after a sweep, at most every `baseUpdate.sweepCheckSeconds` (60), the verb `base-watch` reads the head of the default branch (one
+call) and compares it with the last head the gateway saw. Both feed one debounce: merges within `timing.baseUpdateDebounceSeconds` (20) of
+each other (at most three windows in all) give one trigger with the latest head and every merged pull request number. The first look after
+a start only records the head.
+
+**The trigger.** For every item the plant has an owner for, `base-watch` reads the state, the item's open pull request (branch
+`factory-worker/N-...`), how many commits the branch is behind master (compare API) and, when master moved, the files the new master
+commits changed that the item's pull request changes too (`overlap`, at most 20; master's side is bounded at 300 files). No event for an
+item whose branch is not behind, whose pull request is the one just merged or is closed, that has no branch, or that is in a state the
+gateway owns (a PASS verdict waiting for its merge, a merge being settled). The owner gets:
+
+```json
+{"provider":"gateway","event":"base.updated","item":12,"base":"master","sha":"<new head>","prs":[41,42],"pr":37,
+ "branch":"factory-worker/12-development","behind":2,"overlap":["src/Core/Model/WorkOrder.cs"],"via":"webhook","at":"..."}
+```
+
+It is a plant trigger like `item.assigned`, not a message: it goes to the owner's stream and to the item's mailbox (`wait-event`), with
+messaging on or off. Replay: a newer `base.updated` replaces the older one of the same item in the replay buffer and the mailbox, so a
+session that reconnects gets the latest master, not a backlog. It does not become the item's "last trigger" for the digest. Journal line
+`base-updated` on the item once per trigger (key: the new head); the operator stream gets `plant.event` code `base-updated` with detail
+`sent-<n>-behind-<m>`.
+
+**The standing rule** (skill `factory-owner-session`, referenced by `factory-development` and `factory-follow-through`): on `base.updated`,
+as soon as the current step allows (never in the middle of a subagent's edit), fetch, `git merge origin/master` into the item branch (merge,
+not rebase: an open pull request keeps its history), resolve keeping both changes where they do not contradict, run what the column requires
+(none for docs-only), push, comment one line. Ask the supervisor only when the two changes genuinely contradict; never wait for a person.
+
+**The gateway's own back-merge.** When `baseUpdate.autoUpdateBranch` is on (default), `baseUpdate.autoUpdateDelaySeconds` (120) after the
+trigger the gateway runs `base-update-branch` for each pull request it told an owner about: only when the pull request is open, its head is
+still the one the trigger saw (the owner has not pushed), GitHub reports it mergeable (not `dirty`), it is behind, and no `pr.head_changed`
+webhook came in the last `baseUpdate.quietSeconds` (60). Then `PUT /repos/{o}/{r}/pulls/{n}/update-branch` with `expected_head_sha`
+(journal `branch-updated`, operator `plant.event` `branch-updated`). A conflicting pull request is never touched: it stays the owner's job.
+The switch can be changed at run time: `POST /api/v1/base-update?autoUpdateBranch=false` (operator token; until the next restart).
+GitHub permission: contents write and pull requests write, both in the manifest of the author App (`tools/github-app-setup/serve.ps1`).
+
+**Visibility.** `/api/v1/status` and the dashboard JSON carry `baseUpdate`: `head`, `triggers`, `eventsSent`, `gatewayUpdates`,
+`gatewayConflicts`, `workerBackMerges` (an owner that was told and whose branch is up to date at a later look, without the gateway's
+update), `itemsBehind` and `behind` per owned item (refreshed by each `base-watch`). The dashboard shows a summary line and, per owned
+item in Assignments, how many commits it is behind master.
+
 ## 7. Bots (separate sessions)
 
 When a PASS verdict is recorded under the `peer-approved` policy, the plant manager creates a `bot-job` of kind `inspector` and assigns it to a worker registered with the `inspector` role. That session has a clean context, gets an inspector-role item token, runs `inspect-facts`, judges, and submits `approve-pr`. The owner is told the result by a trigger. Quality-control and release bots follow the same shape: a job kind, a role, a token scope, a result trigger. The inspector rules (mandatory escalations computed by script, three verdicts, holds cleared only by a named person's approval of the current head) are unchanged; see `plugin/scripts/lib/Verbs.Inspect.ps1`.

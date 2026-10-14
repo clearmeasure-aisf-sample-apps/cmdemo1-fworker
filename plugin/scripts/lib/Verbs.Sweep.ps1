@@ -227,6 +227,8 @@ function Verb_ingest_event($a) {
         'pull_request' {
             $act = "$($p.action)"; $pull = $p.pull_request
             $branch = "$($pull.head.ref)"
+            # any pull request merged into the default branch moves master: the gateway tells the owners of open branches (base.updated)
+            if ($act -eq 'closed' -and (Test-Has $pull 'merged') -and $pull.merged -and (Test-Has $pull 'base') -and "$($pull.base.ref)" -eq $c.defaultBranch) { $out += New-Event 'base.merged' $null $null $delivery @{ pr = [int]$pull.number; sha = "$($pull.merge_commit_sha)" } }
             if ($branch -match "^$([regex]::Escape($c.name))/(\d+)-") {
                 $num = [int]$Matches[1]; $full = if ((Test-Has $pull 'head') -and (Test-Has $pull.head 'repo')) { "$($pull.head.repo.full_name)" } else { '' }
                 if ($full -ine "$($c.owner)/$($c.repo)") { return @{ ok = $true; events = @(); dropped = 'pr.fork' } }
