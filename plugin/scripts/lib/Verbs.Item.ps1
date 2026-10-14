@@ -167,8 +167,17 @@ function Verb_claim_item($a) {
     }
     $head = (Invoke-Gh -Path "$(Get-RepoPath)/git/ref/heads/$($c.defaultBranch)").object.sha
     $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/git/refs" -Body @{ ref = "refs/$(Get-RefPath)/$n"; sha = $head } -Allow 422
+    $tookOver = $false
     if ($r -is [hashtable] -and $r.ContainsKey('status') -and $r.status -eq 422) {
-        Reject 40 'claim-held' 'another session created the claim first' @{ detail = "$($r.body.message)" }
+        # The ref exists but the state holds no live claim (a live one was answered above): an orphan, left by a claim cut off between the ref and
+        # the state (a gateway restart, issue 47). This verb holds the item lock and only this gateway writes claim refs, so the ref is taken over:
+        # removed and created again. A second 422 means another writer did win the ref meanwhile, and that is refused as before.
+        Remove-ClaimRef $n
+        $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/git/refs" -Body @{ ref = "refs/$(Get-RefPath)/$n"; sha = $head } -Allow 422
+        if ($r -is [hashtable] -and $r.ContainsKey('status') -and $r.status -eq 422) {
+            Reject 40 'claim-held' 'another session created the claim first' @{ detail = "$($r.body.message)" }
+        }
+        $tookOver = $true
     }
     if (-not (Test-Has $s 'dispatched_at')) { $s.dispatched_at = @{} }
     $s.dispatched_at[$info.column] = ConvertTo-Iso (Get-UtcNow)
@@ -182,7 +191,9 @@ function Verb_claim_item($a) {
         lease_until = ConvertTo-Iso ((Get-UtcNow).AddMinutes($t.leaseMinutes)); launches = $launches + 1 }
     if ((Test-Has $a 'owner') -and $a.owner) { $s.claim.owner = $true; $s.claim.worker = "$($a.worker)"; $s.claim.assignment = "$($a.assignment)"; if ($mode -eq 'relaunch') { $mode = 'resume' } }
     Save-State $n $st
-    return @{ ok = $true; id = $n; claimed = $true; column = $info.column; mode = $mode; launches = $launches + 1; lease_until = $s.claim.lease_until }
+    $out = @{ ok = $true; id = $n; claimed = $true; column = $info.column; mode = $mode; launches = $launches + 1; lease_until = $s.claim.lease_until }
+    if ($tookOver) { $out.orphan_ref_taken_over = $true }
+    return $out
 }
 
 function Verb_record_review($a) {

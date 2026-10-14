@@ -142,10 +142,10 @@ function Invoke-Settle([int]$n) {
         if ($d.candidate) {
             $next = Get-NextColumn $info.column
             if ($next -and $next -ine (Get-LastColumn)) { Move-Card $info $next }
-            $m.awaiting = 'release-queue'; $m.release = $d.candidate.version
+            $m.awaiting = 'release-queue'; $m.release = $d.candidate.version; $m.queued_at = ConvertTo-Iso $now
             Add-Comment $n "release candidate **$($d.candidate.version)** carries ``$($sha.Substring(0,7))`` - waiting in **$next** for the production deployment."
             Save-State $n $st
-            return @{ outcome = 'advanced'; awaiting = 'release-queue'; release = $d.candidate.version }
+            return @{ outcome = 'advanced'; awaiting = 'release-queue'; release = $d.candidate.version; queued_at = $m.queued_at }
         }
         $deadline = ConvertFrom-Iso $m.rc_deadline
         if ($m.awaiting -eq 'release-candidate' -and $deadline -and $now -gt $deadline) {
@@ -169,7 +169,9 @@ function Invoke-Settle([int]$n) {
             & $finish "Delivered to **Prod** in release $later, which contains this change - moved to **$(Get-LastColumn)**."
             return @{ outcome = 'done'; path = 'prod-later-release'; release = $later }
         }
-        return @{ outcome = 'waiting'; awaiting = 'release-queue'; deployments = $d.deployments }
+        # since when it waits (the Release Queue age of the digest): an item queued before queued_at was recorded counts from master green, or the merge
+        $queued = if (Test-Has $m 'queued_at') { $m.queued_at } elseif (Test-Has $m 'green_at') { $m.green_at } else { $m.merged_at }
+        return @{ outcome = 'waiting'; awaiting = 'release-queue'; deployments = $d.deployments; release = $m.release; queued_at = $queued }
     }
     return @{ outcome = 'unknown-state'; awaiting = $m.awaiting }
 }

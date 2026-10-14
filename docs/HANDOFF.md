@@ -162,11 +162,22 @@ s. **Done (2026-10-13): the standing back-merge trigger** (`docs/design/plant-ma
    installed author App has contents write and pull requests write was not checked from this repository (the manifest has both; without
    them the update branch call fails and the owners still do the back-merge); (2) the peer-messaging skill (owner review) does not list
    `base.updated`; it is a plant trigger, not a message, so nothing depends on it; (3) not yet seen live on tdd.
+t. **Done (2026-10-14): SSE keepalive** (enhancement 11). Every event stream (worker, supervisor, operator session, the operator's broadcast)
+   writes a `: ping` comment every 25 s, busy or idle (`FACTORY_SSE_PING_SECONDS`); before, a ping came only after 15 s without an event.
+   The stream clients (`Client.Subscribe.ps1`, `Client.Own.ps1`) ignore comment lines and print `stream.error` only from the third failed
+   attempt in a row (after a drop by error: the drop and 2 failed reconnects; after a clean end of the stream: 3 failed reconnects). Open: `Client.Operator.ps1` (code-owner path) still reports the first failure.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
 j. **pwsh crashes (exit 134 or 139) under machine load in the test suites.** Not a product answer, but it costs reruns; find out whether
    it is memory, the runtime or the long-lived client host.
+t. **Done (2026-10-14): the Release Queue age** (enhancement 9). The sweep lists the items waiting in the Release Queue (`release_queue`:
+   item, release, since); the patrol digest carries `release-queue-aged` when the oldest waits over `timing.mgrReleaseQueueMinutes` (60) or
+   `manager.digest.releaseQueueCount` (3) items wait; the operator stream gets one `release.ready` line per release whose items changed
+   ("ready to promote <release> to UAT: items ..."); the dashboard's "Request promotion to UAT" button (`POST /api/v1/release-queue/
+   promotion-request`, operator token only) records the request in memory and announces it (`release.promotion-requested`). Nothing in
+   the gateway promotes: uat and prod stay with the owner and the cmdemo1 session. Open: the supervisor's skill (owner review) does not
+   yet say what to do with `release-queue-aged`; not yet seen live on tdd.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
 m. **The sweep still saves a state it read without the item lock in two places** of `Verb_sync_board` (Verbs.Sweep.ps1): the
    awaiting-checks path (`Complete-AwaitingChecks`) and the settle path (`Invoke-Settle`, which reads fresh but holds no lock). They were
