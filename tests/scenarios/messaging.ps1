@@ -380,7 +380,7 @@ $MessagingScenarios = [ordered]@{
     Check 'the client registers' (Msg-WaitEvent $c 'worker.registered')
     Start-Sleep -Seconds 5
     $raw = Get-Content -Raw $c.out
-    Check 'the client printed no ping and no stream.error' ($raw -notmatch 'ping' -and @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'stream.error' }).Count -eq 0) $raw
+    Check 'the client printed no ping and no stream.error' ($raw -notmatch '(?m)^\s*:' -and $raw -notmatch ': ping' -and @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'stream.error' }).Count -eq 0) $raw
     try { Stop-Process -Id $c.proc.Id -Force } catch { }; try { Stop-Process -Id $g.proc.Id -Force } catch { }
 }
 
