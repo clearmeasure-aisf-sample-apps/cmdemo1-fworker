@@ -265,6 +265,27 @@ A criterion that fails twice in a row is usually ambiguous or untestable as writ
 
 A quote counts only when, whitespace folded, it is found word for word in the item above its design section and is at least 8 characters long. The records live in the item state (`cited`, `timing_flagged`), so they survive a restart of the gateway. Parking clears every `cited` record, so the first round after the owner answers (or after the park expires on `parkHours`) starts fresh. Timing flags cover every list item above the design section that matches the wording, context bullets included.
 
+### 10d. A person releases a park early (2026-10-14)
+
+A park holds an item for `timing.parkHours` (24) and `claim-item` refuses it meanwhile. When the owner has answered sooner (relaxed or reworded a
+criterion, fixed what the worker reported), the operator releases the park instead of waiting:
+
+```bash
+pwsh plugin/scripts/factory.ps1 unpark --item 212 --reason "criterion 2 relaxed: 3 seconds, not 2"   # FACTORY_URL, FACTORY_TOKEN = the operator token
+curl -X POST -H "Authorization: Bearer $FACTORY_OPERATOR_TOKEN" -H 'Content-Type: application/json' -d '{"reason":"..."}' $U/api/v1/items/212/unpark
+```
+
+| Rule | Enforced by |
+|---|---|
+| Only the operator token (the gateway's admin credential) is accepted; a worker, item, supervisor or operator-session credential is refused 403 | `POST /api/v1/items/{n}/unpark` (Program.cs). No change to Auth.cs: the rule verb `unpark-item` is in no role's verb list, and `POST /api/v1/verbs/unpark-item` answers 400 `use-endpoint` even for the operator, so the reason is always checked |
+| A reason of 1 to 500 characters is required | the endpoint (400 `usage`) and the verb |
+| The park leaves the item's state comment, written by the gateway's own author; a journal line names the park's code, who released it and the reason (redacted like every journal line) | `unpark-item` (Verbs.Item.ps1), event `unparked` |
+| With no live claim and the item in an AI column (`columns.ai`), it gets a handoff to its current column and the plant forgets the assignment of the session that held it before the park (as for a `release`), so the sweep that the call requests offers it again at once, in that column | the verb (`reoffer: true`) and the endpoint |
+| Not a park for a person, so refused (exit 10): `development:awaiting-checks` (`gateway-wait`: the sweep ends it when the checks finish) and `inspector-escalated` (`needs-approval`: only a human approval of the head clears it, `clear-hold`). An item with no park: `not-parked` | `unpark-item` |
+
+An expired park (past its `until`) is removed the same way (`expired: true` in the answer); the two refused codes are refused even then. In a column outside `columns.ai` the park is removed with no handoff (`reoffer: false`). The item's column is not changed: to send it back to
+an earlier column, move the card as before.
+
 ## 11. Cloud workers (designed, NOT implemented)
 
 ### Shape
