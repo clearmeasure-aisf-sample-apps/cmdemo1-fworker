@@ -14,6 +14,8 @@ sealed class WorkerInfo
     public bool Draining, Connected;
     public DateTime LastSeen = DateTime.UtcNow;
     public Channel<(long, string)>? Out;
+    public int Missed;                                        // offers in a row this session let lapse (issue 31); any successful verb resets it
+    public DateTime CoolUntil = DateTime.MinValue;            // until then it is offered no new work (unpinned)
     public List<(long Id, string Json)> Buffer = new();      // item triggers for replay; the event counter itself is the name's Recipient.Next
     public string Model = "", Effort = "";                   // declared at registration (worker-messaging.md 2.2), never verified
     // QC (design pr-qc-environment.md 4.2): environments this session may run at once, the address it declared for URL checks, free memory from its heartbeat
@@ -37,6 +39,7 @@ sealed class Assignment
     public DateTime CreatedAt, AckBy, AcceptedAt;
     public HashSet<string> Declined = new();
     public bool Accepted, AckExtended;   // AckExtended: the offer's window was lengthened once for a journal wait
+    public DateTime? Accepting;          // the accept verb of the offered session is running (BeginAccept): the window does not lapse meanwhile
     public bool MatchedNoted;                      // its "matched" journal line is queued: once per assignment
     public string Sha = "", EnvId = "";            // qc-env only
     public int Attempt;
@@ -133,6 +136,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         lock (gate)
         {
             if (!workers.TryGetValue(name, out var w)) workers[name] = w = new WorkerInfo { Name = name };
+            w.Missed = 0; w.CoolUntil = DateTime.MinValue;   // a (re)registration answers: offers lapsed while the gateway or the session was away do not count
             if (newSession || w.Session == 0)
             {   // a new session starts with what the name still owns: it resumes that item and is given no other
                 w.Session++; w.SessionStarted = DateTime.UtcNow;
@@ -767,6 +771,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             d.VerbErrors.Add((g.Key.Item, g.Key.Name, g.Count(), g.GroupBy(x => x.Code).OrderByDescending(c => c.Count()).ThenBy(c => c.Key, StringComparer.Ordinal).Select(c => (c.Key, c.Count())).ToList()));
         foreach (var k in mergeRefused.Where(kv => (now - kv.Value.At).TotalMinutes > Msg.NoteMinutes).Select(kv => kv.Key).ToList()) mergeRefused.Remove(k);
         foreach (var (item, mr) in mergeRefused.OrderBy(kv => kv.Key)) d.MergeRefused.Add((item, mr.RoundTrip, mr.At));
+        AddPassUnmerged(d, now);
         if (returned.Count > 0 && (now - startedAt).TotalMinutes < Msg.RestartMinutes)
             d.Restart = (returned.Count, d.Owned.Select(o => o.Holder).Distinct().Count(n => !d.Sessions.Any(x => x.Name == n && x.Connected)), (int)(now - startedAt).TotalMinutes);
         foreach (var a in assignments.Values.Where(a => a.WaitingSince != null && a.Worker == "" && !a.Accepted && !IsQc(a)).OrderBy(a => a.Item)) d.Waiting.Add((a.Item, GatedCode(a.WaitingCode), a.WaitingSince!.Value));
@@ -1532,9 +1537,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             if (p != null && SessionSpent(p, a)) { chooseCode = "session-spent"; return (null, $"the pinned worker '{pin}' already held a work item in this session; the item waits for its next session"); }
             return p != null && Owned(p.Name) < p.Capacity ? (p, "") : (null, $"the pinned worker '{pin}' is not available");
         }
-        var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name)).ToList();
+        var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name) && !Cooling(w)).ToList();
         chooseCode = "all-draining-or-declined";
-        if (live.Count == 0) return (null, "every eligible session is draining or has declined");
+        if (live.Count == 0) return (null, "every eligible session is draining, has declined, or is cooling down after offers it let lapse");
         // a slot that a pinned item waits for is that item's (issue 46): an unpinned item takes only the slots no waiting pin claims
         var free = live.Where(w => Owned(w.Name) + PinnedWaiting(w.Name) < w.Capacity).ToList();
         chooseCode = "at-capacity";
@@ -1763,7 +1768,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         var placed = new List<Assignment>();
         lock (gate)
         {
-            foreach (var a in assignments.Values.Where(a => !a.Accepted && a.Worker != "" && a.AckBy < DateTime.UtcNow).ToList())
+            foreach (var a in assignments.Values.Where(a => !a.Accepted && a.Worker != "" && a.AckBy < DateTime.UtcNow && !(a.Accepting is { } ing && (DateTime.UtcNow - ing).TotalSeconds < 90)).ToList())
             {
                 var was = a.Worker;
                 if (!IsQc(a) && a.Pin != "")
@@ -1774,7 +1779,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     continue;
                 }
                 a.Declined.Add(was); a.Worker = "";
-                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s" }, "ack|" + a.Id + "|" + was);
+                var cool = IsQc(a) ? "" : NoteMissed(was);
+                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s{cool}" }, "ack|" + a.Id + "|" + was);
                 var (w, why) = IsQc(a) ? ChooseQc(a) : Choose(a, null);
                 if (w == null) { if (!IsQc(a)) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = chooseCode; Journal(a.Item, "waiting", new JsonObject { ["reason"] = why }, ""); } continue; }
                 Offer(a, w, null);
@@ -1810,6 +1816,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     public void OnVerb(string verb, JsonObject request, Principal who, JsonObject response)
     {
         var item = int.TryParse(request["item"]?.ToString(), out var parsed) ? parsed : who.Item; if (item == 0) return;
+        // validation-verdict answers the gateway's own merge after a PASS in `merge` (Verbs.Merge.ps1 -Gateway)
+        var vm = response["merge"] as JsonObject; var vmOutcome = vm?["outcome"]?.ToString() ?? ""; var vmDetail = vm?["detail"] as JsonObject;
         lock (gate)
         {
             // the lease as the verb answered it (accept, claim-item, claim-item --renew), until the next sweep says otherwise (3.9)
@@ -1828,6 +1836,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     mergeRefused[item] = (int.TryParse(response["detail"]?["round_trip"]?.ToString(), out var trip) ? Math.Max(1, trip) : 1, DateTime.UtcNow);
                     if (mergeRefused.Count > 200) mergeRefused.Remove(mergeRefused.MinBy(kv => kv.Value.At).Key);
                     break;
+                case "validation-verdict" when vmOutcome == "demoted":
+                    mergeRefused[item] = (int.TryParse(vmDetail?["round_trip"]?.ToString(), out var vtrip) ? Math.Max(1, vtrip) : 1, DateTime.UtcNow);
+                    if (mergeRefused.Count > 200) mergeRefused.Remove(mergeRefused.MinBy(kv => kv.Value.At).Key);
+                    break;
             }
             switch (verb)
             {
@@ -1844,8 +1856,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     DropOwner(item); foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
                     break;
                 case "merge" when response["outcome"]?.ToString() is "merged" or "already-merged":
+                case "validation-verdict" when vmOutcome is "merged" or "already-merged":
                     // the owner keeps the item until master is green (item.complete); the open assignments are done
                     foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
+                    passUnmerged.Remove(item);
                     Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.merged", ["item"] = item });
                     break;
                 case "approve-pr":
@@ -1870,7 +1884,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             return new JsonObject
             {
                 ["oneItemPerSession"] = OneItemPerSession,
+                ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
+                    ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null,
                     ["session"] = w.Session, ["sessionStarted"] = w.SessionStarted.ToString("o"), ["sessionItems"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),
                     ["sessionSpent"] = OneItemPerSession && w.SessionItems.Count > 0,
                     ["itemsPerSession"] = new JsonArray(w.Sessions.Select(x => (JsonNode)new JsonObject { ["session"] = x.No, ["started"] = x.Started.ToString("o"), ["items"] = new JsonArray(x.Items.Select(i => (JsonNode)i).ToArray()) }).ToArray()),

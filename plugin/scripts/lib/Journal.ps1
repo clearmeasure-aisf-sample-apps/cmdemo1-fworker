@@ -45,6 +45,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'qc-torn-down' { return "QC environment for PR #$($F.pr) torn down ($($F.reason))." }
         'qc-waiting' { return "QC environment for PR #$($F.pr) is waiting: $($F.reason)." }
         'question-escalated' { return "a question from **$($F.worker)** has waited $($F.minutes) min for the supervisor (supervisor: $(if ("$($F.supervisor)" -eq 'connected') { 'connected' } else { 'absent' })); a person is asked to look at the dashboard." }
+        'merge-waiting' { return "PR #$($F.pr) has a PASS verdict and is not merged yet: $($F.reason) (``$($F.code)``). The gateway merges it by itself when that clears; no session has to call anything." }
         'base-updated' { return "master moved to ``$($F.sha7)``$(if ($F.ContainsKey('prs') -and $F.prs) { " (merged: $($F.prs))" }); told the owner (**$($F.worker)**) to merge master into the branch now: $($F.behind) commit(s) behind$(if ($F.ContainsKey('overlap') -and $F.overlap) { ", files changed on both sides: $($F.overlap)" })." }
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }

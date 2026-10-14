@@ -231,12 +231,14 @@ function Gh-As([string]$Token, [string]$Path, $Body) {
     Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/$Path" -Method POST -Headers @{ Authorization = "Bearer $Token" } -Body ($Body | ConvertTo-Json -Depth 5) -ContentType 'application/json'
 }
 function Get-Head([int]$pr) { (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pulls/$pr").head.sha }
-function To-Verdict([int]$n, [int]$Pr, $Files = @('docs/a.md'), [bool]$DocsOnly = $true, [string]$Body = 'x') {
-    # An item taken to a recorded PASS verdict, ready for the approval step.
+function To-Verdict([int]$n, [int]$Pr, $Files = @('docs/a.md'), [bool]$DocsOnly = $true, [string]$Body = 'x', [switch]$HoldMerge) {
+    # An item taken to a recorded PASS verdict, ready for the approval step. Under merge policy auto the gateway merges that PASS at once:
+    # -HoldMerge lets the checks of the head run again for an hour first, so the PASS stays recorded and unmerged for the scenario.
     $n2 = New-Item-Fake 'Approval trial' $Body $L2
     Do-TechnicalDesign $n2 'w1' $DocsOnly
     $pr2 = Do-Development $n2 $Files
     Do-DevComplete $n2 | Out-Null
+    if ($HoldMerge) { Fake 'pr' @{ number = $pr2; delaySeconds = 3600 } | Out-Null }
     $v = Do-Verdict $n2 $pr2
     return @{ n = $n2; pr = $pr2; verdict = $v }
 }

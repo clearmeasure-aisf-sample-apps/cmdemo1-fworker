@@ -151,7 +151,7 @@ function Verb_claim_item($a) {
     $park = Get-Park $s
     if ($park -and -not ((Test-Has $a 'force') -and $a.force)) { Reject 10 'parked' "item is parked: $($park.reason)" @{ park = $park } }
     if ($info.column -ieq $c.columns.validation -and (Test-Has $s 'verdict') -and -not $s.verdict.processed -and -not (Test-Has $a 'force')) {
-        Reject 10 'verdict-already-recorded' 'a validation verdict is already recorded for this round'
+        Reject 10 'verdict-already-recorded' 'a validation verdict is already recorded for this round; nothing is left for a session to do (a PASS under merge policy auto is merged by the gateway)'
     }
     $launches = 0; $mode = 'first'
     if (Test-Has $s 'claim') {

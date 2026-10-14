@@ -195,6 +195,11 @@ function Verb_validation_verdict($a) {
         }
     }
     $headSha = ''; if ($pr -gt 0) { try { $headSha = (Get-Pr $pr).head.sha } catch { } }
+    # the head the validator tested (--head-sha): a PASS for another head than the current one is refused; without it (older skills) the head
+    # read here is recorded, and a head that could not be read leaves the verdict without one, which the gateway never merges
+    if ($passed -and (Test-Has $a 'head_sha') -and "$($a.head_sha)") {
+        if (-not $headSha -or "$($a.head_sha)" -ne $headSha) { Reject 10 'head-mismatch' "the PASS was given for $("$($a.head_sha)".Substring(0, [Math]::Min(7, "$($a.head_sha)".Length))), but the head of PR #$pr is $(if ($headSha) { $headSha.Substring(0,7) } else { 'unknown' }); test the current head. Nothing was recorded." }
+    }
     $s.verdict = @{ passed = $passed; pr = $pr; head_sha = $headSha; summary = $summary; at = ConvertTo-Iso (Get-UtcNow); round = $(if (Test-Has $s 'demotions') { [int]$s.demotions } else { 0 }); processed = $false }
     Add-Comment $n "validation verdict for **$($info.column)**: $(if ($passed) {'PASS'} else {'FAIL'}) - $summary"
     $res = @{ ok = $true; id = $n; recorded = $true; passed = $passed; downgraded = $downgraded; column = $info.column }
@@ -210,6 +215,8 @@ function Verb_validation_verdict($a) {
         if ($pr -gt 0) {
             $prd = try { Get-Pr $pr } catch { $null }
             $cause = if ($prd -and $prd.merged) { "PR #$pr already merged as $($prd.merge_commit_sha) - residual gaps only (open a NEW branch from master): $summary" } else { $summary }
+            # (a merge that a FAIL verdict judged is not picked up by the sweep as a finished change: the gaps are still to be closed)
+            if ($prd -and $prd.merged) { if (-not (Test-Has $s 'pr')) { $s.pr = @{} }; $s.pr.residual = $true }
             $d = Invoke-Demote $n $info $st $cause 'verdict'
             $res.next = $d.outcome; $res.detail = $d
         } else {
@@ -230,5 +237,13 @@ function Verb_validation_verdict($a) {
     }
     Save-State $n $st
     $res.next = if ($c.mergePolicy -eq 'auto') { 'merge' } else { 'approve' }
+    # The gateway merges an approved change itself (Verbs.Merge.ps1): in this call when nothing stands in the way, otherwise the sweep does it as
+    # soon as it can. 'merge' in the answer says what happened; 'next' stays "merge" so the session's one merge call (answered already-merged)
+    # still confirms it, and names the new state only when the merge sent the item back or parked it.
+    if ($c.mergePolicy -eq 'auto' -and (Test-GatewayMerge) -and (Test-Label $info $c.autoMergeLabel)) {
+        $m = try { Verb_merge @{ item = $n; pr = $pr } -Gateway } catch [FactoryReject] { @{ ok = $true; id = $n; outcome = 'waiting'; reason = $_.Exception.Code } }
+        $res.merge = $m
+        if ($m.outcome -in 'demoted', 'parked') { $res.next = $m.outcome; if (Test-Has $m 'detail') { $res.detail = $m.detail } }
+    }
     return $res
 }
