@@ -118,6 +118,14 @@ Raw evidence (logs, prompts, traffic) stays on the owner's machine and is not co
 
 ## 5. Open defects and backlog, in priority order
 
+Done 2026-10-13 (issues 33, 30 and 31 of this repository): **the gateway finishes an approved item by itself.** A PASS on an `Auto Merge`
+item under policy `auto` is merged by the verdict call, or by the sweep as soon as it can be (checks green, branch brought up to date, after a
+restart or with no owner); the item is never offered while it waits, `/status` lists it under `passUnmerged` and the digest names it
+`pass-unmerged`. A pull request a person merged settles the item from any state. A late accept of a withdrawn offer is refused
+(`stale-assignment`), and a session that lets two offers in a row lapse cools down for 5 minutes. Design: `docs/design/plant-manager.md` 10b
+and 10c; config `gatewayMerge`, `timing.passMergeGraceSeconds`, `passUnmergedDigestMinutes`, `offerMissLimit`, `offerCoolDownMinutes`.
+The suites `auto` and `merge-queue` run with `gatewayMerge` false: they test the session's `merge` verb as it was.
+
 a. **Done (2026-10-13): the plant manager reports problems to the operator proactively.** The patrol digest carries seven more codes
    (`item-quiet`, `last-review-round`, `review-rounds-exhausted`, `worker-blocked-note`, `verb-errors`, `merge-refused`,
    `gateway-restarted`; `docs/design/worker-messaging.md` 3.9 "Reported conditions") and the supervisor's skill sends the operator one

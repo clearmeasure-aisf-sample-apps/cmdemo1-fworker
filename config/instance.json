@@ -74,6 +74,10 @@
     "devChecksTimeoutMinutes": 30,
     "verdictTimeoutMinutes": 180,
     "unprocessedVerdictGraceMinutes": 3,
+    "passMergeGraceSeconds": 60,
+    "passUnmergedDigestMinutes": 5,
+    "offerMissLimit": 2,
+    "offerCoolDownMinutes": 5,
     "parkHours": 24,
     "awaitingChecksParkMinutes": 60,
     "docsOnlyReleaseGraceSeconds": 120,
@@ -263,6 +267,7 @@
   },
   "testLabel": "factory test",
   "mergeQueueDepth": 0,
+  "gatewayMerge": true,
   "ownerSessions": false,
   "idleReleaseMinutes": 60,
   "stateAuthors": [

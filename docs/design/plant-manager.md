@@ -116,6 +116,42 @@ Rules: hidden machine marker on every comment (`<!-- plant event=assigned key=â€
 
 `mergeQueueDepth` limits merged items waiting for their release candidate (the Release workflow keeps one queued run). `mergePolicy` is `auto` or `peer-approved`. A merged docs-only change finishes after master has been green for a grace period even if no release run appears. CI is classified strictly: zero check runs is pending, and each configured gate must be present and successful.
 
+### 10b. The verdict and the merge: the gateway merges (owner decision 2026-10-13)
+
+Under merge policy `auto` (config `gatewayMerge`, default true) the step from a PASS to the merge belongs to the gateway, not to a session:
+
+1. `validation-verdict` records the PASS and, for an item with `Auto Merge`, continues into the merge in the same call (`Verb_merge -Gateway`
+   in `plugin/scripts/lib/Verbs.Merge.ps1`). The checks are exactly those of the `merge` verb: the item's own pull request, open, its head
+   equal to the head the verdict was given for (a push after the verdict voids the PASS and demotes the item; the one head accepted without a
+   new verdict is the one the gateway made itself when it brought the branch up to date with its base), the required checks green, GitHub
+   says mergeable, the merge queue has room, no hold. The answer carries `merge: {outcome, reason}`; `next` stays `merge`, and the session's
+   one `merge` call afterwards answers `already-merged`. Green checks: merged in the same call, about 20 s as before.
+2. What cannot happen yet answers `outcome: "waiting"` with a reason code (`checks-pending`, `branch-updated`, `mergeability-unknown`,
+   `merge-queue`, `held`), kept in `verdict.wait` and journaled once per code (`merge-waiting`). The sweep runs the same step again under the
+   item lock on a fresh read for every unprocessed PASS: at once when the verdict call already tried, otherwise after
+   `timing.passMergeGraceSeconds` (60), so a gateway restart, a lapsed lease or an item without an owner changes nothing. Nothing loops: a
+   branch behind its base is updated at most `timing.outOfDateMergeAttempts` times per verdict, a red check or an unmergeable pull request takes
+   the demote path (bounded by `maxDemotions`), and a PASS still unmerged after `timing.verdictTimeoutMinutes` is parked for a person.
+3. An item in this state is never offered to a worker (a claim would be refused `verdict-already-recorded`). `/status` lists it under
+   `passUnmerged`, and the patrol digest reports it as `pass-unmerged` with the reason code once it has waited
+   `timing.passUnmergedDigestMinutes` (5).
+4. The verdict's `processed` flag and the item lock make the step idempotent: two sweeps, or the session's call racing the sweep, merge once.
+5. A pull request merged by a person is picked up by the sweep whatever state the item was in (a PASS waiting for the gateway, a PASS parked
+   for a person because the item has no `Auto Merge`, an item still in Development): the merge is recorded, the verdict closed, claim, park and
+   hand-off end, the card moves to Functional Testing if it was earlier, and `settle` takes it from there. A merge that a FAIL verdict already
+   judged (residual gaps) is not picked up.
+
+Without `Auto Merge`, or under `peer-approved`, nothing changes: the gateway does not merge.
+
+### 10c. Offers (owner decision 2026-10-13)
+
+- An accept is honoured only for the offer that stands for that session now: a late accept of an offer the gateway withdrew (it lapsed and
+  went back to the plan or to another session), or of one it no longer knows (dropped, made before a restart), is refused with exit 11
+  `stale-assignment`. While an accept runs, its offer does not lapse. A session therefore never holds more than its capacity.
+- A session that let `timing.offerMissLimit` (2) offers in a row lapse is offered nothing new (unpinned) for `timing.offerCoolDownMinutes`
+  (5), or until it calls a verb successfully. The `reassigned` journal line says so; `/status` shows `missedOffers` and `coolDownUntil` per
+  worker and the dashboard a `cool-down` pill. 0 for the limit turns the rule off.
+
 ### 10a. Docs-only fast path (owner decision 2026-10-12)
 
 A one-line documentation item should go from accepted to merged in about 10 minutes with small-model subagents. Docs-only is decided once, in Technical Design: the design's `Files:` line names every file; all are under `docs/` or `.md` outside `src/`, and no code, build, workflow or test reads them; the design then carries `docsOnlyMarker`. `append-body` records the decision in the item state (`design.docs_only`) only when the marker arrives inside the design section while the item is in its design column, and refuses the marker anywhere else (`docs-only-marker-not-allowed`); completing the design column writes `false` when no design append set the field. Once the field exists the body text is ignored, so a marker typed into the issue gives nothing; only a state with no field on an item already past its design column (written by an older version) falls back to the marker in the body. Items without the marker are untouched by everything below.

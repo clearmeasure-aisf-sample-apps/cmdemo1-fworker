@@ -159,6 +159,8 @@ function Verb_validation_verdict($a) {
         if ($pr -gt 0) {
             $prd = try { Get-Pr $pr } catch { $null }
             $cause = if ($prd -and $prd.merged) { "PR #$pr already merged as $($prd.merge_commit_sha) - residual gaps only (open a NEW branch from master): $summary" } else { $summary }
+            # (a merge that a FAIL verdict judged is not picked up by the sweep as a finished change: the gaps are still to be closed)
+            if ($prd -and $prd.merged) { if (-not (Test-Has $s 'pr')) { $s.pr = @{} }; $s.pr.residual = $true }
             $d = Invoke-Demote $n $info $st $cause 'verdict'
             $res.next = $d.outcome; $res.detail = $d
         } else {
@@ -178,5 +180,13 @@ function Verb_validation_verdict($a) {
     }
     Save-State $n $st
     $res.next = if ($c.mergePolicy -eq 'auto') { 'merge' } else { 'approve' }
+    # The gateway merges an approved change itself (Verbs.Merge.ps1): in this call when nothing stands in the way, otherwise the sweep does it as
+    # soon as it can. 'merge' in the answer says what happened; 'next' stays "merge" so the session's one merge call (answered already-merged)
+    # still confirms it, and names the new state only when the merge sent the item back or parked it.
+    if ($c.mergePolicy -eq 'auto' -and (Test-GatewayMerge) -and (Test-Label $info $c.autoMergeLabel)) {
+        $m = try { Verb_merge @{ item = $n; pr = $pr } -Gateway } catch [FactoryReject] { @{ ok = $true; id = $n; outcome = 'waiting'; reason = $_.Exception.Code } }
+        $res.merge = $m
+        if ($m.outcome -in 'demoted', 'parked') { $res.next = $m.outcome; if (Test-Has $m 'detail') { $res.detail = $m.detail } }
+    }
     return $res
 }

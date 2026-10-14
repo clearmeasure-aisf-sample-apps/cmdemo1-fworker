@@ -104,10 +104,10 @@ function Get-ServerLogin {
 }
 
 # One verb at a time per item on this machine. Cross-machine exclusion is the claim ref, not this lock.
-function Use-ItemLock([int]$Item, [scriptblock]$Body) {
+function Use-ItemLock([int]$Item, [scriptblock]$Body, [int]$WaitSeconds = 45) {
     $f = Join-Path (Get-StateDir) "item-$Item.lock"
     $fs = $null
-    $deadline = (Get-Date).AddSeconds(45)
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
     while ($true) {
         try { $fs = [IO.File]::Open($f, 'OpenOrCreate', 'ReadWrite', 'None'); break }
         catch { if ((Get-Date) -gt $deadline) { Reject 20 'item-busy' "another operation on item $Item is running" @{ retryAfterSeconds = 5 } }; Start-Sleep -Milliseconds 300 }

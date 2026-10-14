@@ -44,6 +44,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'qc-torn-down' { return "QC environment for PR #$($F.pr) torn down ($($F.reason))." }
         'qc-waiting' { return "QC environment for PR #$($F.pr) is waiting: $($F.reason)." }
         'question-escalated' { return "a question from **$($F.worker)** has waited $($F.minutes) min for the supervisor (supervisor: $(if ("$($F.supervisor)" -eq 'connected') { 'connected' } else { 'absent' })); a person is asked to look at the dashboard." }
+        'merge-waiting' { return "PR #$($F.pr) has a PASS verdict and is not merged yet: $($F.reason) (``$($F.code)``). The gateway merges it by itself when that clears; no session has to call anything." }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
         default { return "$Event" }
     }
