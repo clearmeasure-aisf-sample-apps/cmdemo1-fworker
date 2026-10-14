@@ -45,7 +45,7 @@ All types share the registry, the assignment protocol, tokens and journaling. On
 - The gateway keeps the registry in memory. Durable truth is the claim in each item's state comment (`claim.holder` = worker name), so a gateway restart is rebuilt as workers reconnect.
 
 ### Choosing a worker
-For each job the plant manager takes the workers that: hold the `owner` (or bot) role, have every capability the item needs, have free capacity, and are not draining. A `worker:<name>` label on the item pins it: the item is offered to that worker and to no other. If that worker is not connected, is draining, is at capacity or lets the accept window pass, the item waits (journal `waiting`, the assignment without a worker on the dashboard) and is offered to the same worker again when it can take it. Among candidates the order is: persistent-local, then cloud, then ephemeral-local; ties go to the worker with the fewest owned items.
+For each job the plant manager takes the workers that: hold the `owner` (or bot) role, have every capability the item needs, have free capacity, and are not draining. A `worker:<name>` label on the item pins it: the item is offered to that worker and to no other. If that worker is not connected, is draining, is at capacity or lets the accept window pass, the item waits (journal `waiting`, the assignment without a worker on the dashboard) and is offered to the same worker again when it can take it. A pinned item comes first: a sweep offers its pinned items before the unpinned ones, and a free slot of a worker that a pinned item waits for is held for that item, so an unpinned item is offered to a worker only when no pinned item waits for it (issue 46). Among candidates the order is: persistent-local, then cloud, then ephemeral-local; ties go to the worker with the fewest owned items.
 
 ### Directed assignment
 `item.assigned` is sent to **one** worker, not broadcast:
@@ -62,6 +62,21 @@ For each job the plant manager takes the workers that: hold the `owner` (or bot)
 - It ends when: the item is complete (merged, master green), is parked or held and the idle limit passes, the session releases it, or the lease expires.
 - **Idle limit:** an owner waiting on a hold longer than 60 minutes releases ownership (journaled); the next trigger assigns it again and a new owner **resumes** from the item state.
 - **Lost session:** the lease expires, the item is offered again with `mode: resume`, and the relaunch budget applies.
+
+## 4a. Host capacity and the build slot (owner decision 2026-10-14)
+
+Code: `gateway/Hosts.cs`; settings `schedule.*` in `config/instance.json`; counts and holders in `/status` (`hosts`).
+
+- A worker declares its host at registration: `subscribe --own --host H` (else `FACTORY_HOST`, else the computer's name, lower case; `host=` on the
+  stream). Sessions that name the same host share its limits; a session that names none has no host limit.
+- Owned items per host: `schedule.hosts.<host>.owned`, else `schedule.hostOwnedDefault` (0: no host limit). An offer out counts, as for a worker's
+  capacity. A worker whose host is at its limit is passed over (waiting code `host-at-capacity`); a pinned item waits for room on its worker's host.
+- Private builds at once per host: `schedule.hosts.<host>.builds`, else `schedule.hostBuildsDefault` (1). `factory.ps1 build-slot --item N [--ttl S]`
+  (`POST /api/v1/build-slot`, an owner's item token or a worker credential) takes a slot or extends the caller's own; exit 21 `build-slot-busy`
+  (HTTP 429) with `retryAfterSeconds` and the holders when the host's slots are held. `--release` gives it back; a slot not given back frees itself
+  after its ttl (`schedule.buildSlotTtlSeconds`, 1800; at most `buildSlotMaxTtlSeconds`, 7200). The slots are in memory: a restart frees them all.
+- A session that registers with effort `low` gets capacity `schedule.lowEffortCapacity` (1), whatever it declared, unless the operator set its
+  capacity on the dashboard.
 
 ## 5. Tokens and roles
 
@@ -131,6 +146,29 @@ GitHub permission: contents write and pull requests write, both in the manifest 
 update), `itemsBehind` and `behind` per owned item (refreshed by each `base-watch`). The dashboard shows a summary line and, per owned
 item in Assignments, how many commits it is behind master.
 
+## 6b. Owner leases kept by the plant (owner decision 2026-10-14)
+
+Code: `gateway/Lease.cs`; settings `schedule.*` in `config/instance.json` (each overridable by `FACTORY_TIMING_<key>`). Counts in `/status` (`lease`).
+
+1. **The client accepts an owner offer itself.** `subscribe --own` answers an `item.assigned` of job `own-item` with `accept` (body `accepted_by: "client"`) on
+   a thread of its own, and prints `item.accepted` (`acceptedBy: "client"`, the lease) or `item.accept-failed` with the gateway's code. The plant offers
+   only into a free slot, so the client does not count slots itself. The journal line `assigned` says "accepted by its client". If the session calls no
+   verb and no `wait` for the item within `schedule.clientStartMinutes` (5; 0 means the lease the accept answered), the item is taken back. A deployed client accepts by itself from this release on unless it is started with `--no-auto-accept` or `FACTORY_AUTO_ACCEPT=0`.
+   `--no-auto-accept`, `FACTORY_AUTO_ACCEPT=0` and `--spawn` leave the accept to the session (the Tier 1 suites run with it off).
+2. **The lease is renewed by the gateway** (issue 48): after any verb call of the owner for the item, and at every heartbeat (`POST /presence`) of the
+   owner while its activity summary names the item as `#N`; at most once per `schedule.leaseRenewMinutes` (5) per item. The renewal is the rule
+   script `claim-item --renew` run as the owner.
+3. **A quiet owner is asked, then replaced.** An owned item with no verb or `wait` of its owner and an unchanged activity summary for
+   `schedule.staleItemMinutes` (15) gets one `item.check` trigger. Any verb for the item (or a new summary) answers it; nothing within
+   `schedule.staleConfirmMinutes` (3) and the item is taken back. Not while the item waits for something else: parked, or its last trigger was
+   `item.parked`, `qc.requested`, `qc.reset`, `item.merged` or `inspector.escalated`. Watched are the owners the plant saw accept, and the owners a
+   sweep listed with a lease; never an owner set by a test seam.
+
+Taking back: the plant lets go only after the rule script `expire-claim` (gateway only) succeeded (a failure keeps the owner and is tried again later). It ends the claim's lease and marks it `taken_back` (journal `lease-expired`), so
+`claim-item --renew` of the old owner is refused; the old owner gets `item.taken_back`; the plant forgets the owner (journal `reassigned`) and asks
+for a sweep, which offers the item again with mode `resume`. That offer goes to another session first when one is connected. A take-back counts as a
+relaunch against `timing.maxRelaunches`, like any lease that lapsed.
+
 ## 7. Bots (separate sessions)
 
 When a PASS verdict is recorded under the `peer-approved` policy, the plant manager creates a `bot-job` of kind `inspector` and assigns it to a worker registered with the `inspector` role. That session has a clean context, gets an inspector-role item token, runs `inspect-facts`, judges, and submits `approve-pr`. The owner is told the result by a trigger. Quality-control and release bots follow the same shape: a job kind, a role, a token scope, a result trigger. The inspector rules (mandatory escalations computed by script, three verdicts, holds cleared only by a named person's approval of the current head) are unchanged; see `plugin/scripts/lib/Verbs.Inspect.ps1`.
@@ -165,6 +203,42 @@ Rules: hidden machine marker on every comment (`<!-- plant event=assigned key=â€
 
 `mergeQueueDepth` limits merged items waiting for their release candidate (the Release workflow keeps one queued run). `mergePolicy` is `auto` or `peer-approved`. A merged docs-only change finishes after master has been green for a grace period even if no release run appears. CI is classified strictly: zero check runs is pending, and each configured gate must be present and successful.
 
+### 10b. The verdict and the merge: the gateway merges (owner decision 2026-10-13)
+
+Under merge policy `auto` (config `gatewayMerge`, default true) the step from a PASS to the merge belongs to the gateway, not to a session:
+
+1. `validation-verdict` records the PASS and, for an item with `Auto Merge`, continues into the merge in the same call (`Verb_merge -Gateway`
+   in `plugin/scripts/lib/Verbs.Merge.ps1`). The checks are exactly those of the `merge` verb: the item's own pull request, open, its head
+   equal to the head the verdict was given for (a push after the verdict voids the PASS and demotes the item; the one head accepted without a
+   new verdict is the one the gateway made itself when it brought the branch up to date with its base), the required checks green, GitHub
+   says mergeable, the merge queue has room, no hold. The answer carries `merge: {outcome, reason}`; `next` stays `merge`, and the session's
+   one `merge` call afterwards answers `already-merged`. Green checks: merged in the same call, about 20 s as before.
+2. What cannot happen yet answers `outcome: "waiting"` with a reason code (`checks-pending`, `branch-updated`, `mergeability-unknown`,
+   `merge-queue`, `held`), kept in `verdict.wait` and journaled once per code (`merge-waiting`). The sweep runs the same step again under the
+   item lock on a fresh read for every unprocessed PASS: at once when the verdict call already tried, otherwise after
+   `timing.passMergeGraceSeconds` (60), so a gateway restart, a lapsed lease or an item without an owner changes nothing. Nothing loops: a
+   branch behind its base is updated at most `timing.outOfDateMergeAttempts` times per verdict, a red check or an unmergeable pull request takes
+   the demote path (bounded by `maxDemotions`), and a PASS still unmerged after `timing.verdictTimeoutMinutes` is parked for a person.
+3. An item in this state is never offered to a worker (a claim would be refused `verdict-already-recorded`). `/status` lists it under
+   `passUnmerged`, and the patrol digest reports it as `pass-unmerged` with the reason code once it has waited
+   `timing.passUnmergedDigestMinutes` (5).
+4. The verdict's `processed` flag and the item lock make the step idempotent: two sweeps, or the session's call racing the sweep, merge once.
+5. A pull request merged by a person is picked up by the sweep whatever state the item was in (a PASS waiting for the gateway, a PASS parked
+   for a person because the item has no `Auto Merge`, an item still in Development): the merge is recorded, the verdict closed, claim, park and
+   hand-off end, the card moves to Functional Testing if it was earlier, and `settle` takes it from there. A merge that a FAIL verdict already
+   judged (residual gaps) is not picked up.
+
+Without `Auto Merge`, or under `peer-approved`, nothing changes: the gateway does not merge.
+
+### 10c. Offers (owner decision 2026-10-13)
+
+- An accept is honoured only for the offer that stands for that session now: a late accept of an offer the gateway withdrew (it lapsed and
+  went back to the plan or to another session), or of one it no longer knows (dropped, made before a restart), is refused with exit 11
+  `stale-assignment`. While an accept runs, its offer does not lapse. A session therefore never holds more than its capacity.
+- A session that let `timing.offerMissLimit` (2) offers in a row lapse is offered nothing new (unpinned) for `timing.offerCoolDownMinutes`
+  (5), or until it calls a verb successfully. The `reassigned` journal line says so; `/status` shows `missedOffers` and `coolDownUntil` per
+  worker and the dashboard a `cool-down` pill. 0 for the limit turns the rule off.
+
 ### 10a. Docs-only fast path (owner decision 2026-10-12)
 
 A one-line documentation item should go from accepted to merged in about 10 minutes with small-model subagents. Docs-only is decided once, in Technical Design: the design's `Files:` line names every file; all are under `docs/` or `.md` outside `src/`, and no code, build, workflow or test reads them; the design then carries `docsOnlyMarker`. `append-body` records the decision in the item state (`design.docs_only`) only when the marker arrives inside the design section while the item is in its design column, and refuses the marker anywhere else (`docs-only-marker-not-allowed`); completing the design column writes `false` when no design append set the field. Once the field exists the body text is ignored, so a marker typed into the issue gives nothing; only a state with no field on an item already past its design column (written by an older version) falls back to the marker in the body. Items without the marker are untouched by everything below.
@@ -178,6 +252,18 @@ A one-line documentation item should go from accepted to merged in about 10 minu
 A command that a subagent's shell refuses inside its worktree is run by the owner session from the worktree path (`factory-development`, "A command refused in a subagent's shell"); the item is not parked for it.
 
 Floor that remains: one design review round; the checks of the pull request (`ciGates`, run by the target repository's workflow, including for documentation); `complete` answers `accepted-checks-pending` while they run and the sweep (every `FACTORY_SWEEP_SECONDS`, default 180) advances the item when they are green; the merge verb waits for mergeability and pre-merge checks (`mergeabilityWaitSeconds` 90, `preMergeChecksWaitSeconds` up to 300); a docs-only change neither waits in the merge queue nor holds a place in it; after the merge the item reaches Done when master is green, at once if the master build skipped its publish step, else `docsOnlyReleaseGraceSeconds` (120) later, on the next sweep.
+
+### 10b. Escalate earlier (owner decision 2026-10-14)
+
+A criterion that fails twice in a row is usually ambiguous or untestable as written; another round costs time and finds nothing new.
+
+| Rule | Enforced by |
+|---|---|
+| Two consecutive findings reviews of one column that quote the same acceptance criterion (`FINDING: criterion "<text above the design section>" - ...`) park the item (`same-criterion-repeated`) with a question to the owner on the item | `record-review` (`Test-RepeatedCriteria`, Verbs.Item.ps1): the round is recorded, the claim released, exit 10 `same-criterion-repeated`. A `REVIEW: COMPLETE` clears the column's record |
+| Two consecutive FAIL verdicts whose summaries quote the same criterion (`criterion "<text>"`) park the item instead of demoting it, with the same question | `validation-verdict` (Verbs.Pr.ps1): answers `next: "parked"`, `reason: "same-criterion-repeated"`. A PASS clears the record |
+| Acceptance criteria worded in time or statistics (`within 2 seconds`, `p95`, `%`, `average`, `latency`, `under load`, `at least N times`, ...) are flagged at Technical Design: one comment on the item and `timing_criteria` in the claim answer; nothing is blocked | `claim-item` in the design column (`Get-TimingCriteria`) |
+
+A quote counts only when, whitespace folded, it is found word for word in the item above its design section and is at least 8 characters long. The records live in the item state (`cited`, `timing_flagged`), so they survive a restart of the gateway. Parking clears every `cited` record, so the first round after the owner answers (or after the park expires on `parkHours`) starts fresh. Timing flags cover every list item above the design section that matches the wording, context bullets included.
 
 ## 11. Cloud workers (designed, NOT implemented)
 

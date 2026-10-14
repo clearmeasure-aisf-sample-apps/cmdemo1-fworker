@@ -27,6 +27,9 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     $t.mergeabilityWaitSeconds = 3; $t.mergeabilityPollSeconds = 1; $t.preMergeChecksWaitSeconds = 12; $t.preMergeChecksPollSeconds = 1
     $t.docsOnlyLegacyBefore = '2020-01-01T00:00:00Z'   # every item and state of a test is new; the legacy scenarios date theirs before it
     $t.updatedHeadWaitSeconds = 10; $t.sweepSeenCount = 1; $t.docsOnlyReleaseGraceSeconds = 4; $t.releaseCandidateTimeoutMinutes = 1; $t.masterGreenTimeoutMinutes = 2
+    # one item per session (plant.oneItemPerSession) is on in the source defaults; the suites let one scripted session take many items, so it is off here
+    # unless a suite sets it. The scenarios of the rule turn it on for their own gateway (FACTORY_ONE_ITEM_PER_SESSION, owner.ps1).
+    $cfg.plant = @{ oneItemPerSession = $false }
     foreach ($k in $Config.Keys) { $cfg[$k] = $Config[$k] }
     $cfgPath = Join-Path $work 'instance.test.json'; $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
     $fakeDll = Join-Path $script:Root 'tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll'
@@ -36,6 +39,8 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     $script:Procs += Start-Process dotnet -ArgumentList $fakeDll -PassThru -RedirectStandardOutput (Join-Path $work 'fake.out') -RedirectStandardError (Join-Path $work 'fake.err')
     $env:GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; $env:GH_TOKEN = 'fake-operator'; $env:OCTOPUS_API_KEY = 'fake'
     $env:FACTORY_CONFIG = $cfgPath; $env:FACTORY_STATE_DIR = Join-Path $work 'state'; $(if ($env:TEST_REAL_APPS) { Remove-Item Env:FACTORY_FAKE_APPS -ErrorAction SilentlyContinue } else { $env:FACTORY_FAKE_APPS = '1' })
+    # a stream client does not accept offers by itself in the suites (the scenarios accept, or let an offer lapse); lease.ps1 switches it on
+    $env:FACTORY_AUTO_ACCEPT = '0'
     $env:FACTORY_PLUGIN_SCRIPTS = Join-Path $script:Root 'plugin/scripts'; $env:FACTORY_DEV_TOKEN = 'test-token'; $env:FACTORY_WEBHOOK_SECRET = ('x' * 40)
     $env:FACTORY_API_PORT = "$($script:ApiPort)"; $env:FACTORY_WEBHOOK_PORT = "$($script:HookPort)"; $env:FACTORY_SWEEP_SECONDS = $(if ($env:TEST_SWEEP_SECONDS) { $env:TEST_SWEEP_SECONDS } else { '2' })
     $script:Procs += Start-Process dotnet -ArgumentList $gwDll -PassThru -RedirectStandardOutput (Join-Path $work 'gateway.out') -RedirectStandardError (Join-Path $work 'gateway.err')
@@ -54,8 +59,14 @@ function Assert-NoServerErrors([string]$Suite) {
 # Stops the suite's gateway and starts it again with the same environment: a new process, so a new epoch and empty memory. Its logs go to
 # gateway-xxxx.out and gateway-restarted.err, which Assert-NoServerErrors reads as well.
 function Get-GatewayBase { "http://127.0.0.1:$($script:ApiPort)" }
-function Restart-Gateway {
-    try { Stop-Process -Id $script:Procs[1].Id -Force } catch { }
+# -Graceful: SIGTERM, as the platform stops a container (the gateway writes its plant snapshot then), and up to 30 s for the process to end;
+# without it the process is killed outright, as an out-of-memory kill would.
+function Restart-Gateway([switch]$Graceful) {
+    if ($Graceful -and -not $IsWindows) {
+        $gp = $script:Procs[1]; & kill -s TERM $gp.Id 2>$null
+        if (-not $gp.WaitForExit(30000)) { try { Stop-Process -Id $gp.Id -Force } catch { } }
+    }
+    else { try { Stop-Process -Id $script:Procs[1].Id -Force } catch { } }
     Start-Sleep -Seconds 1
     $gwDll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'
     $script:Procs[1] = Start-Process dotnet -ArgumentList $gwDll -PassThru -RedirectStandardOutput (Join-Path $script:Work "gateway-$([guid]::NewGuid().ToString('N').Substring(0,4)).out") -RedirectStandardError (Join-Path $script:Work "gateway-restarted.err")
@@ -149,6 +160,8 @@ function F([string]$Holder, [string[]]$FactoryArgs) {
     try { $j = $text | ConvertFrom-Json -AsHashtable; if (-not $j.ContainsKey('exit')) { $j.exit = $code }; return $j } catch { return @{ ok = $false; exit = $code; raw = $text } }
 }
 function Pv($h, [string]$k) { if ($h -is [System.Collections.IDictionary] -and $h.Contains($k)) { return $h[$k] }; return $null }
+# A file that starts like an MP4 (an ftyp box), of the given length.
+function New-TestMp4([string]$Name, [int]$Size) { $p = Join-Path $script:Work $Name; $b = [byte[]]::new($Size); [byte[]]$h = [byte[]](0, 0, 0, 24) + [Text.Encoding]::ASCII.GetBytes('ftypisom'); [Array]::Copy($h, $b, $h.Length); [IO.File]::WriteAllBytes($p, $b); return $p }
 function TmpFile([string]$Name, [string]$Text) { $p = Join-Path $script:Work $Name; Set-Content -Path $p -Value $Text -NoNewline; return $p }
 
 function Check([string]$Name, [bool]$Ok, $Detail = '') {
@@ -218,12 +231,14 @@ function Gh-As([string]$Token, [string]$Path, $Body) {
     Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/$Path" -Method POST -Headers @{ Authorization = "Bearer $Token" } -Body ($Body | ConvertTo-Json -Depth 5) -ContentType 'application/json'
 }
 function Get-Head([int]$pr) { (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pulls/$pr").head.sha }
-function To-Verdict([int]$n, [int]$Pr, $Files = @('docs/a.md'), [bool]$DocsOnly = $true, [string]$Body = 'x') {
-    # An item taken to a recorded PASS verdict, ready for the approval step.
+function To-Verdict([int]$n, [int]$Pr, $Files = @('docs/a.md'), [bool]$DocsOnly = $true, [string]$Body = 'x', [switch]$HoldMerge) {
+    # An item taken to a recorded PASS verdict, ready for the approval step. Under merge policy auto the gateway merges that PASS at once:
+    # -HoldMerge lets the checks of the head run again for an hour first, so the PASS stays recorded and unmerged for the scenario.
     $n2 = New-Item-Fake 'Approval trial' $Body $L2
     Do-TechnicalDesign $n2 'w1' $DocsOnly
     $pr2 = Do-Development $n2 $Files
     Do-DevComplete $n2 | Out-Null
+    if ($HoldMerge) { Fake 'pr' @{ number = $pr2; delaySeconds = 3600 } | Out-Null }
     $v = Do-Verdict $n2 $pr2
     return @{ n = $n2; pr = $pr2; verdict = $v }
 }

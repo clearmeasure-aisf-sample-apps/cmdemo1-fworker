@@ -258,7 +258,7 @@ $QcGateAutoScenarios = [ordered]@{
     Check 'the verdict was parked for a person as before' ($st.verdict.processed -and "$($st.park.reason)" -eq 'pass-without-auto-merge') ($st.park | ConvertTo-Json -Compress)
     $a = New-QcPr @('factory worker', 'Auto Merge')
     $m = F 'w1' @('merge', '--item', $a.n, '--pr', $a.pr); CheckExit 'an Auto Merge item merges without QC' $m 0
-    Check 'merged' ((Pv $m 'outcome') -eq 'merged') "$(Pv $m 'outcome')"
+    Check 'merged (by the gateway at the verdict; the session''s merge confirms it)' ((Pv $m 'outcome') -in 'merged', 'already-merged' -and (Get-FakePr $a.pr).merged) "$(Pv $m 'outcome')"
 }
 
 }
@@ -333,7 +333,7 @@ $QcGateGraceScenarios = [ordered]@{
     Fake 'push-branch' @{ branch = "factory-worker/$($y.n)-development"; files = @('src/a.cs', 'src/d.cs') } | Out-Null
     [void](Wait-Until -Seconds 40 { (Qc-RecState $y.n $y.pr) -eq 'stale' })
     $r0 = F 'op' @('qc-reset', '--item', $y.n, '--pr', $y.pr); CheckExit 'the person presses Reset on the stale environment' $r0 0
-    Start-Sleep -Seconds 14
+    Start-Sleep -Seconds 20   # past the grace (15 s, longer than one slow verb so the Reset can land inside it)
     Check 'after the grace the reset environment was not torn down' ((Gate-TeardownCount 'qw1' $y.pr) -eq 0 -and (Qc-RecState $y.n $y.pr) -ne 'torn-down' -and -not (Qc-Rec $y.n $y.pr).ContainsKey('teardown')) "$(Qc-RecState $y.n $y.pr)"
 }
 
@@ -349,7 +349,7 @@ $QcGateLeaseScenarios = [ordered]@{
     $x = Gate-Run $x '' 'ready'
     $w1 = $x.worker; $w2 = $(if ($w1 -eq 'qw1') { 'qw2' } else { 'qw1' }); $asg1 = $x.asg
     Check 'ready on the first worker' ((Qc-RecState $x.n $x.pr) -eq 'ready')
-    # no heartbeat: the lease (6 s) runs out
+    # no heartbeat: the lease (18 s, three times the slowest verb seen on hosted runners, so it never lapses between two verbs of one step) runs out
     $moved = Wait-Until -Seconds 60 { $r0 = Qc-Rec $x.n $x.pr; $r0 -and "$($r0.state)" -eq 'assigned' -and $r0.ContainsKey('relaunches') -and "$($r0.assignment)" -ne '' -and "$($r0.assignment)" -ne $asg1 }
     Check 'the record went back to assigned with a new assignment (relaunch 1)' $moved ((Qc-Rec $x.n $x.pr) | ConvertTo-Json -Compress -Depth 4)
     $rec = Qc-Rec $x.n $x.pr

@@ -52,8 +52,24 @@
       "prod": "prod"
     }
   },
+  "plant": {
+    "oneItemPerSession": true
+  },
+  "schedule": {
+    "hostOwnedDefault": 0,
+    "hostBuildsDefault": 1,
+    "lowEffortCapacity": 1,
+    "buildSlotTtlSeconds": 1800,
+    "buildSlotMaxTtlSeconds": 7200,
+    "hosts": {},
+    "leaseRenewMinutes": 5,
+    "staleItemMinutes": 15,
+    "staleConfirmMinutes": 3,
+    "clientStartMinutes": 5
+  },
   "timing": {
     "assignAckSeconds": 120,
+    "plantSnapshotMaxAgeMinutes": 30,
     "leaseMinutes": 30,
     "maxRelaunches": 3,
     "maxReviewRounds": 3,
@@ -74,6 +90,10 @@
     "devChecksTimeoutMinutes": 30,
     "verdictTimeoutMinutes": 180,
     "unprocessedVerdictGraceMinutes": 3,
+    "passMergeGraceSeconds": 60,
+    "passUnmergedDigestMinutes": 5,
+    "offerMissLimit": 2,
+    "offerCoolDownMinutes": 5,
     "parkHours": 24,
     "awaitingChecksParkMinutes": 60,
     "docsOnlyReleaseGraceSeconds": 120,
@@ -109,6 +129,7 @@
     "mgrPersistMinutes": 30,
     "mgrVerbErrorMinutes": 10,
     "mgrRestartMinutes": 30,
+    "mgrReleaseQueueMinutes": 60,
     "baseUpdateDebounceSeconds": 20
   },
   "baseUpdate": {
@@ -159,7 +180,7 @@
     "turnBudgetPerDay": 96,
     "patrolReservePerHour": 2,
     "stepBudgetPerHour": 60,
-    "digest": { "refusalCount": 3, "verbErrorCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 }
+    "digest": { "refusalCount": 3, "verbErrorCount": 3, "releaseQueueCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 }
   },
   "operator": {
     "enabled": false,
@@ -271,6 +292,7 @@
   },
   "testLabel": "factory test",
   "mergeQueueDepth": 0,
+  "gatewayMerge": true,
   "ownerSessions": false,
   "idleReleaseMinutes": 60,
   "stateAuthors": [

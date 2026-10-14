@@ -529,7 +529,7 @@ $gwEnv = @{
     FAKE_PORT = "$fakePort"; GITHUB_API_URL = "http://127.0.0.1:$fakePort"; GH_TOKEN = 'fake-operator'; OCTOPUS_API_KEY = 'fake'; FACTORY_FAKE_APPS = '1'
     FACTORY_CONFIG = $cfgPath; FACTORY_STATE_DIR = (Join-Path $work 'state'); FACTORY_PLUGIN_SCRIPTS = (Join-Path $root 'plugin/scripts'); FACTORY_DEV_TOKEN = $adminToken
     FACTORY_WEBHOOK_SECRET = (& $hex 20); FACTORY_API_PORT = "$apiPort"; FACTORY_WEBHOOK_PORT = "$hookPort"; FACTORY_SWEEP_SECONDS = '5'
-    FACTORY_OWNER_MODE = '1'; FACTORY_TOKEN_SECRET = (& $hex 24); FACTORY_ASSIGN_ACK_SECONDS = '60'; FACTORY_URL = "http://127.0.0.1:$apiPort"; FACTORY_TOKEN = $adminToken
+    FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = (& $hex 24); FACTORY_ASSIGN_ACK_SECONDS = '60'; FACTORY_URL = "http://127.0.0.1:$apiPort"; FACTORY_TOKEN = $adminToken
     FACTORY_TIMING_msgTtlMinutes = '2'; FACTORY_TIMING_mgrTakeoverSeconds = '20'; FACTORY_TIMING_mgrPatrolMinutes = '1'; FACTORY_TIMING_mgrDigestSeconds = '5'; FACTORY_TIMING_mgrBatchSeconds = '3'
     HOME = (Join-Path $work 'home'); TMPDIR = (Join-Path $work 'tmp')
 }

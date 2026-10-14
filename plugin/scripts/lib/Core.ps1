@@ -46,6 +46,12 @@ function Test-Has($h, [string]$k) { ($h -is [System.Collections.IDictionary]) -a
 
 function Get-RepoPath { $c = Get-Cfg; "repos/$($c.owner)/$($c.repo)" }
 
+function Get-GhToken {
+    $tok = if ($script:AsToken) { $script:AsToken } elseif ($env:FACTORY_AUTHOR_APP -eq '1') { Get-AppToken 'author' } elseif ($env:GH_TOKEN -ne 'unset') { $env:GH_TOKEN } else { $null }
+    if (-not $tok) { Reject 30 'secret-missing' 'GH_TOKEN is not set on the gateway' }
+    return $tok
+}
+
 function Invoke-GhRaw {
     # -OutFile: the body of the answer goes to that file and not through the JSON reader (job logs, artifact archives). GitHub answers those
     # with a redirect to a signed address; the Authorization header is not sent there (the default of Invoke-RestMethod, and what that store needs).
@@ -53,8 +59,7 @@ function Invoke-GhRaw {
     # -TimeoutSec: the longest one attempt may take (0: the default of the client); -Tries: attempts on a network error or a 502-504.
     # The author identity: an organization GitHub App (cloud gateways; FACTORY_AUTHOR_APP=1) or the GH_TOKEN of a local gateway. The value
     # 'unset' is the vault placeholder written before an identity exists: it counts as no token.
-    $tok = if ($script:AsToken) { $script:AsToken } elseif ($env:FACTORY_AUTHOR_APP -eq '1') { Get-AppToken 'author' } elseif ($env:GH_TOKEN -ne 'unset') { $env:GH_TOKEN } else { $null }
-    if (-not $tok) { Reject 30 'secret-missing' 'GH_TOKEN is not set on the gateway' }
+    $tok = Get-GhToken
     $base = if ($env:GITHUB_API_URL) { $env:GITHUB_API_URL.TrimEnd('/') } else { 'https://api.github.com' }   # tests point this at the fake server
     $uri = if ($Path -match '^https?://') { $Path } else { "$base/$($Path.TrimStart('/'))" }
     $h = @{ Authorization = "Bearer $tok"; Accept = $Accept; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'factory-worker-gateway' }
@@ -104,10 +109,10 @@ function Get-ServerLogin {
 }
 
 # One verb at a time per item on this machine. Cross-machine exclusion is the claim ref, not this lock.
-function Use-ItemLock([int]$Item, [scriptblock]$Body) {
+function Use-ItemLock([int]$Item, [scriptblock]$Body, [int]$WaitSeconds = 45) {
     $f = Join-Path (Get-StateDir) "item-$Item.lock"
     $fs = $null
-    $deadline = (Get-Date).AddSeconds(45)
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
     while ($true) {
         try { $fs = [IO.File]::Open($f, 'OpenOrCreate', 'ReadWrite', 'None'); break }
         catch { if ((Get-Date) -gt $deadline) { Reject 20 'item-busy' "another operation on item $Item is running" @{ retryAfterSeconds = 5 } }; Start-Sleep -Milliseconds 300 }

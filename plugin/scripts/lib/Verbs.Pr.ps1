@@ -122,6 +122,50 @@ function Invoke-Demote([int]$n, $info, $st, [string]$Reason, [string]$Cause) {
     return @{ outcome = 'demoted'; reason = $Reason; round_trip = $s.demotions }
 }
 
+# The demo video of a `video` item (issue #42). Called only by the gateway's POST /api/v1/demo/{item}, which has streamed the MP4 to a temp file,
+# checked its size and its header, and authorized the caller. Creates release demo-<n> if missing (pre-release, on the default branch, the shape
+# of the demo releases a person published) and uploads the asset demo-<n>.mp4, replacing one of that name. Idempotent.
+function Verb_publish_demo($a) {
+    $n = Get-ItemNumber $a; $c = Get-Cfg
+    $file = "$(Need $a 'file')"
+    $tmpRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+    $full = [IO.Path]::GetFullPath($file)
+    if (-not $full.StartsWith($tmpRoot, [StringComparison]::Ordinal) -or [IO.Path]::GetFileName($full) -notmatch "^demo-$n-[0-9a-f]{32}\.mp4$" -or -not (Test-Path -LiteralPath $full -PathType Leaf)) {
+        Reject 2 'use-endpoint' 'send the MP4 as the body of POST /api/v1/demo/{item} (client: factory.ps1 publish-demo --item N --file F)'
+    }
+    $info = Get-ItemInfo $n; Assert-Open $info
+    if (-not (Test-Label $info $c.videoLabel)) { Reject 10 'not-video-item' "item #$n does not carry the '$($c.videoLabel)' label: it owes no demo video" }
+    if ($info.column -notin @($c.columns.development, $c.columns.validation)) { Reject 10 'wrong-column' "item is in '$($info.column)'; a demo video is published in $($c.columns.development) or $($c.columns.validation)" }
+    $st = Get-State $n; $s = $st.state
+    $holder = if (Test-Has $a 'holder') { "$($a.holder)" } else { 'anonymous' }
+    if ((Test-Has $s 'claim') -and (Test-ClaimLive $s) -and $s.claim.holder -ne $holder -and $holder -ne 'anonymous') { Reject 40 'claim-held' "the claim is held by $($s.claim.holder)" }
+    $tag = "demo-$n"; $assetName = "demo-$n.mp4"
+    $rel = Invoke-Gh -Path "$(Get-RepoPath)/releases/tags/$tag" -Allow 404
+    $created = $false
+    if ($rel -is [hashtable] -and $rel.status -eq 404) {
+        $r = Invoke-GhRaw -Method POST -Path "$(Get-RepoPath)/releases" -Body @{ tag_name = $tag; target_commitish = $c.defaultBranch; name = "Demo video for #$n"
+            body = "Functional Validation demo media for #$n (published by the factory worker gateway)."; prerelease = $true; draft = $false }
+        if ($r.status -eq 201) { $rel = $r.body; $created = $true }
+        elseif ($r.status -eq 422) { $rel = Invoke-Gh -Path "$(Get-RepoPath)/releases/tags/$tag" }   # created at the same moment by another call
+        else { Reject 20 'github-error' "GitHub $($r.status) creating release $tag" @{ retryAfterSeconds = 30 } }
+    }
+    $replaced = $false
+    foreach ($old in @($rel.assets | Where-Object { $_ -and $_.name -eq $assetName })) {
+        Invoke-Gh -Method DELETE -Path "$(Get-RepoPath)/releases/assets/$($old.id)" -Allow 404 | Out-Null; $replaced = $true
+    }
+    $up = ("$($rel.upload_url)" -replace '\{.*$', '') + "?name=$assetName"
+    $h = @{ Authorization = "Bearer $(Get-GhToken)"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'factory-worker-gateway' }
+    $sc = 0; $asset = $null
+    for ($try = 1; $try -le 2; $try++) {
+        try { $asset = Invoke-RestMethod -Uri $up -Method POST -Headers $h -ContentType 'video/mp4' -InFile $full -SkipHttpErrorCheck -StatusCodeVariable 'sc' -OperationTimeoutSeconds 480 -ConnectionTimeoutSeconds 30 }
+        catch { if ($try -ge 2) { Reject 20 'upload-failed' "the upload to GitHub did not finish: $($_.Exception.Message)" @{ retryAfterSeconds = 60 } }; continue }
+        if ($sc -eq 201) { break }
+        if ($try -ge 2 -or $sc -notin 502, 503, 504) { Reject 20 'upload-failed' "GitHub $sc on the asset upload" @{ retryAfterSeconds = 60 } }
+    }
+    Add-Comment $n "demo video $(if ($replaced) {'replaced'} else {'published'}): [$assetName]($($asset.browser_download_url)) on release [$tag]($($rel.html_url)) ($([Math]::Round([double]$asset.size / 1MB, 1)) MB)."
+    return @{ ok = $true; id = $n; release = $tag; release_url = "$($rel.html_url)"; asset = $assetName; asset_url = "$($asset.browser_download_url)"; size = [long]$asset.size; created = $created; replaced = $replaced }
+}
+
 function Verb_validation_verdict($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg
     if (-not (Test-Has $a 'passed') -or -not (Test-Has $a 'summary') -or "$($a.summary)".Trim() -eq '') {
@@ -151,14 +195,28 @@ function Verb_validation_verdict($a) {
         }
     }
     $headSha = ''; if ($pr -gt 0) { try { $headSha = (Get-Pr $pr).head.sha } catch { } }
+    # the head the validator tested (--head-sha): a PASS for another head than the current one is refused; without it (older skills) the head
+    # read here is recorded, and a head that could not be read leaves the verdict without one, which the gateway never merges
+    if ($passed -and (Test-Has $a 'head_sha') -and "$($a.head_sha)") {
+        if (-not $headSha -or "$($a.head_sha)" -ne $headSha) { Reject 10 'head-mismatch' "the PASS was given for $("$($a.head_sha)".Substring(0, [Math]::Min(7, "$($a.head_sha)".Length))), but the head of PR #$pr is $(if ($headSha) { $headSha.Substring(0,7) } else { 'unknown' }); test the current head. Nothing was recorded." }
+    }
     $s.verdict = @{ passed = $passed; pr = $pr; head_sha = $headSha; summary = $summary; at = ConvertTo-Iso (Get-UtcNow); round = $(if (Test-Has $s 'demotions') { [int]$s.demotions } else { 0 }); processed = $false }
     Add-Comment $n "validation verdict for **$($info.column)**: $(if ($passed) {'PASS'} else {'FAIL'}) - $summary"
     $res = @{ ok = $true; id = $n; recorded = $true; passed = $passed; downgraded = $downgraded; column = $info.column }
     if (-not $passed) {
         $s.verdict.processed = $true
+        # escalate earlier (enhancement 10): two consecutive FAIL verdicts that cite the same acceptance criterion park the item with a question
+        $repeated = @(Test-RepeatedCriteria $s 'verdict' @(Get-CitedCriteria $info $summary))
+        if ($repeated.Count -gt 0) {
+            Invoke-ParkRepeatedCriterion $n $st 'FAIL verdicts' $repeated
+            $res.next = 'parked'; $res.reason = 'same-criterion-repeated'; $res.criteria = $repeated
+            return $res
+        }
         if ($pr -gt 0) {
             $prd = try { Get-Pr $pr } catch { $null }
             $cause = if ($prd -and $prd.merged) { "PR #$pr already merged as $($prd.merge_commit_sha) - residual gaps only (open a NEW branch from master): $summary" } else { $summary }
+            # (a merge that a FAIL verdict judged is not picked up by the sweep as a finished change: the gaps are still to be closed)
+            if ($prd -and $prd.merged) { if (-not (Test-Has $s 'pr')) { $s.pr = @{} }; $s.pr.residual = $true }
             $d = Invoke-Demote $n $info $st $cause 'verdict'
             $res.next = $d.outcome; $res.detail = $d
         } else {
@@ -168,6 +226,7 @@ function Verb_validation_verdict($a) {
         }
         return $res
     }
+    [void](Test-RepeatedCriteria $s 'verdict' @() -Clear)
     # Without the Auto Merge label a PASS is parked for a person to merge, except under the QC merge gate (peer-approved): there the item stays on the
     # approval path and the merge verb enforces the QC run and the human approval.
     if (-not (Test-Label $info $c.autoMergeLabel) -and -not (Test-QcGateActive)) {
@@ -178,5 +237,13 @@ function Verb_validation_verdict($a) {
     }
     Save-State $n $st
     $res.next = if ($c.mergePolicy -eq 'auto') { 'merge' } else { 'approve' }
+    # The gateway merges an approved change itself (Verbs.Merge.ps1): in this call when nothing stands in the way, otherwise the sweep does it as
+    # soon as it can. 'merge' in the answer says what happened; 'next' stays "merge" so the session's one merge call (answered already-merged)
+    # still confirms it, and names the new state only when the merge sent the item back or parked it.
+    if ($c.mergePolicy -eq 'auto' -and (Test-GatewayMerge) -and (Test-Label $info $c.autoMergeLabel)) {
+        $m = try { Verb_merge @{ item = $n; pr = $pr } -Gateway } catch [FactoryReject] { @{ ok = $true; id = $n; outcome = 'waiting'; reason = $_.Exception.Code } }
+        $res.merge = $m
+        if ($m.outcome -in 'demoted', 'parked') { $res.next = $m.outcome; if (Test-Has $m 'detail') { $res.detail = $m.detail } }
+    }
     return $res
 }
