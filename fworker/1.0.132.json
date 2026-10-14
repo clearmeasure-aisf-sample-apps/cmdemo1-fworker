@@ -1,0 +1,17 @@
+{
+  "deployable": "fworker",
+  "version": "1.0.132",
+  "generated": "2026-10-14T17:25:17Z",
+  "kind": "container image",
+  "process": "dotnet FactoryWorker.Gateway.dll",
+  "entry": "FactoryWorker.Gateway",
+  "assemblies": [
+    {
+      "name": "FactoryWorker.Gateway",
+      "entry": true,
+      "references": [],
+      "packages": []
+    }
+  ],
+  "truncated": false
+}
