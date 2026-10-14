@@ -132,6 +132,25 @@ b. **The operator session role.** Done 2026-10-13: credential kind `o1.`, one sl
    - the answers of the operator session to questions are not rate limited;
    - the caps on notes and on budget grants are in memory and start again at every restart of the gateway (a self-merged release is a
      restart).
+r. **Done (2026-10-13): a session can read why a pull request check failed.** `pr-checks` (and `wait-for-checks` when it answers
+   `checks-red`) returns, next to the status it always returned, `checks`: every check of the head and, for a failed or cancelled one,
+   the output title and summary, the annotations split by where they point (`onChangedLines`, `onChangedFiles`, `elsewhere`), for a
+   GitHub Actions job the failed steps and an excerpt of the log (the last 200 lines of each failed step plus the error lines, 60,000
+   characters for all jobs together, with what was cut), the artifacts of the run, and `baseline` (the same check on the last 5 commits
+   of the base branch) with `likelyPreexisting`. Flags: `--check`, `--tail`, `--brief`, `--full-log [--page]`, `--artifact [--entry]
+   [--page]`, and the client's `--save FILE` (pages of 48,000 characters; 5 MB of text and 25 MB of archive at most). All of that text is
+   in `data` or `content` fields marked `author_trust: "untrusted"`, cleaned and redacted (`plugin/scripts/lib/Checks.ps1`). A call that
+   names an item now reads that item's own pull request only (`pr-not-own`, `sha-not-own`): before, an item token could name any pull
+   request or commit. GitHub permissions of the gateway's identity: `Checks: read` and `Actions: read`; both are in the manifest of the
+   author App (`tools/github-app-setup/serve.ps1`), and whether the installed App has them was not checked from this repository. Without
+   one the answer carries `logs-not-permitted`, `annotations-not-permitted` or `artifacts-not-permitted` and the verb still answers.
+   Open: (1) **the supervisor** gets the default answer only: `Auth.ManagerBodyFields` passes `item`, `pr` and `sha` for `pr-checks`, so
+   `check`, `tail`, `full_log`, `page`, `artifact`, `entry` and `brief` are dropped for it. To give it one check, the whole log or an
+   artifact, add those names to that list (`gateway/Auth.cs`, owner review) and a line to its skill; until then it reads any pull
+   request with `pr-checks --pr P` and no `--item`. (2) The reads of a job, its log, its annotations and an artifact archive (with the redirect to the signed address) were tried once
+   against the real GitHub with a personal token on this repository; with the App identity of a deployed gateway they are not yet seen. (3) The
+   baseline reads the last 5 commits of the base branch, so a check that runs only on pull requests (Qodana may) is `absent` there:
+   then `annotationCounts.elsewhere` is the evidence.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).

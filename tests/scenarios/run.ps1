@@ -24,6 +24,10 @@ if (-not $NoBuild -and -not $ListSuites -and -not $ListScenarios) {
 . (Join-Path $PSScriptRoot 'author.ps1')
 . (Join-Path $PSScriptRoot 'messaging.ps1')   # worker messaging steps 1 to 6: suites 'messaging' and 'manager'
 . (Join-Path $PSScriptRoot 'operator.ps1')    # the factory operator session: suite 'operator' (uses the helpers of messaging.ps1)
+. (Join-Path $PSScriptRoot 'checks.ps1')      # why a check failed (pr-checks): its scenarios join the suites 'auto', 'owner' and 'manager'
+foreach ($k in $CheckScenarios.Keys) { $Scenarios[$k] = $CheckScenarios[$k] }
+foreach ($k in $CheckOwnerScenarios.Keys) { $OwnerScenarios[$k] = $CheckOwnerScenarios[$k] }
+foreach ($k in $CheckManagerScenarios.Keys) { $ManagerScenarios[$k] = $CheckManagerScenarios[$k] }
 . (Join-Path $PSScriptRoot 'qc.ps1')
 . (Join-Path $PSScriptRoot 'qc-dashboard.ps1')
 . (Join-Path $PSScriptRoot 'qc-worker.ps1')   # S3: own gateway and workers, scenarios named "qc: worker ..."

@@ -25,6 +25,10 @@ app.Run(async ctx =>
     if (wait > 0) await Task.Delay(wait);
     lock (gate) { res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString()); }
     ctx.Response.StatusCode = res.Item1;
+    // as GitHub: a job log and an artifact archive are answered with a redirect to a signed address of another store
+    if (res.Item2 is Redirect go) { ctx.Response.Headers.Location = $"http://127.0.0.1:{port}{go.To}"; return; }
+    if (res.Item2 is PlainText pt) { ctx.Response.ContentType = "text/plain; charset=utf-8"; await ctx.Response.WriteAsync(pt.Text); return; }
+    if (res.Item2 is byte[] bin) { ctx.Response.ContentType = "application/zip"; await ctx.Response.Body.WriteAsync(bin); return; }
     if (res.Item2 is not null) { ctx.Response.ContentType = "application/json"; await ctx.Response.WriteAsync(res.Item2 is string s ? s : JsonSerializer.Serialize(res.Item2)); }
 });
 app.Run();
@@ -32,7 +36,13 @@ app.Run();
 sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow; }
 sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
 sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft; public List<Comment> Comments = new(); }
-sealed class Check { public string Name = ""; public string Status = "completed"; public string? Conclusion = "success"; public DateTime Started = DateTime.UtcNow; public DateTime? CompleteAt; public int Id; }
+sealed record Redirect(string To);
+sealed record PlainText(string Text);
+// App "github-actions": the check run is a job of a workflow run (its id is the job id), with steps, a log and the artifacts of the run.
+// Another App (a Qodana-like tool) has no job: it reports through its output and its annotations.
+sealed class Check { public string Name = ""; public string Status = "completed"; public string? Conclusion = "success"; public DateTime Started = DateTime.UtcNow; public DateTime? CompleteAt; public int Id;
+    public string App = "github-actions"; public string? OutputTitle, OutputSummary; public List<JsonObject> Annotations = new(); public List<JsonObject> Steps = new(); public string? Log; public long RunId = 1; }
+sealed class Artifact { public long Id; public long RunId; public string Name = ""; public bool Expired; public long? Size; public byte[] Zip = Array.Empty<byte>(); }
 sealed class Rev { public long Id; public string State = ""; public string Commit = ""; public string User = ""; public string Body = ""; }
 sealed class Fault { public Regex Match = null!; public int Status; public int Remaining; public string Body = "{\"message\":\"injected fault\"}"; }
 sealed class Rel { public string Id = ""; public string Version = ""; public string Notes = ""; public DateTime At; public double ProdDelay; }
@@ -51,6 +61,9 @@ sealed class World
     readonly List<Fault> faults = new();
     readonly List<Rel> releases = new();
     readonly List<string> log = new();
+    readonly List<Artifact> artifacts = new();
+    readonly List<string> masterHistory = new();   // the commits of the base branch, oldest first; the last one is masterSha
+    long nextArtifact = 1;
     readonly HashSet<string> labelNames = new() { "factory worker", "AI Factory", "Auto Merge", "video", "Demo", "Ready To Move", "Needs Human Review" };
     string masterSha = Sha("master0");
     int nextNumber = 1, nextComment = 1000, nextCheck = 1, nextPr = 1;
@@ -90,6 +103,13 @@ sealed class World
         if (path.StartsWith("/octopus/")) return Octopus(path[9..], q);
         var root = $"/repos/{Owner}/{Repo}";
         Match m;
+        if ((m = Regex.Match(path, "^/_blob/(logs|artifacts)/(\\d+)$")).Success)
+        {   // the signed address a redirect points to: it refuses a request that still carries the GitHub credential, as the real store does
+            if (auth.Length > 0) return (403, "{\"message\":\"InvalidAuthenticationInfo: the signed address takes no Authorization header\"}");
+            var bid = long.Parse(m.Groups[2].Value);
+            if (m.Groups[1].Value == "logs") { var bc = checks.Values.SelectMany(x => x).FirstOrDefault(c => c.Id == bid); return bc == null ? (404, null) : (200, new PlainText(bc.Log ?? DefaultLog(bc))); }
+            var ba = artifacts.FirstOrDefault(x => x.Id == bid); return ba == null ? (404, null) : (200, ba.Zip);
+        }
         if (path == "/user") return (200, J(("login", "factory-bot")));
         if (path == "/_healthcheck") return (healthStatus, healthStatus == 200 ? "ok" : null);        // stands in for the QC environment's app in the QC scenarios
         if (path == "/graphql") return GraphQl(b!);
@@ -195,7 +215,40 @@ sealed class World
         {
             var sha = m.Groups[1].Value; var list = checks.TryGetValue(sha, out var l) ? l : new();
             foreach (var c in list) if (c.CompleteAt is { } at && DateTime.UtcNow >= at) { c.Status = "completed"; c.CompleteAt = null; }
-            return (200, J(("check_runs", new JsonArray(list.Select(c => (JsonNode)J(("id", c.Id), ("name", c.Name), ("status", c.Status), ("conclusion", c.Conclusion), ("started_at", c.Started.ToString("o")))).ToArray()))));
+            return (200, J(("check_runs", new JsonArray(list.Select(c => (JsonNode)J(("id", c.Id), ("name", c.Name), ("status", c.Status), ("conclusion", c.Conclusion), ("started_at", c.Started.ToString("o")),
+                ("completed_at", c.Status == "completed" ? c.Started.AddSeconds(30).ToString("o") : null), ("details_url", c.App == "github-actions" ? $"https://fake/actions/runs/{c.RunId}/job/{c.Id}" : $"https://fake/checks/{c.Id}"),
+                ("html_url", $"https://fake/runs/{c.Id}"), ("app", J(("slug", c.App))),
+                ("output", J(("title", c.OutputTitle), ("summary", c.OutputSummary), ("text", null), ("annotations_count", c.Annotations.Count), ("annotations_url", $"https://fake/check-runs/{c.Id}/annotations"))))).ToArray()))));
+        }
+        if (path == root + "/commits" && method == "GET")
+        {   // the commits of a branch, newest first (only the base branch has a history here)
+            int per = Math.Clamp(int.TryParse(q["per_page"], out var cpp) ? cpp : 30, 1, 100);
+            if (q["sha"].ToString() is { Length: > 0 } br0 && br0 != Master) return (404, "{\"message\":\"Not Found\"}");
+            return (200, new JsonArray(History().AsEnumerable().Reverse().Take(per).Select(x => (JsonNode)J(("sha", x))).ToArray()));
+        }
+        if ((m = Regex.Match(path, $"^{root}/check-runs/(\\d+)/annotations$")).Success)
+        {
+            var c = FindCheck(long.Parse(m.Groups[1].Value)); if (c == null) return (404, "{\"message\":\"Not Found\"}");
+            int per = Math.Clamp(int.TryParse(q["per_page"], out var app0) ? app0 : 30, 1, 100); int pg = int.TryParse(q["page"], out var apg) ? apg : 1;
+            return (200, new JsonArray(c.Annotations.Skip((pg - 1) * per).Take(per).Select(o => JsonNode.Parse(o.ToJsonString())).ToArray()));
+        }
+        if ((m = Regex.Match(path, $"^{root}/actions/jobs/(\\d+)(/logs)?$")).Success && method == "GET")
+        {
+            var c = FindCheck(long.Parse(m.Groups[1].Value)); if (c == null || c.App != "github-actions") return (404, "{\"message\":\"Not Found\"}");
+            if (m.Groups[2].Success) return (302, new Redirect($"/_blob/logs/{c.Id}"));
+            var steps = c.Steps.Count > 0 ? c.Steps : new List<JsonObject> { J(("name", "Run"), ("number", 1), ("status", "completed"), ("conclusion", c.Conclusion), ("started_at", c.Started.ToString("o")), ("completed_at", c.Started.AddSeconds(30).ToString("o"))) };
+            return (200, J(("id", c.Id), ("run_id", c.RunId), ("name", c.Name), ("status", c.Status), ("conclusion", c.Conclusion), ("workflow_name", "Build"),
+                ("steps", new JsonArray(steps.Select(o => JsonNode.Parse(o.ToJsonString())).ToArray()))));
+        }
+        if ((m = Regex.Match(path, $"^{root}/actions/runs/(\\d+)/artifacts$")).Success && method == "GET")
+        {
+            var mine = artifacts.Where(x => x.RunId == long.Parse(m.Groups[1].Value)).ToList();
+            return (200, J(("total_count", mine.Count), ("artifacts", new JsonArray(mine.Select(x => (JsonNode)J(("id", x.Id), ("name", x.Name), ("size_in_bytes", x.Size ?? x.Zip.Length), ("expired", x.Expired))).ToArray()))));
+        }
+        if ((m = Regex.Match(path, $"^{root}/actions/artifacts/(\\d+)/zip$")).Success && method == "GET")
+        {
+            var x = artifacts.FirstOrDefault(y => y.Id == long.Parse(m.Groups[1].Value)); if (x == null) return (404, "{\"message\":\"Not Found\"}");
+            return x.Expired ? (410, "{\"message\":\"Artifact has expired\"}") : (302, new Redirect($"/_blob/artifacts/{x.Id}"));
         }
         if (path == root + "/actions/runs" && method == "GET") return (200, J(("workflow_runs", new JsonArray(J(("id", 1), ("conclusion", "failure"))))));
         if (Regex.IsMatch(path, $"^{root}/actions/runs/\\d+/rerun-failed-jobs$"))
@@ -208,9 +261,15 @@ sealed class World
         return (404, "{\"message\":\"fake has no route " + method + " " + path + "\"}");
     }
 
+    Check? FindCheck(long id) => checks.Values.SelectMany(x => x).FirstOrDefault(c => c.Id == id);
+    // the log of a job nobody wrote a log for: what a runner prints at the least
+    static string DefaultLog(Check c) => $"{c.Started:yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[group]Run {c.Name}\n{c.Started.AddSeconds(1):yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[endgroup]\n"
+        + (c.Conclusion == "failure" ? $"{c.Started.AddSeconds(2):yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[error]Process completed with exit code 1.\n" : "");
+    List<string> History() { if (masterHistory.Count == 0 || masterHistory[^1] != masterSha) masterHistory.Add(masterSha); return masterHistory; }
+
     JsonObject PrJson(Pr p, bool detail = false)
     {
-        var o = J(("number", p.Number), ("title", p.Title), ("state", p.Open ? "open" : "closed"), ("html_url", $"https://fake/pull/{p.Number}"), ("merged", p.Merged), ("user", J(("login", p.Author))), ("body", p.Body),
+        var o = J(("number", p.Number), ("title", p.Title), ("state", p.Open ? "open" : "closed"), ("html_url", $"https://fake/pull/{p.Number}"), ("merged", p.Merged), ("user", J(("login", p.Author))), ("body", p.Body), ("base", J(("ref", Master))),
             ("head", J(("ref", p.Ref), ("sha", p.Sha), ("repo", J(("full_name", p.Fork ? "someone-else/cmdemo1-workorders" : $"{Owner}/{Repo}"))))), ("draft", p.Draft), ("changed_files", p.Files.Count), ("merge_commit_sha", p.MergeSha));
         if (detail)
         {
@@ -330,7 +389,7 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0;
-                issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); log.Clear();
+                artifacts.Clear(); masterHistory.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false; return (200, J(("ok", true)));
             case "issue":
             {
@@ -380,7 +439,46 @@ sealed class World
             {
                 var sha = b!["sha"]!.ToString(); var l = checks.TryGetValue(sha, out var x) ? x : (checks[sha] = new());
                 var c = l.FirstOrDefault(y => y.Name == b["name"]!.ToString()); if (c == null) { c = new Check { Id = nextCheck++, Name = b["name"]!.ToString() }; l.Add(c); }
-                c.Status = b["status"]?.ToString() ?? "completed"; c.Conclusion = b["conclusion"]?.ToString(); c.CompleteAt = null; return (200, J(("ok", true)));
+                c.Status = b["status"]?.ToString() ?? "completed"; c.Conclusion = b["conclusion"]?.ToString(); c.CompleteAt = null;
+                // why it failed: app (default github-actions), outputTitle, outputSummary, annotations [{ path, start_line, end_line, annotation_level, message, title }],
+                // steps [{ name, number, conclusion, started_at, completed_at }], log (the text of the job log) or logLines { count, prefix } for a long one, runId
+                if (b["app"] != null) c.App = b["app"]!.ToString();
+                if (b["outputTitle"] != null) c.OutputTitle = b["outputTitle"]!.ToString();
+                if (b["outputSummary"] != null) c.OutputSummary = b["outputSummary"]!.ToString();
+                if (b["annotations"] is JsonArray ans) c.Annotations = ans.Select(o => (JsonObject)JsonNode.Parse(o!.ToJsonString())!).ToList();
+                if (b["steps"] is JsonArray sts) c.Steps = sts.Select(o => { var so = (JsonObject)JsonNode.Parse(o!.ToJsonString())!; so["status"] ??= "completed"; return so; }).ToList();
+                if (b["log"] != null) c.Log = b["log"]!.ToString();
+                if (b["logLines"] is JsonObject ll)
+                {   // count lines "<time> <prefix> <number>", one a millisecond from the start of the check
+                    var sbl = new System.Text.StringBuilder(); int cnt = ll["count"]!.GetValue<int>(); var pre = ll["prefix"]?.ToString() ?? "line";
+                    for (int k = 1; k <= cnt; k++) sbl.Append(c.Started.AddMilliseconds(k).ToString("yyyy-MM-ddTHH:mm:ss.fffffff")).Append("Z ").Append(pre).Append(' ').Append(k).Append('\n');
+                    c.Log = sbl.ToString() + (ll["end"]?.ToString() ?? "");
+                }
+                if (b["runId"] != null) c.RunId = b["runId"]!.GetValue<long>();
+                return (200, J(("ok", true), ("id", c.Id), ("started", c.Started.ToString("o"))));
+            }
+            case "artifact":
+            {   // { runId, name, files { path: text }, binary { path: base64 }, sizeBytes (what the listing claims), expired }: an artifact of a workflow run
+                using var ms = new MemoryStream();
+                using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, true))
+                {
+                    foreach (var kv in b!["files"]?.AsObject() ?? new JsonObject()) { using var w = new StreamWriter(zip.CreateEntry(kv.Key).Open()); w.Write(kv.Value!.ToString()); }
+                    foreach (var kv in b["binary"]?.AsObject() ?? new JsonObject()) { using var e = zip.CreateEntry(kv.Key).Open(); var bytes = Convert.FromBase64String(kv.Value!.ToString()); e.Write(bytes, 0, bytes.Length); }
+                }
+                var art = new Artifact { Id = nextArtifact++, RunId = b["runId"]?.GetValue<long>() ?? 1, Name = b["name"]!.ToString(), Expired = b["expired"]?.GetValue<bool>() ?? false, Size = b["sizeBytes"]?.GetValue<long>(), Zip = ms.ToArray() };
+                artifacts.Add(art); return (200, J(("ok", true), ("id", art.Id)));
+            }
+            case "base-history":
+            {   // { name, conclusions [newest first; null = the check did not run on that commit] }: the same check on the last commits of the base branch
+                var cons = b!["conclusions"]!.AsArray(); var h = History();
+                while (h.Count < cons.Count) h.Insert(0, NewSha());
+                for (int k = 0; k < cons.Count; k++)
+                {
+                    var sha = h[h.Count - 1 - k]; var l = checks.TryGetValue(sha, out var x) ? x : (checks[sha] = new());
+                    l.RemoveAll(y => y.Name == b["name"]!.ToString());
+                    if (cons[k] != null) l.Add(new Check { Id = nextCheck++, Name = b["name"]!.ToString(), Conclusion = cons[k]!.ToString(), App = b["app"]?.ToString() ?? "github-actions" });
+                }
+                return (200, J(("ok", true)));
             }
             case "config":
                 if (b?["masterRed"] != null) masterRed = b["masterRed"]!.GetValue<bool>();

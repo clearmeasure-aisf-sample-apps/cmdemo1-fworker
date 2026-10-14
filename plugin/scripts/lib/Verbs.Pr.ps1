@@ -59,24 +59,37 @@ function Verb_open_pr($a) {
     return @{ ok = $true; id = $n; created = $true; pullRequest = @{ number = $r.number; url = $r.html_url; head_sha = $r.head.sha; branch = $head }; build_owed = $bo.build_owed; build_reason = $bo.build_reason }
 }
 
+# pr-checks: the status of the checks of a head and, for every failed or cancelled check, why it failed and whether the base branch fails it
+# too (lib/Checks.ps1). Read-only.
+#   --item N | --pr P | --sha S   which head (a call that names an item reads that item's pull request only)
+#   --check NAME                  one check only, with its detail whatever its conclusion
+#   --tail N                      lines of each failed step in the log excerpt (default 200, at most 5000; the excerpt stays inside the budget)
+#   --brief                       the status only, as before: no detail, no extra GitHub calls
+#   --full-log [--check NAME] [--page N]            one page of the whole log of one job (the client's --save FILE writes every page to a file)
+#   --artifact NAME [--entry PATH] [--page N]       the files of an artifact of the failed run, or one page of a text file in it
 function Verb_pr_checks($a) {
-    if (Test-Has $a 'sha') { $sha = "$($a.sha)" }
-    else {
-        $num = if (Test-Has $a 'pr') { [int]$a.pr } else { $p = Find-ItemPr (Get-ItemNumber $a); if (-not $p) { Reject 10 'no-open-pr' 'no open pull request linked to this work item' }; $p.number }
-        $sha = (Get-Pr $num).head.sha
-    }
-    $chk = Get-ChecksFor $sha
-    $pub = Get-PublicChecks $chk; $pub.ok = $true; $pub.sha = $sha
+    $t = Resolve-ChecksTarget $a
+    $chk = Get-ChecksFor $t.sha
+    if ((Test-Has $a 'full_log') -and "$($a.full_log)" -ne 'False') { return Get-FullLogPage $chk $a $t.sha }
+    if (Test-Has $a 'artifact') { return Get-ArtifactPage $chk $a $t.sha }
+    $pub = Get-PublicChecks $chk; $pub.ok = $true; $pub.sha = $t.sha
+    if ((Test-Has $a 'brief') -and "$($a.brief)" -ne 'False') { return $pub }
+    Add-CheckDetail $pub $chk $t $a
     return $pub
 }
 
 function Verb_wait_for_checks($a) {
     $cap = if (Test-Has $a 'timeoutSeconds') { [Math]::Min([int]$a.timeoutSeconds, 100) } else { 60 }
     $end = (Get-Date).AddSeconds($cap)
+    # the polls ask for the status only; the detail (logs, annotations, baseline) is read once, when the checks are red
+    $poll = @{}; foreach ($k in $a.Keys) { if ($k -notin 'full_log', 'artifact', 'entry', 'page', 'check') { $poll[$k] = $a[$k] } }; $poll.brief = $true
     do {
-        $r = Verb_pr_checks $a
+        $r = Verb_pr_checks $poll
         if ($r.status -eq 'success') { return $r }
-        if ($r.status -eq 'failure') { Reject 10 'checks-red' "checks failed: $($r.failed_checks -join ', ')" @{ checks = $r } }
+        if ($r.status -eq 'failure') {
+            $poll.Remove('brief'); $d = try { Verb_pr_checks $poll } catch [FactoryReject] { $r }
+            Reject 10 'checks-red' "checks failed: $($r.failed_checks -join ', '). 'checks' holds, per failed check, its log excerpt or annotations (data.*) and its baseline on the base branch (likelyPreexisting)." @{ checks = $d }
+        }
         Start-Sleep -Seconds 10
     } while ((Get-Date) -lt $end)
     Reject 21 'still-pending' 'checks are still running; call again' @{ checks = $r }
