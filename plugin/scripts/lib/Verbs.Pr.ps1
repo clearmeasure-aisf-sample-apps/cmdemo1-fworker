@@ -67,14 +67,18 @@ function Verb_open_pr($a) {
 #   --brief                       the status only, as before: no detail, no extra GitHub calls
 #   --full-log [--check NAME] [--page N]            one page of the whole log of one job (the client's --save FILE writes every page to a file)
 #   --artifact NAME [--entry PATH] [--page N]       the files of an artifact of the failed run, or one page of a text file in it
-function Verb_pr_checks($a) {
+# The status fields and the exit code are what they always were, whatever happens while the detail is collected: a failure there becomes
+# detail = { available: false } in the answer. Only a wrong argument (exit 2) or an unknown check name (exit 12) of the call itself is refused.
+function Verb_pr_checks($a, [int]$DetailSeconds = 60) {
     $t = Resolve-ChecksTarget $a
     $chk = Get-ChecksFor $t.sha
     if ((Test-Has $a 'full_log') -and "$($a.full_log)" -ne 'False') { return Get-FullLogPage $chk $a $t.sha }
     if (Test-Has $a 'artifact') { return Get-ArtifactPage $chk $a $t.sha }
     $pub = Get-PublicChecks $chk; $pub.ok = $true; $pub.sha = $t.sha
     if ((Test-Has $a 'brief') -and "$($a.brief)" -ne 'False') { return $pub }
-    Add-CheckDetail $pub $chk $t $a
+    try { Add-CheckDetail $pub $chk $t $a $DetailSeconds }
+    catch [FactoryReject] { if ($_.Exception.Exit -in 2, 12) { throw }; $pub.detail = @{ available = $false; code = 'detail-failed'; reason = "the detail of the checks could not be collected ($($_.Exception.Code)); the status above is complete" } }
+    catch { $pub.detail = @{ available = $false; code = 'detail-failed'; reason = 'the detail of the checks could not be collected; the status above is complete' } }
     return $pub
 }
 
@@ -87,7 +91,8 @@ function Verb_wait_for_checks($a) {
         $r = Verb_pr_checks $poll
         if ($r.status -eq 'success') { return $r }
         if ($r.status -eq 'failure') {
-            $poll.Remove('brief'); $d = try { Verb_pr_checks $poll } catch [FactoryReject] { $r }
+            $poll.Remove('brief'); $poll.Remove('tail')   # (a wrong --tail must not change this answer)
+            $d = try { Verb_pr_checks $poll 25 } catch { $r }   # 25 s: the gateway ends this verb 40 s after the longest wait
             Reject 10 'checks-red' "checks failed: $($r.failed_checks -join ', '). 'checks' holds, per failed check, its log excerpt or annotations (data.*) and its baseline on the base branch (likelyPreexisting)." @{ checks = $d }
         }
         Start-Sleep -Seconds 10

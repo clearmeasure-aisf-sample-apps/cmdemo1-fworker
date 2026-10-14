@@ -132,16 +132,39 @@ $CheckScenarios = [ordered]@{
     Check 'the status of the checks is unchanged by any of it' ($r2.status -eq 'failure' -and @($r2.failed_checks).Count -eq 2)
 }
 
+'pr-checks: when the detail cannot be read (GitHub fails or does not answer), the status and the exit code are what they always were [full]' = {
+    $t = New-CkRedPr; Set-CkBuildFailure $t 30; Set-CkQodana $t
+    $detailCalls = '(commits|pulls/\d+/files|actions/jobs/\d+(/logs)?|actions/runs/\d+/artifacts|check-runs/\d+/annotations)$'
+    Fake 'fault' @{ match = "GET \S+/$detailCalls"; status = 500; count = 200 } | Out-Null
+    $r = F 'w1' @('pr-checks', '--item', $t.n); CheckExit 'GitHub answers 500 to every detail call: pr-checks answers' $r 0
+    $c = Get-CkCheck $r 'Build result'
+    Check 'the status fields are complete' ($r.status -eq 'failure' -and @($r.failed_checks).Count -eq 2 -and $r.sha -eq $t.sha -and @($r.checks).Count -ge 4) ($r | ConvertTo-Json -Compress -Depth 2)
+    Check 'each part of the detail says that it is not available' ($c.baseline.available -eq $false -and $c.job.available -eq $false -and $c.job.code -eq 'github-error' -and $c.likelyPreexisting -eq $false -and (Get-CkCheck $r 'Qodana').annotationCounts.available -eq $false) ($c | ConvertTo-Json -Compress -Depth 3)
+    $w = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'wait-for-checks reports red as before' $w 10 'checks-red'
+    Check 'with the failed checks named' (@($w.checks.failed_checks) -contains 'Build result') ($w | ConvertTo-Json -Compress -Depth 2)
+    Fake 'reset' @{} | Out-Null
+    $t = New-CkRedPr; Set-CkBuildFailure $t 30; Set-CkQodana $t
+    Fake 'latency' @{ ms = 14000; match = "^GET \S+/$detailCalls\n" } | Out-Null   # longer than one detail call may take
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $w = F 'w1' @('wait-for-checks', '--item', $t.n); $took = $sw.Elapsed.TotalSeconds
+    CheckExit 'GitHub does not answer the detail calls: wait-for-checks still reports red' $w 10 'checks-red'
+    Check 'inside its time, with the failed checks named' ($took -lt 60 -and @($w.checks.failed_checks).Count -eq 2 -and $w.checks.status -eq 'failure') "$took s $($w | ConvertTo-Json -Compress -Depth 2)"
+    $wc = Get-CkCheck $w.checks 'Build result'; $left = @(Pv $w.checks 'detailNotShownFor')
+    Check 'what was not collected is said: not available, or named in detailNotShownFor' (($wc -and $wc.ContainsKey('baseline') -and $wc.baseline.available -eq $false) -or $left -contains 'Build result') ($w.checks | ConvertTo-Json -Compress -Depth 3)
+    Check 'a check left out for time is named' ($left -contains 'Qodana' -or ((Get-CkCheck $w.checks 'Qodana').annotationCounts.available -eq $false)) ($left -join ',')
+    Fake 'latency' @{ ms = 0 } | Out-Null
+}
+
 'pr-checks: the artifacts of a failed run are listed, and a text file of one is returned; binary and oversize ones are listed only [full]' = {
     $t = New-CkRedPr; Set-CkBuildFailure $t 30
     Fake 'artifact' @{ runId = 1; name = 'qodana-report'; files = @{ 'results/qodana.sarif.json' = "{`"runs`":[{`"tool`":`"qodana`",`"key`":`"$($script:CkSecret)`"}]}"; 'notes.txt' = 'two files' }; binary = @{ 'shot.png' = [Convert]::ToBase64String([byte[]](137, 80, 78, 71, 0, 1, 2)) } } | Out-Null
     Fake 'artifact' @{ runId = 1; name = 'memory-dump'; files = @{ 'dump.txt' = 'x' }; sizeBytes = 900000000 } | Out-Null
     $r = F 'w1' @('pr-checks', '--item', $t.n); CheckExit 'pr-checks answers' $r 0
-    $arts = (Get-CkCheck $r 'Build result').artifacts
-    $rep = @($arts.list | Where-Object { $_.name -eq 'qodana-report' })[0]; $dump = @($arts.list | Where-Object { $_.name -eq 'memory-dump' })[0]
-    Check 'the artifacts of the run are listed with name and size' ($arts.available -and $arts.total -eq 2 -and $rep.sizeBytes -gt 0 -and $rep.fetchable -eq $true -and $dump.sizeBytes -eq 900000000 -and $dump.fetchable -eq $false) ($arts | ConvertTo-Json -Compress -Depth 4)
+    $bc = Get-CkCheck $r 'Build result'; $arts = $bc.artifacts; $alist = @($bc.data.artifacts)
+    $rep = @($alist | Where-Object { $_.name -eq 'qodana-report' })[0]; $dump = @($alist | Where-Object { $_.name -eq 'memory-dump' })[0]
+    Check 'the artifacts of the run are listed with name and size' ($arts.available -and $arts.total -eq 2 -and $rep.sizeBytes -gt 0 -and $rep.fetchable -eq $true -and $dump.sizeBytes -eq 900000000 -and $dump.fetchable -eq $false) ($alist | ConvertTo-Json -Compress -Depth 4)
     $l = F 'w1' @('pr-checks', '--item', $t.n, '--artifact', 'qodana-report'); CheckExit 'an artifact with several files lists them' $l 0
-    Check 'the files are listed and none is returned' ($l.fileCount -eq 3 -and -not $l.ContainsKey('content') -and @($l.files | Where-Object { $_.entry -eq 'shot.png' -and $_.text -eq $false }).Count -eq 1 -and @($l.files | Where-Object { $_.entry -eq 'results/qodana.sarif.json' -and $_.text -eq $true }).Count -eq 1) ($l | ConvertTo-Json -Compress -Depth 4)
+    Check 'the files are listed and none is returned' ($l.fileCount -eq 3 -and -not $l.ContainsKey('content') -and $l.data.author_trust -eq 'untrusted' -and $l.data.artifact -eq 'qodana-report' -and @($l.data.files | Where-Object { $_.entry -eq 'shot.png' -and $_.text -eq $false }).Count -eq 1 -and @($l.data.files | Where-Object { $_.entry -eq 'results/qodana.sarif.json' -and $_.text -eq $true }).Count -eq 1) ($l | ConvertTo-Json -Compress -Depth 4)
     $e = F 'w1' @('pr-checks', '--item', $t.n, '--artifact', 'qodana-report', '--entry', 'results/qodana.sarif.json'); CheckExit 'a text file of the artifact is returned' $e 0
     Check 'as untrusted data, redacted' ($e.content.kind -eq 'artifact-file' -and $e.content.author_trust -eq 'untrusted' -and "$($e.content.text)".Contains('"tool":"qodana"') -and -not "$($e.content.text)".Contains('ghp_A') -and $e.content.pages -eq 1) ($e.content | ConvertTo-Json -Compress)
     $file = Join-Path $script:Work "sarif-$($t.n).json"

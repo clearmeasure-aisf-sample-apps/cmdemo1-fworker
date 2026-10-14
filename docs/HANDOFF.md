@@ -144,6 +144,9 @@ r. **Done (2026-10-13): a session can read why a pull request check failed.** `p
    request or commit. GitHub permissions of the gateway's identity: `Checks: read` and `Actions: read`; both are in the manifest of the
    author App (`tools/github-app-setup/serve.ps1`), and whether the installed App has them was not checked from this repository. Without
    one the answer carries `logs-not-permitted`, `annotations-not-permitted` or `artifacts-not-permitted` and the verb still answers.
+   Collecting the detail never changes the old fields or the exit code: each GitHub call for it is one attempt of at most 10 s, an
+   answer spends at most 60 s on it (25 s inside `wait-for-checks`), and what was not read is `available: false` with a code or named
+   in `detailNotShownFor`.
    Open: (1) **the supervisor** gets the default answer only: `Auth.ManagerBodyFields` passes `item`, `pr` and `sha` for `pr-checks`, so
    `check`, `tail`, `full_log`, `page`, `artifact`, `entry` and `brief` are dropped for it. To give it one check, the whole log or an
    artifact, add those names to that list (`gateway/Auth.cs`, owner review) and a line to its skill; until then it reads any pull
