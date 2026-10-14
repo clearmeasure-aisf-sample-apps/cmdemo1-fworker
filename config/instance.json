@@ -56,6 +56,12 @@
     "oneItemPerSession": true
   },
   "schedule": {
+    "hostOwnedDefault": 0,
+    "hostBuildsDefault": 1,
+    "lowEffortCapacity": 1,
+    "buildSlotTtlSeconds": 1800,
+    "buildSlotMaxTtlSeconds": 7200,
+    "hosts": {},
     "leaseRenewMinutes": 5,
     "staleItemMinutes": 15,
     "staleConfirmMinutes": 3,
