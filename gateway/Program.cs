@@ -821,6 +821,8 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
             // a stream opened without a cursor is a new session of this name (a reconnect of the same client sends its last id): one item per session
             newSession: lastEventId == "");
         plant.SetHost(name, ctx.Request.Query["host"].ToString(), effort);
+        // a new session can take a work item that waited as session-spent: plan now instead of at the next sweep (issue 72)
+        if (lastEventId == "") hub.RequestSweep();
         var registered = new JsonObject { ["provider"] = "gateway", ["event"] = "worker.registered", ["name"] = name };
         if (messaging.On) { registered["epoch"] = plant.Epoch; registered["messaging"] = messaging.Enabled; }
         // one peers.snapshot per registration (3.2), only for a client that registered with messaging=1 under an allow-listed name
