@@ -543,6 +543,9 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the plant snapshot is written and read by the gateway itself, at its stop and its start", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "operator-release" or "operator-releases")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/operator/record-release", exit = 2 }), "application/json", Encoding.UTF8, 400);
+    // a person releases a park early only through POST /api/v1/items/{n}/unpark (operator token, with a reason)
+    if (verb is "unpark-item")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/items/{n}/unpark (client: factory.ps1 unpark --item N --reason \"...\")", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // the demo video arrives as a file: only POST /api/v1/demo/{item} streams it to the place the rule script reads it from
     if (verb is "publish-demo")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "send the MP4 as the body of POST /api/v1/demo/{item} (client: factory.ps1 publish-demo --item N --file F)", exit = 2 }), "application/json", Encoding.UTF8, 400);
@@ -604,6 +607,31 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && who.Kind == "item" && who.Role == "owner") { try { JsonObject? vr = null; try { vr = JsonNode.Parse(output) as JsonObject; } catch { } plant.NoteItemCall(who.Name, who.Item, verb, authorized, vr, code == 0); } catch (Exception e) { Console.Error.WriteLine($"lease hook {verb}: {e.Message}"); } }
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
     if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep();
+    return Results.Text(output, "application/json", Encoding.UTF8, status);
+});
+
+// Release a park early (operator token only): after the owner relaxed or reworded a criterion, a person need not wait out timing.parkHours. The rule
+// verb unpark-item removes the park from the item's state comment with the gateway's own GitHub author and journals the reason; the sweep that
+// this call requests then offers the item again in its current column. Body: {"reason": "..."} (required, at most 500 characters).
+app.MapPost("/api/v1/items/{n:int}/unpark", async (int n, HttpContext ctx) =>
+{
+    if (Who(ctx).Kind != "admin") return Fail(403, "forbidden", "only the operator releases a park", 30);
+    string text; using (var rd = new StreamReader(ctx.Request.Body)) text = await rd.ReadToEndAsync();
+    JsonObject body; try { body = string.IsNullOrWhiteSpace(text) ? new JsonObject() : (JsonNode.Parse(text) as JsonObject ?? new JsonObject()); } catch { return Fail(400, "bad-json", "the body is JSON: {\"reason\": \"...\"}", 2); }
+    var reason = body["reason"] is JsonValue rv && rv.TryGetValue<string>(out var rs) ? rs.Trim() : "";
+    if (reason.Length == 0 || reason.Length > 500) return Fail(400, "usage", "a reason of 1 to 500 characters is required", 2);
+    var args = new JsonObject { ["item"] = n, ["reason"] = reason, ["holder"] = "operator", ["by"] = "the operator" };
+    var (code, output) = await runner.RunAsync("unpark-item", args.ToJsonString(), TimeSpan.FromSeconds(120));
+    Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"unpark-item\",\"item\":\"{n}\",\"caller\":\"admin\",\"exit\":{code}}}");
+    if (string.IsNullOrWhiteSpace(output)) output = JsonSerializer.Serialize(new { ok = false, code = "no-output", reason = "the rule script produced no output", exit = code == 0 ? 20 : code });
+    if (code == 0)
+    {   // no live claim: the session that held the item before the park is not its owner any more; the plant forgets that assignment (as for a
+        // release), so the sweep this call requests offers the item afresh instead of first waiting to find that session gone
+        try { if (ownerMode && JsonNode.Parse(output)?["reoffer"] is JsonValue ro && ro.TryGetValue<bool>(out var reoffer) && reoffer) plant.OnVerb("release", new JsonObject { ["item"] = n }, Who(ctx), new JsonObject()); }
+        catch (Exception e) { Console.Error.WriteLine($"plant hook unpark-item: {e.Message}"); }
+        hub.RequestSweep();
+    }
+    var status = code switch { 0 => 200, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, _ => 500 };
     return Results.Text(output, "application/json", Encoding.UTF8, status);
 });
 

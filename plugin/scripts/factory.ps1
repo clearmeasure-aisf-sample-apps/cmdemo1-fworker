@@ -14,6 +14,7 @@
 # factory.ps1 answer --id M --text-file F [--note "..."] | answer --batch-file F | direct --to NAME|--all [--kind directive|announcement] --text-file F [--item N]
 # factory.ps1 questions [--state open|all] | plant-digest | patrol-ack --seq N --note "..." | send --to operator | get-item, pr-checks, get-delivery
 # factory.ps1 subscribe --own --operator --name N --model ID --effort E | operator <verb>   the factory operator session (lib/Client.Operator.ps1), with FACTORY_OPERATOR_SESSION_TOKEN
+# factory.ps1 unpark --item N --reason "..."   the operator (FACTORY_TOKEN = the operator token) releases a park early; the next sweep offers the item
 # factory.ps1 subscribe [--spawn]              client: prints one normalized event per line; with --spawn starts a headless worker per offer
 #
 # Exit codes: 0 ok, 2 usage, 10 gate refused, 11 stale, 12 not found, 20 retryable external, 21 accepted/pending, 30 config/secret, 40 claim held.
@@ -25,7 +26,7 @@ $here = $PSScriptRoot
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'update-pr', 'pr-checks',
     'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
-    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'expire-claim')
+    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'expire-claim', 'unpark-item')
 $NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics')
 
 function Write-Out($obj, [int]$code) {
@@ -151,6 +152,19 @@ if ($verb -in 'peers', 'send', 'inbox', 'ack', 'ask', 'presence', 'message-statu
     Invoke-MessageVerb $verb (ConvertFrom-Flags $flagTokens) (Get-ClientConfig)
 }
 
+# unpark --item N --reason "...": the operator releases a park early (POST /api/v1/items/{n}/unpark, operator token only: FACTORY_TOKEN)
+if ($verb -eq 'unpark') {
+    $u = ConvertFrom-Flags $flagTokens
+    $why = if ($u.ContainsKey('reason')) { "$($u.reason)".Trim() } else { '' }
+    if (-not $u.ContainsKey('item') -or "$($u.item)" -notmatch '^\d+$' -or -not $why -or $why -eq 'True') { Write-Out @{ ok = $false; verb = $verb; code = 'usage'; reason = 'unpark --item N --reason "why the park is released early"' } 2 }
+    $uc = Get-ClientConfig
+    try {
+        $resp = Invoke-WebRequest -Uri "$($uc.url)/api/v1/items/$([int]$u.item)/unpark" -Method POST -Body (@{ reason = $why } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = "Bearer $(Get-ConfigToken $uc)" } -SkipHttpErrorCheck -TimeoutSec 170
+    } catch { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
+    $j = $null; try { $j = $resp.Content | ConvertFrom-Json -AsHashtable } catch { }
+    if (-not $j) { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)" } $(if ([int]$resp.StatusCode -in 401, 403) { 30 } else { 20 }) }
+    $j.verb = $verb; Write-Out $j $(if ($null -ne $j.exit) { [int]$j.exit } elseif ($j.ok) { 0 } else { 20 })
+}
 $a = ConvertFrom-Flags $flagTokens
 if (-not $a.ContainsKey('holder')) { $a.holder = if ($env:FACTORY_HOLDER) { $env:FACTORY_HOLDER } else { "$(Get-FwUserName)@$([Net.Dns]::GetHostName())" } }
 $cfg = Get-ClientConfig
