@@ -37,6 +37,72 @@ function Complete-AwaitingChecks([int]$n, $info, $st) {
     return @{ outcome = 'waiting'; checks = (Get-PublicChecks $chk) }
 }
 
+# A pull request of the item was merged outside the merge verb (a person pressed the button): the item is settled from wherever it was. Under the
+# item lock on a fresh read (the sweep holds no lock, and the merge verb may have recorded the same merge a moment ago): the merge is recorded once,
+# the verdict is closed, and whatever held the item (claim, park, handoff, a wait for checks, an inspector lease) ends. Returns whether it recorded.
+function Invoke-MergePickup([int]$n, $pr) {
+    return Use-ItemLock $n {
+        $f = Get-State $n; $fs = $f.state
+        if ((Test-Has $fs 'merge') -and (Test-Has $fs.merge 'sha') -and $fs.merge.sha) { $false }
+        else {
+            $fs.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = [int]$pr.number; by = 'person' }
+            if (Test-Has $fs 'verdict') { $fs.verdict.processed = $true; $fs.verdict.Remove('wait') }
+            foreach ($k in 'claim', 'park', 'handoff', 'awaiting_checks', 'bot') { $fs.Remove($k) }
+            Save-State $n $f; Remove-ClaimRef $n; $true
+        }
+    }
+}
+
+# ---- orphan claim refs (issue 47) --------------------------------------------------------------------------------------
+# A claim is a ref (refs/factory/<instance>/claims/<item>) and the claim in the item's state; the ref is written first. A claim cut off between the
+# two (a restart) leaves a ref with no claim, and refs of closed items were never removed. Each sweep (the first one runs at start-up) lists the
+# refs and, under the item lock on a fresh read of the state, removes a ref that has no live claim: at once when the item is closed or gone, and
+# when it is open once the ref has been seen without a claim for longer than a lease. When it was first seen so is kept in the state directory: a
+# restart starts the wait again, which only delays the removal (an accept takes such a ref over anyway, Verb_claim_item).
+function Get-ClaimOrphanFile { Join-Path (Get-StateDir) 'claim-orphans.json' }
+
+function Get-ClaimRefItems {
+    $prefix = "refs/$(Get-RefPath)/"; $seen = [System.Collections.Generic.HashSet[int]]::new(); $out = @()
+    # matching-refs may ignore the page parameter (as Get-RevokedRefs): end on an empty page or on one that brings nothing new
+    for ($page = 1; $page -le 50; $page++) {
+        $rows = @(Invoke-Gh -Path "$(Get-RepoPath)/git/matching-refs/$(Get-RefPath)/`?per_page=100&page=$page")
+        if ($rows.Count -eq 0) { break }
+        $new = 0
+        foreach ($r in $rows) {
+            $ref = "$($r.ref)"
+            if ($ref.StartsWith($prefix, [StringComparison]::Ordinal) -and $ref.Substring($prefix.Length) -match '^\d{1,9}$' -and $seen.Add([int]$Matches[0])) { $out += [int]$Matches[0]; $new++ }
+        }
+        if ($new -eq 0) { break }
+    }
+    return , @($out)
+}
+
+function Invoke-ClaimRefReap($List) {
+    $t = (Get-Cfg).timing; $f = Get-ClaimOrphanFile
+    $first = if (Test-Path $f) { try { Get-Content -Raw $f | ConvertFrom-Json -AsHashtable -DateKind String } catch { @{} } } else { @{} }
+    if ($null -eq $first) { $first = @{} }
+    $board = @{}; foreach ($it in $List) { $board["$($it.number)"] = $it }
+    $acts = @(); $keep = @{}; $now = Get-UtcNow
+    foreach ($n in (Get-ClaimRefItems)) {
+        try {
+            $open = if ($board.ContainsKey("$n")) { [bool]$board["$n"].open } else { try { [bool](Get-ItemInfo $n).open } catch [FactoryReject] { if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $false } else { throw } } }
+            $since = if ($first.ContainsKey("$n")) { ConvertFrom-Iso $first["$n"] } else { $null }
+            if (-not $since) { $since = $now }
+            $aged = ($now - $since).TotalMinutes -ge [double]$t.leaseMinutes
+            $res = Use-ItemLock $n {
+                $st = try { Get-State $n } catch [FactoryReject] { if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $null } else { throw } }
+                if ($st -and (Test-ClaimLive $st.state)) { return 'live' }
+                if (-not $open -or $aged) { Remove-ClaimRef $n; return 'removed' }
+                return 'orphan'
+            }
+            if ($res -eq 'removed') { $acts += @{ item = $n; action = 'claim-ref-removed'; reason = $(if (-not $open) { 'item-closed' } else { 'orphan' }) } }
+            elseif ($res -eq 'orphan') { $keep["$n"] = ConvertTo-Iso $since; $acts += @{ item = $n; action = 'orphan-claim'; since = $keep["$n"] } }
+        } catch [FactoryReject] { $acts += @{ item = $n; action = 'skip'; reason = "claim-ref-reap: $($_.Exception.Code)" } }
+    }
+    $keep | ConvertTo-Json -Depth 3 | Set-Content $f
+    return , @($acts)
+}
+
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
@@ -46,6 +112,10 @@ function Verb_sync_board($a) {
     # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled, whose
     # owner still waits for item.complete although the claim ended at the merge
     $owned = @{}; $settling = @(); $unconfirmed = @()
+    # pass_unmerged: every item with a PASS verdict that the gateway is to merge and has not merged yet, with why (a reason code) and since when
+    $passUnmerged = @()
+    # release_queue: the items that wait in the Release Queue for the production deployment, with their release and since when (enhancement 9)
+    $releaseQueue = @()
     $list = Get-BoardList
     $last = Get-LastColumn
     foreach ($it in $list) {
@@ -69,30 +139,35 @@ function Verb_sync_board($a) {
             if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) {
                 $settling += $n
                 if (-not $dry) { $r = Invoke-Settle $n; $actions += @{ item = $n; action = 'settle'; result = $r } }
+                if (-not $dry -and $r.outcome -in 'advanced', 'waiting' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue') {
+                    $releaseQueue += @{ item = $n; release = $(if (Test-Has $r 'release') { "$($r.release)" } else { '' }); since = $(if (Test-Has $r 'queued_at') { $r.queued_at } else { $null }) }
+                }
                 if (-not $dry -and ($r.outcome -eq 'done' -or ($r.outcome -eq 'advanced' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue'))) { $triggers += @{ item = $n; event = 'item.complete'; path = $(if (Test-Has $r 'path') { "$($r.path)" } else { '' }) } }
                 elseif (-not $dry -and $r.outcome -eq 'parked') { $triggers += @{ item = $n; event = 'item.parked'; reason = $r.reason } }
                 continue
             }
             if ($isHold) { continue }
             if (Test-NameIn $c.demoLabel $it.labels) { continue }
-            # a person merged the pull request of a PASS verdict: pick the merge up
-            if ($col -ieq $c.columns.validation -and (Test-Has $s 'verdict') -and $s.verdict.passed -and -not $s.verdict.processed) {
-                $pr = try { Get-Pr ([int]$s.verdict.pr) } catch { $null }
-                if ($pr -and $pr.merged -and -not $dry) {
-                    # written under the item lock on a fresh read: this sweep read the state a while ago and holds no lock (what a verb recorded
-                    # meanwhile must not be undone); only the keys of this step are set
-                    $did = Use-ItemLock $n {
-                        $f = Get-State $n; $fs = $f.state
-                        if ((Test-Has $fs 'verdict') -and $fs.verdict.passed -and -not $fs.verdict.processed) {
-                            $fs.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = $pr.number }
-                            $fs.verdict.processed = $true; $fs.Remove('claim'); Save-State $n $f; Remove-ClaimRef $n; $true
-                        } else { $false }
-                    }
-                    if (-not $did) { continue }
-                    Add-Comment $n "PR #$($pr.number) was merged as ``$($pr.merge_commit_sha.Substring(0,7))``; watching master CI, then the release candidate."
-                    $actions += @{ item = $n; action = 'merge-detected'; sha = $pr.merge_commit_sha }
-                }
-                if ($pr -and $pr.merged) { continue }
+            # A person merged the item's pull request: pick the merge up, whatever state the item was in (a PASS waiting for the gateway's merge, a
+            # PASS parked for a person because the item has no Auto Merge label, an item still in Development, a parked or unowned item). The pull
+            # request is the one of the PASS verdict, else the one open-pr recorded; not one whose merge a FAIL verdict already judged (residual gaps).
+            $unprocessedPass = $col -ieq $c.columns.validation -and (Test-Has $s 'verdict') -and $s.verdict.passed -and -not $s.verdict.processed
+            $ownPr = 0
+            if ((Test-Has $s 'verdict') -and $s.verdict.passed -and [int]$s.verdict.pr -gt 0) { $ownPr = [int]$s.verdict.pr }
+            elseif ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number') -and -not (Test-Has $s.pr 'residual')) { $ownPr = [int]$s.pr.number }
+            $pr = $null
+            if ($ownPr -gt 0 -and ($unprocessedPass -or -not (Test-Has $s 'merge'))) { $pr = try { Get-Pr $ownPr } catch { $null } }
+            if ($pr -and $pr.merged -and ($unprocessedPass -or (Test-PrBelongs $pr $n))) {
+                if ($dry) { continue }
+                if (-not (Invoke-MergePickup $n $pr)) { continue }
+                # the flow after a merge starts from the validation column (settle moves the card on from there)
+                if ((Get-ColumnIndex $col) -ge 0 -and (Get-ColumnIndex $col) -lt (Get-ColumnIndex $c.columns.validation)) { Move-Card (Get-ItemInfo $n) $c.columns.validation }
+                Add-Comment $n "PR #$($pr.number) was merged as ``$($pr.merge_commit_sha.Substring(0,7))``$(if (-not $unprocessedPass) { ' by a person' }); watching master CI, then the release candidate."
+                $actions += @{ item = $n; action = 'merge-detected'; sha = $pr.merge_commit_sha }
+                $settling += $n; $triggers += @{ item = $n; event = 'item.merged' }
+                continue
+            }
+            if ($unprocessedPass) {
                 # the pull request of a PASS verdict was closed without merging: the verdict is void, so the item goes back to Development
                 if ($pr -and -not $pr.merged -and "$($pr.state)" -eq 'closed') {
                     if (-not $dry) { $info = Get-ItemInfo $n; $dr = Invoke-Demote $n $info $st "PR #$($pr.number) was closed without merging; the PASS verdict no longer applies." 'pr-closed'; $actions += @{ item = $n; action = 'demote'; reason = 'pr-closed' } }
@@ -121,6 +196,48 @@ function Verb_sync_board($a) {
                         if (-not $did) { continue }
                         $actions += @{ item = $n; action = 'owner-released-idle'; worker = $holderName }
                         $owned.Remove("$n")
+                    }
+                    continue
+                }
+                # Merge policy auto with the gateway merging (Verbs.Merge.ps1): the item is the gateway's from the verdict to the merge. It is never
+                # offered to a worker in this state (a session could not claim it: verdict-already-recorded), whether its owner is still there or not.
+                # The merge runs under the item lock on a fresh read, so a second sweep or the session's own merge call finds the verdict processed.
+                if ($c.mergePolicy -eq 'auto' -and (Test-GatewayMerge)) {
+                    if (-not $pr -or $dry) { continue }
+                    $vat = ConvertFrom-Iso $s.verdict.at; $age = if ($vat) { ((Get-UtcNow) - $vat).TotalSeconds } else { 1e9 }
+                    $grace = if (Test-Has $t 'passMergeGraceSeconds') { [double]$t.passMergeGraceSeconds } else { 60 }
+                    # the grace leaves the verdict call (and the session's merge call right after it) alone; once the gateway has tried, none is needed
+                    if ($age -lt $grace -and -not (Test-Has $s.verdict 'wait')) { $passUnmerged += @{ item = $n; code = 'grace'; since = $s.verdict.at; pr = [int]$s.verdict.pr }; $unconfirmed += $n; continue }
+                    $gm = try {
+                        Use-ItemLock $n {
+                            $f = Get-State $n; $fs = $f.state
+                            if (-not ((Test-Has $fs 'verdict') -and $fs.verdict.passed -and -not $fs.verdict.processed)) { @{ outcome = 'skipped'; reason = 'settled-meanwhile' } }
+                            elseif (-not (Test-Label (Get-ItemInfo $n) $c.autoMergeLabel)) {
+                                # the label was taken off after the verdict: what the verdict does for an item without it
+                                $fs.verdict.processed = $true; Set-Park $fs 'pass-without-auto-merge' ($t.parkHours * 60); $fs.Remove('claim'); Save-State $n $f; Remove-ClaimRef $n
+                                Add-Comment $n "validation PASSED - awaiting human merge (the '$($c.autoMergeLabel)' label is no longer on the item; the gateway will not merge)."
+                                @{ outcome = 'parked'; reason = 'pass-without-auto-merge' }
+                            }
+                            else { Verb_merge @{ item = $n } -Gateway }
+                        } 3
+                    } catch [FactoryReject] {
+                        # item-busy: a verb of the item is running (the session's own merge call): the next sweep looks again. Anything else the merge
+                        # verb refuses (the card was moved, the item closed) is not a merge the gateway may make.
+                        if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { throw }
+                        @{ outcome = $(if ($_.Exception.Code -eq 'item-busy') { 'waiting' } else { 'skipped' }); reason = $_.Exception.Code }
+                    }
+                    $actions += @{ item = $n; action = 'pass-merge'; outcome = "$($gm.outcome)"; reason = $(if (Test-Has $gm 'reason') { "$($gm.reason)" } else { '' }); roundTrip = $(if ((Test-Has $gm 'detail') -and (Test-Has $gm.detail 'round_trip')) { [int]$gm.detail.round_trip } else { 0 }) }
+                    $ownedLive = (Test-OwnedClaim $s) -and (Test-ClaimLive $s)
+                    switch ("$($gm.outcome)") {
+                        { $_ -in 'merged', 'already-merged' } { $settling += $n; $triggers += @{ item = $n; event = 'item.merged' } }
+                        'demoted' {
+                            # back in Development: its owner is told as for checks that failed (fix forward); without an owner it is offered
+                            $rt = if ((Test-Has $gm 'detail') -and (Test-Has $gm.detail 'round_trip')) { [int]$gm.detail.round_trip } else { 1 }
+                            if ($ownedLive) { $triggers += @{ item = $n; event = 'checks.failed'; column = $c.columns.development; reason = 'merge-demoted'; roundTrip = $rt } }
+                            else { $offers += @{ item = $n; column = $c.columns.development; reason = 'handoff' } }
+                        }
+                        'parked' { $triggers += @{ item = $n; event = 'item.parked'; reason = "$($gm.reason)" } }
+                        'waiting' { $passUnmerged += @{ item = $n; code = "$($gm.reason)"; since = $s.verdict.at; pr = [int]$s.verdict.pr }; if ("$($gm.reason)" -in 'item-busy', 'mergeability-unknown', 'branch-updated') { $unconfirmed += $n } }
                     }
                     continue
                 }
@@ -169,6 +286,12 @@ function Verb_sync_board($a) {
         catch { $errors += @{ item = $n; code = 'error'; reason = "$($_.Exception.Message)" } }
     }
     if (-not $dry) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
+    # claim refs with no live claim behind them (issue 47): removed at once for a closed item, after a lease for an open one
+    if (-not $dry) {
+        try { $actions += @(Invoke-ClaimRefReap $list) }
+        catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "claim-ref-reap: $($_.Exception.Message)" } }
+        catch { $errors += @{ item = 0; code = 'error'; reason = "claim-ref-reap: $($_.Exception.Message)" } }
+    }
     # PR QC environments: offers and teardowns only, never a start (design pr-qc-environment.md 3.5)
     $qcRecords = @(); $qcTeardowns = @(); $qcApprovals = @()
     if (Test-QcEnabled) {
@@ -176,7 +299,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------
