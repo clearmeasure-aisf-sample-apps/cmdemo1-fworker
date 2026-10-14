@@ -20,7 +20,7 @@ sealed partial class Plant
         {
             passUnmerged.Clear();
             foreach (var x in list ?? new JsonArray())
-                if (x?["item"] is JsonValue v && v.TryGetValue<int>(out var item) && item > 0)
+                if (x is JsonObject && x["item"] is JsonValue v && v.TryGetValue<int>(out var item) && item > 0)
                     passUnmerged[item] = (GatedCode(x["code"]?.ToString()) is { Length: > 0 } c ? c : "other", Time(x["since"]) ?? DateTime.UtcNow, int.TryParse(x["pr"]?.ToString(), out var pr) ? pr : 0);
         }
     }

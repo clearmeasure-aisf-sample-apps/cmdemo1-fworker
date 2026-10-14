@@ -655,9 +655,11 @@ function Invoke-SubscribeOwn($a) {
             }
         } catch {
             # on stdout, where a Monitor reads: a refused credential or an unreachable gateway must be visible to the session, not only on stderr
+            # a drop is reported only after 2 reconnects failed as well (enhancement 11): one lost connection that the next attempt restores is
+            # routine (a proxy, a gateway restart) and says nothing to the session. Comment lines (`: ping`) are never events.
             $dropN++
-            if ($dropN -le 3 -or $dropN % 10 -eq 0) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'stream.error'; reason = "$($_.Exception.Message)"; attempt = $dropN; retry_in_seconds = $backoff } | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
-            [Console]::Error.WriteLine("subscription dropped: $($_.Exception.Message); retrying in ${backoff}s")
+            if ($dropN -ge 3 -and ($dropN -le 5 -or $dropN % 10 -eq 0)) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'stream.error'; reason = "$($_.Exception.Message)"; attempt = $dropN; retry_in_seconds = $backoff } | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
+            if ($dropN -ge 3) { [Console]::Error.WriteLine("subscription dropped: $($_.Exception.Message); retrying in ${backoff}s") }
         }
         finally { $http.Dispose() }
         Start-Sleep -Seconds $backoff; $backoff = [Math]::Min(30, $backoff * 2)
@@ -707,4 +709,33 @@ function Get-InboxCursor([string]$Name) {
 function Save-InboxCursor([string]$Name, [string]$Epoch, [long]$After) {
     if ($Epoch -notmatch '^e-[0-9a-f]{8}$') { return }
     Set-Content -LiteralPath (Join-Path (Get-WorkerDir) "inbox-$Name.json") -Value (@{ epoch = $Epoch; after = $After } | ConvertTo-Json -Compress) -NoNewline
+}
+
+# end-session --name N [--marker FILE]: one work item per session (docs/launcher.md). After the session's item settled or was
+# released, the session drains its own name (the gateway offers it nothing more; the next registration of the name, a new session, clears that) and
+# writes the end marker: FACTORY_SESSION_END_FILE when a launcher set it, else --marker. A launcher that watches the marker ends this session and
+# starts a new one from the connect prompt. A drain the gateway does not answer is reported and the marker is written all the same: the gateway
+# offers a session that already held an item nothing more in any case.
+function Invoke-EndSession($a, $cfg) {
+    $name = "$($a.name)"
+    if ($name -notmatch '^[A-Za-z0-9_-]{1,40}$') { Write-Out @{ ok = $false; code = 'usage'; reason = '--name is required: the worker name of this session' } 2 }
+    $marker = if ($env:FACTORY_SESSION_END_FILE) { $env:FACTORY_SESSION_END_FILE } elseif ($a.ContainsKey('marker')) { "$($a.marker)" } else { '' }
+    $cred = Get-WorkerCredential $cfg $name
+    $drained = $false; $note = ''
+    try {
+        $r = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/workers/$([uri]::EscapeDataString($name))/drain" -Method POST -Headers @{ Authorization = "Bearer $cred" } -SkipHttpErrorCheck -TimeoutSec 30
+        $drained = [int]$r.StatusCode -eq 200
+        if (-not $drained) { $note = "drain answered $([int]$r.StatusCode)" }
+    } catch { $note = "drain not sent: $($_.Exception.Message)" }
+    $written = $false
+    if ($marker) {
+        try {
+            $dir = Split-Path -Parent $marker; if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+            Set-Content -Path $marker -Value ([DateTime]::UtcNow.ToString('o')) -NoNewline; $written = $true
+        } catch { $note = (($note, "marker not written: $($_.Exception.Message)") | Where-Object { $_ }) -join '; ' }
+    }
+    $o = [ordered]@{ ok = $true; name = $name; drained = $drained; marker = $marker; markerWritten = $written
+        next = $(if ($written) { 'the launcher ends this session and starts a new one' } else { 'no launcher: stop working; a new session is started from the connect prompt' }) }
+    if ($note) { $o.note = $note }
+    Write-Out $o 0
 }

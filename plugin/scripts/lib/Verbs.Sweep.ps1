@@ -53,6 +53,56 @@ function Invoke-MergePickup([int]$n, $pr) {
     }
 }
 
+# ---- orphan claim refs (issue 47) --------------------------------------------------------------------------------------
+# A claim is a ref (refs/factory/<instance>/claims/<item>) and the claim in the item's state; the ref is written first. A claim cut off between the
+# two (a restart) leaves a ref with no claim, and refs of closed items were never removed. Each sweep (the first one runs at start-up) lists the
+# refs and, under the item lock on a fresh read of the state, removes a ref that has no live claim: at once when the item is closed or gone, and
+# when it is open once the ref has been seen without a claim for longer than a lease. When it was first seen so is kept in the state directory: a
+# restart starts the wait again, which only delays the removal (an accept takes such a ref over anyway, Verb_claim_item).
+function Get-ClaimOrphanFile { Join-Path (Get-StateDir) 'claim-orphans.json' }
+
+function Get-ClaimRefItems {
+    $prefix = "refs/$(Get-RefPath)/"; $seen = [System.Collections.Generic.HashSet[int]]::new(); $out = @()
+    # matching-refs may ignore the page parameter (as Get-RevokedRefs): end on an empty page or on one that brings nothing new
+    for ($page = 1; $page -le 50; $page++) {
+        $rows = @(Invoke-Gh -Path "$(Get-RepoPath)/git/matching-refs/$(Get-RefPath)/`?per_page=100&page=$page")
+        if ($rows.Count -eq 0) { break }
+        $new = 0
+        foreach ($r in $rows) {
+            $ref = "$($r.ref)"
+            if ($ref.StartsWith($prefix, [StringComparison]::Ordinal) -and $ref.Substring($prefix.Length) -match '^\d{1,9}$' -and $seen.Add([int]$Matches[0])) { $out += [int]$Matches[0]; $new++ }
+        }
+        if ($new -eq 0) { break }
+    }
+    return , @($out)
+}
+
+function Invoke-ClaimRefReap($List) {
+    $t = (Get-Cfg).timing; $f = Get-ClaimOrphanFile
+    $first = if (Test-Path $f) { try { Get-Content -Raw $f | ConvertFrom-Json -AsHashtable -DateKind String } catch { @{} } } else { @{} }
+    if ($null -eq $first) { $first = @{} }
+    $board = @{}; foreach ($it in $List) { $board["$($it.number)"] = $it }
+    $acts = @(); $keep = @{}; $now = Get-UtcNow
+    foreach ($n in (Get-ClaimRefItems)) {
+        try {
+            $open = if ($board.ContainsKey("$n")) { [bool]$board["$n"].open } else { try { [bool](Get-ItemInfo $n).open } catch [FactoryReject] { if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $false } else { throw } } }
+            $since = if ($first.ContainsKey("$n")) { ConvertFrom-Iso $first["$n"] } else { $null }
+            if (-not $since) { $since = $now }
+            $aged = ($now - $since).TotalMinutes -ge [double]$t.leaseMinutes
+            $res = Use-ItemLock $n {
+                $st = try { Get-State $n } catch [FactoryReject] { if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $null } else { throw } }
+                if ($st -and (Test-ClaimLive $st.state)) { return 'live' }
+                if (-not $open -or $aged) { Remove-ClaimRef $n; return 'removed' }
+                return 'orphan'
+            }
+            if ($res -eq 'removed') { $acts += @{ item = $n; action = 'claim-ref-removed'; reason = $(if (-not $open) { 'item-closed' } else { 'orphan' }) } }
+            elseif ($res -eq 'orphan') { $keep["$n"] = ConvertTo-Iso $since; $acts += @{ item = $n; action = 'orphan-claim'; since = $keep["$n"] } }
+        } catch [FactoryReject] { $acts += @{ item = $n; action = 'skip'; reason = "claim-ref-reap: $($_.Exception.Code)" } }
+    }
+    $keep | ConvertTo-Json -Depth 3 | Set-Content $f
+    return , @($acts)
+}
+
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
@@ -64,6 +114,8 @@ function Verb_sync_board($a) {
     $owned = @{}; $settling = @(); $unconfirmed = @()
     # pass_unmerged: every item with a PASS verdict that the gateway is to merge and has not merged yet, with why (a reason code) and since when
     $passUnmerged = @()
+    # release_queue: the items that wait in the Release Queue for the production deployment, with their release and since when (enhancement 9)
+    $releaseQueue = @()
     $list = Get-BoardList
     $last = Get-LastColumn
     foreach ($it in $list) {
@@ -87,6 +139,9 @@ function Verb_sync_board($a) {
             if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) {
                 $settling += $n
                 if (-not $dry) { $r = Invoke-Settle $n; $actions += @{ item = $n; action = 'settle'; result = $r } }
+                if (-not $dry -and $r.outcome -in 'advanced', 'waiting' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue') {
+                    $releaseQueue += @{ item = $n; release = $(if (Test-Has $r 'release') { "$($r.release)" } else { '' }); since = $(if (Test-Has $r 'queued_at') { $r.queued_at } else { $null }) }
+                }
                 if (-not $dry -and ($r.outcome -eq 'done' -or ($r.outcome -eq 'advanced' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue'))) { $triggers += @{ item = $n; event = 'item.complete'; path = $(if (Test-Has $r 'path') { "$($r.path)" } else { '' }) } }
                 elseif (-not $dry -and $r.outcome -eq 'parked') { $triggers += @{ item = $n; event = 'item.parked'; reason = $r.reason } }
                 continue
@@ -231,6 +286,12 @@ function Verb_sync_board($a) {
         catch { $errors += @{ item = $n; code = 'error'; reason = "$($_.Exception.Message)" } }
     }
     if (-not $dry) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
+    # claim refs with no live claim behind them (issue 47): removed at once for a closed item, after a lease for an open one
+    if (-not $dry) {
+        try { $actions += @(Invoke-ClaimRefReap $list) }
+        catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "claim-ref-reap: $($_.Exception.Message)" } }
+        catch { $errors += @{ item = 0; code = 'error'; reason = "claim-ref-reap: $($_.Exception.Message)" } }
+    }
     # PR QC environments: offers and teardowns only, never a start (design pr-qc-environment.md 3.5)
     $qcRecords = @(); $qcTeardowns = @(); $qcApprovals = @()
     if (Test-QcEnabled) {
@@ -238,7 +299,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------

@@ -20,6 +20,63 @@ $Scenarios = [ordered]@{
     Check 'issue closed' (-not (Get-FakeIssue $n).open)
 }
 
+'orphan claim refs: an accept takes one over, the sweep removes those of closed items and keeps a young one (issue 47)' = {
+    $inst = "$((Get-Content -Raw (Join-Path $script:Work 'instance.test.json') | ConvertFrom-Json).name)"
+    $repo = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+    $refs = { @((Invoke-RestMethod "$repo/git/matching-refs/factory/$inst/claims/" -Headers @{ Authorization = 'Bearer fake-operator' }) | ForEach-Object { $_ } | ForEach-Object { "$($_.ref)" }) }
+    # a ref left by an accept cut off between the ref and the state: the item state holds no claim
+    $n = New-Item-Fake 'Orphan ref' 'x' $L
+    Gh-As 'fake-operator' 'git/refs' @{ ref = "refs/factory/$inst/claims/$n"; sha = ('0' * 40) } | Out-Null
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'the claim takes the orphan ref over' $r 0
+    Check 'and says so' ($r.orphan_ref_taken_over -eq $true) ($r | ConvertTo-Json -Compress)
+    $r = F 'w2' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'a ref behind a live claim is still refused' $r 40 'claim-held'
+    # a closed item's ref goes at the next sweep; an open item's orphan is kept until it is older than a lease (30 min here)
+    $c = New-Item-Fake 'Closed with a ref' 'x' $L; $o = New-Item-Fake 'Young orphan' 'x' $L
+    Gh-As 'fake-operator' 'git/refs' @{ ref = "refs/factory/$inst/claims/$c"; sha = ('0' * 40) } | Out-Null
+    Gh-As 'fake-operator' 'git/refs' @{ ref = "refs/factory/$inst/claims/$o"; sha = ('0' * 40) } | Out-Null
+    Invoke-RestMethod "$repo/issues/$c" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+    $gone = Wait-Until -Seconds 30 { "refs/factory/$inst/claims/$c" -notin (& $refs) }
+    Check 'the sweep removed the claim ref of the closed item' $gone ((& $refs) -join ',')
+    $now = & $refs
+    Check 'the young orphan of an open item and the live claim are kept' ("refs/factory/$inst/claims/$o" -in $now -and "refs/factory/$inst/claims/$n" -in $now) ($now -join ',')
+}
+
+# Enhancement 13: cycle times come from the item's journal and state comments on GitHub, so a restarted gateway answers the same.
+'metrics: a merged item has its column times, merge and done; the answer survives a restart; operator token only' = {
+    $n = New-Item-Fake 'Metrics item' 'Add docs/m.md' $L
+    Do-TechnicalDesign $n
+    $pr = Do-Development $n
+    $r = F 'w1' @('wait-for-checks', '--item', $n); CheckExit 'checks green' $r 0
+    $r = Do-DevComplete $n; CheckExit 'development complete' $r 0
+    $v = Do-Verdict $n $pr; CheckExit 'verdict PASS' $v 0
+    $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    Check 'settled to Done' (Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Done' })
+    $h = @{ Authorization = 'Bearer test-token' }; $u = "$(Get-GatewayBase)/api/v1/metrics?since=1d&fresh=1"
+    $a = Invoke-RestMethod $u -Headers $h
+    $it = @($a.items | Where-Object { $_.item -eq $n })
+    Check 'the item is listed' ($it.Count -eq 1) ($a | ConvertTo-Json -Depth 6 -Compress)
+    if ($it.Count -eq 1) {
+        $i = $it[0]
+        Check 'merged and done times, merge to done measured' ($i.times.merged -and $i.times.done -and $null -ne $i.durations.mergeToDone -and $i.durations.mergeToDone -ge 0) ($i | ConvertTo-Json -Depth 5 -Compress)
+        Check 'time in Technical Design and Development measured' ($null -ne $i.columns.'Technical Design' -and $null -ne $i.columns.'Development') ($i.columns | ConvertTo-Json -Compress)
+        Check 'the item is in Done and closed' ($i.column -eq 'Done' -and -not $i.open)
+    }
+    Check 'aggregate merge to done counts the item' ($a.aggregate.mergeToDone.count -ge 1 -and $null -ne $a.aggregate.mergeToDone.median -and $null -ne $a.aggregate.mergeToDone.p90)
+    Check 'per-column aggregate' ($a.columns.'Development'.count -ge 1)
+    Restart-Gateway
+    $b = Invoke-RestMethod $u -Headers $h
+    $ib = @($b.items | Where-Object { $_.item -eq $n })
+    Check 'after a restart the same item and times are answered' ($ib.Count -eq 1 -and $ib[0].times.done -eq $it[0].times.done -and $ib[0].durations.mergeToDone -eq $it[0].durations.mergeToDone)
+    $s = try { Invoke-WebRequest "$(Get-GatewayBase)/api/v1/metrics?since=1d" -SkipHttpErrorCheck -Headers @{ Authorization = 'Bearer nope' } } catch { $null }
+    Check 'refused without the operator token' ($s -and $s.StatusCode -in 401, 403) "$($s.StatusCode)"
+    $s = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/metrics?since=yesterday-ish" -SkipHttpErrorCheck -Headers $h
+    Check 'a since that is no date or duration is a usage error' ($s.StatusCode -eq 400) "$($s.StatusCode) $($s.Content)"
+    $f = Invoke-RestMethod "$(Get-GatewayBase)/api/v1/metrics?since=$([Uri]::EscapeDataString((Get-Date).ToUniversalTime().AddMinutes(5).ToString('o')))&fresh=1" -Headers $h
+    Check 'a since after the last event lists nothing' (@($f.items).Count -eq 0)
+    $d = Invoke-WebRequest "$(Get-GatewayBase)/dashboard"
+    Check 'the dashboard has the cycle-time section' ($d.Content -match 'id="metbox"' -and $d.Content -match '/api/v1/metrics')
+}
+
 'gates refuse what they should [full]' = {
     $n = New-Item-Fake 'Gates' 'x' $L
     $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
@@ -152,6 +209,11 @@ $Scenarios = [ordered]@{
     $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
     $q = Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Release Queue' }
     Check 'waits in Release Queue (hold column)' $q "column $((Get-FakeIssue $n).column)"
+    $sw = F 'w1' @('sync-board')
+    $rq = @(@($sw['release_queue']) | Where-Object { $_ -and $_['item'] -eq $n }) | Select-Object -First 1
+    if (@(@($sw['actions']) | Where-Object { $_ -and $_['item'] -eq $n -and $_['result'] -and $_['result']['outcome'] -eq 'done' }).Count -eq 0) {
+        Check 'the sweep lists it in release_queue with its release and since when (the digest''s Release Queue age)' ($rq -and "$($rq['release'])" -match '^\d' -and $null -ne $rq['since']) ($sw | ConvertTo-Json -Compress -Depth 4)
+    }
     $d = Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Done' }
     Check 'Done only after the production deployment succeeded' $d "column $((Get-FakeIssue $n).column)"
     Check 'issue closed' (-not (Get-FakeIssue $n).open)
@@ -212,6 +274,52 @@ $Scenarios = [ordered]@{
     $r = Do-DevComplete $n; CheckExit 'docs-only PR without the marker' $r 10 'development-docs-only-pr'
 }
 
+
+'escalate earlier: the same criterion cited twice parks the item with a question; timing criteria are flagged at Technical Design' = {
+    $crit = 'The work order list shows the room number.'
+    $rec = { param($n, $name, $text, $col = 'Technical Design') F 'w1' @('record-review', '--item', $n, '--column', $col, '--role', 'reviewer', '--text-file', (TmpFile "$name.md" $text)) }
+    # two consecutive review rounds that cite the same criterion
+    $n = New-Item-Fake 'Room number' "Acceptance criteria:`n- $crit`n- The list loads within 2 seconds for 500 work orders." $L
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
+    Check 'the timing criterion is named in the claim answer' (@(Pv $r 'timing_criteria').Count -eq 1 -and "$(@(Pv $r 'timing_criteria')[0])" -like '*within 2 seconds*') ($r | ConvertTo-Json -Compress)
+    Check 'and flagged on the item, once' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*Timing or statistical acceptance criteria*' }).Count -eq 1)
+    $r = F 'w1' @('append-body', '--item', $n, '--column', 'Technical Design', '--content-file', (TmpFile 'es.md' "## Technical Design`n`nFiles: src/a.cs`n- add the column.`n")); CheckExit 'design' $r 0
+    $r = & $rec $n 'es1' "REVIEW: FINDINGS`nFINDING: criterion `"$crit`" - the design adds no column"; CheckExit 'round 1 cites the criterion' $r 0
+    $r = & $rec $n 'es2' "REVIEW: FINDINGS`nFINDING: criterion `"The work order list shows the   room number.`" - still missing"
+    CheckExit 'round 2 citing the same criterion is refused' $r 10 'same-criterion-repeated'
+    $g = F 'w1' @('get-item', '--item', $n); $park = Pv $g.state 'park'
+    Check 'the item is parked for the owner' ($park -and $park.reason -eq 'same-criterion-repeated') ($g.state | ConvertTo-Json -Compress -Depth 5)
+    Check 'with a precise question naming the criterion' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*Question for the owner*' -and $_.body -like "*$crit*" }).Count -eq 1)
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'a parked item is not claimed again' $r 10 'parked'
+    $cited = Pv $g.state 'cited'
+    Check 'parking forgets the cited records, so the round after the answer starts fresh' ($null -eq $cited -or @($cited.PSObject.Properties).Count -eq 0) ($g.state | ConvertTo-Json -Compress -Depth 5)
+    # a criterion that itself contains quotes is counted
+    $qc = 'The button reads "Save order" in bold.'
+    $k = New-Item-Fake 'Quoted repeat' "Acceptance criteria:`n- $qc" $L
+    $r = F 'w1' @('claim-item', '--item', $k, '--column', 'Technical Design')
+    $r = F 'w1' @('append-body', '--item', $k, '--column', 'Technical Design', '--content-file', (TmpFile 'esq.md' "## Technical Design`n`nFiles: src/a.cs`n- add the button.`n"))
+    $r = & $rec $k 'esq1' "REVIEW: FINDINGS`nFINDING: criterion `"$qc`" - no bold"; CheckExit 'quoted round 1' $r 0
+    $r = & $rec $k 'esq2' "REVIEW: FINDINGS`nFINDING: criterion `"$qc`" - still no bold"; CheckExit 'quoted round 2 parks' $r 10 'same-criterion-repeated'
+    # different criteria, or a COMPLETE between, do not escalate
+    $m = New-Item-Fake 'Two criteria' "Acceptance criteria:`n- $crit`n- The list is sorted by the created date." $L
+    $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design'); Check 'no timing criterion, no flag' ($null -eq (Pv $r 'timing_criteria'))
+    $r = F 'w1' @('append-body', '--item', $m, '--column', 'Technical Design', '--content-file', (TmpFile 'es3.md' "## Technical Design`n`nFiles: src/a.cs`n- add the column.`n"))
+    $r = & $rec $m 'es4' "REVIEW: FINDINGS`nFINDING: criterion `"$crit`" - missing"; CheckExit 'round 1' $r 0
+    $r = & $rec $m 'es5' "REVIEW: FINDINGS`nFINDING: criterion `"The list is sorted by the created date.`" - missing"; CheckExit 'round 2 cites another criterion' $r 0
+    $r = & $rec $m 'es6' "REVIEW: FINDINGS`nFINDING: criterion `"$crit`" - missing again"; CheckExit 'not consecutive: round 3 goes on' $r 0
+    # two consecutive FAIL verdicts that cite the same criterion
+    $v = New-Item-Fake 'Verdict repeat' "Acceptance criteria:`n- $crit" $L; Do-TechnicalDesign $v
+    $pr = Do-Development $v; Do-DevComplete $v | Out-Null
+    $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Functional Testing'); CheckExit 'FT claim' $r 0
+    $r = F 'w1' @('validation-verdict', '--item', $v, '--passed', 'false', '--summary-file', (TmpFile 'ev1.md' "criterion `"$crit`" is not met: no column"), '--pr', $pr); CheckExit 'FAIL 1' $r 0
+    Check 'FAIL 1 demotes as before' ($r.next -eq 'demoted' -and (Get-FakeIssue $v).column -eq 'Development') ($r | ConvertTo-Json -Compress -Depth 4)
+    $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Development'); CheckExit 'Development claim after the demotion' $r 0
+    $r = Do-DevComplete $v; CheckExit 'development complete again' $r 0
+    $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Functional Testing'); CheckExit 'FT claim 2' $r 0
+    $r = F 'w1' @('validation-verdict', '--item', $v, '--passed', 'false', '--summary-file', (TmpFile 'ev2.md' "criterion `"$crit`" is still not met"), '--pr', $pr); CheckExit 'FAIL 2' $r 0
+    Check 'FAIL 2 on the same criterion parks instead of demoting' ($r.next -eq 'parked' -and $r.reason -eq 'same-criterion-repeated' -and (Get-FakeIssue $v).column -eq 'Functional Testing') ($r | ConvertTo-Json -Compress -Depth 4)
+    Check 'with the question to the owner' (@((Get-FakeIssue $v).comments | Where-Object { $_.body -like '*Question for the owner*FAIL verdicts*' }).Count -eq 1)
+}
 
 'docs-only fast path: one design review round, a second only for a finding that quotes the item' = {
     $crit = 'The README names the health check route /_healthcheck.'

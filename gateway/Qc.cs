@@ -480,6 +480,7 @@ sealed class QcHub
     async Task<(int, JsonObject)> Report(JsonObject body, Principal who)
     {
         var (m, refusal) = ForCaller(who); if (m == null) return refusal!.Value;
+        Arrived(who);
         var url = Str(body["url"]); var declared = plant.DeclaredAddress(who.Name);
         var bad = QcUrl.Check(cfg, url, declared, out var uri);
         if (bad != null) return (10, new JsonObject { ["ok"] = false, ["code"] = bad.Value.Code, ["reason"] = bad.Value.Reason });
@@ -516,6 +517,15 @@ sealed class QcHub
         }
         var action = stop ? "teardown" : reReport ? "re-report" : "continue";
         return (0, new JsonObject { ["ok"] = true, ["action"] = action, ["state"] = state, ["lease_until"] = m.LeaseUntil?.ToString("o") });
+    }
+
+    // A verb of the current QC assignment has arrived: the worker is alive, so its lease runs from now, not from when the (possibly slow) verb finishes.
+    // Without this a verb that takes longer than what is left of the lease lets the sweep relaunch an environment whose worker is answering.
+    public void Arrived(Principal who)
+    {
+        if (who.Kind != "item" || who.Role != "qc") return;
+        var m = FindByAssignment(who.Assignment); if (m == null) return;
+        lock (m) { if (m.LeaseUntil != null) { var want = DateTime.UtcNow.AddMinutes(cfg.LeaseMinutes); if (m.LeaseUntil < want) m.LeaseUntil = want; } }
     }
 
     // After a rule-script verb succeeded: keep the memory half in step.

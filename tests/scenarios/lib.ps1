@@ -27,6 +27,9 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     $t.mergeabilityWaitSeconds = 3; $t.mergeabilityPollSeconds = 1; $t.preMergeChecksWaitSeconds = 12; $t.preMergeChecksPollSeconds = 1
     $t.docsOnlyLegacyBefore = '2020-01-01T00:00:00Z'   # every item and state of a test is new; the legacy scenarios date theirs before it
     $t.updatedHeadWaitSeconds = 10; $t.sweepSeenCount = 1; $t.docsOnlyReleaseGraceSeconds = 4; $t.releaseCandidateTimeoutMinutes = 1; $t.masterGreenTimeoutMinutes = 2
+    # one item per session (plant.oneItemPerSession) is on in the source defaults; the suites let one scripted session take many items, so it is off here
+    # unless a suite sets it. The scenarios of the rule turn it on for their own gateway (FACTORY_ONE_ITEM_PER_SESSION, owner.ps1).
+    $cfg.plant = @{ oneItemPerSession = $false }
     foreach ($k in $Config.Keys) { $cfg[$k] = $Config[$k] }
     $cfgPath = Join-Path $work 'instance.test.json'; $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
     $fakeDll = Join-Path $script:Root 'tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll'
@@ -54,8 +57,14 @@ function Assert-NoServerErrors([string]$Suite) {
 # Stops the suite's gateway and starts it again with the same environment: a new process, so a new epoch and empty memory. Its logs go to
 # gateway-xxxx.out and gateway-restarted.err, which Assert-NoServerErrors reads as well.
 function Get-GatewayBase { "http://127.0.0.1:$($script:ApiPort)" }
-function Restart-Gateway {
-    try { Stop-Process -Id $script:Procs[1].Id -Force } catch { }
+# -Graceful: SIGTERM, as the platform stops a container (the gateway writes its plant snapshot then), and up to 30 s for the process to end;
+# without it the process is killed outright, as an out-of-memory kill would.
+function Restart-Gateway([switch]$Graceful) {
+    if ($Graceful -and -not $IsWindows) {
+        $gp = $script:Procs[1]; & kill -s TERM $gp.Id 2>$null
+        if (-not $gp.WaitForExit(30000)) { try { Stop-Process -Id $gp.Id -Force } catch { } }
+    }
+    else { try { Stop-Process -Id $script:Procs[1].Id -Force } catch { } }
     Start-Sleep -Seconds 1
     $gwDll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'
     $script:Procs[1] = Start-Process dotnet -ArgumentList $gwDll -PassThru -RedirectStandardOutput (Join-Path $script:Work "gateway-$([guid]::NewGuid().ToString('N').Substring(0,4)).out") -RedirectStandardError (Join-Path $script:Work "gateway-restarted.err")
