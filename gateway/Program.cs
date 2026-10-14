@@ -413,6 +413,7 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     // rule script writes "assigned". The wait is bounded by the plant, which adds it to the offer's window of this worker.
     if (ownerMode && verb == "accept" && who.Kind == "item" && plant.JournalBefore(who.Item, who.Assignment, who.Name) is { AtMost.Ticks: > 0 } earlier)
         await Task.WhenAny(earlier.Written, Task.Delay(earlier.AtMost));
+    if (ownerMode && who.Role == "qc" && verb is "accept" or "qc-progress" or "qc-fail" or "qc-stopped") qc.Arrived(who);
     var (code, output) = await runner.RunAsync(verb, authorized.ToJsonString(), timeout);
     var item = authorized["item"]?.ToString() ?? ""; var holder = authorized["holder"]?.ToString() ?? "";
     Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"item\":\"{item}\",\"holder\":\"{holder}\",\"caller\":\"{who.Kind}:{who.Role}\",\"exit\":{code}}}");

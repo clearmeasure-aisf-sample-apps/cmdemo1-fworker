@@ -252,6 +252,14 @@ Closed on 2026-10-13 (pull request "hardening"):
   merge gate is unchanged and deterministic: recorded inspector approval, approval on GitHub, QC run, person's approval. Same pattern
   elsewhere: entry m.
 
+### Flaky qc-gate-lease scenario (fixed 2026-10-14)
+
+Cause: the QC lease was renewed only when a verb of the worker had finished (accept, qc-progress, qc-report), so a worker whose verb was still
+running counted as silent for the whole verb. With the suite's 6 s lease and verbs of 3.4 to 5.4 s on hosted runners, the sweep relaunched an
+environment whose worker was answering, and the next report got stale-assignment (exit 11). Reproduced locally by slowing the client 5.2 s
+between verbs. Fix: the gateway renews the lease when a verb of the current QC assignment arrives (`Qc.Arrived`), and the scenario lease is
+18 s (qcLeaseMinutes 0.3). The grace suite had the same shape (a Reset verb had to land inside 6 s) and now uses 15 s.
+
 ### Gateway restarts: what can end the process (entry f)
 
 Every start prints `started` in `/_build`. Since this change the console log says how a process ended; read the last lines before the
