@@ -49,7 +49,14 @@ $OwnerScenarios = [ordered]@{
     $ev = (Get-Assigned 'alice' $n)[0]
     Check 'the token never appears on the event stream' (-not ((Get-Content $script:Workers['alice'].out -Raw) -match 'i1\.'))
     Check 'the item token is in the token directory' (Test-Path (Join-Path $script:Workers['alice'].dir "$n.owner"))
-    $r = Fo 'alice' @('accept', '--item', $n, '--assignment', $ev.assignment); CheckExit 'accept' $r 0
+    # a loaded runner can answer after the 4 s window: that offer is withdrawn (stale-assignment) and offered again; take the newest
+    for ($try = 0; $try -lt 5; $try++) {
+        $ev = @(Get-Assigned 'alice' $n)[-1]
+        $r = Fo 'alice' @('accept', '--item', $n, '--assignment', $ev.assignment)
+        if ($r.exit -ne 11) { break }
+        $seen = @(Get-Assigned 'alice' $n).Count; [void](Wait-Until -Seconds 30 { @(Get-Assigned 'alice' $n).Count -gt $seen })
+    }
+    CheckExit 'accept' $r 0
     Check 'the claim belongs to the worker as owner' ($r.kind -eq 'own-item' -and $r.assignment -eq $ev.assignment)
     $st = Get-Plant; Check 'the plant records the owner' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n" -and $_.Value -eq 'alice' }).Count -eq 1)
     # (the gateway writes its own lines in order but not inside the accept: wait for them, as the slow-journal scenario below does)
@@ -531,7 +538,7 @@ $OwnerScenarios['pass-merge: checks still running at the verdict: the answer is 
     $pu = @((Get-Plant).plant.passUnmerged | Where-Object { $_.item -eq $x.n })
     Check '/status lists it as pass-unmerged with its reason' ($pu.Count -eq 1 -and $pu[0].code -eq 'checks-pending' -and $pu[0].pr -eq $x.pr) ((Get-Plant).plant.passUnmerged | ConvertTo-Json -Compress)
     # (an offer before the verdict, while the scripted holder moved the item between columns, is not one of this state)
-    Check 'no offer for it reached a worker (it is the gateway''s to merge)' (@(Get-Assigned 'pmw' $x.n | Where-Object { $_.column -eq 'Functional Testing' }).Count -eq 0) ((Get-Assigned 'pmw' $x.n) | ConvertTo-Json -Compress)
+    Check 'no offer for it reached a worker (it is the gateway''s to merge)' (@(Get-Assigned 'pmw' $x.n | Where-Object { (Pv $_ 'column') -eq 'Functional Testing' }).Count -eq 0) ((Get-Assigned 'pmw' $x.n) | ConvertTo-Json -Compress)
     Check 'merged when the checks are green, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
     $mw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match '<!-- plant event=merge-waiting ' }).Count
     Check 'journal: merge-waiting once, however many sweeps found it waiting' ($mw -eq 1) "$mw"
