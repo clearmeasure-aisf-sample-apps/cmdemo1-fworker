@@ -383,9 +383,10 @@ $OwnerScenarios['owner: sessions of one host share its limit of owned items and 
     Check 'never more than the host limit (1) at once, although each session has capacity 3' ($max -eq 1) "max $max"
     # accept what was offered (an offer lapses after 4 s in this suite: wait for the one that is out)
     $script:HostAcc = $null
-    [void](Wait-Until -Seconds 40 { foreach ($w in 'host-a', 'host-b') { $ev = @(Get-WorkerEvents $w | Where-Object { $_.event -eq 'item.assigned' }); if ($ev.Count) { $r = Fo $w @('accept', '--item', $ev[-1].item, '--assignment', $ev[-1].assignment); if ($r.exit -eq 0) { $script:HostAcc = @{ w = $w; item = [int]$ev[-1].item }; return $true } } }; $false })
+    # (only the offer that is out now: accepting a lapsed one would claim an item the plant already offered elsewhere)
+    [void](Wait-Until -Seconds 40 { $out = Msg-First @((Get-Plant).plant.assignments | Where-Object { $_.worker -in 'host-a', 'host-b' -and -not $_.accepted }); if ($out) { $r = Fo $out.worker @('accept', '--item', $out.item, '--assignment', $out.id); if ($r.exit -eq 0) { $script:HostAcc = @{ w = "$($out.worker)"; item = [int]$out.item }; return $true } }; $false })
     $acc = $script:HostAcc
-    Check 'a session of the host accepts it and owns it' ($acc -and (& $mine) -eq 1) ($acc | ConvertTo-Json -Compress)
+    Check 'a session of the host accepts it and owns it' ($acc -and @((Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$($acc.item)" -and $_.Value -eq $acc.w }).Count -eq 1 -and (& $mine) -le 1) ($acc | ConvertTo-Json -Compress)
     if (-not $acc) { return }
     Start-Sleep -Seconds 8
     Check 'while it owns it, nothing more is offered on that host' ((& $mine) -eq 1) ((Get-Plant).plant | ConvertTo-Json -Compress -Depth 5)
