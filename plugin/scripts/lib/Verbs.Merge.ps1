@@ -158,7 +158,7 @@ function Verb_merge($a, [switch]$Gateway) {
             if ($msg -match 'out of date|out-of-date|Head branch was modified|behind') {
                 # the merge was refused for the verdict's head: if the branch now carries any other head, nothing validated it
                 $pr = Get-Pr $prNum
-                if ("$($pr.head.sha)" -ne "$($s.verdict.head_sha)") { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict (stale-head); the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; code = 'stale-head'; detail = $d } }
+                if ("$($pr.head.sha)" -ne "$($s.verdict.head_sha)") { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict (stale-head); the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
                 # (bounded: the updates of one verdict are counted in the item state, so the sweep's calls add up to the same limit as this loop)
                 $ups = if (Test-Has $s.verdict 'updates') { [int]$s.verdict.updates } else { 0 }
                 if ($Gateway -and $ups -ge [int]$t.outOfDateMergeAttempts) { break }
