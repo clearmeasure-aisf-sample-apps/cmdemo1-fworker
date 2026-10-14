@@ -57,6 +57,7 @@
   },
   "timing": {
     "assignAckSeconds": 120,
+    "plantSnapshotMaxAgeMinutes": 30,
     "leaseMinutes": 30,
     "maxRelaunches": 3,
     "maxReviewRounds": 3,

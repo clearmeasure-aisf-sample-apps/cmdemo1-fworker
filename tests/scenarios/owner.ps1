@@ -496,6 +496,49 @@ $OwnerScenarios['runner: a second run is refused while one is active, a short di
     $script:ClientCrashes = $crashes     # the stand-in is no crash of this run
 }
 
+$OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'] = {
+    # the suite's accept window is 4 s: the offer would lapse before the restart. This scenario runs on a gateway with a 60 s window (started
+    # by an outright kill, which writes no snapshot) and the suite's window comes back in finally, the same way.
+    # The suites run with the snapshot off (run.ps1); it is on for this scenario's gateways.
+    $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $env:FACTORY_ASSIGN_ACK_SECONDS = '60'; $oldSnap = $env:FACTORY_PLANT_SNAPSHOT; $env:FACTORY_PLANT_SNAPSHOT = '1'; Restart-Gateway
+    try {
+        Start-OwnerClient 'sara' 'persistent-local' '--capacity 2'
+        # pinned: a worker left connected by an earlier scenario must not take them
+        $a = New-Item-Fake 'Snapshot owned' 'x' ($OwnerLabels + 'worker:sara'); $b = New-Item-Fake 'Snapshot offered' 'x' ($OwnerLabels + 'worker:sara')
+        [void](Wait-Until -Seconds 40 { (Get-Assigned 'sara' $a).Count -gt 0 -and (Get-Assigned 'sara' $b).Count -gt 0 })
+        $ea = (Get-Assigned 'sara' $a)[0]; $eb = (Get-Assigned 'sara' $b)[0]
+        $r = Fo 'sara' @('accept', '--item', $a, '--assignment', $ea.assignment); CheckExit 'sara accepts the first item' $r 0
+        $before = Get-Plant
+        Restart-Gateway -Graceful
+        $logs = Get-ChildItem -Path $script:Work -File -Filter 'gateway*.out' | ForEach-Object { Get-Content $_.FullName } | Where-Object { $_ -match '"gateway":"plant-(snapshot|restore)"' }
+        $saved = $logs | Where-Object { $_ -match '"gateway":"plant-snapshot"' -and $_ -match '"exit":0' }
+        Check 'at SIGTERM the gateway wrote its plant to GitHub: exit 0' (@($saved).Count -ge 1) (($logs -join "`n") + ' ' + (((Get-FakeState).refs) -join ' '))
+        [void](Wait-Until -Seconds 60 { $null -ne (Get-Plant).plantSnapshot.restore })
+        $st = Get-Plant; $rs = $st.plantSnapshot.restore
+        Check 'the next start restored it before its first sweep: assignments and the owner' ($rs.skipped -eq '' -and $rs.assignments -ge 2 -and $rs.owners -ge 1) ($rs | ConvertTo-Json -Compress)
+        Check 'the snapshot is used once: the start removed the ref after reading it' ((Wait-Until -Seconds 30 { @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' }).Count -eq 0 })) (((Get-FakeState).refs) -join ' ')
+        Check 'the owner of the accepted item is the same' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$a" -and $_.Value -eq 'sara' }).Count -eq 1) ($st.plant.owners | ConvertTo-Json -Compress)
+        $ra = @($st.plant.assignments | Where-Object { $_.item -eq $a }); $rb = @($st.plant.assignments | Where-Object { $_.item -eq $b })
+        Check 'the accepted assignment keeps its id and stays accepted' ($ra.Count -eq 1 -and $ra[0].id -eq $ea.assignment -and $ra[0].accepted -eq $true -and $ra[0].worker -eq 'sara') ($ra | ConvertTo-Json -Compress)
+        Check 'the unanswered offer keeps its id and its worker' ($rb.Count -eq 1 -and $rb[0].id -eq $eb.assignment -and $rb[0].accepted -eq $false -and $rb[0].worker -eq 'sara') "$($rb | ConvertTo-Json -Compress) before: $(@($before.plant.assignments | Where-Object { $_.item -eq $b }) | ConvertTo-Json -Compress)"
+        # the client reconnects by itself; its registration pushes the offer again, with the same assignment
+        [void](Wait-Until -Seconds 45 { (Get-Assigned 'sara' $b).Count -ge 2 })
+        $eb2 = @(Get-Assigned 'sara' $b)[-1]
+        Check 'the reconnected worker is offered the item again, the same assignment' ((Get-Assigned 'sara' $b).Count -ge 2 -and $eb2.assignment -eq $eb.assignment) (@(Get-Assigned 'sara' $b) | ConvertTo-Json -Compress)
+        $r2 = Fo 'sara' @('accept', '--item', $b, '--assignment', $eb2.assignment); CheckExit 'and accepts it' $r2 0
+        $st2 = Get-Plant
+        Check 'both items are owned by sara after the restart' (@($st2.plant.owners.PSObject.Properties | Where-Object { $_.Name -in "$a", "$b" -and $_.Value -eq 'sara' }).Count -eq 2) ($st2.plant.owners | ConvertTo-Json -Compress)
+        Check 'the journal has one matched line for the offered item: the restore wrote none' (@(Get-Journal $b | Where-Object { $_ -eq 'matched' }).Count -eq 1) ((Get-Journal $b) -join ',')
+    } finally {
+        Stop-OwnerClient 'sara'
+        # the next restart of this suite must not restore this scenario's plant
+        foreach ($ref in @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' })) {
+            try { Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/$ref" -Method DELETE -Headers @{ Authorization = 'Bearer fake-operator' } | Out-Null } catch { }
+        }
+        $env:FACTORY_ASSIGN_ACK_SECONDS = $oldAck; $env:FACTORY_PLANT_SNAPSHOT = $oldSnap; Restart-Gateway
+    }
+}
+
 # One work item per worker session (docs/launcher.md): a session that held an item is offered no other, even after that item is
 # released; a new registration of the same name (a stream without a cursor, as the launcher's next session opens it) is a new session and is offered one.
 $OwnerScenarios['owner: one item per session: a session that held an item is offered no second one; the next session of the name is, and the status counts items per session'] = {
