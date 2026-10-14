@@ -525,7 +525,8 @@ function Invoke-QuestionReask($Cfg, [string]$Cred, [string]$Name, [string]$Epoch
     return @($done)
 }
 
-# subscribe --own --name N [--type persistent-local|ephemeral-local] [--capabilities a,b] [--capacity 1] [--roles owner,inspector,qc] [--qc-capacity 1] [--qc-address HOST] [--qc-profile] [--model ID] [--effort E] [--spawn]
+# subscribe --own --name N [--type persistent-local|ephemeral-local] [--capabilities a,b] [--capacity 1] [--roles owner,inspector,qc] [--qc-capacity 1] [--qc-address HOST] [--qc-profile] [--model ID] [--effort E] [--host H] [--spawn]
+# --host (else FACTORY_HOST, else the computer's name) is the host whose limits this session shares (gateway/Hosts.cs).
 # subscribe --own --supervisor --name N --model ID --effort E: the supervisor session (worker-messaging.md 6.4). It registers with the supervisor
 # credential, prints supervisor.questions and supervisor.patrol as the envelopes of 5.2 (and stream.* lines), and heartbeats every 20 s.
 # Exits: 40 when a newer stream of the same name replaced this one (stream.replaced); the body's exit (2, 10, 30, 40) when the gateway refuses the
@@ -553,6 +554,10 @@ function Invoke-SubscribeOwn($a) {
     if ($a.ContainsKey('qc_profile')) { $qcExtra += '&qc_profile=1' }
     if ($a.ContainsKey('model')) { $qcExtra += "&model=$([uri]::EscapeDataString("$($a.model)"))" }
     if ($a.ContainsKey('effort')) { $qcExtra += "&effort=$([uri]::EscapeDataString("$($a.effort)"))" }
+    # the computer this session runs on (gateway/Hosts.cs): sessions of one host share its limits of owned items and private builds
+    $hostName = if ($a.ContainsKey('host')) { "$($a.host)" } elseif ($env:FACTORY_HOST) { $env:FACTORY_HOST } else { [Environment]::MachineName }
+    $hostName = ($hostName.ToLowerInvariant() -replace '[^a-z0-9._-]', '-').TrimStart('.', '_', '-'); if ($hostName.Length -gt 63) { $hostName = $hostName.Substring(0, 63) }
+    if ($hostName) { $qcExtra += "&host=$([uri]::EscapeDataString($hostName))" }
     $qcMax = if ($a.ContainsKey('qc_capacity')) { [Math]::Max(1, [int]$a.qc_capacity) } else { 1 }
     $cred = Get-WorkerCredential $cfg $name -Supervisor:$sup
     $beat = if ($sup) { 20 } else { 30 }

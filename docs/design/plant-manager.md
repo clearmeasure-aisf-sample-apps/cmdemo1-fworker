@@ -63,6 +63,21 @@ For each job the plant manager takes the workers that: hold the `owner` (or bot)
 - **Idle limit:** an owner waiting on a hold longer than 60 minutes releases ownership (journaled); the next trigger assigns it again and a new owner **resumes** from the item state.
 - **Lost session:** the lease expires, the item is offered again with `mode: resume`, and the relaunch budget applies.
 
+## 4a. Host capacity and the build slot (owner decision 2026-10-14)
+
+Code: `gateway/Hosts.cs`; settings `schedule.*` in `config/instance.json`; counts and holders in `/status` (`hosts`).
+
+- A worker declares its host at registration: `subscribe --own --host H` (else `FACTORY_HOST`, else the computer's name, lower case; `host=` on the
+  stream). Sessions that name the same host share its limits; a session that names none has no host limit.
+- Owned items per host: `schedule.hosts.<host>.owned`, else `schedule.hostOwnedDefault` (0: no host limit). An offer out counts, as for a worker's
+  capacity. A worker whose host is at its limit is passed over (waiting code `host-at-capacity`); a pinned item waits for room on its worker's host.
+- Private builds at once per host: `schedule.hosts.<host>.builds`, else `schedule.hostBuildsDefault` (1). `factory.ps1 build-slot --item N [--ttl S]`
+  (`POST /api/v1/build-slot`, an owner's item token or a worker credential) takes a slot or extends the caller's own; exit 21 `build-slot-busy`
+  (HTTP 429) with `retryAfterSeconds` and the holders when the host's slots are held. `--release` gives it back; a slot not given back frees itself
+  after its ttl (`schedule.buildSlotTtlSeconds`, 1800; at most `buildSlotMaxTtlSeconds`, 7200). The slots are in memory: a restart frees them all.
+- A session that registers with effort `low` gets capacity `schedule.lowEffortCapacity` (1), whatever it declared, unless the operator set its
+  capacity on the dashboard.
+
 ## 5. Tokens and roles
 
 | Credential | Held by | Can do |

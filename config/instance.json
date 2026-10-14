@@ -55,6 +55,14 @@
   "plant": {
     "oneItemPerSession": true
   },
+  "schedule": {
+    "hostOwnedDefault": 0,
+    "hostBuildsDefault": 1,
+    "lowEffortCapacity": 1,
+    "buildSlotTtlSeconds": 1800,
+    "buildSlotMaxTtlSeconds": 7200,
+    "hosts": {}
+  },
   "timing": {
     "assignAckSeconds": 120,
     "leaseMinutes": 30,

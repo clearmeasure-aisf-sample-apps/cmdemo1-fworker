@@ -1530,7 +1530,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             chooseCode = "pinned-unavailable";
             var p = withRole.FirstOrDefault(w => w.Name == pin && !w.Draining);
             if (p != null && SessionSpent(p, a)) { chooseCode = "session-spent"; return (null, $"the pinned worker '{pin}' already held a work item in this session; the item waits for its next session"); }
-            return p != null && Owned(p.Name) < p.Capacity ? (p, "") : (null, $"the pinned worker '{pin}' is not available");
+            return p != null && Owned(p.Name) < p.Capacity && HostHasRoom(p.Name) ? (p, "") : (null, $"the pinned worker '{pin}' is not available");
         }
         var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name)).ToList();
         chooseCode = "all-draining-or-declined";
@@ -1542,6 +1542,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         free = free.Where(w => !SessionSpent(w, a)).ToList();
         chooseCode = "session-spent";
         if (free.Count == 0) return (null, "every eligible session already held a work item in this session (one item per session)");
+        // the host limit (gateway/Hosts.cs): sessions that share a computer share its budget of owned items
+        free = free.Where(w => HostHasRoom(w.Name)).ToList();
+        chooseCode = "host-at-capacity";
+        if (free.Count == 0) return (null, "every eligible session's host is at its limit of owned items");
         return (free.OrderBy(w => TypeOrder.GetValueOrDefault(w.Type, 9)).ThenBy(w => Owned(w.Name)).First(), "");
     }
 

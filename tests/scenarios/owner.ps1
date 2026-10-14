@@ -366,6 +366,49 @@ $OwnerScenarios['owner: a pinned item gets its worker''s free slot first, and ke
     Stop-OwnerClient 'pin-r'
 }
 
+# Host capacity (gateway/Hosts.cs): two sessions that declare one host share its limit of owned items (the owner suite sets lab-1 to 1 owned, 1 build),
+# a low-effort session gets capacity 1, and a private-build slot is one per host at a time, freed by release or by its ttl.
+$OwnerScenarios['owner: sessions of one host share its limit of owned items and its build slot; a low-effort session gets capacity 1'] = {
+    foreach ($w in @($script:Workers.Keys)) { Stop-OwnerClient $w }    # only the sessions of this scenario may take its items
+    [void](Wait-Until -Seconds 20 { @((Get-Plant).plant.workers | Where-Object { $_.connected }).Count -eq 0 })
+    try {
+    Start-OwnerClient 'host-a' 'persistent-local' '--capacity 3 --host lab-1'
+    Start-OwnerClient 'host-b' 'persistent-local' '--capacity 3 --host LAB-1'
+    $mine = { $pl = (Get-Plant).plant; @($pl.assignments | Where-Object { $_.worker -in 'host-a', 'host-b' -and -not $_.accepted }).Count + @($pl.owners.PSObject.Properties | Where-Object { $_.Value -in 'host-a', 'host-b' }).Count }
+    $h = Msg-First @((Get-Plant).hosts.hosts | Where-Object { $_.host -eq 'lab-1' })
+    Check 'both sessions are listed under one host (lower case), with its limits' ($h -and @($h.workers).Count -eq 2 -and $h.ownedLimit -eq 1 -and $h.buildLimit -eq 1) ((Get-Plant).hosts | ConvertTo-Json -Compress -Depth 5)
+    $n1 = New-Item-Fake 'Host limit one' 'x' $OwnerLabels; $n2 = New-Item-Fake 'Host limit two' 'x' $OwnerLabels
+    Check 'one item is offered on the host' (Wait-Until -Seconds 40 { (& $mine) -ge 1 })
+    $max = 0; $end = (Get-Date).AddSeconds(10); while ((Get-Date) -lt $end) { $max = [Math]::Max($max, (& $mine)); Start-Sleep -Milliseconds 500 }
+    Check 'never more than the host limit (1) at once, although each session has capacity 3' ($max -eq 1) "max $max"
+    # accept what was offered (an offer lapses after 4 s in this suite: wait for the one that is out)
+    $script:HostAcc = $null
+    [void](Wait-Until -Seconds 40 { foreach ($w in 'host-a', 'host-b') { $ev = @(Get-WorkerEvents $w | Where-Object { $_.event -eq 'item.assigned' }); if ($ev.Count) { $r = Fo $w @('accept', '--item', $ev[-1].item, '--assignment', $ev[-1].assignment); if ($r.exit -eq 0) { $script:HostAcc = @{ w = $w; item = [int]$ev[-1].item }; return $true } } }; $false })
+    $acc = $script:HostAcc
+    Check 'a session of the host accepts it and owns it' ($acc -and (& $mine) -eq 1) ($acc | ConvertTo-Json -Compress)
+    if (-not $acc) { return }
+    Start-Sleep -Seconds 8
+    Check 'while it owns it, nothing more is offered on that host' ((& $mine) -eq 1) ((Get-Plant).plant | ConvertTo-Json -Compress -Depth 5)
+    # the build slot of the host
+    $other = if ($acc.w -eq 'host-a') { 'host-b' } else { 'host-a' }
+    $slot = { param($Name, $Body) $r = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/build-slot" -Method POST -Headers @{ Authorization = "Bearer $($script:Workers[$Name].token)" } -Body ($Body | ConvertTo-Json -Compress) -ContentType 'application/json' -SkipHttpErrorCheck; $j = $r.Content | ConvertFrom-Json -AsHashtable; $j.status = [int]$r.StatusCode; $j }
+    $g = Fo $acc.w @('build-slot', '--item', $acc.item, '--ttl', '600'); CheckExit 'the owner takes the build slot of its host' $g 0
+    $b = & $slot $other @{ action = 'acquire' }
+    Check 'the other session of the host is told busy: 429, exit 21, the holder and when to ask again' ($b.status -eq 429 -and $b.exit -eq 21 -and $b.code -eq 'build-slot-busy' -and $b.retryAfterSeconds -ge 5 -and @($b.holders | Where-Object { $_.name -eq $acc.w }).Count -eq 1) ($b | ConvertTo-Json -Compress -Depth 4)
+    Start-OwnerClient 'host-c' 'persistent-local' '--capacity 1 --host lab-2'
+    $c = & $slot 'host-c' @{ action = 'acquire' }
+    Check 'a session of another host builds at the same time' ($c.status -eq 200 -and $c.granted -eq $true) ($c | ConvertTo-Json -Compress)
+    $rel = Fo $acc.w @('build-slot', '--item', $acc.item, '--release'); CheckExit 'release' $rel 0
+    $b2 = & $slot $other @{ action = 'acquire'; ttlSeconds = 2 }
+    Check 'after the release the other session gets it' ($b2.status -eq 200 -and $b2.granted -eq $true) ($b2 | ConvertTo-Json -Compress)
+    Start-Sleep -Seconds 4
+    $g2 = Fo $acc.w @('build-slot', '--item', $acc.item); CheckExit 'a slot not released frees itself after its ttl' $g2 0
+    [void](Fo $acc.w @('build-slot', '--item', $acc.item, '--release')); [void](& $slot 'host-c' @{ action = 'release' })
+    Start-OwnerClient 'host-low' 'persistent-local' '--capacity 4 --model claude-haiku-5-5 --effort low --host lab-3'
+    Check 'a session that registers with effort low gets capacity 1' (@((Get-Plant).plant.workers | Where-Object { $_.name -eq 'host-low' -and $_.capacity -eq 1 }).Count -eq 1) ((Get-Plant).plant.workers | ConvertTo-Json -Compress -Depth 4)
+    } finally { foreach ($w in 'host-a', 'host-b', 'host-c', 'host-low') { if ($script:Workers.ContainsKey($w)) { Stop-OwnerClient $w } } }
+}
+
 # The journal of one item reads in event order. Each line is a rule-script call of its own (the plant's matched and offered, the worker's accept),
 # and with a GitHub that answers slowly those calls used to reach the item lock in any order: live, "offered" was written 40 s after the offer
 # and after "accepted". The fake holds every matched and offered comment back, and the worker accepts the moment the offer arrives.

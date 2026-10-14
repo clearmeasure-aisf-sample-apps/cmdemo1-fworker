@@ -88,7 +88,7 @@ builder.Services.AddSingleton(sp =>
     {
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
-    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession };
+    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession, Hosts = HostSettings.Load(scriptsDir) };
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
 builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, publicUrl, tokenSecret));
@@ -238,6 +238,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
+    if (ownerMode) o["hosts"] = plant.HostStatus();
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // the switch of the gateway's own back-merges (baseUpdate.autoUpdateBranch) at run time, operator token only; until the next restart
@@ -293,6 +294,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
+    if (ownerMode) o["hosts"] = plant.HostStatus();
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // POST /release-queue/promotion-request { "release": "1.2.3" } (enhancement 9): the dashboard's button. Operator token only. It records the request
@@ -647,6 +649,7 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
             messagingClient: ctx.Request.Query["messaging"].ToString() == "1", model: model, effort: effort,
             // a stream opened without a cursor is a new session of this name (a reconnect of the same client sends its last id): one item per session
             newSession: lastEventId == "");
+        plant.SetHost(name, ctx.Request.Query["host"].ToString(), effort);
         var registered = new JsonObject { ["provider"] = "gateway", ["event"] = "worker.registered", ["name"] = name };
         if (messaging.On) { registered["epoch"] = plant.Epoch; registered["messaging"] = messaging.Enabled; }
         // one peers.snapshot per registration (3.2), only for a client that registered with messaging=1 under an allow-listed name
@@ -676,6 +679,27 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
     }
     catch (OperationCanceledException) { }
     finally { hub.Unsubscribe(sub); }
+});
+
+// POST /build-slot (gateway/Hosts.cs): a private-build slot of the caller's host, so the sessions of one computer do not build all at once.
+// Body { "action": "acquire" | "release", "ttlSeconds": S }. The caller is an owner's item token (the item is the token's) or a worker credential.
+// Exit 0 granted or released; exit 21 build-slot-busy with retryAfterSeconds (HTTP 429).
+app.MapPost("/api/v1/build-slot", async (HttpContext ctx) =>
+{
+    var who = Who(ctx);
+    if (!ownerMode) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
+    if (!(who.Kind == "worker" || (who.Kind == "item" && who.Role == "owner"))) return Fail(403, "forbidden", "a build slot is asked for with an owner's item token or a worker credential", 30);
+    var (text, tooLarge) = await ReadBody(ctx, 4 * 1024);
+    if (tooLarge) return Fail(413, "too-large", "the request body is over 4 KB", 2);
+    JsonObject body; try { body = string.IsNullOrWhiteSpace(text) ? new JsonObject() : (JsonNode.Parse(text) as JsonObject ?? throw new FormatException()); } catch { return Fail(400, "usage", "the body is a JSON object: { \"action\": \"acquire\" | \"release\", \"ttlSeconds\": S }", 2); }
+    var action = body["action"]?.ToString() ?? "acquire";
+    if (action is not ("acquire" or "release")) return Fail(400, "usage", "action is acquire or release", 2);
+    double? ttl = null;
+    if (body["ttlSeconds"] is JsonNode tn) { if (!double.TryParse(tn.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var tv) || !double.IsFinite(tv) || tv <= 0) return Fail(400, "usage", "ttlSeconds is a positive number", 2); ttl = tv; }
+    var item = who.Kind == "item" ? who.Item : (int.TryParse(body["item"]?.ToString(), out var bi) && bi > 0 ? bi : 0);
+    var r = plant.BuildSlotRequest(who.Name, item, action, ttl);
+    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["buildSlot"] = action, ["name"] = who.Name, ["item"] = item, ["ok"] = r["ok"]?.DeepClone() }.ToJsonString());
+    return Results.Text(r.ToJsonString(), "application/json", Encoding.UTF8, r["ok"]?.GetValue<bool>() == true ? 200 : 429);
 });
 
 // POST /presence (worker-messaging.md 3.1, 3.2): the heartbeat of a session's own credential, with an optional activity summary. The stream client
