@@ -149,6 +149,8 @@ function F([string]$Holder, [string[]]$FactoryArgs) {
     try { $j = $text | ConvertFrom-Json -AsHashtable; if (-not $j.ContainsKey('exit')) { $j.exit = $code }; return $j } catch { return @{ ok = $false; exit = $code; raw = $text } }
 }
 function Pv($h, [string]$k) { if ($h -is [System.Collections.IDictionary] -and $h.Contains($k)) { return $h[$k] }; return $null }
+# A file that starts like an MP4 (an ftyp box), of the given length.
+function New-TestMp4([string]$Name, [int]$Size) { $p = Join-Path $script:Work $Name; $b = [byte[]]::new($Size); [byte[]]$h = [byte[]](0, 0, 0, 24) + [Text.Encoding]::ASCII.GetBytes('ftypisom'); [Array]::Copy($h, $b, $h.Length); [IO.File]::WriteAllBytes($p, $b); return $p }
 function TmpFile([string]$Name, [string]$Text) { $p = Join-Path $script:Work $Name; Set-Content -Path $p -Value $Text -NoNewline; return $p }
 
 function Check([string]$Name, [bool]$Ok, $Detail = '') {

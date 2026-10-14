@@ -85,7 +85,27 @@ $OwnerScenarios = [ordered]@{
     $r = Fo 'alice' @('release', '--item', $a); Check 'release without the item token refused' ($r.exit -eq 30)
 }
 
+'owner: the owner publishes the demo video with its item token; another item and a worker credential are refused [full]' = {
+    Start-OwnerClient 'vida' 'persistent-local' '--capacity 5'
+    $n = New-Item-Fake 'Owner video' 'x' ($OwnerLabels + 'video') 'Functional Testing'; $b = New-Item-Fake 'Other video' 'x' ($OwnerLabels + 'video') 'Functional Testing'
+    [void](Wait-Until -Seconds 40 { (Get-Assigned 'vida' $n).Count -gt 0 })
+    $ev = (Get-Assigned 'vida' $n)[0]
+    $r = Fo 'vida' @('accept', '--item', $n, '--assignment', $ev.assignment); CheckExit 'accept' $r 0
+    $mp4 = New-TestMp4 'owner-demo.mp4' 2048
+    $r = Fo 'vida' @('publish-demo', '--item', $n, '--file', $mp4); CheckExit 'the owner publishes' $r 0
+    Check 'the asset is on the release of its item' ($r.release -eq "demo-$n" -and $r.size -eq 2048) ($r | ConvertTo-Json -Compress)
+    $tok = (Get-Content -Raw (Join-Path $script:Workers['vida'].dir "$n.owner")).Trim()
+    $w = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/demo/$b" -Method POST -InFile $mp4 -ContentType 'video/mp4' -Headers @{ Authorization = "Bearer $tok" } -SkipHttpErrorCheck
+    Check "the item token is refused for another item's release" ([int]$w.StatusCode -eq 403 -and ($w.Content | ConvertFrom-Json).code -eq 'forbidden') "$([int]$w.StatusCode) $($w.Content)"
+    $w = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/demo/$n" -Method POST -InFile $mp4 -ContentType 'video/mp4' -Headers @{ Authorization = "Bearer $($script:Workers['vida'].token)" } -SkipHttpErrorCheck
+    Check 'a worker credential (not the item owner) is refused' ([int]$w.StatusCode -eq 403) "$([int]$w.StatusCode) $($w.Content)"
+    $rel = try { Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/tags/demo-$b" } catch { $null }
+    Check 'no release was made for the other item' ($null -eq $rel)
+    Stop-OwnerClient 'vida'
+}
+
 'owner: the owner continues from Technical Design into Development without a new assignment [full]' = {
+    [void](Fo 'alice' @('my-items'))   # alice let offers of earlier scenarios lapse (cool-down, issue 31): a verb shows it is answering again
     $n = New-Item-Fake 'Continue' 'x' $OwnerLabels
     [void](Wait-Until -Seconds 40 { (Get-Assigned 'alice' $n).Count -gt 0 })
     $ev = (Get-Assigned 'alice' $n)[0]
