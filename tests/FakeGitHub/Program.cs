@@ -65,6 +65,9 @@ sealed class World
     readonly Dictionary<int, Pr> prs = new();
     readonly Dictionary<string, List<Check>> checks = new();
     readonly HashSet<string> refs = new();
+    // what a ref points at (a ref created before this was kept points at master's head) and the commits written through git/commits (the plant snapshot)
+    readonly Dictionary<string, string> refSha = new();
+    readonly Dictionary<string, (string Message, string Tree)> commits = new();
     readonly Dictionary<string, (string Sha, List<string> Files, List<JsonObject> Objs)> branches = new();
     long nextReview = 1;
     readonly Dictionary<string, (string Profile, double Delay)> branchProfile = new();
@@ -168,7 +171,35 @@ sealed class World
         {
             var r = b!["ref"]!.ToString();
             if (!refs.Add(r)) return (422, "{\"message\":\"Reference already exists\"}");
+            if (b["sha"]?.ToString() is { } rs) refSha[r] = rs;
             return (201, J(("ref", r)));
+        }
+        // As GitHub: one ref by its path (404 when there is none), an update of an existing ref (422 "Reference does not exist" otherwise), a commit
+        // written with a message, a tree and parents, and a commit read back with its message and tree; an unknown commit is 404.
+        if ((m = Regex.Match(path, $"^{root}/git/ref/(.+)$")).Success && method == "GET")
+        {
+            var r = "refs/" + m.Groups[1].Value;
+            return refs.Contains(r) ? (200, J(("ref", r), ("object", J(("sha", refSha.TryGetValue(r, out var rsha) ? rsha : masterSha), ("type", "commit"))))) : (404, "{\"message\":\"Not Found\"}");
+        }
+        if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "PATCH")
+        {
+            var r = "refs/" + m.Groups[1].Value;
+            if (!refs.Contains(r)) return (422, "{\"message\":\"Reference does not exist\"}");
+            if (b?["sha"]?.ToString() is not { Length: > 0 } ns) return (422, "{\"message\":\"Invalid request.\"}");
+            refSha[r] = ns; return (200, J(("ref", r), ("object", J(("sha", ns), ("type", "commit")))));
+        }
+        if (path == root + "/git/commits" && method == "POST")
+        {
+            if (b?["tree"]?.ToString() is not { Length: > 0 } tree || b["message"] is null) return (422, "{\"message\":\"Invalid request.\"}");
+            var sha = NewSha(); commits[sha] = (b["message"]!.ToString(), tree);
+            return (201, J(("sha", sha), ("message", commits[sha].Message), ("tree", J(("sha", tree)))));
+        }
+        if ((m = Regex.Match(path, $"^{root}/git/commits/([0-9a-f]+)$")).Success && method == "GET")
+        {
+            var sha = m.Groups[1].Value;
+            if (commits.TryGetValue(sha, out var cm)) return (200, J(("sha", sha), ("message", cm.Message), ("tree", J(("sha", cm.Tree)))));
+            if (sha == masterSha || masterFiles.ContainsKey(sha)) return (200, J(("sha", sha), ("message", "master"), ("tree", J(("sha", Sha("tree" + sha))))));
+            return (404, "{\"message\":\"Not Found\"}");
         }
         if ((m = Regex.Match(path, $"^{root}/git/matching-refs/(.+)$")).Success && method == "GET")
         {
@@ -181,7 +212,7 @@ sealed class World
             return (200, new JsonArray(match.Skip((rp - 1) * per).Take(per).Select(r => (JsonNode)J(("ref", r))).ToArray()));
         }
         if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "DELETE")
-            return refs.Remove("refs/" + m.Groups[1].Value) ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}");
+            { refSha.Remove("refs/" + m.Groups[1].Value); return refs.Remove("refs/" + m.Groups[1].Value) ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}"); }
         if (path == root + "/branches/" + Master && method == "GET") return (200, J(("name", Master), ("commit", J(("sha", masterSha)))));
         if ((m = Regex.Match(path, $"^{root}/compare/([^.]+)\\.\\.\\.(.+)$")).Success && method == "GET") return Compare(m.Groups[1].Value, m.Groups[2].Value);
         if (path == root + "/pulls" && method == "GET")
@@ -452,7 +483,7 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0;
-                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false; return (200, J(("ok", true)));
             case "issue":
             {

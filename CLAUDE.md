@@ -16,7 +16,7 @@ demo system.
 | Path | Content |
 |---|---|
 | `gateway/` | The gateway: `Program.cs` (routes, dashboard, connect prompt), `Plant.cs` (workers, assignments), `Messaging.cs`, `Qc.cs`, `Auth.cs`, `RunnerPool.cs`, `Operator.cs` (the operator session) |
-| `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, `lib/*`), `skills/`, `agents/`, `tools/shot` |
+| `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, `lib/*`), `skills/`, `agents/`, `tools/shot`, `launcher/` (the session loop, `docs/launcher.md`) |
 | `config/instance.json` | The source defaults. The tests run on these: messaging off, supervisor off, `ownerSessions` false |
 | `config/deploy.overrides.json` | The settings of the deployed image, merged over the defaults by `config/apply-overrides.ps1` when the image is built |
 | `tests/scenarios/` | Tier 1: scenario suites against the fake GitHub (`run.ps1`, `run-all.ps1`, one file per area) |
@@ -101,7 +101,7 @@ The same image is promoted to uat and prod, so the settings travel with it.
    deployment, treat it as an outage: find the cause or roll back.
 7. uat and prod are manual promotions by the operator (Octopus sign-off, the demo-environment kit). A session does not promote to them.
 
-A gateway restart drops the in-memory state (below): deploy to tdd only when the plant is quiet, say so beforehand, and check afterwards
+A gateway restart drops the in-memory state (below) except the plant, which a graceful stop snapshots to GitHub and the next start restores: deploy to tdd only when the plant is quiet, say so beforehand, and check afterwards
 that the workers reconnected. Roll back by reverting the pull request.
 
 ## Rules

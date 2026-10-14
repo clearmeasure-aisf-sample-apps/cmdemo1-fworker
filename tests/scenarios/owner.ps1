@@ -509,3 +509,97 @@ $OwnerScenarios['runner: a second run is refused while one is active, a short di
     Check 'a client call that ends with exit 139 is reported as a crash of the process, not as an answer' ($x.exit -eq 139 -and $x.code -eq 'client-crashed' -and "$($x.reason)" -match 'EXIT 139 \(SEGMENTATION FAULT\)' -and "$($x.reason)" -match 'not a product answer' -and $script:ClientCrashes -eq $crashes + 1) ($x | ConvertTo-Json -Compress)
     $script:ClientCrashes = $crashes     # the stand-in is no crash of this run
 }
+
+$OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'] = {
+    # the suite's accept window is 4 s: the offer would lapse before the restart. This scenario runs on a gateway with a 60 s window (started
+    # by an outright kill, which writes no snapshot) and the suite's window comes back in finally, the same way.
+    # The suites run with the snapshot off (run.ps1); it is on for this scenario's gateways.
+    $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $env:FACTORY_ASSIGN_ACK_SECONDS = '60'; $oldSnap = $env:FACTORY_PLANT_SNAPSHOT; $env:FACTORY_PLANT_SNAPSHOT = '1'; Restart-Gateway
+    try {
+        Start-OwnerClient 'sara' 'persistent-local' '--capacity 2'
+        # pinned: a worker left connected by an earlier scenario must not take them
+        $a = New-Item-Fake 'Snapshot owned' 'x' ($OwnerLabels + 'worker:sara'); $b = New-Item-Fake 'Snapshot offered' 'x' ($OwnerLabels + 'worker:sara')
+        [void](Wait-Until -Seconds 40 { (Get-Assigned 'sara' $a).Count -gt 0 -and (Get-Assigned 'sara' $b).Count -gt 0 })
+        $ea = (Get-Assigned 'sara' $a)[0]; $eb = (Get-Assigned 'sara' $b)[0]
+        $r = Fo 'sara' @('accept', '--item', $a, '--assignment', $ea.assignment); CheckExit 'sara accepts the first item' $r 0
+        $before = Get-Plant
+        Restart-Gateway -Graceful
+        $logs = Get-ChildItem -Path $script:Work -File -Filter 'gateway*.out' | ForEach-Object { Get-Content $_.FullName } | Where-Object { $_ -match '"gateway":"plant-(snapshot|restore)"' }
+        $saved = $logs | Where-Object { $_ -match '"gateway":"plant-snapshot"' -and $_ -match '"exit":0' }
+        Check 'at SIGTERM the gateway wrote its plant to GitHub: exit 0' (@($saved).Count -ge 1) (($logs -join "`n") + ' ' + (((Get-FakeState).refs) -join ' '))
+        [void](Wait-Until -Seconds 60 { $null -ne (Get-Plant).plantSnapshot.restore })
+        $st = Get-Plant; $rs = $st.plantSnapshot.restore
+        Check 'the next start restored it before its first sweep: assignments and the owner' ($rs.skipped -eq '' -and $rs.assignments -ge 2 -and $rs.owners -ge 1) ($rs | ConvertTo-Json -Compress)
+        Check 'the snapshot is used once: the start removed the ref after reading it' ((Wait-Until -Seconds 30 { @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' }).Count -eq 0 })) (((Get-FakeState).refs) -join ' ')
+        Check 'the owner of the accepted item is the same' (@($st.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$a" -and $_.Value -eq 'sara' }).Count -eq 1) ($st.plant.owners | ConvertTo-Json -Compress)
+        $ra = @($st.plant.assignments | Where-Object { $_.item -eq $a }); $rb = @($st.plant.assignments | Where-Object { $_.item -eq $b })
+        Check 'the accepted assignment keeps its id and stays accepted' ($ra.Count -eq 1 -and $ra[0].id -eq $ea.assignment -and $ra[0].accepted -eq $true -and $ra[0].worker -eq 'sara') ($ra | ConvertTo-Json -Compress)
+        Check 'the unanswered offer keeps its id and its worker' ($rb.Count -eq 1 -and $rb[0].id -eq $eb.assignment -and $rb[0].accepted -eq $false -and $rb[0].worker -eq 'sara') "$($rb | ConvertTo-Json -Compress) before: $(@($before.plant.assignments | Where-Object { $_.item -eq $b }) | ConvertTo-Json -Compress)"
+        # the client reconnects by itself; its registration pushes the offer again, with the same assignment
+        [void](Wait-Until -Seconds 45 { (Get-Assigned 'sara' $b).Count -ge 2 })
+        $eb2 = @(Get-Assigned 'sara' $b)[-1]
+        Check 'the reconnected worker is offered the item again, the same assignment' ((Get-Assigned 'sara' $b).Count -ge 2 -and $eb2.assignment -eq $eb.assignment) (@(Get-Assigned 'sara' $b) | ConvertTo-Json -Compress)
+        $r2 = Fo 'sara' @('accept', '--item', $b, '--assignment', $eb2.assignment); CheckExit 'and accepts it' $r2 0
+        $st2 = Get-Plant
+        Check 'both items are owned by sara after the restart' (@($st2.plant.owners.PSObject.Properties | Where-Object { $_.Name -in "$a", "$b" -and $_.Value -eq 'sara' }).Count -eq 2) ($st2.plant.owners | ConvertTo-Json -Compress)
+        Check 'the journal has one matched line for the offered item: the restore wrote none' (@(Get-Journal $b | Where-Object { $_ -eq 'matched' }).Count -eq 1) ((Get-Journal $b) -join ',')
+    } finally {
+        Stop-OwnerClient 'sara'
+        # the next restart of this suite must not restore this scenario's plant
+        foreach ($ref in @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' })) {
+            try { Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/$ref" -Method DELETE -Headers @{ Authorization = 'Bearer fake-operator' } | Out-Null } catch { }
+        }
+        $env:FACTORY_ASSIGN_ACK_SECONDS = $oldAck; $env:FACTORY_PLANT_SNAPSHOT = $oldSnap; Restart-Gateway
+    }
+}
+
+# One work item per worker session (docs/launcher.md): a session that held an item is offered no other, even after that item is
+# released; a new registration of the same name (a stream without a cursor, as the launcher's next session opens it) is a new session and is offered one.
+$OwnerScenarios['owner: one item per session: a session that held an item is offered no second one; the next session of the name is, and the status counts items per session'] = {
+    $oldOne = $env:FACTORY_ONE_ITEM_PER_SESSION
+    try {
+        $env:FACTORY_ONE_ITEM_PER_SESSION = '1'; Restart-Gateway
+        Start-OwnerClient 'fresh1' 'persistent-local' '--capacity 5'      # capacity 5: what holds the second item back is the rule, not the capacity
+        $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'fresh1' })[0] }
+        $w0 = & $me
+        Check 'the status says the rule is on and shows the session of the worker, with no item yet' ((Get-Plant).plant.oneItemPerSession -eq $true -and $w0.session -ge 1 -and @($w0.sessionItems).Count -eq 0 -and $w0.sessionSpent -eq $false) ($w0 | ConvertTo-Json -Compress -Depth 4)
+        $s0 = [int]$w0.session
+        # pinned: clients of earlier scenarios reconnect to the restarted gateway and must not take these items
+        $a = New-Item-Fake 'Fresh session A' 'x' ($OwnerLabels + 'worker:fresh1')
+        Check 'the first item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'fresh1' $a).Count -gt 0 })
+        $b = New-Item-Fake 'Fresh session B' 'x' ($OwnerLabels + 'worker:fresh1')
+        Start-Sleep -Seconds 6
+        $openOffers = @((Get-Plant).plant.assignments | Where-Object { $_.worker -eq 'fresh1' -and -not $_.accepted })
+        Check 'the session has at most one open offer at a time' ($openOffers.Count -le 1) ($openOffers | ConvertTo-Json -Compress)
+        $r = Fo 'fresh1' @('accept', '--item', $a, '--assignment', (Get-Assigned 'fresh1' $a)[-1].assignment); CheckExit 'the session accepts the first item' $r 0
+        $sinceAccept = @(Get-Assigned 'fresh1' $b).Count
+        $w1 = & $me
+        Check 'the status lists the item under this session and marks it spent' (@($w1.sessionItems) -contains $a -and $w1.sessionSpent -eq $true -and [int]$w1.session -eq $s0) ($w1 | ConvertTo-Json -Compress -Depth 4)
+        Start-Sleep -Seconds 6
+        $ob = @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $b })
+        Check 'the second item is not offered to the session that holds the first (an offer sent before the accept is taken back)' ((Get-Assigned 'fresh1' $b).Count -eq $sinceAccept -and $ob.Count -eq 1 -and "$($ob[0].worker)" -eq '') ($ob | ConvertTo-Json -Compress)
+        $r = Fo 'fresh1' @('release', '--item', $a, '--reason', 'scenario: the item ends'); CheckExit 'the session releases its item' $r 0
+        Start-Sleep -Seconds 8     # sweeps and ticks: the session is no longer at any capacity
+        Check 'after its item was released the same session is still offered no other item' ((Get-Assigned 'fresh1' $b).Count -eq $sinceAccept)
+        $wb = @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $b })
+        Check 'the second item waits, without a worker' ($wb.Count -eq 1 -and "$($wb[0].worker)" -eq '') ($wb | ConvertTo-Json -Compress)
+        $mk = Join-Path $script:Work 'fresh1-session-ended'
+        $e = Fo 'fresh1' @('end-session', '--name', 'fresh1', '--marker', $mk); CheckExit 'end-session' $e 0
+        Check 'end-session drains the name and writes the end marker for the launcher' ($e.drained -eq $true -and $e.markerWritten -eq $true -and (Test-Path $mk) -and (& $me).draining -eq $true) ($e | ConvertTo-Json -Compress)
+        # the launcher's next session: a new process registers the same name without a cursor
+        Stop-OwnerClient 'fresh1'
+        [void](Wait-Until -Seconds 20 { -not (& $me).connected })
+        Start-OwnerClient 'fresh1' 'persistent-local' '--capacity 5'
+        $got = Wait-Until -Seconds 40 { (Get-Assigned 'fresh1' $b).Count -gt 0 -or (Get-Assigned 'fresh1' $a).Count -gt 1 }
+        $w2 = & $me
+        Check 'a new registration of the name is a new session, no longer draining, offered a work item again' ($got -and [int]$w2.session -eq $s0 + 1 -and $w2.draining -eq $false) ($w2 | ConvertTo-Json -Compress -Depth 4)
+        $prev = @($w2.itemsPerSession | Where-Object { [int]$_.session -eq $s0 })
+        Check 'itemsPerSession keeps the earlier session with its one item' ($prev.Count -eq 1 -and @($prev[0].items).Count -eq 1 -and @($prev[0].items)[0] -eq $a) ($w2.itemsPerSession | ConvertTo-Json -Compress -Depth 4)
+        Start-Sleep -Seconds 6
+        $open = @((Get-Plant).plant.assignments | Where-Object { $_.worker -eq 'fresh1' -and -not $_.accepted })
+        Check 'the new session has one open offer, not two' ($open.Count -eq 1) ($open | ConvertTo-Json -Compress)
+    } finally {
+        Stop-OwnerClient 'fresh1'
+        $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; Restart-Gateway
+    }
+}
