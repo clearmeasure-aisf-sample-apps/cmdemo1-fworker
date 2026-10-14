@@ -530,7 +530,8 @@ $OwnerScenarios['pass-merge: checks still running at the verdict: the answer is 
     Start-Sleep -Seconds 6
     $pu = @((Get-Plant).plant.passUnmerged | Where-Object { $_.item -eq $x.n })
     Check '/status lists it as pass-unmerged with its reason' ($pu.Count -eq 1 -and $pu[0].code -eq 'checks-pending' -and $pu[0].pr -eq $x.pr) ((Get-Plant).plant.passUnmerged | ConvertTo-Json -Compress)
-    Check 'no offer for it reached a worker (it is the gateway''s to merge)' ((Get-Assigned 'pmw' $x.n).Count -eq 0) ((Get-Assigned 'pmw' $x.n) | ConvertTo-Json -Compress)
+    # (an offer before the verdict, while the scripted holder moved the item between columns, is not one of this state)
+    Check 'no offer for it reached a worker (it is the gateway''s to merge)' (@(Get-Assigned 'pmw' $x.n | Where-Object { $_.column -eq 'Functional Testing' }).Count -eq 0) ((Get-Assigned 'pmw' $x.n) | ConvertTo-Json -Compress)
     Check 'merged when the checks are green, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
     $mw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match '<!-- plant event=merge-waiting ' }).Count
     Check 'journal: merge-waiting once, however many sweeps found it waiting' ($mw -eq 1) "$mw"
@@ -667,4 +668,13 @@ $OwnerScenarios['pass-merge: a PASS for a head other than the current one is ref
     Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($cm.id)" -Method PATCH -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body (@{ body = $nb } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
     Check 'the gateway parks it instead of merging (verdict-head-unknown)' (Wait-Until -Seconds 40 { $ps0 = Pm-State $y.n; (Pv $ps0 'park') -and "$($ps0.park.reason)" -eq 'pass-unmerged' })
     Check 'not merged' (-not (Get-FakePr $y.pr).merged)
+}
+
+$OwnerScenarios['pass-merge: a hand-made two-parent merge pushed by a worker while the gateway''s update is pending is not merged: demoted (stale-head)'] = {
+    $x = Pm-ToValidation
+    Fake 'pr' @{ number = $x.pr; behind = 1; updateNoop = $true } | Out-Null
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Fake 'push-branch' @{ branch = "factory-worker/$($x.n)-development"; files = @('docs/trial.md', 'docs/sneak.md'); profile = 'green'; parents = @('head', 'base') } | Out-Null
+    Check 'the sweep sends it back to Development' (Wait-Until -Seconds 40 { (Get-FakeIssue $x.n).column -eq 'Development' })
+    Check 'the hand-made merge is not merged' (-not (Get-FakePr $x.pr).merged)
 }

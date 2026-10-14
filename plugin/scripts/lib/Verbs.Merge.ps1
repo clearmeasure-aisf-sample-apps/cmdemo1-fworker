@@ -11,10 +11,15 @@ function Test-GatewayMerge { $c = Get-Cfg; return (-not (Test-Has $c 'gatewayMer
 
 # Is $Head the merge commit GitHub's update-branch made from the verdict head? Exactly two parents, the first the verdict head, the second the
 # base branch head or an ancestor of it. Anything else (a push by a worker or a person, a rebase, a racing commit) is not covered by the verdict.
-function Test-GatewayUpdateHead([string]$VerdictSha, [string]$Head) {
+# The parents alone can be forged by a hand-made merge, so the commit must also carry GitHub's own signature (verified, reason valid, committed
+# by GitHub's web-flow identity), and when update-branch named the commit it made, be exactly that one.
+function Test-GatewayUpdateHead([string]$VerdictSha, [string]$Head, [string]$Expected = '') {
     $c = Get-Cfg
+    if ($Expected -and $Expected -ne $Head) { return $false }
     $cm = Invoke-Gh -Path "$(Get-RepoPath)/commits/$Head" -Allow 404, 422
     if ($cm -is [hashtable] -and $cm.ContainsKey('status')) { return $false }
+    $v = $cm.commit.verification; $who = $cm.commit.committer
+    if (-not $v -or $v.verified -ne $true -or "$($v.reason)" -ne 'valid' -or "$($who.name)" -ne 'GitHub' -or "$($who.email)" -ne 'noreply@github.com') { return $false }
     $ps = @($cm.parents | ForEach-Object { "$($_.sha)" })
     if ($ps.Count -ne 2 -or $ps[0] -ne $VerdictSha) { return $false }
     $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($c.defaultBranch)...$($ps[1])" -Allow 404, 422
@@ -123,13 +128,14 @@ function Verb_merge($a, [switch]$Gateway) {
     # head that is accepted without a new verdict is the one this verb made itself when it brought the branch up to date with its base.
     $vsha = if (Test-Has $s.verdict 'head_sha') { "$($s.verdict.head_sha)" } else { '' }
     # fail closed: the gateway never merges a PASS that does not say which head it covers
-    if ($Gateway -and -not $vsha) { return & $park 'pass-unmerged' "PR #$prNum has a PASS verdict that does not name the head it was given for (verdict-head-unknown); the gateway does not merge it. Parked for a human." }
+    if (-not $vsha) { return & $park 'pass-unmerged' "PR #$prNum has a PASS verdict that does not name the head it was given for (verdict-head-unknown); the gateway does not merge it. Parked for a human." }
     if ($c.mergePolicy -eq 'auto' -and $vsha -and $vsha -ne "$($pr.head.sha)") {
         # the one head accepted without a new verdict: the merge commit of the gateway's own update-branch, verified on GitHub (the marker is
         # cleared once the check has run, pass or fail, so it can never vouch for a later push)
         $fromUpdate = (Test-Has $s.verdict 'updated_from') -and "$($s.verdict.updated_from)" -eq $vsha
-        if ($fromUpdate) { $s.verdict.Remove('updated_from') }
-        if ($fromUpdate -and (Test-GatewayUpdateHead $vsha "$($pr.head.sha)")) { $s.verdict.head_sha = "$($pr.head.sha)"; Save-State $n $st }
+        $expect = if (Test-Has $s.verdict 'updated_to') { "$($s.verdict.updated_to)" } else { '' }
+        if ($fromUpdate) { $s.verdict.Remove('updated_from'); $s.verdict.Remove('updated_to') }
+        if ($fromUpdate -and (Test-GatewayUpdateHead $vsha "$($pr.head.sha)" $expect)) { $s.verdict.head_sha = "$($pr.head.sha)"; Save-State $n $st }
         else { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict (verdict for $($vsha.Substring(0, [Math]::Min(7, $vsha.Length))), head now $($pr.head.sha.Substring(0,7))); the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
     }
     $end = (Get-Date).AddSeconds($(if ($Gateway) { [Math]::Min([double]$t.mergeabilityWaitSeconds, 12) } else { $t.mergeabilityWaitSeconds }))
@@ -155,10 +161,11 @@ function Verb_merge($a, [switch]$Gateway) {
                 if ($Gateway -and $ups -ge [int]$t.outOfDateMergeAttempts) { break }
                 $s.verdict.updates = $ups + 1; $s.verdict.updated_from = "$($pr.head.sha)"; Save-State $n $st
                 $u = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/update-branch" -Body @{ expected_head_sha = $pr.head.sha } -Allow 202, 422, 409
+                if ($u -isnot [hashtable] -and $u.PSObject.Properties.Name -contains 'sha' -and $u.sha) { $s.verdict.updated_to = "$($u.sha)"; Save-State $n $st }
                 if ($u -is [hashtable] -and $u.ContainsKey('status') -and $u.status -ne 202) { $d = Invoke-Demote $n $info $st "could not update PR #${prNum}: $($u.body.message)" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
                 $pr = Wait-HeadChange $prNum $pr.head.sha $(if ($Gateway) { [Math]::Min([double]$t.updatedHeadWaitSeconds, 12) } else { $t.updatedHeadWaitSeconds })
                 if ("$($pr.head.sha)" -ne "$($s.verdict.updated_from)") {
-                    $ok = Test-GatewayUpdateHead "$($s.verdict.updated_from)" "$($pr.head.sha)"; $s.verdict.Remove('updated_from')
+                    $ok = Test-GatewayUpdateHead "$($s.verdict.updated_from)" "$($pr.head.sha)" $(if (Test-Has $s.verdict 'updated_to') { "$($s.verdict.updated_to)" } else { '' }); $s.verdict.Remove('updated_from'); $s.verdict.Remove('updated_to')
                     if (-not $ok) { $d = Invoke-Demote $n $info $st "the branch of PR #$prNum changed after the validation verdict to a commit that is not the gateway's update with the base branch; the PASS verdict no longer applies" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'stale-head'; detail = $d } }
                     $s.verdict.head_sha = "$($pr.head.sha)"; Save-State $n $st
                 }

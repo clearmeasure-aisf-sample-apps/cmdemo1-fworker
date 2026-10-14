@@ -66,7 +66,8 @@ sealed class World
     long nextArtifact = 1;
     readonly HashSet<string> labelNames = new() { "factory worker", "AI Factory", "Auto Merge", "video", "Demo", "Ready To Move", "Needs Human Review" };
     string masterSha = Sha("master0");
-    readonly Dictionary<string, List<string>> parents = new();   // commits/{sha}: the parents of the branch commits the fake made
+    readonly Dictionary<string, List<string>> parents = new();
+    readonly HashSet<string> webFlow = new();                     // commits GitHub itself made and signed (update-branch)   // commits/{sha}: the parents of the branch commits the fake made
     int nextNumber = 1, nextComment = 1000, nextCheck = 1, nextPr = 1;
     int healthStatus = 200;
     bool masterRed; double prodDelay = 0; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold;
@@ -202,7 +203,7 @@ sealed class World
                 case "update-branch":
                     if (pr.Conflict) return (422, "{\"message\":\"merge conflict between base and head\"}");
                     if (pr.UpdateNoop) return (202, "{\"message\":\"Updating pull request branch.\"}");   // accepted, not done yet
-                    { var old = pr.Sha; pr.Behind = 0; pr.Sha = NewSha(); parents[pr.Sha] = new() { old, History()[^1] }; ApplyProfile(pr, pr.Sha); }
+                    { var old = pr.Sha; pr.Behind = 0; pr.Sha = NewSha(); parents[pr.Sha] = new() { old, History()[^1] }; webFlow.Add(pr.Sha); ApplyProfile(pr, pr.Sha); }
                     return (202, "{\"message\":\"Updating pull request branch.\"}");
                 case "merge": return Merge(pr, b);
                 default:
@@ -217,7 +218,10 @@ sealed class World
         if ((m = Regex.Match(path, $"^{root}/commits/([0-9a-f]+)$")).Success)
         {
             var ps = parents.TryGetValue(m.Groups[1].Value, out var known) ? known : new List<string> { History()[^1] };
-            return (200, J(("sha", m.Groups[1].Value), ("parents", new JsonArray(ps.Select(p => (JsonNode)J(("sha", p))).ToArray()))));
+            var gh = webFlow.Contains(m.Groups[1].Value);
+            var commit = J(("committer", gh ? J(("name", "GitHub"), ("email", "noreply@github.com")) : J(("name", "factory-bot"), ("email", "bot@example.invalid"))),
+                ("verification", J(("verified", gh), ("reason", gh ? "valid" : "unsigned"))));
+            return (200, J(("sha", m.Groups[1].Value), ("commit", commit), ("parents", new JsonArray(ps.Select(p => (JsonNode)J(("sha", p))).ToArray()))));
         }
         if ((m = Regex.Match(path, $"^{root}/commits/([0-9a-f]+)/check-runs$")).Success)
         {
@@ -422,7 +426,7 @@ sealed class World
                 }
                 var files = objs.Select(o => o["filename"]!.ToString()).ToList();
                 var sha = NewSha(); branches[br] = (sha, files, objs);
-                { var prev = prs.Values.FirstOrDefault(x => x.Ref == br && x.Open); parents[sha] = new() { prev?.Sha ?? History()[^1] }; }
+                { var prev = prs.Values.FirstOrDefault(x => x.Ref == br && x.Open); parents[sha] = b["parents"] is JsonArray hp ? hp.Select(x => x!.ToString() == "base" ? History()[^1] : x.ToString() == "head" ? (prev?.Sha ?? History()[^1]) : x.ToString()).ToList() : new() { prev?.Sha ?? History()[^1] }; }
                 var existing = prs.Values.FirstOrDefault(x => x.Ref == br && x.Open);
                 var prof = b["profile"]?.ToString() ?? "green"; var dly = b["delaySeconds"]?.GetValue<double>() ?? 0; branchProfile[br] = (prof, dly);
                 if (existing != null) { existing.Sha = sha; existing.Files = files; existing.FileObjs = objs; existing.Profile = prof; existing.DelaySeconds = dly; ApplyProfile(existing, sha); }
