@@ -27,6 +27,12 @@ var tokenSecret = Environment.GetEnvironmentVariable("FACTORY_TOKEN_SECRET") ?? 
 // The accept window of an offer: FACTORY_ASSIGN_ACK_SECONDS, else FACTORY_TIMING_assignAckSeconds, else timing.assignAckSeconds of the config, else 120.
 var ackSeconds = AckSeconds(scriptsDir);
 // timing.<name> of the config (FACTORY_TIMING_<name> first), a positive number, else the fallback
+// a top-level true/false of the config (FACTORY_CONFIG, else config/instance.json); absent or unreadable is false
+static bool ConfigBool(string scriptsDir, string name)
+{
+    try { return JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")))?[name] is JsonValue v && v.TryGetValue<bool>(out var b) && b; }
+    catch { return false; }
+}
 static double TimingNumber(string scriptsDir, string name, double fallback)
 {
     bool Good(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v > 0;
@@ -231,7 +237,24 @@ double RevSeconds(string name, double fallback, double min, double max) => doubl
 var revAttemptLimit = TimeSpan.FromSeconds(RevSeconds("FACTORY_REVOCATIONS_ATTEMPT_SECONDS", 45, 1, 120));
 var revAlarmAfter = TimeSpan.FromSeconds(RevSeconds("FACTORY_REVOCATIONS_ALARM_SECONDS", 180, 1, 3600));
 var revSince = DateTime.UtcNow; var revAttempts = 0;   // failed or timed-out attempts so far (read by /ready)
-if (!ownerMode || tokenSecret.Length == 0 || revocationsOff) revocationsLoaded.SetResult();
+// Nothing to read: owner sessions, messaging, the supervisor and the operator are all off in the configuration (no session credential is issued), or the gateway
+// has no GitHub identity (no App key, or no GH_TOKEN; the vault placeholder 'unset' counts as none). Such a gateway becomes ready at once instead of
+// retrying a read that can never succeed; /api/v1/status names the reason under "revocations", and revoke is refused. A configured identity whose
+// read fails (a wrong key, a GitHub error) still keeps the gateway un-ready: that is never failed open.
+var revSkipReason = !ownerMode ? "" : !ConfigBool(scriptsDir, "ownerSessions") && !messaging.On && !messaging.OperatorEnabled ? "owner-sessions-off" : !GitHubConfigured() ? "github-not-configured" : "";
+if (revSkipReason != "") Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"skipped\",\"reason\":\"{revSkipReason}\",\"warning\":\"revoked credentials are not read and cannot be revoked\"}}");
+static bool Unset(string? v) => string.IsNullOrWhiteSpace(v) || v.Trim() == "unset";
+static bool GitHubConfigured()
+{
+    if (Environment.GetEnvironmentVariable("FACTORY_AUTHOR_APP") == "1")
+    {
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FACTORY_FAKE_APPS"))) return true;   // an absent variable may still have a key in the keyring of a local gateway: only an empty or placeholder value is known to be none
+        var key = Environment.GetEnvironmentVariable("FACTORY_APP_AUTHOR_KEY");
+        return key == null || !Unset(key);
+    }
+    return !Unset(Environment.GetEnvironmentVariable("GH_TOKEN"));
+}
+if (!ownerMode || tokenSecret.Length == 0 || revocationsOff || revSkipReason != "") revocationsLoaded.SetResult();
 else _ = Task.Run(async () =>
 {
     var alarmed = false; var pause = 5.0;
@@ -328,6 +351,9 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (ownerMode) o["hosts"] = plant.HostStatus();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
+    if (ownerMode) o["revocations"] = revSkipReason != "" ? new JsonObject { ["state"] = "skipped", ["reason"] = revSkipReason }
+        : revocationsOff ? new JsonObject { ["state"] = "off", ["reason"] = "test-switch" }
+        : new JsonObject { ["state"] = revocationsLoaded.Task.IsCompleted ? "loaded" : "loading", ["failedAttempts"] = Volatile.Read(ref revAttempts) };
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // the switch of the gateway's own back-merges (baseUpdate.autoUpdateBranch) at run time, operator token only; until the next restart
@@ -465,6 +491,7 @@ app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) 
     if (!ownerMode || tokenSecret.Length == 0) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
     if (!Auth.ValidName(name)) return Fail(400, "usage", "the name may use letters, digits, - and _ only (40 at most)", 2);
     if (revocationsOff) return Fail(403, "revocations-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot revoke", 30);
+    if (revSkipReason != "") return Fail(409, "revocations-unavailable", $"revocations are not read on this gateway ({revSkipReason}): it cannot revoke", 30);
     if (!revocationsLoaded.Task.IsCompleted) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
     await revokeGate.WaitAsync();
     try

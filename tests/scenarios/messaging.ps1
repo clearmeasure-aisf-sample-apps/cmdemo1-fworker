@@ -4179,6 +4179,33 @@ $ManagerScenarios['revoke: more revocation refs than one page on a GitHub that d
     } 60
 }
 
+# The deployment of 2026-10-14: a gateway with nothing to read the revoked credentials from (no session credentials configured, or no GitHub identity) stayed
+# un-ready for ever. It is ready at once, says why in /api/v1/status, and refuses to revoke; a configured identity still waits (the scenario below).
+$ManagerScenarios['start: with owner sessions off or no GitHub identity the gateway is ready at once, /status names the reason and revoke is refused'] = {
+    $cases = [ordered]@{
+        'github-not-configured (GH_TOKEN unset)' = @{ reason = 'github-not-configured'; env = @{ GH_TOKEN = 'unset'; FACTORY_FAKE_APPS = $null; FACTORY_AUTHOR_APP = $null } }
+        'github-not-configured (App key unset)' = @{ reason = 'github-not-configured'; env = @{ FACTORY_AUTHOR_APP = '1'; FACTORY_APP_AUTHOR_KEY = 'unset'; FACTORY_FAKE_APPS = $null } }
+        'owner-sessions-off' = @{ reason = 'owner-sessions-off'; env = @{ FACTORY_CONFIG = (Msg-Config 'instance.no-owner-sessions.json' { param($c) $c.ownerSessions = $false; $c.messaging.enabled = $false; $c.manager.enabled = $false; $c.operator.enabled = $false }) } }
+    }
+    foreach ($k in $cases.Keys) {
+        $case = $cases[$k]
+        # GitHub is a port nothing listens on: a gateway that tried to read would never become ready
+        $env0 = @{ FACTORY_TEST_SKIP_REVOCATIONS = $null; FACTORY_REVOCATIONS_ATTEMPT_SECONDS = '2' }; foreach ($e in $case.env.Keys) { $env0[$e] = $case.env[$e] }
+        Msg-OnGateway $env0 {
+            param($g)
+            $rd = Invoke-WebRequest "$($g.base)/ready" -SkipHttpErrorCheck -TimeoutSec 5
+            Check "${k}: /ready is 200" ([int]$rd.StatusCode -eq 200) "$([int]$rd.StatusCode) $($rd.Content)"
+            $st = Msg-Json (Msg-Api 'GET' '/api/v1/status')
+            Check "${k}: /api/v1/status says the revocations are skipped and why" ("$($st.revocations.state)" -eq 'skipped' -and "$($st.revocations.reason)" -eq $case.reason) ($st.revocations | ConvertTo-Json -Compress)
+            Check "${k}: the log says so once" (@([regex]::Matches((Mgr-Log $g), "`"revocations`":`"skipped`",`"reason`":`"$($case.reason)`"")).Count -eq 1) (Mgr-Log $g)
+            $rv = Msg-Post '/api/v1/workers/rev-z/revoke' @{}
+            Check "${k}: revoke is refused: 409 revocations-unavailable" ($rv.status -eq 409 -and $rv.code -eq 'revocations-unavailable') ($rv | ConvertTo-Json -Compress -Depth 4)
+            $w = Msg-Verb 'my-items' (Msg-Token 'alice')
+            Check "${k}: a worker credential is not held back as starting" ((Msg-Json $w).code -ne 'starting') "$([int]$w.StatusCode) $($w.Content)"
+        } 15
+    }
+}
+
 # A start that cannot read the revoked credentials is not silent and does not fail open.
 $ManagerScenarios['start: while GitHub does not answer the revocation read /ready is 503 with the reason, /health is 200 and no credential is accepted; when it answers the gateway is ready [full]'] = {
     Fake 'latency' @{ ms = 300000; match = '^GET \S*/git/matching-refs/' } | Out-Null
