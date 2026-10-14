@@ -37,11 +37,26 @@ function Verb_accept($a) {
     if (-not (Test-Has $r 'already') -or -not $r.already) {
         $mt = Verb_model_tier @{ item = $n }
         [void](Add-Journal $n $null 'assigned' @{ worker = $holder; column = $r.column; mode = $r.mode; attempt = $r.launches; lease = $r.lease_until
+            by = $(if ((Test-Has $a 'accepted_by') -and "$($a.accepted_by)" -eq 'client') { 'client' } else { 'session' })
             model = $(if (Test-Has $a 'model') { "$($a.model)" } else { '' }); effort = $(if (Test-Has $a 'effort') { "$($a.effort)" } else { '' }); tier = $mt.tier
             url = $(if (Test-Has $a 'url') { "$($a.url)" } else { '' }) } "owner|$assignment" -Save)
     }
     $r.kind = 'own-item'; $r.assignment = $assignment
     return $r
+}
+
+# expire-claim: the gateway takes an owned item back (gateway/Lease.cs): the owner's client accepted it and the session never started, or the owner
+# did not answer an item.check. Called by the gateway only (no role lists it). The claim stays and its lease ends now, marked taken_back, so the next
+# sweep offers the item with mode resume (a relaunch, counted against maxRelaunches) and claim-item --renew of the old owner is refused.
+function Verb_expire_claim($a) {
+    $n = Get-ItemNumber $a; $holder = "$(Need $a 'holder')"
+    $reason = if (Test-Has $a 'reason') { "$($a.reason)" } else { 'taken-back' }
+    $st = Get-State $n; $s = $st.state
+    if (-not (Test-OwnedClaim $s) -or "$($s.claim.holder)" -ne $holder) { return @{ ok = $true; id = $n; expired = $false; reason = 'the claim is not held by that owner' } }
+    $s.claim.lease_until = ConvertTo-Iso ((Get-UtcNow).AddSeconds(-1)); $s.claim.taken_back = $reason
+    [void](Add-Journal $n $st 'lease-expired' @{ worker = $holder; reason = $reason } "exp|$([string](Get-UtcNow).Ticks)")
+    Save-State $n $st
+    return @{ ok = $true; id = $n; expired = $true }
 }
 
 # release: the owner (or an admin) gives the item up. The next trigger assigns it again and a new owner resumes from the item state.

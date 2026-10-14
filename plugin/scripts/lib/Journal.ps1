@@ -28,7 +28,8 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
             if ($F.ContainsKey('role') -and $F.role) { return "**$($F.worker)** accepted the $($F.role) job for PR #$($F.pr)$(if ($F.ContainsKey('url') -and $F.url) { " ([session]($($F.url)))" })." }
             $m = if ($F.ContainsKey('model') -and $F.model) { " Model: $($F.model) ($($F.effort)), tier $($F.tier)." } else { '' }
             $link = if ($F.ContainsKey('url') -and $F.url) { " [session]($($F.url))" } else { '' }
-            return "**$($F.worker)**$link accepted: it owns this item from $col until it is merged (mode $($F.mode), attempt $($F.attempt)).$m Lease until $($F.lease)."
+            $by = if ($F.ContainsKey('by') -and $F.by -eq 'client') { ' (accepted by its client; the session starts on it next)' } else { '' }
+            return "**$($F.worker)**$link accepted$($by): it owns this item from $col until it is merged (mode $($F.mode), attempt $($F.attempt)).$m Lease until $($F.lease)."
         }
         'routed' { return "told the owner (**$($F.worker)**): $($F.what)." }
         'reassigned' { return "$($F.reason); offering to the next worker." }
@@ -46,6 +47,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'question-escalated' { return "a question from **$($F.worker)** has waited $($F.minutes) min for the supervisor (supervisor: $(if ("$($F.supervisor)" -eq 'connected') { 'connected' } else { 'absent' })); a person is asked to look at the dashboard." }
         'base-updated' { return "master moved to ``$($F.sha7)``$(if ($F.ContainsKey('prs') -and $F.prs) { " (merged: $($F.prs))" }); told the owner (**$($F.worker)**) to merge master into the branch now: $($F.behind) commit(s) behind$(if ($F.ContainsKey('overlap') -and $F.overlap) { ", files changed on both sides: $($F.overlap)" })." }
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
+        'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
         default { return "$Event" }
     }
