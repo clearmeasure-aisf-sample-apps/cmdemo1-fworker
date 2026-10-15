@@ -311,6 +311,15 @@ Closed on 2026-10-15 (issue #103):
   `base.updated` only when its pull request has a merge conflict with master (`reason: "conflict"`, also covers the silent wait of #56), and the
   gateway brings a behind branch up to date only right before it merges a PASS (once per verdict). `every-move` keeps the old behaviour (the owner
   suite runs with it; `FACTORY_BASE_UPDATE_MODE` overrides). `docs/design/plant-manager.md` 6a. Open: not yet seen live on tdd.
+Closed on 2026-10-15 (issue #102):
+
+- **#102 One CI rule for flakes and pre-existing failures** (about 18 rejected rounds a day, 13 on acceptance shards). Only the gates (`ciGates`)
+  decide a head; a red head whose runs completed is re-run once when its failures are non-gate checks, known flaky (`masterFlakyChecks`, now both
+  shard families) or failing on master too (`pr.rerun[sha]`, judged on the new attempt); a failure master has as well costs no fix-forward round
+  and no demotion, is reported once (comment, operator `plant.event` `master-defect`), and once master passes it again the gateway merges master
+  into the branch. A park that ends by expiry or unpark resets `fix_forward_rounds` and `demotions`. `docs/design/plant-manager.md` 10e; scenarios
+  `ci rule: ...` (tests/scenarios/cirule.ps1, suites auto and owner). Open: the code-owner documents that list the operator stream's `plant.event`
+  codes (`docs/design/operator-session.md`, the factory-operator skill) do not name `master-defect` yet (owner pull request).
 
 Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
 

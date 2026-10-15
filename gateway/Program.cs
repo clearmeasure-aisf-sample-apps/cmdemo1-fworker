@@ -1963,6 +1963,12 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 foreach (var a in acts)
                     if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
                         plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
+                // issue 102: a red that only repeats a defect of the base branch is reported once to the operator (it costs the item nothing)
+                foreach (var a in acts)
+                    if (a is JsonObject mo && mo["item"] is JsonValue mi && mi.TryGetValue<int>(out var mItem)
+                        && ((mo["action"]?.ToString() == "awaiting-checks" && mo["result"] is JsonObject mr && mr["outcome"]?.ToString() == "master-defect" && mr["new"] is JsonValue mn && mn.TryGetValue<bool>(out var mNew) && mNew)
+                            || (mo["action"]?.ToString() == "pass-merge" && mo["masterDefectNew"] is JsonValue pn && pn.TryGetValue<bool>(out var pNew) && pNew)))
+                        plant.OperatorPlantEvent("master-defect", mItem);
                 if (items == null)
                 {
                     plant.SetReleaseQueue(j["release_queue"] as JsonArray);

@@ -67,7 +67,13 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
         'board-added' { return "the item has the factory label but had no column on the board: the sweep put it in $($F.column), where it is offered like any new item." }
-        'unparked' { if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; if ($F.code -eq 'master-broken') { return "park ``master-broken`` released early by $($F.by): $($F.reason). The item waits for master green again, then for its release candidate." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }
+        'unparked' {
+            $rs = if ($F.ContainsKey('reset') -and $F.reset) { ' Its fix-forward rounds and demotions count from 0 again.' } else { '' }
+            if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }
+            if ($F.code -eq 'master-broken' -and "$($F.by)" -ne 'expiry') { return "park ``master-broken`` released early by $($F.by): $($F.reason).$rs The item waits for master green again, then for its release candidate." }
+            if ("$($F.by)" -eq 'expiry') { return "park ``$($F.code)`` expired ($($F.reason)).$rs The next sweep takes it up again in $col." }
+            return "park ``$($F.code)`` released early by $($F.by): $($F.reason).$rs The next sweep takes it up again in $col."
+        }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
         # the plant manager's flow verbs (Verbs.Manager.ps1, docs/design/plant-manager.md 10e): who acted, what, under which policy code, and why
         # the backlog keeper's verbs (Verbs.Keeper.ps1, docs/design/backlog-keeper.md): who, what, the policy code and why
