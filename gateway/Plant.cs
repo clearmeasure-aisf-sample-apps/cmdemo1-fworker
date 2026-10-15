@@ -190,6 +190,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
             w.RestartSent = 0;                                // and session.restart again, if it is still due
             w.Model = model; w.Effort = effort; w.Runtime = runtime;
+            if (runtime != "local") Runtimes?.Registered(name);
             // the older stream of this name is told it was replaced before it ends, so its client exits instead of reconnecting (4.6, failure mode 30)
             if (Msg.On && w.Out != null) w.Out.Writer.TryWrite((0, ReplacedJson(name)));
             w.Out?.Writer.TryComplete();
@@ -1580,7 +1581,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     int Owned(string name) => ownerOf.Count(kv => kv.Value == name) + botOf.Count(kv => kv.Value == name) + assignments.Values.Count(a => a.Worker == name && !a.Accepted && !IsQc(a));
     // the session already held a work item, owns one (after a gateway restart the sweep fills ownerOf after the registration), or has an open offer of one, and this is another one (an offer of the same item again, to resume it,
     // is not refused); open offers count so that a session with capacity above 1 is never offered two items at once
-    bool SessionSpent(WorkerInfo w, Assignment a) => OneItemPerSession && a.Kind == "own-item"
+    bool SessionSpent(WorkerInfo w, Assignment a) => (OneItemPerSession || RuntimeWorker(w)) && a.Kind == "own-item"
         && (w.SessionItems.Any(i => i != a.Item) || ownerOf.Any(kv => kv.Value == w.Name && kv.Key != a.Item) || assignments.Values.Any(o => o != a && o.Kind == "own-item" && o.Worker == w.Name && !o.Accepted && o.Item != a.Item));
     void NoteSessionItem(string name, int item)
     {
@@ -1608,7 +1609,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     (WorkerInfo? Worker, string Why) Choose(Assignment a, string? pin)
     {
-        var ws = workers.Values.Where(w => w.Connected).ToList();
+        // a runtime worker takes only the item it was started for (its name is the pin), never an unpinned one
+        var ws = workers.Values.Where(w => w.Connected && (!RuntimeWorker(w) || w.Name == pin)).ToList();
         // chooseCode: the reason as one of six codes (session-spent: one item per session), for WaitingCode (the pinned worker's name comes from a GitHub label and is not carried)
         chooseCode = "no-session";
         if (ws.Count == 0) return (null, "no worker session is subscribed");
@@ -1646,7 +1648,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         var o = new JsonObject
         {
             ["provider"] = "gateway", ["event"] = "item.assigned", ["item"] = a.Item, ["column"] = a.Column, ["job"] = a.Kind, ["role"] = a.Role, ["mode"] = a.Mode, ["reason"] = a.Reason,
-            ["pr"] = a.Pr, ["assignment"] = a.Id, ["ackBySeconds"] = ackSeconds,
+            ["pr"] = a.Pr, ["assignment"] = a.Id, ["ackBySeconds"] = AckFor(a.Worker),
             ["token"] = Auth.MintItemToken(secret, a.Item, a.Role, a.Id, a.Worker, IsQc(a) ? TimeSpan.FromHours(QcCfg.TokenHours) : TimeSpan.FromHours(12), Rev.Of(a.Worker),
                 workers.TryGetValue(a.Worker, out var aw) && aw.Runtime != "local" ? aw.Runtime : "")
         };
@@ -1799,7 +1801,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     void Offer(Assignment a, WorkerInfo w, string? why)
     {
-        a.Worker = w.Name; a.AckBy = DateTime.UtcNow.AddSeconds(ackSeconds); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";
+        a.Worker = w.Name; a.AckBy = DateTime.UtcNow.AddSeconds(AckFor(w.Name)); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";
         Push(w, AssignedJson(a), false);
         var trig = lastTrigger.TryGetValue(a.Item, out var t) ? t : "the sweep";
         Journal(a.Item, "offered", new JsonObject { ["worker"] = w.Name, ["type"] = w.Type, ["ackSeconds"] = ackSeconds }, "off|" + a.Id + "|" + w.Name);
@@ -1809,10 +1811,16 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // supervisor is on, so a deployment with both off plans exactly as before.
     // sweepStarted: when the sweep that made this plan started reading the board. An owner it names for an item that was merged after that is not
     // put back: the sweep read the claim before the merge removed it (issue 107).
-    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, DateTime? sweepStarted = null)
+    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, DateTime? sweepStarted = null, JsonObject? runtimes = null, JsonObject? profiles = null)
+    {
+        try { PlanLocked(offers, owners, pins, owned, keep, sweepStarted, runtimes, profiles); }
+        finally { LaunchProvisions(); }
+    }
+    void PlanLocked(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned, IEnumerable<int>? keep, DateTime? sweepStarted, JsonObject? runtimes, JsonObject? profiles)
     {
         lock (gate)
         {
+            runtimeLabels = runtimes ?? new JsonObject(); itemProfiles = profiles ?? new JsonObject();
             var planNow = DateTime.UtcNow;
             foreach (var k in mergedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) mergedAt.Remove(k);
             if (owners != null) foreach (var kv in owners)
@@ -1849,6 +1857,12 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 };
                 assignments[key] = a;
                 if (!ReferenceEquals(a, ex)) DeclineTakenBack(a);      // a new assignment: not first to the worker it was just taken back from
+                if (string.IsNullOrEmpty(pin))
+                {   // cloud-worker-runtimes.md 4.4: the runtime of an unpinned item (Plant.Runtimes.cs)
+                    var (handled, rtPin) = RouteRuntime(a);
+                    if (handled) continue;
+                    if (rtPin != null) pin = rtPin;
+                }
                 a.Pin = pin ?? "";
                 if (a.Pin != "" && a.PinRetryAt > planNow) continue;                                      // its worker just let an offer lapse: the tick offers it again
                 if (!a.MatchedNoted)
@@ -1897,6 +1911,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             foreach (var a in assignments.Values.Where(a => !a.Accepted && a.Worker != "" && a.AckBy < DateTime.UtcNow && !(a.Accepting is { } ing && (DateTime.UtcNow - ing).TotalSeconds < 90)).ToList())
             {
                 var was = a.Worker;
+                if (!IsQc(a) && Runtimes != null && Runtimes.IsRuntimeWorker(was))
+                {   // a runtime worker that did not accept within its window: its execution is stopped and counts as failed; the next plan routes again
+                    a.Worker = ""; a.Pin = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "runtime-offer-lapsed";
+                    Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {Runtimes.AckSeconds:0} s: its execution is stopped", ["opCode"] = "runtime-offer-lapsed" }, "ack|" + a.Id + "|" + was);
+                    Runtimes.OfferLapsed(was);
+                    continue;
+                }
                 if (!IsQc(a) && a.Pin != "")
                 {   // pinned (the item's worker:<name> label): never offered to another worker. It waits, visibly, and is offered to the same worker
                     // again after one more window, or as soon as that worker is back.
@@ -1920,7 +1941,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             // issue 72: a session that is spent (it held a work item) and no longer owns it, nor has an offer of it open, is told to end, so the
             // client writes the launcher's end marker and a fresh session of the name starts; without it the name sat idle as session-spent
-            if (OneItemPerSession) foreach (var w in workers.Values.Where(w => w.Connected && w.Type != "supervisor"))
+            // a runtime worker always runs one item per session (cloud-worker-runtimes.md 5), whatever plant.oneItemPerSession says
+            foreach (var w in workers.Values.Where(w => w.Connected && w.Type != "supervisor" && (OneItemPerSession || RuntimeWorker(w))))
             {
                 // a QC or bot job the session holds or is offered keeps it alive: those are outside the one-item rule and run in this client
                 var idle = w.SessionItems.Count > 0 && !ownerOf.Values.Contains(w.Name) && !botOf.Values.Contains(w.Name) && !qcOf.Values.Contains(w.Name)
@@ -2065,6 +2087,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             return new JsonObject
             {
                 ["oneItemPerSession"] = OneItemPerSession,
+                ["runtimes"] = RuntimesStatus(),
                 ["pinFallbackMinutes"] = PinFallbackMinutes,
                 ["pinsSetAside"] = new JsonObject(pinFallback.Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
 
@@ -2072,7 +2095,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 ["sessionRestarts"] = new JsonObject { ["sent"] = restartsSent, ["recent"] = new JsonArray(restarts.Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["worker"] = r.Name, ["session"] = r.Session, ["code"] = r.Reason }).ToArray()) },
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["sessionsBlocked"] = sessionsBlocked,
-                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
+                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["execution"] = Runtimes?.ExecutionOf(w.Name) ?? "", ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null, ["takenBackInRow"] = w.TakeBackMisses,
                     ["blocked"] = Blocked(w), ["blockedSince"] = w.BlockedSince?.ToString("o"),
                     ["session"] = w.Session, ["sessionStarted"] = w.SessionStarted.ToString("o"), ["sessionItems"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),

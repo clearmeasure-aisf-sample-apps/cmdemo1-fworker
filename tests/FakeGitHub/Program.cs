@@ -57,8 +57,50 @@ sealed class GhRel { public long Id; public string Tag = "", Name = "", Body = "
 sealed class GhAsset { public long Id; public string Name = "", ContentType = ""; public long Size; }
 sealed class Rel { public string Id = ""; public string Version = ""; public string Notes = ""; public DateTime At; public double ProdDelay; }
 
+// A Container Apps job execution of the fake ARM (cloud worker runtimes): its name, status, env and times.
+sealed class ArmExec { public string Name = ""; public string Status = "Running"; public JsonArray Containers = new(); public DateTime Start = DateTime.UtcNow; public DateTime? End; }
+
 sealed class World
 {
+    // The fake ARM (Microsoft.App/jobs of cloud-worker-runtimes.md 2.1): GET the job, POST start with a container override, GET executions, POST
+    // stop. It wants the bearer token "fake-arm". It is not cleared by /_fake/reset (a gateway keeps its executions across scenarios); /_fake/arm-reset does.
+    readonly List<ArmExec> armExecs = new(); int armStarts, armStops; long armSeq; int armStartFailures;
+    (int, object?) Arm(string method, string path, JsonNode? b, string auth)
+    {
+        if (auth != "Bearer fake-arm") return (401, "{\"error\":{\"code\":\"InvalidAuthenticationToken\"}}");
+        var m = Regex.Match(path, "^(/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\\.App/jobs/[^/]+)(/start|/executions(/([^/]+)/stop)?)?$");
+        if (!m.Success) return (404, "{\"error\":{\"code\":\"ResourceNotFound\"}}");
+        var tail = m.Groups[2].Value;
+        if (tail == "" && method == "GET")
+        {
+            var env = new JsonArray(J(("name", "CLAUDE_CODE_USE_FOUNDRY"), ("value", "1")), J(("name", "FWORKER_NAME"), ("value", "from-the-job-template")));
+            var container = J(("name", "fwrunner"), ("image", "fake.azurecr.io/fwrunner:1"), ("env", env));
+            return (200, J(("id", m.Groups[1].Value), ("properties", J(("template", J(("containers", new JsonArray(container))))))));
+        }
+        if (tail == "/start" && method == "POST")
+        {
+            if (armStartFailures > 0) { armStartFailures--; return (500, "{\"error\":{\"code\":\"InternalServerError\"}}"); }
+            armStarts++;
+            var e = new ArmExec { Name = "caj-test-" + (++armSeq).ToString("x6"), Containers = b?["containers"]?.DeepClone() as JsonArray ?? new JsonArray() };
+            armExecs.Add(e);
+            return (202, J(("id", m.Groups[1].Value + "/executions/" + e.Name), ("name", e.Name)));
+        }
+        if (tail == "/executions" && method == "GET")
+            return (200, J(("value", new JsonArray(armExecs.Select(e => (JsonNode)J(("name", e.Name), ("properties", J(("status", e.Status), ("startTime", e.Start.ToString("o")), ("endTime", e.End?.ToString("o")),
+                ("template", J(("containers", e.Containers.DeepClone()))))))).ToArray()))));
+        if (m.Groups[4].Success && method == "POST")
+        {
+            var e = armExecs.FirstOrDefault(x => x.Name == m.Groups[4].Value); if (e == null) return (404, null);
+            armStops++; if (e.Status is "Running" or "Processing") { e.Status = "Stopped"; e.End = DateTime.UtcNow; }
+            return (200, J(("name", e.Name)));
+        }
+        return (405, null);
+    }
+    static string EnvOf(ArmExec e, string n) => e.Containers.SelectMany(c => c?["env"] as JsonArray ?? new JsonArray()).LastOrDefault(x => x?["name"]?.ToString() == n)?["value"]?.ToString() ?? "";
+    JsonObject ArmState() => J(("starts", armStarts), ("stops", armStops), ("executions", new JsonArray(armExecs.Select(e => (JsonNode)J(("name", e.Name), ("status", e.Status),
+        ("worker", EnvOf(e, "FWORKER_NAME")), ("item", EnvOf(e, "FWORKER_ITEM")), ("phase", EnvOf(e, "FWORKER_PHASE")), ("nonce", EnvOf(e, "FWORKER_NONCE")), ("profile", EnvOf(e, "FWORKER_MODEL_PROFILE")),
+        ("image", e.Containers.FirstOrDefault()?["image"]?.ToString()), ("env", e.Containers.FirstOrDefault()?["env"]?.DeepClone()))).ToArray())));
+
     const string Owner = "clearmeasure-aisf-sample-apps", Repo = "cmdemo1-workorders", Master = "master";
     readonly string[] columns = { "Todo", "In Progress", "Technical Design", "Development", "Functional Testing", "Release Queue", "Done" };
     readonly Dictionary<int, Issue> issues = new();
@@ -123,6 +165,7 @@ sealed class World
         foreach (var f in faults.ToList())
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
         if (path.StartsWith("/octopus/")) return Octopus(path[9..], q);
+        if (path.StartsWith("/subscriptions/")) return Arm(method, path, b, auth);
         var root = $"/repos/{Owner}/{Repo}";
         Match m;
         if ((m = Regex.Match(path, "^/_blob/(logs|artifacts)/(\\d+)$")).Success)
@@ -562,6 +605,16 @@ sealed class World
                 latencyMs = b?["ms"]?.GetValue<int>() ?? 0; latencyMatch = latencyMs > 0 ? new Regex(b?["match"]?.ToString() ?? ".") : null; return (200, J(("ok", true)));
             case "ref-page":   // { size }: matching-refs pages, with at most size refs a page (1 to 100); size 0 or none: it does not page, as GitHub
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
+            case "arm": return (200, ArmState());
+            case "arm-reset": armExecs.Clear(); armStarts = 0; armStops = 0; armStartFailures = 0; return (200, J(("ok", true)));
+            case "arm-start-failures": armStartFailures = b?["count"]?.GetValue<int>() ?? 1; return (200, J(("ok", true)));
+            case "arm-exec":
+            {   // ends an execution as the platform would: {"worker" or "name", "status": Succeeded | Failed | Stopped}
+                var e = armExecs.LastOrDefault(x => x.Name == b?["name"]?.ToString() || (b?["worker"] != null && EnvOf(x, "FWORKER_NAME") == b["worker"]!.ToString()));
+                if (e == null) return (404, J(("ok", false)));
+                e.Status = b!["status"]!.ToString(); if (e.Status is not ("Running" or "Processing")) e.End = DateTime.UtcNow;
+                return (200, J(("ok", true), ("name", e.Name)));
+            }
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0;
                 artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear();

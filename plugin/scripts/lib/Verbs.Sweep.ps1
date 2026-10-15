@@ -252,7 +252,7 @@ function Verb_sync_board($a) {
     $dry = (Test-Has $a 'dry') -and $a.dry
     $seenFile = Get-SeenFile
     $seen = if (Test-Path $seenFile) { Get-Content -Raw $seenFile | ConvertFrom-Json -AsHashtable } else { @{} }
-    $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @()
+    $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @(); $rtLabels = @{}; $profiles = @{}
     # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled (their
     # owner was released at item.merged)
     $owned = @{}; $settling = @(); $unconfirmed = @()
@@ -279,6 +279,10 @@ function Verb_sync_board($a) {
             $st = Get-State $n; $s = $st.state
             $pin = @($it.labels | Where-Object { $_ -like 'worker:*' } | Select-Object -First 1)
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
+            # cloud-worker-runtimes.md 4.4: a runtime:<kind> label forces the item's runtime; the test label selects the cheapest model profile
+            $rtl = @($it.labels | Where-Object { $_ -match '^runtime:[a-z0-9-]{1,20}$' } | Select-Object -First 1)
+            if ($rtl.Count -gt 0) { $rtLabels["$n"] = ([string]$rtl[0]).Substring(8) }
+            if ($c.testLabel -and (Test-NameIn $c.testLabel $it.labels)) { $profiles["$n"] = 'testing' }
             if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) {
                 # issue 82: a closed item whose flow has ended keeps no park (280 stayed parked master-broken after it was closed)
                 if ((Test-Has $s 'park') -and -not $dry) { $r = Clear-ClosedPark $n; if ($r) { $actions += @{ item = $n; action = 'park-cleared'; reason = 'item-closed'; code = $r }; $unparked += $n } }
@@ -492,7 +496,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------

@@ -86,7 +86,11 @@ $SuiteDefs = @(
             operator = @{ enabled = $true; allowedNames = @('operator-session', 'operator-two'); tokenGeneration = 1; requiredModelTier = 'premium'; requiredEffort = 'low'; maxSelfMergesPerDay = 2 } }; Env = 'owner'
         Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; opSelfAnswerMinutes = 0.1; staleItemMinutes = 600 } }
     # cloud worker runtimes (runtime.ps1): the w2 credential, the one-time nonce (minted through the messaging test seam) and git-credential
-    @{ Name = 'runtime'; Policy = 'auto'; Set = $RuntimeScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true } }; Env = 'owner'; Timing = @{ staleItemMinutes = 600 } }
+    # and the adapter against the fake ARM: items opt in by the runtime:cae-job label (no routing rule), a 15 s window for runtime workers (8 s for local ones)
+    @{ Name = 'runtime'; Policy = 'auto'; Set = $RuntimeScenarios; Env = 'runtime'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
+        Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+            runtimes = @{ preferConnected = $true; routing = @(); caeJob = @{ enabled = $true; maxConcurrent = 3; maxExecutionsPerDay = 1000; ackSeconds = 15; replicaTimeoutSeconds = 3600; maxFailuresPerPhase = 2; unhealthyAfterFailures = 2; listSeconds = 1
+                jobResourceId = '/subscriptions/s1/resourceGroups/rg-test/providers/Microsoft.App/jobs/caj-test'; armEndpoint = '__FAKE_URL__'; apiVersion = '2024-03-01'; managedIdentityClientId = ''; image = ''; containerName = 'fwrunner'; cpu = 4; memory = '8Gi'; gatewayUrl = 'http://ca-test-fworker' } } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
@@ -160,6 +164,8 @@ function Get-SuiteEnv([string]$Kind) {
         # 8 s: a late accept is refused now (stale-assignment), and a loaded runner takes several seconds per client call
         # the plant snapshot (PlantSnapshot.cs) is off in the suites: its read at start would hold every first sweep back; its own scenario switches it on
         'owner' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8' } }
+        # the runtime suite: owner mode and the bearer token of the fake ARM (taken by the gateway only for a loopback ARM endpoint)
+        'runtime' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_TEST_ARM_TOKEN = 'fake-arm' } }
         'qc' {
             $adminTokens = Join-Path $script:SuiteRoot 'qc-admin-tokens'; New-Item -ItemType Directory -Force -Path $adminTokens | Out-Null
             return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '60'; FACTORY_PUBLIC_URL = "http://127.0.0.1:$($script:ApiPort)"; FACTORY_TOKEN_DIR = $adminTokens }

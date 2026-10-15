@@ -31,7 +31,8 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     # unless a suite sets it. The scenarios of the rule turn it on for their own gateway (FACTORY_ONE_ITEM_PER_SESSION, owner.ps1).
     $cfg.plant = @{ oneItemPerSession = $false }
     foreach ($k in $Config.Keys) { $cfg[$k] = $Config[$k] }
-    $cfgPath = Join-Path $work 'instance.test.json'; $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+    # __FAKE_URL__ in a suite's configuration is the fake's address (the fake ARM of the runtime suite)
+    $cfgPath = Join-Path $work 'instance.test.json'; ($cfg | ConvertTo-Json -Depth 12).Replace('__FAKE_URL__', "http://127.0.0.1:$($script:FakePort)") | Set-Content $cfgPath
     $fakeDll = Join-Path $script:Root 'tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll'
     $gwDll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'
     foreach ($d in $fakeDll, $gwDll) { if (-not (Test-Path $d)) { throw "build first: $d is missing" } }
