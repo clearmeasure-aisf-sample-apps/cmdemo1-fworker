@@ -89,7 +89,7 @@ sealed class World
     // does on GitHub. rerunSeconds / rerunConclusion: how long a re-run of failed jobs takes and how it ends (default: 3 s, success).
     bool masterFlaky; double flakyRunSeconds = 4, rerunSeconds = 3; string rerunConclusion = "success";
     long nextRun = 1000; readonly Dictionary<long, int> runAttempts = new(); readonly Dictionary<long, string> pendingRelease = new(); int rerunRefusals, reruns; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold; string? masterArchitecture;
-    long counter = 0; int appMints;
+    long counter = 0; int appMints; readonly List<string> scopedMints = new();
 
     static string Sha(string seed) => Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(seed))).ToLowerInvariant();
     string NewSha() => Sha("c" + (++counter) + DateTime.UtcNow.Ticks);
@@ -107,6 +107,8 @@ sealed class World
     static bool DocsOnly(IEnumerable<string> files) { var l = files.ToList(); var pats = DocPats(); return l.Count > 0 && l.All(f => pats.Any(p => p.IsMatch(f))); }
     static JsonObject J(params (string, JsonNode?)[] kv) { var o = new JsonObject(); foreach (var (k, v) in kv) o[k] = v; return o; }
 
+    // GitHub adds the App's mandatory metadata: read to the permissions a token is narrowed to
+    static JsonObject Granted(JsonObject? asked) { var g = asked?.DeepClone() as JsonObject ?? J(("contents", "write")); g["metadata"] = "read"; return g; }
     static string Who(string auth)
     {
         var t = auth.StartsWith("Bearer ") ? auth[7..] : auth;
@@ -142,6 +144,13 @@ sealed class World
             if (parts.Length != 3) return (401, "{\"message\":\"A JSON web token could not be decoded\"}");
             string iss; try { var pl = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(parts[1].Replace('-', '+').Replace('_', '/').PadRight((parts[1].Length + 3) / 4 * 4, '='))); iss = JsonNode.Parse(pl)!["iss"]!.ToString(); } catch { return (401, "{\"message\":\"bad payload\"}"); }
             appMints++;
+            // as GitHub: a request may narrow the token to repositories and permissions, and the answer names the scope granted
+            if (b?["repositories"] is JsonArray want)
+            {
+                scopedMints.Add(b.ToJsonString());
+                return (201, J(("token", "fake-app-" + iss), ("expires_at", DateTime.UtcNow.AddHours(1).ToString("o")),
+                    ("permissions", Granted(b["permissions"] as JsonObject)), ("repositories", new JsonArray(want.Select(r => (JsonNode)J(("name", r!.ToString()), ("full_name", $"{Owner}/{r}"))).ToArray()))));
+            }
             return (201, J(("token", "fake-app-" + iss), ("expires_at", DateTime.UtcNow.AddHours(1).ToString("o"))));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)/labels(/(.+))?$")).Success && issues.TryGetValue(int.Parse(m.Groups[1].Value), out var li))
@@ -555,7 +564,7 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0;
-                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
                 masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; return (200, J(("ok", true)));
             case "issue":
@@ -687,7 +696,7 @@ sealed class World
                 return (200, J(
                     ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
                         ("comments", new JsonArray(i.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())))).ToArray())),
-                    ("appMints", appMints), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
+                    ("appMints", appMints), ("scopedMints", new JsonArray(scopedMints.Select(x => (JsonNode)x).ToArray())), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
                     ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("releases", releases.Count), ("requests", log.Count)));
             case "health": healthStatus = b?["status"]?.GetValue<int>() ?? 200; return (200, J(("ok", true)));
             case "log": return (200, new JsonArray(log.Select(l => (JsonNode)l).ToArray()));

@@ -25,6 +25,7 @@ sealed class WorkerInfo
     public int BlockedItem;
     public List<(long Id, string Json)> Buffer = new();      // item triggers for replay; the event counter itself is the name's Recipient.Next
     public string Model = "", Effort = "";                   // declared at registration (worker-messaging.md 2.2), never verified
+    public string Runtime = "local";                          // from the credential: a w2 names its runtime, a w1 is always local (cloud-worker-runtimes.md 4.1)
     // QC (design pr-qc-environment.md 4.2): environments this session may run at once, the address it declared for URL checks, free memory from its heartbeat
     public int QcCapacity = 1;
     public string QcAddress = "";
@@ -164,7 +165,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // ---- registry ---------------------------------------------------------------------------------------------------------------------
     // after: the cursor of this stream. With messaging off it is today's bare number (-1: nothing is replayed). With messaging on the caller has
     // parsed "<epoch>.<seq>" and passes 0 for another epoch, a bare number or no header, so the whole Buffer and every undelivered message replay.
-    public (WorkerInfo W, Channel<(long, string)> Ch, List<(long, string)> Replay) Register(string name, string type, IEnumerable<string> caps, int capacity, IEnumerable<string> roles, long after, int qcCapacity = 1, string qcAddress = "", bool qcProfile = false, bool messagingClient = false, string model = "", string effort = "", bool newSession = true)
+    public (WorkerInfo W, Channel<(long, string)> Ch, List<(long, string)> Replay) Register(string name, string type, IEnumerable<string> caps, int capacity, IEnumerable<string> roles, long after, int qcCapacity = 1, string qcAddress = "", bool qcProfile = false, bool messagingClient = false, string model = "", string effort = "", bool newSession = true, string runtime = "local")
     {
         lock (gate)
         {
@@ -188,7 +189,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name);   // issue 80: only the operator clears its drain
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
             w.RestartSent = 0;                                // and session.restart again, if it is still due
-            w.Model = model; w.Effort = effort;
+            w.Model = model; w.Effort = effort; w.Runtime = runtime;
             // the older stream of this name is told it was replaced before it ends, so its client exits instead of reconnecting (4.6, failure mode 30)
             if (Msg.On && w.Out != null) w.Out.Writer.TryWrite((0, ReplacedJson(name)));
             w.Out?.Writer.TryComplete();
@@ -1646,7 +1647,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         {
             ["provider"] = "gateway", ["event"] = "item.assigned", ["item"] = a.Item, ["column"] = a.Column, ["job"] = a.Kind, ["role"] = a.Role, ["mode"] = a.Mode, ["reason"] = a.Reason,
             ["pr"] = a.Pr, ["assignment"] = a.Id, ["ackBySeconds"] = ackSeconds,
-            ["token"] = Auth.MintItemToken(secret, a.Item, a.Role, a.Id, a.Worker, IsQc(a) ? TimeSpan.FromHours(QcCfg.TokenHours) : TimeSpan.FromHours(12), Rev.Of(a.Worker))
+            ["token"] = Auth.MintItemToken(secret, a.Item, a.Role, a.Id, a.Worker, IsQc(a) ? TimeSpan.FromHours(QcCfg.TokenHours) : TimeSpan.FromHours(12), Rev.Of(a.Worker),
+                workers.TryGetValue(a.Worker, out var aw) && aw.Runtime != "local" ? aw.Runtime : "")
         };
         if (IsQc(a)) { o["sha"] = a.Sha; o["env_id"] = a.EnvId; }
         return o.ToJsonString();
@@ -1742,6 +1744,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     }
     public bool IsConnected(string name) { lock (gate) return workers.TryGetValue(name, out var w) && w.Connected; }
     // a name that registered at least once since the start (connected or not)
+    // git-credential (cloud-worker-runtimes.md 2.6): only while the name owns the item through an accepted own-item assignment; an item token
+    // outlives its offer, its release and its merge, the push credential must not
+    public bool OwnsAccepted(string name, int item) { lock (gate) return ownerOf.TryGetValue(item, out var o) && o == name && assignments.Values.Any(a => a.Accepted && a.Item == item && a.Worker == name && a.Kind == "own-item"); }
     public bool IsWorker(string name) { lock (gate) return workers.ContainsKey(name); }
     public string DeclaredAddress(string name) { lock (gate) return workers.TryGetValue(name, out var w) ? w.QcAddress : ""; }
     public void SetMemFree(string name, double mb) { lock (gate) { if (workers.TryGetValue(name, out var w)) w.MemFreeMb = mb; } }
@@ -2067,7 +2072,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 ["sessionRestarts"] = new JsonObject { ["sent"] = restartsSent, ["recent"] = new JsonArray(restarts.Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["worker"] = r.Name, ["session"] = r.Session, ["code"] = r.Reason }).ToArray()) },
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["sessionsBlocked"] = sessionsBlocked,
-                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
+                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null, ["takenBackInRow"] = w.TakeBackMisses,
                     ["blocked"] = Blocked(w), ["blockedSince"] = w.BlockedSince?.ToString("o"),
                     ["session"] = w.Session, ["sessionStarted"] = w.SessionStarted.ToString("o"), ["sessionItems"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),

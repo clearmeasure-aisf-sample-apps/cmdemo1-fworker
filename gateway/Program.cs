@@ -120,6 +120,7 @@ var plantRestored = new TaskCompletionSource(TaskCreationOptions.RunContinuation
 if (!snapshotOn) plantRestored.SetResult();
 var snapshotState = new JsonObject { ["enabled"] = snapshotOn, ["maxAgeMinutes"] = snapshotMaxAge };
 var revocations = new Revocations();
+var runtimeNonces = new RuntimeNonces();   // the one-time nonces of runtime workers (Auth.cs, cloud-worker-runtimes.md 2.6)
 builder.Services.AddSingleton(sp =>
 {
     var runner = sp.GetRequiredService<Runner>();
@@ -297,6 +298,8 @@ app.Use(async (ctx, next) =>
     var port = ctx.Connection.LocalPort;
     var path = ctx.Request.Path.Value ?? "";
     if (port == hookPort && hookPort != apiPort && !(path == "/webhooks/github" && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
+    // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
+    if (port == apiPort && path == "/api/v1/runtime/redeem") { await next(); return; }
     if (port == apiPort && path.StartsWith("/api/"))
     {
         var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
@@ -517,6 +520,7 @@ app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) 
             return Results.Json(new { ok = false, code = "not-recorded", reason = "the revocation could not be written to GitHub, so nothing was revoked; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
         }
         revocations.Raise(name, next);
+        runtimeNonces.Forget(name);   // a nonce of the name not yet redeemed is spent with it
         var closed = plant.Revoke(name);
         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"generation\":{next},\"streamClosed\":{(closed ? "true" : "false")},\"by\":\"operator\"}}");
         return Results.Json(new { ok = true, name, generation = next, streamClosed = closed, exit = 0 });
@@ -575,6 +579,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":{JsonSerializer.Serialize(refusal)}}}");
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "forbidden", reason = refusal, exit = 30 }), "application/json", Encoding.UTF8, 403);
     }
+    if (verb == "git-credential" && who.Kind == "item" && !(ownerMode && plant.OwnsAccepted(who.Name, who.Item)))
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "not-owner", reason = $"this session does not own item #{who.Item} through an accepted assignment: no git credential", exit = 10 }), "application/json", Encoding.UTF8, 409);
     // the rule scripts of a revocation run only inside POST /workers/{name}/revoke, which keeps the stored generation and this process in step
     if (verb is "revoke-worker" or "revocations")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/workers/{name}/revoke", exit = 2 }), "application/json", Encoding.UTF8, 400);
@@ -649,6 +655,28 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
     if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep();
     return Results.Text(output, "application/json", Encoding.UTF8, status);
+});
+
+// A runtime worker's one-time nonce (cloud-worker-runtimes.md 2.6) is redeemed here for its w2, once. No Authorization header: the nonce is the
+// credential. Body {"nonce": "n1.<hex>"}. Every refusal is the same 401 for the caller (unknown, spent, expired); the log says which.
+app.MapPost("/api/v1/runtime/redeem", async (HttpContext ctx) =>
+{
+    if (!revocationsLoaded.Task.IsCompleted)
+    {
+        await Task.WhenAny(revocationsLoaded.Task, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
+        if (!revocationsLoaded.Task.IsCompleted) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
+    }
+    string text; using (var rd = new StreamReader(ctx.Request.Body)) text = await rd.ReadToEndAsync();
+    if (text.Length > 1000) return Results.Json(new { ok = false, code = "usage", reason = "the body is {\"nonce\": \"...\"}", exit = 2 }, statusCode: 400);
+    string? nonce = null; try { nonce = (JsonNode.Parse(text) as JsonObject)?["nonce"]?.ToString(); } catch { }
+    var (name, rt, expires, error) = runtimeNonces.Redeem(nonce);
+    if (error != null || tokenSecret.Length == 0)
+    {
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "redeem-refused", ["code"] = error ?? "no-token-secret" }.ToJsonString());
+        return Results.Json(new { ok = false, code = "unauthorized", reason = "unknown, spent or expired nonce", exit = 30 }, statusCode: 401);
+    }
+    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "redeemed", ["worker"] = name, ["kind"] = rt, ["expires"] = expires }.ToJsonString());
+    return Results.Json(new { ok = true, name, runtime = rt, expires, token = Auth.WorkerToken2(tokenSecret, name, rt, expires, revocations.Of(name)), exit = 0 });
 });
 
 // Release a park early (operator token only): after the owner relaxed or reworded a criterion, a person need not wait out timing.parkHours. The rule
@@ -864,6 +892,10 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
         var roles = ctx.Request.Query["roles"].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var type = string.IsNullOrEmpty(ctx.Request.Query["type"]) ? "persistent-local" : ctx.Request.Query["type"].ToString();
         var model = ctx.Request.Query["model"].ToString(); var effort = ctx.Request.Query["effort"].ToString();
+        // the runtime is the credential's (cloud-worker-runtimes.md 4.1): a w2 names it, a w1 or the admin token is local; a claim that differs is refused
+        var runtime = who.Kind == "worker" && who.Runtime != "" ? who.Runtime : "local";
+        var claimedRuntime = ctx.Request.Query["runtime"].ToString();
+        if (claimedRuntime != "" && claimedRuntime != runtime) { await Refuse(ctx, 403, "runtime-not-trusted", $"this credential registers runtime '{runtime}' only: a runtime is taken from the credential the gateway minted, never from the claim"); return; }
         if (!Auth.ValidRegistration(type, roles, caps, model, effort))
         { await Refuse(ctx, 400, "usage", "type, roles, capabilities (10 at most), model and effort must use the registration values (worker-messaging.md 2.2)", 2); return; }
         ctx.Response.Headers.ContentType = "text/event-stream"; ctx.Response.Headers.CacheControl = "no-cache";
@@ -871,7 +903,7 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
             int.TryParse(ctx.Request.Query["qc_capacity"], out var qcap) ? qcap : 1, ctx.Request.Query["qc_address"].ToString(), ctx.Request.Query["qc_profile"].ToString() is "1" or "true",
             messagingClient: ctx.Request.Query["messaging"].ToString() == "1", model: model, effort: effort,
             // a stream opened without a cursor is a new session of this name (a reconnect of the same client sends its last id): one item per session
-            newSession: lastEventId == "");
+            newSession: lastEventId == "", runtime: runtime);
         plant.SetHost(name, ctx.Request.Query["host"].ToString(), effort);
         // a new session can take a work item that waited as session-spent: plan now instead of at the next sweep (issue 72)
         if (lastEventId == "") hub.RequestSweep();
@@ -1230,6 +1262,16 @@ if (messaging.Enabled && messaging.TestHooks)
         catch { return (null, Fail(400, "usage", shape, 2)); }
     }
 
+    // a runtime worker's nonce, as the adapter mints one at provisioning: {"name", "runtime", "tokenSeconds", "ttlSeconds"}
+    app.MapPost("/api/v1/_test/runtime-nonce", async (HttpContext ctx) =>
+    {
+        var (b, err) = await SeamBody(ctx, "the body is a JSON object with name and runtime");
+        if (b == null) return err!;
+        var nm = b["name"]?.ToString() ?? ""; var rk = b["runtime"]?.ToString() ?? "";
+        if (!Auth.ValidName(nm) || !Auth.ValidRuntime(rk)) return Fail(400, "usage", "a valid worker name and a runtime other than local", 2);
+        var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (long)(double.TryParse(b["tokenSeconds"]?.ToString(), out var ts) ? ts : 3600);
+        return Results.Json(new { ok = true, nonce = runtimeNonces.Mint(nm, rk, exp, TimeSpan.FromSeconds(double.TryParse(b["ttlSeconds"]?.ToString(), out var tt) ? tt : 600)) });
+    });
     app.MapPost("/api/v1/_test/deliver", async (HttpContext ctx) =>
     {
         var (b, err) = await SeamBody(ctx, "the body is a JSON object with to and text, trigger or assigned");

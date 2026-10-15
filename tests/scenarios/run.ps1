@@ -39,6 +39,7 @@ foreach ($k in $QcPoolScenarios.Keys) { $QcScenarios[$k] = $QcPoolScenarios[$k] 
 . (Join-Path $PSScriptRoot 'baseupdate.ps1')  # master moved: base.updated and the gateway's update branch; scenarios named "base update: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'lease.ps1')       # owner leases kept by the plant (gateway/Lease.cs): scenarios named "lease: ..." join the manager suite
 foreach ($k in $LeaseScenarios.Keys) { $ManagerScenarios[$k] = $LeaseScenarios[$k] }
+. (Join-Path $PSScriptRoot 'runtime.ps1')     # cloud worker runtimes: w2, the nonce, git-credential; suite 'runtime' (uses the helpers of owner.ps1)
 
 # ---- the suites. ORDER IS THE PORT SLOT: append new suites at the end, never reorder (a slot is 100 ports from 6100, see lib.ps1). ----------
 # Env names the environment a suite needs (set before it, removed after it); Timing sets FACTORY_TIMING_* for the suite; Extra is merged into the gateway config.
@@ -84,6 +85,8 @@ $SuiteDefs = @(
     @{ Name = 'operator'; Policy = 'auto'; Set = $OperatorScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob'); testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor'); allowedAskers = @('alice', 'bob'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }
             operator = @{ enabled = $true; allowedNames = @('operator-session', 'operator-two'); tokenGeneration = 1; requiredModelTier = 'premium'; requiredEffort = 'low'; maxSelfMergesPerDay = 2 } }; Env = 'owner'
         Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; opSelfAnswerMinutes = 0.1; staleItemMinutes = 600 } }
+    # cloud worker runtimes (runtime.ps1): the w2 credential, the one-time nonce (minted through the messaging test seam) and git-credential
+    @{ Name = 'runtime'; Policy = 'auto'; Set = $RuntimeScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true } }; Env = 'owner'; Timing = @{ staleItemMinutes = 600 } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
