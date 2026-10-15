@@ -67,6 +67,8 @@ sealed class CaeJobRuntime : IWorkerRuntime
         void Add(string n, string v) => env.Add(new JsonObject { ["name"] = n, ["value"] = v });
         Add("FWORKER_NONCE", r.Nonce); Add("FWORKER_NAME", r.WorkerName); Add("FWORKER_ITEM", r.Item.ToString()); Add("FWORKER_PHASE", r.Phase);
         Add("FWORKER_MODEL_PROFILE", r.ModelProfile); Add("FWORKER_RUNTIME", Kind); if (cfg.GatewayUrl != "") Add("FWORKER_GATEWAY_URL", cfg.GatewayUrl);
+        // the agent of the image follows the configuration even when the job template says otherwise
+        env.RemoveAll(e => e?["name"]?.ToString() == "FWRUNNER_AGENT"); Add("FWRUNNER_AGENT", cfg.Agent);
         baseC["env"] = new JsonArray(env.ToArray());
         var (ss, started) = await Send(HttpMethod.Post, Url("/start"), new JsonObject { ["containers"] = new JsonArray(baseC) }, ct);
         if (ss is not (200 or 202)) return new(false, "", $"start-{ss}");

@@ -90,7 +90,8 @@ $SuiteDefs = @(
     @{ Name = 'runtime'; Policy = 'auto'; Set = $RuntimeScenarios; Env = 'runtime'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             runtimes = @{ preferConnected = $true; routing = @(); caeJob = @{ enabled = $true; maxConcurrent = 3; maxExecutionsPerDay = 1000; ackSeconds = 15; replicaTimeoutSeconds = 3600; maxFailuresPerPhase = 2; unhealthyAfterFailures = 2; listSeconds = 1
-                jobResourceId = '/subscriptions/s1/resourceGroups/rg-test/providers/Microsoft.App/jobs/caj-test'; armEndpoint = '__FAKE_URL__'; apiVersion = '2024-03-01'; managedIdentityClientId = ''; image = ''; containerName = 'fwrunner'; cpu = 4; memory = '8Gi'; gatewayUrl = 'http://ca-test-fworker' } } } }
+                jobResourceId = '/subscriptions/s1/resourceGroups/rg-test/providers/Microsoft.App/jobs/caj-test-claude'; armEndpoint = '__FAKE_URL__'; apiVersion = '2024-03-01'; managedIdentityClientId = ''; image = ''; containerName = 'fwrunner'; cpu = 4; memory = '8Gi'; gatewayUrl = 'http://ca-test-fworker'
+                agent = 'codex'; jobs = @{ codex = '/subscriptions/s1/resourceGroups/rg-test/providers/Microsoft.App/jobs/caj-test' } } } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }

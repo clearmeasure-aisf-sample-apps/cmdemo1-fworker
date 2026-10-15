@@ -58,7 +58,7 @@ sealed class GhAsset { public long Id; public string Name = "", ContentType = ""
 sealed class Rel { public string Id = ""; public string Version = ""; public string Notes = ""; public DateTime At; public double ProdDelay; }
 
 // A Container Apps job execution of the fake ARM (cloud worker runtimes): its name, status, env and times.
-sealed class ArmExec { public string Name = ""; public string Status = "Running"; public JsonArray Containers = new(); public DateTime Start = DateTime.UtcNow; public DateTime? End; }
+sealed class ArmExec { public string Name = "", Job = ""; public string Status = "Running"; public JsonArray Containers = new(); public DateTime Start = DateTime.UtcNow; public DateTime? End; }
 
 sealed class World
 {
@@ -81,7 +81,7 @@ sealed class World
         {
             if (armStartFailures > 0) { armStartFailures--; return (500, "{\"error\":{\"code\":\"InternalServerError\"}}"); }
             armStarts++;
-            var e = new ArmExec { Name = "caj-test-" + (++armSeq).ToString("x6"), Containers = b?["containers"]?.DeepClone() as JsonArray ?? new JsonArray() };
+            var e = new ArmExec { Name = "caj-test-" + (++armSeq).ToString("x6"), Job = m.Groups[1].Value.Split('/')[^1], Containers = b?["containers"]?.DeepClone() as JsonArray ?? new JsonArray() };
             armExecs.Add(e);
             return (202, J(("id", m.Groups[1].Value + "/executions/" + e.Name), ("name", e.Name)));
         }
@@ -97,7 +97,7 @@ sealed class World
         return (405, null);
     }
     static string EnvOf(ArmExec e, string n) => e.Containers.SelectMany(c => c?["env"] as JsonArray ?? new JsonArray()).LastOrDefault(x => x?["name"]?.ToString() == n)?["value"]?.ToString() ?? "";
-    JsonObject ArmState() => J(("starts", armStarts), ("stops", armStops), ("executions", new JsonArray(armExecs.Select(e => (JsonNode)J(("name", e.Name), ("status", e.Status),
+    JsonObject ArmState() => J(("starts", armStarts), ("stops", armStops), ("executions", new JsonArray(armExecs.Select(e => (JsonNode)J(("name", e.Name), ("job", e.Job), ("status", e.Status),
         ("worker", EnvOf(e, "FWORKER_NAME")), ("item", EnvOf(e, "FWORKER_ITEM")), ("phase", EnvOf(e, "FWORKER_PHASE")), ("nonce", EnvOf(e, "FWORKER_NONCE")), ("profile", EnvOf(e, "FWORKER_MODEL_PROFILE")),
         ("image", e.Containers.FirstOrDefault()?["image"]?.ToString()), ("env", e.Containers.FirstOrDefault()?["env"]?.DeepClone()))).ToArray())));
 

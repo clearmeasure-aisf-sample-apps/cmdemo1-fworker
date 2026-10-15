@@ -16,6 +16,12 @@ sealed class CaeJobSettings
     public double ListSeconds = 30;                    // how often the executions are read from ARM
     public string JobResourceId = "", ArmEndpoint = "https://management.azure.com", ApiVersion = "2024-03-01", ManagedIdentityClientId = "",
         Image = "", ContainerName = "fwrunner", Memory = "8Gi", GatewayUrl = "";
+    // The agent the job's container runs (FWRUNNER_AGENT of the fwrunner image): claude or codex. Each agent has its own job (its own identity
+    // and model variables); jobs.<agent> names it, and when it does it replaces jobResourceId. One agent is active at a time: the adapter
+    // lists and stops executions of the active agent's job only, so switching agents (a redeploy) needs the other job's executions drained first.
+    public string Agent = "claude";
+    public Dictionary<string, string> Jobs = new(StringComparer.Ordinal);
+    public static readonly string[] Agents = { "claude", "codex" };
     public double Cpu = 4;
     public bool On => Enabled && MaxConcurrent > 0 && JobResourceId != "";
 }
@@ -59,6 +65,11 @@ sealed class RuntimeSettings
             j.JobResourceId = S("jobResourceId", ""); j.ArmEndpoint = S("armEndpoint", j.ArmEndpoint).TrimEnd('/'); j.ApiVersion = S("apiVersion", j.ApiVersion);
             j.ManagedIdentityClientId = S("managedIdentityClientId", ""); j.Image = S("image", ""); j.ContainerName = S("containerName", j.ContainerName);
             j.Memory = S("memory", j.Memory); j.GatewayUrl = S("gatewayUrl", "");
+            var agent = S("agent", j.Agent).Trim().ToLowerInvariant(); if (CaeJobSettings.Agents.Contains(agent)) j.Agent = agent;
+            if (c["jobs"] is JsonObject jobs)
+                foreach (var (k, v) in jobs)
+                    if (CaeJobSettings.Agents.Contains(k.Trim().ToLowerInvariant()) && v is JsonValue jv && jv.TryGetValue<string>(out var id) && id != "") j.Jobs[k.Trim().ToLowerInvariant()] = id;
+            if (j.Jobs.TryGetValue(j.Agent, out var agentJob)) j.JobResourceId = agentJob;
         }
         return s;
     }

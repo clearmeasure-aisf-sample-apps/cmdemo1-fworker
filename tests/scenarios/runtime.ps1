@@ -158,6 +158,7 @@ $RuntimeScenarios['runtime: an item labelled runtime:cae-job starts one executio
         Check 'its worker name is cae-<item>-<6 hex>' ($name -match "^cae-$n-[0-9a-f]{6}$") $name
         Check 'it carries the item, the phase, the model profile and the gateway address' ($e.phase -eq 'Technical Design' -and $e.profile -eq 'testing' -and @($e.env | Where-Object { $_.name -eq 'FWORKER_GATEWAY_URL' -and $_.value -eq 'http://ca-test-fworker' }).Count -eq 1 -and @($e.env | Where-Object { $_.name -eq 'FWORKER_RUNTIME' -and $_.value -eq 'cae-job' }).Count -eq 1) ($e | ConvertTo-Json -Compress -Depth 5)
         Check 'the job container is kept: its image and its own variables, its FWORKER_ values replaced' ($e.image -eq 'fake.azurecr.io/fwrunner:1' -and @($e.env | Where-Object { $_.name -eq 'CLAUDE_CODE_USE_FOUNDRY' }).Count -eq 1 -and @($e.env | Where-Object { $_.name -eq 'FWORKER_NAME' }).Count -eq 1)
+        Check 'the configured agent picks the job (jobs.codex) and is passed as FWRUNNER_AGENT' ($e.job -eq 'caj-test' -and @($e.env | Where-Object { $_.name -eq 'FWRUNNER_AGENT' -and $_.value -eq 'codex' }).Count -eq 1) ($e | ConvertTo-Json -Compress -Depth 5)
         Check 'the environment holds a nonce, no credential' ("$($e.nonce)" -like 'n1.*' -and -not (($e.env | ConvertTo-Json -Compress) -match '"w[12]\.|"i1\.'))
         Check 'the nonce is not in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "$($e.nonce)").Count -eq 0)
         $st = Rt-Status

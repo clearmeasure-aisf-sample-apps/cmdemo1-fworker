@@ -218,7 +218,9 @@
       "containerName": "fwrunner",
       "cpu": 4,
       "memory": "8Gi",
-      "gatewayUrl": ""
+      "gatewayUrl": "",
+      "agent": "claude",
+      "jobs": {}
     }
   },
   "secrets": {
