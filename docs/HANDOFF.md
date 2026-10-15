@@ -15,7 +15,8 @@ Technical Design, Development and Functional Testing to a merged pull request, a
   the connect prompt and the plugin download, and carries worker messaging. Workers never hold a GitHub credential: they call verbs.
 - **Workers**: AI sessions (Claude Code local or cloud, Cursor cloud) started by a person with the connect prompt of the dashboard.
   The prompt downloads PowerShell and the plugin and runs `subscribe --own`; the session owns each item it is given until its pull request
-  is merged and master is green. Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
+  is merged (the gateway settles it from there, issue #107; the connect prompt still says "and master is green": its text is pinned by a
+  hash in the operator suite, a code-owner path). Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
   `factory test` selects the cheapest model profile.
 - **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask and reads the gateway's patrol
   digest. It advises; it changes nothing.
@@ -247,6 +248,14 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    was saved and whose plan was applied more than 20 s after it. The check now prints the item's journal: a `reassigned` line in the next
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
+
+Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
+
+- **#107 The owner session idled from the merge to the Release Queue.** The owner was kept until `item.complete` (master green, release,
+  production), doing nothing while the gateway settled the item, so its session was neither free nor told to end. Now the owner hears
+  `item.merged` and is released at once (`Plant.Merged`, also on the merge verb and the gateway's merge after a PASS); the Sweeper no longer
+  keeps the owners of settling items. The spent session gets `session.end` after `timing.sessionEndGraceSeconds` and settle carries the item.
+  The owner skill says the item ends for the session at `item.merged`.
 
 Closed on 2026-10-15 (issues #79 and #82):
 

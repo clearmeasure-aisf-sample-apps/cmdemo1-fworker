@@ -1268,7 +1268,7 @@ if (messaging.Enabled && messaging.TestHooks)
         return ok ? Results.Json(new { ok = true, id = answerId, exit = 0 }) : Fail(409, code, reason, 10);
     });
 
-    // one sweep's `owned` and the items it must keep (settling, or not read this time), as the Sweeper hands them to Plan
+    // one sweep's `owned` and the items it must keep (not read this time), as the Sweeper hands them to Plan
     app.MapPost("/api/v1/_test/plan", async (HttpContext ctx) =>
     {
         var (b, err) = await SeamBody(ctx, "the body is a JSON object with owned and keep");
@@ -1571,6 +1571,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             var soon = false;
             try
             {
+                var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
                 var (code, output) = await runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(280));
                 hub.LastSweep = DateTime.UtcNow;
                 if (code == 0)
@@ -1580,12 +1581,11 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                     var acts = j["actions"]!.AsArray();
                     if (ownerMode)
                     {
-                        // step 5a (worker-messaging.md 3.9): the sweep's `owned` replaces the plant's owner list, except for items whose merge is settling
-                        // and items the sweep could not read this time
+                        // step 5a (worker-messaging.md 3.9): the sweep's `owned` replaces the plant's owner list, except for items the sweep could not read
+                        // this time. A settling item keeps no owner: its owner was released at item.merged (Plant.Merged).
                         var keep = new List<int>();
-                        foreach (var x in j["settling"] as JsonArray ?? new JsonArray()) if (x is JsonValue sv && sv.TryGetValue<int>(out var si)) keep.Add(si);
                         foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
-                        plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep);
+                        plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, sweepStarted);
                         plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray);
                         if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
                         // a merge the gateway made after a PASS and the round-trip of one it could not make (Verbs.Merge.ps1 -Gateway)

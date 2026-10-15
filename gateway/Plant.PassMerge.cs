@@ -12,6 +12,7 @@ sealed partial class Plant
     public double OfferCoolDownMinutes { get; set; } = 5;
 
     readonly Dictionary<int, (string Code, DateTime Since, int Pr)> passUnmerged = new();
+    readonly Dictionary<int, DateTime> mergedAt = new();   // issue 107: when the plant released an item's owner at its merge (kept an hour)
 
     // The sweep's pass_unmerged replaces the list (an item the sweep merged, or that left the state, is gone from it).
     public void SetPassUnmerged(JsonArray? list)
@@ -25,14 +26,24 @@ sealed partial class Plant
         }
     }
 
-    // The item's pull request was merged (by the gateway, by the merge verb, or by a person): its open assignments are done; the owner keeps the
-    // item until item.complete (master green), as after the merge verb.
+    // The item's pull request was merged (by the gateway, by the merge verb, or by a person): its open assignments are done, and so is its owner. The
+    // gateway carries the item from here on (settle: master green, the release candidate, the Release Queue, Done), so the owner is released at
+    // once (issue 107): its session is spent and owns nothing, so the tick tells it session.end and the launcher starts the next one, instead of
+    // the session idling from the merge to the Release Queue. Called after item.merged was routed, so the owner has heard it.
     public void Merged(int item)
     {
         lock (gate)
         {
             foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
             passUnmerged.Remove(item);
+            // a sweep that read the claim before the merge removed it must not name the owner again (Plan skips it)
+            mergedAt[item] = DateTime.UtcNow;
+            if (ownerOf.TryGetValue(item, out var owner))
+            {
+                Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["plant"] = "owner-released-at-merge", ["item"] = item, ["worker"] = owner }.ToJsonString());
+                DropOwner(item); seamOwned.Remove(item);
+                acceptedOwner.Remove(item); clientAccepted.Remove(item); lastCall.Remove(item); lastRenew.Remove(item); checks.Remove(item);
+            }
         }
     }
 

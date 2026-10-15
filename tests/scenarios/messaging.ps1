@@ -3778,7 +3778,7 @@ $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one 
     }
 }
 
-$ManagerScenarios['mgr: a real sweep keeps the owner of an item whose merge is settling and of an item it could not read, and drops the owner it no longer lists'] = {
+$ManagerScenarios['mgr: a real sweep keeps the owner of an item it could not read, and drops the owner it no longer lists, that of a settling item too'] = {
     # a gateway of its own name and label: its sweep reads the fake GitHub, and this suite's gateway never looks at these items (so the injected
     # fault is never seen by it)
     $cfg = Msg-Config 'instance.sweep-two.json' { param($c) $c.name = 'sweep-two'; $c.label = 'sweep-two' }
@@ -3795,9 +3795,11 @@ $ManagerScenarios['mgr: a real sweep keeps the owner of an item whose merge is s
         $sweeps = { @([regex]::Matches((Mgr-Log $g), '"sweep":\{')).Count }
         Check 'the three items have their owner' (((& $owners) -join ',') -eq ((@($s, $e, $d) | Sort-Object) -join ','))
         Check 'the owner of the item no sweep lists is dropped: after the grace, by two sweeps in a row' (Wait-Until -Seconds 90 { (& $owners) -notcontains $d }) ((& $owners) -join ',')
+        # a settling item keeps no owner (it is released at item.merged, issue 107): an owner the seam set on one is dropped like any the sweep omits
+        Check 'so is the owner of the settling item' (Wait-Until -Seconds 30 { (& $owners) -notcontains $s }) ((& $owners) -join ',')
         $n0 = & $sweeps
         Check 'three more sweeps run' (Wait-Until -Seconds 60 { (& $sweeps) -ge $n0 + 3 }) "$n0 $(& $sweeps)"
-        Check 'the settling item and the unreadable item kept their owner through every one of them' (((& $owners) -join ',') -eq ((@($s, $e) | Sort-Object) -join ',')) ((& $owners) -join ',')
+        Check 'the unreadable item kept its owner through every one of them' (((& $owners) -join ',') -eq "$e") ((& $owners) -join ',')
         $log = Mgr-Log $g
         Check 'the sweep did settle the one (no error for it) and did report the error of the other' ($log -match "`"sweepAction`":\{[^\n]*`"item`":$s\b[^\n]*`"action`":`"settle`"|`"sweepAction`":\{[^\n]*`"action`":`"settle`"[^\n]*`"item`":$s\b" -and $log -notmatch "`"sweepError`":\{[^\n]*`"item`":$s\b" -and $log -match "`"sweepError`":\{[^\n]*`"item`":$e\b") ($log -split "`n" | Where-Object { $_ -match 'sweepError|settle' } | Select-Object -First 4 | Out-String)
     }

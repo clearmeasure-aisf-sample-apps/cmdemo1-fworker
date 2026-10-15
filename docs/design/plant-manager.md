@@ -59,7 +59,7 @@ For each job the plant manager takes the workers that: hold the `owner` (or bot)
 
 ### Ownership lifetime
 - The claim is **per item** and spans columns: `complete` moves the column and keeps the claim; the lease is renewed by the session's heartbeat.
-- It ends when: the item is complete (merged, master green), is parked or held and the idle limit passes, the session releases it, or the lease expires.
+- It ends when: the item's pull request is merged (the gateway settles it from there and releases the owner at `item.merged`, so its session ends; issue 107), is parked or held and the idle limit passes, the session releases it, or the lease expires.
 - **Idle limit:** an owner waiting on a hold longer than 60 minutes releases ownership (journaled); the next trigger assigns it again and a new owner **resumes** from the item state.
 - **Lost session:** the lease expires, the item is offered again with `mode: resume`, and the relaunch budget applies.
 

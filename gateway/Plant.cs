@@ -1201,8 +1201,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     // The sweep's `owned` replaces what the plant believes of own-item owners (3.9): a listed claim refreshes column, lease, heartbeat and park; an
     // owner the sweep no longer lists (an idle release, a card moved away by a person) is dropped once the grace from its accept has passed. Not
-    // dropped: an item whose merge is settling (its claim ended at the merge, its owner still waits for item.complete), an item the sweep could
-    // not read this time, and an owner set through the test seam.
+    // dropped: an item the sweep could not read this time (`keep`), and an owner set through the test seam. An item whose merge is settling has no
+    // owner any more: it was released at item.merged (Merged).
     void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now)
     {
         var kept = new HashSet<int>(keep);
@@ -1755,14 +1755,18 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     // owned and keep (step 5a): what the sweep says of every owned claim, and the items it must not drop an owner of; used only while messaging or the
     // supervisor is on, so a deployment with both off plans exactly as before.
-    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null)
+    // sweepStarted: when the sweep that made this plan started reading the board. An owner it names for an item that was merged after that is not
+    // put back: the sweep read the claim before the merge removed it (issue 107).
+    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, DateTime? sweepStarted = null)
     {
         lock (gate)
         {
             var planNow = DateTime.UtcNow;
+            foreach (var k in mergedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) mergedAt.Remove(k);
             if (owners != null) foreach (var kv in owners)
             {
                 var oi = int.Parse(kv.Key); var on = kv.Value!.ToString();
+                if (sweepStarted is { } ss && mergedAt.TryGetValue(oi, out var ma) && ma >= ss) continue;
                 if (Msg.On && !(ownerOf.TryGetValue(oi, out var cur) && cur == on)) { ownedSince[oi] = planNow; seamOwned.Remove(oi); ownedMisses.Remove(oi); ownedInfo.Remove(oi); }
                 ownerOf[oi] = on;
             }
@@ -1919,10 +1923,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     break;
                 case "merge" when response["outcome"]?.ToString() is "merged" or "already-merged":
                 case "validation-verdict" when vmOutcome is "merged" or "already-merged":
-                    // the owner keeps the item until master is green (item.complete); the open assignments are done
-                    foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
-                    passUnmerged.Remove(item);
+                    // the owner hears item.merged, then is released: the gateway settles the item from here (Merged); the open assignments are done
                     Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.merged", ["item"] = item });
+                    Merged(item);
                     break;
                 case "approve-pr":
                     botOf.Remove(item);
