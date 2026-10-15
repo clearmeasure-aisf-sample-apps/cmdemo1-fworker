@@ -690,9 +690,12 @@ function Invoke-SubscribeOwn($a) {
                     # the client accepts an owner offer itself (gateway/Lease.cs, rule 1): the gateway offers only into a free slot, and an offer the model
                     # answers late is offered to the next worker. The model is told with item.accepted; if it does not start within the lease, the
                     # gateway takes the item back. Not with --spawn (the spawned session accepts) and not with FACTORY_AUTO_ACCEPT=0.
-                    if ($itemTok -and -not $spawn -and $autoAccept -and $ev['job'] -eq 'own-item' -and "$($ev.role)" -eq 'owner') { try { Start-ClientAccept $cfg.url $itemTok $ev } catch { [Console]::Error.WriteLine("client accept not started: $($_.Exception.Message)") } }
+                    # issue 81: a resent assignment (resent: true) is one this name accepted already; the gateway sends it again after a reconnect or to a
+                    # new session so the session works it. The token is saved and the model told; it is not accepted again here and spawns nothing
+                    $resent = $ev['resent'] -eq $true
+                    if ($itemTok -and -not $resent -and -not $spawn -and $autoAccept -and $ev['job'] -eq 'own-item' -and "$($ev.role)" -eq 'owner') { try { Start-ClientAccept $cfg.url $itemTok $ev } catch { [Console]::Error.WriteLine("client accept not started: $($_.Exception.Message)") } }
                     if ($evId) { $lastId = $evId }
-                    if ($replayed) { }
+                    if ($replayed -or $resent) { }
                     elseif ($spawn -and $ev.event -eq 'item.assigned' -and $ev['job'] -eq 'qc-env') { try { Start-QcWorker $ev $cfg $name $qcMax $msgOn } catch { [Console]::Error.WriteLine("qc spawn failed: $($_.Exception.Message)") } }
                     elseif ($spawn -and $ev.event -eq 'item.assigned') { try { Start-OwnerWorker $ev $cfg $name $cap $msgOn } catch { [Console]::Error.WriteLine("spawn failed: $($_.Exception.Message)") } }
                 }

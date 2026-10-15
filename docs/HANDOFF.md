@@ -260,6 +260,18 @@ Closed on 2026-10-15 (issues #79 and #82):
   `POST /api/v1/items/{n}/unpark` accepts a closed item, removing only the park (no hand-off, no offer). Released parks leave the digest's
   parks list at once.
 
+Closed on 2026-10-15 (issues #80, #81 and #74):
+
+- **#80 An operator drain was lost when the name's next session registered.** The operator's drain (`POST /api/v1/workers/{name}/drain` with
+  the operator token) belongs to the name: it holds across reconnects, new sessions and a graceful restart (the plant snapshot carries
+  `drained`) until the operator resumes the name. A session's own drain (end-session) stays the session's, so the launcher's next session is
+  offered work; a session cannot lift the operator's drain.
+- **#81 An owner whose assignment event was lost was never told about its item again** (274). Every registration of a name, a new session
+  included, and the snapshot restore resend `item.assigned` (mode `resume`, `resent: true`, `accepted: true`) for each accepted own-item
+  assignment of an item the name still owns. The client saves the token and does not accept or spawn for it; the owner skill says what to do.
+- **#74 An accepted assignment outlived its dropped owner.** Where the sweep drops an owner it no longer lists, the owner's accepted
+  own-item assignment goes too, so "accepted" means "owned" and a dropped owner is never resent a finished item.
+
 Closed on 2026-10-14 (issue #42):
 
 - **#42 A video item could not pass Functional Testing without a person.** `factory.ps1 publish-demo --item N --file <mp4>` (item token,

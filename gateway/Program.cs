@@ -815,7 +815,7 @@ app.MapPost("/api/v1/workers/{name}/{action}", (string name, string action, Http
         return Results.Json(new { ok = true, name, messaging = mode, exit = 0 });
     }
     if (action is not ("drain" or "resume") || opMode) return Results.NotFound();
-    return plant.SetDraining(name, action == "drain") ? Results.Text(JsonSerializer.Serialize(new { ok = true, name, draining = action == "drain" }), "application/json")
+    return plant.SetDraining(name, action == "drain", who.Kind == "admin") ? Results.Text(JsonSerializer.Serialize(new { ok = true, name, draining = plant.IsDraining(name) }), "application/json")
         : Results.Text("{\"ok\":false,\"code\":\"not-found\",\"reason\":\"no such worker\",\"exit\":12}", "application/json", Encoding.UTF8, 404);
 });
 
