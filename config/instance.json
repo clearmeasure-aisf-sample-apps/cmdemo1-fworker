@@ -131,7 +131,8 @@
     "mgrVerbErrorMinutes": 10,
     "mgrRestartMinutes": 30,
     "mgrReleaseQueueMinutes": 60,
-    "baseUpdateDebounceSeconds": 20
+    "baseUpdateDebounceSeconds": 20,
+    "journalWaitingMinutes": 30
   },
   "baseUpdate": {
     "enabled": true,

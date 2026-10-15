@@ -202,6 +202,13 @@ v. **Done (2026-10-14): lasting cycle-time metrics** (enhancement 13). `GET /api
    changes nothing. One computation reads every item's comments: answers are cached 120 s per query and computed one at a time. The dashboard
    section "Cycle times" loads it when opened. Limits: `dispatched_at` keeps the last dispatch of a column (a column visited twice counts from
    its last visit); items worked before the journal existed have no match or accept time; at most 300 items and 90 days.
+z. **Done (2026-10-14, issue 93): the journal folds its repeats** (`plugin/scripts/lib/Journal.ps1`, `docs/design/plant-manager.md` 8). 23
+   items had filled their 30 journal comments with `matched`, `waiting` and `reassigned` lines while they waited for a worker, and then
+   journaled nothing more. A repeat of one of these kinds now edits the comment its kind last posted (the latest line, how often, from when to
+   when, the latest 5 lines), as long as only these kinds or `offered` came after it; any other line ends the folds. Only new comments count
+   against the cap. The state keeps `journal.kinds.<event>` (count, first, last) and `journal.fold.<event>`. `waiting` lines are written at
+   most once per `timing.journalWaitingMinutes` (30). The metrics read the first line of a kind as before (the folded comment keeps the first
+   line's marker and time). Open: the items that are already full stay full.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
