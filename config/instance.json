@@ -56,6 +56,9 @@
   "plant": {
     "oneItemPerSession": true
   },
+  "github": {
+    "budgetReserve": 300
+  },
   "schedule": {
     "hostOwnedDefault": 0,
     "hostBuildsDefault": 1,
@@ -131,7 +134,8 @@
     "mgrVerbErrorMinutes": 10,
     "mgrRestartMinutes": 30,
     "mgrReleaseQueueMinutes": 60,
-    "baseUpdateDebounceSeconds": 20
+    "baseUpdateDebounceSeconds": 20,
+    "sweepMinSeconds": 60
   },
   "baseUpdate": {
     "enabled": true,

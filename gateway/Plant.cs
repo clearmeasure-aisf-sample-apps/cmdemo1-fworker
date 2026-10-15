@@ -1203,7 +1203,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // owner the sweep no longer lists (an idle release, a card moved away by a person) is dropped once the grace from its accept has passed. Not
     // dropped: an item whose merge is settling (its claim ended at the merge, its owner still waits for item.complete), an item the sweep could
     // not read this time, and an owner set through the test seam.
-    void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now)
+    // scope (issue 92): an incremental pass read only these items; the owners of every other item are not touched (nor their counts of misses)
+    void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now, IReadOnlyCollection<int>? scope = null)
     {
         var kept = new HashSet<int>(keep);
         var listed = new Dictionary<int, OwnedInfo>();
@@ -1215,6 +1216,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
         foreach (var (item, name) in ownerOf.ToList())
         {
+            if (scope != null && !scope.Contains(item)) continue;
             if (listed.TryGetValue(item, out var li) && li.Holder == name) { ownedInfo[item] = li; ownedMisses.Remove(item); continue; }
             if (kept.Contains(item) || seamOwned.Contains(item)) { ownedMisses.Remove(item); continue; }
             if (!ownedSince.TryGetValue(item, out var since)) ownedSince[item] = since = now;
@@ -1755,7 +1757,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     // owned and keep (step 5a): what the sweep says of every owned claim, and the items it must not drop an owner of; used only while messaging or the
     // supervisor is on, so a deployment with both off plans exactly as before.
-    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null)
+    // scope (issue 92): the items of an incremental pass. Only they were read, so owners and unanswered assignments of every other item are kept.
+    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, IReadOnlyCollection<int>? scope = null)
     {
         lock (gate)
         {
@@ -1766,7 +1769,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 if (Msg.On && !(ownerOf.TryGetValue(oi, out var cur) && cur == on)) { ownedSince[oi] = planNow; seamOwned.Remove(oi); ownedMisses.Remove(oi); ownedInfo.Remove(oi); }
                 ownerOf[oi] = on;
             }
-            if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow);
+            if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow, scope);
             var wanted = new HashSet<string>();
             // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can
             foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0))
@@ -1805,7 +1808,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 Offer(a, w, null);
             }
             // an unanswered or unwanted assignment that the sweep no longer asks for is dropped
-            foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
+            foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k]) && (scope == null || scope.Contains(assignments[k].Item))).ToList()) assignments.Remove(k);
         }
     }
 

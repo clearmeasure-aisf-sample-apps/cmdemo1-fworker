@@ -14,11 +14,12 @@ sealed partial class Plant
     readonly Dictionary<int, (string Code, DateTime Since, int Pr)> passUnmerged = new();
 
     // The sweep's pass_unmerged replaces the list (an item the sweep merged, or that left the state, is gone from it).
-    public void SetPassUnmerged(JsonArray? list)
+    // scope (issue 92): the items of an incremental pass; only their entries are replaced
+    public void SetPassUnmerged(JsonArray? list, IReadOnlyCollection<int>? scope = null)
     {
         lock (gate)
         {
-            passUnmerged.Clear();
+            if (scope == null) passUnmerged.Clear(); else foreach (var i in scope) passUnmerged.Remove(i);
             foreach (var x in list ?? new JsonArray())
                 if (x is JsonObject && x["item"] is JsonValue v && v.TryGetValue<int>(out var item) && item > 0)
                     passUnmerged[item] = (GatedCode(x["code"]?.ToString()) is { Length: > 0 } c ? c : "other", Time(x["since"]) ?? DateTime.UtcNow, int.TryParse(x["pr"]?.ToString(), out var pr) ? pr : 0);
