@@ -68,7 +68,7 @@ function Get-BoardList {
     $q = @'
 query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(number:$n){ items(first:100, after:$after){ pageInfo{ hasNextPage endCursor }
   nodes{ id fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
-    content{ ... on Issue{ number state title labels(first:30){ nodes{ name } } } } } } } } }
+    content{ ... on Issue{ number state title body labels(first:30){ nodes{ name } } } } } } } } }
 '@
     $after = $null; $out = @()
     do {
@@ -77,6 +77,7 @@ query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(numbe
         foreach ($n in $items.nodes) {
             if (-not $n.content -or -not $n.content.PSObject.Properties['number']) { continue }
             $out += @{ cardId = $n.id; number = [int]$n.content.number; open = ($n.content.state -eq 'OPEN'); title = $n.content.title
+                body = $(if ($n.content.PSObject.Properties['body']) { "$($n.content.body)" } else { '' })
                 column = $(if ($n.fieldValueByName) { $n.fieldValueByName.name } else { $null })
                 labels = @($n.content.labels.nodes | ForEach-Object { $_.name }) }
         }

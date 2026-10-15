@@ -118,6 +118,30 @@ function Clear-ClosedPark([int]$n) {
     }
 }
 
+# Issue 65: the items an item waits for, from "Depends on #N" in its body (any case, a colon allowed, several numbers on the same line: "Depends
+# on #291 and #292"; a list on the following lines is not read). Its own number is never a dependency.
+function Get-ItemDependencies([int]$Item, [string]$Body) {
+    $deps = @()
+    foreach ($m in [regex]::Matches("$Body", '(?im)\bdepends[ \t]+on[ \t]*:?[ \t]*([^\r\n]*)')) {
+        foreach ($d in [regex]::Matches($m.Groups[1].Value, '#(\d{1,7})\b')) { $v = [int]$d.Groups[1].Value; if ($v -ne $Item -and $deps -notcontains $v) { $deps += $v } }
+    }
+    return , $deps
+}
+# A dependency is met once it is merged or closed: closed, or (still open) in a hold column (the Release Queue: merged, waiting for production) or
+# Done. An item that is not on the board is read once per sweep through the REST API; one that cannot be read counts as not met.
+function Test-DependencyMet([int]$Dep, $ByNumber, $Cache) {
+    $c = Get-Cfg
+    if ($Cache.ContainsKey($Dep)) { return $Cache[$Dep] }
+    $met = $false
+    if ($ByNumber.ContainsKey($Dep)) {
+        $d = $ByNumber[$Dep]; $col = "$($d.column)"
+        $met = (-not $d.open) -or (Test-NameIn $col $c.columns.hold) -or ($col -and $col -ieq "$($c.columns.done)")
+    } else {
+        try { $iss = Invoke-Gh -Path "$(Get-RepoPath)/issues/$Dep"; $met = "$($iss.state)" -eq 'closed' } catch { $met = $false }
+    }
+    $Cache[$Dep] = $met; return $met
+}
+
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
@@ -309,6 +333,22 @@ function Verb_sync_board($a) {
         }
         catch { $errors += @{ item = $n; code = 'error'; reason = "$($_.Exception.Message)" } }
     }
+    # issue 65: an item is offered to nobody while an item it depends on is neither merged nor closed. The seen count goes on meanwhile, so the
+    # sweep after its last dependency was merged offers it at once. held: the items that wait, with the code and the numbers they wait for.
+    $held = @(); $byNumber = @{}; foreach ($x in $list) { $byNumber[[int]$x.number] = $x }; $depCache = @{}
+    $kept = @()
+    foreach ($o in $offers) {
+        # a failure here offers the item (fail open, as before this rule) and is reported; it never stops the sweep
+        try {
+            $kind = if ($o.ContainsKey('kind')) { "$($o.kind)" } else { 'own-item' }
+            $it = $byNumber[[int]$o.item]
+            $deps = if ($kind -eq 'own-item' -and $it) { Get-ItemDependencies ([int]$o.item) "$($it.body)" } else { @() }
+            $open = @($deps | Where-Object { -not (Test-DependencyMet $_ $byNumber $depCache) })
+        } catch { $errors += @{ item = [int]$o.item; code = 'depends-on-check'; reason = "$($_.Exception.Message)" }; $open = @() }
+        if ($open.Count -gt 0) { $held += @{ item = [int]$o.item; column = "$($o.column)"; code = 'depends-on'; on = $open } }
+        else { $kept += $o }
+    }
+    $offers = $kept
     if (-not $dry) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
     # claim refs with no live claim behind them (issue 47): removed at once for a closed item, after a lease for an open one
     if (-not $dry) {
@@ -329,7 +369,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- work intake (issue 104) -----------------------------------------------------------------------------------------
