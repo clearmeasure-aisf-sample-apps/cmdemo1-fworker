@@ -53,7 +53,8 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         }
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
-        'unparked' { if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }
+        'board-added' { return "the item has the factory label but had no column on the board: the sweep put it in $($F.column), where it is offered like any new item." }
+        'unparked' { if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; if ($F.code -eq 'master-broken') { return "park ``master-broken`` released early by $($F.by): $($F.reason). The item waits for master green again, then for its release candidate." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
         default { return "$Event" }
     }
