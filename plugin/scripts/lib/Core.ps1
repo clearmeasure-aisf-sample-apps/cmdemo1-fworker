@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 $script:Cfg = $null
 $script:ServerLogin = $null
 $script:AsToken = $null
+# The rate limit GitHub reported in this process, per resource (core, graphql): the latest answer's numbers. The server wrapper (factory.ps1) hands
+# them to the gateway in the field _github of its answer; the gateway keeps the shared budget (gateway/GitHubBudget.cs, issue 92).
+$script:GhRate = @{}
 
 class FactoryReject : System.Exception {
     [int]$Exit
@@ -70,9 +73,42 @@ function Invoke-GhRaw {
     if ($TimeoutSec -gt 0) { $params.ConnectionTimeoutSeconds = $TimeoutSec; $params.OperationTimeoutSeconds = $TimeoutSec }
     for ($try = 1; $try -le $Tries; $try++) {
         try { $resp = Invoke-RestMethod @params } catch { if ($try -ge $Tries) { Reject 20 'github-unreachable' $_.Exception.Message @{ retryAfterSeconds = 30 } }; Start-Sleep -Seconds (2 * $try); continue }
+        Add-GhRate $rh   # (a redirect to a store that is not GitHub's API carries no rate headers and records nothing)
         if ($sc -in 502, 503, 504 -and $try -lt $Tries) { Start-Sleep -Seconds (2 * $try); continue }
         return @{ status = [int]$sc; body = $resp; headers = $rh }
     }
+}
+
+# One header of an answer, whatever its case ($null when absent)
+function Get-GhHeader($Headers, [string]$Name) {
+    if (-not $Headers) { return $null }
+    foreach ($k in @($Headers.Keys)) { if ("$k" -ieq $Name) { $v = $Headers[$k]; return "$(@($v)[0])" } }
+    return $null
+}
+# Records the rate limit an answer reports (x-ratelimit-*): the latest numbers of each resource, unless an earlier answer of the same window said less
+function Add-GhRate($Headers) {
+    # only the gateway's own identity: a call made as another App (Use-GhAs, the reviewer's approval) spends that App's budget, not this one
+    if ($script:AsToken) { return }
+    $rem = Get-GhHeader $Headers 'x-ratelimit-remaining'; if ($null -eq $rem -or "$rem" -notmatch '^\d+$') { return }
+    $res = Get-GhHeader $Headers 'x-ratelimit-resource'; if (-not $res -or $res -notmatch '^[a-z_]{1,30}$') { $res = 'core' }
+    $o = @{ remaining = [int]$rem; limit = $(if ("$(Get-GhHeader $Headers 'x-ratelimit-limit')" -match '^\d+$') { [int](Get-GhHeader $Headers 'x-ratelimit-limit') } else { $null })
+        reset = $(if ("$(Get-GhHeader $Headers 'x-ratelimit-reset')" -match '^\d+$') { [long](Get-GhHeader $Headers 'x-ratelimit-reset') } else { $null }); at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
+    $prev = $script:GhRate[$res]
+    if ($prev -and $prev.reset -eq $o.reset -and $prev.remaining -lt $o.remaining) { return }
+    $script:GhRate[$res] = $o
+}
+function Get-GhRateReport { if ($script:GhRate.Count -eq 0) { return $null }; $r = @{}; foreach ($k in $script:GhRate.Keys) { $r[$k] = $script:GhRate[$k] }; return $r }
+
+# A 403 or 429 is a rate limit only when GitHub says so: no requests left (x-ratelimit-remaining 0), a Retry-After, or the message of a primary or
+# secondary rate limit. Any other 403 is a refusal of permission (an App without the permission, a protected branch, a resource not accessible by
+# the integration): retrying it changes nothing. Returns the seconds to wait, or -1 when it is not a rate limit.
+function Get-GhRateLimitWait([int]$Status, $Headers, [string]$Message) {
+    $ra = Get-GhHeader $Headers 'retry-after'
+    if ($ra -match '^\d+$') { return [Math]::Max(1, [int]$ra) }
+    $rem = Get-GhHeader $Headers 'x-ratelimit-remaining'; $reset = Get-GhHeader $Headers 'x-ratelimit-reset'
+    if ($rem -eq '0') { if ($reset -match '^\d+$') { return [int][Math]::Max(1, [long]$reset - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) }; return 60 }
+    if ($Status -eq 429 -or $Message -match '(?i)rate limit|abuse detection|secondary rate') { return 60 }
+    return -1
 }
 
 function Invoke-Gh {
@@ -85,8 +121,15 @@ function Invoke-Gh {
     switch ($r.status) {
         404 { Reject 12 'github-not-found' "GitHub 404 on $Method $Path" @{ detail = $detail } }
         { $_ -in 403, 429 } {
-            $ra = 60; if ($r.headers -and $r.headers['Retry-After']) { $ra = [int]($r.headers['Retry-After'] | Select-Object -First 1) }
-            Reject 20 'github-rate-limited' "GitHub $($r.status) on $Method $Path" @{ retryAfterSeconds = $ra; detail = $detail }
+            $msg = if ($r.body -and $r.body.PSObject.Properties['message']) { "$($r.body.message)" } else { $detail }
+            $wait = Get-GhRateLimitWait $r.status $r.headers $msg
+            if ($wait -ge 0) {
+                $reset = Get-GhHeader $r.headers 'x-ratelimit-reset'
+                $x = @{ retryAfterSeconds = $wait; detail = $detail }; if ($reset -match '^\d+$') { $x.resetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$reset).UtcDateTime.ToString('o') }
+                Reject 20 'github-rate-limited' "GitHub $($r.status) on $Method $Path" $x
+            }
+            # (issue 92) a refusal of permission, not a rate limit: exit 30, with what GitHub said
+            Reject 30 'github-forbidden' "GitHub refused $Method $Path (403): $msg" @{ status = 403; detail = $detail }
         }
         default { Reject 20 'github-error' "GitHub $($r.status) on $Method $Path" @{ status = $r.status; detail = $detail; retryAfterSeconds = 30 } }
     }
@@ -97,6 +140,13 @@ function Invoke-GhGraphQL([string]$Query, [hashtable]$Variables = @{}) {
     if ($r.status -ne 200) { Reject 20 'github-graphql-error' "GraphQL HTTP $($r.status)" @{ retryAfterSeconds = 30 } }
     if ($r.body.PSObject.Properties['errors'] -and $r.body.errors) {
         $msg = ($r.body.errors | ForEach-Object { $_.message }) -join '; '
+        # GraphQL answers its own rate limit with 200 and an error of type RATE_LIMITED
+        if (@($r.body.errors | Where-Object { $_.PSObject.Properties['type'] -and "$($_.type)" -eq 'RATE_LIMITED' }).Count -gt 0) {
+            $reset = Get-GhHeader $r.headers 'x-ratelimit-reset'
+            $wait = if ($reset -match '^\d+$') { [int][Math]::Max(1, [long]$reset - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) } else { 60 }
+            $x = @{ retryAfterSeconds = $wait }; if ($reset -match '^\d+$') { $x.resetAt = [DateTimeOffset]::FromUnixTimeSeconds([long]$reset).UtcDateTime.ToString('o') }
+            Reject 20 'github-rate-limited' $msg $x
+        }
         Reject 20 'github-graphql-error' $msg @{ retryAfterSeconds = 30 }
     }
     return $r.body.data

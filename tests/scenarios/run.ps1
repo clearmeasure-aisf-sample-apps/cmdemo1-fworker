@@ -36,10 +36,14 @@ foreach ($k in $QcDashScenarios.Keys) { $QcScenarios[$k] = $QcDashScenarios[$k] 
 foreach ($k in $QcGateAutoScenarios.Keys) { $QcScenarios[$k] = $QcGateAutoScenarios[$k] }   # S4: the auto policy is unchanged
 . (Join-Path $PSScriptRoot 'qc-pool.ps1')     # the rule-script worker pool; scenarios named "qc: runner pool ..."
 foreach ($k in $QcPoolScenarios.Keys) { $QcScenarios[$k] = $QcPoolScenarios[$k] }
+. (Join-Path $PSScriptRoot 'budget.ps1')      # the sweep throttle and the GitHub budget (GitHubBudget.cs): scenarios named "sweep throttle: ..." and "github budget: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'baseupdate.ps1')  # master moved: base.updated and the gateway's update branch; scenarios named "base update: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'lease.ps1')       # owner leases kept by the plant (gateway/Lease.cs): scenarios named "lease: ..." join the manager suite
 foreach ($k in $LeaseScenarios.Keys) { $ManagerScenarios[$k] = $LeaseScenarios[$k] }
 . (Join-Path $PSScriptRoot 'leader.ps1')      # one acting gateway (Leader.cs): the leader lease, the hand-over, the gap; scenarios named "leader: ..." join the owner suite
+. (Join-Path $PSScriptRoot 'journal-fold.ps1') # the journal folds its repeats (Journal.ps1): scenarios named "journal fold: ..." join the owner suite
+. (Join-Path $PSScriptRoot 'manager-actions.ps1')   # the plant manager's flow verbs (gateway/Manager.cs): scenarios named "act: ..." join the manager suite
+foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerActionScenarios[$k] }
 
 # ---- the suites. ORDER IS THE PORT SLOT: append new suites at the end, never reorder (a slot is 100 ports from 6100, see lib.ps1). ----------
 # Env names the environment a suite needs (set before it, removed after it); Timing sets FACTORY_TIMING_* for the suite; Extra is merged into the gateway config.
@@ -57,7 +61,7 @@ $SuiteDefs = @(
     @{ Name = 'auto'; Policy = 'auto'; Set = $Scenarios; Extra = @{ gatewayMerge = $false } }
     @{ Name = 'peer-approved'; Policy = 'peer-approved'; Set = $ApprovalScenarios }
     @{ Name = 'merge-queue'; Policy = 'auto'; Set = $QueueScenarios; Extra = @{ mergeQueueDepth = 1; gatewayMerge = $false } }
-    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600 } }
+    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ mode = 'every-move'; autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600 } }
     @{ Name = 'qc'; Policy = 'auto'; Set = $QcScenarios; Extra = $qcOpen; Env = 'qc'; ClientHost = $true }   # ClientHost: F runs the client in one long-lived pwsh (lib.ps1)
     @{ Name = 'qc-worker'; Policy = 'auto'; Set = $QcWorkerScenarios; Extra = (New-Gate); Env = 'qc' }
     @{ Name = 'qc-gate'; Policy = 'peer-approved'; Set = $QcGateScenarios; Extra = (New-Gate); Env = 'qc' }

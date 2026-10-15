@@ -244,3 +244,19 @@ function To-Verdict([int]$n, [int]$Pr, $Files = @('docs/a.md'), [bool]$DocsOnly 
     $v = Do-Verdict $n2 $pr2
     return @{ n = $n2; pr = $pr2; verdict = $v }
 }
+
+# Edits the item's state comment the way a lease end would (the fake keeps it as a comment): $Edit gets the state hashtable.
+function Set-ItemState([int]$Item, [scriptblock]$Edit) {
+    $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
+    $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
+    & $Edit $st
+    $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
+    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+}
+function Get-ItemState([int]$Item) {
+    $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
+    [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```').Groups[1].Value | ConvertFrom-Json -AsHashtable
+}
+function Expire-Claim([int]$Item, [string]$TakenBack = '') {
+    Set-ItemState $Item { param($st) $st.claim.lease_until = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o'); if ($TakenBack) { $st.claim.taken_back = $TakenBack } }
+}
