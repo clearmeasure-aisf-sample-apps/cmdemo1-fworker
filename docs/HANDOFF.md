@@ -258,6 +258,13 @@ Closed on 2026-10-15 (issue #106):
   `--sidecar auto|on|off`, `docs/launcher.md`. Open: not yet run live on tdd; batch 3's connect-prompt change (PR 121, owner review) and this note
   must agree on step 7.
 
+Closed on 2026-10-15 (issue #103):
+
+- **#103 Base updates restarted CI on every open pull request.** New setting `baseUpdate.mode`, default `conflict-or-merge`: an owner gets
+  `base.updated` only when its pull request has a merge conflict with master (`reason: "conflict"`, also covers the silent wait of #56), and the
+  gateway brings a behind branch up to date only right before it merges a PASS (once per verdict). `every-move` keeps the old behaviour (the owner
+  suite runs with it; `FACTORY_BASE_UPDATE_MODE` overrides). `docs/design/plant-manager.md` 6a. Open: not yet seen live on tdd.
+
 Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
 
 - **#87 A code change was moved to Done when its master Build had been re-run** (272, 276). The Release and Architecture workflows start when a

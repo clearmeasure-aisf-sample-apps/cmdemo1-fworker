@@ -4,6 +4,13 @@
 #   base-update-branch  GitHub's "update branch" for one item's pull request, only when it is open, still at the head the trigger saw, has no
 #                       conflict with master and is behind; anything else is left to the owner session
 
+# baseUpdate.mode (issue 103, gateway/BaseUpdate.cs): conflict-or-merge (default), conflict or every-move; FACTORY_BASE_UPDATE_MODE overrides it.
+function Get-BaseUpdateMode {
+    $m = if ($env:FACTORY_BASE_UPDATE_MODE) { "$env:FACTORY_BASE_UPDATE_MODE" } else { $c = Get-Cfg; if ((Test-Has $c 'baseUpdate') -and (Test-Has $c.baseUpdate 'mode')) { "$($c.baseUpdate.mode)" } else { '' } }
+    if ($m -in 'every-move', 'conflict', 'conflict-or-merge') { return $m }
+    return 'conflict-or-merge'
+}
+
 function Get-BaseHead { $c = Get-Cfg; "$((Invoke-Gh -Path "$(Get-RepoPath)/branches/$($c.defaultBranch)").commit.sha)" }
 
 # behind_by of the default branch against a branch (per_page=1: the count is all that is read, not the commit list)
@@ -39,6 +46,10 @@ function Verb_base_watch($a) {
         if ($cmp -isnot [hashtable] -and $cmp.PSObject.Properties['files']) { $baseFiles = @($cmp.files | Select-Object -First 300 | ForEach-Object { "$($_.filename)" }) }
     }
     $rows = @()
+    # the conflict modes (issue 103): whether each open pull request conflicts with master. GitHub answers mergeable null until it has computed
+    # it (a later look gets it); a pull request whose head and master's are the ones of a definite earlier answer is not read again
+    $conflicts = (Test-Has $a 'conflicts') -and $a.conflicts
+    $knownC = if (Test-Has $a 'conflictKnown') { $a.conflictKnown } else { @{} }
     $items = @(if (Test-Has $a 'items') { @($a.items) | ForEach-Object { [int]$_ } | Select-Object -First 50 })
     if ($items.Count -gt 0) {
         $open = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&per_page=100")
@@ -55,6 +66,16 @@ function Verb_base_watch($a) {
                 elseif ((Test-Has $s 'pr') -and (Test-Has $s.pr 'branch') -and $s.pr.branch) { $row.branch = "$($s.pr.branch)" }
                 elseif (-not $row.skip) { $row.skip = 'no-branch' }
                 if (-not $row.skip) { $row.skip = Get-BackmergeHold $n $s $row.pr $row.head }
+                if (-not $row.skip -and $conflicts -and $row.pr -gt 0) {
+                    $kc = if ($knownC -is [System.Collections.IDictionary] -and $knownC.Contains("$n")) { $knownC["$n"] } else { $null }
+                    if ($kc -and "$($kc.prHead)" -eq $row.head -and "$($kc.head)" -eq $head -and $kc.conflict -is [bool]) { $row.conflict = $kc.conflict }
+                    else {
+                        # GitHub answers null until it has computed it (the first read starts that): one more read 3 s later, then the next look
+                        $p1 = Get-Pr $row.pr
+                        if ($null -eq $p1.mergeable) { Start-Sleep -Seconds 3; $p1 = Get-Pr $row.pr }
+                        $row.conflict = if ($p1.mergeable -eq $false -or "$($p1.mergeable_state)" -eq 'dirty') { $true } elseif ($p1.mergeable -eq $true) { $false } else { $null }
+                    }
+                }
                 if (-not $row.skip) {
                     $row.behind = Get-BehindBy $row.branch
                     if ($changed -and $row.pr -gt 0 -and $baseFiles.Count -gt 0) {
