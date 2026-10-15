@@ -36,7 +36,10 @@ function Test-DocsOnlyFiles($Files) {
 
 # Strict classification. Divergence from the live factory, on purpose: a head with zero check runs is 'pending', never green,
 # and every configured gate must be present and successful. Any failed run on the head is a failure.
-function Get-ChecksFor([string]$Sha) {
+# -Ignore: check names left out of the verdict (status, failed, pending); they stay readable in `runs`. Master's verdict ignores the checks of the
+# workflows that a finished Build starts (masterIgnoredChecks: Release, Architecture): GitHub attaches those to master's head at the time they
+# start, not to the commit that was built, so they say nothing about that commit and a skipped or failed one must not decide its fate.
+function Get-ChecksFor([string]$Sha, [string[]]$Ignore = @()) {
     $runs = @((Invoke-Gh -Path "$(Get-RepoPath)/commits/$Sha/check-runs?per_page=100").check_runs)
     $latest = @{}
     foreach ($r in $runs) {
@@ -44,7 +47,8 @@ function Get-ChecksFor([string]$Sha) {
         if (-not $latest.ContainsKey($k) -or ([DateTime]$r.started_at) -gt ([DateTime]$latest[$k].started_at)) { $latest[$k] = $r }
     }
     $failed = @(); $pending = @(); $ok = @()
-    foreach ($k in $latest.Keys) {
+    $judged = @($latest.Keys | Where-Object { -not (Test-NameIn "$_" $Ignore) })
+    foreach ($k in $judged) {
         $r = $latest[$k]
         if ($r.status -ne 'completed') { $pending += $k; continue }
         switch ($r.conclusion) {
@@ -55,6 +59,7 @@ function Get-ChecksFor([string]$Sha) {
     }
     $gates = [ordered]@{}
     foreach ($g in (Get-Cfg).ciGates) {
+        if (Test-NameIn $g $Ignore) { continue }   # an ignored check is no gate either
         if (-not $latest.ContainsKey($g)) { $gates[$g] = 'absent' }
         elseif ($failed -contains $g) { $gates[$g] = 'failure' }
         elseif ($pending -contains $g) { $gates[$g] = 'pending' }
@@ -62,9 +67,12 @@ function Get-ChecksFor([string]$Sha) {
     }
     $status = 'success'
     if ($failed.Count -gt 0) { $status = 'failure' }
-    elseif ($latest.Count -eq 0 -or $pending.Count -gt 0 -or ($gates.Values -contains 'absent') -or ($gates.Values -contains 'pending')) { $status = 'pending' }
-    return @{ status = $status; total = $latest.Count; failed = $failed.Count; failed_checks = $failed; pending_checks = $pending; gates = $gates; runs = $latest }
+    elseif ($judged.Count -eq 0 -or $pending.Count -gt 0 -or ($gates.Values -contains 'absent') -or ($gates.Values -contains 'pending')) { $status = 'pending' }
+    return @{ status = $status; total = $judged.Count; failed = $failed.Count; failed_checks = $failed; pending_checks = $pending; gates = $gates; runs = $latest }
 }
+
+# The checks a master commit is judged without (see Get-ChecksFor -Ignore).
+function Get-MasterIgnoredChecks { $c = Get-Cfg; if (Test-Has $c 'masterIgnoredChecks') { @($c.masterIgnoredChecks | ForEach-Object { "$_" }) } else { @('release', 'packages', 'architecture') } }
 
 function Get-PublicChecks($c) {
     @{ status = $c.status; total = $c.total; failed = $c.failed; failed_checks = $c.failed_checks; pending_checks = $c.pending_checks; gates = $c.gates }
