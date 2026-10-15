@@ -19,8 +19,13 @@
       "enabled": true,
       "maxConcurrent": 1,
       "maxExecutionsPerDay": 10,
-      "jobResourceId": "/subscriptions/SUBSCRIPTION-ID/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-tdd-fwrunner",
-      "managedIdentityClientId": "",
+      "jobResourceId": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-tdd-fwrunner",
+      "agent": "codex",
+      "jobs": {
+        "claude": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-tdd-fwrunner",
+        "codex": "/subscriptions/4a4dfa6d-d434-4b9e-8a88-63bbf61cfb69/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-tdd-fwrunner-codex"
+      },
+      "managedIdentityClientId": "4b168728-3e6c-4c1a-9bc2-861988d1cf7f",
       "gatewayUrl": "http://ca-cmdemo1-tdd-fworker"
     }
   }
