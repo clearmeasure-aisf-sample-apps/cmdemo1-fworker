@@ -222,6 +222,13 @@ w. **Built (2026-10-14), awaiting the owner's review: the plant manager acts on 
    seen live on tdd; the hourly and per-name counts and the log of actions are in memory (the per-item count is not); `mode: act` and the
    summary hour ship in `config/instance.json`, so the one image carries them to uat and prod; the supervisor's skill and its connect prompt
    changed (owner review).
+z. **Done (2026-10-14, issue 93): the journal folds its repeats** (`plugin/scripts/lib/Journal.ps1`, `docs/design/plant-manager.md` 8). 23
+   items had filled their 30 journal comments with `matched`, `waiting` and `reassigned` lines while they waited for a worker, and then
+   journaled nothing more. A repeat of one of these kinds now edits the comment its kind last posted (the latest line, how often, from when to
+   when, the latest 5 lines), as long as only these kinds or `offered` came after it; any other line ends the folds. Only new comments count
+   against the cap. The state keeps `journal.kinds.<event>` (count, first, last) and `journal.fold.<event>`. `waiting` lines are written at
+   most once per `timing.journalWaitingMinutes` (30). The metrics read the first line of a kind as before (the folded comment keeps the first
+   line's marker and time). Open: the items that are already full stay full.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
