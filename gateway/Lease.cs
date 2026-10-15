@@ -200,7 +200,12 @@ sealed partial class Plant
                 DropOwner(item); acceptedOwner.Remove(item); lastCall.Remove(item); lastRenew.Remove(item); checks.Remove(item);
                 foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|own-item|", StringComparison.Ordinal)).ToList()) assignments.Remove(k);
                 takenBackFrom[item] = name;
-                Journal(item, "reassigned", new JsonObject { ["reason"] = reason == "client-accepted-not-started" ? $"{name} accepted by its client but did not start within the lease; offered again" : $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again" }, "back|" + item + "|" + now.Ticks);
+                Journal(item, "reassigned", new JsonObject { ["reason"] = reason switch
+                {
+                    "client-accepted-not-started" => $"{name} accepted by its client but did not start within the lease; offered again",
+                    "released-by-plant-manager" => $"the plant manager released {name} from this item (Manager.cs); offered again",
+                    _ => $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again"
+                } }, "back|" + item + "|" + now.Ticks);
             }
         }
         RequestSweepAfterTakeBack?.Invoke();

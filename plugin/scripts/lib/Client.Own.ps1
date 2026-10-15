@@ -680,7 +680,9 @@ function Invoke-SubscribeOwn($a) {
                     # issue 72: the gateway says this session is spent and owns nothing (its item ended or was taken back). The end marker the launcher
                     # watches (FACTORY_SESSION_END_FILE) is written here, mechanically, so the loop starts a fresh session even when the model does not
                     # run end-session; the model is told on the same line. Never for a replayed event or a --spawn client (it is no launcher session).
-                    if ($ev.event -eq 'session.end' -and -not $replayed -and -not $spawn -and $env:FACTORY_SESSION_END_FILE) {
+                    # session.restart (the plant manager restarts a session, docs/design/plant-manager.md 10e) ends it the same way; the launcher's next
+                    # session of the name is resent what the name owns and resumes it.
+                    if ($ev.event -in 'session.end', 'session.restart' -and -not $replayed -and -not $spawn -and $env:FACTORY_SESSION_END_FILE) {
                         try {
                             $mdir = Split-Path -Parent $env:FACTORY_SESSION_END_FILE; if ($mdir) { New-Item -ItemType Directory -Force -Path $mdir | Out-Null }
                             Set-Content -Path $env:FACTORY_SESSION_END_FILE -Value ([DateTime]::UtcNow.ToString('o')) -NoNewline; $ev['markerWritten'] = $true
