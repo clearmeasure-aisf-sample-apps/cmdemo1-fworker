@@ -1741,6 +1741,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
     }
     public bool IsConnected(string name) { lock (gate) return workers.TryGetValue(name, out var w) && w.Connected; }
+    // a name that registered at least once since the start (connected or not)
+    public bool IsWorker(string name) { lock (gate) return workers.ContainsKey(name); }
     public string DeclaredAddress(string name) { lock (gate) return workers.TryGetValue(name, out var w) ? w.QcAddress : ""; }
     public void SetMemFree(string name, double mb) { lock (gate) { if (workers.TryGetValue(name, out var w)) w.MemFreeMb = mb; } }
     // A directed event for one worker (qc.reset, qc.teardown).

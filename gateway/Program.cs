@@ -364,34 +364,46 @@ app.MapPost("/api/v1/base-update", (HttpContext c) =>
     return Results.Text(baseWatch.Status().ToJsonString(), "application/json");
 });
 
-// Cycle-time metrics (enhancement 13), operator token only: computed by the rule script `metrics` from the items' journal comments and state
-// comments on GitHub, so they survive a restart. since: an ISO date or 30m, 24h, 7d (default 7d, at most 90d); max: items read, newest first
-// (default 100, at most 300); fresh=1 skips the cache. One computation reads every item's comments: answers are cached for metricsCacheSeconds and
-// computed one at a time.
+// Cycle-time metrics (enhancement 13), operator token and the active operator session (read-only): computed by the rule script `metrics` from the
+// items' journal comments and state comments on GitHub, so they survive a restart. since: an ISO date or 30m, 24h, 7d (default 7d, at most 90d);
+// max: items read, newest first (default 100, at most 300); fresh=1 skips the cache. One computation reads every item's comments: answers are cached
+// per since|max for metricsCacheSeconds and computed one at a time. A failed computation (any exit but 0 and 2, a timeout included) is cached too,
+// for metricsFailSeconds, for every caller except the operator token's fresh=1: a caller that retries cannot make the gateway read GitHub again and
+// again. The operator session may ask only since=24h or 7d (none is read as 7d, the script's default), with no max and no fresh: its answers come
+// from two cache entries, so it causes at most one computation per entry in 120 s while they succeed, and one in 30 s while they fail.
 var metricsCache = new Dictionary<string, (DateTime At, int Code, string Json)>();
 var metricsGate = new SemaphoreSlim(1, 1);
-const int metricsCacheSeconds = 120;
+const int metricsCacheSeconds = 120, metricsFailSeconds = 30;
+static bool MetricsFresh((DateTime At, int Code, string Json) e) => (DateTime.UtcNow - e.At).TotalSeconds < (e.Code is 0 or 2 ? metricsCacheSeconds : metricsFailSeconds);
+static int MetricsStatus(int code) => code == 0 ? 200 : code == 2 ? 400 : 502;
 app.MapGet("/api/v1/metrics", async (HttpContext c) =>
 {
-    if (Who(c).Kind != "admin") return Results.StatusCode(403);
+    if (Admitted(c).Kind != "admin") return Results.StatusCode(403);
     var since = c.Request.Query["since"].ToString().Trim(); var maxText = c.Request.Query["max"].ToString().Trim();
+    if (OperatorActive(c))
+    {
+        if (since is not ("" or "24h" or "7d") || maxText != "" || c.Request.Query.ContainsKey("fresh"))
+            return Results.Json(new { ok = false, code = "usage", reason = "the operator session reads the metrics with since=24h or 7d (or none), no max and no fresh: answers come from a 120 s cache and a miss computes them", exit = 2 }, statusCode: 400);
+        if (since == "") since = "7d";   // the script's default: one cache entry for both spellings
+    }
     if (since.Length > 40 || maxText.Length > 4 || (maxText != "" && !int.TryParse(maxText, out _))) return Results.Json(new { ok = false, code = "usage", reason = "since is an ISO date or 30m, 24h, 7d; max a number", exit = 2 }, statusCode: 400);
     var key = since + "|" + maxText;
     var fresh = c.Request.Query["fresh"].ToString() == "1";
     // a cached answer does not wait behind a computation that is running
-    lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit0) && (DateTime.UtcNow - hit0.At).TotalSeconds < metricsCacheSeconds) return Results.Text(hit0.Json, "application/json", Encoding.UTF8, hit0.Code == 0 ? 200 : 400);
+    lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit0) && MetricsFresh(hit0)) return Results.Text(hit0.Json, "application/json", Encoding.UTF8, MetricsStatus(hit0.Code));
     await metricsGate.WaitAsync(c.RequestAborted);
     try
     {
-        lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit) && (DateTime.UtcNow - hit.At).TotalSeconds < metricsCacheSeconds) return Results.Text(hit.Json, "application/json", Encoding.UTF8, hit.Code == 0 ? 200 : 400);
+        lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit) && MetricsFresh(hit)) return Results.Text(hit.Json, "application/json", Encoding.UTF8, MetricsStatus(hit.Code));
         var args = new JsonObject(); if (since != "") args["since"] = since; if (maxText != "") args["max"] = int.Parse(maxText);
         var (code, output) = await runner.RunAsync("metrics", args.ToJsonString(), TimeSpan.FromMinutes(3));
         lock (metricsCache)
         {
-            foreach (var k in metricsCache.Where(kv => (DateTime.UtcNow - kv.Value.At).TotalSeconds >= metricsCacheSeconds).Select(kv => kv.Key).ToList()) metricsCache.Remove(k);
-            if (code == 0 || code == 2) metricsCache[key] = (DateTime.UtcNow, code, output);
+            foreach (var k in metricsCache.Where(kv => !MetricsFresh(kv.Value)).Select(kv => kv.Key).ToList()) metricsCache.Remove(k);
+            // a failed fresh=1 of the operator token never replaces a good entry
+            if (!fresh || code is 0 or 2 || !metricsCache.ContainsKey(key)) metricsCache[key] = (DateTime.UtcNow, code, output);
         }
-        return Results.Text(output, "application/json", Encoding.UTF8, code == 0 ? 200 : code == 2 ? 400 : 502);
+        return Results.Text(output, "application/json", Encoding.UTF8, MetricsStatus(code));
     }
     finally { metricsGate.Release(); }
 });
@@ -424,8 +436,9 @@ app.MapGet("/api/v1/plugin", (HttpContext c) =>
 // The messaging and manager blocks of /status and of the dashboard JSON (worker-messaging.md 7, 8): the plant's states and counts with the
 // Messenger's counters. /status carries counts and states only; the dashboard adds the last digest and the decision log for the operator's page.
 // The operator SESSION credential (o1., Auth.cs) is admitted at exactly the endpoints that call Admitted or OperatorActive, and nowhere else: there it
-// acts as the operator does (its notes are operator notes). It must hold the operator slot, and messaging must be switched on. Everywhere else its
-// kind is "operator", which no endpoint accepts: it cannot mint or revoke a credential, switch messaging, set a capacity, drain, or call a verb.
+// acts as the operator does (its notes are operator notes). It must hold the operator slot, and messaging must be switched on. Since 2026-10-14 that
+// includes a worker's capacity, drain and resume (POST /workers/{name}/...) and the read-only cycle-time metrics. Everywhere else its kind is
+// "operator", which no endpoint accepts: it cannot mint or revoke a credential, switch messaging, read the dashboard JSON or call a verb.
 bool OperatorActive(HttpContext c) => Who(c) is { Kind: "operator" } w && ownerMode && messaging.OperatorEnabled && messaging.Enabled && plant.ActiveOperator() == w.Name;
 // The principal it acts as carries the session's NAME: the admin token's has none. What the session sends is stamped with that name and the kind
 // "operator-session" (Messaging.cs), never as the person's "operator"; log lines name it too (By).
@@ -797,14 +810,21 @@ app.MapGet("/api/v1/wait", async (HttpContext ctx) =>
 app.MapPost("/api/v1/workers/{name}/{action}", (string name, string action, HttpContext ctx) =>
 {
     var who = Who(ctx);
-    // the operator session sets a session's messaging mode, as the operator does, and nothing else here (no capacity, no drain or resume)
-    var opMode = action == "messaging" && OperatorActive(ctx);
-    if (!(opMode || who.Kind == "admin" || (who.Kind == "worker" && who.Name == name))) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"a worker may only change itself\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+    // the operator session acts here as the operator does for exactly four actions: a session's messaging mode, its capacity, drain and resume
+    // (owner decision 2026-10-14). It never revokes or mints here (those are routes of their own, admin token only).
+    var opMode = action is "messaging" or "capacity" or "drain" or "resume" && OperatorActive(ctx);
+    var asOperator = who.Kind == "admin" || opMode;
+    if (!(asOperator || (who.Kind == "worker" && who.Name == name))) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"a worker may only change itself\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     if (action == "capacity")
-    {   // operator only: how many items this worker name may own at once
-        if (who.Kind != "admin") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"only the operator sets a worker's capacity\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+    {   // the operator (or the active operator session): how many items this worker name may own at once
+        if (!asOperator) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"only the operator sets a worker's capacity\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+        if (opMode && (!Auth.ValidName(name) || messaging.ManagerNames.Contains(name) || messaging.OperatorNames.Contains(name))) return Fail(400, "usage", "the name is a worker session's", 2);
+        // a name that has not registered since the gateway started gets no override from the session (the overrides are kept per name, so they
+        // must not grow without bound)
+        if (opMode && !plant.IsWorker(name)) return Results.Text("{\"ok\":false,\"code\":\"not-found\",\"reason\":\"no such worker\",\"exit\":12}", "application/json", Encoding.UTF8, 404);
         if (!int.TryParse(ctx.Request.Query["value"], out var cv) || cv < 1 || cv > 20) return Results.Text("{\"ok\":false,\"code\":\"usage\",\"reason\":\"value must be 1 to 20\",\"exit\":2}", "application/json", Encoding.UTF8, 400);
         plant.SetCapacity(name, cv);
+        if (opMode) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["worker"] = "capacity", ["name"] = name, ["capacity"] = Math.Clamp(cv, 1, 20), ["by"] = By(ctx) }.ToJsonString());
         return Results.Text(JsonSerializer.Serialize(new { ok = true, name, capacity = Math.Clamp(cv, 1, 20) }), "application/json");
     }
     if (action == "messaging" && messaging.Configured && ownerMode)
@@ -815,9 +835,12 @@ app.MapPost("/api/v1/workers/{name}/{action}", (string name, string action, Http
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["message"] = "mode", ["name"] = name, ["mode"] = mode, ["by"] = By(ctx) }.ToJsonString());
         return Results.Json(new { ok = true, name, messaging = mode, exit = 0 });
     }
-    if (action is not ("drain" or "resume") || opMode) return Results.NotFound();
-    return plant.SetDraining(name, action == "drain", who.Kind == "admin") ? Results.Text(JsonSerializer.Serialize(new { ok = true, name, draining = plant.IsDraining(name) }), "application/json")
-        : Results.Text("{\"ok\":false,\"code\":\"not-found\",\"reason\":\"no such worker\",\"exit\":12}", "application/json", Encoding.UTF8, 404);
+    if (action is not ("drain" or "resume")) return Results.NotFound();
+    if (opMode && (!Auth.ValidName(name) || messaging.ManagerNames.Contains(name) || messaging.OperatorNames.Contains(name))) return Fail(400, "usage", "the name is a worker session's", 2);
+    // the operator session's drain is the operator's: it belongs to the name and holds across its reconnects and new sessions (issue 80)
+    if (!plant.SetDraining(name, action == "drain", asOperator)) return Results.Text("{\"ok\":false,\"code\":\"not-found\",\"reason\":\"no such worker\",\"exit\":12}", "application/json", Encoding.UTF8, 404);
+    if (opMode) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["worker"] = action, ["name"] = name, ["by"] = By(ctx) }.ToJsonString());
+    return Results.Text(JsonSerializer.Serialize(new { ok = true, name, draining = plant.IsDraining(name) }), "application/json");
 });
 
 app.MapGet("/api/v1/events", async (HttpContext ctx) =>

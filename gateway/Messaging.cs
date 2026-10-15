@@ -22,7 +22,7 @@ sealed class MessagingSettings
     // The factory operator session (Operator.cs): operator.* of the config. Off by default; needs messaging.enabled.
     public bool OperatorEnabled;
     public string[] OperatorNames = Array.Empty<string>();
-    public int OperatorTokenGeneration = 1, OperatorMaxSelfMergesPerDay = 3;
+    public int OperatorTokenGeneration = 1, OperatorMaxSelfMergesPerDay = 12;
     public string OperatorRequiredModelTier = "premium", OperatorRequiredEffort = "low";
     // timing.opSelfAnswerMinutes: how long a question the operator session answered itself keeps its release-check from answering quiet
     public double OperatorSelfAnswerMinutes = 10;
@@ -190,7 +190,7 @@ sealed class MessagingSettings
         {
             s.OperatorNames = (op?["allowedNames"] is JsonArray oa ? oa.Select(n => n!.ToString()).ToArray() : new[] { "operator-session" }).Where(Auth.ValidName).ToArray();
             s.OperatorTokenGeneration = op?["tokenGeneration"]?.GetValue<int>() ?? 1;
-            s.OperatorMaxSelfMergesPerDay = Limit(op, "maxSelfMergesPerDay", 3, 0);
+            s.OperatorMaxSelfMergesPerDay = Limit(op, "maxSelfMergesPerDay", 12, 0);
             s.OperatorRequiredModelTier = op?["requiredModelTier"]?.ToString() ?? "premium"; s.OperatorRequiredEffort = op?["requiredEffort"]?.ToString() ?? "low";
             s.Reserved = Auth.ReservedNames(names.Concat(s.OperatorNames));
             s.OperatorSelfAnswerMinutes = Timing("opSelfAnswerMinutes", 10) is var sa && double.IsFinite(sa) && sa > 0 ? sa : 10;

@@ -84,8 +84,13 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   2. deploy only when the plant is quiet; announce the restart to the connected sessions, verify that they reconnect, roll back otherwise;
   3. protected areas need the owner: credentials and tokens, authorization, revoke, the deploy pipeline, the operator's own skill and
      guard rails, uat and prod;
-  4. a daily limit of self-merged releases, with a report;
+  4. a daily limit of self-merged releases, with a report (12 a day since 2026-10-14, with small changes batched; 3 before);
   5. every change is recorded as an issue in this repository.
+- **The operator session acts without a person inside its guard rails** (2026-10-14, pull request "operator authority", owner review): it takes
+  the recommended option and builds it, the owner hearing of it in the changelog issue; it merges its own green, unprotected pull requests
+  as soon as guard rails a to e allow, without waiting; it may drain, resume and set the capacity of a worker name as the operator does, and read the
+  cycle-time metrics. It still cannot mint, revoke, switch messaging or call a verb, and container logs stay with the operator (no read-only
+  wrapper exists).
 - **uat and prod stay manual.**
 - **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so; the connect prompt text is unchanged because its hash is pinned by the operator suite, a protected path), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
@@ -444,7 +449,7 @@ The role is on in the deployed image (`operator.enabled` in `config/deploy.overr
    It does not get the operator token, the Octopus key or any GitHub App key.
 3. The prompt clones this repository, has the session read `CLAUDE.md` and this file, and hands over to
    `plugin/skills/factory-operator/SKILL.md`. The dashboard shows it in the group "Factory operator" with its model check and the
-   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 3).
+   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 12).
 4. To stop it: revoke the name `operator-session` on the dashboard, or switch messaging off (both act at once). To stop the role: set
    `operator.enabled` false in the overrides. Its GitHub connection is removed on GitHub.
 
