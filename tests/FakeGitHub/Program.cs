@@ -13,6 +13,28 @@ builder.Logging.SetMinimumLevel(LogLevel.Warning);
 var app = builder.Build();
 var world = new World();
 var gate = new object();
+// FAKE_PROXY_PORT: a TCP forwarder in front of a gateway, as the platform's ingress is (the leader scenarios, issue 94). A connection goes to the
+// backend that /_fake/proxy { port } named when it was opened and stays there (as a stream stays on the old revision); 0 refuses connections.
+if (int.TryParse(Environment.GetEnvironmentVariable("FAKE_PROXY_PORT"), out var proxyPort) && proxyPort > 0)
+{
+    var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, proxyPort); listener.Start();
+    _ = Task.Run(async () =>
+    {
+        while (true)
+        {
+            System.Net.Sockets.TcpClient inbound; try { inbound = await listener.AcceptTcpClientAsync(); } catch { return; }
+            int backend; lock (gate) backend = world.ProxyBackend;
+            _ = Task.Run(async () =>
+            {
+                using var a = inbound; if (backend <= 0) return;
+                using var b = new System.Net.Sockets.TcpClient();
+                try { await b.ConnectAsync(System.Net.IPAddress.Loopback, backend); } catch { return; }
+                var sa = a.GetStream(); var sb = b.GetStream();
+                await Task.WhenAny(sa.CopyToAsync(sb), sb.CopyToAsync(sa));
+            });
+        }
+    });
+}
 
 app.Run(async ctx =>
 {
@@ -31,7 +53,9 @@ app.Run(async ctx =>
     // /_fake/latency: the answer to a matching request is held back, as a slow GitHub would (the test control itself is never slowed)
     int wait; lock (gate) { wait = world.LatencyFor(method, path, body); }
     if (wait > 0) await Task.Delay(wait);
-    lock (gate) { res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString()); }
+    string? etag;
+    lock (gate) { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString()); etag = world.Etag; }
+    if (etag != null) ctx.Response.Headers.ETag = etag;
     ctx.Response.StatusCode = res.Item1;
     // as GitHub: a job log and an artifact archive are answered with a redirect to a signed address of another store
     if (res.Item2 is Redirect go) { ctx.Response.Headers.Location = $"http://127.0.0.1:{port}{go.To}"; return; }
@@ -67,7 +91,9 @@ sealed class World
     readonly HashSet<string> refs = new();
     // what a ref points at (a ref created before this was kept points at master's head) and the commits written through git/commits (the plant snapshot)
     readonly Dictionary<string, string> refSha = new();
-    readonly Dictionary<string, (string Message, string Tree)> commits = new();
+    readonly Dictionary<string, (string Message, string Tree, List<string> Parents)> commits = new();
+    // a conditional read (If-None-Match of the request) and the ETag of the answer, for the one ref by its path (as GitHub: 304 when unchanged)
+    public string IfNoneMatch = ""; public string? Etag;
     readonly Dictionary<string, (string Sha, List<string> Files, List<JsonObject> Objs)> branches = new();
     long nextReview = 1;
     readonly Dictionary<string, (string Profile, double Delay)> branchProfile = new();
@@ -185,19 +211,27 @@ sealed class World
         if ((m = Regex.Match(path, $"^{root}/git/ref/(.+)$")).Success && method == "GET")
         {
             var r = "refs/" + m.Groups[1].Value;
-            return refs.Contains(r) ? (200, J(("ref", r), ("object", J(("sha", refSha.TryGetValue(r, out var rsha) ? rsha : masterSha), ("type", "commit"))))) : (404, "{\"message\":\"Not Found\"}");
+            if (!refs.Contains(r)) return (404, "{\"message\":\"Not Found\"}");
+            var rsha0 = refSha.TryGetValue(r, out var rsha) ? rsha : masterSha;
+            Etag = $"W/\"{rsha0}\"";
+            if (IfNoneMatch != "" && IfNoneMatch == Etag) return (304, null);
+            return (200, J(("ref", r), ("object", J(("sha", rsha0), ("type", "commit")))));
         }
         if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "PATCH")
         {
             var r = "refs/" + m.Groups[1].Value;
             if (!refs.Contains(r)) return (422, "{\"message\":\"Reference does not exist\"}");
             if (b?["sha"]?.ToString() is not { Length: > 0 } ns) return (422, "{\"message\":\"Invalid request.\"}");
+            // as GitHub: without force the ref moves only to a commit that descends from the one it points at (a fast forward)
+            var force = b["force"] is JsonValue fv && fv.TryGetValue<bool>(out var fb) && fb;
+            var curSha = refSha.TryGetValue(r, out var cs0) ? cs0 : masterSha;
+            if (!force && ns != curSha && !Descends(ns, curSha)) return (422, "{\"message\":\"Update is not a fast forward\"}");
             refSha[r] = ns; return (200, J(("ref", r), ("object", J(("sha", ns), ("type", "commit")))));
         }
         if (path == root + "/git/commits" && method == "POST")
         {
             if (b?["tree"]?.ToString() is not { Length: > 0 } tree || b["message"] is null) return (422, "{\"message\":\"Invalid request.\"}");
-            var sha = NewSha(); commits[sha] = (b["message"]!.ToString(), tree);
+            var sha = NewSha(); commits[sha] = (b["message"]!.ToString(), tree, (b["parents"] as JsonArray ?? new JsonArray()).Select(x => x!.ToString()).ToList());
             return (201, J(("sha", sha), ("message", commits[sha].Message), ("tree", J(("sha", tree)))));
         }
         if ((m = Regex.Match(path, $"^{root}/git/commits/([0-9a-f]+)$")).Success && method == "GET")
@@ -380,6 +414,13 @@ sealed class World
     }
 
     Check? FindCheck(long id) => checks.Values.SelectMany(x => x).FirstOrDefault(c => c.Id == id);
+    // whether commit `sha` has `ancestor` among its parents, their parents and so on (the commits written through git/commits)
+    bool Descends(string sha, string ancestor)
+    {
+        var todo = new Stack<string>(); todo.Push(sha); var seen = new HashSet<string>();
+        while (todo.Count > 0) { var c = todo.Pop(); if (!seen.Add(c) || !commits.TryGetValue(c, out var cm)) continue; foreach (var p in cm.Parents) { if (p == ancestor) return true; todo.Push(p); } }
+        return false;
+    }
     // the log of a job nobody wrote a log for: what a runner prints at the least
     static string DefaultLog(Check c) => $"{c.Started:yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[group]Run {c.Name}\n{c.Started.AddSeconds(1):yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[endgroup]\n"
         + (c.Conclusion == "failure" ? $"{c.Started.AddSeconds(2):yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[error]Process completed with exit code 1.\n" : "");
@@ -518,6 +559,7 @@ sealed class World
         return (404, null);
     }
 
+    public int ProxyBackend;   // the gateway port the proxy forwards new connections to (FAKE_PROXY_PORT)
     int latencyMs; Regex? latencyMatch; int refPage;   // refPage 0: matching-refs does not page (GitHub)
     public int LatencyFor(string method, string path, string body) => latencyMs > 0 && !path.StartsWith("/_fake/") && latencyMatch!.IsMatch(method + " " + path + "\n" + body) ? latencyMs : 0;
     (int, object?) Control(string method, string what, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b)
@@ -526,6 +568,8 @@ sealed class World
         {
             case "latency":   // { ms, match }: every request whose "METHOD path" line plus body matches the regular expression waits ms first; ms 0 ends it
                 latencyMs = b?["ms"]?.GetValue<int>() ?? 0; latencyMatch = latencyMs > 0 ? new Regex(b?["match"]?.ToString() ?? ".") : null; return (200, J(("ok", true)));
+            case "proxy":   // { port }: new connections of the proxy (FAKE_PROXY_PORT) go to this port; 0 refuses them
+                ProxyBackend = b?["port"]?.GetValue<int>() ?? 0; return (200, J(("ok", true), ("port", ProxyBackend)));
             case "ref-page":   // { size }: matching-refs pages, with at most size refs a page (1 to 100); size 0 or none: it does not page, as GitHub
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":

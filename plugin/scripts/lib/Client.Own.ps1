@@ -553,6 +553,7 @@ function Invoke-QuestionReask($Cfg, [string]$Cred, [string]$Name, [string]$Epoch
 # --host (else FACTORY_HOST, else the computer's name) is the host whose limits this session shares (gateway/Hosts.cs).
 # subscribe --own --supervisor --name N --model ID --effort E: the supervisor session (worker-messaging.md 6.4). It registers with the supervisor
 # credential, prints supervisor.questions and supervisor.patrol as the envelopes of 5.2 (and stream.* lines), and heartbeats every 20 s.
+# A stream.replaced with reconnect (the gateway process handed over to a newer one, issue 94) is printed as stream.handover and the client connects again.
 # Exits: 40 when a newer stream of the same name replaced this one (stream.replaced); the body's exit (2, 10, 30, 40) when the gateway refuses the
 # registration with 400, 401, 403 or 409 (stream.refused). Only network errors and 5xx answers are retried.
 function Invoke-SubscribeOwn($a) {
@@ -597,9 +598,10 @@ function Invoke-SubscribeOwn($a) {
         try { $ps = Sync-Plugin $cfg; if ($ps.ok -and $ps.updated) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'plugin.updated'; from = $ps.from; to = $ps.to; restart_needed = $true } | ConvertTo-Json -Compress)); [Console]::Out.Flush() } } catch { }
         $http = [Net.Http.HttpClient]::new(); $http.Timeout = [TimeSpan]::FromHours(24)
         try {
-            $q = "name=$([uri]::EscapeDataString($name))&type=$type&capabilities=$([uri]::EscapeDataString($caps))&capacity=$cap&roles=$([uri]::EscapeDataString($roles))$qcExtra&messaging=1"
+            # handover=1: this client reconnects on stream.replaced with reconnect (a newer gateway process took over, issue 94)
+            $q = "name=$([uri]::EscapeDataString($name))&type=$type&capabilities=$([uri]::EscapeDataString($caps))&capacity=$cap&roles=$([uri]::EscapeDataString($roles))$qcExtra&messaging=1&handover=1"
             if ($sup) {
-                $q = "name=$([uri]::EscapeDataString($name))&supervisor=1&messaging=1"
+                $q = "name=$([uri]::EscapeDataString($name))&supervisor=1&messaging=1&handover=1"
                 foreach ($k in 'model', 'effort') { if ($a.ContainsKey($k)) { $q += "&$k=$([uri]::EscapeDataString("$($a[$k])"))" } }
             }
             $req = [Net.Http.HttpRequestMessage]::new('GET', "$($cfg.url)/api/v1/events?$q")
@@ -628,6 +630,9 @@ function Invoke-SubscribeOwn($a) {
                     $ev = try { $line.Substring(5).Trim() | ConvertFrom-Json -AsHashtable } catch { $null }
                     $evId = $pendingId; $pendingId = ''
                     if ($null -eq $ev) { if ($evId) { $lastId = $evId }; continue }
+                    # a newer gateway process took over (reconnect true): the line is printed and the client connects again, to the new process; a
+                    # newer stream of this name (no reconnect) ends this client
+                    if ($ev.event -eq 'stream.replaced' -and $ev['reconnect'] -eq $true) { [Console]::Out.WriteLine(([ordered]@{ provider = 'client'; event = 'stream.handover'; reason = 'the gateway handed the plant over to a newer process; this client connects to it again by itself (nothing to do)' } | ConvertTo-Json -Compress)); [Console]::Out.Flush(); break }
                     if ($ev.event -eq 'stream.replaced') { [Console]::Out.WriteLine(($ev | ConvertTo-Json -Compress -Depth 6)); [Console]::Out.Flush(); exit 40 }
                     # the heartbeat starts once messaging is on, and again after a reconnect if its job ended (401, 403 or 404); a job still queued is kept, not
                     # duplicated; a failure to start it is reported, never fatal
