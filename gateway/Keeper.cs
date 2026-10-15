@@ -111,7 +111,9 @@ sealed partial class Plant
     // (at most once per keeperBacklogLowMinutes, 60).
     public void KeeperBacklog(int waiting)
     {
-        if (!Keeper.Enabled || waiting >= Keeper.MinTechnicalDesign) return;
+        if (!Keeper.Enabled) return;
+        lock (gate) kpDesignWaiting = waiting;
+        if (waiting >= Keeper.MinTechnicalDesign) return;
         lock (gate)
         {
             if (kpJobSent.TryGetValue("backlog-low|0", out var last) && (DateTime.UtcNow - last).TotalMinutes < Keeper.BacklogLowMinutes) return;
@@ -119,6 +121,11 @@ sealed partial class Plant
         }
         KeeperJob("backlog-low", 0, Keeper.Column, $"waiting-{Math.Max(0, waiting)}-of-{Keeper.MinTechnicalDesign}");
     }
+
+    // A keeper that registers is told the open backlog-low at once from the last full sweep's count: full sweeps are throttled (issue 92), so the
+    // next one may be an interval away.
+    int? kpDesignWaiting;
+    public void KeeperRaiseOpen() { int? w; lock (gate) w = kpDesignWaiting; if (w is { } wv) KeeperBacklog(wv); }
 
     // The day's new items (create-item, split-item, a follow-up of amend-criteria): how many may still be created, and the record of those that were.
     public int KeeperItemsLeft() { lock (gate) { var now = DateTime.UtcNow; kpCreated.RemoveAll(x => (now - x.At).TotalHours >= 24); return Math.Max(0, Keeper.MaxNewItemsPerDay - kpCreated.Sum(x => x.N)); } }

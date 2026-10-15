@@ -1615,6 +1615,7 @@ async Task KeeperStream(HttpContext ctx, Principal who, string name, long after)
     if (!Auth.ValidRegistration("persistent-local", Array.Empty<string>(), Array.Empty<string>(), model, effort)) { await Refuse(ctx, 400, "usage", "model and effort must use the registration values (worker-messaging.md 2.2)", 2); return; }
     var (ok, active, since, ch, replay) = plant.RegisterKeeper(name, model, effort, after);
     if (!ok) { ctx.Response.StatusCode = 409; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "keeper-active", reason = "another backlog keeper is active and was heard within timing.mgrTakeoverSeconds", name = active, since, exit = 40 }); return; }
+    plant.KeeperRaiseOpen();
     ctx.Response.Headers.ContentType = "text/event-stream"; ctx.Response.Headers.CacheControl = "no-cache";
     try { await Pump(ctx, ch!, replay, new JsonObject { ["provider"] = "gateway", ["event"] = "keeper.registered", ["name"] = name, ["epoch"] = plant.Epoch, ["modelCheck"] = messaging.ModelCheckFor(model, effort, keeper.RequiredModelTier, keeper.RequiredEffort) }.ToJsonString()); }
     catch (OperationCanceledException) { }
