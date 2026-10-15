@@ -29,6 +29,7 @@ sealed partial class Plant
                     ["pr"] = a.Pr, ["pin"] = a.Pin, ["accepted"] = a.Accepted, ["acceptedAt"] = Iso(a.AcceptedAt), ["createdAt"] = Iso(a.CreatedAt)
                 }).ToArray()),
                 ["owners"] = new JsonObject(ownerOf.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
+                ["drained"] = new JsonArray(drainedNames.OrderBy(x => x, StringComparer.Ordinal).Select(x => (JsonNode)x).ToArray()),   // issue 80
                 ["bots"] = new JsonObject(botOf.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
                 ["ownedSince"] = new JsonObject(ownedSince.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value.ToString("o")))),
                 ["owned"] = new JsonObject(ownedInfo.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)new JsonObject
@@ -76,6 +77,9 @@ sealed partial class Plant
                 if (Num(JsonValue.Create(kv.Key)) is var item and > 0 && Name(kv.Value) is { Length: > 0 } name && !ownerOf.ContainsKey(item)) { ownerOf[item] = name; no++; }
             foreach (var kv in s["bots"] as JsonObject ?? new JsonObject())
                 if (Num(JsonValue.Create(kv.Key)) is var item and > 0 && Name(kv.Value) is { Length: > 0 } name && !botOf.ContainsKey(item)) botOf[item] = name;
+            // issue 80: the operator's drains of names (an older snapshot has none); a name already registered is draining at once
+            foreach (var d in s["drained"] as JsonArray ?? new JsonArray())
+                if (Name(d) is { Length: > 0 } dn && drainedNames.Add(dn) && workers.TryGetValue(dn, out var dw)) dw.Draining = true;
             if (Msg.On)
             {
                 foreach (var kv in s["ownedSince"] as JsonObject ?? new JsonObject())
@@ -89,6 +93,7 @@ sealed partial class Plant
                 var mine = ownerOf.Where(kv => kv.Value == w.Name).Select(kv => kv.Key).ToList();
                 if (mine.Count > 0) Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "ownership.restored", ["items"] = new JsonArray(mine.Select(i => (JsonNode)i).ToArray()) }.ToJsonString(), false);
                 foreach (var a in assignments.Values.Where(a => a.Worker == w.Name && !a.Accepted && !IsQc(a))) Push(w, AssignedJson(a), false);
+                ResendAccepted(w);   // issue 81
             }
             return (na, no, "");
         }
