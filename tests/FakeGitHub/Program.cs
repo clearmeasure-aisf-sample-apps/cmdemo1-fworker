@@ -154,7 +154,7 @@ sealed class World
         {
             var i = issues[int.Parse(m.Groups[1].Value)];
             if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
-            return (200, J(("number", i.Number)));
+            return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body)));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)/comments$")).Success)
         {
@@ -481,7 +481,7 @@ sealed class World
         if (q.Contains("items(first"))
         {
             var nodes = issues.Values.Where(i => i.Card != null).Select(i => (JsonNode)J(("id", i.Card), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column))),
-                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
+                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
             return (200, Data(J(("organization", J(("projectV2", J(("items", J(("pageInfo", J(("hasNextPage", false), ("endCursor", null))), ("nodes", new JsonArray(nodes)))))))))));
         }
         if (q.Contains("fields(first"))
