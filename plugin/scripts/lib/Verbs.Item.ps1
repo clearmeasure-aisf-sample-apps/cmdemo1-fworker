@@ -166,6 +166,8 @@ function Verb_claim_item($a) {
     if (-not (Test-Label $info $c.label)) { Reject 10 'no-worker-label' "item does not carry the label '$($c.label)'" }
     if (Test-Label $info $c.rivalLabel) { Reject 10 'ambiguous-owner' "item carries both '$($c.label)' and '$($c.rivalLabel)'; one owner per item" }
     if (Test-Label $info $c.demoLabel) { Reject 10 'demo-exclusion' "item carries the '$($c.demoLabel)' label" }
+    $holdLabel = Get-HoldLabel $info.labels
+    if ($holdLabel) { Reject 10 'held-by-label' "item carries the '$holdLabel' label: a person holds it; no session takes it until the label is removed" @{ label = $holdLabel } }
     if (-not (Test-NameIn "$($info.column)" $c.columns.ai)) { Reject 10 'not-ai-column' "item is in '$($info.column)', which this worker does not work" }
     if ((Test-Has $a 'column') -and $a.column -and $a.column -ine $info.column) {
         if ((Get-ColumnIndex $info.column) -gt (Get-ColumnIndex $a.column)) { Reject 11 'column-changed' "item moved on to '$($info.column)'" }
@@ -183,16 +185,37 @@ function Verb_claim_item($a) {
     if ($info.column -ieq $c.columns.validation -and (Test-Has $s 'verdict') -and -not $s.verdict.processed -and -not (Test-Has $a 'force')) {
         Reject 10 'verdict-already-recorded' 'a validation verdict is already recorded for this round; nothing is left for a session to do (a PASS under merge policy auto is merged by the gateway)'
     }
-    $launches = 0; $mode = 'first'
+    $launches = 0; $mode = 'first'; $sessionLaunches = 0
     if (Test-Has $s 'claim') {
         if ((Test-ClaimLive $s) -and $s.claim.holder -ne $holder) { Reject 40 'claim-held' "claim held by $($s.claim.holder) until $($s.claim.lease_until)" @{ holder = $s.claim.holder; lease_until = $s.claim.lease_until } }
         if ((Test-ClaimLive $s) -and $s.claim.holder -eq $holder) { return @{ ok = $true; id = $n; claimed = $true; already = $true; column = $info.column; lease_until = $s.claim.lease_until } }
         # expired: ended without signal
         $launches = [int]$s.claim.launches; $mode = 'relaunch'
-        if ($launches -gt [int]$t.maxRelaunches) {
-            Set-Park $s 'watchdog-relaunch-budget' ($t.parkHours * 60); $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n
-            Add-Comment $n "relaunch budget ($($t.maxRelaunches)) spent in **$($info.column)**; parked for a human."
-            Reject 10 'parked' 'watchdog-relaunch-budget' @{ park = $s.park }
+        # A claim the gateway took back (gateway/Lease.cs: the client accepted and no session started, or the owner did not answer item.check) ended
+        # through session trouble, not through the item: on 2026-10-14 six items were parked by sessions that were refused by the permission
+        # classifier, lost their stream or were spent. Such a relaunch does not spend the item's budget (maxRelaunches); it counts against
+        # maxSessionRelaunches (default 10) instead, whose park says so (session-relaunch-budget) and is lifted by the sweep once a worker is free.
+        $sessionCause = Test-Has $s.claim 'taken_back'
+        $sessionLaunches = if (Test-Has $s.claim 'session_launches') { [int]$s.claim.session_launches } else { 0 }
+        if ($sessionCause) { $sessionLaunches++; $launches = [Math]::Max(0, $launches - 1) } else { $sessionLaunches = 0 }
+        $maxSession = if (Test-Has $t 'maxSessionRelaunches') { [int]$t.maxSessionRelaunches } else { 10 }
+        $code = $null
+        if ($sessionCause -and $sessionLaunches -gt $maxSession) { $code = 'session-relaunch-budget' }
+        elseif ($launches -gt [int]$t.maxRelaunches) {
+            # issue: a Functional Testing round whose sessions all ended without a verdict is parked for that (296 was parked as a relaunch budget)
+            $code = if ($info.column -ieq $c.columns.validation -and -not (Test-Has $s 'verdict')) { 'validation-no-verdict' } else { 'watchdog-relaunch-budget' }
+        }
+        if ($code) {
+            $was = if ($sessionCause) { "$($s.claim.taken_back)" } else { '' }
+            Set-Park $s $code ($t.parkHours * 60); $s.park.launches = $launches; $s.park.session_launches = $sessionLaunches; if ($was) { $s.park.last_take_back = $was }
+            $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n
+            $why = switch ($code) {
+                'session-relaunch-budget' { "$sessionLaunches sessions in a row lost **$($info.column)** to session trouble (last: $was), over the limit of $maxSession; parked until a worker is free (the sweep lifts it)." }
+                'validation-no-verdict' { "relaunch budget ($($t.maxRelaunches)) spent in **$($info.column)** without a validation verdict; parked for a human." }
+                default { "relaunch budget ($($t.maxRelaunches)) spent in **$($info.column)**; parked for a human." }
+            }
+            Add-Comment $n $why
+            Reject 10 'parked' $code @{ park = $s.park }
         }
         Remove-ClaimRef $n
     }
@@ -220,6 +243,7 @@ function Verb_claim_item($a) {
     if ($mode -ne 'relaunch') { Reset-Refusals $n }
     $s.claim = @{ holder = $holder; column = $info.column; started = ConvertTo-Iso (Get-UtcNow); heartbeat = ConvertTo-Iso (Get-UtcNow)
         lease_until = ConvertTo-Iso ((Get-UtcNow).AddMinutes($t.leaseMinutes)); launches = $launches + 1 }
+    if ($sessionLaunches -gt 0) { $s.claim.session_launches = $sessionLaunches }
     if ((Test-Has $a 'owner') -and $a.owner) { $s.claim.owner = $true; $s.claim.worker = "$($a.worker)"; $s.claim.assignment = "$($a.assignment)"; if ($mode -eq 'relaunch') { $mode = 'resume' } }
     # timing or statistical criteria are flagged once, at Technical Design (the design column), on the item and in the answer; never a block
     $timing = @()
@@ -413,6 +437,7 @@ function Verb_complete($a) {
         $rerun = $s.pr.rerun
         if ($rule.ruling -eq 'red') {
             $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url; failed_checks = $chk.failed_checks; rerun = $rerun }
+            [void](Add-ChecksRed $s "$($prd.head.sha)")
             Save-State $n $st
             Reject 10 'checks-not-green' "pull request checks are not green ($($rule.reason))" @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
         }

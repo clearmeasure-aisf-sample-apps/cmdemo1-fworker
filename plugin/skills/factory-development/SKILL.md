@@ -35,6 +35,7 @@ DOCS-ONLY FAST PATH (script-verified; target: change to open pull request in a f
    - `likelyPreexisting: false`: the change caused it. The implementer fixes what the log or the annotations name, pushes, repeat.
    - `likelyPreexisting: true`, or every annotation is `elsewhere`: the base branch already fails this check. Do not guess and do not change unrelated code to make it pass. Record the review and call `complete`: the gateway re-runs the failed jobs once and, when master fails them too, waits for master without counting a round against the item (`docs/design/plant-manager.md` 10e). A failed check that is not a required one (`Build result`, `secret-scan`) does not block `complete` at all; a failed acceptance shard alone is re-run by the gateway too.
    - a `code` in place of the text (`logs-not-permitted`, `annotations-not-permitted`, `artifacts-not-permitted`, `logs-expired`): the gateway may not read it; say that in the question, with the `detailsUrl` of the check.
+   - exit 21 `rerun-started`: the one failed check fails on master too; the gateway reran its job once: call `wait-for-checks` again. Push gate: after checks went red on 2 heads, `open-pr` and `update-pr` answer exit 10 `private-build-required` until you run the private build on the head you push and record it with `factory.ps1 private-build --item N --attest <full 40-char sha>` (each new head needs its own attestation; a docs-only item is not gated).
    `record-review ... --column Development` with last line `REVIEW: COMPLETE`.
 6. REVIEWER, only on green checks and `REVIEW: COMPLETE`: ONE call
    `factory.ps1 complete --item N --column Development --review-ref <ref> --comment "PR open, CI green - <PR link>. REVIEW: COMPLETE - <one sentence>"`.
@@ -43,7 +44,7 @@ DOCS-ONLY FAST PATH (script-verified; target: change to open pull request in a f
    - exit 11: stop at once.
    - unrecoverable: `complete --succeeded false --comment "<summary>"`.
 
-A branch that is behind master is routine: bring it up to date yourself by MERGING origin/master into it (no rebase, no force-push), run the checks again and go on. Do not ask a person or the supervisor whether to do that, and do not wait for anyone to do it; ask the supervisor only when the two changes contradict (a conflict whose right resolution the item and the design do not decide). After a PASS the gateway merges the pull request; nobody has to merge it by hand.
+A branch that is merely behind master needs nothing: do not merge master into an open, clean pull request on your own (every push restarts its checks); the gateway brings it up to date right before it merges. When the pull request has a merge conflict with master (`base.updated` with `reason: "conflict"`, or GitHub runs no checks for it), bring it up to date yourself by MERGING origin/master into it (no rebase, no force-push), run the checks again and go on. Do not ask a person or the supervisor whether to do that, and do not wait for anyone to do it; ask the supervisor only when the two changes contradict (a conflict whose right resolution the item and the design do not decide). After a PASS the gateway merges the pull request; nobody has to merge it by hand.
 
 Never: merge, approve, force-push, rebase pushed history, open a pull request on a red build, or call `complete` before the checks report success.
 
