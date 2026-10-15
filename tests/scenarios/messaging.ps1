@@ -3712,11 +3712,13 @@ $MessagingScenarios['msg: a thousand refused notes of one noisy sender do not pu
 # ---- step 10, supervisor side -----------------------------------------------------------------------------------------------------------------
 $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one main produces plus the stream note, and gen-connect-prompt.sh still renders it'] = {
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Write-Host '    skip  prompt hashes: node is not installed'; Check 'the page has the generator' ((Msg-Page) -match 'function buildPrompt'); return }
-    # SHA-256 of what buildPrompt of main (commit f9458a3, gateway/Program.cs) returns for these three argument objects
+    # SHA-256 of what buildPrompt of main (commit f9458a3, gateway/Program.cs) returns for these three argument objects, with the two changes of the
+    # worker prompt since: it owns an item until its pull request is merged (not until master is green), and step 7 tells a session to load a
+    # deferred Monitor tool and never to run the stream as a background command where Monitor exists
     $main = [ordered]@{
-        cloud = @{ args = "{env:'tdd',url:'https://gw.example',token:'w1.tok.sig',name:'cloud-1',type:'claude-cloud',cap:'2',repo:'https://github.com/o/r',qcProfile:''}"; sha = 'beab25408f52c5bdf39cd72db1137a79d9e72a23a4f5568da9303c0b16ea4d90' }
-        local = @{ args = "{env:'uat',url:'https://gw.example',token:'w1.tok.sig',name:'alice-laptop',type:'persistent-local',cap:'3',repo:'',qcProfile:''}"; sha = '412ec19102bf09b1c8068195d4a1e463fa46196efc13dccb361d1150cdadb6cd' }
-        qc    = @{ args = "{env:'prod',url:'https://gw.example',token:'w1.tok.sig',name:'qc-box',type:'persistent-local',cap:'1',repo:'https://github.com/o/r',qcProfile:'sdk: dotnet 10',qcAddress:'10.0.4.9',qcCapacity:'2'}"; sha = 'ecafe7701f24a3fbdd158ff08d4a2d5f96abd0297f7dbc4a6442ee81bb0b6969' }
+        cloud = @{ args = "{env:'tdd',url:'https://gw.example',token:'w1.tok.sig',name:'cloud-1',type:'claude-cloud',cap:'2',repo:'https://github.com/o/r',qcProfile:''}"; sha = '8bde80a378bb873478fac49338926a10d4a80024f7e7c4fae47c2eafb0b080b7' }
+        local = @{ args = "{env:'uat',url:'https://gw.example',token:'w1.tok.sig',name:'alice-laptop',type:'persistent-local',cap:'3',repo:'',qcProfile:''}"; sha = '376e93c69d814e12976467a1398f64604c98e93d89c54cd898d33557b5400b19' }
+        qc    = @{ args = "{env:'prod',url:'https://gw.example',token:'w1.tok.sig',name:'qc-box',type:'persistent-local',cap:'1',repo:'https://github.com/o/r',qcProfile:'sdk: dotnet 10',qcAddress:'10.0.4.9',qcCapacity:'2'}"; sha = '5bc9dd6b753d1554919b65ed3d16e9140167fedc990e0efaedce29d6148b56c8' }
     }
     # One line of this prompt is not in main's, deliberately: the stream note of step 7 (a tool that runs the stream may end it; start it again).
     # It is taken out, exactly once, before the comparison (U), so everything else is still pinned to main; its own text is checked below.
@@ -3724,13 +3726,17 @@ $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one 
     $note = Msg-Node 'console.log(streamNote)'
     Check 'the stream note is one short sentence group that names no shell, no operating system and no tool option' ($note.Length -gt 80 -and $note.Length -lt 420 -and $note -match 'start the same command again' -and $note -notmatch '(?i)nohup|Start-Process|linux|macos|windows|timeout_ms|persistent|[<>&|$]') $note
     foreach ($sup in 'false', 'true') {
-        $at = Msg-Node "const t=buildPrompt({env:'tdd',url:'https://gw.example',token:'t',name:'n1',type:'persistent-local',cap:'1',supervisor:$sup});const i=t.indexOf(streamNote);console.log((i>0&&t.indexOf(streamNote,i+1)<0&&i>t.indexOf('Without a Monitor tool')&&i<t.indexOf('\n8. '))+'')"
+        # (the worker's step 7 names its fallback after the Monitor rule; the supervisor's says "Without a Monitor tool")
+        $anchor = if ($sup -eq 'true') { 'Without a Monitor tool' } else { 'uses the background fallback' }
+        $at = Msg-Node "const t=buildPrompt({env:'tdd',url:'https://gw.example',token:'t',name:'n1',type:'persistent-local',cap:'1',supervisor:$sup});const i=t.indexOf(streamNote),j=t.indexOf('$anchor');console.log((i>0&&j>0&&t.indexOf(streamNote,i+1)<0&&i>j&&i<t.indexOf('\n8. '))+'')"
         Check "the prompt (supervisor: $sup) carries the stream note once, in step 7 after the two ways to start the stream" ($at -eq 'true') $at
     }
+    $wp = Msg-Node "console.log(buildPrompt({env:'tdd',url:'https://gw.example',token:'t',name:'n1',type:'persistent-local',cap:'1'}))"
+    Check 'the worker prompt: an item is owned until its pull request is merged; a deferred Monitor tool is loaded, and the stream never runs in the background where Monitor exists' ("$wp".Contains('until its pull request is merged.') -and -not "$wp".Contains('master is green') -and "$wp".Contains('The Monitor tool can be deferred: load it first.') -and "$wp".Contains('Never run subscribe as a background shell command when Monitor exists') -and "$wp".Contains('Only a runtime with no Monitor tool at all uses the background fallback') -and -not "$wp".Contains('check the tail of that file')) "$wp"
     foreach ($k in $main.Keys) {
         $a = $main[$k].args
         $got = Msg-Node "$sha console.log(H(U(buildPrompt($a)))+' '+H(U(buildPrompt(Object.assign($a,{messaging:false,asking:false})))))"
-        Check "the $k prompt of this gateway's page, without the messaging fields and with them false, has the hash of main's" ($got -eq "$($main[$k].sha) $($main[$k].sha)") $got
+        Check "the $k prompt of this gateway's page, without the messaging fields and with them false, has its pinned hash" ($got -eq "$($main[$k].sha) $($main[$k].sha)") $got
     }
     $on = Msg-Node "$sha console.log(H(buildPrompt(Object.assign($($main.cloud.args),{messaging:true,asking:true}))))"
     Check 'and with messaging on it is another text (the hash can tell)' ($on -match '^[0-9a-f]{64}$' -and $on -ne $main.cloud.sha) $on

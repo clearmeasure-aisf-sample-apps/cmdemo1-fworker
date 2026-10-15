@@ -14,9 +14,10 @@ Technical Design, Development and Functional Testing to a merged pull request, a
   (`plugin/scripts/factory.ps1 --server <verb>`), sweeps the board, keeps the plant (workers, assignments, owners), serves the dashboard,
   the connect prompt and the plugin download, and carries worker messaging. Workers never hold a GitHub credential: they call verbs.
 - **Workers**: AI sessions (Claude Code local or cloud, Cursor cloud) started by a person with the connect prompt of the dashboard.
-  The prompt downloads PowerShell and the plugin and runs `subscribe --own`; the session owns each item it is given until its pull request
-  is merged and master is green. Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
-  `factory test` selects the cheapest model profile.
+  The prompt downloads PowerShell and the plugin and runs `subscribe --own` under the Monitor tool (loaded first where it is deferred; a
+  background command only where there is no Monitor tool); the session owns each item it is given until its pull request is merged.
+  Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person; `factory test` selects the cheapest
+  model profile.
 - **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask and reads the gateway's patrol
   digest. It advises; it changes nothing.
 - **Operator**: the person (or script) with the operator token: dashboard, credentials for workers, revoke, messaging on and off,
@@ -86,7 +87,7 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   4. a daily limit of self-merged releases, with a report;
   5. every change is recorded as an issue in this repository.
 - **uat and prod stay manual.**
-- **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so; the connect prompt text is unchanged because its hash is pinned by the operator suite, a protected path), and a launcher loop starts a new session from the
+- **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so, and the worker connect prompt says an item is owned until its pull request is merged; changing that text changes a hash pinned by the operator suite, a protected path, so it needs the owner's review), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
 - **Messaging and the supervisor are on for every registered worker** (`allowedWorkers` and `allowedAskers` are `*`), set in
   `config/deploy.overrides.json`; the source default stays off.
