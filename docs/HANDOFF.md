@@ -250,6 +250,12 @@ q. **Item state signing is still open**: entry d. Until then the state comment i
 
 Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
 
+- **#87 A code change was moved to Done when its master Build had been re-run** (272, 276). The Release and Architecture workflows start when a
+  Build completes and GitHub attaches their check runs to master's head at that moment, so a merge commit whose first attempt failed keeps the
+  skipped `release` check of that attempt; settle read it as docs-only. Docs-only is now decided from the merge commit's own Build
+  (`masterCodeChecks`, the jobs that run only for code: all skipped means docs-only) or else the pull request's files, and recorded as
+  `merge.docs_only` with `docs_only_from`; only then may a skipped or missing release check finish an item. The master-green verdict ignores
+  `masterIgnoredChecks` (`release`, `packages`, `architecture`), which could also park an item master-broken.
 - **#109 `hold:owner` was ignored** (296). A setting `holdLabels` (default `["hold:owner"]`) is honoured like `Demo`: the sweep offers nothing
   for an item that carries one (its open offer is dropped at the next plan), its PASS is not merged (`merge` answers exit 10 `held-by-label`,
   the gateway's merge waits), and `claim-item` (so `accept` and a live owner's `--renew`, whose lease then lapses as with `Demo`) answers exit 10

@@ -44,6 +44,8 @@
   ],
   "releaseCheckName": "release",
   "masterFlakyChecks": ["^Acceptance Tests \\[shard \\d+/\\d+\\]$"],
+  "masterIgnoredChecks": ["release", "packages", "architecture"],
+  "masterCodeChecks": ["Integration Build (SQL container)"],
   "octopus": {
     "url": "https://clearmeasure.octopus.app",
     "space": "Spaces-355",
