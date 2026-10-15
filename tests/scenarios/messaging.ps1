@@ -4563,7 +4563,7 @@ $ManagerScenarios['mgr: the same question about the same item within the hour is
             $q4 = Mgr-Ask 'bob' 9871 'Should the new test cover the empty list?'
             Check 'another item, or another session, is another question' ($q3.status -eq 202 -and $q4.status -eq 202 -and $q3.id -ne $q1.id -and $q4.id -ne $q1.id -and -not $q3.ContainsKey('duplicate') -and -not $q4.ContainsKey('duplicate')) "$($q3 | ConvertTo-Json -Compress) $($q4 | ConvertTo-Json -Compress)"
             $ids = @(); $end = (Get-Date).AddSeconds(20)
-            while ((Get-Date) -lt $end -and $ids.Count -lt 3) { Mgr-Beat; Msg-Read $sup 0.5; $ids = @(Mgr-Ids (Mgr-Batches $sup)) }
+            while ((Get-Date) -lt $end -and $ids.Count -lt 3) { Mgr-Beat; Msg-Read $sup 0.5; $ids = Mgr-Ids (Mgr-Batches $sup) }
             Check 'the supervisor receives each question once: the repeat was not relayed' ($ids.Count -eq 3 -and @($ids | Where-Object { $_ -eq $q1.id }).Count -eq 1) ($ids -join ',')
             Check 'the status counts the repeat' ((Msg-Admin '/api/v1/status').messaging.questionsDeduped -eq 1) ((Msg-Admin '/api/v1/status').messaging | ConvertTo-Json -Compress -Depth 3)
             $c2 = Msg-F 'alice' @('ask', '--item', '9871', '--text', 'Should the new test cover the empty list?')
