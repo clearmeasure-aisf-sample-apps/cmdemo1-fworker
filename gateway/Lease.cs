@@ -202,7 +202,7 @@ sealed partial class Plant
                 takenBackFrom[item] = name;
                 // issue 100: a take-back is a miss of the session; two in a row (or with lapsed offers) block it until it calls a verb of its own
                 var blocked = NoteTakeBack(name, item);
-                Journal(item, "reassigned", new JsonObject { ["reason"] = (reason == "client-accepted-not-started" ? $"{name} accepted by its client but did not start within the lease; offered again" : $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again") + blocked }, "back|" + item + "|" + now.Ticks);
+                Journal(item, "reassigned", new JsonObject { ["reason"] = (reason == "client-accepted-not-started" ? $"{name} accepted by its client but did not start within the lease; offered again" : $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again") + blocked, ["opCode"] = reason }, "back|" + item + "|" + now.Ticks);
             }
         }
         RequestSweepAfterTakeBack?.Invoke();

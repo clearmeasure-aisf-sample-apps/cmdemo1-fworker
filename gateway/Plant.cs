@@ -1760,7 +1760,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             // the repeated "waiting" of a sweep or a tick (no key; the rule script posts one per 30 minutes) is not queued behind one that is still to be written
             var repeat = ev == "waiting" && key == "";
             if (repeat && !waitingQueued.Add(item)) return;
-            if (ev is "matched" or "offered" or "reassigned") OperatorPlantEvent(ev, item, fields["worker"]?.ToString() ?? "", fields["column"]?.ToString() ?? "");
+            // issue 144: a reassigned line says why (a code, never the journal's text); the code is for the operator stream only, not the journal
+            var why = fields["opCode"]?.ToString() ?? ""; fields.Remove("opCode");
+            if (ev is "matched" or "offered" or "reassigned") OperatorPlantEvent(ev, item, fields["worker"]?.ToString() ?? "", fields["column"]?.ToString() ?? "", ev == "reassigned" ? why : "");
             var prev = journalTail.TryGetValue(item, out var t) ? t : Task.CompletedTask;
             var next = prev.ContinueWith(_ => Write(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
             journalTail[item] = next;
@@ -1829,7 +1831,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     if (ex.Accepted)
                     {   // accepted, yet the item needs a worker again: the session is gone
                         assignments.Remove(key); if (kind == "own-item") DropOwner(item); else botOf.Remove(item);
-                        Journal(item, "reassigned", new JsonObject { ["reason"] = $"the session that owned this item ({ex.Worker}) is gone" }, "gone|" + ex.Id);
+                        Journal(item, "reassigned", new JsonObject { ["reason"] = $"the session that owned this item ({ex.Worker}) is gone", ["opCode"] = "session-gone" }, "gone|" + ex.Id);
                     }
                     else if (ex.Worker != "") continue;                                                     // waiting for an answer
                 }
@@ -1897,7 +1899,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 }
                 a.Declined.Add(was); a.Worker = "";
                 var cool = IsQc(a) ? "" : NoteMissed(was, a.Item);
-                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s{cool}" }, "ack|" + a.Id + "|" + was);
+                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s{cool}", ["opCode"] = "offer-lapsed" }, "ack|" + a.Id + "|" + was);
                 var (w, why) = IsQc(a) ? ChooseQc(a) : Choose(a, null);
                 if (w == null) { if (!IsQc(a)) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = chooseCode; Journal(a.Item, "waiting", new JsonObject { ["reason"] = why }, ""); } continue; }
                 Offer(a, w, null);
