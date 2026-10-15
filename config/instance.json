@@ -220,7 +220,7 @@
       "memory": "8Gi",
       "gatewayUrl": "",
       "agent": "claude",
-      "jobs": {}
+      "jobs": { "claude": "", "codex": "" }
     }
   },
   "secrets": {
