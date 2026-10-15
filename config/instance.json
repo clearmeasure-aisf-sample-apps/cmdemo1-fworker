@@ -189,7 +189,7 @@
     "tokenGeneration": 1,
     "requiredModelTier": "premium",
     "requiredEffort": "low",
-    "maxSelfMergesPerDay": 3
+    "maxSelfMergesPerDay": 12
   },
   "secrets": {
     "patterns": [
