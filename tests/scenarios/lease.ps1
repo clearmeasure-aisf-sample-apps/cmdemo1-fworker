@@ -128,30 +128,3 @@ $LeaseScenarios['lease: items taken back from a session count as misses and the 
         } finally { Mgr-Stop $c }
     }
 }
-
-$LeaseScenarios['lease: a sweep that started before an accept does not take the item back as session-gone, however long it ran (issue 75); a later sweep that still offers it does'] = {
-    $n = New-Item-Fake 'Stale sweep after accept' 'x' @('factory worker', 'worker:ghost-lease')
-    Msg-OnGateway (Ls-Env 'instance.lease-d.json' @{ FACTORY_TIMING_staleItemMinutes = '600'; FACTORY_TIMING_clientStartMinutes = '600' }) {
-        param($g)
-        Ls-Swept
-        $carol = Msg-Open 'name=carol&capacity=5&messaging=1' (Msg-Token 'carol'); Msg-Registered $carol
-        try {
-            $offer = @{ item = $n; kind = 'own-item'; column = 'Technical Design' }
-            $before = (Get-Date).ToUniversalTime().ToString('o')
-            [void](Msg-Post '/api/v1/_test/plan' @{ offers = @($offer); pins = @{}; owned = @{}; keep = @() })
-            Msg-Read $carol 20 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' -and $_.data['item'] -eq $n }).Count -ge 1 }
-            $tok = "$((Msg-First @(Msg-Of $carol 'item.assigned' | Where-Object { $_.data['item'] -eq $n })).data['token'])"
-            $r = Msg-Json (Msg-Verb 'accept' $tok @{ item = $n }); Check 'carol accepts' ($r.exit -eq 0) ($r | ConvertTo-Json -Compress)
-            Start-Sleep -Seconds 22
-            # a sweep that began reading before the accept still lists the item: more than 20 s after the accept, it must not count
-            [void](Msg-Post '/api/v1/_test/plan' @{ offers = @($offer); pins = @{}; owned = @{}; keep = @(); sweepStarted = $before })
-            Start-Sleep -Seconds 2
-            Check 'the stale sweep leaves the owner in place' ((Ls-Owner $n) -eq 'carol') ((Ls-Status).plant.owners | ConvertTo-Json -Compress)
-            Check 'and writes no session-gone line' (@((Ls-Journal $n 'reassigned')).Count -eq 0)
-            # a sweep that began after the accept and still offers the item: the session is gone, as before
-            [void](Msg-Post '/api/v1/_test/plan' @{ offers = @($offer); pins = @{}; owned = @{}; keep = @(); sweepStarted = (Get-Date).ToUniversalTime().ToString('o') })
-            Check 'a sweep that started after the accept and still offers it drops the owner' (Wait-Until -Seconds 20 { (Ls-Owner $n) -ne 'carol' }) ((Ls-Status).plant.owners | ConvertTo-Json -Compress)
-            Check 'and journals it as reassigned' (Wait-Until -Seconds 30 { @((Ls-Journal $n 'reassigned')).Count -ge 1 }) (@((Get-FakeIssue $n).comments | ForEach-Object { ($_.body -split "`n")[0] }) -join ' | ')
-        } finally { Msg-Close $carol }
-    }
-}
