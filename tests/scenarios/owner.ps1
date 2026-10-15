@@ -918,6 +918,26 @@ $OwnerScenarios['owner: one item per session: a spent session that owns nothing 
     }
 }
 
+# Issue 98: a pinned item whose worker cannot take it (away here) is offered to any eligible worker after timing.pinFallbackMinutes, with a journal
+# line, and the pin stays set aside while the label names the same worker.
+$OwnerScenarios['owner: a pin that waits too long falls back to another worker and is journalled'] = {
+    $old = $env:FACTORY_TIMING_pinFallbackMinutes
+    try {
+        $env:FACTORY_TIMING_pinFallbackMinutes = '0.2'; Restart-Gateway
+        $n = New-Item-Fake 'Pinned to an absent worker' 'x' ($OwnerLabels + 'worker:ghost1')
+        Start-OwnerClient 'fb1' 'persistent-local'
+        Start-Sleep -Seconds 5
+        Check 'at first the item waits for its pinned worker' ((Get-Assigned 'fb1' $n).Count -eq 0)
+        Check 'after the fallback time it is offered to another worker' (Wait-Until -Seconds 60 { (Get-Assigned 'fb1' $n).Count -gt 0 })
+        Check 'the fallback is journalled once' (Wait-Until -Seconds 15 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=pin-fallback ' }).Count -eq 1 })
+        $st = (Get-Plant).plant
+        Check 'the status shows the pin set aside' ("$($st.pinsSetAside."$n")" -eq 'ghost1') ($st.pinsSetAside | ConvertTo-Json -Compress)
+    } finally {
+        Stop-OwnerClient 'fb1'
+        $env:FACTORY_TIMING_pinFallbackMinutes = $old; Restart-Gateway
+    }
+}
+
 # Issue 80: the operator's drain belongs to the name; a new session of the name (the launcher's next one) is still draining until the operator resumes.
 $OwnerScenarios['owner: an operator drain holds across a new session of the name until the operator resumes it'] = {
     $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'drn1' })[0] }

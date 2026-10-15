@@ -75,6 +75,12 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // issue 72: how long a spent session may own nothing (and have no offer of its item open) before it is told session.end; the pause covers a
     // column move in which the same session is offered its item again (timing.sessionEndGraceSeconds, FACTORY_TIMING_sessionEndGraceSeconds)
     public double SessionEndGraceSeconds { get; set; } = 90;
+    // issue 98: a pinned item that has waited this long for its pinned worker (away, at capacity, spent) is offered to any eligible worker, once
+    // per pin, with a journal line (timing.pinFallbackMinutes; 0 is off). pinFallback: the items whose pin is set aside, with the pin it was.
+    public double PinFallbackMinutes { get; set; } = 30;
+    readonly Dictionary<int, string> pinFallback = new();
+    // since when each pinned item has waited with its current pin (the wait counts from the pin, not from an unpinned wait before it)
+    readonly Dictionary<int, (string Pin, DateTime Since)> pinWaitSince = new();
     public string Epoch => store.Epoch;
     readonly Dictionary<string, WorkerInfo> workers = new();
     readonly Dictionary<string, Assignment> assignments = new();
@@ -1774,6 +1780,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
                 var key = $"{item}|{kind}|{role}"; wanted.Add(key);
                 var pin = pins?[item.ToString()]?.ToString();
+                // issue 98: a pin set aside after its long wait stays aside while the label names the same worker (a new label is a new pin)
+                if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
                 if (assignments.TryGetValue(key, out var ex))
                 {
                     if (ex.Accepted && (DateTime.UtcNow - ex.AcceptedAt).TotalSeconds < 20) continue;     // the offer predates the acceptance
@@ -1801,9 +1809,30 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     Journal(item, "matched", new JsonObject { ["trigger"] = trigText, ["reason"] = a.Reason, ["column"] = a.Column, ["role"] = a.Kind == "bot-job" ? a.Role : "" }, "m|" + a.Id);
                 }
                 var (w, why) = Choose(a, pin);
+                if (w == null && !string.IsNullOrEmpty(pin))
+                {
+                    if (!(pinWaitSince.TryGetValue(item, out var pw) && pw.Pin == pin)) pinWaitSince[item] = pw = (pin, planNow);
+                    if (PinFallbackMinutes > 0 && (planNow - pw.Since).TotalMinutes >= PinFallbackMinutes)
+                    {
+                        var pinnedCode = chooseCode;
+                        var (fw, _) = Choose(a, null);
+                        if (fw != null)
+                        {
+                            pinFallback[item] = pin; a.Pin = ""; pinWaitSince.Remove(item);
+                            Journal(item, "pin-fallback", new JsonObject { ["pin"] = pin, ["worker"] = fw.Name, ["minutes"] = (int)(planNow - pw.Since).TotalMinutes, ["code"] = pinnedCode }, "pinfb|" + a.Id + "|" + Regex.Replace(pin, "[^A-Za-z0-9_.-]", ""));   // (the label text is not trusted inside the journal's marker)
+                            Console.WriteLine(new JsonObject { ["at"] = planNow.ToString("o"), ["plant"] = "pin-fallback", ["item"] = item, ["pin"] = pin, ["worker"] = fw.Name }.ToJsonString());
+                            w = fw;
+                        }
+                        else chooseCode = pinnedCode;   // the item still waits for its pin: keep the pinned code, not the unpinned one
+                    }
+                }
+                else pinWaitSince.Remove(item);
                 if (w == null) { a.WaitingSince ??= planNow; a.WaitingCode = chooseCode; Journal(item, "waiting", new JsonObject { ["reason"] = why }, ""); continue; }
                 Offer(a, w, null);
             }
+            // a pin set aside is forgotten once the item is no longer wanted (taken, finished or parked)
+            foreach (var i in pinFallback.Keys.Where(i => !wanted.Any(k => k.StartsWith(i + "|", StringComparison.Ordinal))).ToList()) pinFallback.Remove(i);
+            foreach (var i in pinWaitSince.Keys.Where(i => !wanted.Any(k => k.StartsWith(i + "|", StringComparison.Ordinal))).ToList()) pinWaitSince.Remove(i);
             // an unanswered or unwanted assignment that the sweep no longer asks for is dropped
             foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
         }
@@ -1946,6 +1975,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             return new JsonObject
             {
                 ["oneItemPerSession"] = OneItemPerSession,
+                ["pinFallbackMinutes"] = PinFallbackMinutes,
+                ["pinsSetAside"] = new JsonObject(pinFallback.Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null,

@@ -35,6 +35,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'reassigned' { return "$($F.reason); offering to the next worker." }
         'tier' { return "model tier raised to **$($F.name)** ($($F.reasons))." }
         'waiting' { return "waiting: $($F.reason)." }
+        'pin-fallback' { return "the pinned worker **$($F.pin)** could not take the item for $($F.minutes) min ($($F.code)): the pin is set aside and it is offered to **$($F.worker)**. A new worker label pins it again." }
         'skipped' { return "not assigned: $($F.reason)." }
         'qc-offered' { return "a QC environment is offered for PR #$($F.pr) at head $($F.sha7); nothing runs until a person presses Start." }
         'qc-requested' { return "a person asked for a QC environment for PR #$($F.pr) at head $($F.sha7) (attempt $($F.attempt))." }
@@ -97,7 +98,7 @@ function Get-JournalKeys($State) { if (Test-Has $State 'journal') { return @($St
 # Admin verb: the gateway journals the decisions it makes itself (matched, offered, reassigned, waiting, skipped).
 function Verb_journal($a) {
     $n = Get-ItemNumber $a; $ev = "$(Need $a 'event')"
-    if ($ev -notin 'matched', 'offered', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated', 'base-updated', 'branch-updated') { Reject 2 'usage' "unknown journal event '$ev'" }
+    if ($ev -notin 'matched', 'offered', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated', 'base-updated', 'branch-updated', 'pin-fallback') { Reject 2 'usage' "unknown journal event '$ev'" }
     $f = @{}; if (Test-Has $a 'fields') { foreach ($k in $a.fields.Keys) { $f[$k] = $a.fields[$k] } }
     # a 'waiting' note is rate-limited: at most one per 30 minutes per item
     if ($ev -eq 'waiting') {
