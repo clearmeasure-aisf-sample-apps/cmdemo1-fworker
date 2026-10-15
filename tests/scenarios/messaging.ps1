@@ -2554,7 +2554,7 @@ function Mgr-DigestProblems($D) {
         'waiting' = 'item', 'code', 'waitingMinutes'; 'refusals' = 'item', 'code', 'count', 'windowMinutes'; 'parked' = 'item', 'code', 'ageMinutes'
         'item-quiet' = 'worker', 'item', 'column', 'quietMinutes'; 'last-review-round' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'; 'review-rounds-exhausted' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'
         'worker-blocked-note' = 'worker', 'item', 'id', 'count', 'ageMinutes'; 'verb-errors' = 'worker', 'item', 'count', 'byCode', 'windowMinutes'; 'merge-refused' = 'item', 'roundTrip', 'ageMinutes'; 'gateway-restarted' = 'reconnected', 'notReconnected', 'upMinutes'
-        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'pass-unmerged' = 'item', 'pr', 'code', 'waitingMinutes' }
+        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'pass-unmerged' = 'item', 'pr', 'code', 'waitingMinutes'; 'session-blocked' = 'worker', 'item', 'blockedMinutes' }
     foreach ($e in @($D.attention)) {
         if (-not $fields.ContainsKey("$($e.kind)")) { $bad += "kind $($e.kind)"; continue }
         foreach ($k in $e.Keys) {
@@ -3811,7 +3811,7 @@ $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one 
     }
 }
 
-$ManagerScenarios['mgr: a real sweep keeps the owner of an item whose merge is settling and of an item it could not read, and drops the owner it no longer lists'] = {
+$ManagerScenarios['mgr: a real sweep keeps the owner of an item it could not read, and drops the owner it no longer lists, that of a settling item too'] = {
     # a gateway of its own name and label: its sweep reads the fake GitHub, and this suite's gateway never looks at these items (so the injected
     # fault is never seen by it)
     $cfg = Msg-Config 'instance.sweep-two.json' { param($c) $c.name = 'sweep-two'; $c.label = 'sweep-two' }
@@ -3828,9 +3828,11 @@ $ManagerScenarios['mgr: a real sweep keeps the owner of an item whose merge is s
         $sweeps = { @([regex]::Matches((Mgr-Log $g), '"sweep":\{')).Count }
         Check 'the three items have their owner' (((& $owners) -join ',') -eq ((@($s, $e, $d) | Sort-Object) -join ','))
         Check 'the owner of the item no sweep lists is dropped: after the grace, by two sweeps in a row' (Wait-Until -Seconds 90 { (& $owners) -notcontains $d }) ((& $owners) -join ',')
+        # a settling item keeps no owner (it is released at item.merged, issue 107): an owner the seam set on one is dropped like any the sweep omits
+        Check 'so is the owner of the settling item' (Wait-Until -Seconds 30 { (& $owners) -notcontains $s }) ((& $owners) -join ',')
         $n0 = & $sweeps
         Check 'three more sweeps run' (Wait-Until -Seconds 60 { (& $sweeps) -ge $n0 + 3 }) "$n0 $(& $sweeps)"
-        Check 'the settling item and the unreadable item kept their owner through every one of them' (((& $owners) -join ',') -eq ((@($s, $e) | Sort-Object) -join ',')) ((& $owners) -join ',')
+        Check 'the unreadable item kept its owner through every one of them' (((& $owners) -join ',') -eq "$e") ((& $owners) -join ',')
         $log = Mgr-Log $g
         Check 'the sweep did settle the one (no error for it) and did report the error of the other' ($log -match "`"sweepAction`":\{[^\n]*`"item`":$s\b[^\n]*`"action`":`"settle`"|`"sweepAction`":\{[^\n]*`"action`":`"settle`"[^\n]*`"item`":$s\b" -and $log -notmatch "`"sweepError`":\{[^\n]*`"item`":$s\b" -and $log -match "`"sweepError`":\{[^\n]*`"item`":$e\b") ($log -split "`n" | Where-Object { $_ -match 'sweepError|settle' } | Select-Object -First 4 | Out-String)
     }
@@ -4121,9 +4123,11 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
         Check 'another name is not touched' ((& $verb 'my-items' $alice) -eq 200)
         $t2 = "$((& $mint 'rev-a').token)"
         Check 'a credential minted afterwards for the same name is a new one and works' ($t2 -match '^w1\.rev-a\.[0-9a-f]{64}$' -and $t2 -ne $t1 -and (& $verb 'my-items' $t2) -eq 200)
-        $s2 = Msg-Open 'name=rev-a' $t2; Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'worker.registered' }).Count -gt 0 }
+        # (a new session's registration starts a sweep, which may offer it another item of the shared board first: room for both, and the read
+        # waits for the offer of this scenario's item)
+        $s2 = Msg-Open 'name=rev-a&capacity=50' $t2; Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'worker.registered' }).Count -gt 0 }
         [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design'; reason = 'test' }); owned = @{}; keep = @() })
-        Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' }).Count -gt 0 }
+        Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' -and $_.data.item -eq $n }).Count -gt 0 }
         $as = Msg-First @(Msg-Of $s2 'item.assigned' | Where-Object { $_.data.item -eq $n })
         Check 'it registers again, is offered work, and the item token of that offer is answered' ((Msg-Of $s2 'worker.registered').Count -eq 1 -and $as -and "$($as.data.token)" -match '^i1\.' -and (& $verb 'get-item' "$($as.data.token)" @{ item = "$n" }) -eq 200)
         Msg-Close $s2
