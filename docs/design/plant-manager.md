@@ -254,6 +254,10 @@ Without `Auto Merge`, or under `peer-approved`, nothing changes: the gateway doe
 - A session that let `timing.offerMissLimit` (2) offers in a row lapse is offered nothing new (unpinned) for `timing.offerCoolDownMinutes`
   (5), or until it calls a verb successfully. The `reassigned` journal line says so; `/status` shows `missedOffers` and `coolDownUntil` per
   worker and the dashboard a `cool-down` pill. 0 for the limit turns the rule off.
+- Issue 100: an item taken back from a session (lease rule 1 or 3, section 6b) is a miss too, and the accept the stream client makes by itself
+  (`accepted_by: client`) is no answer. `offerMissLimit` misses in a row with a take-back among them block the session: no offer at all, pinned
+  items included, until the session calls a verb of its own or a new session of the name registers. The plant event `session-blocked` and the
+  digest kind `session-blocked` report it; `/status` shows `blocked` and `blockedSince`.
 
 ### 10a. Docs-only fast path (owner decision 2026-10-12)
 
