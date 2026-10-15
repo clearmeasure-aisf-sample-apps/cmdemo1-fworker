@@ -1592,7 +1592,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                         foreach (var a in acts)
                             if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
                                 plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
-                        plant.SetReleaseQueue(j["release_queue"] as JsonArray);
+                        plant.SetReleaseQueue(j["release_queue"] switch { JsonArray ra => ra, JsonObject ro => new JsonArray(ro.DeepClone()), _ => null });   // (PowerShell sends a one-item queue as an object)
                         try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
                         foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
                             if (t is JsonObject to && to["item"] is JsonNode ti)

@@ -78,6 +78,11 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     public string Epoch => store.Epoch;
     readonly Dictionary<string, WorkerInfo> workers = new();
     readonly Dictionary<string, Assignment> assignments = new();
+    // issue 96: the accepted assignments (ids) the last sweep saw stale, and how many were dropped
+    readonly HashSet<string> staleSeen = new();
+    long staleDropped;
+    // issue 96: items whose owner was dropped because they sit in the Release Queue (SetReleaseQueue); forgotten when they leave it
+    readonly HashSet<int> rqOwnerDropped = new();
     readonly Dictionary<int, string> ownerOf = new(), botOf = new(), lastTrigger = new();
     // Plant data the digest is computed from (worker-messaging.md 3.9, step 5a), kept only while messaging or the supervisor is on: when an owner was
     // recorded (the grace of the sweep's replacement), what the sweep said of each owned item, the last request per (name, item), and the rings of
@@ -1763,6 +1768,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             if (owners != null) foreach (var kv in owners)
             {
                 var oi = int.Parse(kv.Key); var on = kv.Value!.ToString();
+                if (rqOwnerDropped.Contains(oi)) continue;   // issue 96: an item in the Release Queue whose owner was dropped keeps no owner while its claim lives on
                 if (Msg.On && !(ownerOf.TryGetValue(oi, out var cur) && cur == on)) { ownedSince[oi] = planNow; seamOwned.Remove(oi); ownedMisses.Remove(oi); ownedInfo.Remove(oi); }
                 ownerOf[oi] = on;
             }
@@ -1806,6 +1812,19 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             // an unanswered or unwanted assignment that the sweep no longer asks for is dropped
             foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
+            // issue 96: an accepted own-item assignment whose worker no longer owns the item (another session holds the claim, its owner was dropped
+            // without it) is stale. Left in place it keeps a spent session from being told session.end. Dropped when two sweeps in a row see it so,
+            // a minute or more after the accept. (An item in the Release Queue loses its owner and assignments in SetReleaseQueue.)
+            var staleNow = new HashSet<string>();
+            foreach (var (k, a) in assignments.Where(kv => kv.Value.Accepted && kv.Value.Kind == "own-item" && !IsQc(kv.Value) && !wanted.Contains(kv.Key)).ToList())
+            {
+                var owns = ownerOf.TryGetValue(a.Item, out var ow) && ow == a.Worker;
+                if (owns || (keep != null && keep.Contains(a.Item)) || (planNow - a.AcceptedAt).TotalSeconds < 60) continue;
+                if (!staleSeen.Contains(a.Id)) { staleNow.Add(a.Id); continue; }
+                assignments.Remove(k); staleDropped++;
+                Console.WriteLine(new JsonObject { ["at"] = planNow.ToString("o"), ["plant"] = "stale-assignment-dropped", ["item"] = a.Item, ["worker"] = a.Worker, ["owner"] = ow ?? "", ["assignment"] = a.Id }.ToJsonString());
+            }
+            staleSeen.Clear(); staleSeen.UnionWith(staleNow);
         }
     }
 
@@ -1946,6 +1965,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             return new JsonObject
             {
                 ["oneItemPerSession"] = OneItemPerSession,
+                ["staleAssignmentsDropped"] = staleDropped,
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null,

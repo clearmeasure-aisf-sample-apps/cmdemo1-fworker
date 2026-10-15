@@ -36,7 +36,19 @@ sealed partial class Plant
                 next.Add((item, QueueRelease(o["release"]?.ToString()), since));
                 if (next.Count >= ReleaseQueueCap) break;
             }
+            // issue 96: an item that two sweeps in a row found in the Release Queue has no owner work left (item.complete was due when it got there):
+            // a missed item.complete must not leave its owner and accepted assignment behind, holding the session back from session.end
+            foreach (var q in next.Where(q => releaseQueue.Any(p => p.Item == q.Item)))
+            {
+                var had = ownerOf.TryGetValue(q.Item, out var ow) ? ow : null;
+                var gone = assignments.Where(kv => kv.Value.Item == q.Item && !IsQc(kv.Value)).Select(kv => kv.Key).ToList();
+                rqOwnerDropped.Add(q.Item);
+                if (had == null && gone.Count == 0 && !botOf.ContainsKey(q.Item)) continue;
+                DropOwner(q.Item); botOf.Remove(q.Item); foreach (var k in gone) assignments.Remove(k); staleDropped += gone.Count;
+                Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["plant"] = "release-queue-owner-dropped", ["item"] = q.Item, ["owner"] = had ?? "", ["assignments"] = gone.Count }.ToJsonString());
+            }
             releaseQueue.Clear(); releaseQueue.AddRange(next.OrderBy(q => q.Item));
+            rqOwnerDropped.IntersectWith(releaseQueue.Select(q => q.Item));
             foreach (var k in promotionRequests.Keys.Where(r => releaseQueue.All(q => q.Release != r)).ToList()) promotionRequests.Remove(k);
             // one operator line per release whose waiting items changed; a release that left the queue is forgotten, so its return is announced again
             var byRelease = releaseQueue.Where(q => q.Release != "").GroupBy(q => q.Release).ToDictionary(g => g.Key, g => g.Select(q => q.Item).OrderBy(i => i).ToList(), StringComparer.Ordinal);
