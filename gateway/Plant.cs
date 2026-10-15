@@ -1827,7 +1827,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
                 if (assignments.TryGetValue(key, out var ex))
                 {
-                    if (ex.Accepted && (DateTime.UtcNow - ex.AcceptedAt).TotalSeconds < 20) continue;     // the offer predates the acceptance
+                    // the offer predates the acceptance: the sweep read the board before the accept (issue 75: a sweep takes tens of seconds and reads
+                    // without the item lock, so its offer of a just-accepted item is stale), or, without a sweep start (the test seam), within 20 s of it
+                    if (ex.Accepted && (sweepStarted is { } st ? st <= ex.AcceptedAt : (DateTime.UtcNow - ex.AcceptedAt).TotalSeconds < 20)) continue;
                     if (ex.Accepted)
                     {   // accepted, yet the item needs a worker again: the session is gone
                         assignments.Remove(key); if (kind == "own-item") DropOwner(item); else botOf.Remove(item);
