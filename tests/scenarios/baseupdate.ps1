@@ -31,12 +31,21 @@ function Bu-MergeHook([int]$Pr, [string]$Ref, [string]$Sha) {
 function Bu-Journal([int]$n, [string]$Event) { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match "<!-- plant event=$Event " }).Count -gt 0 }
 function Bu-Puts([int]$Pr) { @((Fake 'log') | Where-Object { $_ -match "^PUT /repos/[^ ]+/pulls/$Pr/update-branch$" }).Count }
 
-function Bu-SetVerdict([int]$Item, [int]$Pr) {
-    $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
-    $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
-    $st.verdict = @{ passed = $true; processed = $false; pr = $Pr; head_sha = (Get-FakePr $Pr).sha }
-    $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
-    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+# A PASS verdict written into the item's state comment, under the item lock the rule scripts take (as a verdict verb would): a journal line that
+# read the state before this edit would otherwise save it back over the verdict (the runner gate runs journal lines last, so one can come late).
+function Bu-SetVerdict([int]$Item, [int]$Pr, [switch]$NoHead) {
+    $lock = $null; $end = (Get-Date).AddSeconds(45)
+    while ($true) {
+        try { $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$Item.lock"), 'OpenOrCreate', 'ReadWrite', 'None'); break }
+        catch { if ((Get-Date) -gt $end) { throw }; Start-Sleep -Milliseconds 200 }
+    }
+    try {
+        $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
+        $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
+        $st.verdict = @{ passed = $true; processed = $false; pr = $Pr }; if (-not $NoHead) { $st.verdict.head_sha = (Get-FakePr $Pr).sha }
+        $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
+        [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+    } finally { $lock.Dispose() }
 }
 
 $BaseUpdateScenarios = [ordered]@{
@@ -145,11 +154,7 @@ $BaseUpdateScenarios = [ordered]@{
     Bu-Worker 'bm1'
     $a = Bu-OwnedPr 'bm1' @('docs/pass.md'); $b = Bu-OwnedPr 'bm1' @('docs/pass2.md')
     # the state of a PASS verdict that the gateway has not merged yet (pass-unmerged)
-    $sc = @((Get-FakeIssue $a.item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
-    $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
-    $st.verdict = @{ passed = $true; processed = $false; pr = $a.pr }
-    $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
-    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+    Bu-SetVerdict $a.item $a.pr -NoHead
     Bu-Synced
     [void](Fake 'master-merge' @{ files = @('docs/z.md') })
     $got = Wait-Until -Seconds 30 { (Bu-Events 'bm1' $b.item).Count -gt 0 }
