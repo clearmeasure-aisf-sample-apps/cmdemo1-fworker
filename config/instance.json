@@ -137,6 +137,7 @@
     "journalWaitingMinutes": 30
   },
   "baseUpdate": {
+    "mode": "conflict-or-merge",
     "enabled": true,
     "autoUpdateBranch": true,
     "autoUpdateDelaySeconds": 120,
