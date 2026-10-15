@@ -12,6 +12,7 @@ sealed class HostSettings
     public int DefaultBuilds = 1;            // private builds at once per host
     public int LowEffortCapacity = 1;        // the capacity of a session that registers with effort "low" (0 = no such rule)
     public double BuildSlotTtlSeconds = 1800, BuildSlotMaxTtlSeconds = 7200;
+    public double BuildSlotDisconnectSeconds = 120;   // a session disconnected this long gives its build slots up (it is gone, not reconnecting)
     public Dictionary<string, (int Owned, int Builds)> Limits = new(StringComparer.OrdinalIgnoreCase);
 
     public static HostSettings Load(string scriptsDir)
@@ -24,7 +25,8 @@ sealed class HostSettings
         var h = new HostSettings
         {
             DefaultOwned = (int)Math.Min(D("hostOwnedDefault", 0), 10000), DefaultBuilds = Math.Max(1, (int)Math.Min(D("hostBuildsDefault", 1), 10000)), LowEffortCapacity = (int)Math.Min(D("lowEffortCapacity", 1), 20),
-            BuildSlotTtlSeconds = Math.Max(1, D("buildSlotTtlSeconds", 1800)), BuildSlotMaxTtlSeconds = Math.Max(1, D("buildSlotMaxTtlSeconds", 7200))
+            BuildSlotTtlSeconds = Math.Max(1, D("buildSlotTtlSeconds", 1800)), BuildSlotMaxTtlSeconds = Math.Max(1, D("buildSlotMaxTtlSeconds", 7200)),
+            BuildSlotDisconnectSeconds = Math.Max(1, D("buildSlotDisconnectSeconds", 120))
         };
         if (s?["hosts"] is JsonObject hosts)
             foreach (var kv in hosts)
@@ -44,7 +46,29 @@ sealed partial class Plant
     readonly Dictionary<string, string> hostOf = new(StringComparer.Ordinal);   // worker name -> declared host (lower case)
     sealed record BuildSlot(string Id, string Host, string Name, int Item, DateTime Since, DateTime Until);
     readonly List<BuildSlot> buildSlots = new();
-    long buildGrants, buildBusy;
+    long buildGrants, buildBusy, buildFreed;
+
+    // Issue 108: a slot is held for a piece of work that can end without the slot's release (the item taken back or released, the item done, the
+    // owner dropped, the session ended, revoked or gone); its ttl (30 min) was the only other end, so the host's next build waited behind a slot
+    // nobody used. These free it when that work ends. Under the gate.
+    // holder: the owner that is let go (its slots for the item; another session that named the item for a slot keeps its own), or null for all
+    void FreeItemSlots(int item, string? holder, string why) { if (item > 0) FreeSlots(buildSlots.Where(s => s.Item == item && (holder == null || s.Name == holder)).ToList(), why); }
+    void FreeNameSlots(string name, string why) => FreeSlots(buildSlots.Where(s => s.Name == name).ToList(), why);
+    void FreeSlots(List<BuildSlot> gone, string why)
+    {
+        if (gone.Count == 0) return;
+        foreach (var s in gone) buildSlots.Remove(s);
+        buildFreed += gone.Count;
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["buildSlot"] = "freed", ["why"] = why,
+            ["slots"] = new JsonArray(gone.Select(s => (JsonNode)new JsonObject { ["name"] = s.Name, ["item"] = s.Item, ["host"] = s.Host }).ToArray()) }.ToJsonString());
+    }
+    // From the tick: the slots of a session that has been disconnected for schedule.buildSlotDisconnectSeconds (a reconnect within that time keeps them).
+    void FreeSlotsOfGoneSessions(DateTime now)
+    {
+        if (buildSlots.Count == 0) return;
+        foreach (var w in workers.Values.Where(w => !w.Connected && w.DisconnectedAt is { } d && (now - d).TotalSeconds >= Hosts.BuildSlotDisconnectSeconds).ToList())
+            if (buildSlots.Any(s => s.Name == w.Name)) FreeNameSlots(w.Name, "disconnected");
+    }
 
     // Called right after Register: the declared host, and the capacity rule of a low-effort profile (the operator's capacity wins).
     public void SetHost(string name, string host, string effort)
@@ -96,7 +120,7 @@ sealed partial class Plant
                     ["ok"] = false, ["code"] = "build-slot-busy", ["host"] = host, ["limit"] = limit, ["held"] = held.Count,
                     ["holders"] = new JsonArray(held.Select(s => (JsonNode)new JsonObject { ["name"] = s.Name, ["item"] = s.Item, ["until"] = s.Until.ToString("o") }).ToArray()),
                     ["retryAfterSeconds"] = Math.Clamp((int)Math.Ceiling((next - now).TotalSeconds), 5, 120),
-                    ["reason"] = $"the {limit} private-build slot(s) of this host are held; wait and ask again (the slot of a build that ended without release frees itself at its ttl)", ["exit"] = 21
+                    ["reason"] = $"the {limit} private-build slot(s) of this host are held; wait and ask again (the slot of a build that ended without release frees itself at its ttl, or when its item or session ends)", ["exit"] = 21
                 };
             }
             var slot = new BuildSlot("b-" + Interlocked.Increment(ref counter).ToString("x"), key, name, item, now, now.AddSeconds(ttl));
@@ -119,7 +143,7 @@ sealed partial class Plant
                     ["host"] = g.Key, ["workers"] = new JsonArray(g.OrderBy(n => n, StringComparer.Ordinal).Select(n => (JsonNode)n).ToArray()), ["owned"] = g.Sum(Owned),
                     ["ownedLimit"] = Hosts.OwnedLimit(g.Key), ["builds"] = buildSlots.Count(s => s.Host == g.Key), ["buildLimit"] = Hosts.BuildLimit(g.Key)
                 });
-            return new JsonObject { ["hosts"] = hosts, ["buildSlotsHeld"] = buildSlots.Count, ["buildGrants"] = buildGrants, ["buildBusy"] = buildBusy };
+            return new JsonObject { ["hosts"] = hosts, ["buildSlotsHeld"] = buildSlots.Count, ["buildGrants"] = buildGrants, ["buildBusy"] = buildBusy, ["buildFreed"] = buildFreed };
         }
     }
 }

@@ -62,6 +62,7 @@
     "lowEffortCapacity": 1,
     "buildSlotTtlSeconds": 1800,
     "buildSlotMaxTtlSeconds": 7200,
+    "buildSlotDisconnectSeconds": 120,
     "hosts": {},
     "leaseRenewMinutes": 5,
     "staleItemMinutes": 15,

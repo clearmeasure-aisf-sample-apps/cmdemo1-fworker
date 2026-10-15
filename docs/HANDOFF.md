@@ -248,6 +248,13 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
+
+- **#108 Build slots were freed only by their release or their ttl** (30 min). Now an item's slots go when it is taken back, released or
+  completed and whenever its owner is dropped, and a name's slots go when it is revoked, when its session is told `session.end`, and when it
+  stays disconnected for `schedule.buildSlotDisconnectSeconds` (120). `/status` `hosts.buildFreed` counts them; each free is one log line
+  (`"buildSlot":"freed"`) with its reason.
+
 Closed on 2026-10-15 (issues #79 and #82):
 
 - **#79 A flaky master Build parked merged items as master-broken** (276, 272, 280). The settle step asked GitHub to re-run the failed jobs
