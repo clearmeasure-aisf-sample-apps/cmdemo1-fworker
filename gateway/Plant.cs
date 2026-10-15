@@ -34,6 +34,11 @@ sealed class WorkerInfo
     // number a session.end event was sent for; the client writes the launcher's end marker on that event, so the loop does not rely on the model
     public DateTime? SpentIdleSince;
     public int SessionEndSent;
+    // the launcher watchdog (docs/launcher.md): since when this session is spent and owns nothing, counted across reconnects (a reconnect is no
+    // progress), the session number a session.restart was sent for, and a reason noted elsewhere (a repeated question) for the next tick to send
+    public DateTime? StuckSince;
+    public int RestartSent;
+    public string RestartReason = "", RestartDetail = "";
 }
 
 sealed class Assignment
@@ -75,6 +80,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // issue 72: how long a spent session may own nothing (and have no offer of its item open) before it is told session.end; the pause covers a
     // column move in which the same session is offered its item again (timing.sessionEndGraceSeconds, FACTORY_TIMING_sessionEndGraceSeconds)
     public double SessionEndGraceSeconds { get; set; } = 90;
+    // the launcher watchdog: a session still connected this long after it became spent and owns nothing (session.end was not acted on, or a stale
+    // accepted offer kept it from being sent) is told session.restart; 0 switches it off (timing.sessionRestartMinutes)
+    public double SessionRestartMinutes { get; set; } = 10;
+    // a session that asks the same question more than this many times is told session.restart (timing.sessionRepeatQuestionLimit); 0 is off
+    public int RepeatQuestionLimit { get; set; } = 2;
+    readonly List<(DateTime At, string Name, int Session, string Reason)> restarts = new();
+    long restartsSent;
     public string Epoch => store.Epoch;
     readonly Dictionary<string, WorkerInfo> workers = new();
     readonly Dictionary<string, Assignment> assignments = new();
@@ -148,6 +160,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             {   // a new session starts with what the name still owns: it resumes that item and is given no other
                 w.Session++; w.SessionStarted = DateTime.UtcNow;
                 w.SessionItems = new(ownerOf.Where(kv => kv.Value == name).Select(kv => kv.Key));
+                w.StuckSince = null; w.RestartReason = ""; w.RestartDetail = "";
                 w.Sessions.Add((w.Session, w.SessionStarted, w.SessionItems.ToList()));
                 if (w.Sessions.Count > 10) w.Sessions.RemoveAt(0);
             }
@@ -155,6 +168,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
             w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name) || mgrDrained.Contains(name);   // issue 80: only the operator clears its drain (and the plant manager its own, Manager.cs)
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
+            w.RestartSent = 0;                                // and session.restart again, if it is still due
             w.Model = model; w.Effort = effort;
             // the older stream of this name is told it was replaced before it ends, so its client exits instead of reconnecting (4.6, failure mode 30)
             if (Msg.On && w.Out != null) w.Out.Writer.TryWrite((0, ReplacedJson(name)));
@@ -316,6 +330,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 q.QFlags = s.Event["flags"] is JsonArray qf ? qf.Select(f => f!.ToString()).ToArray() : Array.Empty<string>();
                 // a question of the item's owner becomes moot when it loses the item before the question is delivered (3.8)
                 q.OwnedAtAsk = s.Item is int qi && ownerOf.TryGetValue(qi, out var qo) && qo == s.From;
+                NoteRepeatedQuestion(s.From, q);
                 return o;
             }
             // the recipients: the one named, or derived for a thread (the item's owner and its QC worker, never its inspector) and for a
@@ -1858,6 +1873,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     ["items"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),
                     ["reason"] = "this session held its one work item and no longer owns it (completed, taken back, released, demoted or reassigned): end it; a new session takes the next item" }.ToJsonString(), false);
             }
+            RestartStuckSessions();
             // a Start that found no worker keeps its place: it is offered as soon as a qualified worker connects (it is the person's earlier Start, not a new automatic one)
             foreach (var a in assignments.Values.Where(a => IsQc(a) && !a.Accepted && a.Worker == "").ToList())
             {
@@ -1876,6 +1892,46 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
         }
         foreach (var a in placed) { try { _ = OnQcPlaced?.Invoke(a); } catch { } }
+    }
+
+    // The launcher watchdog (docs/launcher.md): a session that is stuck is told session.restart; its stream client writes the launcher's end marker
+    // and the reason, and the launcher starts a new session of the name (which resumes what the name still owns). Once per session, again after a
+    // reconnect while it is still due. Two causes are seen here: a spent session that owns nothing for sessionRestartMinutes (unlike session.end an
+    // accepted offer does not hold it back: on 2026-10-15 a stale accepted offer kept a spent session idle for hours), and a question the session
+    // asked more than RepeatQuestionLimit times (noted by SendMessage). Called under the gate.
+    void RestartStuckSessions()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var w in workers.Values.Where(w => w.Type != "supervisor"))
+        {
+            // an open QC or bot offer holds it back as it holds session.end back; an own-item offer or a stale accepted one does not
+            var spentIdle = OneItemPerSession && SessionRestartMinutes > 0 && w.SessionItems.Count > 0
+                && !ownerOf.Values.Contains(w.Name) && !botOf.Values.Contains(w.Name) && !qcOf.Values.Contains(w.Name)
+                && !assignments.Values.Any(o => o.Worker == w.Name && o.Kind != "own-item" && !o.Accepted);
+            if (!spentIdle) w.StuckSince = null; else w.StuckSince ??= now;
+            if (!w.Connected || w.RestartSent == w.Session) continue;
+            string reason = w.RestartReason, detail = w.RestartDetail;
+            if (reason == "" && w.StuckSince is { } st && (now - st).TotalMinutes >= SessionRestartMinutes)
+            { reason = "spent-idle"; detail = $"this session held its one work item and has owned nothing for {(now - st).TotalMinutes:0.#} min"; }
+            if (reason == "") continue;
+            w.RestartSent = w.Session; restartsSent++;
+            restarts.Add((now, w.Name, w.Session, reason)); if (restarts.Count > 20) restarts.RemoveAt(0);
+            Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "session.restart", ["name"] = w.Name, ["session"] = w.Session, ["code"] = reason,
+                ["reason"] = detail + ": the launcher ends this session and starts a new one, which resumes what the name still owns" }.ToJsonString(), false);
+            Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["plant"] = "session-restart", ["worker"] = w.Name, ["session"] = w.Session, ["code"] = reason }.ToJsonString());
+        }
+    }
+
+    // A question of a worker session: the same text (case and spacing ignored) about the same item asked more than RepeatQuestionLimit times in this session marks the
+    // session for session.restart at the next tick (the overnight run of 2026-10-14 had sessions asking one thing again and again). Under the gate.
+    void NoteRepeatedQuestion(string name, MessageRecord q)
+    {
+        if (RepeatQuestionLimit <= 0 || !workers.TryGetValue(name, out var w) || w.RestartReason != "") return;
+        static string Norm(string t) => Regex.Replace(t.Trim().ToLowerInvariant(), @"\s+", " ");
+        var text = Norm(q.QText); if (text == "") return;
+        // about the same item (or about none): a long-lived inspector or QC session may ask one stock question for several items
+        var n = store.Records.Values.Count(r => r.Type == "question" && r.From == name && r.At >= w.SessionStarted && r.Item == q.Item && Norm(r.QText) == text);
+        if (n > RepeatQuestionLimit) { w.RestartReason = "repeated-question"; w.RestartDetail = $"this session asked the same question {n} times"; }
     }
 
     // After a verb succeeded: ownership changes, and the triggers that follow from it.
@@ -1950,11 +2006,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             return new JsonObject
             {
                 ["oneItemPerSession"] = OneItemPerSession,
+                ["sessionRestarts"] = new JsonObject { ["sent"] = restartsSent, ["recent"] = new JsonArray(restarts.Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["worker"] = r.Name, ["session"] = r.Session, ["code"] = r.Reason }).ToArray()) },
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null,
                     ["session"] = w.Session, ["sessionStarted"] = w.SessionStarted.ToString("o"), ["sessionItems"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),
                     ["sessionSpent"] = OneItemPerSession && w.SessionItems.Count > 0,
+                    ["stuckSince"] = w.StuckSince?.ToString("o"), ["restartSent"] = w.RestartSent == w.Session && w.Session > 0,
                     ["itemsPerSession"] = new JsonArray(w.Sessions.Select(x => (JsonNode)new JsonObject { ["session"] = x.No, ["started"] = x.Started.ToString("o"), ["items"] = new JsonArray(x.Items.Select(i => (JsonNode)i).ToArray()) }).ToArray()),
                     ["roles"] = new JsonArray(w.Roles.Select(r => (JsonNode)r).ToArray()) }).ToArray()),
                 ["owners"] = new JsonObject(ownerOf.Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
