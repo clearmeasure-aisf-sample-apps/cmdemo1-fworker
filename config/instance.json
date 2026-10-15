@@ -34,6 +34,7 @@
   "autoMergeLabel": "Auto Merge",
   "videoLabel": "video",
   "demoLabel": "Demo",
+  "holdLabels": ["hold:owner"],
   "docsOnlyMarker": "<!-- aisf:docs-only -->",
   "docsOnlyPaths": [
     "^docs/.*\\.(md|txt|png|svg|puml)$",
@@ -74,7 +75,9 @@
     "assignAckSeconds": 120,
     "plantSnapshotMaxAgeMinutes": 30,
     "leaseMinutes": 30,
+    "redChecksGate": 2,
     "maxRelaunches": 3,
+    "maxSessionRelaunches": 10,
     "maxReviewRounds": 3,
     "docsOnlyMaxReviewRounds": 2,
     "docsOnlyLegacyBefore": "2026-10-16T00:00:00Z",
@@ -98,6 +101,8 @@
     "offerMissLimit": 2,
     "offerCoolDownMinutes": 5,
     "parkHours": 24,
+    "pinFallbackMinutes": 30,
+    "autoUnparkMax": 3,
     "awaitingChecksParkMinutes": 60,
     "docsOnlyReleaseGraceSeconds": 120,
     "qcLinkDays": 7,
@@ -199,7 +204,7 @@
     "tokenGeneration": 1,
     "requiredModelTier": "premium",
     "requiredEffort": "low",
-    "maxSelfMergesPerDay": 3
+    "maxSelfMergesPerDay": 12
   },
   "keeper": {
     "enabled": false,

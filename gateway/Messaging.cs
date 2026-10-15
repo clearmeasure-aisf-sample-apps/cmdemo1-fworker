@@ -22,7 +22,7 @@ sealed class MessagingSettings
     // The factory operator session (Operator.cs): operator.* of the config. Off by default; needs messaging.enabled.
     public bool OperatorEnabled;
     public string[] OperatorNames = Array.Empty<string>();
-    public int OperatorTokenGeneration = 1, OperatorMaxSelfMergesPerDay = 3;
+    public int OperatorTokenGeneration = 1, OperatorMaxSelfMergesPerDay = 12;
     public string OperatorRequiredModelTier = "premium", OperatorRequiredEffort = "low";
     // timing.opSelfAnswerMinutes: how long a question the operator session answered itself keeps its release-check from answering quiet
     public double OperatorSelfAnswerMinutes = 10;
@@ -69,7 +69,7 @@ sealed class MessagingSettings
     // entry is worse once, for the one reminder), mgrVerbErrorMinutes and digest.verbErrorCount (failed verbs of one worker on one item), and
     // mgrRestartMinutes (how long after its start a gateway reports that sessions came back from an earlier process).
     public double QuietMinutes = 20, NoteMinutes = 60, PersistMinutes = 30, VerbErrorMinutes = 10, RestartMinutes = 30;
-    public int VerbErrorCount = 3;
+    public int VerbErrorCount = 3, ChecksRedCount = 2;
     // The Release Queue (enhancement 9): timing.mgrReleaseQueueMinutes (the oldest item waits longer than this) or digest.releaseQueueCount (this many
     // items wait) makes release-queue-aged: the promotion to uat is the owner's, and the digest only says that it is due.
     public double ReleaseQueueMinutes = 60;
@@ -169,7 +169,7 @@ sealed class MessagingSettings
         var dg = g?["digest"];
         s.RefusalCount = Limit(dg, "refusalCount", 3); s.DigestMaxBytes = Limit(dg, "maxBytes", 4096, 512);
         s.QuietMinutes = Span("mgrQuietMinutes", 20); s.NoteMinutes = Span("mgrNoteMinutes", 60); s.PersistMinutes = Span("mgrPersistMinutes", 30);
-        s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3);
+        s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3); s.ChecksRedCount = Limit(dg, "checksRedCount", 2);
         s.ReleaseQueueMinutes = Span("mgrReleaseQueueMinutes", 60); s.ReleaseQueueCount = Limit(dg, "releaseQueueCount", 3);
         if (dg?["waitCodes"] is JsonArray wc) s.WaitCodes = List(wc);
         s.RequiredModelTier = g?["requiredModelTier"]?.ToString() ?? "premium"; s.RequiredEffort = g?["requiredEffort"]?.ToString() ?? "high";
@@ -191,7 +191,7 @@ sealed class MessagingSettings
         {
             s.OperatorNames = (op?["allowedNames"] is JsonArray oa ? oa.Select(n => n!.ToString()).ToArray() : new[] { "operator-session" }).Where(Auth.ValidName).ToArray();
             s.OperatorTokenGeneration = op?["tokenGeneration"]?.GetValue<int>() ?? 1;
-            s.OperatorMaxSelfMergesPerDay = Limit(op, "maxSelfMergesPerDay", 3, 0);
+            s.OperatorMaxSelfMergesPerDay = Limit(op, "maxSelfMergesPerDay", 12, 0);
             s.OperatorRequiredModelTier = op?["requiredModelTier"]?.ToString() ?? "premium"; s.OperatorRequiredEffort = op?["requiredEffort"]?.ToString() ?? "low";
             s.Reserved = Auth.ReservedNames(names.Concat(s.OperatorNames));
             s.OperatorSelfAnswerMinutes = Timing("opSelfAnswerMinutes", 10) is var sa && double.IsFinite(sa) && sa > 0 ? sa : 10;
@@ -398,6 +398,8 @@ sealed class DigestInput
     // a PASS the gateway has not merged yet, after timing.passUnmergedDigestMinutes: the reason code of the wait and since when (the verdict)
     public List<(int Item, string Code, int Pr, DateTime Since)> PassUnmerged = new();
     public double PassUnmergedMinutes = 5;
+    // sessions blocked after items were taken back from them (issue 100): offered nothing until they call a verb of their own
+    public List<(string Name, int Item, DateTime Since)> BlockedSessions = new();
     public (int Reconnected, int Missing, int UpMinutes)? Restart;
     // the items the sweep found waiting in the Release Queue column for the production deployment, with their release and since when
     public List<(int Item, string Release, DateTime Since)> ReleaseQueue = new();
@@ -415,7 +417,7 @@ static class DigestBuilder
 {
     public const int SchemaVersion = 1;
     public static readonly string[] Kinds = { "stalled", "disconnected-owner", "late-question", "waiting", "refusals", "parked",
-        "gateway-restarted", "review-rounds-exhausted", "merge-refused", "worker-blocked-note", "verb-errors", "last-review-round", "item-quiet", "release-queue-aged", "pass-unmerged" };
+        "gateway-restarted", "review-rounds-exhausted", "merge-refused", "worker-blocked-note", "verb-errors", "last-review-round", "item-quiet", "release-queue-aged", "pass-unmerged", "session-blocked" };
     static int Min(TimeSpan t) => (int)Math.Max(0, Math.Floor(t.TotalMinutes));
     static int Step(double value, double unit) => value >= unit * 4 ? 3 : value >= unit * 2 ? 2 : value >= unit ? 1 : 0;
 
@@ -468,7 +470,7 @@ static class DigestBuilder
         }
         foreach (var r in d.Refusals.Where(r => r.Code != "" && !cfg.WaitCodes.Contains(r.Code)))
         {
-            var b = Step(r.Count, cfg.RefusalCount);
+            var b = Step(r.Count, r.Code is "checks-red" or "checks-not-green" or "private-build-required" ? cfg.ChecksRedCount : cfg.RefusalCount);   // red checks are reported at 2
             if (b > 0) list.Add(new DigestEntry { Key = $"refusals|{r.Item}|{r.Code}", Kind = "refusals", Bucket = b,
                 Fields = new JsonObject { ["kind"] = "refusals", ["item"] = r.Item, ["code"] = r.Code, ["bucket"] = b, ["count"] = r.Count, ["windowMinutes"] = 60 } });
         }
@@ -512,6 +514,12 @@ static class DigestBuilder
             var b = Math.Max(1, Step((now - p.Since).TotalMinutes, Math.Max(0.1, d.PassUnmergedMinutes)));
             list.Add(new DigestEntry { Key = $"pass-unmerged|{p.Item}", Kind = "pass-unmerged", Bucket = b,
                 Fields = new JsonObject { ["kind"] = "pass-unmerged", ["item"] = p.Item, ["pr"] = p.Pr, ["code"] = p.Code, ["bucket"] = b, ["waitingMinutes"] = Min(now - p.Since) } });
+        }
+        foreach (var bs in d.BlockedSessions)
+        {   // session-blocked (issue 100): worse once after mgrPersistMinutes, the one reminder of a session nobody looked at
+            var b = Persist(bs.Since);
+            list.Add(new DigestEntry { Key = $"session-blocked|{bs.Name}", Kind = "session-blocked", Worker = bs.Name, Bucket = b,
+                Fields = new JsonObject { ["kind"] = "session-blocked", ["worker"] = bs.Name, ["item"] = bs.Item, ["bucket"] = b, ["blockedMinutes"] = Min(now - bs.Since) } });
         }
         if (d.ReleaseQueue.Count > 0)
         {   // release-queue-aged: one entry for the whole queue; worse as the oldest item ages (60, 120, 240 min by default) or the queue grows
