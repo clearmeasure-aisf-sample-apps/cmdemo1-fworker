@@ -56,6 +56,11 @@
   "plant": {
     "oneItemPerSession": true
   },
+  "runner": {
+    "pool": 0,
+    "poolMaxCalls": 200,
+    "maxProcesses": 6
+  },
   "schedule": {
     "hostOwnedDefault": 0,
     "hostBuildsDefault": 1,

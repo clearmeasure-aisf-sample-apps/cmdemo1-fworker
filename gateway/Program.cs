@@ -351,6 +351,8 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (ownerMode) o["hosts"] = plant.HostStatus();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
+    // the rule scripts running and waiting, the processes and memory (gateway/RunnerGate.cs, issue 89)
+    o["runner"] = runner.Status();
     if (ownerMode) o["revocations"] = revSkipReason != "" ? new JsonObject { ["state"] = "skipped", ["reason"] = revSkipReason }
         : revocationsOff ? new JsonObject { ["state"] = "off", ["reason"] = "test-switch" }
         : new JsonObject { ["state"] = revocationsLoaded.Task.IsCompleted ? "loaded" : "loading", ["failedAttempts"] = Volatile.Read(ref revAttempts) };
@@ -391,7 +393,7 @@ app.MapGet("/api/v1/metrics", async (HttpContext c) =>
             foreach (var k in metricsCache.Where(kv => (DateTime.UtcNow - kv.Value.At).TotalSeconds >= metricsCacheSeconds).Select(kv => kv.Key).ToList()) metricsCache.Remove(k);
             if (code == 0 || code == 2) metricsCache[key] = (DateTime.UtcNow, code, output);
         }
-        return Results.Text(output, "application/json", Encoding.UTF8, code == 0 ? 200 : code == 2 ? 400 : 502);
+        return Results.Text(output, "application/json", Encoding.UTF8, code == 0 ? 200 : code == 2 ? 400 : code == 20 ? 503 : 502);
     }
     finally { metricsGate.Release(); }
 });
@@ -1433,19 +1435,48 @@ sealed class Runner(string entry)
 {
     // runner.pool > 0: long-lived pwsh workers take the calls (RunnerPool.cs); null (the default): one process per call, as below.
     readonly RunnerPool? pool = RunnerPool.Create(entry);
+    // at most runner.maxProcesses calls at once, pooled and spawned together, started by priority (RunnerGate.cs, issue 89)
+    readonly RunnerGate limiter = RunnerGate.Create(entry);
+    // the processes of calls that run now (not the pool's workers), for the process count and memory of /status
+    readonly ConcurrentDictionary<long, Process> live = new();
+    long liveKey;
     public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
     {
+        var queuedAt = DateTime.UtcNow;
+        using var slot = await limiter.EnterAsync(verb, RunnerGate.MaxWait(RunnerGate.ClassOf(verb), timeout));
+        if (slot is null)
+        {
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runner"] = "busy", ["verb"] = verb, ["limit"] = limiter.Limit }.ToJsonString());
+            return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "runner-busy", reason = $"the gateway runs {limiter.Limit} rule scripts at once and none came free in time; try again", retryAfterSeconds = 15, exit = 20 }));
+        }
+        // the wait for the slot is taken from the time the call may run, down to a quarter of it: a caller that set a timeout is not kept much longer
+        var waited = DateTime.UtcNow - queuedAt;
+        if (waited > TimeSpan.Zero) timeout = timeout - waited > timeout / 4 ? timeout - waited : timeout / 4;
         if (pool is not null && await pool.TryRunAsync(verb, stdin, timeout) is { } pooled) return pooled;
         var psi = new ProcessStartInfo("pwsh") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", entry, "--server", verb }) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
-        await p.StandardInput.WriteAsync(stdin); p.StandardInput.Close();
-        var outTask = p.StandardOutput.ReadToEndAsync(); var errTask = p.StandardError.ReadToEndAsync();
-        using var cts = new CancellationTokenSource(timeout);
-        try { await p.WaitForExitAsync(cts.Token); }
-        catch (OperationCanceledException) { try { p.Kill(true); } catch { } return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "timeout", reason = "the rule script did not finish in time", retryAfterSeconds = 30, exit = 20 })); }
-        var err = await errTask; if (!string.IsNullOrWhiteSpace(err)) Console.Error.WriteLine($"[{verb}] {err.Trim()}");
-        return (p.ExitCode, (await outTask).Trim());
+        var key = Interlocked.Increment(ref liveKey); live[key] = p;
+        try
+        {
+            await p.StandardInput.WriteAsync(stdin); p.StandardInput.Close();
+            var outTask = p.StandardOutput.ReadToEndAsync(); var errTask = p.StandardError.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(timeout);
+            try { await p.WaitForExitAsync(cts.Token); }
+            catch (OperationCanceledException) { try { p.Kill(true); } catch { } return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "timeout", reason = "the rule script did not finish in time", retryAfterSeconds = 30, exit = 20 })); }
+            var err = await errTask; if (!string.IsNullOrWhiteSpace(err)) Console.Error.WriteLine($"[{verb}] {err.Trim()}");
+            return (p.ExitCode, (await outTask).Trim());
+        }
+        finally { live.TryRemove(key, out _); }
+    }
+
+    // /status: the gate (limit, running and waiting by class, peaks, the last starts), the pool's size, and the processes and memory now
+    public JsonObject Status()
+    {
+        var o = limiter.Status();
+        o["pool"] = pool?.Size ?? 0;
+        o["memory"] = RunnerMemory.Read(live.Values.Concat(pool?.Processes() ?? Enumerable.Empty<Process>()).ToList());
+        return o;
     }
 }
 
