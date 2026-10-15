@@ -78,6 +78,38 @@ function Verb_get_delivery($a) {
     return $d
 }
 
+# Issue 79: why a failure on master looks flaky, for the item's comment: a check named in masterFlakyChecks (patterns), or the same check failed on
+# another of the last 5 master commits. Only the wording depends on it; the re-run happens either way. Never throws.
+function Get-FlakyReason([string]$Sha, $Failed) {
+    $c = Get-Cfg
+    $pats = if (Test-Has $c 'masterFlakyChecks') { @($c.masterFlakyChecks) } else { @() }
+    $known = @(@($Failed) | Where-Object { $f = "$_"; @($pats | Where-Object { $f -match $_ }).Count -gt 0 })
+    if ($known.Count -gt 0) { return "known flaky: $($known -join ', ')" }
+    try {
+        $elsewhere = @()
+        foreach ($cm in @(Invoke-Gh -Path "$(Get-RepoPath)/commits?sha=$($c.defaultBranch)&per_page=6" | Where-Object { $_ -and "$($_.sha)" -ne $Sha } | Select-Object -First 5)) {
+            $o = Get-ChecksFor "$($cm.sha)" -Ignore (Get-MasterIgnoredChecks)
+            $elsewhere += @(@($Failed) | Where-Object { $o.failed_checks -contains $_ -and $_ -notin $elsewhere })
+        }
+        if ($elsewhere.Count -gt 0) { return "also failed on a recent master commit: $($elsewhere -join ', ')" }
+    } catch { }
+    return 'not known to be flaky'
+}
+
+# Whether the merged change is documentation only, and from what. First the merge commit's own Build: the jobs in masterCodeChecks run only for a
+# code change (build.yml's job "Detect code changes" skips them otherwise), so all of them skipped means no code changed and no release will be
+# built. Without those checks, the files of the pull request (docsOnlyPaths). Never the release check: the Release workflow attaches its check runs
+# to master's head when it starts, so a merge commit whose Build failed and was re-run keeps the skipped release check of its first attempt
+# (items 272 and 276 were moved to Done that way, with code that was never released). $null when neither can be read.
+function Get-MergeDocsOnly($m, $Chk) {
+    $c = Get-Cfg
+    $names = if (Test-Has $c 'masterCodeChecks') { @($c.masterCodeChecks | ForEach-Object { "$_" }) } else { @() }
+    $seen = @($names | Where-Object { $Chk.runs.ContainsKey($_) -and "$($Chk.runs[$_].status)" -eq 'completed' } | ForEach-Object { $Chk.runs[$_] })
+    if ($seen.Count -gt 0) { return @{ docs_only = (@($seen | Where-Object { "$($_.conclusion)" -ne 'skipped' }).Count -eq 0); from = 'build' } }
+    if (Test-Has $m 'pr') { try { return @{ docs_only = [bool](Test-DocsOnlyFiles (Get-PrFiles ([int]$m.pr))); from = 'pr-files' } } catch { } }
+    return $null
+}
+
 # One idempotent step of the post-merge flow for one item: master green, release candidate, docs-only skip, Release Queue, Done.
 function Invoke-Settle([int]$n) {
     $c = Get-Cfg; $t = $c.timing
@@ -93,19 +125,45 @@ function Invoke-Settle([int]$n) {
         $m.awaiting = $null; $m.done_at = ConvertTo-Iso (Get-UtcNow); Save-State $n $st
     }
     if ($m.awaiting -eq 'master-green') {
-        $chk = Get-ChecksFor $sha
+        # judge_sha: an auto-unpark found master green on a later head while the merge commit's own run stayed red (issue 70): that head is judged
+        $chk = Get-ChecksFor $(if ((Test-Has $m 'judge_sha') -and "$($m.judge_sha)") { "$($m.judge_sha)" } else { $sha }) -Ignore (Get-MasterIgnoredChecks)
         $mergedAt = ConvertFrom-Iso $m.merged_at
+        $rerunAt = if (Test-Has $m 'rerun_at') { ConvertFrom-Iso $m.rerun_at } else { $null }
         if ($chk.status -eq 'failure') {
+            # Issue 79: the failed jobs are re-run once before master is declared broken (a flaky acceptance shard must not park a merged item).
+            # GitHub refuses rerun-failed-jobs for a workflow run that is still in progress, so the re-run waits until every run of the commit has
+            # completed; the runs and attempts re-run are recorded, and the verdict waits for a newer, completed attempt of each of them.
+            $runs = @((Invoke-Gh -Path "$(Get-RepoPath)/actions/runs?head_sha=$sha&per_page=50").workflow_runs | Where-Object { $_ })
+            $running = @($runs | Where-Object { "$($_.status)" -ne 'completed' })
             if (-not (Test-Has $m 'rerun_attempted') -or -not $m.rerun_attempted) {
-                $m.rerun_attempted = $true
-                $runs = @((Invoke-Gh -Path "$(Get-RepoPath)/actions/runs?head_sha=$sha&per_page=50").workflow_runs | Where-Object { $_.conclusion -eq 'failure' })
-                foreach ($r in $runs) { Invoke-Gh -Method POST -Path "$(Get-RepoPath)/actions/runs/$($r.id)/rerun-failed-jobs" -Allow 403, 409, 422 | Out-Null }
-                Add-Comment $n "master checks failed at ``$($sha.Substring(0,7))`` ($($chk.failed_checks -join ', ')) - re-running failed jobs once, then re-polling."
-                Save-State $n $st; return @{ outcome = 'rerun'; failed = $chk.failed_checks }
+                if ($running.Count -gt 0 -or $chk.pending_checks.Count -gt 0) {
+                    if (-not ($mergedAt -and ($now - $mergedAt).TotalMinutes -gt $t.masterGreenTimeoutMinutes)) { return @{ outcome = 'waiting'; awaiting = 'master-green'; reason = 'failed-run-in-progress'; checks = (Get-PublicChecks $chk) } }
+                }
+                $flaky = Get-FlakyReason $sha $chk.failed_checks
+                $started = @(); $refused = @()
+                foreach ($r in @($runs | Where-Object { "$($_.status)" -eq 'completed' -and "$($_.conclusion)" -in 'failure', 'timed_out', 'startup_failure' })) {
+                    $res = Invoke-GhRaw -Method POST -Path "$(Get-RepoPath)/actions/runs/$($r.id)/rerun-failed-jobs"
+                    if ([int]$res.status -in 200, 201) { $started += @{ id = [long]$r.id; attempt = $(if ($r.run_attempt) { [int]$r.run_attempt } else { 1 }) } } else { $refused += "$($r.id): $([int]$res.status)" }
+                }
+                $m.rerun_attempted = $true; $m.rerun_at = ConvertTo-Iso $now; $m.rerun_runs = $started
+                if ($started.Count -gt 0) {
+                    Add-Comment $n "master checks failed at ``$($sha.Substring(0,7))`` ($($chk.failed_checks -join ', ')) - $flaky; re-running the failed jobs once (workflow run $(($started | ForEach-Object { $_.id }) -join ', ')), then judging the new attempt."
+                    Save-State $n $st; return @{ outcome = 'rerun'; failed = $chk.failed_checks; runs = $started }
+                }
+                Add-Comment $n "master checks failed at ``$($sha.Substring(0,7))`` ($($chk.failed_checks -join ', ')) - $flaky; the failed jobs could not be re-run ($(if ($refused.Count) { 'GitHub refused: ' + ($refused -join ', ') } else { 'no failed workflow run found' }))."
+            }
+            elseif (@($m.rerun_runs).Count -gt 0) {
+                # the old attempt's results stand until each re-run has a newer attempt that completed
+                $inFlight = @(@($m.rerun_runs) | Where-Object { $rr = $_; $cur = @($runs | Where-Object { [long]$_.id -eq [long]$rr.id }) | Select-Object -First 1
+                    (-not $cur) -or ([int]$cur.run_attempt -le [int]$rr.attempt) -or ("$($cur.status)" -ne 'completed') })
+                if ($inFlight.Count -gt 0 -and -not ($rerunAt -and ($now - $rerunAt).TotalMinutes -gt $t.masterGreenTimeoutMinutes)) {
+                    return @{ outcome = 'waiting'; awaiting = 'master-green'; reason = 'rerun-in-progress'; checks = (Get-PublicChecks $chk) }
+                }
             }
             if ($chk.pending_checks.Count -eq 0) {
-                Set-Park $s 'master-broken' ($t.parkHours * 60); $m.awaiting = $null; Save-State $n $st
-                Add-Comment $n "**master is BROKEN** at ``$($sha.Substring(0,7))`` after the merge ($($chk.failed_checks -join ', ')) - parked for a human. Auto-revert is out of scope."
+                # auto-unpark (Verbs.Sweep.ps1) lifts it only once each of these checks has passed (not skipped) on a later master head
+                Set-Park $s 'master-broken' ($t.parkHours * 60); $s.park.failed = @($chk.failed_checks); $s.park.sha = "$sha"; $m.awaiting = $null; Save-State $n $st
+                Add-Comment $n "**master is BROKEN** at ``$($sha.Substring(0,7))`` after the merge ($($chk.failed_checks -join ', '))$(if ((Test-Has $m 'rerun_runs') -and @($m.rerun_runs).Count -gt 0) { ', also after one re-run of the failed jobs' }) - parked for a human. Auto-revert is out of scope."
                 return @{ outcome = 'parked'; reason = 'master-broken' }
             }
         }
@@ -116,7 +174,9 @@ function Invoke-Settle([int]$n) {
             Save-State $n $st
             return @{ outcome = 'advanced'; awaiting = 'release-candidate' }
         }
-        if ($mergedAt -and ($now - $mergedAt).TotalMinutes -gt $t.masterGreenTimeoutMinutes) {
+        # a re-run started counts the timeout again from the re-run (issue 79): an acceptance re-run takes as long as the first run
+        $since = if ($rerunAt -and $mergedAt -and $rerunAt -gt $mergedAt) { $rerunAt } else { $mergedAt }
+        if ($since -and ($now - $since).TotalMinutes -gt $t.masterGreenTimeoutMinutes) {
             Set-Park $s 'master-green-timeout' ($t.parkHours * 60); $m.awaiting = $null; Save-State $n $st
             Add-Comment $n "master CI did not go green within $($t.masterGreenTimeoutMinutes) min of the merge - parked for a human."
             return @{ outcome = 'parked'; reason = 'master-green-timeout' }
@@ -126,15 +186,18 @@ function Invoke-Settle([int]$n) {
     if ($m.awaiting -in 'release-candidate', 'late-rc') {
         $chk = Get-ChecksFor $sha
         $rel = $chk.runs[$c.releaseCheckName]
-        if ($rel -and $rel.status -eq 'completed' -and $rel.conclusion -eq 'skipped') {
+        # docs-only is decided from the merge commit's own Build or the pull request's files (Get-MergeDocsOnly), once, before the release check is
+        # read; an item that is not known to be docs-only always goes on to look for its release candidate
+        if (-not (Test-Has $m 'docs_only')) { $dk = Get-MergeDocsOnly $m $chk; if ($dk) { $m.docs_only = [bool]$dk.docs_only; $m.docs_only_from = "$($dk.from)" } }
+        $docsOnly = (Test-Has $m 'docs_only') -and $m.docs_only
+        if ($docsOnly -and $rel -and $rel.status -eq 'completed' -and $rel.conclusion -eq 'skipped') {
             & $finish "the master build published no release candidate for ``$($sha.Substring(0,7))`` - its publish step was skipped because no code changed. A docs-only change has nothing to deploy, so it is moved straight to **$(Get-LastColumn)**."
             return @{ outcome = 'done'; path = 'docs-only' }
         }
         # A docs-only change builds no release. If the Release workflow never produced a 'release' check (for instance its run was dropped by the
         # workflow's concurrency group), do not wait for one: finish once master has been green for the grace period.
-        if (-not (Test-Has $m 'docs_only') -and (Test-Has $m 'pr')) { try { $m.docs_only = Test-DocsOnlyFiles (Get-PrFiles ([int]$m.pr)) } catch { } }
         $since = if (Test-Has $m 'green_at') { ConvertFrom-Iso $m.green_at } else { ConvertFrom-Iso $m.merged_at }
-        if ((Test-Has $m 'docs_only') -and $m.docs_only -and -not $rel -and $since -and ($now - $since).TotalSeconds -ge [double]$t.docsOnlyReleaseGraceSeconds) {
+        if ($docsOnly -and -not $rel -and $since -and ($now - $since).TotalSeconds -ge [double]$t.docsOnlyReleaseGraceSeconds) {
             & $finish "the change is documentation only and no release was built for ``$($sha.Substring(0,7))`` ($($t.docsOnlyReleaseGraceSeconds) s after master went green). A docs-only change has nothing to deploy, so it is moved straight to **$(Get-LastColumn)**."
             return @{ outcome = 'done'; path = 'docs-only-no-release' }
         }

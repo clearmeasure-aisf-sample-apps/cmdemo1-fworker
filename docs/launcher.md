@@ -12,7 +12,9 @@ and a new Claude session started from the connect prompt takes the next item.
 | Status | `GET /api/v1/status`: `plant.oneItemPerSession`, and for each worker `session` (a number per name), `sessionStarted`, `sessionItems`, `sessionSpent` and `itemsPerSession` (the last 10 sessions of the name, each with its items). The state is in memory: a gateway restart starts every name again at session 1. |
 | Worker skill (`plugin/skills/factory-owner-session`, section "One item per session") | When the item ends (complete, released, demoted or reassigned) the session runs `factory.ps1 end-session --name N --marker <BASE>/work/session-ended`, stops its event stream and ends. It never accepts a second item. |
 | `factory.ps1 end-session` | Drains the name at the gateway with the session's own credential and writes the end marker (`FACTORY_SESSION_END_FILE` when a launcher set it, else `--marker`). |
-| Launcher (`plugin/launcher/`) | Starts `claude` with the connect prompt, waits for the end marker, ends that session and starts the next one after a pause. |
+| `session.end` (issue 72) | The gateway's tick sends it on the stream of a session that is spent and has owned nothing (no owned item, no accepted or open offer of its item, no QC or bot job held or offered) for `timing.sessionEndGraceSeconds` (default 90; `FACTORY_TIMING_sessionEndGraceSeconds`), once per session (again after a reconnect). The stream client (`subscribe --name`) then writes `FACTORY_SESSION_END_FILE` itself, so a session whose item was taken back is ended by the launcher even when the model never runs `end-session`. A take-back is seen when the gateway drops the owner (release, complete, or the sweep no longer finding the holder). |
+| Launcher (`plugin/launcher/`) | Starts `claude` with the connect prompt, waits for the end marker, ends that session and starts the next one after a pause. It also restarts a stuck session (watchdog, below). |
+| `session.restart` (launcher watchdog) | The gateway's tick sends it, once per session (again after a reconnect), to a session that is stuck: code `spent-idle` when the session is spent and has owned nothing (no owned item, no QC or bot job held or offered; unlike `session.end` an accepted own-item offer, possibly stale, does not hold it back) for `timing.sessionRestartMinutes` (default 10, 0 is off) while still connected, and code `repeated-question` when it asked the same question (case and spacing ignored) about the same item, or about none, more than `timing.sessionRepeatQuestionLimit` times (default 2, 0 is off). The stream client writes the end marker and `<marker>.reason`, so the launcher restarts the session and logs the gateway's reason. `GET /api/v1/status`: `plant.sessionRestarts` (count and the last 20) and per worker `stuckSince`, `restartSent`. |
 
 Without a launcher (a cloud session, Cursor) the session says it is finished and stops; a person starts the next session from the connect prompt.
 The gateway rule holds either way.
@@ -50,9 +52,28 @@ pwsh -File <BASE>/plugin/launcher/fworker-loop.ps1 -Dir <BASE> -PromptFile <BASE
 - On Windows an npm-installed `claude` is a `.cmd` shim that cannot take a multi-line argument: the PowerShell launcher then gives the session a short
   first message that names the prompt file instead of the prompt itself.
 
+## The watchdog
+
+Besides the gateway's `session.end` and `session.restart`, each launcher checks the running session every 5 s and restarts it when:
+
+| Code | Condition | Option (bash / PowerShell), default |
+|---|---|---|
+| `stream-disconnected` | The stream client showed no sign of life for this long: it stamps `<BASE>/work/stream-alive` at every connect attempt (a failed one too, so a gateway outage restarts nobody) and at most every 20 s while lines arrive (events and the `: ping` of every 25 s). Before the first stamp the session's start counts. So the check means the client is dead, hung or was never started (a Monitor that expired). | `--stream-stale` / `-StreamStale`, 600 s |
+| `no-output-while-owning` | The session's screen did not change for this long while it holds an item (`<BASE>/work/session-owning`, written by the stream client on an owner offer, acceptance or restored ownership, removed on `session.end`, `session.restart` and `item.taken_back`). | `--silent` / `-Silent`, 1800 s |
+| `unsent-input` | The live prompt line holds typed text and the screen did not change for this long. Only the bottom-most line starting with `>` or `❯` (after a box border) among the last 8 lines of the screen counts, since earlier messages in the transcript carry the same marker; the `Try "..."` placeholder and numbered menu rows (`❯ 1. Yes`) are no typed input. | `--unsent` / `-Unsent`, 600 s |
+
+The screen is read with `--screen-cmd` / `-ScreenCmd` (a command whose output is the screen); inside tmux the default is `tmux capture-pane -p -t $TMUX_PANE`. Without
+one the two screen checks are off; the stream check and the gateway's events still work. 0 switches a check off. Every restart, its cause and the
+gateway's reason, is printed and appended to `<BASE>/work/launcher.log`. A restarted session is a new session of the name: it resumes what the name
+still owns (the gateway resends the accepted assignment) and takes nothing else. The launcher prints "restarted by the watchdog" for its own restarts.
+
 ## Tests
 
 `tests/scenarios/owner.ps1`, scenario "owner: one item per session": a session with capacity 5 is offered one item at a time, is offered nothing
 after it accepted one and after it released it, `end-session` drains it and writes the marker, and the next registration of the name is a new
 session that is offered an item again, with `itemsPerSession` keeping the earlier session's one item. The other suites run with the rule off
 (`tests/scenarios/lib.ps1`), because their scripted sessions take many items each.
+
+`tests/scenarios/owner.ps1`, "owner: launcher watchdog: ...": the gateway's `session.restart` (`spent-idle`) after an ignored `session.end`, with the
+client's reason file and the status; and both launchers, with a fake `claude`, restarting on each watchdog cause and on a gateway reason, each logged.
+`tests/scenarios/messaging.ps1` (manager suite), "mgr: a session that asks the same question a third time is told session.restart".

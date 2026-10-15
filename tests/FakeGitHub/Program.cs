@@ -84,7 +84,11 @@ sealed class World
     readonly HashSet<string> webFlow = new();                     // commits GitHub itself made and signed (update-branch)   // commits/{sha}: the parents of the branch commits the fake made
     int nextNumber = 1, nextComment = 1000, nextCheck = 1, nextPr = 1;
     int healthStatus = 200;
-    bool masterRed; double prodDelay = 0; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold;
+    bool masterRed; double prodDelay = 0;
+    // masterFlaky: the master Build fails one acceptance shard at once while "Build result" is still running (it fails seconds later), as a flaky shard
+    // does on GitHub. rerunSeconds / rerunConclusion: how long a re-run of failed jobs takes and how it ends (default: 3 s, success).
+    bool masterFlaky; double flakyRunSeconds = 4, rerunSeconds = 3; string rerunConclusion = "success";
+    long nextRun = 1000; readonly Dictionary<long, int> runAttempts = new(); readonly Dictionary<long, string> pendingRelease = new(); int rerunRefusals, reruns; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold; string? masterArchitecture;
     long counter = 0; int appMints;
 
     static string Sha(string seed) => Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(seed))).ToLowerInvariant();
@@ -146,11 +150,21 @@ sealed class World
             if (method == "DELETE") return li.Labels.Remove(Uri.UnescapeDataString(m.Groups[3].Value)) ? (200, new JsonArray()) : (404, "{\"message\":\"Label does not exist\"}");
         }
         if (path == root + "/labels" && method == "GET") return (200, new JsonArray(labelNames.Select(n => (JsonNode)J(("name", n))).ToArray()));
+        if (path == $"{root}/issues" && method == "GET")
+        {   // the repository's issues, as GitHub lists them: state (default open), labels (all of a comma list), per_page (default 30, at most 100), page
+            var st = q["state"].ToString() is { Length: > 0 } sv ? sv : "open";
+            var want = q["labels"].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            int per = Math.Clamp(int.TryParse(q["per_page"], out var pp) ? pp : 30, 1, 100), pg = Math.Max(1, int.TryParse(q["page"], out var pq) ? pq : 1);
+            var rows = issues.Values.Where(i => st == "all" || (st == "open") == i.Open).Where(i => want.All(w => i.Labels.Contains(w, StringComparer.OrdinalIgnoreCase)))
+                .OrderByDescending(i => i.Number).Skip((pg - 1) * per).Take(per)
+                .Select(i => (JsonNode)J(("number", i.Number), ("node_id", i.Node), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))).ToArray();
+            return (200, new JsonArray(rows));
+        }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)$")).Success)
         {
             var i = issues[int.Parse(m.Groups[1].Value)];
             if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
-            return (200, J(("number", i.Number)));
+            return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body)));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)/comments$")).Success)
         {
@@ -308,7 +322,6 @@ sealed class World
             var x = artifacts.FirstOrDefault(y => y.Id == long.Parse(m.Groups[1].Value)); if (x == null) return (404, "{\"message\":\"Not Found\"}");
             return x.Expired ? (410, "{\"message\":\"Artifact has expired\"}") : (302, new Redirect($"/_blob/artifacts/{x.Id}"));
         }
-        if (path == root + "/actions/runs" && method == "GET") return (200, J(("workflow_runs", new JsonArray(J(("id", 1), ("conclusion", "failure"))))));
         if ((m = Regex.Match(path, $"^{root}/actions/jobs/(\\d+)/rerun$")).Success && method == "POST")
         {   // as GitHub: the job runs again; here it passes at once (rerunJobs counts the reruns, for the scenarios)
             var id = long.Parse(m.Groups[1].Value);
@@ -317,9 +330,37 @@ sealed class World
             c.Conclusion = "success"; rerunJobs++;
             return (201, null);
         }
-        if (Regex.IsMatch(path, $"^{root}/actions/runs/\\d+/rerun-failed-jobs$"))
-        {
-            foreach (var l in checks.Values) foreach (var c in l.Where(c => c.Conclusion == "failure")) c.Conclusion = "success";
+        if (path == root + "/actions/runs" && method == "GET")
+        {   // the workflow runs of a commit (head_sha), as GitHub lists them: one per run id of its check runs, judged on the latest attempt of each job
+            var sha = q["head_sha"].ToString();
+            var list = checks.TryGetValue(sha, out var rl) ? rl : new();
+            foreach (var c in list) if (c.CompleteAt is { } at && DateTime.UtcNow >= at) { c.Status = "completed"; c.CompleteAt = null; }
+            var runsOut = list.GroupBy(c => c.RunId).Select(g =>
+            {
+                var jobs = g.GroupBy(c => c.Name).Select(n => n.OrderBy(c => c.Started).Last()).ToList();
+                var done = jobs.All(c => c.Status == "completed");
+                var failed = jobs.Any(c => c.Conclusion is "failure" or "timed_out");
+                return (JsonNode)J(("id", g.Key), ("head_sha", sha), ("status", done ? "completed" : "in_progress"), ("conclusion", done ? (failed ? "failure" : "success") : null), ("run_attempt", runAttempts.GetValueOrDefault(g.Key, 1)));
+            }).ToArray();
+            return (200, J(("total_count", runsOut.Length), ("workflow_runs", new JsonArray(runsOut))));
+        }
+        if ((m = Regex.Match(path, $"^{root}/actions/runs/(\\d+)/rerun-failed-jobs$")).Success && method == "POST")
+        {   // as GitHub: a run that is still in progress is refused (403); otherwise its failed jobs start again as a new attempt of the run
+            var rid = long.Parse(m.Groups[1].Value);
+            var all = checks.Values.SelectMany(x => x).Where(c => c.RunId == rid).ToList();
+            if (all.Count == 0) return (404, "{\"message\":\"Not Found\"}");
+            foreach (var c in all) if (c.CompleteAt is { } at && DateTime.UtcNow >= at) { c.Status = "completed"; c.CompleteAt = null; }
+            var jobs = all.GroupBy(c => c.Name).Select(n => n.OrderBy(c => c.Started).Last()).ToList();
+            if (jobs.Any(c => c.Status != "completed")) { rerunRefusals++; return (403, "{\"message\":\"This workflow is already running\"}"); }
+            var failedJobs = jobs.Where(c => c.Conclusion is "failure" or "timed_out").ToList();
+            if (failedJobs.Count == 0) return (403, "{\"message\":\"This workflow run has no failed jobs\"}");
+            runAttempts[rid] = runAttempts.GetValueOrDefault(rid, 1) + 1; reruns++;
+            var listOf = checks.First(kv => kv.Value.Any(c => c.RunId == rid)).Value;
+            var now = DateTime.UtcNow.AddMilliseconds(5);
+            foreach (var f in failedJobs) listOf.Add(new Check { Id = nextCheck++, Name = f.Name, RunId = rid, App = f.App, Started = now, Status = "in_progress", CompleteAt = now.AddSeconds(rerunSeconds), Conclusion = rerunConclusion });
+            // a code change whose first attempt failed: the Release workflow that the re-run's completion starts makes the release (it appears then)
+            if (rerunConclusion == "success" && pendingRelease.Remove(rid, out var relSha))
+                releases.Add(new Rel { Id = "Releases-" + (releases.Count + 1), Version = "2.4." + (100 + releases.Count), Notes = $"Build https://fake/run/{rid} of {relSha}", At = now.AddSeconds(rerunSeconds + 1), ProdDelay = prodDelay });
             return (201, null);
         }
         if ((m = Regex.Match(path, $"^{root}/releases/tags/(demo-\\d+)$")).Success && method == "GET")
@@ -417,11 +458,29 @@ sealed class World
                 return (405, "{\"message\":\"Required status check \\\"" + req + "\\\" is expected.\"}");
         pr.Merged = true; pr.Open = false; masterSha = NewSha(); pr.MergeSha = masterSha;
         var docs = DocsOnly(pr.Files);
-        var mc = new List<Check> { new() { Id = nextCheck++, Name = "Build result", Status = masterHold ? "in_progress" : "completed", Conclusion = masterHold ? null : (masterRed ? "failure" : "success") }, new() { Id = nextCheck++, Name = "secret-scan" } };
-        if (docs) { if (docsRelease != "absent") mc.Add(new Check { Id = nextCheck++, Name = "release", Conclusion = "skipped" }); }
+        // the jobs of one Build workflow run share its run id; secret-scan is a workflow of its own
+        var buildRun = nextRun++; var scanRun = nextRun++; runAttempts[buildRun] = 1; runAttempts[scanRun] = 1;
+        var mc = new List<Check> { new() { Id = nextCheck++, Name = "Build result", RunId = buildRun, Status = masterHold ? "in_progress" : "completed", Conclusion = masterHold ? null : (masterRed ? "failure" : "success") }, new() { Id = nextCheck++, Name = "secret-scan", RunId = scanRun } };
+        if (masterFlaky && !masterHold)
+        {
+            mc.Add(new Check { Id = nextCheck++, Name = "Acceptance Tests [shard 1/6]", RunId = buildRun, Conclusion = "failure" });
+            mc[0].Status = "in_progress"; mc[0].CompleteAt = DateTime.UtcNow.AddSeconds(flakyRunSeconds); mc[0].Conclusion = "failure";
+        }
+        // masterArchitecture: the Architecture workflow (started by the Build's completion) fails on the merge commit
+        if (masterArchitecture != null) mc.Add(new Check { Id = nextCheck++, Name = "architecture", RunId = nextRun++, Conclusion = masterArchitecture });
+        // the Build's jobs that run only for a code change (build.yml's job "Detect code changes" skips them for documentation)
+        mc.Add(new Check { Id = nextCheck++, Name = "Integration Build (SQL container)", RunId = buildRun, Conclusion = docs ? "skipped" : (masterRed ? "failure" : "success") });
+        if (docs) { if (docsRelease != "absent") mc.Add(new Check { Id = nextCheck++, Name = "release", RunId = buildRun, Conclusion = "skipped" }); }
+        else if (releaseMode != "none" && (masterRed || masterFlaky) && !masterHold)
+        {   // as on GitHub: the Release workflow runs when the Build completes, and skips its jobs because the first attempt failed. Its check runs are
+            // attached to master's head when it starts, so after a successful re-run the merge commit keeps that skipped release check, while the
+            // release made by the second run of the Release workflow does carry the commit (Octopus, from the re-run's packages)
+            mc.Add(new Check { Id = nextCheck++, Name = "release", RunId = nextRun++, Conclusion = "skipped" });
+            pendingRelease[buildRun] = masterSha;
+        }
         else if (releaseMode != "none")
         {
-            mc.Add(new Check { Id = nextCheck++, Name = "release" });
+            mc.Add(new Check { Id = nextCheck++, Name = "release", RunId = buildRun });
             releases.Add(new Rel { Id = "Releases-" + (releases.Count + 1), Version = "2.4." + (100 + releases.Count), Notes = $"Build https://fake/run/1 of {masterSha}", At = DateTime.UtcNow, ProdDelay = prodDelay });
         }
         checks[masterSha] = mc; masterFiles[masterSha] = pr.Files.ToList();
@@ -454,7 +513,7 @@ sealed class World
         if (q.Contains("items(first"))
         {
             var nodes = issues.Values.Where(i => i.Card != null).Select(i => (JsonNode)J(("id", i.Card), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column))),
-                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
+                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
             return (200, Data(J(("organization", J(("projectV2", J(("items", J(("pageInfo", J(("hasNextPage", false), ("endCursor", null))), ("nodes", new JsonArray(nodes)))))))))));
         }
         if (q.Contains("fields(first"))
@@ -469,20 +528,21 @@ sealed class World
     {
         if (path == "api/users/me") return (200, J(("Id", "Users-1")));
         if (Regex.IsMatch(path, @"^api/Spaces-355/projects/(cmdemo1-ui|Projects-1)$")) return (200, J(("Id", "Projects-1"), ("Name", "cmdemo1-ui")));
+        var made = releases.Where(r => r.At <= DateTime.UtcNow).ToList();   // a release appears once the workflow that makes it has run
         if (path == "api/Spaces-355/projects/Projects-1/releases")
-            return (200, J(("Items", new JsonArray(releases.AsEnumerable().Reverse().Select(r => (JsonNode)J(("Id", r.Id), ("Version", r.Version), ("ReleaseNotes", r.Notes), ("Assembled", r.At.ToString("o")))).ToArray()))));
+            return (200, J(("Items", new JsonArray(made.AsEnumerable().Reverse().Select(r => (JsonNode)J(("Id", r.Id), ("Version", r.Version), ("ReleaseNotes", r.Notes), ("Assembled", r.At.ToString("o")))).ToArray()))));
         if (path == "api/Spaces-355/environments") return (200, J(("Items", new JsonArray(J(("Id", "E-tdd"), ("Name", "tdd")), J(("Id", "E-uat"), ("Name", "uat")), J(("Id", "E-prod"), ("Name", "prod"))))));
         if (path == "api/Spaces-355/deployments")
         {
             var items = new JsonArray();
-            foreach (var r in releases) foreach (var (env, idx) in new[] { ("E-tdd", 0), ("E-uat", 1), ("E-prod", 2) })
+            foreach (var r in made) foreach (var (env, idx) in new[] { ("E-tdd", 0), ("E-uat", 1), ("E-prod", 2) })
                 items.Add(J(("Id", $"Deployments-{r.Id}-{env}"), ("ReleaseId", r.Id), ("EnvironmentId", env), ("TaskId", $"{r.Id}|{env}"), ("Created", r.At.AddSeconds(idx).ToString("o"))));
             return (200, J(("Items", items)));
         }
         var m = Regex.Match(path, @"^api/Spaces-355/tasks/(.+)$");
         if (m.Success)
         {
-            var parts = m.Groups[1].Value.Split('|'); var r = releases.FirstOrDefault(x => x.Id == parts[0]);
+            var parts = m.Groups[1].Value.Split('|'); var r = made.FirstOrDefault(x => x.Id == parts[0]);
             if (r == null) return (404, null);
             var due = parts[1] == "E-prod" ? r.At.AddSeconds(r.ProdDelay) : r.At;
             var done = DateTime.UtcNow >= due;
@@ -504,7 +564,8 @@ sealed class World
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0;
                 artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
-                masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false; return (200, J(("ok", true)));
+                masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
+                masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; return (200, J(("ok", true)));
             case "issue":
             {
                 var i = new Issue { Number = nextNumber++, Title = b!["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Column = b["column"]?.ToString() };
@@ -621,6 +682,11 @@ sealed class World
                 if (b?["releaseMode"] != null) releaseMode = b["releaseMode"]!.ToString();
                 if (b?["docsRelease"] != null) docsRelease = b["docsRelease"]!.ToString();
                 if (b?["masterHold"] != null) masterHold = b["masterHold"]!.GetValue<bool>();
+                if (b?["masterArchitecture"] != null) masterArchitecture = b["masterArchitecture"]!.ToString();
+                if (b?["masterFlaky"] != null) masterFlaky = b["masterFlaky"]!.GetValue<bool>();
+                if (b?["flakyRunSeconds"] != null) flakyRunSeconds = b["flakyRunSeconds"]!.GetValue<double>();
+                if (b?["rerunSeconds"] != null) rerunSeconds = b["rerunSeconds"]!.GetValue<double>();
+                if (b?["rerunConclusion"] != null) rerunConclusion = b["rerunConclusion"]!.ToString();
                 return (200, J(("ok", true)));
             case "fault":
                 faults.Add(new Fault { Match = new Regex(b!["match"]!.ToString()), Status = b["status"]!.GetValue<int>(), Remaining = b["count"]?.GetValue<int>() ?? 1, Body = b["body"]?.ToString() ?? "{\"message\":\"injected fault\"}" });
@@ -629,7 +695,7 @@ sealed class World
                 return (200, J(
                     ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
                         ("comments", new JsonArray(i.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())))).ToArray())),
-                    ("appMints", appMints), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
+                    ("appMints", appMints), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
                     ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("rerunJobs", rerunJobs), ("releases", releases.Count), ("requests", log.Count)));
             case "health": healthStatus = b?["status"]?.GetValue<int>() ?? 200; return (200, J(("ok", true)));
             case "log": return (200, new JsonArray(log.Select(l => (JsonNode)l).ToArray()));

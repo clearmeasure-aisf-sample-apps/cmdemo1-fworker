@@ -1713,6 +1713,33 @@ $ManagerScenarios = [ordered]@{
     }
 }
 
+# the launcher watchdog (docs/launcher.md): a session that asks one question more than twice is stuck in a loop and is told session.restart
+'mgr: a session that asks the same question a third time is told session.restart' = {
+    Msg-OnGateway @{} {
+        param($g)
+        $st = Msg-Open 'name=kate&messaging=1' (Msg-Token 'kate'); Msg-Registered $st
+        try {
+            # one stock question about three different items is no loop: only the same question about the same item (or about none) counts
+            foreach ($i in 61, 62, 63) { [void](Msg-F 'kate' @('ask', '--text', 'Is the shared build slot free?', '--item', "$i")) }
+            Msg-Read $st 5
+            Check 'the same question about three different items: no restart' ((Msg-Of $st 'session.restart').Count -eq 0)
+            # the open-question cap (3) is reached: the scenario's gateway forgets them so the same session can ask again
+            foreach ($q in @((Invoke-RestMethod (Msg-Url '/api/v1/questions') -Headers @{ Authorization = 'Bearer test-token' }).questions | Where-Object { $_.from -eq 'kate' })) {
+                [void](Msg-Post '/api/v1/_test/answer' @{ id = $q.id; text = 'Yes.'; model = 'claude-opus-5-5' })
+            }
+            foreach ($i in 1, 2) { [void](Msg-F 'kate' @('ask', '--text', 'Which criterion governs the search?')) }
+            Msg-Read $st 5
+            Check 'asked twice: no restart' ((Msg-Of $st 'session.restart').Count -eq 0)
+            [void](Msg-F 'kate' @('ask', '--text', '  which CRITERION   governs the search? '))
+            Msg-Read $st 15 { param($e) @($e | Where-Object { $_.data.event -eq 'session.restart' }).Count -gt 0 }
+            $ev = @(Msg-Of $st 'session.restart')
+            Check 'the third time (case and spacing ignored) the session is told session.restart, code repeated-question' ($ev.Count -eq 1 -and $ev[0].data.code -eq 'repeated-question' -and $ev[0].data.name -eq 'kate') ($ev | ForEach-Object { $_.data } | ConvertTo-Json -Compress -Depth 4)
+            $rs = (Invoke-RestMethod (Msg-Url '/api/v1/status') -Headers @{ Authorization = 'Bearer test-token' }).plant.sessionRestarts
+            Check 'the status counts the restart with its reason' ($rs.sent -ge 1 -and @($rs.recent | Where-Object { $_.worker -eq 'kate' -and $_.code -eq 'repeated-question' }).Count -eq 1) ($rs | ConvertTo-Json -Compress -Depth 4)
+        } finally { Msg-Close $st }
+    }
+}
+
 'mgr: ask --wait returns the answer as an envelope, once, and closes the question' = {
     $sup = Msg-Open 'name=supervisor&supervisor=1&model=claude-opus-5-5&effort=high&messaging=1' (Msg-Supervisor); Msg-Registered $sup
     try {
@@ -2527,7 +2554,7 @@ function Mgr-DigestProblems($D) {
         'waiting' = 'item', 'code', 'waitingMinutes'; 'refusals' = 'item', 'code', 'count', 'windowMinutes'; 'parked' = 'item', 'code', 'ageMinutes'
         'item-quiet' = 'worker', 'item', 'column', 'quietMinutes'; 'last-review-round' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'; 'review-rounds-exhausted' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'
         'worker-blocked-note' = 'worker', 'item', 'id', 'count', 'ageMinutes'; 'verb-errors' = 'worker', 'item', 'count', 'byCode', 'windowMinutes'; 'merge-refused' = 'item', 'roundTrip', 'ageMinutes'; 'gateway-restarted' = 'reconnected', 'notReconnected', 'upMinutes'
-        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'pass-unmerged' = 'item', 'pr', 'code', 'waitingMinutes' }
+        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'pass-unmerged' = 'item', 'pr', 'code', 'waitingMinutes'; 'session-blocked' = 'worker', 'item', 'blockedMinutes' }
     foreach ($e in @($D.attention)) {
         if (-not $fields.ContainsKey("$($e.kind)")) { $bad += "kind $($e.kind)"; continue }
         foreach ($k in $e.Keys) {
@@ -3778,7 +3805,7 @@ $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one 
     }
 }
 
-$ManagerScenarios['mgr: a real sweep keeps the owner of an item whose merge is settling and of an item it could not read, and drops the owner it no longer lists'] = {
+$ManagerScenarios['mgr: a real sweep keeps the owner of an item it could not read, and drops the owner it no longer lists, that of a settling item too'] = {
     # a gateway of its own name and label: its sweep reads the fake GitHub, and this suite's gateway never looks at these items (so the injected
     # fault is never seen by it)
     $cfg = Msg-Config 'instance.sweep-two.json' { param($c) $c.name = 'sweep-two'; $c.label = 'sweep-two' }
@@ -3795,9 +3822,11 @@ $ManagerScenarios['mgr: a real sweep keeps the owner of an item whose merge is s
         $sweeps = { @([regex]::Matches((Mgr-Log $g), '"sweep":\{')).Count }
         Check 'the three items have their owner' (((& $owners) -join ',') -eq ((@($s, $e, $d) | Sort-Object) -join ','))
         Check 'the owner of the item no sweep lists is dropped: after the grace, by two sweeps in a row' (Wait-Until -Seconds 90 { (& $owners) -notcontains $d }) ((& $owners) -join ',')
+        # a settling item keeps no owner (it is released at item.merged, issue 107): an owner the seam set on one is dropped like any the sweep omits
+        Check 'so is the owner of the settling item' (Wait-Until -Seconds 30 { (& $owners) -notcontains $s }) ((& $owners) -join ',')
         $n0 = & $sweeps
         Check 'three more sweeps run' (Wait-Until -Seconds 60 { (& $sweeps) -ge $n0 + 3 }) "$n0 $(& $sweeps)"
-        Check 'the settling item and the unreadable item kept their owner through every one of them' (((& $owners) -join ',') -eq ((@($s, $e) | Sort-Object) -join ',')) ((& $owners) -join ',')
+        Check 'the unreadable item kept its owner through every one of them' (((& $owners) -join ',') -eq "$e") ((& $owners) -join ',')
         $log = Mgr-Log $g
         Check 'the sweep did settle the one (no error for it) and did report the error of the other' ($log -match "`"sweepAction`":\{[^\n]*`"item`":$s\b[^\n]*`"action`":`"settle`"|`"sweepAction`":\{[^\n]*`"action`":`"settle`"[^\n]*`"item`":$s\b" -and $log -notmatch "`"sweepError`":\{[^\n]*`"item`":$s\b" -and $log -match "`"sweepError`":\{[^\n]*`"item`":$e\b") ($log -split "`n" | Where-Object { $_ -match 'sweepError|settle' } | Select-Object -First 4 | Out-String)
     }
@@ -4088,9 +4117,11 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
         Check 'another name is not touched' ((& $verb 'my-items' $alice) -eq 200)
         $t2 = "$((& $mint 'rev-a').token)"
         Check 'a credential minted afterwards for the same name is a new one and works' ($t2 -match '^w1\.rev-a\.[0-9a-f]{64}$' -and $t2 -ne $t1 -and (& $verb 'my-items' $t2) -eq 200)
-        $s2 = Msg-Open 'name=rev-a' $t2; Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'worker.registered' }).Count -gt 0 }
+        # (a new session's registration starts a sweep, which may offer it another item of the shared board first: room for both, and the read
+        # waits for the offer of this scenario's item)
+        $s2 = Msg-Open 'name=rev-a&capacity=50' $t2; Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'worker.registered' }).Count -gt 0 }
         [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design'; reason = 'test' }); owned = @{}; keep = @() })
-        Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' }).Count -gt 0 }
+        Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' -and $_.data.item -eq $n }).Count -gt 0 }
         $as = Msg-First @(Msg-Of $s2 'item.assigned' | Where-Object { $_.data.item -eq $n })
         Check 'it registers again, is offered work, and the item token of that offer is answered' ((Msg-Of $s2 'worker.registered').Count -eq 1 -and $as -and "$($as.data.token)" -match '^i1\.' -and (& $verb 'get-item' "$($as.data.token)" @{ item = "$n" }) -eq 200)
         Msg-Close $s2
@@ -4177,6 +4208,33 @@ $ManagerScenarios['revoke: more revocation refs than one page on a GitHub that d
         $t = "$((Msg-Post '/api/v1/workers/pg-7/credential' @{}).token)"
         Check 'the highest generation of a name was read: a credential minted now works' ($t -match '^w1\.pg-7\.' -and $t -ne (New-WorkerToken 'pg-7') -and (& $st $t) -eq 200)
     } 60
+}
+
+# The deployment of 2026-10-14: a gateway with nothing to read the revoked credentials from (no session credentials configured, or no GitHub identity) stayed
+# un-ready for ever. It is ready at once, says why in /api/v1/status, and refuses to revoke; a configured identity still waits (the scenario below).
+$ManagerScenarios['start: with owner sessions off or no GitHub identity the gateway is ready at once, /status names the reason and revoke is refused'] = {
+    $cases = [ordered]@{
+        'github-not-configured (GH_TOKEN unset)' = @{ reason = 'github-not-configured'; env = @{ GH_TOKEN = 'unset'; FACTORY_FAKE_APPS = $null; FACTORY_AUTHOR_APP = $null } }
+        'github-not-configured (App key unset)' = @{ reason = 'github-not-configured'; env = @{ FACTORY_AUTHOR_APP = '1'; FACTORY_APP_AUTHOR_KEY = 'unset'; FACTORY_FAKE_APPS = $null } }
+        'owner-sessions-off' = @{ reason = 'owner-sessions-off'; env = @{ FACTORY_CONFIG = (Msg-Config 'instance.no-owner-sessions.json' { param($c) $c.ownerSessions = $false; $c.messaging.enabled = $false; $c.manager.enabled = $false; $c.operator.enabled = $false }) } }
+    }
+    foreach ($k in $cases.Keys) {
+        $case = $cases[$k]
+        # GitHub is a port nothing listens on: a gateway that tried to read would never become ready
+        $env0 = @{ FACTORY_TEST_SKIP_REVOCATIONS = $null; FACTORY_REVOCATIONS_ATTEMPT_SECONDS = '2' }; foreach ($e in $case.env.Keys) { $env0[$e] = $case.env[$e] }
+        Msg-OnGateway $env0 {
+            param($g)
+            $rd = Invoke-WebRequest "$($g.base)/ready" -SkipHttpErrorCheck -TimeoutSec 5
+            Check "${k}: /ready is 200" ([int]$rd.StatusCode -eq 200) "$([int]$rd.StatusCode) $($rd.Content)"
+            $st = Msg-Json (Msg-Api 'GET' '/api/v1/status')
+            Check "${k}: /api/v1/status says the revocations are skipped and why" ("$($st.revocations.state)" -eq 'skipped' -and "$($st.revocations.reason)" -eq $case.reason) ($st.revocations | ConvertTo-Json -Compress)
+            Check "${k}: the log says so once" (@([regex]::Matches((Mgr-Log $g), "`"revocations`":`"skipped`",`"reason`":`"$($case.reason)`"")).Count -eq 1) (Mgr-Log $g)
+            $rv = Msg-Post '/api/v1/workers/rev-z/revoke' @{}
+            Check "${k}: revoke is refused: 409 revocations-unavailable" ($rv.status -eq 409 -and $rv.code -eq 'revocations-unavailable') ($rv | ConvertTo-Json -Compress -Depth 4)
+            $w = Msg-Verb 'my-items' (Msg-Token 'alice')
+            Check "${k}: a worker credential is not held back as starting" ((Msg-Json $w).code -ne 'starting') "$([int]$w.StatusCode) $($w.Content)"
+        } 15
+    }
 }
 
 # A start that cannot read the revoked credentials is not silent and does not fail open.

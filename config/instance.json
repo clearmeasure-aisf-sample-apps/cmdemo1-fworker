@@ -34,6 +34,7 @@
   "autoMergeLabel": "Auto Merge",
   "videoLabel": "video",
   "demoLabel": "Demo",
+  "holdLabels": ["hold:owner"],
   "docsOnlyMarker": "<!-- aisf:docs-only -->",
   "docsOnlyPaths": [
     "^docs/.*\\.(md|txt|png|svg|puml)$",
@@ -42,6 +43,9 @@
     "^\\.github/ISSUE_TEMPLATE/"
   ],
   "releaseCheckName": "release",
+  "masterFlakyChecks": ["^Acceptance Tests \\[shard \\d+/\\d+\\]$"],
+  "masterIgnoredChecks": ["release", "packages", "architecture"],
+  "masterCodeChecks": ["Integration Build (SQL container)"],
   "octopus": {
     "url": "https://clearmeasure.octopus.app",
     "space": "Spaces-355",
@@ -73,6 +77,7 @@
     "leaseMinutes": 30,
     "redChecksGate": 2,
     "maxRelaunches": 3,
+    "maxSessionRelaunches": 10,
     "maxReviewRounds": 3,
     "docsOnlyMaxReviewRounds": 2,
     "docsOnlyLegacyBefore": "2026-10-16T00:00:00Z",
@@ -96,6 +101,8 @@
     "offerMissLimit": 2,
     "offerCoolDownMinutes": 5,
     "parkHours": 24,
+    "pinFallbackMinutes": 30,
+    "autoUnparkMax": 3,
     "awaitingChecksParkMinutes": 60,
     "docsOnlyReleaseGraceSeconds": 120,
     "qcLinkDays": 7,
@@ -134,6 +141,7 @@
     "baseUpdateDebounceSeconds": 20
   },
   "baseUpdate": {
+    "mode": "conflict-or-merge",
     "enabled": true,
     "autoUpdateBranch": true,
     "autoUpdateDelaySeconds": 120,
@@ -189,7 +197,7 @@
     "tokenGeneration": 1,
     "requiredModelTier": "premium",
     "requiredEffort": "low",
-    "maxSelfMergesPerDay": 3
+    "maxSelfMergesPerDay": 12
   },
   "secrets": {
     "patterns": [

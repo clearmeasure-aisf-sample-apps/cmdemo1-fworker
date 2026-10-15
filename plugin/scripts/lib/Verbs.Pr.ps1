@@ -296,6 +296,8 @@ function Verb_validation_verdict($a) {
             # (a merge that a FAIL verdict judged is not picked up by the sweep as a finished change: the gaps are still to be closed)
             if ($prd -and $prd.merged) { if (-not (Test-Has $s 'pr')) { $s.pr = @{} }; $s.pr.residual = $true }
             $d = Invoke-Demote $n $info $st $cause 'verdict'
+            # auto-unpark (Verbs.Sweep.ps1): the head this park judged, so the sweep can lift it once the pull request is green on a newer head
+            if ($d.outcome -eq 'parked' -and $prd -and -not $prd.merged -and (Test-Has $s 'park')) { $s.park.pr = $pr; $s.park.head = $(if ($headSha) { "$headSha" } else { "$($prd.head.sha)" }); Save-State $n $st }
             $res.next = $d.outcome; $res.detail = $d
         } else {
             Set-Park $s 'verdict-failed' ($c.timing.parkHours * 60); $s.Remove('claim'); Remove-ClaimRef $n; Save-State $n $st
