@@ -4115,9 +4115,11 @@ $ManagerScenarios['revoke: the operator revokes a name: every credential of it i
         Check 'another name is not touched' ((& $verb 'my-items' $alice) -eq 200)
         $t2 = "$((& $mint 'rev-a').token)"
         Check 'a credential minted afterwards for the same name is a new one and works' ($t2 -match '^w1\.rev-a\.[0-9a-f]{64}$' -and $t2 -ne $t1 -and (& $verb 'my-items' $t2) -eq 200)
-        $s2 = Msg-Open 'name=rev-a' $t2; Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'worker.registered' }).Count -gt 0 }
+        # (a new session's registration starts a sweep, which may offer it another item of the shared board first: room for both, and the read
+        # waits for the offer of this scenario's item)
+        $s2 = Msg-Open 'name=rev-a&capacity=50' $t2; Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'worker.registered' }).Count -gt 0 }
         [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design'; reason = 'test' }); owned = @{}; keep = @() })
-        Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' }).Count -gt 0 }
+        Msg-Read $s2 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' -and $_.data.item -eq $n }).Count -gt 0 }
         $as = Msg-First @(Msg-Of $s2 'item.assigned' | Where-Object { $_.data.item -eq $n })
         Check 'it registers again, is offered work, and the item token of that offer is answered' ((Msg-Of $s2 'worker.registered').Count -eq 1 -and $as -and "$($as.data.token)" -match '^i1\.' -and (& $verb 'get-item' "$($as.data.token)" @{ item = "$n" }) -eq 200)
         Msg-Close $s2
