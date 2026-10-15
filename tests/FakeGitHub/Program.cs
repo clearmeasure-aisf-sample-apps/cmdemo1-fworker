@@ -165,11 +165,21 @@ sealed class World
             if (method == "DELETE") return li.Labels.Remove(Uri.UnescapeDataString(m.Groups[3].Value)) ? (200, new JsonArray()) : (404, "{\"message\":\"Label does not exist\"}");
         }
         if (path == root + "/labels" && method == "GET") return (200, new JsonArray(labelNames.Select(n => (JsonNode)J(("name", n))).ToArray()));
+        if (path == $"{root}/issues" && method == "GET")
+        {   // the repository's issues, as GitHub lists them: state (default open), labels (all of a comma list), per_page (default 30, at most 100), page
+            var st = q["state"].ToString() is { Length: > 0 } sv ? sv : "open";
+            var want = q["labels"].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            int per = Math.Clamp(int.TryParse(q["per_page"], out var pp) ? pp : 30, 1, 100), pg = Math.Max(1, int.TryParse(q["page"], out var pq) ? pq : 1);
+            var rows = issues.Values.Where(i => st == "all" || (st == "open") == i.Open).Where(i => want.All(w => i.Labels.Contains(w, StringComparer.OrdinalIgnoreCase)))
+                .OrderByDescending(i => i.Number).Skip((pg - 1) * per).Take(per)
+                .Select(i => (JsonNode)J(("number", i.Number), ("node_id", i.Node), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))).ToArray();
+            return (200, new JsonArray(rows));
+        }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)$")).Success)
         {
             var i = issues[int.Parse(m.Groups[1].Value)];
             if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
-            return (200, J(("number", i.Number)));
+            return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body)));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)/comments$")).Success)
         {
@@ -326,6 +336,14 @@ sealed class World
         {
             var x = artifacts.FirstOrDefault(y => y.Id == long.Parse(m.Groups[1].Value)); if (x == null) return (404, "{\"message\":\"Not Found\"}");
             return x.Expired ? (410, "{\"message\":\"Artifact has expired\"}") : (302, new Redirect($"/_blob/artifacts/{x.Id}"));
+        }
+        if ((m = Regex.Match(path, $"^{root}/actions/jobs/(\\d+)/rerun$")).Success && method == "POST")
+        {   // as GitHub: the job runs again; here it passes at once (rerunJobs counts the reruns, for the scenarios)
+            var id = long.Parse(m.Groups[1].Value);
+            var c = checks.Values.SelectMany(l => l).FirstOrDefault(c => c.Id == id);
+            if (c == null) return (404, "{\"message\":\"Not Found\"}");
+            c.Conclusion = "success"; rerunJobs++;
+            return (201, null);
         }
         if (path == root + "/actions/runs" && method == "GET")
         {   // the workflow runs of a commit (head_sha), as GitHub lists them: one per run id of its check runs, judged on the latest attempt of each job
@@ -510,7 +528,7 @@ sealed class World
         if (q.Contains("items(first"))
         {
             var nodes = issues.Values.Where(i => i.Card != null).Select(i => (JsonNode)J(("id", i.Card), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column))),
-                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
+                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
             return (200, Data(J(("organization", J(("projectV2", J(("items", J(("pageInfo", J(("hasNextPage", false), ("endCursor", null))), ("nodes", new JsonArray(nodes)))))))))));
         }
         if (q.Contains("fields(first"))
@@ -563,7 +581,7 @@ sealed class World
         else return (res, r.Limit, 0, r.Reset, r.Limit);
         return (res, r.Limit, r.Remaining, r.Reset, r.Limit - r.Remaining);
     }
-    int latencyMs; Regex? latencyMatch; int refPage;   // refPage 0: matching-refs does not page (GitHub)
+    int latencyMs; Regex? latencyMatch; int refPage; int rerunJobs;   // refPage 0: matching-refs does not page (GitHub)
     public int LatencyFor(string method, string path, string body) => latencyMs > 0 && !path.StartsWith("/_fake/") && latencyMatch!.IsMatch(method + " " + path + "\n" + body) ? latencyMs : 0;
     (int, object?) Control(string method, string what, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b)
     {
@@ -582,7 +600,7 @@ sealed class World
             case "ref-page":   // { size }: matching-refs pages, with at most size refs a page (1 to 100); size 0 or none: it does not page, as GitHub
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "reset":
-                latencyMs = 0; latencyMatch = null; refPage = 0; rates.Clear();
+                latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();
                 artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
                 masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; return (200, J(("ok", true)));
@@ -716,7 +734,7 @@ sealed class World
                     ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
                         ("comments", new JsonArray(i.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())))).ToArray())),
                     ("appMints", appMints), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
-                    ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("releases", releases.Count), ("requests", log.Count)));
+                    ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("rerunJobs", rerunJobs), ("releases", releases.Count), ("requests", log.Count)));
             case "health": healthStatus = b?["status"]?.GetValue<int>() ?? 200; return (200, J(("ok", true)));
             case "log": return (200, new JsonArray(log.Select(l => (JsonNode)l).ToArray()));
         }

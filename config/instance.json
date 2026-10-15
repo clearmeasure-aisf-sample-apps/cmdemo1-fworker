@@ -34,6 +34,7 @@
   "autoMergeLabel": "Auto Merge",
   "videoLabel": "video",
   "demoLabel": "Demo",
+  "holdLabels": ["hold:owner"],
   "docsOnlyMarker": "<!-- aisf:docs-only -->",
   "docsOnlyPaths": [
     "^docs/.*\\.(md|txt|png|svg|puml)$",
@@ -77,7 +78,9 @@
     "assignAckSeconds": 120,
     "plantSnapshotMaxAgeMinutes": 30,
     "leaseMinutes": 30,
+    "redChecksGate": 2,
     "maxRelaunches": 3,
+    "maxSessionRelaunches": 10,
     "maxReviewRounds": 3,
     "docsOnlyMaxReviewRounds": 2,
     "docsOnlyLegacyBefore": "2026-10-16T00:00:00Z",
@@ -101,6 +104,8 @@
     "offerMissLimit": 2,
     "offerCoolDownMinutes": 5,
     "parkHours": 24,
+    "pinFallbackMinutes": 30,
+    "autoUnparkMax": 3,
     "awaitingChecksParkMinutes": 60,
     "docsOnlyReleaseGraceSeconds": 120,
     "qcLinkDays": 7,
@@ -140,6 +145,7 @@
     "sweepMinSeconds": 60
   },
   "baseUpdate": {
+    "mode": "conflict-or-merge",
     "enabled": true,
     "autoUpdateBranch": true,
     "autoUpdateDelaySeconds": 120,
@@ -187,7 +193,14 @@
     "turnBudgetPerDay": 96,
     "patrolReservePerHour": 2,
     "stepBudgetPerHour": 60,
-    "digest": { "refusalCount": 3, "verbErrorCount": 3, "releaseQueueCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 }
+    "digest": { "refusalCount": 3, "verbErrorCount": 3, "releaseQueueCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 },
+    "mode": "act",
+    "dailySummaryHourUtc": 7,
+    "actions": {
+      "perItemPerDay": 3,
+      "perHour": 30,
+      "policies": ["park-resolved", "stalled-owner", "pinned-worker-absent", "stuck-offer", "outside-blocker", "flaky-check", "repeated-question", "backlog-order", "load-balance", "operator-request"]
+    }
   },
   "operator": {
     "enabled": false,
@@ -195,7 +208,30 @@
     "tokenGeneration": 1,
     "requiredModelTier": "premium",
     "requiredEffort": "low",
-    "maxSelfMergesPerDay": 3
+    "maxSelfMergesPerDay": 12
+  },
+  "runtimes": {
+    "preferConnected": true,
+    "routing": [],
+    "caeJob": {
+      "enabled": false,
+      "maxConcurrent": 0,
+      "maxExecutionsPerDay": 0,
+      "ackSeconds": 300,
+      "replicaTimeoutSeconds": 14400,
+      "maxFailuresPerPhase": 2,
+      "unhealthyAfterFailures": 2,
+      "listSeconds": 30,
+      "jobResourceId": "",
+      "armEndpoint": "https://management.azure.com",
+      "apiVersion": "2024-03-01",
+      "managedIdentityClientId": "",
+      "image": "",
+      "containerName": "fwrunner",
+      "cpu": 4,
+      "memory": "8Gi",
+      "gatewayUrl": ""
+    }
   },
   "secrets": {
     "patterns": [
@@ -298,6 +334,8 @@
     "minTierByColumn": {}
   },
   "testLabel": "factory test",
+  "ownerHoldLabel": "hold:owner",
+  "priorityLabels": { "top": "priority:top", "high": "priority:high" },
   "mergeQueueDepth": 0,
   "gatewayMerge": true,
   "ownerSessions": false,

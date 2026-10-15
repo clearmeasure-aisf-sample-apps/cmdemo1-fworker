@@ -5,6 +5,8 @@ using System.Text.Json.Nodes;
 //   merge yet as pass_unmerged; the plant keeps that list for /status and the patrol digest (kind pass-unmerged, after timing.passUnmergedDigestMinutes);
 // - an accept is honoured only for the offer that stands for that session now (a late accept of a withdrawn offer is refused, stale-assignment);
 // - a session that let timing.offerMissLimit offers in a row lapse is not offered more work for timing.offerCoolDownMinutes, or until it calls a verb.
+//   Issue 100: an item taken back from a session counts as a miss as well, and a streak with a take-back in it blocks the session until it calls a
+//   verb of its own; the client's own accept (accepted_by client) never counts as answering.
 sealed partial class Plant
 {
     public double PassUnmergedDigestMinutes { get; set; } = 5;
@@ -12,6 +14,7 @@ sealed partial class Plant
     public double OfferCoolDownMinutes { get; set; } = 5;
 
     readonly Dictionary<int, (string Code, DateTime Since, int Pr)> passUnmerged = new();
+    readonly Dictionary<int, DateTime> mergedAt = new();   // issue 107: when the plant released an item's owner at its merge (kept an hour)
 
     // The sweep's pass_unmerged replaces the list (an item the sweep merged, or that left the state, is gone from it).
     // scope (issue 92): the items of an incremental pass; only their entries are replaced
@@ -26,14 +29,24 @@ sealed partial class Plant
         }
     }
 
-    // The item's pull request was merged (by the gateway, by the merge verb, or by a person): its open assignments are done; the owner keeps the
-    // item until item.complete (master green), as after the merge verb.
+    // The item's pull request was merged (by the gateway, by the merge verb, or by a person): its open assignments are done, and so is its owner. The
+    // gateway carries the item from here on (settle: master green, the release candidate, the Release Queue, Done), so the owner is released at
+    // once (issue 107): its session is spent and owns nothing, so the tick tells it session.end and the launcher starts the next one, instead of
+    // the session idling from the merge to the Release Queue. Called after item.merged was routed, so the owner has heard it.
     public void Merged(int item)
     {
         lock (gate)
         {
             foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
             passUnmerged.Remove(item);
+            // a sweep that read the claim before the merge removed it must not name the owner again (Plan skips it)
+            mergedAt[item] = DateTime.UtcNow;
+            if (ownerOf.TryGetValue(item, out var owner))
+            {
+                Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["plant"] = "owner-released-at-merge", ["item"] = item, ["worker"] = owner }.ToJsonString());
+                DropOwner(item); seamOwned.Remove(item);
+                acceptedOwner.Remove(item); clientAccepted.Remove(item); lastCall.Remove(item); lastRenew.Remove(item); checks.Remove(item);
+            }
         }
     }
 
@@ -71,20 +84,60 @@ sealed partial class Plant
     public void EndAccept(string assignment) { lock (gate) foreach (var a in assignments.Values.Where(x => x.Id == assignment)) a.Accepting = null; }
 
     // Issue 31: any verb a session calls successfully shows it is answering; its count of lapsed offers starts again and a cool-down ends.
+    // Issue 100: the caller (Program.cs) leaves out the accept that the stream client makes by itself (accepted_by client): that is not the session
+    // at work. A verb of the session's own also ends a block.
     public void NoteAnswered(string name)
     {
-        lock (gate) { if (workers.TryGetValue(name, out var w)) { w.Missed = 0; w.CoolUntil = DateTime.MinValue; } }
+        lock (gate)
+        {
+            if (!workers.TryGetValue(name, out var w)) return;
+            w.Missed = 0; w.TakeBackMisses = 0; w.CoolUntil = DateTime.MinValue;
+            if (w.BlockedSince != null) Unblock(w, "verb");
+        }
     }
 
-    // Under the gate, from Tick: the session let an (unpinned) offer lapse. Returns the text added to the journal line when a cool-down starts.
-    string NoteMissed(string name)
+    // Under the gate, from Tick: the session let an (unpinned) offer lapse. Returns the text added to the journal line when a cool-down or a block starts.
+    string NoteMissed(string name, int item)
     {
         if (!workers.TryGetValue(name, out var w)) return "";
         w.Missed++;
         if (OfferMissLimit <= 0 || w.Missed < OfferMissLimit) return "";
+        if (w.TakeBackMisses > 0) return Block(w, item);
         w.Missed = 0; w.CoolUntil = DateTime.UtcNow.AddMinutes(OfferCoolDownMinutes);
         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"plant\":\"cool-down\",\"worker\":\"{name}\",\"until\":\"{w.CoolUntil:o}\"}}");
         return $"; {name} let {OfferMissLimit} offers in a row lapse and is offered nothing new for {OfferCoolDownMinutes:0.#} min, or until it calls a verb";
     }
+
+    // Issue 100, under the gate, from the lease's take-back (Lease.cs Finish): the item was taken back from the session, which is a miss. Returns the
+    // text added to the journal line when the session is blocked by it.
+    string NoteTakeBack(string name, int item)
+    {
+        if (!workers.TryGetValue(name, out var w)) return "";
+        w.Missed++; w.TakeBackMisses++;
+        if (OfferMissLimit <= 0 || w.Missed < OfferMissLimit) return "";
+        return Block(w, item);
+    }
+
+    // The session is offered nothing (Choose, pinned items included) until it calls a verb of its own or a new session of the name registers. The
+    // operator stream gets a session-blocked plant event and the patrol digest a session-blocked entry while it lasts.
+    string Block(WorkerInfo w, int item)
+    {
+        var misses = w.Missed;
+        // already blocked (an offer made before the block was accepted by its client and taken back): one block, one event
+        if (w.BlockedSince != null) { w.Missed = 0; w.TakeBackMisses = 0; return ""; }
+        w.Missed = 0; w.TakeBackMisses = 0; w.BlockedSince = DateTime.UtcNow; w.BlockedItem = item; sessionsBlocked++;
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["plant"] = "session-blocked", ["worker"] = w.Name, ["item"] = item, ["misses"] = misses }.ToJsonString());
+        OperatorPlantEvent("session-blocked", item, w.Name, "", $"misses-{misses}");
+        return $"; {w.Name} missed {misses} items in a row (an item taken back among them) and is offered nothing until it calls a verb of its own";
+    }
+
+    void Unblock(WorkerInfo w, string why)
+    {
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["plant"] = "session-unblocked", ["worker"] = w.Name, ["by"] = why, ["blockedSeconds"] = (int)(DateTime.UtcNow - w.BlockedSince!.Value).TotalSeconds }.ToJsonString());
+        w.BlockedSince = null; w.BlockedItem = 0;
+        OperatorPlantEvent("session-unblocked", 0, w.Name, "", why);
+    }
+    long sessionsBlocked;
     static bool Cooling(WorkerInfo w) => w.CoolUntil > DateTime.UtcNow;
+    static bool Blocked(WorkerInfo w) => w.BlockedSince != null;
 }
