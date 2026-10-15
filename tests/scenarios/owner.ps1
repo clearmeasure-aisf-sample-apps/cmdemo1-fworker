@@ -821,6 +821,10 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
         $st2 = Get-Plant
         Check 'both items are owned by sara after the restart' (@($st2.plant.owners.PSObject.Properties | Where-Object { $_.Name -in "$a", "$b" -and $_.Value -eq 'sara' }).Count -eq 2) ($st2.plant.owners | ConvertTo-Json -Compress)
         Check 'the journal has one matched line for the offered item: the restore wrote none' (@(Get-Journal $b | Where-Object { $_ -eq 'matched' }).Count -eq 1) ((Get-Journal $b) -join ',')
+        # issue 81: the accepted item is resent to the reconnected owner (mode resume, resent), so a session that lost its event still works it
+        $ra2 = @((Get-Assigned 'sara' $a) | Where-Object { $_['resent'] -eq $true })
+        Check 'the reconnected owner is resent its accepted item: same assignment, mode resume, a token saved' ($ra2.Count -ge 1 -and $ra2[-1].assignment -eq $ea.assignment -and $ra2[-1].mode -eq 'resume' -and $ra2[-1]['accepted'] -eq $true) (@(Get-Assigned 'sara' $a) | ConvertTo-Json -Compress)
+        Check 'the client does not accept a resent item again' (@(Get-WorkerEvents 'sara' | Where-Object { $_.event -eq 'item.accepted' -and $_.item -eq $a }).Count -le 1) (@(Get-WorkerEvents 'sara' | Where-Object { $_.item -eq $a }) | ConvertTo-Json -Compress)
     } finally {
         Stop-OwnerClient 'sara'
         # the next restart of this suite must not restore this scenario's plant
@@ -912,6 +916,57 @@ $OwnerScenarios['owner: one item per session: a spent session that owns nothing 
         $env:FACTORY_SESSION_END_FILE = $oldEnd
         $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; $env:FACTORY_TIMING_sessionEndGraceSeconds = $oldGrace; Restart-Gateway
     }
+}
+
+# Issue 80: the operator's drain belongs to the name; a new session of the name (the launcher's next one) is still draining until the operator resumes.
+$OwnerScenarios['owner: an operator drain holds across a new session of the name until the operator resumes it'] = {
+    $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'drn1' })[0] }
+    $hdr = @{ Authorization = 'Bearer test-token' }
+    try {
+        Start-OwnerClient 'drn1' 'persistent-local'
+        $null = Invoke-RestMethod "$(Get-GatewayBase)/api/v1/workers/drn1/drain" -Method POST -Headers $hdr
+        Check 'the operator drains the name' ((& $me).draining -eq $true)
+        Stop-OwnerClient 'drn1'; [void](Wait-Until -Seconds 20 { -not (& $me).connected })
+        Start-OwnerClient 'drn1' 'persistent-local'
+        Check 'the next session of the name registers still draining' ((& $me).connected -eq $true -and (& $me).draining -eq $true) ((& $me) | ConvertTo-Json -Compress -Depth 3)
+        $n = New-Item-Fake 'Drained name' 'x' ($OwnerLabels + 'worker:drn1')
+        Start-Sleep -Seconds 8
+        Check 'the drained name is offered nothing' ((Get-Assigned 'drn1' $n).Count -eq 0)
+        $d = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/workers/drn1/resume" -Method POST -Headers @{ Authorization = "Bearer $($script:Workers['drn1'].token)" } -SkipHttpErrorCheck
+        Check 'the session itself cannot lift the operator drain' ([int]$d.StatusCode -eq 200 -and (& $me).draining -eq $true) "$([int]$d.StatusCode) $($d.Content)"
+        $null = Invoke-RestMethod "$(Get-GatewayBase)/api/v1/workers/drn1/resume" -Method POST -Headers $hdr
+        Check 'the operator resumes it' ((& $me).draining -eq $false)
+        Check 'then it is offered the item' (Wait-Until -Seconds 40 { (Get-Assigned 'drn1' $n).Count -gt 0 })
+        # a session's own drain (end-session) stays the session's: the next session of the name is not draining
+        $null = Invoke-RestMethod "$(Get-GatewayBase)/api/v1/workers/drn1/drain" -Method POST -Headers @{ Authorization = "Bearer $($script:Workers['drn1'].token)" }
+        Check 'the session drains itself' ((& $me).draining -eq $true)
+        Stop-OwnerClient 'drn1'; [void](Wait-Until -Seconds 20 { -not (& $me).connected })
+        Start-OwnerClient 'drn1' 'persistent-local'
+        Check 'its next session is not draining' ((& $me).connected -eq $true -and (& $me).draining -eq $false) ((& $me) | ConvertTo-Json -Compress -Depth 3)
+    } finally { Stop-OwnerClient 'drn1' }
+}
+
+# Issue 81: an owner whose item.assigned was lost is resent its accepted item when a new session of the name registers.
+$OwnerScenarios['owner: a new session of an owner is resent its accepted item; an item whose owner was dropped is not'] = {
+    try {
+        Start-OwnerClient 'rsd1' 'persistent-local' '--no-auto-accept'
+        $n = New-Item-Fake 'Resent item' 'x' ($OwnerLabels + 'worker:rsd1')
+        Check 'the item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'rsd1' $n).Count -gt 0 })
+        $e = @(Get-Assigned 'rsd1' $n)[-1]
+        $r = Fo 'rsd1' @('accept', '--item', $n, '--assignment', $e.assignment); CheckExit 'the session accepts' $r 0
+        Stop-OwnerClient 'rsd1'; [void](Wait-Until -Seconds 20 { -not @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'rsd1' })[0].connected })
+        $before = (Get-Assigned 'rsd1' $n).Count
+        Start-OwnerClient 'rsd1' 'persistent-local' '--no-auto-accept'
+        Check 'the new session is resent the item' (Wait-Until -Seconds 20 { @((Get-Assigned 'rsd1' $n) | Where-Object { $_['resent'] -eq $true }).Count -gt 0 })
+        $x = @((Get-Assigned 'rsd1' $n) | Where-Object { $_['resent'] -eq $true })[-1]
+        Check 'with the accepted assignment, mode resume' ($x.assignment -eq $e.assignment -and $x.mode -eq 'resume' -and $x['accepted'] -eq $true) ($x | ConvertTo-Json -Compress)
+        $r = Fo 'rsd1' @('accept', '--item', $n, '--assignment', $x.assignment); CheckExit 'accepting it again is harmless' $r 0
+        $r = Fo 'rsd1' @('release', '--item', $n, '--reason', 'scenario: the item ends'); CheckExit 'the item is released' $r 0
+        Stop-OwnerClient 'rsd1'; [void](Wait-Until -Seconds 20 { -not @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'rsd1' })[0].connected })
+        Start-OwnerClient 'rsd1' 'persistent-local' '--no-auto-accept'
+        Start-Sleep -Seconds 3
+        Check 'a released item is never resent (the output of the new client starts empty)' (@((Get-Assigned 'rsd1' $n) | Where-Object { $_['resent'] -eq $true }).Count -eq 0)
+    } finally { Stop-OwnerClient 'rsd1' }
 }
 
 # A person releases a park early (POST /api/v1/items/{n}/unpark, operator token): docs/design/plant-manager.md 10d

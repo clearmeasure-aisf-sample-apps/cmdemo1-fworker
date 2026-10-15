@@ -153,7 +153,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             w.Type = type; w.Caps = new(caps); w.Capacity = capOverride.TryGetValue(name, out var capSet) ? capSet : Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
-            w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = false;
+            w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name);   // issue 80: only the operator clears its drain
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
             w.Model = model; w.Effort = effort;
             // the older stream of this name is told it was replaced before it ends, so its client exits instead of reconnecting (4.6, failure mode 30)
@@ -166,7 +166,23 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             var mine = ownerOf.Where(kv => kv.Value == name).Select(kv => kv.Key).ToList();
             if (mine.Count > 0) Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "ownership.restored", ["items"] = new JsonArray(mine.Select(i => (JsonNode)i).ToArray()) }.ToJsonString(), false);
             foreach (var a in assignments.Values.Where(a => a.Worker == name && !a.Accepted)) Push(w, AssignedJson(a), false);
+            ResendAccepted(w);
             return (w, w.Out, replay);
+        }
+    }
+
+    // Issue 81: an owner whose item.assigned (or the client's item.accepted) was lost, in a gateway restart or a dropped stream, would only renew its
+    // claim and never work the item. Every (re)registration of the name, a new session included, and the snapshot restore resend item.assigned
+    // for each accepted own-item assignment of an item the name still owns, with mode resume and resent: true (the client saves the token and does
+    // not accept again; the session's own accept is idempotent). Only while the name owns the item: an owner that was dropped (merged and done,
+    // released, taken back, reassigned) has no accepted assignment left (issue 74) and is told nothing, so a finished item is never revived.
+    void ResendAccepted(WorkerInfo w)
+    {
+        foreach (var a in assignments.Values.Where(a => a.Accepted && a.Worker == w.Name && a.Kind == "own-item" && !IsQc(a) && ownerOf.TryGetValue(a.Item, out var o) && o == w.Name).ToList())
+        {
+            if (JsonNode.Parse(AssignedJson(a)) is not JsonObject j) continue;
+            j["mode"] = "resume"; j["resent"] = true; j["accepted"] = true;
+            Push(w, j.ToJsonString(), false);
         }
     }
 
@@ -1207,6 +1223,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             var misses = ownedMisses[item] = ownedMisses.GetValueOrDefault(item) + 1;
             if (misses < 2) continue;
             DropOwner(item);
+            // issue 74: an accepted own-item assignment of the dropped owner goes with it, so "accepted" always means "owned": a new session of the name
+            // is not resent an item it no longer owns (ResendAccepted), and the next sweep offers the item afresh instead of finding the session gone
+            if (assignments.TryGetValue($"{item}|own-item|owner", out var acc) && acc.Accepted && acc.Worker == name) assignments.Remove($"{item}|own-item|owner");
         }
         foreach (var k in ownedInfo.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) ownedInfo.Remove(k);
         foreach (var k in ownedSince.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) ownedSince.Remove(k);
@@ -1443,7 +1462,21 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
     }
 
-    public bool SetDraining(string name, bool on) { lock (gate) { if (!workers.TryGetValue(name, out var w)) return false; w.Draining = on; return true; } }
+    // Issue 80: the operator's drain belongs to the name. It holds across reconnects, new sessions of the name (the launcher) and a graceful restart
+    // (plant snapshot) until the operator resumes the name. A session's own drain (end-session, docs/launcher.md) is the session's: the next
+    // registration of the name clears it, so the launcher's next session is offered work. A session cannot resume an operator's drain.
+    readonly HashSet<string> drainedNames = new();
+    public bool SetDraining(string name, bool on, bool byOperator = false)
+    {
+        lock (gate)
+        {
+            if (!workers.TryGetValue(name, out var w)) return false;
+            if (byOperator) { if (on) drainedNames.Add(name); else drainedNames.Remove(name); }
+            w.Draining = on || drainedNames.Contains(name);
+            return true;
+        }
+    }
+    public bool IsDraining(string name) { lock (gate) return workers.TryGetValue(name, out var w) && w.Draining; }
 
     long Push(WorkerInfo w, string json, bool toBuffer = true)
     {
