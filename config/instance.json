@@ -198,6 +198,29 @@
     "requiredEffort": "low",
     "maxSelfMergesPerDay": 12
   },
+  "runtimes": {
+    "preferConnected": true,
+    "routing": [],
+    "caeJob": {
+      "enabled": false,
+      "maxConcurrent": 0,
+      "maxExecutionsPerDay": 0,
+      "ackSeconds": 300,
+      "replicaTimeoutSeconds": 14400,
+      "maxFailuresPerPhase": 2,
+      "unhealthyAfterFailures": 2,
+      "listSeconds": 30,
+      "jobResourceId": "",
+      "armEndpoint": "https://management.azure.com",
+      "apiVersion": "2024-03-01",
+      "managedIdentityClientId": "",
+      "image": "",
+      "containerName": "fwrunner",
+      "cpu": 4,
+      "memory": "8Gi",
+      "gatewayUrl": ""
+    }
+  },
   "secrets": {
     "patterns": [
       "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)",
