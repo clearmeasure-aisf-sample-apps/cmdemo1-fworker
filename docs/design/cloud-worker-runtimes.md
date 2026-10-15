@@ -9,6 +9,14 @@ Revised 2026-10-15 with the owner's decisions: the Foundry hosted-agent runtime 
 Apps runtime uses Claude Sonnet 5.5 deployed in Microsoft Foundry, billed through Azure, with Entra auth by the runner's managed identity
 (section 3); the runtime adapter stays, with the kinds `local` and `cae-job`.
 
+Revised again 2026-10-15 after the owner's Azure session:
+- **Claude via Foundry is blocked**: the Azure Marketplace refused the subscription for the Claude offer, and the owner chose to leave Claude
+  off for now. Section 3.1 to 3.2 stay as the plan for when it is unblocked; the Claude job (`caj-cmdemo1-tdd-fwrunner`) is kept.
+- **The active agent is Codex CLI on Azure OpenAI**: deployment `gpt-6.1-sol` (600k TPM) in the Foundry resource `aif-cmdemo1-tdd`, keyless
+  (key auth is disabled on the resource), Entra tokens of the runner's managed identity, in a second job `caj-cmdemo1-tdd-fwrunner-codex`
+  (section 3.4). The same fwrunner image runs both agents; `FWRUNNER_AGENT` chooses.
+- **Consumption, not D4, for now**: the jobs run on the Consumption profile at 4 vCPU / 8 GiB, with no termination-grace setting (2.5).
+
 Diagrams (PlantUML sources and rendered SVG in `docs/design/diagrams/`):
 
 | View | Source | Rendered |
@@ -25,8 +33,9 @@ Diagrams (PlantUML sources and rendered SVG in `docs/design/diagrams/`):
    environment as the gateway, manual trigger, started by the gateway through ARM with its managed identity: **one work item per execution** (an item may span several executions: one per phase and per retry).
    The execution runs one Claude Code session in auto mode with a settings file shipped in the image, and exits when the gateway sends
    `session.end`. This replaces the launcher loop: the fresh container is the fresh context. Not a literal sidecar (section 2.13).
-2. **Model: Claude Sonnet 5.5 in Microsoft Foundry** (Global Standard deployment), billed on the Azure bill through the Marketplace. Claude
-   Code runs with `CLAUDE_CODE_USE_FOUNDRY=1` and authenticates with the runner's managed identity: no model key exists (section 3).
+2. **Model: Codex CLI on Azure OpenAI `gpt-6.1-sol` is the active agent** (section 3.4): Entra token of the runner's managed identity, no
+   key. Claude Sonnet 5.5 in Microsoft Foundry (section 3.1 to 3.2) is the planned agent, blocked by the Azure Marketplace; it returns by
+   switching `runtimes.caeJob.agent` back to `claude` once the Marketplace accepts the subscription.
 3. **A runtime adapter in the gateway**: `runtime` on the worker registration (`local`, `cae-job`), an `IWorkerRuntime`
    interface with provision and deprovision, capacity per runtime, and routing rules by label (section 4).
 
@@ -140,6 +149,10 @@ Recommendation: a **dedicated workload profile D4** (4 vCPU, 16 GiB) added to `c
 and an ephemeral disk large enough for the worktree. The environment today has the Consumption profile only, so this is an environment
 change made through the demo-environment kit (`containerapps.bicep`). If the owner prefers no dedicated profile, start on Consumption at
 4 vCPU / 8 GiB and measure whether 8 GiB of disk is enough (a 7 GB worktree leaves no room) for a docs-only and a code item; move to D4 if not.
+
+**Decided 2026-10-15: Consumption for now.** Both jobs run on the Consumption profile at 4 vCPU / 8 GiB; no D4 profile is added. The jobs
+have no termination-grace setting, so the default applies and fwrunner.sh's stop and transcript upload must fit in it. The first items
+measure disk and build time; D4 is revisited if a code item runs out of the 8 GiB disk or the build does not finish within the replica timeout.
 
 ### 2.6 Identity and secrets
 
@@ -315,6 +328,38 @@ OTel collector next to the gateway.
 | Jobs: manual, schedule or event (KEDA) triggers; `replicaTimeout`, `replicaRetryLimit`; platform maintenance can interrupt long jobs; last 100 executions kept; no ingress. The maximum `replicaTimeout` is not documented | learn.microsoft.com/en-us/azure/container-apps/jobs (ms.date 2026-09-16) |
 | Dynamic sessions with custom containers: Hyper-V sandbox, pre-warmed pool, egress off by default; considered and not chosen because a session is driven by HTTP calls into the container, not a batch run | learn.microsoft.com/en-us/azure/container-apps/sessions-custom-container (updated 2026-05-10) |
 
+### 3.4 Active agent: Codex CLI on Azure OpenAI (decided 2026-10-15)
+
+| Fact | Source |
+|---|---|
+| Codex providers are set in `config.toml` under `[model_providers.<id>]` with `base_url` and `wire_api = "responses"`; for Azure the v1 API needs `/openai/v1` in `base_url` and no `api-version` | learn.microsoft.com/azure/foundry/openai/how-to/codex (ms.date 2026-09-03); learn.chatgpt.com/docs/config-file/config-reference (read 2026-10-15) |
+| Microsoft's page says "Entra ID support is currently not available for Codex": there is no built-in Azure credential chain | same Microsoft page, "Troubleshooting" |
+| Command-backed auth: `[model_providers.<id>.auth]` with `command`, `args`, `timeout_ms` (default 5000), `refresh_interval_ms` (default 300000) and `cwd`; the command gets no stdin and prints the token; Codex refreshes it proactively and after an auth failure; it cannot be combined with `env_key` | learn.chatgpt.com/docs/config-file/config-advanced, "Command-backed authentication" (read 2026-10-15) |
+| Codex CLI 0.155.1 is validated with `gpt-6-sol` on Azure OpenAI; `gpt-6.1-sol`, the deployment used here, is not on Microsoft's validated list | Microsoft page, "Validated versions" |
+
+The design: Codex 0.155.1 in the fwrunner image; `FWRUNNER_AGENT=codex` makes fwrunner.sh write `$CODEX_HOME/config.toml` with the
+provider `azure` (`base_url = https://aif-cmdemo1-tdd.openai.azure.com/openai/v1`, `model = gpt-6.1-sol`) and an auth command,
+`fwrunner-entra-token`, that fetches a token for `https://cognitiveservices.azure.com` of the runner identity (`AZURE_CLIENT_ID`) from the
+Container Apps identity endpoint. The bearer token is therefore an Entra token, refreshed by Codex every 10 minutes (`refresh_interval_ms = 600000` in the config) and after a 401; no key
+exists anywhere. Both jobs use the same runner identity (client id `45fb5295-…`); it needs **Cognitive Services OpenAI User** on `aif-cmdemo1-tdd` (Foundry User also covers it). The
+agent's own commands do not inherit the identity endpoint variables (`shell_environment_policy`).
+
+How the factory reaches Codex: the plugin's skills are Claude Code skills. fwrunner.sh generates `$CODEX_HOME/AGENTS.md` from a Codex
+preamble, the connect prompt, an index of the plugin's skills and the full owner-session skill; Codex reads the other skills as files.
+Limits: Codex in this setup has no subagents, so the analyst, implementer, reviewer and inspector roles run inline in the one session, one
+after the other (multi-agent tools exist in Codex but are not validated on `gpt-6.1-sol` and are left off); `model-for --role subagent` is
+not used; there are no Claude hooks, Monitor or ToolSearch. The command policy is Codex execpolicy rules that forbid the prefixes of the
+Claude settings' deny list (env, printenv, force pushes, pushes to master or main, wget, nc, ssh, scp, sudo); a deny in the middle of a
+command is not expressible as a prefix, so branch protection and the per-item token stay the controls, as for Claude. Approval is `never`
+and the sandbox mode is `danger-full-access` by default (the container is the boundary, as for Claude's auto mode); `workspace-write` can
+be chosen once the Codex Linux sandbox is shown to work in a Consumption replica. The worker still registers with type `claude-cloud`.
+
+The adapter chooses the job by `runtimes.caeJob.agent` and `runtimes.caeJob.jobs.<agent>` and passes `FWRUNNER_AGENT`; the gateway
+identity holds the job-operator role on both jobs. Only the active agent's job is listed and stopped, so a switch of agent is a redeploy
+after the other job's executions have ended. Where sections 1, 2.6, 2.7, 5 and 6 speak of Claude Code, Foundry User and the
+`claude-sonnet-5-5` deployment or the D4 profile, they describe the Claude path, which is planned but blocked; for the active path read
+Codex, Cognitive Services OpenAI User on `aif-cmdemo1-tdd`, the `gpt-6.1-sol` deployment and the Consumption profile.
+
 ## 4. The runtime adapter in the gateway
 
 ### 4.1 Registration
@@ -413,8 +458,8 @@ runner uses its own prompt template rather than changing it.
 ## 8. Open questions for the owner
 
 1. ARM right for the gateway (option A) or a queue between gateway and job (option B)?
-2. Dedicated D4 workload profile in `cae-cmdemo1-tdd`, or start on Consumption?
-3. ~~Model credential for the runner~~ **Decided 2026-10-15**: Claude Sonnet 5.5 in Microsoft Foundry (Global Standard), Entra auth by the runner's managed identity, no key, billed on the Azure bill (section 3).
+2. ~~Dedicated D4 workload profile, or Consumption?~~ **Decided 2026-10-15**: Consumption at 4 vCPU / 8 GiB for now (2.5).
+3. ~~Model credential for the runner~~ **Decided 2026-10-15**: Claude Sonnet 5.5 in Microsoft Foundry (Global Standard), Entra auth by the runner's managed identity, no key, billed on the Azure bill (section 3). **Blocked the same day** by the Azure Marketplace; **Codex CLI on Azure OpenAI `gpt-6.1-sol`** with Entra is the active agent (3.4).
 4. Restricted egress (VNet, NAT, firewall) now, or open egress for tdd?
 5. Pushes through a per-item installation token of the author App (new `git-credential` verb), or a separate "runner" GitHub App?
 6. Should cloud executions be preferred over connected local workers once proven, or stay opt-in by label?
