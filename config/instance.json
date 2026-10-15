@@ -43,6 +43,8 @@
   ],
   "releaseCheckName": "release",
   "masterFlakyChecks": ["^Acceptance Tests \\[shard \\d+/\\d+\\]$"],
+  "masterIgnoredChecks": ["release", "packages", "architecture"],
+  "masterCodeChecks": ["Integration Build (SQL container)"],
   "octopus": {
     "url": "https://clearmeasure.octopus.app",
     "space": "Spaces-355",
@@ -134,6 +136,7 @@
     "baseUpdateDebounceSeconds": 20
   },
   "baseUpdate": {
+    "mode": "conflict-or-merge",
     "enabled": true,
     "autoUpdateBranch": true,
     "autoUpdateDelaySeconds": 120,
