@@ -197,7 +197,34 @@ $Scenarios = [ordered]@{
     $v = Do-Verdict $n $pr; $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
     $done = Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Done' }
     Check 'rerun made master green and the item finished' $done "column $((Get-FakeIssue $n).column)"
-    Check 'a re-run was noted in the item' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*re-running failed jobs*' }).Count -ge 1)
+    Check 'a re-run was noted in the item' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*re-running the failed jobs*' }).Count -ge 1)
+}
+
+'master flaky: a shard fails while the Build runs; the failed jobs are re-run once the run completes and the item proceeds [full]' = {
+    # issue 79: before, the re-run was asked for while the run was still in progress (GitHub refuses it) and the item was parked master-broken
+    Fake 'config' @{ masterFlaky = $true; flakyRunSeconds = 6 } | Out-Null
+    $n = New-Item-Fake 'Flaky master' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n; Do-DevComplete $n | Out-Null
+    $v = Do-Verdict $n $pr; $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    $done = Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Done' }
+    $fs = Get-FakeState
+    Check 'the item finished after the re-run' $done "column $((Get-FakeIssue $n).column)"
+    Check 'one re-run, never asked for while the run was in progress' ($fs.reruns -eq 1 -and $fs.rerunRefusals -eq 0) "reruns $($fs.reruns) refused $($fs.rerunRefusals)"
+    Check 'the comment calls the shard known flaky and names the run' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*known flaky: Acceptance Tests `[shard 1/6`]*re-running the failed jobs once (workflow run*' }).Count -eq 1)
+    Check 'it was not parked' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' }).Count -eq 0)
+}
+
+'master red after the re-run: the item is parked master-broken once the new attempt failed [full]' = {
+    Fake 'config' @{ masterFlaky = $true; flakyRunSeconds = 3; rerunSeconds = 6; rerunConclusion = 'failure' } | Out-Null
+    $n = New-Item-Fake 'Broken master' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n; Do-DevComplete $n | Out-Null
+    $v = Do-Verdict $n $pr; $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    $parked = Wait-Until -Seconds 90 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' }).Count -gt 0 }
+    Check 'parked master-broken after the re-run failed' $parked
+    $c = @((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' })
+    Check 'the park says it failed after one re-run' ($c.Count -eq 1 -and $c[0].body -like '*also after one re-run of the failed jobs*') ($c | ForEach-Object { $_.body } | Out-String)
+    $ri = [array]::IndexOf([string[]]@((Get-FakeIssue $n).comments | ForEach-Object { "$($_.body)" }), [string]@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*re-running the failed jobs once*' } | ForEach-Object { "$($_.body)" })[0])
+    Check 'the re-run was asked for once and judged on its own attempt (the park came after it)' ((Get-FakeState).reruns -eq 1 -and $ri -ge 0) "reruns $((Get-FakeState).reruns)"
 }
 
 'code change: release candidate, Release Queue, production, Done [full]' = {

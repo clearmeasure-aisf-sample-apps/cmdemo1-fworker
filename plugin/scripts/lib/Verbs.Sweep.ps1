@@ -103,6 +103,21 @@ function Invoke-ClaimRefReap($List) {
     return , @($acts)
 }
 
+# Issue 82: removes the park of a closed item under the item lock, on a fresh read, and journals it. Returns the park's code, or $null when there
+# was none any more or the item is open again (reopened meanwhile: its park is a person's to release).
+function Clear-ClosedPark([int]$n) {
+    Use-ItemLock $n {
+        $info = Get-ItemInfo $n; if ($info.open) { return $null }
+        $f = Get-State $n; $fs = $f.state
+        if (-not (Test-Has $fs 'park')) { return $null }
+        if ((Test-Has $fs 'merge') -and (Test-Has $fs.merge 'awaiting') -and $fs.merge.awaiting) { return $null }
+        $park = $fs.park; $code = "$($park.reason)"; $fs.Remove('park')
+        [void](Add-Journal $n $f 'unparked' @{ column = "$($info.column)"; code = $code; by = 'the sweep'; reason = 'the item is closed'; closed = $true } "closed|$($park.at)")
+        Save-State $n $f
+        return $code
+    }
+}
+
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
@@ -116,12 +131,15 @@ function Verb_sync_board($a) {
     $passUnmerged = @()
     # release_queue: the items that wait in the Release Queue for the production deployment, with their release and since when (enhancement 9)
     $releaseQueue = @()
+    # unparked: items whose park the sweep removed because they are closed (issue 82); the plant forgets their parks
+    $unparked = @()
     $list = Get-BoardList
     $last = Get-LastColumn
     foreach ($it in $list) {
         # a closed item is still followed when its merged pull request closed it and the flow after the merge is not finished
         if (-not (Test-NameIn $c.label $it.labels)) { continue }
-        if (-not $it.open -and -not (("$($it.column)" -ieq $c.columns.validation) -or (Test-NameIn "$($it.column)" $c.columns.hold))) { continue }
+        # (issue 82: a closed item in any column the factory works is read too, so a park it was left with is removed below)
+        if (-not $it.open -and -not ((Test-NameIn "$($it.column)" $c.columns.ai) -or (Test-NameIn "$($it.column)" $c.columns.hold))) { continue }
         $n = $it.number; $col = "$($it.column)"
         if (Test-NameIn $c.rivalLabel $it.labels) { $actions += @{ item = $n; action = 'skip'; reason = 'ambiguous-owner' }; continue }
         if (-not $col -or $col -ieq $last) { continue }
@@ -131,7 +149,13 @@ function Verb_sync_board($a) {
             $st = Get-State $n; $s = $st.state
             $pin = @($it.labels | Where-Object { $_ -like 'worker:*' } | Select-Object -First 1)
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
-            if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) { continue }
+            if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) {
+                # issue 82: a closed item whose flow has ended keeps no park (280 stayed parked master-broken after it was closed)
+                if ((Test-Has $s 'park') -and -not $dry) { $r = Clear-ClosedPark $n; if ($r) { $actions += @{ item = $n; action = 'park-cleared'; reason = 'item-closed'; code = $r }; $unparked += $n } }
+                continue
+            }
+            # a closed item outside Functional Testing and the hold columns is followed no further, as before (only its park was of interest)
+            if (-not $it.open -and -not (("$($it.column)" -ieq $c.columns.validation) -or (Test-NameIn "$($it.column)" $c.columns.hold))) { continue }
             if ((Test-OwnedClaim $s) -and (Test-ClaimLive $s)) {
                 $owners["$n"] = "$($s.claim.holder)"
                 $owned["$n"] = @{ holder = "$($s.claim.holder)"; column = $col; lease_until = $s.claim.lease_until; heartbeat = $(if (Test-Has $s.claim 'heartbeat') { $s.claim.heartbeat } else { $null }); parked = [bool](Get-Park $s) }
@@ -299,7 +323,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------

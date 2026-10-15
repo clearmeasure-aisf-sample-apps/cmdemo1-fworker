@@ -969,6 +969,39 @@ $OwnerScenarios['owner: a new session of an owner is resent its accepted item; a
     } finally { Stop-OwnerClient 'rsd1' }
 }
 
+# Issue 82: a closed item keeps no park. The sweep removes it; unpark accepts a closed item and removes only the park.
+$OwnerScenarios['unpark: a closed item keeps no park: the sweep removes it, and unpark of a closed item removes only the park'] = {
+    $api = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"; $gh = @{ Authorization = 'Bearer fake-operator' }
+    $park = {
+        param($title)
+        $n = New-Item-Fake $title 'x' ($OwnerLabels + 'worker:cpk')
+        [void](Wait-Until -Seconds 40 { (Get-Assigned 'cpk' $n).Count -gt 0 })
+        $r = Fo 'cpk' @('accept', '--item', $n, '--assignment', @(Get-Assigned 'cpk' $n)[-1].assignment); CheckExit "accept $n" $r 0
+        $r = Fo 'cpk' @('complete', '--item', $n, '--column', 'Technical Design', '--succeeded', 'false', '--comment', 'cannot be met as written')
+        Check "item $n is parked" ($r.exit -eq 0 -and $r.parked -eq $true -and (Pm-State $n).ContainsKey('park')) ($r | ConvertTo-Json -Compress)
+        return $n
+    }
+    try {
+        Start-OwnerClient 'cpk' 'persistent-local' '--capacity 3'
+        # unpark of a closed item: the label is taken off first, so the sweep leaves it alone and the endpoint is what removes the park
+        $a = & $park 'Closed unpark'
+        Invoke-RestMethod "$api/issues/$a/labels/factory%20worker" -Method DELETE -Headers $gh | Out-Null
+        Invoke-RestMethod "$api/issues/$a" -Method PATCH -Body '{"state":"closed"}' -ContentType 'application/json' -Headers $gh | Out-Null
+        $r = F 'op' @('unpark', '--item', $a, '--reason', 'the item was closed by a person')
+        CheckExit 'unpark accepts a closed item' $r 0
+        Check 'it removes only the park: no re-offer, and says the item is closed' ($r.unparked -eq $true -and $r.reoffer -eq $false -and $r.closed -eq $true -and -not (Pm-State $a).ContainsKey('park') -and -not (Pm-State $a).ContainsKey('handoff')) ($r | ConvertTo-Json -Compress -Depth 4)
+        Check 'the journal records it' (@((Get-FakeIssue $a).comments | Where-Object { $_.body -match 'plant event=unparked' -and $_.body -like '*The item is closed*' }).Count -eq 1)
+        # the sweep removes the park of a closed item by itself
+        $b = & $park 'Closed park sweep'
+        Invoke-RestMethod "$api/issues/$b" -Method PATCH -Body '{"state":"closed"}' -ContentType 'application/json' -Headers $gh | Out-Null
+        Check 'the next sweep removes the park of the closed item' (Wait-Until -Seconds 60 { -not (Pm-State $b).ContainsKey('park') }) ((Pm-State $b) | ConvertTo-Json -Compress -Depth 4)
+        Check 'and journals it once, as removed by the sweep' (@((Get-FakeIssue $b).comments | Where-Object { $_.body -match 'plant event=unparked' -and $_.body -like '*by the sweep*' -and $_.body -like '*The item is closed*' }).Count -eq 1) (((Get-FakeIssue $b).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(120, $_.body.Length)) }) -join ' | ')
+        Start-Sleep -Seconds 6
+        $j = [string[]](Get-Journal $b); $u = [array]::LastIndexOf($j, 'unparked')
+        Check 'nothing is offered after it' ($u -ge 0 -and @($j | Select-Object -Skip ($u + 1) | Where-Object { $_ -in 'matched', 'offered' }).Count -eq 0) ($j -join ',')
+    } finally { Stop-OwnerClient 'cpk' }
+}
+
 # A person releases a park early (POST /api/v1/items/{n}/unpark, operator token): docs/design/plant-manager.md 10d
 $OwnerScenarios['unpark: the operator releases a park early with a reason; the next sweep offers the item again in its column'] = {
     Start-OwnerClient 'una' 'persistent-local' '--capacity 3'
