@@ -434,4 +434,46 @@ $OperatorScenarios = [ordered]@{
     $r = Msg-StartRefused @{ FACTORY_MESSAGING = '0'; FACTORY_MANAGER = '0' }
     Check 'operator.enabled without messaging.enabled is refused at start' ($null -ne $r.exit -and $r.exit -ne 0 -and "$($r.stderr)" -match 'operator.enabled needs messaging.enabled') "$($r.exit) $($r.stderr)"
 }
+'op: its note waits in a worker''s inbox like the operator''s: queued while the worker is away, read, acknowledged, quoted with --from-message, once per worker for a note to all, and as an answer' = {
+    $op = Op-Hold; $al = $null; $bo = $null; $c = $null
+    try {
+        [void](Msg-F 'alice' @('presence'))
+        $text = 'The gateway restarts at 15:00 for a release; streams reconnect by themselves.'
+        $n = Op-Post '/api/v1/messages' @{ to = 'alice'; item = 4711; text = $text }
+        Check 'a note to a worker with no stream open is accepted and queued' ($n.status -eq 200 -and $n.queued -eq 1 -and $n.pushed -eq 0 -and (@($n.recipients) -join ',') -eq 'alice') ($n | ConvertTo-Json -Compress -Depth 4)
+        $in = Msg-F 'alice' @('inbox')
+        $e = Msg-First @($in.messages | Where-Object { $_.id -eq $n.id })
+        Check 'the worker finds it with inbox as the operator session''s note: its name and kind, its own trust, the full warning, the whole text' ($in.exit -eq 0 -and $e -and $e.event -eq 'operator-session.note' -and $e.from -eq 'operator-session' -and $e.fromKind -eq 'operator-session' -and $e.trust -eq 'operator-session-text' -and $e.warning -match 'not the person' -and $e.item -eq 4711 -and $e.text -eq $text) ($in | ConvertTo-Json -Compress -Depth 5)
+        Check 'the record shows it delivered to alice' ((Msg-Admin "/api/v1/messages/$($n.id)").perRecipient.alice -eq 'delivered') ((Msg-Admin "/api/v1/messages/$($n.id)") | ConvertTo-Json -Compress -Depth 4)
+        $ack = Msg-F 'alice' @('ack', '--ids', $n.id)
+        Check 'alice acknowledges it: handled, as an operator note is' ($ack.exit -eq 0 -and (Msg-Admin "/api/v1/messages/$($n.id)").perRecipient.alice -eq 'handled') ($ack | ConvertTo-Json -Compress)
+        $again = Msg-F 'alice' @('inbox', '--id', $n.id)
+        Check 'it stays in the inbox after it was handled: inbox --id still reads it, once' (@($again.messages | Where-Object { $_.id -eq $n.id }).Count -eq 1) ($again | ConvertTo-Json -Compress -Depth 5)
+        $item = New-Item-Fake 'operator session note quoted' 'body' @()
+        $cm = Msg-Json (Msg-Verb 'comment' (Msg-ItemToken $item 'owner' 'alice') @{ item = $item; body = 'Assumed from the operator session: the restart is at 15:00.'; from_message = $n.id })
+        Check 'its id works with --from-message: one marked block that names the operator session as the sender' ($cm.ok -eq $true -and @((Get-FakeIssue $item).comments | Where-Object { $_.body -match ('aisf:assumption source=' + [regex]::Escape($n.id) + ' from=operator-session ') }).Count -eq 1) ($cm | ConvertTo-Json -Compress)
+        $al = Op-Worker 'alice'; $bo = Op-Worker 'bob'
+        $all = Op-Post '/api/v1/messages' @{ to = '*'; text = 'to all from the operator session' }
+        Check 'a note to all reaches alice and bob' ($all.status -eq 200 -and @($all.recipients | Where-Object { $_ -in 'alice', 'bob' }).Count -eq 2) ($all | ConvertTo-Json -Compress -Depth 4)
+        foreach ($w in 'alice', 'bob') {
+            $x = Msg-F $w @('inbox', '--include', 'delivered')
+            Check "it is in the inbox of $w once, as the operator session's note" (@($x.messages | Where-Object { $_.id -eq $all.id -and $_.event -eq 'operator-session.note' -and $_.trust -eq 'operator-session-text' }).Count -eq 1) ($x | ConvertTo-Json -Compress -Depth 5)
+        }
+        $q = Mgr-Ask 'alice' 4712 'Does item 4712 need the migration?'
+        $ans = Op-Post "/api/v1/questions/$($q.id)/answer" @{ text = 'No: the migration is item 4713.' }
+        $ai = Msg-F 'alice' @('inbox', '--id', $ans.id)
+        Check 'its answer to a question waits in the asker''s inbox the same way, in reply to the question' ($ans.status -eq 200 -and $ai.exit -eq 0 -and $ai.messages[0].event -eq 'operator-session.note' -and $ai.messages[0].in_reply_to -eq $q.id -and $ai.messages[0].text -eq 'No: the migration is item 4713.') ($ai | ConvertTo-Json -Compress -Depth 5)
+        # a long note on the real client's stream: one line of at most 500 characters, cut, and inbox --id prints it whole
+        Msg-Close $bo; $bo = $null
+        $c = Msg-Client 'bob' 'op-long'
+        Check 'bob''s client registers' (Msg-WaitEvent $c 'worker.registered' 30)
+        $long = (1..180 | ForEach-Object { "part $_" }) -join ', '
+        $ln = Op-Post '/api/v1/messages' @{ to = 'bob'; text = $long }
+        Check 'bob prints the long note' ($ln.status -eq 200 -and (Msg-WaitPrinted $c $ln.id)) ($ln | ConvertTo-Json -Compress -Depth 4)
+        $line = Msg-First @(Get-Content $c.out | Where-Object { $_ -match [regex]::Escape($ln.id) }); $lo = $line | ConvertFrom-Json -AsHashtable
+        Check 'as one line of at most 500 characters: operator-session.note with its trust, a short warning, cut, and the command that prints it whole' ($line.Length -le 500 -and $lo.event -eq 'operator-session.note' -and $lo.trust -eq 'operator-session-text' -and $lo.warning -match 'not the person' -and $lo.truncated -eq $true -and $lo.read -eq "factory.ps1 inbox --id $($ln.id)" -and $long.StartsWith("$($lo.text)") -and @($lo.Keys)[-1] -eq 'text') $line
+        $whole = Msg-F 'bob' @('inbox', '--id', $ln.id)
+        Check 'and inbox --id prints it whole' ($whole.exit -eq 0 -and $whole.messages[0].text -eq $long) ($whole | ConvertTo-Json -Compress -Depth 5)
+    } finally { Msg-Close $op; if ($al) { Msg-Close $al }; if ($bo) { Msg-Close $bo }; if ($c) { try { Stop-Process -Id $c.proc.Id -Force -ErrorAction SilentlyContinue } catch { } }; Op-AnswerAll }
+}
 }
