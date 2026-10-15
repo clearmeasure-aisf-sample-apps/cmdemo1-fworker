@@ -1576,6 +1576,7 @@ sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runn
 
 sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int seconds, bool ownerMode, BaseWatch? baseWatch = null, Task? restored = null) : BackgroundService
 {
+    readonly HashSet<(int, string)> flagged = new();
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         try { await Task.Delay(TimeSpan.FromSeconds(3), ct); } catch (OperationCanceledException) { return; }
@@ -1607,6 +1608,10 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                         plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep);
                         plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray);
                         if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
+                        // issue 117: what the sweep flags (a Release Queue card without a merge record): one plant event per item and code in this process
+                        foreach (var f in j["flags"] as JsonArray ?? new JsonArray())
+                            if (f is JsonObject fo && fo["item"] is JsonValue fv && fv.TryGetValue<int>(out var fi) && flagged.Add((fi, fo["code"]?.ToString() ?? "")))
+                                plant.OperatorPlantEvent(fo["code"]?.ToString() ?? "flagged", fi, "", fo["column"]?.ToString() ?? "");
                         // a merge the gateway made after a PASS and the round-trip of one it could not make (Verbs.Merge.ps1 -Gateway)
                         foreach (var a in acts)
                             if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))

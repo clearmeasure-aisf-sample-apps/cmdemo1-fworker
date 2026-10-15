@@ -256,6 +256,25 @@ $Scenarios = [ordered]@{
     Check 'it was never called broken' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' -or $_.body -like '*master checks failed*' }).Count -eq 0)
 }
 
+'settle and checks under the item lock: a wait for checks moves no card that left Development, and a Release Queue card without a merge record is flagged once' = {
+    # issue 117: two passes 5 s apart moved 290 Development -> Functional Testing -> Release Queue with its pull request unmerged
+    $gh = @{ Authorization = 'Bearer fake-operator' }
+    $mut = 'mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }'
+    $move = { param($i, $col) Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/graphql" -Method POST -Headers $gh -Body (@{ query = $mut; variables = @{ p = 'p'; i = "card_$i"; f = 'f'; o = 'opt_' + ($col -replace ' ', '_') } } | ConvertTo-Json -Depth 5) -ContentType 'application/json' | Out-Null }
+    $n = New-Item-Fake 'Moved while its checks run' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n @('docs/trial.md') 'w1' 'green' 3600
+    $r = Do-DevComplete $n; CheckExit 'complete waits for the checks' $r 21 'accepted-checks-pending'
+    Check 'the wait records the column it began in' ("$((Pm-State $n).awaiting_checks.column)" -eq 'Development') ((Pm-State $n) | ConvertTo-Json -Compress -Depth 4)
+    & $move $n 'Functional Testing'
+    Check 'the wait ends without moving the card' (Wait-Until -Seconds 40 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*ended without moving the card*' }).Count -eq 1 })
+    $st = Pm-State $n
+    Check 'the card stays where it was put, and the wait and its park are gone' ((Get-FakeIssue $n).column -eq 'Functional Testing' -and -not $st.ContainsKey('awaiting_checks') -and -not ($st.ContainsKey('park') -and "$($st.park.reason)" -eq 'development:awaiting-checks')) ($st | ConvertTo-Json -Compress -Depth 4)
+    $m = New-Item-Fake 'In the Release Queue, unmerged' 'x' $L 'Release Queue'
+    Check 'an open Release Queue card without a merge record is flagged' (Wait-Until -Seconds 30 { @((Get-FakeIssue $m).comments | Where-Object { $_.body -match 'plant event=flagged' -and $_.body -like '*release-queue-without-merge*' }).Count -eq 1 })
+    Start-Sleep -Seconds 6
+    Check 'once, and nothing moves it' (@((Get-FakeIssue $m).comments | Where-Object { $_.body -match 'plant event=flagged' }).Count -eq 1 -and (Get-FakeIssue $m).column -eq 'Release Queue')
+}
+
 'code change: release candidate, Release Queue, production, Done [full]' = {
     Fake 'config' @{ prodDelaySeconds = 6 } | Out-Null
     $n = New-Item-Fake 'Code' 'x' $L; Do-TechnicalDesign $n 'w1' $false

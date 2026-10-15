@@ -215,11 +215,9 @@ t. **Done (2026-10-14): the Release Queue age** (enhancement 9). The sweep lists
    the gateway promotes: uat and prod stay with the owner and the cmdemo1 session. Open: the supervisor's skill (owner review) does not
    yet say what to do with `release-queue-aged`; not yet seen live on tdd.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
-m. **The sweep still saves a state it read without the item lock in two places** of `Verb_sync_board` (Verbs.Sweep.ps1): the
-   awaiting-checks path (`Complete-AwaitingChecks`) and the settle path (`Invoke-Settle`, which reads fresh but holds no lock). They were
-   left because they call GitHub and Octopus for a long time between the read and the save: under the item lock a verb for the same item
-   would wait and be refused `item-busy`. They need the read-decide part outside and a short locked write of their own keys. The
-   merge-detected and owner-released-idle writes are fixed (locked, on a fresh read), as is the QC step.
+m. **Done (2026-10-15, #117): the sweep saves no state it read without the item lock.** Settle (`Invoke-SettleLocked`) and the end of a
+   wait for checks (`Invoke-AwaitingChecksLocked`) run under the item lock on a fresh read; a lock still busy after 3 s skips the item for
+   one sweep. A verb of the same item waits for them at most its own 45 s.
 n. **Rule scripts run as one `pwsh` per call with no limit on how many at once** (`runner.pool` is 0 in the deployed configuration). A
    burst of verbs is a burst of processes: the likeliest way for the container to run out of memory. Either a concurrency limit in `Runner`
    (Program.cs) or `runner.pool` in `config/deploy.overrides.json` (a protected file: the owner decides).
@@ -272,6 +270,13 @@ Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
   too, instead of only removing their park), an unpark re-arms it and hands nothing off (`reoffer` false, `awaiting` in the answer), and the
   merge verb's already-merged path keeps the original record and `merged_at`. `POST /api/v1/items/{n}/resettle` (operator token, a reason)
   puts a finished merged item back into the settle step, for an item a person reopened because no release carried it. No auto-revert.
+
+- **#117 Two sweep passes moved an unmerged item to the Release Queue** (290: Development, Functional Testing, Release Queue 5 s apart, its
+  pull request unmerged). Settle and the end of a wait for checks run under the item lock on a fresh read (entry m). A card is moved only
+  from the column the step expects: the wait for checks ends without a move when the card left the column it began in
+  (`awaiting_checks.column`), and settle moves a card to the Release Queue only from Functional Testing. An open Release Queue card without a
+  merge record is flagged once (journal `flagged`, code `release-queue-without-merge`, and a plant event on the operator stream); nothing
+  moves it.
 
 Closed on 2026-10-15 (issues #79 and #82):
 

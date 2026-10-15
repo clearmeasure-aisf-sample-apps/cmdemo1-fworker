@@ -52,6 +52,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         }
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
+        'flagged' { return "flagged ``$($F.code)`` in $($col): $($F.reason)." }
         'settle-rearmed' { return "the settle step of this merged item is re-armed by $($F.by) (awaiting ``$($F.awaiting)``): $($F.reason). The gateway carries it on; it is not offered to a worker." }
         'unparked' { if ($F.ContainsKey('merged') -and $F.merged) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is merged: the gateway settles it, nothing is offered." }
             if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }

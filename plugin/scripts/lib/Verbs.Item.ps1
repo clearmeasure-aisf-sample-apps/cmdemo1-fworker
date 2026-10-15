@@ -433,7 +433,7 @@ function Verb_complete($a) {
     }
     $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url }
     if ($chk.status -eq 'pending') {
-        $s.awaiting_checks = @{ pr = $pr.number; sha = $prd.head.sha; comment = $comment; since = ConvertTo-Iso (Get-UtcNow) }
+        $s.awaiting_checks = @{ pr = $pr.number; sha = $prd.head.sha; comment = $comment; since = ConvertTo-Iso (Get-UtcNow); column = $col }
         Set-Park $s 'development:awaiting-checks' $c.timing.awaitingChecksParkMinutes
         if (Test-OwnedClaim $s) { Save-State $n $st } else { $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n }
         Add-Comment $n "PR #$($pr.number) checks are still running; the gateway is watching them and will advance the item when green. The worker's job here is done."
