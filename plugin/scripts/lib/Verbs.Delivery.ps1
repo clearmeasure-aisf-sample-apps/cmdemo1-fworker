@@ -88,12 +88,26 @@ function Get-FlakyReason([string]$Sha, $Failed) {
     try {
         $elsewhere = @()
         foreach ($cm in @(Invoke-Gh -Path "$(Get-RepoPath)/commits?sha=$($c.defaultBranch)&per_page=6" | Where-Object { $_ -and "$($_.sha)" -ne $Sha } | Select-Object -First 5)) {
-            $o = Get-ChecksFor "$($cm.sha)"
+            $o = Get-ChecksFor "$($cm.sha)" -Ignore (Get-MasterIgnoredChecks)
             $elsewhere += @(@($Failed) | Where-Object { $o.failed_checks -contains $_ -and $_ -notin $elsewhere })
         }
         if ($elsewhere.Count -gt 0) { return "also failed on a recent master commit: $($elsewhere -join ', ')" }
     } catch { }
     return 'not known to be flaky'
+}
+
+# Whether the merged change is documentation only, and from what. First the merge commit's own Build: the jobs in masterCodeChecks run only for a
+# code change (build.yml's job "Detect code changes" skips them otherwise), so all of them skipped means no code changed and no release will be
+# built. Without those checks, the files of the pull request (docsOnlyPaths). Never the release check: the Release workflow attaches its check runs
+# to master's head when it starts, so a merge commit whose Build failed and was re-run keeps the skipped release check of its first attempt
+# (items 272 and 276 were moved to Done that way, with code that was never released). $null when neither can be read.
+function Get-MergeDocsOnly($m, $Chk) {
+    $c = Get-Cfg
+    $names = if (Test-Has $c 'masterCodeChecks') { @($c.masterCodeChecks | ForEach-Object { "$_" }) } else { @() }
+    $seen = @($names | Where-Object { $Chk.runs.ContainsKey($_) -and "$($Chk.runs[$_].status)" -eq 'completed' } | ForEach-Object { $Chk.runs[$_] })
+    if ($seen.Count -gt 0) { return @{ docs_only = (@($seen | Where-Object { "$($_.conclusion)" -ne 'skipped' }).Count -eq 0); from = 'build' } }
+    if (Test-Has $m 'pr') { try { return @{ docs_only = [bool](Test-DocsOnlyFiles (Get-PrFiles ([int]$m.pr))); from = 'pr-files' } } catch { } }
+    return $null
 }
 
 # One idempotent step of the post-merge flow for one item: master green, release candidate, docs-only skip, Release Queue, Done.
@@ -111,7 +125,7 @@ function Invoke-Settle([int]$n) {
         $m.awaiting = $null; $m.done_at = ConvertTo-Iso (Get-UtcNow); Save-State $n $st
     }
     if ($m.awaiting -eq 'master-green') {
-        $chk = Get-ChecksFor $sha
+        $chk = Get-ChecksFor $sha -Ignore (Get-MasterIgnoredChecks)
         $mergedAt = ConvertFrom-Iso $m.merged_at
         $rerunAt = if (Test-Has $m 'rerun_at') { ConvertFrom-Iso $m.rerun_at } else { $null }
         if ($chk.status -eq 'failure') {
@@ -170,15 +184,18 @@ function Invoke-Settle([int]$n) {
     if ($m.awaiting -in 'release-candidate', 'late-rc') {
         $chk = Get-ChecksFor $sha
         $rel = $chk.runs[$c.releaseCheckName]
-        if ($rel -and $rel.status -eq 'completed' -and $rel.conclusion -eq 'skipped') {
+        # docs-only is decided from the merge commit's own Build or the pull request's files (Get-MergeDocsOnly), once, before the release check is
+        # read; an item that is not known to be docs-only always goes on to look for its release candidate
+        if (-not (Test-Has $m 'docs_only')) { $dk = Get-MergeDocsOnly $m $chk; if ($dk) { $m.docs_only = [bool]$dk.docs_only; $m.docs_only_from = "$($dk.from)" } }
+        $docsOnly = (Test-Has $m 'docs_only') -and $m.docs_only
+        if ($docsOnly -and $rel -and $rel.status -eq 'completed' -and $rel.conclusion -eq 'skipped') {
             & $finish "the master build published no release candidate for ``$($sha.Substring(0,7))`` - its publish step was skipped because no code changed. A docs-only change has nothing to deploy, so it is moved straight to **$(Get-LastColumn)**."
             return @{ outcome = 'done'; path = 'docs-only' }
         }
         # A docs-only change builds no release. If the Release workflow never produced a 'release' check (for instance its run was dropped by the
         # workflow's concurrency group), do not wait for one: finish once master has been green for the grace period.
-        if (-not (Test-Has $m 'docs_only') -and (Test-Has $m 'pr')) { try { $m.docs_only = Test-DocsOnlyFiles (Get-PrFiles ([int]$m.pr)) } catch { } }
         $since = if (Test-Has $m 'green_at') { ConvertFrom-Iso $m.green_at } else { ConvertFrom-Iso $m.merged_at }
-        if ((Test-Has $m 'docs_only') -and $m.docs_only -and -not $rel -and $since -and ($now - $since).TotalSeconds -ge [double]$t.docsOnlyReleaseGraceSeconds) {
+        if ($docsOnly -and -not $rel -and $since -and ($now - $since).TotalSeconds -ge [double]$t.docsOnlyReleaseGraceSeconds) {
             & $finish "the change is documentation only and no release was built for ``$($sha.Substring(0,7))`` ($($t.docsOnlyReleaseGraceSeconds) s after master went green). A docs-only change has nothing to deploy, so it is moved straight to **$(Get-LastColumn)**."
             return @{ outcome = 'done'; path = 'docs-only-no-release' }
         }
