@@ -15,7 +15,7 @@ function Complete-AwaitingChecks([int]$n, $info, $st) {
         $rounds = $(if (Test-Has $s 'fix_forward_rounds') { [int]$s.fix_forward_rounds } else { 0 }) + 1
         $s.fix_forward_rounds = $rounds; $s.Remove('awaiting_checks'); $s.Remove('park')
         if ($rounds -gt [int]$c.timing.fixForwardMaxRounds) {
-            Set-Park $s 'fix-forward-exhausted' ($c.timing.parkHours * 60); Save-State $n $st
+            Set-Park $s 'fix-forward-exhausted' ($c.timing.parkHours * 60); $s.park.pr = [int]$pr.number; $s.park.head = "$($pr.head.sha)"; Save-State $n $st
             Add-Comment $n "PR #$($pr.number) has failed CI after $($rounds - 1) fix-forward Development rounds - parked for a human."
             return @{ outcome = 'parked'; reason = 'fix-forward-exhausted' }
         }
@@ -118,6 +118,111 @@ function Clear-ClosedPark([int]$n) {
     }
 }
 
+# Auto-unpark: a park whose cause has cleared is lifted by the sweep, so nobody has to watch for it (the overnight runs of 2026-10-14 needed a person
+# for each). Returns why the cause cleared, or $null. $Ctx caches master's state for one sweep and carries free_workers from the gateway.
+#   master-broken             master's head is green now AND every check that failed at the park (park.failed) passed on it (a skipped job, as
+#                             on a docs-only head, does not count); a park written before park.failed existed is left to a person
+#   verdict-failed,           the item's open pull request is green on a head newer than the one the park judged (park.head; a park written
+#   fix-forward-exhausted     before park.head existed is left to a person)
+#   session-relaunch-budget   (and a watchdog-relaunch-budget whose last claim was taken back by the gateway): a session that could take it is free
+# No item is lifted more than timing.autoUnparkMax times (default 3) per park code: after that the park is a person's again, so an item that
+# breaks every session it gets is not retried for ever.
+function Test-AutoUnpark([int]$n, $s, $Park, $Ctx) {
+    $code = "$($Park.reason)"
+    $t = (Get-Cfg).timing; $max = if (Test-Has $t 'autoUnparkMax') { [int]$t.autoUnparkMax } else { 3 }
+    $cnt = if ((Test-Has $s 'auto_unparks') -and (Test-Has $s.auto_unparks $code)) { [int]$s.auto_unparks[$code] } else { 0 }
+    if ($cnt -ge $max) { return $null }   # (0 switches the lifts off)
+    switch ($code) {
+        'master-broken' {
+            if (-not (Test-Has $Park 'failed') -or @($Park.failed).Count -eq 0) { return $null }
+            if (-not $Ctx.ContainsKey('master')) {
+                $Ctx.master = $null
+                try { $head = Get-BaseHead; $chk = Get-ChecksFor $head; $Ctx.master = @{ sha = $head; green = ($chk.status -eq 'success'); runs = $chk.runs } } catch { }
+            }
+            $mc = $Ctx.master
+            if (-not $mc -or -not $mc.green) { return $null }
+            foreach ($f in @($Park.failed)) { $r = $mc.runs["$f"]; if (-not $r -or "$($r.conclusion)" -ne 'success') { return $null } }
+            return "master is green again at $($mc.sha.Substring(0, 7)), with $(@($Park.failed) -join ', ') passing"
+        }
+        { $_ -in 'verdict-failed', 'fix-forward-exhausted' } {
+            if (-not (Test-Has $Park 'head') -or -not "$($Park.head)") { return $null }
+            $prn = if (Test-Has $Park 'pr') { [int]$Park.pr } elseif ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }
+            if ($prn -le 0) { return $null }
+            $pr = try { Get-Pr $prn } catch { $null }
+            if (-not $pr -or "$($pr.state)" -ne 'open' -or "$($pr.head.sha)" -eq "$($Park.head)") { return $null }
+            if ((Get-ChecksFor "$($pr.head.sha)").status -eq 'success') { return "PR #$prn is green on a newer head $("$($pr.head.sha)".Substring(0, 7))" }
+        }
+        { $_ -eq 'session-relaunch-budget' -or ($_ -eq 'watchdog-relaunch-budget' -and (Test-Has $Park 'last_take_back')) } {
+            # one lift per free session in a sweep: six parked items and one free session lift one
+            if ([int]$Ctx.free_workers -gt 0) { return "the relaunches were lost to session trouble ($(if (Test-Has $Park 'last_take_back') { $Park.last_take_back } else { 'take-backs' })) and a worker session can take it now" }
+        }
+    }
+    return $null
+}
+# Lifts the park under the item lock on a fresh read (only the same park: one a person or a verb changed meanwhile is left), counts the lift,
+# journals it, and hands an open item without a live claim to its column so the sweep offers it at once. A merged item parked master-broken goes
+# back to waiting for master green, judged on master's green head when its own merge commit is still not green (issue 70). Returns
+# @{ code; handoff; owned } or $null.
+function Invoke-AutoUnpark([int]$n, $Park, [string]$Why, $Ctx) {
+    Use-ItemLock $n {
+        $c = Get-Cfg
+        $info = Get-ItemInfo $n; $f = Get-State $n; $fs = $f.state
+        if (-not (Test-Has $fs 'park') -or "$($fs.park.at)" -ne "$($Park.at)" -or "$($fs.park.reason)" -ne "$($Park.reason)") { return $null }
+        $code = "$($fs.park.reason)"; $fs.Remove('park')
+        if (-not (Test-Has $fs 'auto_unparks')) { $fs.auto_unparks = @{} }
+        $fs.auto_unparks[$code] = $(if (Test-Has $fs.auto_unparks $code) { [int]$fs.auto_unparks[$code] } else { 0 }) + 1
+        $handoff = $false
+        if ($code -eq 'master-broken' -and (Test-Has $fs 'merge')) {
+            $m = $fs.merge; $m.awaiting = 'master-green'
+            if ($Ctx.master -and "$($m.sha)" -and (Get-ChecksFor "$($m.sha)").status -ne 'success') { $m.judge_sha = $Ctx.master.sha } elseif (Test-Has $m 'judge_sha') { $m.Remove('judge_sha') }
+        } elseif ($info.open -and -not (Test-ClaimLive $fs) -and (Test-NameIn "$($info.column)" $c.columns.ai)) {
+            $fs.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $handoff = $true
+        }
+        $why2 = "$Why (automatic lift $($fs.auto_unparks[$code]) of at most $(if (Test-Has $c.timing 'autoUnparkMax') { $c.timing.autoUnparkMax } else { 3 }))"
+        [void](Add-Journal $n $f 'unparked' @{ column = "$($info.column)"; code = $code; by = 'the sweep'; reason = $why2 } "auto|$($Park.at)")
+        Save-State $n $f
+        return @{ code = $code; handoff = $handoff; owned = (Test-OwnedClaim $fs) -and (Test-ClaimLive $fs) }
+    } 3
+}
+
+# Board guard: an open issue with the factory label that has no card on the board, or a card with no column, is invisible to the sweep (on
+# 2026-10-14 nine new items sat unseen until a person added them). Each sweep lists the open labelled issues (REST, paged, pull requests and the
+# rival label skipped) and, for each one the board snapshot shows without a column, reads the issue again (a person may have placed it meanwhile):
+# a card in a column is left alone, a card without a column is given the intake column, and an issue without a card is added there (the intake
+# column is the first column the factory works, Technical Design). One journal line each. At most $Max per sweep, so a first run over many issues
+# stays within the sweep's time; the rest follow at the next sweeps. A rate limit ends the pass. Returns the actions.
+function Invoke-BoardGuard($List, [int]$Max = 20) {
+    $c = Get-Cfg; $acts = [System.Collections.Generic.List[object]]::new(); $placed = @{}
+    foreach ($x in $List) { if ("$($x.column)") { $placed[[int]$x.number] = $true } }
+    $intake = "$(@($c.columns.ai)[0])"
+    $page = 1; $done = 0; $fails = 0
+    do {
+        $chunk = @(Invoke-Gh -Path "$(Get-RepoPath)/issues?state=open&labels=$([uri]::EscapeDataString("$($c.label)"))&per_page=100&page=$page")
+        foreach ($i in $chunk) {
+            $n = [int]$i.number
+            if ($null -ne $i.PSObject.Properties['pull_request'] -or $n -le 0 -or $placed.ContainsKey($n)) { continue }
+            if (@($i.labels | ForEach-Object { "$($_.name)" }) -contains "$($c.rivalLabel)") { continue }
+            if ($done -ge $Max -or $fails -ge 3) { return , $acts.ToArray() }   # attempts count, failed ones too; three failures in a row end the pass
+            $done++
+            try {
+                $info = Get-ItemInfo $n
+                if (-not $info.open -or "$($info.column)") { $placed[$n] = $true; $done--; continue }   # (a read that found it placed is no attempt)
+                $card = if ($info.cardId) { $info.cardId } else { Add-ToBoard "$($info.nodeId)" }
+                Move-Card @{ number = $n; cardId = $card } $intake
+                $placed[$n] = $true; $fails = 0
+                $acts.Add(@{ item = $n; action = 'board-added'; column = $intake; repaired = [bool]$info.cardId })
+                try { Use-ItemLock $n { [void](Add-Journal $n $null 'board-added' @{ column = $intake } "$n") } 3 }
+                catch { $acts.Add(@{ item = $n; action = 'board-added-unjournalled'; reason = "$($_.Exception.Message)" }) }
+            } catch [FactoryReject] {
+                if ($_.Exception.Code -eq 'github-rate-limited') { $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = 'rate limited: the pass ends' }); return , $acts.ToArray() }
+                $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = "$($_.Exception.Message)" }); $fails++
+            } catch { $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = "$($_.Exception.Message)" }); $fails++ }
+        }
+        $page++
+    } while ($chunk.Count -eq 100 -and $page -le 20)
+    return , $acts.ToArray()
+}
+
 # Issue 65: the items an item waits for, from "Depends on #N" in its body (any case, a colon allowed, several numbers on the same line: "Depends
 # on #291 and #292"; a list on the following lines is not read). Its own number is never a dependency.
 function Get-ItemDependencies([int]$Item, [string]$Body) {
@@ -148,8 +253,8 @@ function Verb_sync_board($a) {
     $seenFile = Get-SeenFile
     $seen = if (Test-Path $seenFile) { Get-Content -Raw $seenFile | ConvertFrom-Json -AsHashtable } else { @{} }
     $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @()
-    # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled, whose
-    # owner still waits for item.complete although the claim ended at the merge
+    # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled (their
+    # owner was released at item.merged)
     $owned = @{}; $settling = @(); $unconfirmed = @()
     # pass_unmerged: every item with a PASS verdict that the gateway is to merge and has not merged yet, with why (a reason code) and since when
     $passUnmerged = @()
@@ -159,6 +264,7 @@ function Verb_sync_board($a) {
     $unparked = @()
     $list = Get-BoardList
     $last = Get-LastColumn
+    $unparkCtx = @{ free_workers = $(if (Test-Has $a 'free_workers') { [int]$a.free_workers } else { 0 }) }
     foreach ($it in $list) {
         # a closed item is still followed when its merged pull request closed it and the flow after the merge is not finished
         if (-not (Test-NameIn $c.label $it.labels)) { continue }
@@ -320,6 +426,19 @@ function Verb_sync_board($a) {
                         if ($r.outcome -eq 'fix-forward') { $offers += @{ item = $n; column = $c.columns.development; reason = 'fix-forward' } }
                     }
                 }
+                elseif (-not $dry) {
+                    $why = Test-AutoUnpark $n $s $park $unparkCtx
+                    if ($why) {
+                        $u = Invoke-AutoUnpark $n $park $why $unparkCtx
+                        if ($u) {
+                            $actions += @{ item = $n; action = 'auto-unparked'; code = $u.code; reason = $why }; $unparked += $n
+                            if ($u.code -in 'session-relaunch-budget', 'watchdog-relaunch-budget') { $unparkCtx.free_workers = [int]$unparkCtx.free_workers - 1 }
+                            if ($u.handoff) { $offers += @{ item = $n; column = $col; reason = 'handoff' } }
+                            # an owner that still holds the claim (owner mode keeps it across a fix-forward wait) is told, so it carries on
+                            if ($u.owned) { $triggers += @{ item = $n; event = 'item.unparked'; code = $u.code; reason = $why } }
+                        }
+                    }
+                }
                 continue
             }
             if (Test-ClaimLive $s) { continue }
@@ -359,6 +478,12 @@ function Verb_sync_board($a) {
         try { $actions += @(Invoke-ClaimRefReap $list) }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "claim-ref-reap: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "claim-ref-reap: $($_.Exception.Message)" } }
+    }
+    # the board guard: open labelled issues without a card are put on the board in the intake column (they are offered from the next sweeps)
+    if (-not $dry) {
+        try { $actions += Invoke-BoardGuard $list }
+        catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "board-guard: $($_.Exception.Message)" } }
+        catch { $errors += @{ item = 0; code = 'error'; reason = "board-guard: $($_.Exception.Message)" } }
     }
     # PR QC environments: offers and teardowns only, never a start (design pr-qc-environment.md 3.5)
     $qcRecords = @(); $qcTeardowns = @(); $qcApprovals = @()
