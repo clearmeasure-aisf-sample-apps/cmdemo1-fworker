@@ -91,6 +91,10 @@ var qcSettings = QcSettings.Load(scriptsDir, publicUrl, ownerMode);
 var messaging = MessagingSettings.Load(scriptsDir, ownerMode);
 // the gateway's own secrets, so that a message carrying one verbatim is refused (worker-messaging.md 5.4); short development values are left out
 messaging.SecretLiterals = new[] { apiToken, tokenSecret }.Where(x => x.Length >= 16).ToArray();
+// the backlog keeper session (Keeper.cs, docs/design/backlog-keeper.md): off by default; needs messaging.enabled; its names are reserved
+var keeper = KeeperSettings.Load(scriptsDir, messaging.Enabled);
+Auth.Keeper = keeper;
+if (keeper.Enabled) messaging.Reserved.UnionWith(keeper.Names);
 
 var builder = WebApplication.CreateBuilder(args);
 var apiPort = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_API_PORT"), out var ap) ? ap : 5100;
@@ -130,7 +134,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir) };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -322,6 +326,7 @@ app.Use(async (ctx, next) =>
         // the operator session (Operator.cs): heard while it holds the slot; and, for its quiet-plant check, every verb call of an item token is
         // counted from its arrival to its answer
         if (p.Kind == "operator") plant.OperatorHeard(p.Name);
+        if (p.Kind == "keeper") plant.KeeperHeard(p.Name);
         if (messaging.OperatorEnabled && p.Kind == "item" && path.StartsWith("/api/v1/verbs/"))
         {
             var flightVerb = path["/api/v1/verbs/".Length..];
@@ -351,6 +356,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     // the messaging and manager blocks (worker-messaging.md 8) only while either feature is on; a default deployment answers exactly as before
     if (messaging.On) foreach (var kv in MessagingBlocks(false).ToList()) o[kv.Key] = kv.Value?.DeepClone();
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
+    if (keeper.Enabled) o["keeper"] = plant.KeeperStatus();
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
@@ -397,6 +403,12 @@ app.MapGet("/api/v1/metrics", async (HttpContext c) =>
             return Fail(400, "usage", "the supervisor reads since=24h or since=7d (no fresh, no max)", 2);
         if (plant.SupervisorStep(false) is { Ok: false } noStep) return Results.Json(new { ok = false, code = "step-budget", reason = "the supervisor's step budget of this hour is spent; keep waiting for events and do not work around it", retryAfterSeconds = noStep.RetryAfter, exit = 20 }, statusCode: 429);
     }
+    else if (mw.Kind == "keeper")
+    {   // the backlog keeper: the cached answers of two windows (the median time in Development, for the oversized-item policy)
+        if (!ownerMode || plant.ActiveKeeper() != mw.Name) return Fail(403, "not-keeper", "this credential is not the active backlog keeper: register with subscribe --own --keeper first", 30);
+        if (c.Request.Query["fresh"].ToString() == "1" || c.Request.Query["max"].ToString() != "" || c.Request.Query["since"].ToString() is not ("" or "24h" or "7d"))
+            return Fail(400, "usage", "the backlog keeper reads since=24h or since=7d (no fresh, no max)", 2);
+    }
     else if (mw.Kind != "admin") return Results.StatusCode(403);
     var since = c.Request.Query["since"].ToString().Trim(); var maxText = c.Request.Query["max"].ToString().Trim();
     if (OperatorActive(c))
@@ -435,7 +447,7 @@ app.MapGet("/dashboard", () => Results.Text(DashboardPage.Html, "text/html; char
 app.MapGet("/api/v1/plugin", (HttpContext c) =>
 {
     var who = Who(c);
-    if (who.Kind is not ("admin" or "worker" or "manager" or "operator")) return Results.StatusCode(403);
+    if (who.Kind is not ("admin" or "worker" or "manager" or "operator" or "keeper")) return Results.StatusCode(403);
     var root = PluginRoot();
     if (!Directory.Exists(root) || !File.Exists(Path.Combine(root, "scripts", "factory.ps1"))) return Results.NotFound();
     var ms = new MemoryStream();
@@ -471,6 +483,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
         ["lastSweep"] = hub.LastSweep, ["plant"] = plant.Status() };
     if (messaging.On) foreach (var kv in MessagingBlocks(true).ToList()) o[kv.Key] = kv.Value?.DeepClone();
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
+    if (keeper.Enabled) o["keeper"] = plant.KeeperStatus();
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
@@ -497,8 +510,14 @@ app.MapPost("/api/v1/workers/{name}/credential", (string name, HttpContext c) =>
 {
     if (Who(c).Kind != "admin") return Results.StatusCode(403);
     var role = c.Request.Query["role"].ToString() is { Length: > 0 } r ? r : "worker";
-    if (!Auth.ValidName(name) || tokenSecret.Length == 0 || role is not ("worker" or "manager" or "operator"))
+    if (!Auth.ValidName(name) || tokenSecret.Length == 0 || role is not ("worker" or "manager" or "operator" or "keeper"))
         return Results.Json(new { ok = false, code = "usage", reason = "a valid name, a role of worker, manager or operator and FACTORY_TOKEN_SECRET are required", exit = 2 }, statusCode: 400);
+    if (role == "keeper")
+    {   // the backlog keeper's credential (Keeper.cs): only while keeper.enabled, and only for a name in keeper.allowedNames
+        if (!keeper.Enabled) return Results.Json(new { ok = false, code = "keeper-disabled", reason = "the backlog keeper is not enabled on this gateway (keeper.enabled)", exit = 30 }, statusCode: 403);
+        if (!keeper.Names.Contains(name)) return Results.Json(new { ok = false, code = "name-not-allowed", reason = "the name is not in keeper.allowedNames", exit = 10 }, statusCode: 409);
+        return Results.Json(new { ok = true, name, token = Auth.KeeperToken(tokenSecret, name, keeper.TokenGeneration, revocations.Of(name)) });
+    }
     if (role == "operator")
     {   // the factory operator session's credential: only while operator.enabled, and only for a name in operator.allowedNames
         if (!messaging.OperatorEnabled) return Results.Json(new { ok = false, code = "operator-disabled", reason = "the operator session is not enabled on this gateway (operator.enabled)", exit = 30 }, statusCode: 403);
@@ -614,6 +633,31 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     // the demo video arrives as a file: only POST /api/v1/demo/{item} streams it to the place the rule script reads it from
     if (verb is "publish-demo")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "send the MP4 as the body of POST /api/v1/demo/{item} (client: factory.ps1 publish-demo --item N --file F)", exit = 2 }), "application/json", Encoding.UTF8, 400);
+    // the backlog keeper (Keeper.cs): only the name that holds the slot; the day's limit of new items before a verb that creates one; a pin
+    // "next-free" resolved to the worker the plan would offer an unpinned item to
+    if (who.Kind == "keeper")
+    {
+        if (!ownerMode || plant.ActiveKeeper() != who.Name) return Fail(403, "not-keeper", "this credential is not the active backlog keeper: register with subscribe --own --keeper first", 30);
+        // flags are JSON booleans and children a JSON array: the rule verb reads exactly what was counted here
+        foreach (var bf in new[] { "follow_up", "unpark", "remove", "chain" })
+            if (authorized[bf] is { } bv && bv.GetValueKind() is not (JsonValueKind.True or JsonValueKind.False)) return Fail(400, "usage", $"{bf} is true or false", 2);
+        if (authorized["children"] is { } cv && cv is not JsonArray) return Fail(400, "usage", "children is a JSON array", 2);
+        var need = verb switch
+        {
+            "create-item" => 1,
+            "split-item" => authorized["children"] is JsonArray ka ? ka.Count : 2,
+            "amend-criteria" => authorized["follow_up"] is JsonValue fu && fu.TryGetValue<bool>(out var fb) && fb ? 1 : 0,
+            _ => 0
+        };
+        if (need > 0 && plant.KeeperItemsLeft() < need)
+            return Results.Json(new { ok = false, verb, code = "daily-item-limit", reason = $"the backlog keeper may create {keeper.MaxNewItemsPerDay} new items in 24 hours; this would need {need} and {plant.KeeperItemsLeft()} are left", retryAfterSeconds = 3600, exit = 20 }, statusCode: 429);
+        if (verb == "create-item" && authorized["pin"]?.ToString() == "next-free")
+        {
+            var free = plant.NextFreeWorker();
+            if (free == "") return Fail(409, "no-free-worker", "no connected worker has a free slot for a pin of next-free: create it without a pin, or name the worker", 10);
+            authorized["pin"] = free;
+        }
+    }
     // every verb call of the supervisor is a step of its hourly budget (worker-messaging.md 3.9); at the budget its read verbs answer 429 step-budget
     // (only the active supervisor spends steps: another supervisor name's credential is refused before anything is counted)
     if (ownerMode && who.Kind == "manager" && plant.ActiveSupervisor().Name != who.Name)
@@ -748,6 +792,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && messaging.On && code is 10 or 11 && who.Kind == "item") { try { plant.NoteRefusal(who.Name, who.Item, JsonNode.Parse(output)?["code"]?.ToString() ?? ""); } catch { } }
     // a verb that failed for an item (the gateway or GitHub could not serve it, or the rule script crashed), for the digest's verb-errors (3.9)
     if (ownerMode && messaging.On && status is 503 or 500 && who.Kind == "item") { string failed = ""; try { failed = JsonNode.Parse(output)?["code"]?.ToString() ?? ""; } catch { } plant.NoteVerbError(who.Name, who.Item, failed, code); }
+    if (ownerMode && keeper.Enabled && verb == "complete" && code == 0 && int.TryParse(authorized["item"]?.ToString(), out var kpi)) { try { if (JsonNode.Parse(output)?["parked"] is JsonValue kpv && kpv.TryGetValue<bool>(out var kpb) && kpb) plant.KeeperPark(kpi, "worker-failure", authorized["column"]?.ToString() ?? ""); } catch { } }
+    if (ownerMode && keeper.Enabled && who.Kind == "keeper" && code == 0) { try { var ko = JsonNode.Parse(output); plant.KeeperCreated((ko?["created"] as JsonArray)?.Count ?? (ko?["follow_up"] is JsonValue fv && fv.TryGetValue<int>(out _) ? 1 : 0)); } catch { } }
     if (ownerMode && messaging.OperatorEnabled) { try { plant.OperatorVerbEvent(verb, code, who, authorized, output); } catch { } }
     if (ownerMode && code == 0) { try { plant.OnVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"plant hook {verb}: {e.Message}"); } }
     if (accepting) plant.EndAccept(who.Assignment);
@@ -994,6 +1040,8 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
         // with messaging or the supervisor on the id is "<epoch>.<seq>"; another epoch, a bare number or no header is no valid cursor and replays all (3.5)
         if (messaging.On) { after = ParseCursor(lastEventId, plant.Epoch); if ((who.Kind is "worker" or "manager") && who.Name == name) plant.NoteStaleEpoch(name, lastEventId); }
         if (messaging.OperatorEnabled && ctx.Request.Query["operator"].ToString() == "1") { await OperatorStream(ctx, who, name, after); return; }
+        if (keeper.Enabled && ctx.Request.Query["keeper"].ToString() == "1") { await KeeperStream(ctx, who, name, after); return; }
+        if (who.Kind == "keeper") { await Refuse(ctx, 403, "forbidden", "the backlog keeper opens only its own stream (keeper=1)"); return; }
         if (messaging.ManagerEnabled && ctx.Request.Query["supervisor"].ToString() == "1") { await SupervisorStream(ctx, who, name, after); return; }
         if (who.Kind == "manager") { await Refuse(ctx, 403, "forbidden", "a supervisor session does not open a worker stream"); return; }
         if (!(who.Kind == "admin" || (who.Kind == "worker" && who.Name == name))) { ctx.Response.StatusCode = 403; await ctx.Response.WriteAsync("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"register with the credential issued for this worker name\",\"exit\":30}"); return; }
@@ -1073,6 +1121,7 @@ app.MapPost("/api/v1/presence", async (HttpContext ctx) =>
     if (!ownerMode) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
     if (!messaging.Enabled) return Fail(403, "messaging-disabled", "peer messaging is not enabled on this gateway (messaging.enabled)", 30);
     // the operator session's heartbeat: the request itself stamped it (the middleware), and it has no summary and no directory entry
+    if (who.Kind == "keeper") return plant.ActiveKeeper() == who.Name ? Results.Json(new { ok = true, presence = "online", epoch = plant.Epoch, exit = 0 }) : Fail(403, "not-keeper", "this credential is not the active backlog keeper: register with subscribe --own --keeper first", 30);
     if (who.Kind == "operator") return OperatorActive(ctx) ? Results.Json(new { ok = true, presence = "online", epoch = plant.Epoch, exit = 0 }) : Fail(403, "not-operator", "this credential is not the active operator session: register with subscribe --own --operator first", 30);
     if (who.Kind is not ("worker" or "item" or "manager")) return Fail(403, "forbidden", "presence is sent with a session's own credential", 30);
     if (who.Kind == "item" && who.Role is not ("owner" or "inspector")) return Fail(403, "role-cannot-send", "only the item tokens of an owner or an inspector session have presence (a QC token is pull request code's credential)", 30);
@@ -1558,6 +1607,21 @@ async Task SupervisorStream(HttpContext ctx, Principal who, string name, long af
     finally { plant.DisconnectSupervisor(ch!); }
 }
 
+// GET /events?name=N&keeper=1&model=&effort= with the k1. credential of that name: the backlog keeper's slot (Keeper.cs), never a worker.
+async Task KeeperStream(HttpContext ctx, Principal who, string name, long after)
+{
+    if (who.Kind != "keeper" || who.Name != name) { await Refuse(ctx, 403, "forbidden", "only the keeper credential issued for this name registers as the backlog keeper"); return; }
+    var model = ctx.Request.Query["model"].ToString(); var effort = ctx.Request.Query["effort"].ToString();
+    if (!Auth.ValidRegistration("persistent-local", Array.Empty<string>(), Array.Empty<string>(), model, effort)) { await Refuse(ctx, 400, "usage", "model and effort must use the registration values (worker-messaging.md 2.2)", 2); return; }
+    var (ok, active, since, ch, replay) = plant.RegisterKeeper(name, model, effort, after);
+    if (!ok) { ctx.Response.StatusCode = 409; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "keeper-active", reason = "another backlog keeper is active and was heard within timing.mgrTakeoverSeconds", name = active, since, exit = 40 }); return; }
+    plant.KeeperRaiseOpen();
+    ctx.Response.Headers.ContentType = "text/event-stream"; ctx.Response.Headers.CacheControl = "no-cache";
+    try { await Pump(ctx, ch!, replay, new JsonObject { ["provider"] = "gateway", ["event"] = "keeper.registered", ["name"] = name, ["epoch"] = plant.Epoch, ["modelCheck"] = messaging.ModelCheckFor(model, effort, keeper.RequiredModelTier, keeper.RequiredEffort) }.ToJsonString()); }
+    catch (OperationCanceledException) { }
+    finally { plant.DisconnectKeeper(ch!); }
+}
+
 // GET /events?name=N&operator=1&model=&effort= with the o1. credential of that name: the operator session's slot (Operator.cs), never a worker.
 async Task OperatorStream(HttpContext ctx, Principal who, string name, long after)
 {
@@ -1854,6 +1918,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 var keep = new List<int>();
                 foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
                 plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, items);
+                if (items == null && j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);   // a full sweep only: an incremental one reads a few items
                 // the hold:owner items of the whole board: a full sweep replaces them, an incremental pass updates its own items; the plant hears
                 // them once a full sweep has read the whole board (until then its name actions wait, sweep-pending)
                 var holds = (j["holds"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var hi) ? hi : 0).Where(i => i > 0);

@@ -195,17 +195,24 @@ $BaseUpdateScenarios['base update (conflict mode): master moves; a clean branch 
         # GitHub has not computed the mergeability of b yet (null twice), then says it conflicts
         Fake 'pr' @{ number = $b.pr; conflict = $true; mergeableNullReads = 2 } | Out-Null
         [void](Fake 'master-merge' @{ files = @('docs/other.md') })
-        Check 'the owner of the conflicting pull request is told: base.updated, reason conflict' (Wait-Until -Seconds 45 { (Bu-Events 'bc2' $b.item).Count -ge 1 }) ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
-        $e = (Bu-Events 'bc2' $b.item)[0]
+        # told once per pull request head and master head (BaseUpdate.cs, issue 103). Under load a look can find the conflict before the fake's master
+        # merge lands: that earlier master head is then told once too. The checks read the line of the moved master, and that no heads are told twice.
+        $mh = (Get-FakeState).masterSha
+        Check 'the owner of the conflicting pull request is told: base.updated, reason conflict' (Wait-Until -Seconds 45 { @((Bu-Events 'bc2' $b.item) | Where-Object { (Pv $_ 'sha') -eq $mh }).Count -ge 1 }) ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
+        $e = @((Bu-Events 'bc2' $b.item) | Where-Object { (Pv $_ 'sha') -eq $mh })[0]
         Check 'the event names the pull request and the conflict' ($e.reason -eq 'conflict' -and $e.conflict -eq $true -and $e.pr -eq $b.pr -and $e.behind -ge 1) ($e | ConvertTo-Json -Compress)
         Start-Sleep -Seconds 12
-        Check 'once: later looks at the same heads tell nothing again' ((Bu-Events 'bc2' $b.item).Count -eq 1) ((Bu-Events 'bc2' $b.item) | ConvertTo-Json -Compress)
+        $ev = Bu-Events 'bc2' $b.item; $shas = @($ev | ForEach-Object { "$(Pv $_ 'sha')" })
+        Check 'once: later looks at the same heads tell nothing again' ($ev.Count -le 2 -and @($shas | Select-Object -Unique).Count -eq $shas.Count -and $shas[-1] -eq $mh) ($ev | ConvertTo-Json -Compress)
         Check 'the owner of the clean branch, only behind, is told nothing and its branch is not updated' ((Bu-Events 'bc1' $a.item).Count -eq 0 -and (Bu-Puts $a.pr) -eq 0 -and (Bu-Puts $b.pr) -eq 0)
-        Check 'the journal says the pull request has a merge conflict' (@((Get-FakeIssue $b.item).comments | Where-Object { $_.body -like '*has a merge conflict with master*plant event=base-updated*' }).Count -eq 1)
+        # the journal line is written by the rule script after the event (gateway Journal, not awaited): wait for it
+        [void](Wait-Until -Seconds 30 { @((Get-FakeIssue $b.item).comments | Where-Object { $_.body -like '*has a merge conflict with master*plant event=base-updated*' }).Count -ge $ev.Count })
+        $told = @((Get-FakeIssue $b.item).comments | Where-Object { $_.body -like '*has a merge conflict with master*plant event=base-updated*' }).Count
+        Check 'the journal says the pull request has a merge conflict, once per line told' ($told -eq $ev.Count) "$told comments, $($ev.Count) lines"
         Check '/status counts it' ((Bu-Status).conflictsTold -ge 1 -and (Bu-Status).conflicting -ge 1) ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
         # the owner merges master and pushes: a new head that still conflicts is told again, once
         Fake 'push-branch' @{ branch = $b.branch; files = @('docs/conflict.md', 'docs/more.md') } | Out-Null
-        Check 'a new head that still conflicts is told again' (Wait-Until -Seconds 30 { (Bu-Events 'bc2' $b.item).Count -eq 2 })
+        Check 'a new head that still conflicts is told again' (Wait-Until -Seconds 30 { (Bu-Events 'bc2' $b.item).Count -eq $ev.Count + 1 })
     }
 }
 

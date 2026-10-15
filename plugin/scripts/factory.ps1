@@ -27,8 +27,8 @@ $here = $PSScriptRoot
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'update-pr', 'pr-checks',
     'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
-    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'expire-claim', 'private-build', 'unpark-item', 'manager-action')
-$NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics')
+    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'backlog', 'amend-criteria', 'split-item', 'create-item', 'set-priority', 'link-dependency', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'expire-claim', 'private-build', 'unpark-item', 'manager-action')
+$NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'backlog')
 
 function Write-Out($obj, [int]$code) {
     $obj.exit = $code
@@ -42,7 +42,7 @@ function Write-Out($obj, [int]$code) {
 function Add-GhReport($o) { try { $g = Get-GhRateReport; if ($g -and $o -is [System.Collections.IDictionary]) { $o['_github'] = $g } } catch { } }
 if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
     $verb = $Rest[1]
-    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'PlantSnapshot', 'Metrics', 'Verbs.Manager') { . (Join-Path $here "lib/$f.ps1") }
+    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'PlantSnapshot', 'Metrics', 'Verbs.Manager', 'Verbs.Keeper') { . (Join-Path $here "lib/$f.ps1") }
     $ErrorActionPreference = 'Stop'
     try {
         if ($verb -notin $ServerVerbs) { Reject 2 'unknown-verb' "unknown verb '$verb'" }
@@ -139,10 +139,16 @@ if ($verb -eq 'model-for') {
 }
 if ($verb -eq 'subscribe') {
     . (Join-Path $here 'lib/Client.Subscribe.ps1'); $sf = ConvertFrom-Flags $flagTokens
+    if ($sf.ContainsKey('own') -and $sf.ContainsKey('keeper')) { . (Join-Path $here 'lib/Client.Own.ps1'); . (Join-Path $here 'lib/Client.Keeper.ps1'); Invoke-KeeperSubscribe $sf }
     if ($sf.ContainsKey('own') -and $sf.ContainsKey('operator')) { . (Join-Path $here 'lib/Client.Own.ps1'); . (Join-Path $here 'lib/Client.Operator.ps1'); Invoke-OperatorSubscribe $sf }
     if ($sf.ContainsKey('own')) { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-SubscribeOwn $sf } else { Invoke-Subscribe $sf }
 }
 # the factory operator session's verbs: factory.ps1 operator <verb> [--flag value]
+# the backlog keeper's verbs (docs/design/backlog-keeper.md), with the keeper credential FACTORY_KEEPER_TOKEN
+if ($verb -in 'backlog', 'amend-criteria', 'split-item', 'create-item', 'set-priority', 'link-dependency') {
+    . (Join-Path $here 'lib/Client.Own.ps1'); . (Join-Path $here 'lib/Client.Keeper.ps1')
+    Invoke-KeeperVerb $verb (ConvertFrom-Flags $flagTokens) (Get-ClientConfig)
+}
 if ($verb -eq 'operator') {
     . (Join-Path $here 'lib/Client.Operator.ps1')
     $ot = @($flagTokens)      # (one token alone would be a string, and its first element a character)

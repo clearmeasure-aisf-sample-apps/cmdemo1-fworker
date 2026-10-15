@@ -644,7 +644,9 @@ $OwnerScenarios['pass-merge: checks still running at the verdict: the answer is 
     Check 'merged when the checks are green, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
     $mw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match '<!-- plant event=merge-waiting ' }).Count
     Check 'journal: merge-waiting once, however many sweeps found it waiting' ($mw -eq 1) "$mw"
-    Check 'merged once' ((Pm-MergeComments $x.n $x.pr) -eq 1)
+    # the merge comment follows the merge after the state write (Verbs.Merge.ps1): wait for it, then make sure no second merge adds another
+    [void](Wait-Until -Seconds 20 { (Pm-MergeComments $x.n $x.pr) -ge 1 }); Start-Sleep -Seconds 3
+    Check 'merged once' ((Pm-MergeComments $x.n $x.pr) -eq 1) "$(Pm-MergeComments $x.n $x.pr)"
     Stop-OwnerClient 'pmw'
 }
 

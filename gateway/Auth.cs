@@ -49,6 +49,21 @@ static class Auth
         ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["get-delivery"] = ["item", "commit"],
         ["manager-action"] = ["item", "action", "policy", "reason", "worker", "level"]
     };
+    // The backlog keeper (Keeper.cs, docs/design/backlog-keeper.md): two read verbs, the board read, and its five verbs, which never merge, approve,
+    // record a verdict, clear a hold, claim or move an existing card. Its `by` is the credential's name, never the body's.
+    public static KeeperSettings Keeper = new();
+    public static readonly HashSet<string> KeeperVerbs = new() { "get-item", "pr-checks", "backlog", "amend-criteria", "split-item", "create-item", "set-priority", "link-dependency" };
+    static readonly Dictionary<string, string[]> KeeperBodyFields = new()
+    {
+        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["backlog"] = [],
+        ["amend-criteria"] = ["item", "criterion", "replacement", "follow_up", "unpark", "policy", "reason"],
+        ["split-item"] = ["item", "children", "chain", "policy", "reason"],
+        ["create-item"] = ["title", "body", "labels", "priority", "pin", "depends_on", "policy", "reason"],
+        ["set-priority"] = ["item", "level", "policy", "reason"],
+        ["link-dependency"] = ["item", "depends_on", "remove", "policy", "reason"]
+    };
+    public static string KeeperToken(string secret, string name, int generation, int rev = 0) => rev == 0
+        ? $"k1.{name}.{generation}.{Mac(secret, $"keeper:{name}:{generation}")}" : $"k1.{name}.{generation}-{rev}.{Mac(secret, $"keeper:{name}:{generation}:{rev}")}";
     public static readonly HashSet<string> ManagerItemActions = new() { "unpark", "release-owner", "pin", "unpin", "requeue", "prioritize", "rerun-failed" };
     public static readonly HashSet<string> ManagerNameActions = new() { "drain", "resume", "restart-session" };
     // Role "qc": the session that runs a PR's environment. No release, no merge, no comment, no approval: only its own job.
@@ -115,6 +130,11 @@ static class Auth
             var parts = t.Split('.'); if (parts.Length != 4 || !msg.OperatorEnabled || !msg.OperatorNames.Contains(parts[1])) return null;
             return Same(t, OperatorToken(secret, parts[1], msg.OperatorTokenGeneration, rev.Of(parts[1]))) ? new Principal("operator", parts[1]) : null;
         }
+        if (t.StartsWith("k1."))
+        {   // only while keeper.enabled, only a name of keeper.allowedNames, bound to keeper.tokenGeneration and the name's revocation generation
+            var parts = t.Split('.'); if (parts.Length != 4 || !Keeper.Enabled || !Keeper.Names.Contains(parts[1])) return null;
+            return Same(t, KeeperToken(secret, parts[1], Keeper.TokenGeneration, rev.Of(parts[1]))) ? new Principal("keeper", parts[1]) : null;
+        }
         if (t.StartsWith("i1."))
         {
             var parts = t.Split('.'); if (parts.Length != 3) return null;
@@ -160,6 +180,14 @@ static class Auth
             var kept = new JsonObject();
             foreach (var f in ManagerBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
             if (verb == "manager-action") kept["by"] = p.Name;
+            return (kept, null);
+        }
+        if (p.Kind == "keeper")
+        {
+            if (!KeeperVerbs.Contains(verb)) return (null, $"the keeper role cannot call '{verb}'");
+            var kept = new JsonObject();
+            foreach (var f in KeeperBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
+            if (verb is not ("get-item" or "pr-checks" or "backlog")) kept["by"] = p.Name;
             return (kept, null);
         }
         if (p.Kind == "operator") return (null, $"an operator session credential cannot call '{verb}': it calls no verb");

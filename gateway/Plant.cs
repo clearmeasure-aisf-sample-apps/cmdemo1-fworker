@@ -1496,6 +1496,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             if (store.Slot is { } s && s.Name == name && s.Out != null) { closed = true; s.Out.Writer.TryComplete(); s.Out = null; store.Get(name).GoneAt = DateTime.UtcNow; }
             if (RevokeOperator(name)) closed = true;
+            if (RevokeKeeper(name)) closed = true;
             return closed;
         }
     }
@@ -1536,6 +1537,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         {
             var json = evt.ToJsonString();
             OperatorRouted(item, evt);
+            if (evt["event"]?.ToString() == "item.parked") KeeperPark(item, evt["reason"]?.ToString() ?? "");
             if (Msg.On && ownerOf.ContainsKey(item)) lastRouted[item] = evt["event"]?.ToString() ?? "";
             if (Msg.On && evt["event"]?.ToString() == "item.parked") { parks.Add((DateTime.UtcNow, item, GatedCode(evt["reason"]?.ToString()))); if (parks.Count > 200) parks.RemoveAt(0); }
             if (!mailboxes.TryGetValue(item, out var box)) mailboxes[item] = box = new();

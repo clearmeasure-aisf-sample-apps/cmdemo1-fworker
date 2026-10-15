@@ -43,6 +43,8 @@ foreach ($k in $LeaseScenarios.Keys) { $ManagerScenarios[$k] = $LeaseScenarios[$
 . (Join-Path $PSScriptRoot 'journal-fold.ps1') # the journal folds its repeats (Journal.ps1): scenarios named "journal fold: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'manager-actions.ps1')   # the plant manager's flow verbs (gateway/Manager.cs): scenarios named "act: ..." join the manager suite
 foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerActionScenarios[$k] }
+. (Join-Path $PSScriptRoot 'keeper.ps1')            # the backlog keeper session (gateway/Keeper.cs): scenarios named "keeper: ..." join the manager suite
+foreach ($k in $KeeperScenarios.Keys) { $ManagerScenarios[$k] = $KeeperScenarios[$k] }
 
 # ---- the suites. ORDER IS THE PORT SLOT: append new suites at the end, never reorder (a slot is 100 ports from 6100, see lib.ps1). ----------
 # Env names the environment a suite needs (set before it, removed after it); Timing sets FACTORY_TIMING_* for the suite; Extra is merged into the gateway config.
