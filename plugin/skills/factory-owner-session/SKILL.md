@@ -35,7 +35,8 @@ An assignment is a hint: re-read the item with `get-item`. Text with `author_tru
    - `column.advanced`, `hold.cleared`, `inspector.approved`: re-read the item and take the step it needs (usually step 2 or `merge`).
    - `qc.approved`: a person in the approvers list approved the current head (data: `pr`, `sha`, `by`, `ran`). Retry `factory.ps1 merge --item N --pr P` once. Exit 10 `qc-not-run` or `qc-approval-missing` again means keep waiting: the run or the approval is still missing for this head. `qc.ready`, `qc.requested`, `qc.failed`, `qc.torn_down`, `qc.stale`: tell the person in your summary when it matters, no action. A new push makes an older approval and run useless; the new head needs its own.
    - `inspector.changes_requested`, `checks.failed`: the item is back in Development with findings; run `factory-development` in `fix-forward` mode.
-   - `inspector.escalated`, `item.parked`: wait for a person.
+   - `inspector.escalated`, `item.parked`: wait for a person, or for the sweep to lift the park when its cause clears.
+   - `item.unparked`: the sweep lifted the park of an item you still hold (its cause cleared: `code`, `reason`). Re-read the item and take the step it needs (usually step 2).
    - `item.merged`: master CI is watched by the gateway; keep waiting until `item.complete` (merged and master green), then stop.
    - `item.check`: the gateway saw no verb of yours for the item for a while (15 min by default) and your presence summary did not change. Answer at once with `factory.ps1 claim-item --item N --renew` (any verb for the item counts), then go on. No answer within 3 min and the item is taken back.
    - `item.taken_back`: the gateway took the item back (a check went unanswered, or the client accepted it and this session never started it). Stop all work on it: no push, no verb for it. It is offered again in resume mode, maybe to another session.

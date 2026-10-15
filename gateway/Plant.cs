@@ -1558,6 +1558,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             if (o.Pin == "") o.Declined.Add(name);
         }
     }
+    // auto-unpark (sync-board input free_workers): sessions that could take a work item now, as Choose would see them for an unpinned item
+    public int FreeOwnerSessions()
+    {
+        lock (gate)
+            return workers.Values.Count(w => w.Connected && w.Roles.Contains("owner") && !w.Draining && !Cooling(w) && Owned(w.Name) + PinnedWaiting(w.Name) < w.Capacity
+                && !(OneItemPerSession && w.SessionItems.Count > 0) && HostHasRoom(w.Name));
+    }
     int QcActive(string name) => assignments.Values.Count(a => IsQc(a) && a.Worker == name);
     // pinned items that wait for this worker with no offer out (an offer out is counted by Owned already)
     int PinnedWaiting(string name) => assignments.Values.Count(a => !IsQc(a) && !a.Accepted && a.Worker == "" && a.Pin == name);

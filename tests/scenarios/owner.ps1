@@ -918,6 +918,61 @@ $OwnerScenarios['owner: one item per session: a spent session that owns nothing 
     }
 }
 
+# Auto-unpark (issue 90): the sweep lifts a park once its cause has cleared and journals it.
+function New-TestPark([string]$Code, [hashtable]$Extra = @{}) {
+    $now = (Get-Date).ToUniversalTime(); $p = @{ reason = $Code; at = $now.ToString('o'); until = $now.AddHours(24).ToString('o') }
+    foreach ($k in $Extra.Keys) { $p[$k] = $Extra[$k] }; return $p
+}
+function Get-SweepUnparks([int]$n) { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=unparked ' -and $_.body -match 'by the sweep' }).Count }
+
+$OwnerScenarios['owner: auto-unpark: a red-shard park is lifted once the pull request is green on a newer head, not on the head it judged'] = {
+    $n = New-Item-Fake 'Auto-unpark red shard' 'x' $OwnerLabels 'Development'
+    $pr = Do-Development $n
+    $old = Get-Head $pr
+    Set-ItemState $n { param($st) $st.Remove('claim'); $st.park = (New-TestPark 'fix-forward-exhausted' @{ pr = $pr; head = $old }) }
+    Start-Sleep -Seconds 12
+    Check 'green on the head the park judged: still parked' ((Get-ItemState $n).ContainsKey('park'))
+    [void](Fake 'push-branch' @{ branch = "factory-worker/$n-development"; files = @('docs/trial.md') })
+    Check 'a newer green head: the sweep lifts the park' (Wait-Until -Seconds 40 { -not (Get-ItemState $n).ContainsKey('park') }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
+    $st = Get-ItemState $n
+    Check 'journalled once as unparked by the sweep, and counted' ((Get-SweepUnparks $n) -eq 1 -and [int]$st.auto_unparks.'fix-forward-exhausted' -eq 1) ($st.auto_unparks | ConvertTo-Json -Compress)
+    Check 'handed to its column, so it is offered at once' ($st.handoff.column -eq 'Development' -or $st.ContainsKey('claim'))
+    # at the limit (autoUnparkMax 3) a park is a person's again
+    Set-ItemState $n { param($st) $st.Remove('claim'); $st.Remove('handoff'); $st.auto_unparks = @{ 'fix-forward-exhausted' = 3 }; $st.park = (New-TestPark 'fix-forward-exhausted' @{ pr = $pr; head = $old }) }
+    Start-Sleep -Seconds 12
+    Check 'lifted three times already: left parked' ((Get-ItemState $n).ContainsKey('park'))
+}
+
+$OwnerScenarios['owner: auto-unpark: a park of session trouble is lifted once a worker session is free, and the item is offered to it'] = {
+    try {
+        $m = New-Item-Fake 'Auto-unpark session trouble' 'x' $OwnerLabels
+        $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design'); CheckExit 'a claim writes the state' $r 0
+        Set-ItemState $m { param($st) $st.Remove('claim'); $st.park = (New-TestPark 'session-relaunch-budget' @{ last_take_back = 'client-accepted-not-started' }) }
+        Start-Sleep -Seconds 12
+        Check 'no free worker: still parked' ((Get-ItemState $m).ContainsKey('park'))
+        Start-OwnerClient 'unpark1' 'persistent-local'
+        Check 'a free worker: the park is lifted' (Wait-Until -Seconds 40 { -not (Get-ItemState $m).ContainsKey('park') })
+        Check 'and the item is offered to it' (Wait-Until -Seconds 40 { (Get-Assigned 'unpark1' $m).Count -gt 0 })
+        Check 'journalled as unparked by the sweep' ((Get-SweepUnparks $m) -eq 1)
+    } finally { Stop-OwnerClient 'unpark1' }
+}
+
+$OwnerScenarios['owner: auto-unpark: master-broken is lifted only once the checks that failed passed on master, then judged on that head'] = {
+    $k = New-Item-Fake 'Auto-unpark master broken' 'x' $OwnerLabels 'Functional Testing'
+    $r = F 'w1' @('claim-item', '--item', $k, '--column', 'Functional Testing'); CheckExit 'a claim writes the state' $r 0
+    $mm = Fake 'master-merge' @{ files = @('docs/other.md') }
+    $red = ('e' * 40); $at = (Get-Date).ToUniversalTime().ToString('o')
+    # a check that has no passing run on master's head (a skipped or absent job, as on a docs-only head) keeps the park
+    Set-ItemState $k { param($st) $st.Remove('claim'); $st.merge = @{ sha = $red; merged_at = $at; awaiting = $null; rerun_attempted = $true }; $st.park = (New-TestPark 'master-broken' @{ failed = @('Acceptance shard 1'); sha = $red }) }
+    Start-Sleep -Seconds 12
+    Check 'master green but the failed check has not passed on it: still parked' ((Get-ItemState $k).ContainsKey('park'))
+    Set-ItemState $k { param($st) $st.park = (New-TestPark 'master-broken' @{ failed = @('Build result'); sha = $red }) }
+    Check 'the failed check passed on master: the park is lifted' (Wait-Until -Seconds 40 { -not (Get-ItemState $k).ContainsKey('park') }) ((Get-ItemState $k) | ConvertTo-Json -Compress -Depth 5)
+    $ms = (Get-ItemState $k).merge
+    Check "the item is judged on master's green head, not its merge commit" ($ms.judge_sha -eq $mm.sha -and $null -ne $ms.awaiting) ($ms | ConvertTo-Json -Compress)
+    Check 'journalled as unparked by the sweep' ((Get-SweepUnparks $k) -eq 1)
+}
+
 # Issue 80: the operator's drain belongs to the name; a new session of the name (the launcher's next one) is still draining until the operator resumes.
 $OwnerScenarios['owner: an operator drain holds across a new session of the name until the operator resumes it'] = {
     $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'drn1' })[0] }

@@ -111,7 +111,8 @@ function Invoke-Settle([int]$n) {
         $m.awaiting = $null; $m.done_at = ConvertTo-Iso (Get-UtcNow); Save-State $n $st
     }
     if ($m.awaiting -eq 'master-green') {
-        $chk = Get-ChecksFor $sha
+        # judge_sha: an auto-unpark found master green on a later head while the merge commit's own run stayed red (issue 70): that head is judged
+        $chk = Get-ChecksFor $(if ((Test-Has $m 'judge_sha') -and "$($m.judge_sha)") { "$($m.judge_sha)" } else { $sha })
         $mergedAt = ConvertFrom-Iso $m.merged_at
         $rerunAt = if (Test-Has $m 'rerun_at') { ConvertFrom-Iso $m.rerun_at } else { $null }
         if ($chk.status -eq 'failure') {
@@ -146,7 +147,8 @@ function Invoke-Settle([int]$n) {
                 }
             }
             if ($chk.pending_checks.Count -eq 0) {
-                Set-Park $s 'master-broken' ($t.parkHours * 60); $m.awaiting = $null; Save-State $n $st
+                # auto-unpark (Verbs.Sweep.ps1) lifts it only once each of these checks has passed (not skipped) on a later master head
+                Set-Park $s 'master-broken' ($t.parkHours * 60); $s.park.failed = @($chk.failed_checks); $s.park.sha = "$sha"; $m.awaiting = $null; Save-State $n $st
                 Add-Comment $n "**master is BROKEN** at ``$($sha.Substring(0,7))`` after the merge ($($chk.failed_checks -join ', '))$(if ((Test-Has $m 'rerun_runs') -and @($m.rerun_runs).Count -gt 0) { ', also after one re-run of the failed jobs' }) - parked for a human. Auto-revert is out of scope."
                 return @{ outcome = 'parked'; reason = 'master-broken' }
             }
