@@ -34,6 +34,7 @@
   "autoMergeLabel": "Auto Merge",
   "videoLabel": "video",
   "demoLabel": "Demo",
+  "holdLabels": ["hold:owner"],
   "docsOnlyMarker": "<!-- aisf:docs-only -->",
   "docsOnlyPaths": [
     "^docs/.*\\.(md|txt|png|svg|puml)$",

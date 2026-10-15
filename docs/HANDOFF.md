@@ -278,6 +278,10 @@ Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
   `item.merged` and is released at once (`Plant.Merged`, also on the merge verb and the gateway's merge after a PASS); the Sweeper no longer
   keeps the owners of settling items. The spent session gets `session.end` after `timing.sessionEndGraceSeconds` and settle carries the item.
   The owner skill says the item ends for the session at `item.merged`.
+- **#109 `hold:owner` was ignored** (296). A setting `holdLabels` (default `["hold:owner"]`) is honoured like `Demo`: the sweep offers nothing
+  for an item that carries one (its open offer is dropped at the next plan), its PASS is not merged (`merge` answers exit 10 `held-by-label`,
+  the gateway's merge waits), and `claim-item` (so `accept` and a live owner's `--renew`, whose lease then lapses as with `Demo`) answers exit 10
+  `held-by-label`. A merge the person makes is still picked up and settled. Remove the label to hand the item back.
 
 Closed on 2026-10-15 (issues #79 and #82):
 
