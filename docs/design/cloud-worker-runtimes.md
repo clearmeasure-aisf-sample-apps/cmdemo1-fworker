@@ -1,0 +1,455 @@
+# Cloud worker runtimes: Container Apps jobs and Microsoft Foundry
+
+Status: design only, 2026-10-15. Nothing here is built or deployed. Asked for by the owner: "a container app that runs as a sidecar app with
+fworker so that worker agents can be provisioned and run in the cae", and "another runtime so that it can run the agent in its container in
+ai foundry". Builds on `plant-manager.md` (workers, tokens, host limits), `docs/launcher.md` (one item per session) and
+`worker-messaging.md` (the stream).
+
+Diagrams (PlantUML sources and rendered SVG in `docs/design/diagrams/`):
+
+| View | Source | Rendered |
+|---|---|---|
+| System context, all runtimes | `cwr-context.puml` | [cwr-context.svg](diagrams/cwr-context.svg) |
+| Container view, Container Apps runtime | `cwr-cae-container.puml` | [cwr-cae-container.svg](diagrams/cwr-cae-container.svg) |
+| Container view, Foundry runtime (split) | `cwr-foundry-container.puml` | [cwr-foundry-container.svg](diagrams/cwr-foundry-container.svg) |
+| One item, one job execution (sequence) | `cwr-lifecycle.puml` | [cwr-lifecycle.svg](diagrams/cwr-lifecycle.svg) |
+
+![System context](diagrams/cwr-context.svg)
+
+## 0. Summary
+
+1. **Container Apps runtime (recommended, build first).** A separate Container Apps **Job** `caj-cmdemo1-<env>-fwrunner` in the same
+   environment as the gateway, manual trigger, started by the gateway through ARM with its managed identity: **one work item per execution** (an item may span several executions: one per phase and per retry).
+   The execution runs one Claude Code session in auto mode with a settings file shipped in the image, and exits when the gateway sends
+   `session.end`. This replaces the launcher loop: the fresh container is the fresh context. Not a literal sidecar (section 2.13).
+2. **Foundry runtime (second, partial).** A Foundry hosted agent (custom container) runs the phases that need reasoning and no build:
+   Technical Design, reviews and the Functional Testing verdict. Build and test phases go to a Container Apps job execution from the same
+   image. Foundry cannot be the whole worker today: at most 2 vCPU / 4 GiB and still preview (section 3.2).
+3. **A runtime adapter in the gateway**: `runtime` on the worker registration (`local`, `cae-job`, `foundry`), an `IWorkerRuntime`
+   interface with provision and deprovision, capacity per runtime, and routing rules by label and phase (section 4).
+
+## 1. What a worker needs today, and what the local run taught
+
+| Need | Today (local worker) | In a container |
+|---|---|---|
+| Claude Code CLI, auto mode | npm install on the machine; permission prompts and classifier refusals settled by a person | baked into the image at a pinned version; `--settings` file reviewed once (2.7) |
+| Plugin | `curl /api/v1/plugin` from the connect prompt | same call at start of each execution (the plugin always matches the gateway version) |
+| git push to cmdemo1-workorders | the machine's GitHub connection | installation token of a GitHub App, minted per item by the gateway (2.6) |
+| .NET 10 SDK, pwsh 7.5.4, SQLite, Playwright browsers | `ensure-tools.ps1` downloads into the worker dir | baked into the image; `ensure-tools.ps1` finds them and downloads nothing |
+| Disk, 2 to 7 GB per item worktree | a shared home disk that ran down to 1.4 GB | ephemeral disk of the execution, gone at exit (2.4) |
+| Model credential | the person's Claude login | Anthropic API key or Foundry endpoint from Key Vault (2.6) |
+| Worker token w1 and one item per session | pasted into a connect prompt by a person; launcher loop | a w2 minted by the gateway per execution, expiry bound to the execution (2.6) |
+| Build slot and host limits | `Hosts.cs`: one private build per host | one host per execution: every execution is its own host, so the build slot is always free (4.3) |
+
+Evidence of 2026-10-14 (owner's overnight log, not committed) that shapes this design:
+
+- **Disk pressure**: free space fell to 1.4 to 2.1 GB several times; 19 GB of closed-item worktrees could not be removed because the
+  classifier refused "irreversible local destruction"; root-owned scratch copies; an 8.5 GB local telemetry file (issue 305). An ephemeral
+  disk per item removes this whole class.
+- **Memory**: the tdd gateway itself was OOM-killed five times (1 GiB limit, working set 1.1 GB) and each restart left workers hung. Cloud
+  workers add stream load: the gateway's size must be raised before cloud workers scale (section 6, step 0).
+- **Classifier refusals**: `subscribe` under Monitor, `plugin-sync`, `accept`, the private build (`build.ps1` with SQLite) and worktree
+  removal were each denied once by the auto-mode classifier, and two of four workers were drained for it. A reviewed settings file in the image
+  settles these once for every execution.
+- **Stalls and restarts**: a session that missed `item.assigned` after a gateway restart, leases lost three times during a long Functional
+  Testing phase, `watchdog-relaunch-budget` parks. The job model gives each stall a hard end (the execution timeout) and a clean re-route.
+
+## 2. Container Apps runtime
+
+![Container view, Container Apps runtime](diagrams/cwr-cae-container.svg)
+
+### 2.1 Provisioning model
+
+Three options were weighed:
+
+| Option | How | For | Against |
+|---|---|---|---|
+| A. **Job per item, manual trigger, started by the gateway** (recommended) | `POST .../jobs/{name}/start` with a per-execution template override (env vars); the gateway decides when | the gateway already decides who gets which item; exact one-item-per-execution; per-execution env carries the worker name; no queue to build | the gateway needs `Microsoft.App/jobs/start/action` on one job; ARM call latency (seconds) |
+| B. Job per item, event-driven (KEDA on a queue) | gateway writes a message to an Azure Storage or Service Bus queue; KEDA starts an execution per message | standard pattern; ARM rights not needed by the gateway | a second source of truth (queue) beside the plant; the execution does not know its item until it reads the message; a new resource and a new secret; KEDA polling delay (30 s) |
+| C. Long-lived replicas of a container app with KEDA scaling on the plant's queue depth | an app `ca-...-fwrunner` with min 0, max N; a KEDA scaler on a metric of the gateway | warm containers, faster start | a replica outlives an item: we would rebuild the launcher loop inside it and lose the fresh disk; scale-in can kill a replica mid-item (no graceful drain longer than 600 s); the queue-depth metric needs an external scaler |
+
+Option A because the plant is already the queue: the sweep decides an item is ready, the plant picks a worker, and with the adapter the
+"worker" is created at that moment. Option B is the fallback if the owner does not want the gateway's identity to hold an ARM right.
+
+Capacity is the adapter's `maxConcurrent` (section 4.2), not a KEDA rule. Set the job's `parallelism` 1, `replicaCompletionCount` 1,
+`replicaRetryLimit` 0 (retries are the gateway's decision, 2.11).
+
+### 2.2 One item per container lifetime
+
+The execution is the session. Its entrypoint `fwrunner.sh`:
+
+1. downloads the plugin with the w2 token (after redeeming the nonce) (`GET /api/v1/plugin`), clones the work-orders repository shallowly;
+2. writes the connect prompt from a template in the image plus the values of the execution (gateway URL, name, capacity 1, runtime `cae-job`). The prompt names the variable that holds the credential, never the credential itself, and is never written to stdout;
+3. runs `claude -p` (headless print mode, no TTY) with `--settings /etc/fworker/settings.json`, the model and effort the gateway chose, and
+   `FACTORY_SESSION_END_FILE=/work/session-ended`;
+4. watches the end marker (the launcher's rule: marker seen, wait 5 s, TERM, KILL after 10 s) and exits 0; exits 1 when claude exits without
+   the marker.
+
+An execution holds one item for one routed span of phases (all phases when the item is routed only to `cae-job`). At a phase boundary where the router sends the next phase elsewhere, the session releases the item and runs `end-session`; the execution exits at once and does not wait out `sessionEndGraceSeconds`, and it never takes another item.
+
+There is no loop: the next item is a new execution with a new name, a new disk and a new context. The launcher's watchdog codes keep their
+meaning with the screen checks off (no screen): `stream-disconnected` stays in `fwrunner.sh`; `no-output-while-owning` becomes "no
+transcript bytes" read from Claude Code's `--output-format stream-json` output, which `fwrunner.sh` reads for liveness. Only a redacted summary line per turn goes to stdout (tokens of the forms `w1.`, `w2.`, `i1.`, `ghs_`, `sk-ant-` are masked); full transcripts go only to the private blob container (2.4).
+
+Worker names are `cae-<item>-<6 hex>`: the plant's rule "a new stream without a cursor is a new session of that name" is met trivially, and
+the dashboard shows which execution holds which item. The adapter pins the item to the name (`worker:` label is not needed: the offer goes
+to the name it created; section 4.4).
+
+### 2.3 Image, size and build pipeline
+
+`fwrunner` image, `Dockerfile.fwrunner` at the root of this repository (to be added to CODEOWNERS in the same pull request, section 7). "Runner" here is the worker container; it is unrelated to `gateway/RunnerPool.cs`, the pool of rule-script processes:
+
+| Layer | Content | Approx. size |
+|---|---|---|
+| base | `mcr.microsoft.com/dotnet/sdk:10.0` (Debian) | 0.9 GB |
+| pwsh | 7.5.4 tarball, as in the gateway image | 0.2 GB |
+| node 22 + Claude Code | `npm i -g @anthropic-ai/claude-code@<pinned>` | 0.25 GB |
+| Playwright | Chromium only, with its OS dependencies (`playwright install --with-deps chromium`) | 0.7 GB |
+| tools | git, sqlite3, curl, tar, ca-certificates, `tini` | 0.1 GB |
+| warm caches (optional) | NuGet packages of cmdemo1-workorders master, restored at image build | 0.8 GB |
+| fworker files | `fwrunner.sh`, the settings file, the prompt template | small |
+
+About 3 GB without the warm NuGet layer, 3.8 GB with it. Non-root user, `tini` as PID 1 so TERM reaches claude.
+
+Pipeline: a second job in `build.yml` (code-owner path, owner approval) builds `fwrunner` only when `Dockerfile.fwrunner`, `runner/**` or the
+pinned versions change, tags it `fwrunner:<claude-code version>-<build>` and pushes it in `release.yml` next to the gateway image. The
+gateway's config names the runner image tag (`runtimes.caeJob.image`), so a gateway release and a runner release are promoted together by
+Octopus. A weekly rebuild picks up base-image fixes. The image never contains a credential or the connect prompt.
+
+### 2.4 Storage
+
+| What | Where | Why |
+|---|---|---|
+| Worktree, build output, app logs | **ephemeral** container disk | the execution's own; removed at exit, which ends the disk problem of section 1. Size by the workload profile (2.5) |
+| NuGet package cache | image layer (warm) plus ephemeral; optionally an Azure Files share mounted read-only | a read-write shared NuGet cache over SMB is slow and racy; restore against the warm layer is fast enough |
+| Playwright browsers | image layer | 0.7 GB once per image, not per item |
+| Transcripts, launcher log | stdout (Log Analytics) and an upload to a blob container at exit | for the operator's post-mortem; prompts and logs may hold secrets, so the container is private and has a 14-day lifecycle rule |
+
+Azure Files for worktrees is rejected: an item's worktree is written heavily by `dotnet build` and git, and SMB latency makes both slow;
+the worktree has no value after the item's PR is pushed.
+
+### 2.5 CPU, memory and workload profile
+
+The Consumption profile caps a replica at 4 vCPU / 8 GiB with 8 GiB of ephemeral disk (section 3.7).
+`. .\build.ps1 ; Build` (compile, unit tests, migrations, integration tests) plus Playwright acceptance tests needs about 4 vCPU and 6 to
+8 GiB to finish in a reasonable time; the worktree needs 2 to 7 GB.
+
+Recommendation: a **dedicated workload profile D4** (4 vCPU, 16 GiB) added to `cae-cmdemo1-tdd`, with the job pinned to it at 4 vCPU / 8 GiB
+and an ephemeral disk large enough for the worktree. The environment today has the Consumption profile only, so this is an environment
+change made through the demo-environment kit (`containerapps.bicep`). If the owner prefers no dedicated profile, start on Consumption at
+4 vCPU / 8 GiB and measure whether 8 GiB of disk is enough (a 7 GB worktree leaves no room) for a docs-only and a code item; move to D4 if not.
+
+### 2.6 Identity and secrets
+
+Two user-assigned managed identities, never one shared with the gateway:
+
+| Identity | Holds | Rights |
+|---|---|---|
+| `id-cmdemo1-<env>-fworker` (exists) | gateway | as today, plus `Microsoft.App/jobs/start/action` and `.../executions/read`, `.../stop/action` on the one runner job (custom role) |
+| `id-cmdemo1-<env>-fwrunner` (new) | runner job | `AcrPull` on the registry; `Key Vault Secrets User` on the **model key secret only** (secret-scoped role assignment) |
+
+| Secret | Store | Reaches the execution how |
+|---|---|---|
+| Anthropic API key, or none with Foundry (Entra auth) | Key Vault `fwrunner-model-key` | job secret with `keyVaultUrl` and the runner identity; env `ANTHROPIC_API_KEY` |
+| GitHub App key (author App) | Key Vault, held by the gateway only | **never**. The gateway mints a GitHub installation token for the item (contents write on cmdemo1-workorders only, 1 hour, repository-scoped) and hands it to the session through a new verb `git-credential` with the item's i1 token; a git credential helper in the image calls it |
+| Worker token (w2) | minted by the gateway per execution | redeemed once with a nonce (below); bound to the name `cae-<item>-<rand>` and an expiry |
+| Item token i1 | minted at assignment, as today | over the stream, as today |
+
+Why not the GitHub App key in the container: the worker could then push to any repository of the installation and outlive the item. The
+per-item installation token, fetched again when it nears expiry, keeps "workers never hold a GitHub credential" nearly true (they hold a
+one-hour, one-repository token).
+
+**Worker token delivery (decided here): a one-time nonce.** The start call carries only a random nonce in a per-execution env var; the execution redeems it once at `POST /api/v1/runtime/redeem` for its worker token. A nonce read from ARM afterwards is spent. A token in an env var was rejected: anyone with read on the job's executions would see it.
+
+**Token format and revocation.** Today w1 is `w1.<name>.<hmac>`, stateless, with no expiry, bound to the name's revocation generation (`gateway/Auth.cs`), and the generations are refs in GitHub. Adapter workers get a new kind `w2.<name>.<runtime>.<expiresUnix>.<hmac>` (expiry = execution timeout plus 15 minutes), checked next to w1; existing hand-minted w1 keep working unchanged. A normal end writes no revocation ref (the name is never used again and the token expires); only a failed or stopped execution is revoked, so refs stay few. The `git-credential` verb goes into a new verb set callable by an i1 of role `owner` only (not inspector, qc or the supervisor).
+
+**The GitHub token is repository-wide.** Contents write lets the container push to any branch, `master` included. The control is the ruleset of `master` in cmdemo1-workorders (pull request required, no direct or force push), verified before rollout step 3; the settings file's deny rule is not a control.
+
+### 2.7 Auto mode shipped in the image
+
+`/etc/fworker/settings.json` (read-only, root-owned) passed with `--settings`:
+
+- `permissions.defaultMode`: auto mode, with explicit `allow` rules for exactly the commands the classifier refused on 2026-10-14:
+  `pwsh <SCRIPTS>/factory.ps1 *` (subscribe, plugin-sync, accept, end-session and every verb), `dotnet build|test|run` in the worktree,
+  `pwsh ./build.ps1`, `git worktree remove` under `/work`, `rm -rf /work/*`, `npx playwright test`.
+- `deny` rules: reading `/etc/fworker`, `env` and `printenv`, `curl` to any host other than the gateway, github.com and the model API,
+  `git push --force` to `master`, writes outside `/work` and `/tmp`. These rules steer the model; they are **not a security boundary**
+  (`/proc/self/environ`, node, pwsh or dotnet read the same values). The boundaries are the token scopes (2.6), the master ruleset and egress (2.8).
+- `env`: `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, OTel export on (2.9).
+
+The file is reviewed once by the owner (`runner/settings.json`, to be added to CODEOWNERS) and changes only by pull request. The container is the
+sandbox: what the classifier protects on a person's machine (their home, other repositories) does not exist in it, which is why these
+rules can be wider than on a laptop.
+
+### 2.8 Network
+
+- **Ingress**: the runner job has none. The gateway keeps its public ingress (local workers and the dashboard need it). Executions reach it
+  by the environment's internal FQDN (`http://ca-cmdemo1-tdd-fworker` inside the environment, or the internal DNS name); HTTP inside
+  the environment is acceptable because the environment is the trust boundary, HTTPS is preferred where the internal name has a cert.
+- **Egress**: github.com, objects.githubusercontent.com and codeload, api.nuget.org, the model API (api.anthropic.com or the Foundry
+  endpoint), the Playwright CDN only at image build, the npm registry only at image build. The environment has no VNet today, so egress is
+  open. A restricted egress needs the environment on a VNet with a NAT gateway and Azure Firewall or NSG rules: a separate, larger
+  environment change (open question 4).
+
+### 2.9 Logs and telemetry
+
+- stdout and stderr of `fwrunner.sh` and claude's `stream-json` go to the environment's log destination (Log Analytics `ContainerAppConsoleLogs`),
+  with the execution name and the worker name on every line. The environment's `appLogsConfiguration` showed no destination in the read-only
+  check; that must be set (kit change) or logs are lost when the execution ends.
+- Claude Code's OpenTelemetry export (`CLAUDE_CODE_ENABLE_TELEMETRY=1`, OTLP to an OTel collector or the Azure Monitor exporter) sends token
+  counts and cost per session to the existing Application Insights, tagged `fworker.worker`, `fworker.item`, `fworker.runtime=cae-job`.
+- The gateway adds a span per provision and deprovision and a metric `fworker.runtime.executions{runtime,outcome}`.
+- `/api/v1/status` gets `runtimes` (section 4.5).
+
+### 2.10 Cost per item and scale to zero
+
+Assumptions: an item takes 30 to 90 minutes of execution time; the model cost dominates.
+
+| Part | Estimate per item |
+|---|---|
+| Compute, D4 dedicated profile | a D4 node is billed while it exists; with min 0 nodes and one item at a time, about 0.4 to 1.2 node-hours. Several items share a node |
+| Compute, Consumption at 4 vCPU / 8 GiB | about 4 vCPU x 1 h x the per-vCPU-second rate plus 8 GiB x 1 h: well under a dollar per item at list price |
+| Model tokens | the dominant cost: from a few dollars (docs-only on Sonnet) to tens of dollars (a code item with Opus reviews), the same as a local worker |
+| Storage, logs | cents |
+
+Exact rates were not looked up for this document: the estimate is the shape, the first tdd week measures it (`fworker.runtime.executions` and
+Claude Code's cost metric). Jobs scale to zero by nature: with no item routed there is no execution and no compute bill; the D4 profile's
+`minimumCount` is 0.
+
+### 2.11 Failure handling
+
+| Event | Detection | Action |
+|---|---|---|
+| Item ends normally | `end-session` writes the marker; or the gateway's `session.end` after `sessionEndGraceSeconds` | execution exits 0; adapter sees `Succeeded`, the w2 expires |
+| Session stuck (`session.restart` codes `spent-idle`, `repeated-question`) | gateway tick | in a job, restart means **end**: the client writes the marker and reason, execution exits 0; the item, if still owned, is taken back by the sweep and re-routed to a new execution |
+| No stream or no transcript output | `fwrunner.sh` watchdog | exit 1; same take-back |
+| Execution never offered an item (offer lapsed, item went to another worker) | adapter: no owned item `runtimes.caeJob.ackSeconds` after `worker.registered` | adapter deprovisions (stops the execution); `session.end` would never come because the session is not spent |
+| Execution timeout | `replicaTimeout` (set 4 h; the maximum is not documented, configurable per item class: 1 h docs-only) | Container Apps kills the replica; adapter sees `Failed`; take-back and re-route |
+| Image pull or start failure | execution `Failed` within minutes and no `worker.registered` | adapter marks the runtime unhealthy after 2 in a row, routes to `local` until an operator resets it |
+| Gateway restart | executions keep running and reconnect their stream (cursor) | the plant snapshot restores owners; the adapter re-reads its executions from ARM at start (`jobs/{name}/executions`), so it does not start a second one |
+| Retry | the gateway's decision, not `replicaRetryLimit` | at most 2 executions per item per phase; the third failure parks the item with a new park code `runtime-failed`, using the existing park mechanism and the operator's `unpark` |
+
+The existing `watchdog-relaunch-budget` counts executions the same way it counts relaunches, so the two do not burn the budget twice.
+
+### 2.12 SQL Server-dependent tests
+
+The build of cmdemo1-workorders already falls back to SQLite where no SQL Server is present (`CLAUDE.md` of that repository: "LocalDB on
+Windows, Docker container on Linux, SQLite fallback"). In a Container Apps execution there is no Docker daemon, so the fallback is
+SQLite; that is what the local Linux workers do today.
+
+| Choice | For | Against |
+|---|---|---|
+| **SQLite in the container** (recommended) | no shared state, nothing to secure, parallel items never collide | SQL Server-specific behaviour is not tested by the worker; CI on the pull request runs against SQL Server and catches it |
+| Shared Azure SQL test database | real engine | parallel items collide on migrations; a credential in every execution; cost |
+| SQL Server as a second container in the execution (sidecar of the job) | real engine, isolated | about 2 GiB more memory per execution; the image is 1.5 GB; start time |
+
+### 2.13 Where "sidecar" fits
+
+Container Apps supports several containers in one app (sidecars sharing the replica's network and lifecycle). A literal sidecar on the
+fworker app is **not recommended**:
+
+- it shares the gateway's replica: one replica (`maxReplicas` 1, and only one gateway may sweep), so at most one worker, and a worker's
+  build would compete for the gateway's memory, which already OOM-killed the gateway five times on 2026-10-14;
+- a gateway release would restart the worker mid-item, and a worker crash or OOM could restart the gateway;
+- one item per container lifetime is impossible: the sidecar lives as long as the gateway replica.
+
+"Sidecar" is therefore read as "a companion resource in the same environment, owned and driven by fworker": the Container Apps Job
+`caj-cmdemo1-<env>-fwrunner`, deployed by the same Octopus project as the gateway (a second step), sharing the environment, the registry,
+the Key Vault and Application Insights, and reachable only through the gateway. The one literal sidecar that may later earn its place is an
+OTel collector next to the gateway.
+
+## 3. Microsoft Foundry runtime
+
+![Container view, Foundry runtime](diagrams/cwr-foundry-container.svg)
+
+### 3.1 What Foundry offers (researched 2026-10-15)
+
+| Fact | Source (date) |
+|---|---|
+| Hosted agents run a customer container image (pushed to ACR or built with `azd deploy`), any framework including the Claude Agent SDK; each version is immutable (image, CPU/memory, env, protocols). Status: **public preview**; Foundry Agent Service itself is GA | learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents (ms.date 2026-09-11, updated 2026-09-29); devblogs.microsoft.com/foundry/introducing-the-new-hosted-agents-in-foundry-agent-service-secure-scalable-compute-built-for-agents (2026-04-22) |
+| Protocols the container exposes: Responses (`/responses`, streaming, `background: true` with polling and cancel), Invocations (arbitrary JSON and SSE, recommended for webhooks and long-running async work, "resilient tasks"), Invocations over WebSocket, Activity, A2A | hosted-agents page (2026-09-29) |
+| Sandbox sizes: 0.5 vCPU / 1 GiB, 1 vCPU / 2 GiB, **2 vCPU / 4 GiB maximum** | hosted-agents page |
+| Disk: up to 20 GiB per session (about 20 % reserved), shared by image, `$HOME` and writable paths; `$HOME` and `/files` persist across idle periods | hosted-agents page |
+| Idle timeout 2 to 60 min (default 15), then compute is deprovisioned with state saved; session deleted after 30 days idle. **No documented maximum run duration** | hosted-agents page |
+| One VM-isolated sandbox per session; scale to zero; cold start "seconds"; 1,000 to 2,000 concurrent sessions per subscription and region | hosted-agents page; learn.microsoft.com/en-us/azure/foundry/agents/concepts/limits-quotas-regions (ms.date 2026-09-07, updated 2026-10-15) |
+| 31 regions, South Central US included | hosted-agents page |
+| Outbound VNet only if set when the Foundry account is created; the agent endpoint stays public in the preview. Whether the default sandbox reaches github.com is **not stated** (implied, unverified) | learn.microsoft.com/en-us/azure/foundry/agents/how-to/virtual-networks (ms.date 2026-06-15, updated 2026-08-27) |
+| Each agent gets an Entra agent identity at deploy; secrets through managed identity and a Key Vault connection, not env vars | hosted-agents page |
+| App Insights connection string injected; OpenTelemetry traces from the protocol libraries | hosted-agents page |
+| Billing on vCPU-hours and GiB-hours of active sessions; the pricing page showed no rates when read | azure.microsoft.com/en-us/pricing/details/foundry-agent-service/ (read 2026-10-15) |
+| Claude in Foundry: Opus 5.5, Opus 5, Sonnet 5.5, Sonnet 5, Haiku 5.5 (and older) hosted on Azure; Global Standard and US Data Zone deployments (Sonnet 5.5 Global only); native Messages API at `https://{resource}.services.ai.azure.com/anthropic/v1/messages`, API key or Entra token; billed through Azure Marketplace | platform.claude.com/docs/en/build-with-claude/claude-in-microsoft-foundry (undated, read 2026-10-15) |
+| Claude Code on Foundry: `CLAUDE_CODE_USE_FOUNDRY=1`, `ANTHROPIC_FOUNDRY_RESOURCE`, auth by key or DefaultAzureCredential (managed identity works); pin `ANTHROPIC_DEFAULT_OPUS_MODEL` and siblings, else `opus` resolves to an older model | code.claude.com/docs/en/microsoft-foundry (undated, read 2026-10-15) |
+
+### 3.2 What does not fit
+
+A full worker item (compile, unit and integration tests, the app run for Functional Testing, Playwright) on **2 vCPU / 4 GiB** is slow and
+at risk of running out of memory: the local workers use more than that per build, and Playwright with the app running adds about 1.5 GiB.
+The run duration has no documented maximum, and a hosted agent is built around a request protocol, not a 60 to 90 minute batch process.
+The preview status and the public endpoint add risk for prod. Therefore **Foundry is not the build host**. The split:
+
+| Phase | Runtime |
+|---|---|
+| Technical Design (read the item and the code, write the design into the item, review rounds) | Foundry hosted agent |
+| Docs-only items end to end (no build: the docs-only fast path) | Foundry hosted agent, if its sandbox can push (3.4) |
+| Development, private build, Functional Testing, QC environment | Container Apps job (section 2) |
+| Review subagents and verdict reasoning (findings review, validation verdict) | either; Foundry when the item is in a Foundry phase |
+
+Ownership hands over between phases through the plant's existing take-back and offer: the Foundry agent ends its session at the phase
+boundary, and the router sends the next phase to `cae-job`. The design text is in the item, so no state crosses besides what GitHub holds.
+
+### 3.3 Dispatch and talk-back
+
+- **Dispatch**: the `FoundryRuntime` adapter invokes the agent's **Invocations** protocol (long-running async work as a resilient task): a JSON
+  body with the gateway URL, the worker name, a one-time nonce (redeemed for w2 as in 2.6, so no token sits in Foundry's request logs), the
+  item and the phase. The gateway authenticates to Foundry with its managed identity
+  (Foundry User role on the project).
+- **Talk-back**: the agent, inside its container, runs the same plugin client as any worker: it opens the SSE stream (`subscribe --own`)
+  and calls verbs over HTTPS. That needs no new gateway API, keeps one code path for all runtimes, and works because the gateway's ingress
+  is public. A callback API (Foundry calls the gateway per event) was rejected: it would duplicate the verb surface.
+- **End**: `session.end` on the stream ends the agent's run; the adapter also cancels the background invocation on deprovision.
+- **Idle**: whether an open outbound stream counts as activity for Foundry's idle timeout is not documented; set the idle timeout to 60 minutes
+  and prove it in rollout step 5.
+
+### 3.4 Identity, secrets, tooling inside the container
+
+- Agent identity: Foundry User on the Claude deployment (model calls by Entra token, no key); Key Vault Secrets User on nothing (no secret
+  is needed besides w2, redeemed with the nonce of the invocation; i1 arrives on the stream; a GitHub token from the `git-credential` verb, 2.6).
+- Tooling: the hosted agent image is ours, so it can be the `fwrunner` image plus the hosted-agent protocol adapter (Python or C# AgentServer
+  library). dotnet, git, pwsh and Playwright fit in the image; the limits are CPU, memory and the 20 GiB disk, not the tooling.
+- Network to github.com and the gateway: not documented for the default sandbox; first proof in step 5 of the rollout. Without it, Foundry
+  does design only through gateway verbs (`get-item`, `append-body`, `record-review`) and reads code through a read-only verb that the
+  gateway would add.
+
+### 3.5 Model choice, Agent SDK or Claude Code CLI
+
+- Model: Claude Opus 5.5 and Sonnet 5.5 deployed in the Foundry resource (Global Standard), the same profile names as
+  `plugin/scripts/models.default.json`, pinned with `ANTHROPIC_DEFAULT_*_MODEL`.
+- **Claude Code CLI in headless mode** inside the hosted agent, driven by a thin Agent SDK wrapper that implements the Invocations
+  protocol: the skills, subagents (`plugin/agents/*.md`) and settings file are Claude Code features and run unchanged. Rewriting the
+  worker as pure Agent SDK tool code would fork the plugin. The Agent SDK is assumed to honour the same Foundry env vars as the CLI (not
+  separately verified).
+- The CAE runtime can use the same Foundry model deployment (`CLAUDE_CODE_USE_FOUNDRY=1` with the runner's managed identity), which removes
+  the Anthropic key from the design entirely (open question 3).
+
+### 3.6 Observability and cost
+
+Traces go to Application Insights through the injected connection string; set it to the existing cmdemo1 instance. Claude Code's own OTel
+metrics as in 2.9 with `fworker.runtime=foundry`. Cost: compute on 2 vCPU / 4 GiB active hours only (rates not published at the time of
+reading) plus Claude consumption units on the Azure bill, which is the main cost and the same as on any runtime.
+
+### 3.7 Container Apps limits for comparison
+
+| Fact | Source (date) |
+|---|---|
+| Consumption: up to 4 vCPU / 8 GiB per replica in a workload-profiles environment (2 vCPU / 4 GiB in a consumption-only environment); images up to 8 GB | learn.microsoft.com/en-us/azure/container-apps/containers (updated 2026-03-25) |
+| Ephemeral storage: 8 GiB per replica above 1 vCPU | learn.microsoft.com/en-us/azure/container-apps/storage-mounts (ms.date 2026-08-21) |
+| Dedicated D4 to D32: 4 to 32 vCPU, 16 to 128 GiB | learn.microsoft.com/en-us/azure/container-apps/workload-profiles-overview (updated 2026-06-26) |
+| Jobs: manual, schedule or event (KEDA) triggers; `replicaTimeout`, `replicaRetryLimit`; platform maintenance can interrupt long jobs; last 100 executions kept; no ingress. The maximum `replicaTimeout` is not documented | learn.microsoft.com/en-us/azure/container-apps/jobs (ms.date 2026-09-16) |
+| Dynamic sessions with custom containers: Hyper-V sandbox, pre-warmed pool, egress off by default; considered and not chosen because a session is driven by HTTP calls into the container, not a batch run | learn.microsoft.com/en-us/azure/container-apps/sessions-custom-container (updated 2026-05-10) |
+
+## 4. The runtime adapter in the gateway
+
+### 4.1 Registration
+
+The stream registration (`GET /api/v1/workers/{name}/stream`, `subscribe --own`) gets `runtime=` (`local` default, `cae-job`, `foundry`).
+The gateway trusts the claim only when it matches the credential: a w2 minted by an adapter carries the runtime, and a hand-minted w1
+is always `local`. `/status` and the dashboard show the runtime per worker.
+
+### 4.2 Interface
+
+```csharp
+interface IWorkerRuntime
+{
+    string Kind { get; }                                   // "cae-job", "foundry"
+    int MaxConcurrent { get; }                              // runtimes.<kind>.maxConcurrent
+    Task<ProvisionResult> Provision(ProvisionRequest r, CancellationToken ct);   // item, phase, model profile, worker name, nonce
+    Task Deprovision(string workerName, string reason, CancellationToken ct);    // stop execution / cancel run; idempotent
+    Task<IReadOnlyList<RuntimeInstance>> List(CancellationToken ct);             // for restart recovery and status
+}
+```
+
+`local` is not an adapter: local sessions connect by themselves as today. `CaeJobRuntime` calls ARM with the gateway's managed identity
+(`Azure.ResourceManager.AppContainers` or plain REST with `Azure.Identity`; a new NuGet package for this repository, owner approval).
+`FoundryRuntime` calls the Foundry project endpoint.
+
+### 4.3 Capacity
+
+- `runtimes.caeJob.maxConcurrent` (start at 2 in tdd), `runtimes.foundry.maxConcurrent` (start at 1).
+- An adapter-created worker registers with capacity 1 and its own host name, so `Hosts.cs` gives it its own build slot.
+- A daily budget per runtime (`runtimes.<kind>.maxExecutionsPerDay`) stops a loop of failed executions from spending money.
+
+### 4.4 Routing
+
+The plant routes an item that is ready and has no live owner:
+
+1. a `worker:<name>` pin wins, as today (local workers stay pinnable);
+2. a label `runtime:local`, `runtime:cae-job` or `runtime:foundry` on the item forces the runtime;
+3. otherwise `runtimes.routing`, an ordered list of rules in `config/instance.json`, for example
+   `[{ "phase": "technical-design", "docsOnly": true, "runtime": "foundry" }, { "phase": "*", "runtime": "cae-job" }, { "runtime": "local" }]`;
+4. a connected local worker with free capacity takes precedence when `runtimes.preferConnected` is true (default true in tdd, so the
+   existing workers are not starved during rollout);
+5. a runtime at `maxConcurrent`, over budget or unhealthy is skipped.
+
+The adapter provisions only after the plant has chosen the runtime; the offer goes to the name the adapter created, with a
+longer acknowledgement window for adapter workers to cover the container start (`runtimes.caeJob.ackSeconds`, 300). New work: today
+`timing.assignAckSeconds` (120) is one global value, so the plant needs a per-worker window.
+
+### 4.5 Status
+
+`GET /api/v1/status` gains `runtimes: { "cae-job": { "maxConcurrent", "running", "today", "healthy", "last": [...] }, ... }` and per worker
+`runtime` and `execution`. The operator session reads it; it cannot provision (no new verb for it).
+
+## 5. Security boundary and guard rails
+
+- **Trust boundary**: the container is untrusted code execution (it runs the model's commands and the repository's build). It holds a w2
+  bound to one name and an expiry, an i1 for one item, a one-hour GitHub token for one repository, and the model key. It holds no Octopus
+  key, no GitHub App key, no token secret, no operator token.
+- **Model key**: the one long-lived secret, and the model can read it (2.7). Default: Claude through Foundry with Entra auth by the runner's
+  managed identity, so there is no key in the container. Fallback: an Anthropic key used by the runner only, with a spend limit.
+- **Egress**: with open egress, a prompt injection can send any token in the container anywhere. Open egress is accepted for tdd only;
+  restricted egress (2.8) is a precondition for uat and prod.
+- **Secrets in telemetry**: no credential in argv, the prompt text or stdout (2.2); Log Analytics retention 30 days and read access for the
+  operator only; full transcripts only in the private blob container.
+- **Revocation**: ending an execution revokes its name's generation; `POST /workers/{name}/revoke` stops the execution too.
+- **Prompt injection**: unchanged rules: item and PR text are data. The container limits the blast radius to one repository and one item.
+- **Kill switch**: `runtimes.<kind>.enabled` false (config override) or the operator's drain of the runtime stops new executions; running
+  ones finish.
+- **Operator session**: may read runtime status and drain a runtime; may not change runtime config.
+- **Config**: every `runtimes.*` setting defaults to disabled (`maxConcurrent` 0) in `config/instance.json`, which is not a code-owner
+  path; a runtime is switched on and sized only in `config/deploy.overrides.json`, which is. A Tier 1 check asserts the source defaults are off.
+- **Adapter workers always run one item per session**: the gateway ignores `FACTORY_ONE_ITEM_PER_SESSION=0` for them.
+- **Gateway replicas**: with runtimes on, the gateway keeps `minReplicas` 1 (today 0), or executions lose their stream when it scales to zero.
+
+## 6. Rollout
+
+| Step | Where | Exit criterion |
+|---|---|---|
+| 0 | tdd gateway | the read-only check of 2026-10-15 shows 1 vCPU / 2 GiB already (the OOMs were at 1 GiB); verify no OOM for a week with the local workers |
+| 1 | this repository | adapter interface, `runtime` claim, routing with only `local` configured; Tier 1 suites with a fake ARM |
+| 2 | kit and system repo | runner identity, job, D4 profile, log destination, Key Vault secret, in tdd only |
+| 3 | tdd | precondition: master ruleset of cmdemo1-workorders verified (2.6), gateway `minReplicas` 1. Then `runtimes.caeJob.enabled` with `maxConcurrent` 1, items labelled `runtime:cae-job` only; 10 docs-only items, then 5 code items |
+| 4 | tdd | routing rule on by default (open question 6 decides `preferConnected`), `maxConcurrent` 3; a week of measurements (time, cost, failures) against the local workers |
+| 5 | tdd | Foundry design agent behind `runtime:foundry`, docs-only Technical Design only |
+| 6 | uat | manual Octopus promotion of gateway and runner; the uat environment gets its own job, identities and Key Vault entries |
+| 7 | prod | only after `activate-prod.sh`; prod is inert today |
+
+## 7. Code-owner paths touched
+
+From `.github/CODEOWNERS`, these changes need the owner's review: `/Dockerfile` pattern does not cover a new `Dockerfile.fwrunner`, so add it
+to CODEOWNERS in the same pull request; `/.github/` (the build and release jobs for the runner image); `/gateway/Auth.cs` (the w2 kind, the nonce
+redemption, the new verb set with `git-credential`); `/config/deploy.overrides.json` (runtimes on in the deployed image);
+`/plugin/skills/factory-operator/` (if the operator session is told about runtimes). New paths that should be added to CODEOWNERS:
+`/Dockerfile.fwrunner`, `/runner/` (entrypoint, settings file, prompt template), `/gateway/Runtimes/` (the adapters hold the ARM and Foundry
+rights). `gateway/Program.cs` and the connect prompt are mixed files: the connect prompt's hash is pinned by the operator suite, so the
+runner uses its own prompt template rather than changing it.
+
+## 8. Open questions for the owner
+
+1. ARM right for the gateway (option A) or a queue between gateway and job (option B)?
+2. Dedicated D4 workload profile in `cae-cmdemo1-tdd`, or start on Consumption?
+3. Model credential for the runner: an Anthropic API key with a spend limit, or Claude through Foundry with Entra auth?
+4. Restricted egress (VNet, NAT, firewall) now, or open egress for tdd?
+5. Pushes through a per-item installation token of the author App (new `git-credential` verb), or a separate "runner" GitHub App?
+6. Should cloud executions be preferred over connected local workers once proven, or stay opt-in by label?
+7. Is the split Foundry runtime (design and review in Foundry, build in a job) worth building, given that the job runtime can do all phases?
+8. Budget: a daily cap of executions and of model spend per runtime in tdd.
