@@ -59,4 +59,21 @@ Check 'testing profile is haiku 5.5 at low effort' ($tp.model -eq 'claude-haiku-
 Check 'testing profile never climbs, whatever the tier' ((Resolve-ModelFor 'orchestrator' 2 $mc 'testing').model -eq 'claude-haiku-5-5' -and -not $tp.escalates)
 Check 'an unknown profile falls back to the ladder' ((Resolve-ModelFor 'subagent' 1 $mc 'nope').model -eq 'claude-sonnet-5-5')
 Check 'the testing profile wins over fixed mode too' ((Resolve-ModelFor 'subagent' 0 $fx 'testing').effort -eq 'low')
+# local progress of owned items (lib/Progress.ps1): which places belong to an item, and which files of the work directory never count
+. (Join-Path $root 'plugin/scripts/lib/Progress.ps1')
+Check 'progress: a branch or file names the item as a whole token' ((Test-NamesItem 'factory-worker/308-development' 308) -and (Test-NamesItem 'brief-308.md' 308) -and (Test-NamesItem '308' 308))
+Check 'progress: a longer number or a hash does not name the item' (-not (Test-NamesItem 'factory-worker/1308-development' 308) -and -not (Test-NamesItem 'worktree-agent-a3081f' 308) -and -not (Test-NamesItem '3080.txt' 308))
+Check 'progress: the files the client, the launcher and the stream write are never work' ($script:PgWorkSkip.IsMatch('events.log') -and $script:PgWorkSkip.IsMatch('launcher.log') -and $script:PgWorkSkip.IsMatch('session-ended') -and -not $script:PgWorkSkip.IsMatch('brief-308.md'))
+$pgDir = Join-Path ([IO.Path]::GetTempPath()) "fw-smoke-progress-$PID"; New-Item -ItemType Directory -Force -Path (Join-Path $pgDir 'progress') | Out-Null
+try {
+    Set-Content -LiteralPath (Join-Path $pgDir 'progress/308.txt') -Value 'x'
+    $pgState = New-ProgressState $pgDir @(); $pgState.owned[308] = [DateTime]::UtcNow.AddMinutes(-1); $pgState.repos = @()
+    $pgRep = @(Get-ProgressReport $pgState)
+    Check 'progress: a progress file is reported once as the item''s (source marker), then not again until it changes' ($pgRep.Count -eq 1 -and $pgRep[0].item -eq 308 -and $pgRep[0].source -eq 'marker' -and $(foreach ($e in $pgRep) { $pgState.sent[[int]$e.item] = [DateTime]::Parse($e.seen).ToUniversalTime() }; @(Get-ProgressReport $pgState).Count -eq 0))
+    Check 'progress: recent work answers a check' ($null -ne (Get-RecentProgress $pgState 308) -and $null -eq (Get-RecentProgress $pgState 309))
+    # a file dated in the future (a skewed mount, a restored archive) is no sign of work
+    $pgFut = New-ProgressState $pgDir @(); $pgFut.owned[310] = [DateTime]::UtcNow.AddMinutes(-1); $pgFut.repos = @()
+    $fut = Join-Path $pgDir 'progress/310.txt'; Set-Content -LiteralPath $fut -Value 'x'; (Get-Item -LiteralPath $fut).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(3)
+    Check 'progress: a file dated in the future is not work' ($null -eq (Get-ItemProgress $pgFut 310 $false ([Diagnostics.Stopwatch]::StartNew())))
+} finally { Remove-Item -Recurse -Force -LiteralPath $pgDir -ErrorAction SilentlyContinue }
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }

@@ -163,6 +163,22 @@ Code: `gateway/Lease.cs`; settings `schedule.*` in `config/instance.json` (each 
    `schedule.staleConfirmMinutes` (3) and the item is taken back. Not while the item waits for something else: parked, or its last trigger was
    `item.parked`, `qc.requested`, `qc.reset`, `item.merged` or `inspector.escalated`. Watched are the owners the plant saw accept, and the owners a
    sweep listed with a lease; never an owner set by a test seam.
+4. **A busy owner is not quiet** (issue 101, 2026-10-15). An owner that waits on a long subagent (a private build, an app run, a functional test)
+   calls no verb for many minutes. Its stream client (`plugin/scripts/lib/Progress.ps1`) looks at its own machine and sends the latest work it saw
+   per owned item with the heartbeat (`POST /presence` body `progress: [{ item, ageSeconds, source }]`, at most 20; the age by the client's clock,
+   so a client whose clock is off still reports what is recent): `marker` (a file `<work>/progress/<N>.txt` a subagent wrote), `work` (any other
+   file written in the work directory), `commit` (a worktree's index or HEAD log changed), `files` (a file of the worktree changed; builds write
+   `obj/` and `bin/`), `process` (Linux: a build or test process in the worktree that used CPU since the last look). A time in the future is no work.
+   A place is the item's when its path or branch names the item number as a token; while the session owns one item, every worktree of its
+   checkouts and its whole work directory are. Only items the name owns count. Progress counts for rule 3 like a verb (the quiet spell starts at the
+   latest of the last call, the last summary change and the last progress), renews the lease like a summary that names the item (rule 2), and
+   progress newer than the start of the quiet spell answers an open `item.check`. **Cap**: progress counts only while the session itself (a verb or
+   poll of its own, or a changed summary) was active within `schedule.progressMaxMinutes` (180; 0 is no cap): a machine that stays busy (an orphaned
+   browser, a spinning test host) while the session is stuck does not hold the item for ever; past it the `item.check` carries
+   `progressCounts: false` and only the session itself answers it. When an `item.check` arrives within the cap (no heartbeat, messaging off) and
+   the client saw work on the item within `FACTORY_PROGRESS_RECENT_MINUTES` (10), it answers the check itself with `claim-item --renew`
+   (`renewed_by: "client"`: progress, not the session's own verb; the line carries `answeredBy: "client"`, then `item.check-answered`).
+   `/status` `lease` shows `progress`, `progressReports` and `checksAnsweredByProgress`. `FACTORY_PROGRESS=0` switches the client's watching off.
 
 Taking back: the plant lets go only after the rule script `expire-claim` (gateway only) succeeded (a failure keeps the owner and is tried again later). It ends the claim's lease and marks it `taken_back` (journal `lease-expired`), so
 `claim-item --renew` of the old owner is refused; the old owner gets `item.taken_back`; the plant forgets the owner (journal `reassigned`) and asks

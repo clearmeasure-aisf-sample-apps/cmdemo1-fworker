@@ -248,6 +248,18 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Closed on 2026-10-15 (issue #101):
+
+- **#101 Busy owners were taken back as quiet** (about 10 items a day, 308, 296 and 310 among them): lease rule 3 counted only verbs and a changed
+  summary, so an owner waiting on a long subagent was taken back about 18 min after its last verb. The stream client now watches its machine
+  (`plugin/scripts/lib/Progress.ps1`: a progress file `<work>/progress/<N>.txt`, files of the work directory, commits and changed files of the
+  item's worktrees, on Linux a build or test process at work there) and sends the latest per owned item with its heartbeat (`progress`, each
+  entry's age in seconds); rule 3 counts it like a verb, it renews the lease, and it answers an open `item.check`. An `item.check` that arrives
+  anyway is answered by the client itself (`claim-item --renew` with `renewed_by: "client"`) when it saw work within 10 minutes. Progress counts
+  only while the session itself was active within `schedule.progressMaxMinutes` (180), so a busy machine cannot hold a stuck session's item for
+  ever. `/status` `lease.progress`. `docs/design/plant-manager.md` 6b rule 4.
+  Open: not yet seen live on tdd; #83 (renewals that did not reach the lease watchdog) is a separate cause.
+
 Closed on 2026-10-15 (issues #79 and #82):
 
 - **#79 A flaky master Build parked merged items as master-broken** (276, 272, 280). The settle step asked GitHub to re-run the failed jobs

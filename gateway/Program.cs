@@ -922,7 +922,23 @@ app.MapPost("/api/v1/presence", async (HttpContext ctx) =>
     foreach (var kv in body)
     {
         if (kv.Key is "from" or "sender" or "holder" or "fromKind" or "role") return Fail(403, "forged-sender", "the sender comes from the credential; a body never names it", 30);
-        if (kv.Key != "summary") return Fail(400, "usage", $"unknown field '{kv.Key}'", 2);
+        if (kv.Key is not ("summary" or "progress")) return Fail(400, "usage", $"unknown field '{kv.Key}'", 2);
+    }
+    // local progress of owned items (gateway/Lease.cs rule 3): [{ "item": N, "ageSeconds": S, "source": "commit|files|process|marker|work" }], 20 at most;
+    // the age (by the client's clock) and not a time, so a client whose clock is off still reports what is recent
+    var progress = new List<(int Item, DateTime At, string Source)>();
+    if (body["progress"] is JsonNode pn)
+    {
+        if (who.Kind == "manager") return Fail(400, "usage", "the supervisor owns no item: progress is sent by an owner's client", 2);
+        if (pn is not JsonArray pa || pa.Count > 20) return Fail(400, "usage", "progress is an array of at most 20 { item, ageSeconds, source }", 2);
+        foreach (var e in pa)
+        {
+            if (e is not JsonObject eo || !int.TryParse(eo["item"]?.ToString(), out var pi) || pi <= 0
+                || !double.TryParse(eo["ageSeconds"]?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var age) || !double.IsFinite(age) || age < 0 || age > 86400
+                || eo["source"]?.ToString() is not ("commit" or "files" or "process" or "marker" or "work"))
+                return Fail(400, "usage", "each progress entry is { \"item\": N, \"ageSeconds\": 0 to 86400, \"source\": \"commit|files|process|marker|work\" }", 2);
+            progress.Add((pi, DateTime.UtcNow.AddSeconds(-age), eo["source"]!.ToString()));
+        }
     }
     string? summary = null;
     if (body["summary"] is JsonNode sn) { if (sn.GetValueKind() != System.Text.Json.JsonValueKind.String) return Fail(400, "usage", "summary is text", 2); summary = sn.GetValue<string>(); if (summary.Length > 140) return Fail(413, "too-large", "summary is 140 characters at most", 2); }
@@ -931,8 +947,9 @@ app.MapPost("/api/v1/presence", async (HttpContext ctx) =>
     var (presence, retry) = plant.Heartbeat(who.Name, summary);
     if (retry > 0) messenger.CountRefusal("rate-limited");
     if (retry > 0) return Results.Json(new { ok = false, code = "rate-limited", reason = "the summary changes at most once per 10 seconds", retryAfterSeconds = retry, exit = 20 }, statusCode: 429);
-    // a summary that names owned items ("#N") renews their leases (gateway/Lease.cs)
+    // a summary that names owned items ("#N") renews their leases, and local progress counts as the owner's activity (gateway/Lease.cs)
     if (who.Kind is "worker" or "item") plant.NoteHeartbeat(who.Name);
+    if (progress.Count > 0) return Results.Json(new { ok = true, presence, epoch = plant.Epoch, progress = plant.NoteProgress(who.Name, progress), exit = 0 });
     return Results.Json(new { ok = true, presence, epoch = plant.Epoch, exit = 0 });
 });
 
