@@ -260,6 +260,35 @@ $Scenarios = [ordered]@{
     Check 'the re-run was asked for once and judged on its own attempt (the park came after it)' ((Get-FakeState).reruns -eq 1 -and $ri -ge 0) "reruns $((Get-FakeState).reruns)"
 }
 
+'code change, master red once: the skipped release check of the first attempt is no docs-only path; the item waits for its release [full]' = {
+    # items 272 and 276: a code change whose master Build failed and was re-run keeps the skipped release check of the first attempt (the Release
+    # workflow attaches its checks to master's head when it starts); settle read that as docs-only and moved the item to Done with nothing released
+    Fake 'config' @{ masterRed = $true; prodDelaySeconds = 3600 } | Out-Null
+    $n = New-Item-Fake 'Red code' 'x' $L; Do-TechnicalDesign $n 'w1' $false
+    $pr = Do-Development $n @('src/App/Red.cs'); Do-DevComplete $n | Out-Null
+    $v = Do-Verdict $n $pr; $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    # (the state is saved last, after the card move and the comment)
+    $q = Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Release Queue' -and "$(Pv (Pv (Pm-State $n) 'merge') 'awaiting')" -eq 'release-queue' }
+    $iss = Get-FakeIssue $n
+    Check 'after the re-run it waits in the Release Queue for the production deployment' $q "column $($iss.column)"
+    Check 'it is not closed and was never called docs-only' ($iss.open -and @($iss.comments | Where-Object { $_.body -like '*docs-only change has nothing to deploy*' }).Count -eq 0) "open $($iss.open)"
+    Check 'the release made after the re-run is the one that carries it' (@($iss.comments | Where-Object { $_.body -match 'release candidate \*\*2\.4\.\d+\*\* carries' }).Count -eq 1) ($iss.comments | ForEach-Object { $_.body } | Out-String)
+    $mg = Pv (Pm-State $n) 'merge'
+    Check 'the state says why it is not docs-only: the Build ran its code jobs' ((Pv $mg 'docs_only') -eq $false -and (Pv $mg 'docs_only_from') -eq 'build') ($mg | ConvertTo-Json -Compress)
+}
+
+'master-green ignores the checks of the workflows a Build starts: a failed architecture check parks nothing [full]' = {
+    $n = New-Item-Fake 'Docs with arch' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n; Do-DevComplete $n | Out-Null
+    $v = Do-Verdict $n $pr
+    Fake 'config' @{ masterArchitecture = 'failure' } | Out-Null   # the merge commit gets a failed architecture check at once
+    $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    Check 'the merge commit has the failed architecture check' (@(Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/commits/$((Get-FakePr $pr).mergeSha)/check-runs").check_runs | Where-Object { $_.name -eq 'architecture' -and $_.conclusion -eq 'failure' }).Count -eq 1
+    $done = Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Done' }
+    Check 'the docs-only item finished' $done "column $((Get-FakeIssue $n).column)"
+    Check 'it was never called broken' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' -or $_.body -like '*master checks failed*' }).Count -eq 0)
+}
+
 'code change: release candidate, Release Queue, production, Done [full]' = {
     Fake 'config' @{ prodDelaySeconds = 6 } | Out-Null
     $n = New-Item-Fake 'Code' 'x' $L; Do-TechnicalDesign $n 'w1' $false
