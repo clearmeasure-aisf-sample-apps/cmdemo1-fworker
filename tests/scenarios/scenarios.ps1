@@ -4,6 +4,39 @@ $L = @('factory worker', 'Auto Merge')
 
 $Scenarios = [ordered]@{
 
+# Session trouble does not spend an item's relaunch budget: a claim the gateway took back (taken_back) is relaunched without counting against
+# maxRelaunches, up to maxSessionRelaunches (10) in a row, whose park is session-relaunch-budget; a plain lapse counts as before; a Functional
+# Testing round that runs out without a verdict is parked as validation-no-verdict, not as a relaunch budget.
+'relaunch budget: session take-backs do not spend it, their own limit parks with session-relaunch-budget, and the park codes say why' = {
+    $n = New-Item-Fake 'Relaunch budget' 'x' @('factory worker', 'Auto Merge')
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'first claim' $r 0
+    foreach ($i in 1..10) { Expire-Claim $n 'client-accepted-not-started'; $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); if ($r.exit -ne 0) { break } }
+    CheckExit 'ten session take-backs in a row: still relaunched' $r 0
+    $st = Get-ItemState $n
+    Check 'the item budget is untouched, the session count is 10' ([int]$st.claim.launches -eq 1 -and [int]$st.claim.session_launches -eq 10) ($st.claim | ConvertTo-Json -Compress)
+    Expire-Claim $n 'no-answer-to-item-check'; $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design')
+    CheckExit 'the eleventh is parked as session trouble' $r 10 'parked'
+    $st = Get-ItemState $n
+    Check 'park code session-relaunch-budget with the last take-back' ($st.park.reason -eq 'session-relaunch-budget' -and $st.park.last_take_back -eq 'no-answer-to-item-check') ($st.park | ConvertTo-Json -Compress)
+
+    $m = New-Item-Fake 'Relaunch budget, item trouble' 'x' @('factory worker', 'Auto Merge')
+    $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design'); CheckExit 'first claim of the second item' $r 0
+    Expire-Claim $m 'client-accepted-not-started'; $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design'); CheckExit 'a take-back' $r 0
+    foreach ($i in 1..3) { Expire-Claim $m; $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design') }
+    CheckExit 'three plain lapses are within the budget of 3' $r 0
+    Check 'a plain lapse resets the run of session take-backs' (-not (Get-ItemState $m).claim.ContainsKey('session_launches'))
+    Expire-Claim $m; $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design')
+    CheckExit 'the fourth lapse parks' $r 10 'parked'
+    Check 'park code watchdog-relaunch-budget' ((Get-ItemState $m).park.reason -eq 'watchdog-relaunch-budget') ((Get-ItemState $m) | ConvertTo-Json -Compress -Depth 4)
+
+    $v = New-Item-Fake 'Relaunch budget, no verdict' 'x' @('factory worker', 'Auto Merge') 'Functional Testing'
+    $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Functional Testing'); CheckExit 'claim in Functional Testing' $r 0
+    foreach ($i in 1..4) { Expire-Claim $v; $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Functional Testing') }
+    CheckExit 'the budget runs out in Functional Testing' $r 10 'parked'
+    Check 'park code validation-no-verdict' ((Get-ItemState $v).park.reason -eq 'validation-no-verdict') ((Get-ItemState $v).park | ConvertTo-Json -Compress)
+}
+
+
 'happy-docs-only (auto policy)' = {
     $n = New-Item-Fake 'Add a docs file' 'Add docs/a.md' $L
     Do-TechnicalDesign $n
