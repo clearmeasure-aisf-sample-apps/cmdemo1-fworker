@@ -103,6 +103,19 @@ Owner's words: "there needs to be a standing rule and standing trigger. workers 
 branch so that they can backmerge from master into the feature branch to avoid difficult merge conflicts." Code: `gateway/BaseUpdate.cs`,
 `plugin/scripts/lib/BaseUpdate.ps1`.
 
+**When a branch is updated: `baseUpdate.mode` (issue 103, 2026-10-15).** The ruleset of the work-orders repository does not require an
+up-to-date branch, and every back-merge restarts the pull request's checks, so the default no longer updates a branch on every master move:
+
+| Mode | The owner gets `base.updated` | The gateway updates a branch itself |
+|---|---|---|
+| `conflict-or-merge` (default) | only when the item's pull request has a merge conflict with master (`reason: "conflict"`, `conflict: true`), once per pull request head, master head and owner, at the first look of `base-watch` (after a sweep, at most every `sweepCheckSeconds`) once GitHub has computed the mergeability (GitHub runs no checks for a conflicting pull request, issue 56; `overlap` is often empty then; a restart of the gateway tells a standing conflict once more) | right before it merges a PASS under `auto`, once per verdict, when the branch is behind (`Verb_merge -Gateway`: update branch, the new head verified and recorded as the verdict's, then `merge-waiting` `branch-updated`; the next sweep merges once its checks are green, and a session's own `merge` call waits meanwhile instead of polling). Off with `baseUpdate.autoUpdateBranch` false |
+| `conflict` | as above | never |
+| `every-move` | as described below: on every master move, when the branch is behind | after `autoUpdateDelaySeconds`, for a clean branch the owner did not update |
+
+`FACTORY_BASE_UPDATE_MODE` overrides the setting (gateway and rule scripts). In the conflict modes `base-watch` reads each owned pull request once
+per pull request head and master head (`mergeable`; `null` until GitHub has computed it, then the next look gets it). `/status` `baseUpdate`
+shows `mode`, `conflictsTold` and `conflicting`. The rest of this section describes `every-move`.
+
 **Detection.** (1) The webhook: every `pull_request` delivery with `action: closed`, `merged: true` and `base.ref` the default branch
 becomes the event `base.merged` (`ingest-event`, any branch, not only factory branches). The repository webhook already delivers
 `pull_request` (`docs/deploy/create-webhook.sh`) and the gateway verifies its HMAC; `push` is not needed and not subscribed. (2) The

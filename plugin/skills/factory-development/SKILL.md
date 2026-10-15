@@ -43,7 +43,7 @@ DOCS-ONLY FAST PATH (script-verified; target: change to open pull request in a f
    - exit 11: stop at once.
    - unrecoverable: `complete --succeeded false --comment "<summary>"`.
 
-A branch that is behind master is routine: bring it up to date yourself by MERGING origin/master into it (no rebase, no force-push), run the checks again and go on. Do not ask a person or the supervisor whether to do that, and do not wait for anyone to do it; ask the supervisor only when the two changes contradict (a conflict whose right resolution the item and the design do not decide). After a PASS the gateway merges the pull request; nobody has to merge it by hand.
+A branch that is merely behind master needs nothing: do not merge master into an open, clean pull request on your own (every push restarts its checks); the gateway brings it up to date right before it merges. When the pull request has a merge conflict with master (`base.updated` with `reason: "conflict"`, or GitHub runs no checks for it), bring it up to date yourself by MERGING origin/master into it (no rebase, no force-push), run the checks again and go on. Do not ask a person or the supervisor whether to do that, and do not wait for anyone to do it; ask the supervisor only when the two changes contradict (a conflict whose right resolution the item and the design do not decide). After a PASS the gateway merges the pull request; nobody has to merge it by hand.
 
 Never: merge, approve, force-push, rebase pushed history, open a pull request on a red build, or call `complete` before the checks report success.
 
