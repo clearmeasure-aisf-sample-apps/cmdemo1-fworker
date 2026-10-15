@@ -23,6 +23,7 @@ function Complete-AwaitingChecks([int]$n, $info, $st) {
         $s.pr.number = $pr.number; $s.pr.branch = $pr.head.ref; $s.pr.url = $pr.html_url
         $s.pr.rejection = "PR #$($pr.number) checks failed after the completion: $($chk.failed_checks -join ', ')"
         $s.pr.failed_checks = $chk.failed_checks
+        [void](Add-ChecksRed $s "$($pr.head.sha)")
         $s.handoff = @{ column = $c.columns.development; at = ConvertTo-Iso (Get-UtcNow) }
         Save-State $n $st
         Add-Comment $n "REJECTED a Development completion - PR #$($pr.number) checks are 'failure' ($($chk.failed_checks -join ', ')). Re-dispatching Development to fix forward (round $rounds)."

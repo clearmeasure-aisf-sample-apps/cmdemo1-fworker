@@ -75,6 +75,7 @@
     "assignAckSeconds": 120,
     "plantSnapshotMaxAgeMinutes": 30,
     "leaseMinutes": 30,
+    "redChecksGate": 2,
     "maxRelaunches": 3,
     "maxSessionRelaunches": 10,
     "maxReviewRounds": 3,
