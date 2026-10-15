@@ -248,12 +248,23 @@ function Test-DependencyMet([int]$Dep, $ByNumber, $Cache) {
     $Cache[$Dep] = $met; return $met
 }
 
+# items (issue 92): an incremental pass over those items only (the gateway queues the item of a webhook or a verb between full sweeps): the same rules,
+# each item read by itself instead of the whole board, and no claim-ref reaping and no QC sync (both are about the whole board). low: the gateway's
+# GitHub budget is below its reserve; the full sweep skips the claim-ref reaping and the QC sync, which can wait for the reset.
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
+    $only = $null
+    if (Test-Has $a 'items') { $only = @($a.items | ForEach-Object { [int]$_ } | Where-Object { $_ -gt 0 } | Select-Object -Unique -First 50) }
+    $low = (Test-Has $a 'low') -and $a.low
+    $skipped = @()
     $seenFile = Get-SeenFile
     $seen = if (Test-Path $seenFile) { Get-Content -Raw $seenFile | ConvertFrom-Json -AsHashtable } else { @{} }
     $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @(); $rtLabels = @{}; $profiles = @{}
+    # priorities: the priority label of each item that has one (top, high), for the order of the plan (Plant.Plan)
+    $priorities = @{}
+    # holds: the items labelled hold:owner (ownerHoldLabel); the plant manager's name actions leave the sessions that own one alone (Manager.cs)
+    $holds = @(); $holdLabel = if (Test-Has $c 'ownerHoldLabel') { "$($c.ownerHoldLabel)" } else { 'hold:owner' }
     # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled (their
     # owner was released at item.merged)
     $owned = @{}; $settling = @(); $unconfirmed = @()
@@ -263,7 +274,13 @@ function Verb_sync_board($a) {
     $releaseQueue = @()
     # unparked: items whose park the sweep removed because they are closed (issue 82); the plant forgets their parks
     $unparked = @()
-    $list = Get-BoardList
+    # design_waiting: open factory items in the backlog keeper's column (keeper.newItemColumn, Technical Design); fewer than keeper.minTechnicalDesign
+    # send the keeper backlog-low (gateway/Keeper.cs)
+    $designWaiting = 0; $designCol = if ((Test-Has $c 'keeper') -and (Test-Has $c.keeper 'newItemColumn')) { "$($c.keeper.newItemColumn)" } else { 'Technical Design' }
+    $list = if ($null -ne $only) {
+        # one read per item (the board list is one read per 100 cards): an item without a card on the board is not factory work here
+        @(foreach ($n0 in $only) { try { $i0 = Get-ItemInfo $n0; if ($i0.cardId) { $i0 } } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { $errors += @{ item = $n0; code = $_.Exception.Code; reason = $_.Exception.Message } } } })
+    } else { Get-BoardList }
     $last = Get-LastColumn
     $unparkCtx = @{ free_workers = $(if (Test-Has $a 'free_workers') { [int]$a.free_workers } else { 0 }) }
     foreach ($it in $list) {
@@ -272,6 +289,7 @@ function Verb_sync_board($a) {
         # (issue 82: a closed item in any column the factory works is read too, so a park it was left with is removed below)
         if (-not $it.open -and -not ((Test-NameIn "$($it.column)" $c.columns.ai) -or (Test-NameIn "$($it.column)" $c.columns.hold))) { continue }
         $n = $it.number; $col = "$($it.column)"
+        if ($it.open -and $col -ieq $designCol) { $designWaiting++ }
         if (Test-NameIn $c.rivalLabel $it.labels) { $actions += @{ item = $n; action = 'skip'; reason = 'ambiguous-owner' }; continue }
         if (-not $col -or $col -ieq $last) { continue }
         try {
@@ -280,6 +298,8 @@ function Verb_sync_board($a) {
             $st = Get-State $n; $s = $st.state
             $pin = @($it.labels | Where-Object { $_ -like 'worker:*' } | Select-Object -First 1)
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
+            $prio = Get-ItemPriority $it.labels; if ($prio) { $priorities["$n"] = $prio }
+            if (Test-NameIn $holdLabel $it.labels) { $holds += $n }
             # cloud-worker-runtimes.md 4.4: a runtime:<kind> label forces the item's runtime; the test label selects the cheapest model profile
             $rtl = @($it.labels | Where-Object { $_ -match '^runtime:[a-z0-9-]{1,20}$' } | Select-Object -First 1)
             if ($rtl.Count -gt 0) { $rtLabels["$n"] = ([string]$rtl[0]).Substring(8) }
@@ -479,25 +499,31 @@ function Verb_sync_board($a) {
     $offers = $kept
     if (-not $dry) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
     # claim refs with no live claim behind them (issue 47): removed at once for a closed item, after a lease for an open one
-    if (-not $dry) {
+    if ($null -ne $only) { }
+    elseif ($low) { $skipped += 'claim-ref-reap' }
+    elseif (-not $dry) {
         try { $actions += @(Invoke-ClaimRefReap $list) }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "claim-ref-reap: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "claim-ref-reap: $($_.Exception.Message)" } }
     }
-    # the board guard: open labelled issues without a card are put on the board in the intake column (they are offered from the next sweeps)
-    if (-not $dry) {
+    # the board guard: open labelled issues without a card are put on the board in the intake column (they are offered from the next sweeps); it
+    # needs the whole board, so a full sweep only, and not on a low budget (it lists every labelled issue)
+    if ($null -ne $only) { }
+    elseif ($low) { $skipped += 'board-guard' }
+    elseif (-not $dry) {
         try { $actions += Invoke-BoardGuard $list }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "board-guard: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "board-guard: $($_.Exception.Message)" } }
     }
     # PR QC environments: offers and teardowns only, never a start (design pr-qc-environment.md 3.5)
     $qcRecords = @(); $qcTeardowns = @(); $qcApprovals = @()
-    if (Test-QcEnabled) {
+    if ((Test-QcEnabled) -and $low -and $null -eq $only) { $skipped += 'qc-sync' }
+    if ((Test-QcEnabled) -and -not $low -and $null -eq $only) {
         try { $qs = Invoke-QcSync $list $dry; $actions += @($qs.actions); $errors += @($qs.errors); $qcRecords = @($qs.records); $qcTeardowns = @($qs.teardowns); $qcApprovals = @($qs.approvals) }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------
