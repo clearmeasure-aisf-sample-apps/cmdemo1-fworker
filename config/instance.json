@@ -99,6 +99,7 @@
     "offerMissLimit": 2,
     "offerCoolDownMinutes": 5,
     "parkHours": 24,
+    "pinFallbackMinutes": 30,
     "autoUnparkMax": 3,
     "awaitingChecksParkMinutes": 60,
     "docsOnlyReleaseGraceSeconds": 120,
