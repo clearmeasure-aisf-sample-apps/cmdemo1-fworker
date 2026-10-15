@@ -142,7 +142,8 @@
     "mgrRestartMinutes": 30,
     "mgrReleaseQueueMinutes": 60,
     "baseUpdateDebounceSeconds": 20,
-    "sweepMinSeconds": 60
+    "sweepMinSeconds": 60,
+    "journalWaitingMinutes": 30
   },
   "baseUpdate": {
     "mode": "conflict-or-merge",
