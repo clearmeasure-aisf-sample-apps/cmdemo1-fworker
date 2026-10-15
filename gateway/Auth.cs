@@ -6,7 +6,8 @@ using System.Text.Json.Nodes;
 //   admin     the gateway's own token (the sweep, tests, the operator)
 //   worker    "w1.<name>.<hmac>"  one per worker, issued once: may register, receive assignments, ask my-items. It cannot act on an item.
 //   item      "i1.<payload>.<hmac>" minted at an assignment for ONE item and ONE role: the only credential that acts on an item.
-//   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs and nothing else (worker-messaging.md 4.6).
+//   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs (worker-messaging.md 4.6) and the plant manager's flow verb
+//             manager-action (docs/design/plant-manager.md 10e), which never merges, approves, records a verdict or clears a hold.
 //   operator  "o1.<name>.<generation>.<hmac>" the factory operator SESSION (Operator.cs, docs/design/operator-session.md): not the admin token. It
 //             calls no verb, mints and revokes nothing, and is admitted only at the endpoints that name it (Program.cs, Admitted and OperatorActive):
 //             messaging, the questions, the supervisor's budget, its release checks, a worker's capacity, drain and resume, and the read-only metrics.
@@ -39,11 +40,17 @@ static class Auth
     public static readonly HashSet<string> InspectorVerbs = new() { "get-item", "inspect-facts", "approve-pr", "accept", "pr-checks", "model-tier" };
     public static readonly HashSet<string> WorkerVerbs = new() { "my-items" };
     // The supervisor's verbs. The body keeps only the fields listed for the verb, whatever the caller sent.
-    public static readonly HashSet<string> ManagerVerbs = new() { "get-item", "pr-checks", "get-delivery" };
+    // manager-action is the plant manager's flow verb (docs/design/plant-manager.md 10e): one action per call, from ManagerItemActions (a rule script,
+    // Verbs.Manager.ps1) or ManagerNameActions (the gateway's own plant). Its `by` is the credential's name, never the body's. The verbs that decide
+    // about the work itself are never in this list: merge, approve-pr, validation-verdict, clear-hold, complete, move-next, claim-item, accept.
+    public static readonly HashSet<string> ManagerVerbs = new() { "get-item", "pr-checks", "get-delivery", "manager-action" };
     static readonly Dictionary<string, string[]> ManagerBodyFields = new()
     {
-        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["get-delivery"] = ["item", "commit"]
+        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["get-delivery"] = ["item", "commit"],
+        ["manager-action"] = ["item", "action", "policy", "reason", "worker", "level"]
     };
+    public static readonly HashSet<string> ManagerItemActions = new() { "unpark", "release-owner", "pin", "unpin", "requeue", "prioritize", "rerun-failed" };
+    public static readonly HashSet<string> ManagerNameActions = new() { "drain", "resume", "restart-session" };
     // Role "qc": the session that runs a PR's environment. No release, no merge, no comment, no approval: only its own job.
     public static readonly HashSet<string> QcVerbs = new() { "get-item", "accept", "qc-job", "qc-progress", "qc-report", "qc-fail", "qc-heartbeat", "qc-stopped" };
     // Principal "qc-click": a person who holds a link. Not a credential: the /qc handlers build it after checking the link, and /api/v1/verbs never yields one.
@@ -152,6 +159,7 @@ static class Auth
             if (!ManagerVerbs.Contains(verb)) return (null, $"the manager role cannot call '{verb}'");
             var kept = new JsonObject();
             foreach (var f in ManagerBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
+            if (verb == "manager-action") kept["by"] = p.Name;
             return (kept, null);
         }
         if (p.Kind == "operator") return (null, $"an operator session credential cannot call '{verb}': it calls no verb");

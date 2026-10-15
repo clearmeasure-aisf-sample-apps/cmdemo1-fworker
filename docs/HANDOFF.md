@@ -18,8 +18,10 @@ Technical Design, Development and Functional Testing to a merged pull request, a
   is merged (the gateway settles it from there, issue #107; the connect prompt still says "and master is green": its text is pinned by a
   hash in the operator suite, a code-owner path). Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
   `factory test` selects the cheapest model profile.
-- **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask and reads the gateway's patrol
-  digest. It advises; it changes nothing.
+- **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask, reads the gateway's patrol
+  digest and keeps the flow moving with the flow verbs of `manager-action` (unpark, release-owner, pin and unpin, requeue, prioritize,
+  rerun-failed, drain and resume, restart-session) within guard rails the gateway enforces (`docs/design/plant-manager.md` 10e). It never
+  merges, approves, records a verdict or clears a hold; `manager.mode` `advise` turns its verbs off.
 - **Operator**: the person (or script) with the operator token: dashboard, credentials for workers, revoke, messaging on and off,
   notes to any session.
 - **Operator session**: one AI session (name `operator-session`) with a credential of its own kind, not the operator token. It watches
@@ -208,6 +210,18 @@ v. **Done (2026-10-14): lasting cycle-time metrics** (enhancement 13). `GET /api
    changes nothing. One computation reads every item's comments: answers are cached 120 s per query and computed one at a time. The dashboard
    section "Cycle times" loads it when opened. Limits: `dispatched_at` keeps the last dispatch of a column (a column visited twice counts from
    its last visit); items worked before the journal existed have no match or accept time; at most 300 items and 90 days.
+w. **Built (2026-10-14), awaiting the owner's review: the plant manager acts on the flow** (`docs/design/plant-manager.md` 10e). The supervisor's
+   `manager-action` (`factory.ps1 act`): unpark, release-owner, pin, unpin, requeue, prioritize (labels `priority:top`, `priority:high`; the plan
+   offers them first after the pins), rerun-failed (failed jobs only, once per head), drain, resume, restart-session (`session.restart`, the
+   client writes the launcher's end marker). Guard rails in code: never merge, approve, record a verdict or clear a hold; the label `hold:owner`
+   refuses every action (and a restart of a session that owns such an item); 3 actions per item in 24 hours (in the item state), 3 drains or
+   restarts per session name in 24 hours and 30 actions an hour (both in memory); a policy code from `manager.actions.policies` on every
+   action, journaled; `manager.mode` `advise` (any unknown value too) turns them off; the operator token can switch it at run time, and a
+   graceful restart brings back an `advise`, never an `act`. Once a day `supervisor.summary-due` (`manager.dailySummaryHourUtc`; the day is
+   kept in the plant snapshot): the skill sends one summary from `GET /api/v1/metrics` and `act-log` instead of a note per event. Open: not yet
+   seen live on tdd; the hourly and per-name counts and the log of actions are in memory (the per-item count is not); `mode: act` and the
+   summary hour ship in `config/instance.json`, so the one image carries them to uat and prod; the supervisor's skill and its connect prompt
+   changed (owner review).
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).

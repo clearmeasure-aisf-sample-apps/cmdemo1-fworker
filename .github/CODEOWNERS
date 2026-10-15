@@ -26,5 +26,11 @@
 /plugin/skills/factory-peer-messaging/        @jeffreypalermo
 /plugin/skills/factory-supervisor/            @jeffreypalermo
 
+# the plant manager's powers: its flow verbs and their guard rails
+/gateway/Manager.cs                           @jeffreypalermo
+/plugin/scripts/lib/Verbs.Manager.ps1         @jeffreypalermo
+/plugin/scripts/lib/Client.Manager.ps1        @jeffreypalermo
+/tests/scenarios/manager-actions.ps1          @jeffreypalermo
+
 # uat and prod
 /docs/deploy/activate-prod.sh                 @jeffreypalermo

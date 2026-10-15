@@ -262,8 +262,10 @@ $OperatorScenarios = [ordered]@{
         $ghost = Op-Post '/api/v1/workers/not-registered/capacity?value=2'
         Check 'it sets no capacity for a name that has not registered since the gateway started: 404' ($ghost.status -eq 404 -and $ghost.code -eq 'not-found') ($ghost | ConvertTo-Json -Compress)
         foreach ($c2 in @(@('a worker', (Msg-Token 'alice')), @('the supervisor', (Msg-Supervisor)), @('an operator name that does not hold the slot', (Op-Token 'operator-two')))) {
-            $x = @((Op-Post '/api/v1/workers/bob/drain' @{} $c2[1]), (Op-Post '/api/v1/workers/bob/resume' @{} $c2[1]), (Op-Post '/api/v1/workers/bob/capacity?value=2' @{} $c2[1]), (Op-Metrics 'since=24h' $c2[1]))
-            Check "$($c2[0]) is refused drain, resume and capacity of another name and the metrics" (@($x | Where-Object { $_.status -ne 403 }).Count -eq 0) (($x | ForEach-Object { $_.status }) -join ' ')
+            # the active supervisor reads the metrics (docs/design/plant-manager.md 10e, manager-actions.ps1): it is refused only the three name actions
+            $x = @((Op-Post '/api/v1/workers/bob/drain' @{} $c2[1]), (Op-Post '/api/v1/workers/bob/resume' @{} $c2[1]), (Op-Post '/api/v1/workers/bob/capacity?value=2' @{} $c2[1]))
+            if ($c2[0] -ne 'the supervisor') { $x += @(Op-Metrics 'since=24h' $c2[1]) }
+            Check "$($c2[0]) is refused drain, resume and capacity of another name$(if ($c2[0] -ne 'the supervisor') { ' and the metrics' })" (@($x | Where-Object { $_.status -ne 403 }).Count -eq 0) (($x | ForEach-Object { $_.status }) -join ' ')
         }
         Check 'and none of the refused calls changed bob' ((& $me).draining -eq $false -and (& $me).capacity -eq 1) ((& $me) | ConvertTo-Json -Compress -Depth 3)
         # with messaging switched off the operator session is admitted nowhere: the four calls answer 403 to it and still work for the admin token

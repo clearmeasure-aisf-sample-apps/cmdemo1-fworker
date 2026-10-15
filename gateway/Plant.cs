@@ -185,7 +185,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             w.Type = type; w.Caps = new(caps); w.Capacity = capOverride.TryGetValue(name, out var capSet) ? capSet : Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
-            w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name);   // issue 80: only the operator clears its drain
+            w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name) || mgrDrained.Contains(name);   // issue 80: only the operator clears its drain (and the plant manager its own, Manager.cs)
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
             w.RestartSent = 0;                                // and session.restart again, if it is still due
             w.Model = model; w.Effort = effort;
@@ -1509,8 +1509,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         lock (gate)
         {
             if (!workers.TryGetValue(name, out var w)) return false;
-            if (byOperator) { if (on) drainedNames.Add(name); else drainedNames.Remove(name); }
-            w.Draining = on || drainedNames.Contains(name);
+            // the operator's resume lifts the plant manager's drain of the name too (Manager.cs); a session's own resume lifts neither
+            if (byOperator) { if (on) drainedNames.Add(name); else { drainedNames.Remove(name); mgrDrained.Remove(name); } }
+            w.Draining = on || drainedNames.Contains(name) || mgrDrained.Contains(name);
             return true;
         }
     }
@@ -1802,9 +1803,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     // owned and keep (step 5a): what the sweep says of every owned claim, and the items it must not drop an owner of; used only while messaging or the
     // supervisor is on, so a deployment with both off plans exactly as before.
+    // priorities (docs/design/plant-manager.md 10e): the items with a priority label (top, high); after the pins they are offered first, top before high
     // sweepStarted: when the sweep that made this plan started reading the board. An owner it names for an item that was merged after that is not
     // put back: the sweep read the claim before the merge removed it (issue 107).
-    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, DateTime? sweepStarted = null)
+    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, JsonObject? priorities = null, DateTime? sweepStarted = null)
     {
         lock (gate)
         {
@@ -1819,8 +1821,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow);
             var wanted = new HashSet<string>();
-            // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can
-            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0))
+            // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can; then by priority (the
+            // order is stable, so items of one rank keep the sweep's order)
+            static int Rank(string? p) => p == "top" ? 0 : p == "high" ? 1 : 2;
+            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0).ThenBy(x => Rank(priorities?[x!["item"]!.ToString()]?.ToString())))
             {
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
                 var key = $"{item}|{kind}|{role}"; wanted.Add(key);

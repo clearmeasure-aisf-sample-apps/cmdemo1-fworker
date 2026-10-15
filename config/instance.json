@@ -189,7 +189,14 @@
     "turnBudgetPerDay": 96,
     "patrolReservePerHour": 2,
     "stepBudgetPerHour": 60,
-    "digest": { "refusalCount": 3, "verbErrorCount": 3, "releaseQueueCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 }
+    "digest": { "refusalCount": 3, "verbErrorCount": 3, "releaseQueueCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 },
+    "mode": "act",
+    "dailySummaryHourUtc": 7,
+    "actions": {
+      "perItemPerDay": 3,
+      "perHour": 30,
+      "policies": ["park-resolved", "stalled-owner", "pinned-worker-absent", "stuck-offer", "outside-blocker", "flaky-check", "repeated-question", "backlog-order", "load-balance", "operator-request"]
+    }
   },
   "operator": {
     "enabled": false,
@@ -323,6 +330,8 @@
     "minTierByColumn": {}
   },
   "testLabel": "factory test",
+  "ownerHoldLabel": "hold:owner",
+  "priorityLabels": { "top": "priority:top", "high": "priority:high" },
   "mergeQueueDepth": 0,
   "gatewayMerge": true,
   "ownerSessions": false,
