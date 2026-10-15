@@ -1593,6 +1593,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                             if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
                                 plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
                         plant.SetReleaseQueue(j["release_queue"] as JsonArray);
+                        plant.SetHeld(j["held"] as JsonArray);   // issue 65: items that wait for their dependencies
                         try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
                         foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
                             if (t is JsonObject to && to["item"] is JsonNode ti)
@@ -1600,6 +1601,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                                 to["provider"] = "gateway"; plant.Route(ti.GetValue<int>(), (JsonObject)JsonNode.Parse(to.ToJsonString())!);
                                 if (to["event"]?.ToString() == "item.complete") plant.Complete(ti.GetValue<int>());
                                 if (to["event"]?.ToString() == "item.merged") plant.Merged(ti.GetValue<int>());
+                                // issue 65: an item that waits for its dependencies is offered by the next sweep once one of them merged or ended, not an interval later
+                                if (to["event"]?.ToString() is "item.merged" or "item.complete" && j["held"] is JsonArray { Count: > 0 }) soon = true;
                             }
                         // the fallback of the back-merge trigger: master's head compared with the last one seen (not awaited: the sweep goes on)
                         if (baseWatch != null) _ = Task.Run(baseWatch.AfterSweep);
