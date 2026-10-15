@@ -88,7 +88,7 @@ sealed class World
     // masterFlaky: the master Build fails one acceptance shard at once while "Build result" is still running (it fails seconds later), as a flaky shard
     // does on GitHub. rerunSeconds / rerunConclusion: how long a re-run of failed jobs takes and how it ends (default: 3 s, success).
     bool masterFlaky; double flakyRunSeconds = 4, rerunSeconds = 3; string rerunConclusion = "success";
-    long nextRun = 1000; readonly Dictionary<long, int> runAttempts = new(); int rerunRefusals, reruns; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold;
+    long nextRun = 1000; readonly Dictionary<long, int> runAttempts = new(); readonly Dictionary<long, string> pendingRelease = new(); int rerunRefusals, reruns; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold; string? masterArchitecture;
     long counter = 0; int appMints;
 
     static string Sha(string seed) => Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(seed))).ToLowerInvariant();
@@ -154,7 +154,7 @@ sealed class World
         {
             var i = issues[int.Parse(m.Groups[1].Value)];
             if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
-            return (200, J(("number", i.Number)));
+            return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body)));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)/comments$")).Success)
         {
@@ -340,6 +340,9 @@ sealed class World
             var listOf = checks.First(kv => kv.Value.Any(c => c.RunId == rid)).Value;
             var now = DateTime.UtcNow.AddMilliseconds(5);
             foreach (var f in failedJobs) listOf.Add(new Check { Id = nextCheck++, Name = f.Name, RunId = rid, App = f.App, Started = now, Status = "in_progress", CompleteAt = now.AddSeconds(rerunSeconds), Conclusion = rerunConclusion });
+            // a code change whose first attempt failed: the Release workflow that the re-run's completion starts makes the release (it appears then)
+            if (rerunConclusion == "success" && pendingRelease.Remove(rid, out var relSha))
+                releases.Add(new Rel { Id = "Releases-" + (releases.Count + 1), Version = "2.4." + (100 + releases.Count), Notes = $"Build https://fake/run/{rid} of {relSha}", At = now.AddSeconds(rerunSeconds + 1), ProdDelay = prodDelay });
             return (201, null);
         }
         if ((m = Regex.Match(path, $"^{root}/releases/tags/(demo-\\d+)$")).Success && method == "GET")
@@ -445,7 +448,18 @@ sealed class World
             mc.Add(new Check { Id = nextCheck++, Name = "Acceptance Tests [shard 1/6]", RunId = buildRun, Conclusion = "failure" });
             mc[0].Status = "in_progress"; mc[0].CompleteAt = DateTime.UtcNow.AddSeconds(flakyRunSeconds); mc[0].Conclusion = "failure";
         }
+        // masterArchitecture: the Architecture workflow (started by the Build's completion) fails on the merge commit
+        if (masterArchitecture != null) mc.Add(new Check { Id = nextCheck++, Name = "architecture", RunId = nextRun++, Conclusion = masterArchitecture });
+        // the Build's jobs that run only for a code change (build.yml's job "Detect code changes" skips them for documentation)
+        mc.Add(new Check { Id = nextCheck++, Name = "Integration Build (SQL container)", RunId = buildRun, Conclusion = docs ? "skipped" : (masterRed ? "failure" : "success") });
         if (docs) { if (docsRelease != "absent") mc.Add(new Check { Id = nextCheck++, Name = "release", RunId = buildRun, Conclusion = "skipped" }); }
+        else if (releaseMode != "none" && (masterRed || masterFlaky) && !masterHold)
+        {   // as on GitHub: the Release workflow runs when the Build completes, and skips its jobs because the first attempt failed. Its check runs are
+            // attached to master's head when it starts, so after a successful re-run the merge commit keeps that skipped release check, while the
+            // release made by the second run of the Release workflow does carry the commit (Octopus, from the re-run's packages)
+            mc.Add(new Check { Id = nextCheck++, Name = "release", RunId = nextRun++, Conclusion = "skipped" });
+            pendingRelease[buildRun] = masterSha;
+        }
         else if (releaseMode != "none")
         {
             mc.Add(new Check { Id = nextCheck++, Name = "release", RunId = buildRun });
@@ -481,7 +495,7 @@ sealed class World
         if (q.Contains("items(first"))
         {
             var nodes = issues.Values.Where(i => i.Card != null).Select(i => (JsonNode)J(("id", i.Card), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column))),
-                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
+                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
             return (200, Data(J(("organization", J(("projectV2", J(("items", J(("pageInfo", J(("hasNextPage", false), ("endCursor", null))), ("nodes", new JsonArray(nodes)))))))))));
         }
         if (q.Contains("fields(first"))
@@ -496,20 +510,21 @@ sealed class World
     {
         if (path == "api/users/me") return (200, J(("Id", "Users-1")));
         if (Regex.IsMatch(path, @"^api/Spaces-355/projects/(cmdemo1-ui|Projects-1)$")) return (200, J(("Id", "Projects-1"), ("Name", "cmdemo1-ui")));
+        var made = releases.Where(r => r.At <= DateTime.UtcNow).ToList();   // a release appears once the workflow that makes it has run
         if (path == "api/Spaces-355/projects/Projects-1/releases")
-            return (200, J(("Items", new JsonArray(releases.AsEnumerable().Reverse().Select(r => (JsonNode)J(("Id", r.Id), ("Version", r.Version), ("ReleaseNotes", r.Notes), ("Assembled", r.At.ToString("o")))).ToArray()))));
+            return (200, J(("Items", new JsonArray(made.AsEnumerable().Reverse().Select(r => (JsonNode)J(("Id", r.Id), ("Version", r.Version), ("ReleaseNotes", r.Notes), ("Assembled", r.At.ToString("o")))).ToArray()))));
         if (path == "api/Spaces-355/environments") return (200, J(("Items", new JsonArray(J(("Id", "E-tdd"), ("Name", "tdd")), J(("Id", "E-uat"), ("Name", "uat")), J(("Id", "E-prod"), ("Name", "prod"))))));
         if (path == "api/Spaces-355/deployments")
         {
             var items = new JsonArray();
-            foreach (var r in releases) foreach (var (env, idx) in new[] { ("E-tdd", 0), ("E-uat", 1), ("E-prod", 2) })
+            foreach (var r in made) foreach (var (env, idx) in new[] { ("E-tdd", 0), ("E-uat", 1), ("E-prod", 2) })
                 items.Add(J(("Id", $"Deployments-{r.Id}-{env}"), ("ReleaseId", r.Id), ("EnvironmentId", env), ("TaskId", $"{r.Id}|{env}"), ("Created", r.At.AddSeconds(idx).ToString("o"))));
             return (200, J(("Items", items)));
         }
         var m = Regex.Match(path, @"^api/Spaces-355/tasks/(.+)$");
         if (m.Success)
         {
-            var parts = m.Groups[1].Value.Split('|'); var r = releases.FirstOrDefault(x => x.Id == parts[0]);
+            var parts = m.Groups[1].Value.Split('|'); var r = made.FirstOrDefault(x => x.Id == parts[0]);
             if (r == null) return (404, null);
             var due = parts[1] == "E-prod" ? r.At.AddSeconds(r.ProdDelay) : r.At;
             var done = DateTime.UtcNow >= due;
@@ -532,7 +547,7 @@ sealed class World
                 latencyMs = 0; latencyMatch = null; refPage = 0;
                 artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
-                masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); rerunRefusals = 0; reruns = 0; return (200, J(("ok", true)));
+                masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; return (200, J(("ok", true)));
             case "issue":
             {
                 var i = new Issue { Number = nextNumber++, Title = b!["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Column = b["column"]?.ToString() };
@@ -654,6 +669,7 @@ sealed class World
                 if (b?["releaseMode"] != null) releaseMode = b["releaseMode"]!.ToString();
                 if (b?["docsRelease"] != null) docsRelease = b["docsRelease"]!.ToString();
                 if (b?["masterHold"] != null) masterHold = b["masterHold"]!.GetValue<bool>();
+                if (b?["masterArchitecture"] != null) masterArchitecture = b["masterArchitecture"]!.ToString();
                 if (b?["masterFlaky"] != null) masterFlaky = b["masterFlaky"]!.GetValue<bool>();
                 if (b?["flakyRunSeconds"] != null) flakyRunSeconds = b["flakyRunSeconds"]!.GetValue<double>();
                 if (b?["rerunSeconds"] != null) rerunSeconds = b["rerunSeconds"]!.GetValue<double>();

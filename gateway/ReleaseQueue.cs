@@ -123,4 +123,30 @@ sealed partial class Plant
         d.ReleaseQueue.AddRange(releaseQueue);
         d.PromotionRequested = promotionRequests.Count > 0;
     }
+
+    // Issue 65: the items the sweep holds back because an item they depend on is neither merged nor closed (sync-board `held`), with since when the
+    // gateway has seen each held (kept across sweeps while the item stays held). Replaced by every sweep; shown in the status as plant.held.
+    readonly Dictionary<int, (string Code, string Column, int[] On, DateTime Since)> held = new();
+    public void SetHeld(JsonArray? list)
+    {
+        if (list == null) return;
+        lock (gate)
+        {
+            var now = DateTime.UtcNow; var next = new Dictionary<int, (string, string, int[], DateTime)>();
+            foreach (var x in list)
+            {
+                if (x is not JsonObject o || !(o["item"] is JsonValue iv && iv.TryGetValue<int>(out var item) && item >= 1)) continue;
+                var on = (o["on"] as JsonArray ?? new JsonArray()).Select(v => int.TryParse(v?.ToString(), out var d) ? d : 0).Where(d => d > 0).ToArray();
+                var code = o["code"]?.ToString() ?? "depends-on";
+                next[item] = (code, o["column"]?.ToString() ?? "", on, held.TryGetValue(item, out var was) && was.Code == code ? was.Since : now);
+            }
+            held.Clear(); foreach (var kv in next) held[kv.Key] = kv.Value;
+        }
+    }
+    public JsonArray HeldJson()
+    {
+        lock (gate)
+            return new JsonArray(held.OrderBy(kv => kv.Key).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key, ["code"] = kv.Value.Code, ["column"] = kv.Value.Column,
+                ["on"] = new JsonArray(kv.Value.On.Select(d => (JsonNode)d).ToArray()), ["since"] = kv.Value.Since.ToString("o") }).ToArray());
+    }
 }
