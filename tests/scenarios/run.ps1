@@ -28,6 +28,9 @@ if (-not $NoBuild -and -not $ListSuites -and -not $ListScenarios) {
 foreach ($k in $CheckScenarios.Keys) { $Scenarios[$k] = $CheckScenarios[$k] }
 foreach ($k in $CheckOwnerScenarios.Keys) { $OwnerScenarios[$k] = $CheckOwnerScenarios[$k] }
 foreach ($k in $CheckManagerScenarios.Keys) { $ManagerScenarios[$k] = $CheckManagerScenarios[$k] }
+. (Join-Path $PSScriptRoot 'cirule.ps1')      # one CI rule for flakes and pre-existing failures (issue 102): its scenarios join the suite 'auto'
+foreach ($k in $CiRuleScenarios.Keys) { $Scenarios[$k] = $CiRuleScenarios[$k] }
+foreach ($k in $CiRuleOwnerScenarios.Keys) { $OwnerScenarios[$k] = $CiRuleOwnerScenarios[$k] }   # (the gateway's merge after a PASS: the owner suite)
 . (Join-Path $PSScriptRoot 'qc.ps1')
 . (Join-Path $PSScriptRoot 'qc-dashboard.ps1')
 . (Join-Path $PSScriptRoot 'qc-worker.ps1')   # S3: own gateway and workers, scenarios named "qc: worker ..."

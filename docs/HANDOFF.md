@@ -248,6 +248,16 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Closed on 2026-10-15 (issue #102):
+
+- **#102 One CI rule for flakes and pre-existing failures** (about 18 rejected rounds a day, 13 on acceptance shards). Only the gates (`ciGates`)
+  decide a head; a red head whose runs completed is re-run once when its failures are non-gate checks, known flaky (`masterFlakyChecks`, now both
+  shard families) or failing on master too (`pr.rerun[sha]`, judged on the new attempt); a failure master has as well costs no fix-forward round
+  and no demotion, is reported once (comment, operator `plant.event` `master-defect`), and once master passes it again the gateway merges master
+  into the branch. A park that ends by expiry or unpark resets `fix_forward_rounds` and `demotions`. `docs/design/plant-manager.md` 10e; scenarios
+  `ci rule: ...` (tests/scenarios/cirule.ps1, suites auto and owner). Open: the code-owner documents that list the operator stream's `plant.event`
+  codes (`docs/design/operator-session.md`, the factory-operator skill) do not name `master-defect` yet (owner pull request).
+
 Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
 
 - **#87 A code change was moved to Done when its master Build had been re-run** (272, 276). The Release and Architecture workflows start when a

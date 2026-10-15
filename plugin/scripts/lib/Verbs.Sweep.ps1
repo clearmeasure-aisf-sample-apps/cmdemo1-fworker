@@ -4,29 +4,78 @@ function Get-SeenFile { Join-Path (Get-StateDir) 'seen.json' }
 
 function Complete-AwaitingChecks([int]$n, $info, $st) {
     $c = Get-Cfg; $s = $st.state; $aw = $s.awaiting_checks
-    $pr = Get-Pr ([int]$aw.pr); $chk = Get-ChecksFor $pr.head.sha
+    $pr = Get-Pr ([int]$aw.pr); $sha = "$($pr.head.sha)"
+    $chk = Get-ChecksFor $sha
     if ($chk.status -eq 'success') {
-        $s.Remove('fix_forward_rounds'); if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
+        $s.Remove('fix_forward_rounds'); $s.Remove('master_defect'); if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
         $comment = "PR #$($pr.number) checks are green; development complete. $($aw.comment)"
         $r = Finish-ColumnExit $n $info $st $comment @{ prNumber = $pr.number }
         return @{ outcome = 'completed'; moved_to = $r.moved_to }
     }
     if ($chk.status -eq 'failure') {
-        $rounds = $(if (Test-Has $s 'fix_forward_rounds') { [int]$s.fix_forward_rounds } else { 0 }) + 1
-        $s.fix_forward_rounds = $rounds; $s.Remove('awaiting_checks'); $s.Remove('park')
-        if ($rounds -gt [int]$c.timing.fixForwardMaxRounds) {
-            Set-Park $s 'fix-forward-exhausted' ($c.timing.parkHours * 60); Save-State $n $st
-            Add-Comment $n "PR #$($pr.number) has failed CI after $($rounds - 1) fix-forward Development rounds - parked for a human."
-            return @{ outcome = 'parked'; reason = 'fix-forward-exhausted' }
+        # one CI rule (issue 102, Prs.ps1): re-run once, a master defect costs no round, only a red of the change's own is a fix-forward round
+        $rule = Get-RedHeadRuling $s $sha $chk
+        if ($rule.ruling -eq 'rerun') {
+            # the wait for the checks starts again with the re-run: an acceptance re-run takes as long as the first run
+            $aw.since = ConvertTo-Iso (Get-UtcNow); Set-Park $s 'development:awaiting-checks' $c.timing.awaitingChecksParkMinutes; Save-State $n $st
+            Add-Comment $n "PR #$($pr.number) checks failed at ``$($sha.Substring(0,7))`` ($($rule.causes -join ', ')) - $($rule.reason); re-running the failed jobs once (workflow run $(($rule.runs | ForEach-Object { $_.id }) -join ', ')), then judging the new attempt. No fix-forward round is counted for it."
+            return @{ outcome = 'rerun'; failed = $rule.causes; runs = $rule.runs }
         }
-        if (-not (Test-Has $s 'pr')) { $s.pr = @{} }
-        $s.pr.number = $pr.number; $s.pr.branch = $pr.head.ref; $s.pr.url = $pr.html_url
-        $s.pr.rejection = "PR #$($pr.number) checks failed after the completion: $($chk.failed_checks -join ', ')"
-        $s.pr.failed_checks = $chk.failed_checks
-        $s.handoff = @{ column = $c.columns.development; at = ConvertTo-Iso (Get-UtcNow) }
-        Save-State $n $st
-        Add-Comment $n "REJECTED a Development completion - PR #$($pr.number) checks are 'failure' ($($chk.failed_checks -join ', ')). Re-dispatching Development to fix forward (round $rounds)."
-        return @{ outcome = 'fix-forward'; round = $rounds; offer = $true }
+        # running, rerun-wait, deferred: judged later; the hung-CI timeout below still counts (from the re-run, when there was one)
+        # a master defect seen less than masterDefectCheckMinutes ago (cached: nothing was read): wait
+        if ($rule.ruling -eq 'master-defect' -and $rule.cached) { return @{ outcome = 'waiting'; reason = 'master-defect'; checks = @($rule.causes) } }
+        if ($rule.ruling -eq 'master-defect') {
+            $new = Register-MasterDefect $n $s ([int]$pr.number) $sha $rule.causes
+            $md = $s.master_defect; $md.checked_at = ConvertTo-Iso (Get-UtcNow)
+            # the hung-CI timeout does not apply while the base branch is broken; a defect that outlasts timing.parkHours is a person's to look at
+            $since = ConvertFrom-Iso $md.reported_at
+            if ($since -and ((Get-UtcNow) - $since).TotalHours -gt [double]$c.timing.parkHours) {
+                $s.Remove('awaiting_checks'); Set-Park $s 'master-defect' ($c.timing.parkHours * 60); Save-State $n $st
+                Add-Comment $n "PR #$($pr.number) has waited more than $($c.timing.parkHours) h for **$($c.defaultBranch)** to pass $($rule.causes -join ', ') again - parked for a human. No fix-forward round and no demotion were counted."
+                return @{ outcome = 'parked'; reason = 'master-defect' }
+            }
+            $aw.since = ConvertTo-Iso (Get-UtcNow); Set-Park $s 'development:awaiting-checks' $c.timing.awaitingChecksParkMinutes
+            # the base branch passes those checks again (the ruling says fixed): its fix is merged into the branch (GitHub's update branch), once
+            # per head, and the new head is judged as any head
+            $updated = ''
+            if ($rule.fixed) {
+                $md.updated_for = $sha; $md.updated_at = ConvertTo-Iso (Get-UtcNow)
+                $u = try { Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$($pr.number)/update-branch" -Body @{ expected_head_sha = $sha } -Allow 409, 422 } catch { @{ status = 0; body = @{ message = "$($_.Exception.Message)" } } }
+                $updated = if (-not ($u -is [hashtable] -and $u.ContainsKey('status'))) { 'updated' } elseif ("$($u.body.message)" -match 'conflict') { 'conflict' } else { 'refused' }
+                if ($updated -eq 'updated') { Add-Comment $n "**$($c.defaultBranch)** passes $($rule.causes -join ', ') again: the gateway merged $($c.defaultBranch) into the branch of PR #$($pr.number); the checks of the new head decide." }
+                elseif ($updated -eq 'refused') { $md.Remove('updated_for'); $md.Remove('updated_at') }   # (a refusal that is no conflict: tried again at the next look)
+                elseif ($updated -eq 'conflict') {
+                    # GitHub cannot merge it (a conflict): the owner merges master into the branch; this hand-off is not a fix-forward round
+                    $s.Remove('awaiting_checks'); $s.Remove('park')
+                    if (-not (Test-Has $s 'pr')) { $s.pr = @{} }
+                    $s.pr.number = $pr.number; $s.pr.branch = $pr.head.ref; $s.pr.url = $pr.html_url
+                    $s.pr.rejection = "$($c.defaultBranch) passes $($rule.causes -join ', ') again, and GitHub could not merge it into the branch of PR #$($pr.number) (conflict): merge $($c.defaultBranch) into the branch, resolve, push"
+                    $s.handoff = @{ column = $c.columns.development; at = ConvertTo-Iso (Get-UtcNow) }
+                    Save-State $n $st
+                    Add-Comment $n "**$($c.defaultBranch)** passes $($rule.causes -join ', ') again, but GitHub could not merge it into the branch of PR #$($pr.number). Re-dispatching Development to merge $($c.defaultBranch) into the branch (not counted as a fix-forward round)."
+                    return @{ outcome = 'fix-forward'; round = $(if (Test-Has $s 'fix_forward_rounds') { [int]$s.fix_forward_rounds } else { 0 }); reason = 'master-fixed-conflict'; offer = $true }
+                }
+            }
+            Save-State $n $st
+            return @{ outcome = 'master-defect'; checks = @($rule.causes); new = $new; branch = $updated }
+        }
+        if ($rule.ruling -eq 'red') {
+            $rounds = $(if (Test-Has $s 'fix_forward_rounds') { [int]$s.fix_forward_rounds } else { 0 }) + 1
+            $s.fix_forward_rounds = $rounds; $s.Remove('awaiting_checks'); $s.Remove('park'); $s.Remove('master_defect')
+            if ($rounds -gt [int]$c.timing.fixForwardMaxRounds) {
+                Set-Park $s 'fix-forward-exhausted' ($c.timing.parkHours * 60); Save-State $n $st
+                Add-Comment $n "PR #$($pr.number) has failed CI after $($rounds - 1) fix-forward Development rounds - parked for a human."
+                return @{ outcome = 'parked'; reason = 'fix-forward-exhausted' }
+            }
+            if (-not (Test-Has $s 'pr')) { $s.pr = @{} }
+            $s.pr.number = $pr.number; $s.pr.branch = $pr.head.ref; $s.pr.url = $pr.html_url
+            $s.pr.rejection = "PR #$($pr.number) checks failed after the completion: $($rule.causes -join ', ')"
+            $s.pr.failed_checks = $chk.failed_checks
+            $s.handoff = @{ column = $c.columns.development; at = ConvertTo-Iso (Get-UtcNow) }
+            Save-State $n $st
+            Add-Comment $n "REJECTED a Development completion - PR #$($pr.number) checks are 'failure' ($($chk.failed_checks -join ', ')$(if ($rule.reason -match '^still red') { '; still red after one re-run of the failed jobs' })). Re-dispatching Development to fix forward (round $rounds)."
+            return @{ outcome = 'fix-forward'; round = $rounds; offer = $true }
+        }
     }
     $since = ConvertFrom-Iso $aw.since
     if ($since -and ((Get-UtcNow) - $since).TotalMinutes -gt $c.timing.devChecksTimeoutMinutes) {
@@ -118,6 +167,23 @@ function Clear-ClosedPark([int]$n) {
     }
 }
 
+# Issue 102: a park that ended by expiry gives the item a fresh start. Its fix-forward rounds and demotions are counted from 0 again (they parked it,
+# or they would park it again at the first red), and the expired park leaves the state; a journal line says so. Not the gateway's own wait for
+# checks (development:awaiting-checks): that one is not a person's park. Under the item lock on a fresh read. Returns the park code, or $null.
+function Reset-ExpiredPark([int]$n) {
+    Use-ItemLock $n {
+        $f = Get-State $n; $fs = $f.state
+        if (-not (Test-Has $fs 'park') -or (Get-Park $fs) -or "$($fs.park.reason)" -eq 'development:awaiting-checks') { return $null }
+        if (-not ((Test-Has $fs 'fix_forward_rounds') -or (Test-Has $fs 'demotions') -or (Test-Has $fs 'master_defect'))) { return $null }
+        $park = $fs.park; $code = "$($park.reason)"
+        $fs.Remove('park'); $fs.Remove('fix_forward_rounds'); $fs.Remove('demotions'); $fs.Remove('master_defect')
+        $info = Get-ItemInfo $n
+        [void](Add-Journal $n $f 'unparked' @{ column = "$($info.column)"; code = $code; by = 'expiry'; reason = "the park ended at $($park.until)"; reset = $true } "expired|$($park.at)")
+        Save-State $n $f
+        return $code
+    }
+}
+
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
@@ -147,6 +213,10 @@ function Verb_sync_board($a) {
             $isAi = Test-NameIn $col $c.columns.ai; $isHold = Test-NameIn $col $c.columns.hold
             if (-not $isAi -and -not $isHold) { $seen.Remove("$n"); continue }
             $st = Get-State $n; $s = $st.state
+            if ($it.open -and -not $dry -and (Test-Has $s 'park') -and -not (Get-Park $s) -and ((Test-Has $s 'fix_forward_rounds') -or (Test-Has $s 'demotions') -or (Test-Has $s 'master_defect'))) {
+                $xp = Reset-ExpiredPark $n
+                if ($xp) { $actions += @{ item = $n; action = 'park-expired'; code = $xp; reset = $true }; $unparked += $n; $st = Get-State $n; $s = $st.state }
+            }
             $pin = @($it.labels | Where-Object { $_ -like 'worker:*' } | Select-Object -First 1)
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
             if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) {
@@ -250,7 +320,7 @@ function Verb_sync_board($a) {
                         if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { throw }
                         @{ outcome = $(if ($_.Exception.Code -eq 'item-busy') { 'waiting' } else { 'skipped' }); reason = $_.Exception.Code }
                     }
-                    $actions += @{ item = $n; action = 'pass-merge'; outcome = "$($gm.outcome)"; reason = $(if (Test-Has $gm 'reason') { "$($gm.reason)" } else { '' }); roundTrip = $(if ((Test-Has $gm 'detail') -and (Test-Has $gm.detail 'round_trip')) { [int]$gm.detail.round_trip } else { 0 }) }
+                    $actions += @{ item = $n; action = 'pass-merge'; outcome = "$($gm.outcome)"; reason = $(if (Test-Has $gm 'reason') { "$($gm.reason)" } else { '' }); roundTrip = $(if ((Test-Has $gm 'detail') -and (Test-Has $gm.detail 'round_trip')) { [int]$gm.detail.round_trip } else { 0 }); masterDefectNew = ((Test-Has $gm 'masterDefectNew') -and $gm.masterDefectNew) }
                     $ownedLive = (Test-OwnedClaim $s) -and (Test-ClaimLive $s)
                     switch ("$($gm.outcome)") {
                         { $_ -in 'merged', 'already-merged' } { $settling += $n; $triggers += @{ item = $n; event = 'item.merged' } }
