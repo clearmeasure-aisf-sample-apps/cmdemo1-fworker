@@ -265,7 +265,7 @@ function Verb_sync_board($a) {
     $priorities = @{}
     # holds: the items labelled hold:owner (ownerHoldLabel); the plant manager's name actions leave the sessions that own one alone (Manager.cs)
     $holds = @(); $holdLabel = if (Test-Has $c 'ownerHoldLabel') { "$($c.ownerHoldLabel)" } else { 'hold:owner' }
-        # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled (their
+    # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled (their
     # owner was released at item.merged)
     $owned = @{}; $settling = @(); $unconfirmed = @()
     # pass_unmerged: every item with a PASS verdict that the gateway is to merge and has not merged yet, with why (a reason code) and since when
