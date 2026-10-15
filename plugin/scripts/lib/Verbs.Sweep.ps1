@@ -118,6 +118,44 @@ function Clear-ClosedPark([int]$n) {
     }
 }
 
+# Board guard: an open issue with the factory label that has no card on the board, or a card with no column, is invisible to the sweep (on
+# 2026-10-14 nine new items sat unseen until a person added them). Each sweep lists the open labelled issues (REST, paged, pull requests and the
+# rival label skipped) and, for each one the board snapshot shows without a column, reads the issue again (a person may have placed it meanwhile):
+# a card in a column is left alone, a card without a column is given the intake column, and an issue without a card is added there (the intake
+# column is the first column the factory works, Technical Design). One journal line each. At most $Max per sweep, so a first run over many issues
+# stays within the sweep's time; the rest follow at the next sweeps. A rate limit ends the pass. Returns the actions.
+function Invoke-BoardGuard($List, [int]$Max = 20) {
+    $c = Get-Cfg; $acts = [System.Collections.Generic.List[object]]::new(); $placed = @{}
+    foreach ($x in $List) { if ("$($x.column)") { $placed[[int]$x.number] = $true } }
+    $intake = "$(@($c.columns.ai)[0])"
+    $page = 1; $done = 0; $fails = 0
+    do {
+        $chunk = @(Invoke-Gh -Path "$(Get-RepoPath)/issues?state=open&labels=$([uri]::EscapeDataString("$($c.label)"))&per_page=100&page=$page")
+        foreach ($i in $chunk) {
+            $n = [int]$i.number
+            if ($null -ne $i.PSObject.Properties['pull_request'] -or $n -le 0 -or $placed.ContainsKey($n)) { continue }
+            if (@($i.labels | ForEach-Object { "$($_.name)" }) -contains "$($c.rivalLabel)") { continue }
+            if ($done -ge $Max -or $fails -ge 3) { return , $acts.ToArray() }   # attempts count, failed ones too; three failures in a row end the pass
+            $done++
+            try {
+                $info = Get-ItemInfo $n
+                if (-not $info.open -or "$($info.column)") { $placed[$n] = $true; $done--; continue }   # (a read that found it placed is no attempt)
+                $card = if ($info.cardId) { $info.cardId } else { Add-ToBoard "$($info.nodeId)" }
+                Move-Card @{ number = $n; cardId = $card } $intake
+                $placed[$n] = $true; $fails = 0
+                $acts.Add(@{ item = $n; action = 'board-added'; column = $intake; repaired = [bool]$info.cardId })
+                try { Use-ItemLock $n { [void](Add-Journal $n $null 'board-added' @{ column = $intake } "$n") } 3 }
+                catch { $acts.Add(@{ item = $n; action = 'board-added-unjournalled'; reason = "$($_.Exception.Message)" }) }
+            } catch [FactoryReject] {
+                if ($_.Exception.Code -eq 'github-rate-limited') { $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = 'rate limited: the pass ends' }); return , $acts.ToArray() }
+                $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = "$($_.Exception.Message)" }); $fails++
+            } catch { $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = "$($_.Exception.Message)" }); $fails++ }
+        }
+        $page++
+    } while ($chunk.Count -eq 100 -and $page -le 20)
+    return , $acts.ToArray()
+}
+
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
@@ -315,6 +353,12 @@ function Verb_sync_board($a) {
         try { $actions += @(Invoke-ClaimRefReap $list) }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "claim-ref-reap: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "claim-ref-reap: $($_.Exception.Message)" } }
+    }
+    # the board guard: open labelled issues without a card are put on the board in the intake column (they are offered from the next sweeps)
+    if (-not $dry) {
+        try { $actions += Invoke-BoardGuard $list }
+        catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "board-guard: $($_.Exception.Message)" } }
+        catch { $errors += @{ item = 0; code = 'error'; reason = "board-guard: $($_.Exception.Message)" } }
     }
     # PR QC environments: offers and teardowns only, never a start (design pr-qc-environment.md 3.5)
     $qcRecords = @(); $qcTeardowns = @(); $qcApprovals = @()

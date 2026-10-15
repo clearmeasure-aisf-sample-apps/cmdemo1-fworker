@@ -327,3 +327,14 @@ Local first, in this order: (1) worker registry, `subscribe --own`, `accept`, `m
 Open question closed: nobody provisions a cloud environment automatically. A person starts a Claude cloud session (or a Cursor cloud agent) and gives it the connect prompt; from then on it behaves exactly like a persistent local session (`subscribe --own`, same credentials, same skills). The registry only labels it `claude-cloud` / `cursor-cloud` (assignment preference: persistent-local, then cloud, then ephemeral-local). No cloud adapter is built.
 
 The worker dashboard (`GET /dashboard`, data from `GET /api/v1/dashboard`, operator token) shows the connected sessions of one running factory (the gateway's `FACTORY_ENVIRONMENT`: tdd, uat or prod), their state, load and assignments, drain/resume, and generates the connect prompt. Creating the prompt issues a one-time worker credential for the chosen name (`POST /api/v1/workers/{name}/credential`); the gateway does not store it. `revoke` on a session row refuses every credential issued so far for that name (section 5).
+
+## 15. Board guard (2026-10-15, issue 88)
+
+An open issue with the factory label (`label` in `config/instance.json`) that has no card on the project board, or a card with no column, is
+invisible to the sweep: on 2026-10-14 nine new items sat unseen until a person added them. Every sweep (`sync-board`, `Invoke-BoardGuard` in
+`Verbs.Sweep.ps1`) lists the open labelled issues through the REST API (paged; pull requests and issues with the rival label skipped). For each one
+the board snapshot shows without a column it reads the issue again, since a person may have placed it meanwhile: a card in a column is left
+alone, a card without a column gets the intake column (the first column of `columns.ai`, Technical Design), and an issue without a card is added
+there. Each placement is journalled once (`board-added`); from there the item is offered like any new item, after `timing.sweepSeenCount`
+sightings. At most 20 attempts per sweep (the rest follow at the next sweeps); a rate limit, or three failures in a row, end the pass. A failed listing is reported in the
+sweep's `errors` (item 0), a failed placement in its `actions` (`board-add-failed`); both are tried again at the next sweep.

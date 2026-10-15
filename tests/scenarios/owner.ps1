@@ -918,6 +918,28 @@ $OwnerScenarios['owner: one item per session: a spent session that owns nothing 
     }
 }
 
+# The board guard: an open issue with the factory label that has no card is put on the board in the intake column by the sweep, journalled once, and
+# then offered like any new item; an issue without the label, and a closed one, are left alone.
+$OwnerScenarios['owner: board guard: a labelled issue missing from the board is added in Technical Design and offered'] = {
+    try {
+        $n = (Fake 'issue' @{ title = 'Created without a card'; body = 'x'; labels = ($OwnerLabels + 'worker:guard1') }).number
+        $other = (Fake 'issue' @{ title = 'Not a factory item'; body = 'x'; labels = @('bug') }).number
+        $rival = (Fake 'issue' @{ title = 'Two owners'; body = 'x'; labels = ($OwnerLabels + 'AI Factory') }).number
+        $closed = (Fake 'issue' @{ title = 'Closed factory item'; body = 'x'; labels = $OwnerLabels }).number
+        [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$closed" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json')
+        $stranded = (Fake 'issue' @{ title = 'A card without a column'; body = 'x'; labels = $OwnerLabels; onBoard = $true }).number
+        Check 'the sweep puts the labelled issue on the board in Technical Design' (Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Technical Design' }) ((Get-FakeIssue $n) | ConvertTo-Json -Compress -Depth 3)
+        Check 'a card without a column gets the intake column' (Wait-Until -Seconds 20 { (Get-FakeIssue $stranded).column -eq 'Technical Design' })
+        Check 'a closed issue and one with the rival label are left alone' ($null -eq (Get-FakeIssue $closed).column -and $null -eq (Get-FakeIssue $rival).column)
+        Check 'it is journalled once' (Wait-Until -Seconds 10 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=board-added ' }).Count -eq 1 })
+        Check 'the unlabelled issue stays off the board' ($null -eq (Get-FakeIssue $other).column)
+        Start-OwnerClient 'guard1' 'persistent-local'
+        Check 'the added item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'guard1' $n).Count -gt 0 })
+        Start-Sleep -Seconds 5
+        Check 'still journalled only once' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=board-added ' }).Count -eq 1)
+    } finally { Stop-OwnerClient 'guard1' }
+}
+
 # Issue 80: the operator's drain belongs to the name; a new session of the name (the launcher's next one) is still draining until the operator resumes.
 $OwnerScenarios['owner: an operator drain holds across a new session of the name until the operator resumes it'] = {
     $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'drn1' })[0] }
