@@ -298,7 +298,8 @@ function Invoke-MsgAsk($a, $cfg) {
     $r = Invoke-GatewayJsonRetry $cfg 'POST' '/api/v1/messages' $body $cred
     if (-not $r.transport -or $r.status -ne 202 -or -not $r.body -or -not $r.body.id) { Write-GatewayResult $r }
     $qid = "$($r.body.id)"
-    if ($name) {
+    # a question the gateway recognised as one asked before and still open (issue 105: same item, same text, within an hour) is that question: stored once
+    if ($name -and -not ($r.body.duplicate -eq $true -and (Find-Question $name $qid))) {
         $rec = @{ id = $qid; ids = @(); text = $text; item = $item; context = $context; clientId = $clientId; epoch = "$($r.body.epoch)"; reasked = ''; askedAt = [DateTime]::UtcNow.ToString('o') }
         try { Add-Question $name $rec } catch { [Console]::Error.WriteLine("the question could not be stored for a re-ask: $($_.Exception.Message)") }
     }

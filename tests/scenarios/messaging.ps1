@@ -1796,7 +1796,7 @@ $ManagerScenarios = [ordered]@{
         Check 'three open questions are accepted (202, exit 21)' (@($q | Where-Object { $_.status -eq 202 -and $_.exit -eq 21 -and $_.state -eq 'open' }).Count -eq 3) (($q | ForEach-Object { $_.status }) -join ',')
         $fourth = & $ask $carol 64
         Check 'the fourth: too-many-open, exit 10' ($fourth.status -eq 409 -and $fourth.code -eq 'too-many-open' -and $fourth.exit -eq 10) ($fourth | ConvertTo-Json -Compress -Depth 6)
-        $same = & $ask $carol 61
+        $same = Msg-Post '/api/v1/messages' @{ type = 'question'; text = 'another question about 61'; item = 61 } $carol
         Check 'another question on an item with one open: item-has-open-question, exit 10' ($same.status -eq 409 -and $same.code -eq 'item-has-open-question' -and $same.exit -eq 10) ($same | ConvertTo-Json -Compress -Depth 6)
         [void](Msg-Post '/api/v1/_test/answer' @{ id = $q[0].id; text = 'ok' })
         $again = & $ask $carol 64
@@ -2917,12 +2917,13 @@ $ManagerScenarios['mgr: a spent delivery budget drops the patrol of a reported c
             $streams += Msg-Open 'name=gina&messaging=1' (Msg-Token 'gina') 'e-deadbeef.7'; Msg-Registered $streams[-1]
             $e = & $rs
             Check 'a session that comes back with a cursor of another epoch: gateway-restarted, with how many sessions are back and how many owners are not' ($e -and $e.reconnected -ge ($r0 + 1) -and $e.notReconnected -ge 1 -and $e.bucket -eq 2 -and (Mgr-Status).attention['gateway-restarted'] -eq 1) ($e | ConvertTo-Json -Compress -Depth 6)
-            [void](Msg-Post '/api/v1/presence' @{} (Msg-Token 'ivan'))
-            $e2 = & $rs
-            Check 'an owner that is heard again is no longer counted as missing' ($e -and $e2 -and $e2.notReconnected -eq ($e.notReconnected - 1)) ($e2 | ConvertTo-Json -Compress -Depth 6)
             $got = { @((Mgr-Attention $sup) | Where-Object { $_.kind -eq 'gateway-restarted' -and $_.new -eq $true }).Count -ge 1 }
             $end = (Get-Date).AddSeconds(15); while ((Get-Date) -lt $end -and -not (& $got)) { Mgr-Beat; Msg-Read $sup 0.5 }
             Check 'it reaches the supervisor in a patrol that fits the schema' ((& $got) -and @(Mgr-AllValid (Mgr-Patrols $sup)).Count -eq 0) ((Mgr-AllValid (Mgr-Patrols $sup)) -join '; ')
+            [void](Msg-Post '/api/v1/presence' @{} (Msg-Token 'ivan'))
+            $e2 = & $rs
+            # issue 105: a restart after which every owner came back is no condition: when ivan was the last one missing, the entry is gone
+            Check 'an owner that is heard again is no longer counted as missing; with none missing there is no gateway-restarted at all' ($e -and (($e.notReconnected -eq 1 -and $null -eq $e2) -or ($e2 -and $e2.notReconnected -eq ($e.notReconnected - 1)))) ($e2 | ConvertTo-Json -Compress -Depth 6)
         } finally { Msg-Close $sup; foreach ($s in $streams) { Msg-Close $s } }
     }
     Msg-OnGateway @{ FACTORY_CONFIG = $cfg; FACTORY_MESSAGING = '0'; FACTORY_MANAGER = '0' } {
@@ -4498,5 +4499,81 @@ $ManagerScenarios['mgr: the Release Queue is reported when it ages or grows, eac
             Check 'an empty queue clears the entry and the request' ($null -eq (Msg-First @($dg.attention | Where-Object { $_.kind -eq 'release-queue-aged' })) -and @((Msg-Admin '/api/v1/status').releaseQueue.requests).Count -eq 0) ($dg | ConvertTo-Json -Compress -Depth 6)
             Check 'every digest fits the schema' (@(Mgr-DigestProblems $dg).Count -eq 0) ((Mgr-DigestProblems $dg) -join '; ')
         } finally { Msg-Close $op }
+    }
+}
+
+# issue 105: the patrol digest's memory survives a graceful restart (the plant snapshot carries it, gateway/DigestCarry.cs), and a question repeated
+# about the same item within the hour is that question again (gateway/Messaging.cs)
+$ManagerScenarios['mgr: what the patrol reported survives a restart: with the plant snapshot restored, a condition that persists is not new again'] = {
+    $cfg = Mgr-PatrolConfig 'instance.patrol-carry.json'
+    $script:CarrySnap = $null
+    Msg-OnGateway (Msg-Merge $script:MgrPatrol @{ FACTORY_CONFIG = $cfg }) {
+        param($g)
+        Mgr-Alive 'alice'
+        [void](Mgr-Fact @{ fact = 'merge-refused'; item = 9861; roundTrip = 1 })
+        $sup = Mgr-Open
+        try {
+            $ok = { (Mgr-NewBuckets $sup 'merge-refused' 9861).Count -ge 1 }
+            $end = (Get-Date).AddSeconds(15); while ((Get-Date) -lt $end -and -not (& $ok)) { Mgr-Alive 'alice'; Msg-Read $sup 0.5 }
+            Check 'before the restart the refused merge is reported as new' (& $ok) (((Mgr-Attention $sup) | ForEach-Object { "$($_.kind):$($_['item']):$($_.new)" }) -join ',')
+            $script:CarrySnap = Msg-Admin '/api/v1/_test/plant-snapshot'
+            Check 'the plant snapshot carries what the digest reported, key and bucket' (@($script:CarrySnap.digest | Where-Object { $_.key -eq 'merge-refused|9861' -and $_.bucket -eq 1 }).Count -eq 1) ($script:CarrySnap.digest | ConvertTo-Json -Compress -Depth 4)
+        } finally { Msg-Close $sup }
+    }
+    # the next process: the snapshot restored as a start restores it; the refused merge still holds, and another one is new
+    $seen = {
+        param($restore)
+        Msg-OnGateway (Msg-Merge $script:MgrPatrol @{ FACTORY_CONFIG = $cfg }) {
+            param($g)
+            if ($restore) {
+                $bad = @{ v = 1; at = [DateTime]::UtcNow.ToString('o'); digest = @(@{ key = 'merge-refused|9861|x|y|z'; bucket = 1; at = [DateTime]::UtcNow.ToString('o') }, @{ key = 'no-such-kind|1'; bucket = 1; at = [DateTime]::UtcNow.ToString('o') }, @{ key = 'stalled|alice|9863'; bucket = 99; at = [DateTime]::UtcNow.ToString('o') }) }
+                $rb = Msg-Post '/api/v1/_test/plant-restore' $bad
+                Check 'a snapshot entry that is no known key or no bucket is not taken' ($rb.status -eq 200 -and $rb.digest -eq 0) ($rb | ConvertTo-Json -Compress)
+                $r = Msg-Post '/api/v1/_test/plant-restore' $script:CarrySnap
+                Check 'the restore takes the digest''s memory' ($r.status -eq 200 -and "$($r.skipped)" -eq '' -and $r.digest -ge 1) ($r | ConvertTo-Json -Compress)
+            }
+            Mgr-Alive 'alice'
+            [void](Mgr-Fact @{ fact = 'merge-refused'; item = 9861; roundTrip = 1 })
+            [void](Mgr-Fact @{ fact = 'merge-refused'; item = 9862; roundTrip = 1 })
+            $sup = Mgr-Open
+            try {
+                $ok = { (Mgr-NewBuckets $sup 'merge-refused' 9862).Count -ge 1 }
+                $end = (Get-Date).AddSeconds(15); while ((Get-Date) -lt $end -and -not (& $ok)) { Mgr-Alive 'alice'; Msg-Read $sup 0.5 }
+                $script:CarrySeen = @{ other = (& $ok); persisting = (Mgr-NewBuckets $sup 'merge-refused' 9861).Count }
+            } finally { Msg-Close $sup }
+        }
+    }
+    & $seen $true
+    Check 'after the restore the persisting condition is not new, the other one is' ($script:CarrySeen.other -and $script:CarrySeen.persisting -eq 0) ($script:CarrySeen | ConvertTo-Json -Compress)
+    & $seen $false
+    Check 'without the restore the same condition is new again (as before)' ($script:CarrySeen.other -and $script:CarrySeen.persisting -ge 1) ($script:CarrySeen | ConvertTo-Json -Compress)
+}
+
+$ManagerScenarios['mgr: the same question about the same item within the hour is relayed once; the repeat answers with the first question'] = {
+    Msg-OnGateway (Msg-Merge $script:MgrFast @{ FACTORY_CONFIG = (Mgr-PatrolConfig 'instance.dedupe-q.json') }) {
+        param($g)
+        Mgr-Alive 'alice', 'bob'
+        $sup = Mgr-Open
+        try {
+            $q1 = Mgr-Ask 'alice' 9871 'Should the new test cover the empty list?'
+            Check 'the first question is accepted (202, pending)' ($q1.status -eq 202 -and $q1.id) ($q1 | ConvertTo-Json -Compress)
+            $q2 = Mgr-Ask 'alice' 9871 '  should the NEW test cover   the empty list? '
+            Check 'the same text again (case and spaces aside) about the same item is that question: 202, its id, duplicate' ($q2.status -eq 202 -and $q2.id -eq $q1.id -and $q2.duplicate -eq $true -and $q2.duplicateOf -eq $q1.id -and $q2.state -eq 'open') ($q2 | ConvertTo-Json -Compress)
+            $q3 = Mgr-Ask 'alice' 9872 'Should the new test cover the empty list?'
+            $q4 = Mgr-Ask 'bob' 9871 'Should the new test cover the empty list?'
+            Check 'another item, or another session, is another question' ($q3.status -eq 202 -and $q4.status -eq 202 -and $q3.id -ne $q1.id -and $q4.id -ne $q1.id -and -not $q3.ContainsKey('duplicate') -and -not $q4.ContainsKey('duplicate')) "$($q3 | ConvertTo-Json -Compress) $($q4 | ConvertTo-Json -Compress)"
+            $ids = @(); $end = (Get-Date).AddSeconds(20)
+            while ((Get-Date) -lt $end -and $ids.Count -lt 3) { Mgr-Beat; Msg-Read $sup 0.5; $ids = @(Mgr-Ids (Mgr-Batches $sup)) }
+            Check 'the supervisor receives each question once: the repeat was not relayed' ($ids.Count -eq 3 -and @($ids | Where-Object { $_ -eq $q1.id }).Count -eq 1) ($ids -join ',')
+            Check 'the status counts the repeat' ((Msg-Admin '/api/v1/status').messaging.questionsDeduped -eq 1) ((Msg-Admin '/api/v1/status').messaging | ConvertTo-Json -Compress -Depth 3)
+            $c2 = Msg-F 'alice' @('ask', '--item', '9871', '--text', 'Should the new test cover the empty list?')
+            $c3 = Msg-F 'alice' @('ask', '--item', '9871', '--text', 'Should the new test cover the empty list?')
+            $qf = @((Get-Content -Raw (Join-Path (Msg-WorkerDir 'alice') 'questions-alice.json') | ConvertFrom-Json -AsHashtable).questions | Where-Object { $_.id -eq $q1.id })
+            Check 'the client: ask answers with the open question; asked twice, its record of open questions holds it once' ($c2.exit -eq 21 -and $c2.id -eq $q1.id -and $c2.duplicate -eq $true -and $c3.id -eq $q1.id -and $qf.Count -eq 1) "$($c2 | ConvertTo-Json -Compress) $($qf.Count)"
+            [void](Msg-Post '/api/v1/messages' @{ type = 'answer'; inReplyTo = $q1.id; text = 'Yes, cover it.' } (Msg-Supervisor))
+            Check 'the answer arrives' (Wait-Until -Seconds 10 { (Msg-F 'alice' @('message-status', '--id', $q1.id)).state -eq 'answered' })
+            $q5 = Mgr-Ask 'alice' 9871 'Should the new test cover the empty list?'
+            Check 'asked once more after the answer: a new question (only an open question is that question again)' ($q5.status -eq 202 -and $q5.id -ne $q1.id -and -not $q5.ContainsKey('duplicate')) ($q5 | ConvertTo-Json -Compress)
+        } finally { Msg-Close $sup }
     }
 }

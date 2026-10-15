@@ -1317,6 +1317,17 @@ if (messaging.Enabled && messaging.TestHooks)
     // the plant data the digest will be computed from (3.9, step 5a): owners as the sweep lists them, activity, waiting codes, refusals, parks
     app.MapGet("/api/v1/_test/plant-data", (HttpContext ctx) => Who(ctx).Kind != "admin" ? Results.StatusCode(403) : Results.Text(plant.PlantData().ToJsonString(), "application/json"));
 
+    // issue 105: the plant snapshot as a graceful stop writes it, and its restore as the next start runs it (the digest's memory is part of it)
+    app.MapGet("/api/v1/_test/plant-snapshot", (HttpContext ctx) => Who(ctx).Kind != "admin" ? Results.StatusCode(403) : Results.Text(plant.Snapshot().ToJsonString(), "application/json"));
+    app.MapPost("/api/v1/_test/plant-restore", async (HttpContext ctx) =>
+    {
+        if (Who(ctx).Kind != "admin") return Results.StatusCode(403);
+        string text; using (var rd = new StreamReader(ctx.Request.Body)) text = await rd.ReadToEndAsync();
+        JsonNode? snap; try { snap = JsonNode.Parse(text); } catch { return Fail(400, "bad-json", "the body is a plant snapshot", 2); }
+        var (na, no, skipped) = plant.Restore(snap, snapshotMaxAge);
+        return Results.Json(new { ok = true, assignments = na, owners = no, skipped, digest = plant.DigestReportedCount() });
+    });
+
     // how many entries each bounded store holds, with its cap (the stress test and the limit scenarios read it); counts only, never a text or a name
     app.MapGet("/api/v1/_test/stores", (HttpContext ctx) =>
     {

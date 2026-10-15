@@ -1926,7 +1926,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         static string Norm(string t) => Regex.Replace(t.Trim().ToLowerInvariant(), @"\s+", " ");
         var text = Norm(q.QText); if (text == "") return;
         // about the same item (or about none): a long-lived inspector or QC session may ask one stock question for several items
-        var n = store.Records.Values.Count(r => r.Type == "question" && r.From == name && r.At >= w.SessionStarted && r.Item == q.Item && Norm(r.QText) == text);
+        // (a repeat the Messenger did not relay again, issue 105, counts on the question it repeated)
+        var n = store.Records.Values.Where(r => r.Type == "question" && r.From == name && r.At >= w.SessionStarted && r.Item == q.Item && Norm(r.QText) == text).Sum(r => 1 + r.Repeats);
         if (n > RepeatQuestionLimit) { w.RestartReason = "repeated-question"; w.RestartDetail = $"this session asked the same question {n} times"; }
     }
 
