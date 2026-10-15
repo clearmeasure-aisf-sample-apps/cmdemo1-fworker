@@ -38,6 +38,41 @@ function Set-CkQodana($T) {
 
 $CheckScenarios = [ordered]@{
 
+'push gate: after red checks on 2 heads, open-pr and update-pr wait for a private-build attestation' = {
+    $t = New-CkRedPr
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the first head is red' $r 10 'checks-red'
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the same head asked again' $r 10 'checks-red'
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b1'); CheckExit 'one red head (asked twice) does not gate' $r 0
+    $sha2 = (Fake 'push-branch' @{ branch = "factory-worker/$($t.n)-development"; files = @('src/App.cs'); profile = 'red' }).sha
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the second head is red' $r 10 'checks-red'
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b2'); CheckExit 'update-pr is refused' $r 10 'private-build-required'
+    Check 'the refusal names the count and the head' ($r.checks_red -eq 2 -and $r.head_sha -eq $sha2) ($r | ConvertTo-Json -Compress)
+    $r = F 'w1' @('open-pr', '--item', $t.n, '--head', "factory-worker/$($t.n)-development", '--title', 'again'); CheckExit 'open-pr is refused' $r 10 'private-build-required'
+    $r = F 'w1' @('private-build', '--item', $t.n, '--attest', 'abc'); CheckExit 'an attestation takes a full sha' $r 2 'usage'
+    $r = F 'w1' @('private-build', '--item', $t.n, '--attest', ('0' * 40)); CheckExit 'an attestation of another commit is recorded' $r 0
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b3'); CheckExit 'but does not open the gate for this head' $r 10 'private-build-required'
+    $r = F 'w1' @('private-build', '--item', $t.n, '--attest', $sha2); CheckExit 'the attestation of the head' $r 0
+    Check 'answers the count' ($r.attested -eq $true -and $r.checks_red -eq 2 -and $r.gate -eq 2) ($r | ConvertTo-Json -Compress)
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b4'); CheckExit 'opens the gate for that head' $r 0
+    $r = F 'w1' @('open-pr', '--item', $t.n, '--head', "factory-worker/$($t.n)-development", '--title', 'again'); CheckExit 'open-pr as well' $r 0
+    Fake 'push-branch' @{ branch = "factory-worker/$($t.n)-development"; files = @('src/App.cs'); profile = 'green' } | Out-Null
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b5'); CheckExit 'a new head needs its own attestation' $r 10 'private-build-required'
+}
+
+'push gate: one failed check that the base branch fails too is rerun once by the gateway, and not counted' = {
+    $t = New-CkRedPr
+    Fake 'base-history' @{ name = 'Build result'; conclusions = @('failure', 'failure', 'success') } | Out-Null
+    $before = [int](Get-FakeState).rerunJobs
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the red is answered as a rerun' $r 21 'rerun-started'
+    Check 'the job was rerun once' ([int](Get-FakeState).rerunJobs -eq $before + 1) "$((Get-FakeState).rerunJobs)"
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the rerun passed' $r 0
+    $sha2 = (Fake 'push-branch' @{ branch = "factory-worker/$($t.n)-development"; files = @('src/App.cs'); profile = 'red' }).sha
+    Fake 'checks' @{ sha = $sha2; name = 'Other platform'; conclusion = 'failure' } | Out-Null
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'two failed checks are not rerun' $r 10 'checks-red'
+    Check 'no further rerun' ([int](Get-FakeState).rerunJobs -eq $before + 1) "$((Get-FakeState).rerunJobs)"
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b'); CheckExit 'the rerun head was not counted: one red head, no gate' $r 0
+}
+
 'pr-checks: a failed Actions job returns its failed step, the end of its log and the error lines, cleaned and redacted' = {
     $t = New-CkRedPr; Set-CkBuildFailure $t
     $r = F 'w1' @('pr-checks', '--item', $t.n); CheckExit 'pr-checks answers' $r 0

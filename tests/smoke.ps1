@@ -76,4 +76,14 @@ try {
     $fut = Join-Path $pgDir 'progress/310.txt'; Set-Content -LiteralPath $fut -Value 'x'; (Get-Item -LiteralPath $fut).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(3)
     Check 'progress: a file dated in the future is not work' ($null -eq (Get-ItemProgress $pgFut 310 $false ([Diagnostics.Stopwatch]::StartNew())))
 } finally { Remove-Item -Recurse -Force -LiteralPath $pgDir -ErrorAction SilentlyContinue }
+"config"
+# docs/design/cloud-worker-runtimes.md section 5: every runtime is off in the source defaults; one is switched on and sized only in
+# config/deploy.overrides.json (a code-owner path). A default that starts executions would spend money from any build of this repository.
+$rtCfg = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).runtimes
+Check 'runtimes: the source defaults exist' ($rtCfg -is [System.Collections.IDictionary] -and $rtCfg.caeJob -is [System.Collections.IDictionary])
+Check 'runtimes: no routing rule in the source defaults' (@($rtCfg.routing).Count -eq 0)
+foreach ($rk in @($rtCfg.Keys | Where-Object { $rtCfg[$_] -is [System.Collections.IDictionary] })) {
+    $rv = $rtCfg[$rk]
+    Check "runtimes.${rk}: off in the source defaults (enabled false, maxConcurrent 0, maxExecutionsPerDay 0, no job named)" ($rv.enabled -eq $false -and $rv.maxConcurrent -eq 0 -and $rv.maxExecutionsPerDay -eq 0 -and "$($rv.jobResourceId)" -eq '')
+}
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }
