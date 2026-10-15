@@ -115,7 +115,9 @@ if (qcSettings.TrustProxy)
         o.ForwardLimit = null; o.KnownProxies.Clear(); o.KnownIPNetworks.Clear();
         foreach (var p in qcSettings.KnownProxies) o.KnownProxies.Add(System.Net.IPAddress.Parse(p));
     });
-builder.Services.AddSingleton(new Runner(entry));
+// the shared GitHub budget (GitHubBudget.cs, issue 92): fed by every rule-script answer, read by the verb route and the sweeper
+var githubBudget = GitHubBudget.Load(scriptsDir);
+builder.Services.AddSingleton(new Runner(entry) { Budget = githubBudget });
 // The plant snapshot (PlantSnapshot.cs, enhancement 5): written at SIGTERM, read back before the first sweep. Owner mode only, and not for the suites'
 // second gateways (FACTORY_TEST_SKIP_REVOCATIONS: their GitHub is a port nothing listens on). FACTORY_PLANT_SNAPSHOT=0 switches it off.
 var snapshotOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_PLANT_SNAPSHOT") != "0";
@@ -140,7 +142,9 @@ builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), s
 // master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs)
 builder.Services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), BaseUpdateSettings.Load(scriptsDir), ownerMode));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
-builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task));
+// a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
+var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : TimingValue(scriptsDir, "sweepMinSeconds", 60));
+builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget });
 builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()));
 // A background loop that throws must not end the process (the default of .NET stops the host): the loops catch and go on, and this is the net under them.
 builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
@@ -175,7 +179,7 @@ if (ownerMode)
         // an answer of "not held by that owner" is no failure: the claim is gone or another owner holds it, so the plant lets go too
         return rc == 0;
     };
-    plant.RequestSweepAfterTakeBack = hub.RequestSweep;
+    plant.RequestSweepAfterTakeBack = item => hub.RequestSweep(item);
 }
 // The restore runs before the first sweep (the Sweeper waits for it, at most 60 s): a sweep that planned first would offer the items of the snapshot
 // anew. One read, bounded; a failure leaves the plant empty, as every restart did before, and the sweep rebuilds from the board.
@@ -359,6 +363,9 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode && messaging.ManagerEnabled) o["managerActions"] = plant.ManagerActionsStatus(false);
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
+    // the GitHub budget and the sweep's passes (issue 92)
+    o["github"] = githubBudget.Status();
+    o["sweep"] = hub.SweepStatus(sweepMinSeconds);
     if (ownerMode) o["revocations"] = revSkipReason != "" ? new JsonObject { ["state"] = "skipped", ["reason"] = revSkipReason }
         : revocationsOff ? new JsonObject { ["state"] = "off", ["reason"] = "test-switch" }
         : new JsonObject { ["state"] = revocationsLoaded.Task.IsCompleted ? "loaded" : "loading", ["failedAttempts"] = Volatile.Read(ref revAttempts) };
@@ -589,7 +596,13 @@ app.MapPost("/webhooks/github", async (HttpContext ctx) =>
                 if (eo["event"]?.ToString() == "pr.reviewed") { var evo = (JsonObject)JsonNode.Parse(eo.ToJsonString())!; _ = Task.Run(async () => { try { await qc.OnReview(evo); } catch (Exception ex) { Console.Error.WriteLine($"qc review: {ex.Message}"); } }); }
             }
         }
-        if (events.Count > 0) hub.RequestSweep();
+        // each event's item gets an incremental pass; an event of no item (master moved, a build of master) asks for a full sweep (issue 92)
+        // a pull request event also asks for a full sweep (still at most every sweepMinSeconds): the QC offers and teardowns are made only there
+        foreach (var e in events) if (e is JsonObject eo2)
+        {
+            if (eo2["item"] is JsonValue iv2 && iv2.TryGetValue<int>(out var ii2) && ii2 > 0) hub.RequestSweep(ii2); else hub.RequestSweep();
+            if (ownerMode && eo2["event"]?.ToString() is "pr.opened" or "pr.head_changed" or "pr.closed" or "pr.merged") hub.RequestSweep();
+        }
     }
     return Results.Accepted();
 });
@@ -718,6 +731,15 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"item\":\"{authorized["item"]}\",\"holder\":\"{authorized["holder"]}\",\"caller\":\"{who.Kind}:{who.Role}\",\"status\":{qs}}}");
         return Results.Text(qj, "application/json", Encoding.UTF8, qs);
     }
+    // below the reserve of the GitHub budget only the essential verbs run (GitHubBudget.cs, issue 92): the rest wait for the reset
+    if (!GitHubBudget.EssentialVerbs.Contains(verb) && githubBudget.Low() is { Low: true } gl)
+    {
+        githubBudget.CountVerbRefusal();
+        // the owner is at work and is told to wait: that is no quiet item (gateway/Lease.cs)
+        if (ownerMode && who.Kind == "item" && who.Role == "owner") { try { plant.NoteItemCall(who.Name, who.Item, ""); } catch { } }
+        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":\"github-budget\",\"resource\":\"{gl.Resource}\"}}");
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "github-budget", reason = $"the gateway's GitHub budget ({gl.Resource}) is below its reserve; only accept, claim-item, release and my-items run until the reset", retryAfterSeconds = Math.Max(1, (int)(gl.ResetAt - DateTime.UtcNow).TotalSeconds), resetAt = gl.ResetAt.ToString("o"), exit = 20 }), "application/json", Encoding.UTF8, 503);
+    }
     var timeout = TimeSpan.FromSeconds(verb is "wait-for-checks" ? 140 : 580);
     // the journal of an item reads in event order: the lines the plant decided before this acceptance (matched, offered) are written before the
     // rule script writes "assigned". The wait is bounded by the plant, which adds it to the offer's window of this worker.
@@ -781,7 +803,7 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     // any call of the owner for its item is its activity and renews the lease when due (gateway/Lease.cs); after OnVerb, which records an accept
     if (ownerMode && who.Kind == "item" && who.Role == "owner") { try { JsonObject? vr = null; try { vr = JsonNode.Parse(output) as JsonObject; } catch { } plant.NoteItemCall(who.Name, who.Item, verb, authorized, vr, code == 0); } catch (Exception e) { Console.Error.WriteLine($"lease hook {verb}: {e.Message}"); } }
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
-    if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep();
+    if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep(int.TryParse(item, out var swItem) ? swItem : 0);
     return Results.Text(output, "application/json", Encoding.UTF8, status);
 });
 
@@ -833,7 +855,7 @@ app.MapPost("/api/v1/items/{n:int}/unpark", async (int n, HttpContext ctx) =>
         try { if (ownerMode && JsonNode.Parse(output)?["reoffer"] is JsonValue ro && ro.TryGetValue<bool>(out var reoffer) && reoffer) plant.OnVerb("release", new JsonObject { ["item"] = n }, Who(ctx), new JsonObject()); }
         catch (Exception e) { Console.Error.WriteLine($"plant hook unpark-item: {e.Message}"); }
         if (ownerMode) plant.ClearParks(new[] { n });   // issue 82: the digest no longer reports a park that was released
-        hub.RequestSweep();
+        hub.RequestSweep(n);
     }
     var status = code switch { 0 => 200, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, _ => 500 };
     return Results.Text(output, "application/json", Encoding.UTF8, status);
@@ -1636,7 +1658,21 @@ sealed class Runner(string entry)
 {
     // runner.pool > 0: long-lived pwsh workers take the calls (RunnerPool.cs); null (the default): one process per call, as below.
     readonly RunnerPool? pool = RunnerPool.Create(entry);
+    // the shared GitHub budget (GitHubBudget.cs, issue 92): every answer's _github field is recorded there and taken out of the answer
+    public GitHubBudget? Budget { get; set; }
     public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
+    {
+        // a call of the gateway itself that can wait (a journal line, the back-merge check, the metrics) is not started while the budget is low
+        if (Budget is { } b && GitHubBudget.DeferredCalls.Contains(verb) && b.Low() is { Low: true } low)
+        {
+            b.CountCallRefusal();
+            return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "github-budget", reason = $"the gateway's GitHub budget ({low.Resource}) is below its reserve; this call waits for the reset", retryAfterSeconds = Math.Max(1, (int)(low.ResetAt - DateTime.UtcNow).TotalSeconds), resetAt = low.ResetAt.ToString("o"), exit = 20 }));
+        }
+        var (code, output) = await RunProcessAsync(verb, stdin, timeout);
+        return (code, Budget?.Take(output) ?? output);
+    }
+
+    async Task<(int Code, string Output)> RunProcessAsync(string verb, string stdin, TimeSpan timeout)
     {
         if (pool is not null && await pool.TryRunAsync(verb, stdin, timeout) is { } pooled) return pooled;
         var psi = new ProcessStartInfo("pwsh") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -1696,8 +1732,34 @@ sealed class EventHub
         }
         foreach (var o in fresh) Publish(o);
     }
-    public void RequestSweep() { try { sweepSignal.Release(); } catch (SemaphoreFullException) { } }
+    // Sweep requests (issue 92): a trigger of one item queues that item for an incremental pass; a trigger of no item asks for a full sweep. The
+    // sweeper takes them; a request that finds its item (or a full sweep) already asked for is coalesced into it.
+    readonly HashSet<int> sweepItems = new();
+    bool sweepFull;
+    long sweepRequests, sweepCoalesced, fullSweeps, incrementalPasses, itemsPassed, lowSweeps;
+    DateTime? lastIncremental;
+    public void RequestSweep() => RequestSweep(0);
+    public void RequestSweep(int item)
+    {
+        lock (gate) { sweepRequests++; if (item > 0 ? !sweepItems.Add(item) : sweepFull) sweepCoalesced++; if (item <= 0) sweepFull = true; }
+        try { sweepSignal.Release(); } catch (SemaphoreFullException) { }
+    }
+    public (bool Full, int Items) PendingSweep() { lock (gate) return (sweepFull, sweepItems.Count); }
+    public List<int> TakeSweepItems() { lock (gate) { var l = sweepItems.OrderBy(i => i).ToList(); sweepItems.Clear(); return l; } }
+    // a full sweep covers every queued item and the full request
+    public void FullSweepTaken() { lock (gate) { sweepItems.Clear(); sweepFull = false; } }
+    public void NoteSweep(bool full, int items, bool low) { lock (gate) { if (full) fullSweeps++; else { incrementalPasses++; itemsPassed += items; lastIncremental = DateTime.UtcNow; } if (low) lowSweeps++; } }
     public Task WaitForSweepSignal(TimeSpan max, CancellationToken ct) => sweepSignal.WaitAsync(max, ct);
+    public JsonObject SweepStatus(int minSeconds)
+    {
+        lock (gate)
+            return new JsonObject
+            {
+                ["minSeconds"] = minSeconds, ["full"] = fullSweeps, ["incremental"] = incrementalPasses, ["itemsInIncremental"] = itemsPassed, ["lowBudgetSweeps"] = lowSweeps,
+                ["requests"] = sweepRequests, ["coalesced"] = sweepCoalesced, ["queued"] = sweepItems.Count, ["fullRequested"] = sweepFull,
+                ["lastFull"] = LastSweep?.ToString("o"), ["lastIncremental"] = lastIncremental?.ToString("o")
+            };
+    }
 }
 
 sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runner) : BackgroundService
@@ -1761,79 +1823,150 @@ sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runn
 
 sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int seconds, bool ownerMode, BaseWatch? baseWatch = null, Task? restored = null) : BackgroundService
 {
+    // issue 92: a full sweep (sync-board over the whole board, about 50 REST calls) runs every `seconds` (180), and at most every MinSeconds (60) when
+    // a trigger asks for one. A trigger of one item (a webhook, a verb, a take-back, an unpark) queues the item: between full sweeps the queued items
+    // get an incremental pass (sync-board with items: the same rules for those items only, no claim-ref reaping, no QC sync). Before, every trigger
+    // started a full sweep 2 s later, so a busy plant swept about once a minute.
+    public int MinSeconds { get; init; }
+    public GitHubBudget? Budget { get; init; }
+
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         try { await Task.Delay(TimeSpan.FromSeconds(3), ct); } catch (OperationCanceledException) { return; }
         // the plant snapshot is restored before the first plan (PlantSnapshot.cs); a read that hangs holds the sweep back 60 s at most
         if (restored != null) try { await Task.WhenAny(restored, Task.Delay(TimeSpan.FromSeconds(60), ct)); } catch (OperationCanceledException) { return; }
         // An item new in a working column is offered by the second sweep that sees it there (timing.sweepSeenCount, so a card dragged across the
-        // board starts nothing). That second look must not cost a whole interval: after a sweep that saw such an item the next one runs after
-        // FACTORY_SWEEP_CONFIRM_SECONDS (20). Before, a new item waited up to two intervals (6 minutes at 180 s) for its first offer.
+        // board starts nothing). That second look must not cost a whole interval: after a sweep that saw such an item it gets a pass of its own
+        // after FACTORY_SWEEP_CONFIRM_SECONDS (20). Before, a new item waited up to two intervals (6 minutes at 180 s) for its first offer.
         var confirmSeconds = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_CONFIRM_SECONDS"), out var cs0) && cs0 > 0 ? cs0 : 20;
+        var lastFull = DateTime.MinValue; DateTime? confirmAt = null; var confirmItems = new HashSet<int>();
         while (!ct.IsCancellationRequested)
         {
-            var soon = false;
             try
             {
-                var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
-                // free_workers: the auto-unpark of a park caused by session trouble needs a session that could take the item (Verbs.Sweep.ps1)
-                var (code, output) = await runner.RunAsync("sync-board", ownerMode ? new JsonObject { ["free_workers"] = plant.FreeOwnerSessions() }.ToJsonString() : "{}", TimeSpan.FromSeconds(280));
-                hub.LastSweep = DateTime.UtcNow;
-                if (code == 0)
+                var now = DateTime.UtcNow; var sinceFull = (now - lastFull).TotalSeconds;
+                var (fullAsked, queued) = hub.PendingSweep();
+                var confirmDue = confirmAt is { } ca && ca <= now;
+                // a full sweep: its interval is up, or one was asked for and the last is MinSeconds old; without owner mode there is no incremental
+                // pass (the broadcast offers are the whole list), so a queued item or a second look asks for a full one
+                var full = sinceFull >= seconds || ((fullAsked || (!ownerMode && (queued > 0 || confirmDue))) && sinceFull >= MinSeconds);
+                if (full)
                 {
-                    var j = JsonNode.Parse(output)!;
-                    soon = j["unconfirmed"] is JsonArray { Count: > 0 };
-                    var acts = j["actions"]!.AsArray();
-                    if (ownerMode)
-                    {
-                        // step 5a (worker-messaging.md 3.9): the sweep's `owned` replaces the plant's owner list, except for items the sweep could not read
-                        // this time. A settling item keeps no owner: its owner was released at item.merged (Plant.Merged).
-                        var keep = new List<int>();
-                        foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
-                        plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted);
-                        if (j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);
-                        plant.SetOwnerHeld((j["holds"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var hi) ? hi : 0));
-                        plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray);
-                        if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
-                        // a merge the gateway made after a PASS and the round-trip of one it could not make (Verbs.Merge.ps1 -Gateway)
-                        foreach (var a in acts)
-                            if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
-                                plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
-                        plant.SetReleaseQueue(j["release_queue"] as JsonArray);
-                        plant.SetHeld(j["held"] as JsonArray);   // issue 65: items that wait for their dependencies
-                        try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
-                        foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
-                            if (t is JsonObject to && to["item"] is JsonNode ti)
-                            {
-                                to["provider"] = "gateway"; plant.Route(ti.GetValue<int>(), (JsonObject)JsonNode.Parse(to.ToJsonString())!);
-                                if (to["event"]?.ToString() == "item.complete") plant.Complete(ti.GetValue<int>());
-                                if (to["event"]?.ToString() == "item.merged") plant.Merged(ti.GetValue<int>());
-                                // issue 65: an item that waits for its dependencies is offered by the next sweep once one of them merged or ended, not an interval later
-                                if (to["event"]?.ToString() is "item.merged" or "item.complete" && j["held"] is JsonArray { Count: > 0 }) soon = true;
-                            }
-                        // the fallback of the back-merge trigger: master's head compared with the last one seen (not awaited: the sweep goes on)
-                        if (baseWatch != null) _ = Task.Run(baseWatch.AfterSweep);
-                        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":{{\"offers\":{j["offers"]!.AsArray().Count},\"actions\":{acts.Count},\"errors\":{j["errors"]!.AsArray().Count}}}}}");
-                    }
-                    else
-                    {
-                        var offers = new List<string>();
-                        foreach (var o in j["offers"]!.AsArray())
-                            offers.Add(new JsonObject { ["provider"] = "gateway", ["event"] = "work.offered", ["item"] = o!["item"]!.DeepClone(), ["column"] = o["column"]!.DeepClone(), ["reason"] = o["reason"]!.DeepClone() }.ToJsonString());
-                        hub.SetOffers(offers);
-                        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":{{\"offers\":{offers.Count},\"actions\":{acts.Count},\"errors\":{j["errors"]!.AsArray().Count}}}}}");
-                    }
-                    foreach (var a in acts) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweepAction\":{a!.ToJsonString()}}}");
-                    foreach (var er in j["errors"]!.AsArray()) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweepError\":{er!.ToJsonString()}}}");
+                    hub.FullSweepTaken(); confirmItems.Clear(); confirmAt = null; lastFull = now;
+                    var unconfirmed = await SweepOnce(null);
+                    if (unconfirmed.Count > 0) { confirmItems.UnionWith(unconfirmed); confirmAt = DateTime.UtcNow.AddSeconds(Math.Min(seconds, confirmSeconds)); }
                 }
-                else plant.OperatorPlantEvent("sweep-failed", 0, detail: "exit-" + code);
-                if (code != 0) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"failed\",\"exit\":{code},\"out\":{JsonSerializer.Serialize(output.Length > 300 ? output[..300] : output)}}}");
+                else if (ownerMode && (queued > 0 || confirmDue))
+                {
+                    var items = hub.TakeSweepItems();
+                    if (confirmDue) { items.AddRange(confirmItems); confirmItems.Clear(); confirmAt = null; }
+                    items = items.Distinct().OrderBy(i => i).ToList();
+                    // at most 50 in one pass; the rest stay queued for the next one
+                    if (items.Count > 50) { foreach (var i in items.Skip(50)) hub.RequestSweep(i); items = items.Take(50).ToList(); }
+                    var unconfirmed = await SweepOnce(items);
+                    if (unconfirmed.Count > 0) { confirmItems.UnionWith(unconfirmed); confirmAt ??= DateTime.UtcNow.AddSeconds(Math.Min(seconds, confirmSeconds)); }
+                }
             }
             // only the host's own stop ends the loop: a cancellation from anywhere else (a timeout inside a call) is an error of this sweep, not the end of sweeping
             catch (Exception e) when (!ct.IsCancellationRequested) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"error\",\"type\":{JsonSerializer.Serialize(e.GetType().Name)},\"message\":{JsonSerializer.Serialize(e.Message)}}}"); }
             catch (Exception) { return; }
-            try { await hub.WaitForSweepSignal(TimeSpan.FromSeconds(soon ? Math.Min(seconds, confirmSeconds) : seconds), ct); await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } catch (Exception e) { Console.Error.WriteLine($"sweep wait: {e.Message}"); try { await Task.Delay(2000, ct); } catch (OperationCanceledException) { } }
+            try
+            {
+                // until the next thing due: the interval, an asked-for full sweep once MinSeconds have passed, the second look; a queued item at once
+                var next = lastFull.AddSeconds(seconds);
+                var (fa, q) = hub.PendingSweep();
+                if (fa || (!ownerMode && q > 0)) { var m = lastFull.AddSeconds(MinSeconds); if (m < next) next = m; }
+                // (without owner mode the second look is a full sweep, so it waits for MinSeconds as well)
+                if (confirmAt is { } c2) { var c3 = !ownerMode && c2 < lastFull.AddSeconds(MinSeconds) ? lastFull.AddSeconds(MinSeconds) : c2; if (c3 < next) next = c3; }
+                var wait = next - DateTime.UtcNow;
+                if (ownerMode && q > 0) wait = TimeSpan.Zero;
+                if (wait > TimeSpan.Zero) await hub.WaitForSweepSignal(wait, ct);
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception e) { Console.Error.WriteLine($"sweep wait: {e.Message}"); try { await Task.Delay(2000, ct); } catch (OperationCanceledException) { } }
         }
+    }
+
+    // One pass of sync-board: the whole board (items null) or the given items. Returns the items it saw for the first time in their column (unconfirmed).
+    readonly HashSet<int> ownerHolds = new(); bool holdsComplete;
+    async Task<List<int>> SweepOnce(List<int>? items)
+    {
+        var unconfirmedOut = new List<int>();
+        var low = Budget?.Low().Low == true;
+        var args = new JsonObject();
+        if (items != null) args["items"] = new JsonArray(items.Select(i => (JsonNode)i).ToArray());
+        if (low) args["low"] = true;   // the budget is below its reserve: no claim-ref reaping, no QC sync (GitHubBudget.cs)
+        // free_workers: the auto-unpark of a park caused by session trouble needs a session that could take the item (Verbs.Sweep.ps1)
+        if (ownerMode) args["free_workers"] = plant.FreeOwnerSessions();
+        var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
+        var (code, output) = await runner.RunAsync("sync-board", args.ToJsonString(), TimeSpan.FromSeconds(280));
+        if (items == null) hub.LastSweep = DateTime.UtcNow;
+        hub.NoteSweep(items == null, items?.Count ?? 0, low); if (low) Budget?.CountLowSweep();
+        var kind = items == null ? "full" : "incremental";
+        if (code == 0)
+        {
+            var j = JsonNode.Parse(output)!;
+            foreach (var x in j["unconfirmed"] as JsonArray ?? new JsonArray()) if (x is JsonValue uv && uv.TryGetValue<int>(out var ui) && ui > 0) unconfirmedOut.Add(ui);
+            var acts = j["actions"]!.AsArray();
+            if (ownerMode)
+            {
+                // step 5a (worker-messaging.md 3.9): the sweep's `owned` replaces the plant's owner list, except for items the sweep could not read
+                // this time and, in an incremental pass, every item it did not look at. A settling item keeps no owner: its owner was released at
+                // item.merged (Plant.Merged).
+                var keep = new List<int>();
+                foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
+                plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, items);
+                if (items == null && j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);   // a full sweep only: an incremental one reads a few items
+                // the hold:owner items of the whole board: a full sweep replaces them, an incremental pass updates its own items; the plant hears
+                // them once a full sweep has read the whole board (until then its name actions wait, sweep-pending)
+                var holds = (j["holds"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var hi) ? hi : 0).Where(i => i > 0);
+                if (items == null) { ownerHolds.Clear(); holdsComplete = true; } else foreach (var i in items) ownerHolds.Remove(i);
+                ownerHolds.UnionWith(holds);
+                if (holdsComplete) plant.SetOwnerHeld(ownerHolds.ToList());
+                plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray, items);
+                plant.SetHeld(j["held"] as JsonArray, items);   // issue 65: items that wait for their dependencies
+                if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
+                // a merge the gateway made after a PASS and the round-trip of one it could not make (Verbs.Merge.ps1 -Gateway)
+                foreach (var a in acts)
+                    if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
+                        plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
+                if (items == null)
+                {
+                    plant.SetReleaseQueue(j["release_queue"] as JsonArray);
+                    try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
+                }
+                foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
+                    if (t is JsonObject to && to["item"] is JsonNode ti)
+                    {
+                        to["provider"] = "gateway"; plant.Route(ti.GetValue<int>(), (JsonObject)JsonNode.Parse(to.ToJsonString())!);
+                        if (to["event"]?.ToString() == "item.complete") plant.Complete(ti.GetValue<int>());
+                        if (to["event"]?.ToString() == "item.merged") plant.Merged(ti.GetValue<int>());
+                        // issue 65: an item that waits for its dependencies is offered by the next pass once one of them merged or ended, not an interval later
+                        if (to["event"]?.ToString() is "item.merged" or "item.complete")
+                            foreach (var h in j["held"] as JsonArray ?? new JsonArray()) if (h?["item"] is JsonValue hv && hv.TryGetValue<int>(out var hItem)) hub.RequestSweep(hItem);
+                    }
+                // the fallback of the back-merge trigger: master's head compared with the last one seen (not awaited: the sweep goes on); not on a
+                // low budget, and only after a full sweep
+                if (baseWatch != null && items == null && !low) _ = Task.Run(baseWatch.AfterSweep);
+                Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":{{\"offers\":{j["offers"]!.AsArray().Count},\"actions\":{acts.Count},\"errors\":{j["errors"]!.AsArray().Count},\"kind\":\"{kind}\",\"items\":{items?.Count ?? -1},\"lowBudget\":{(low ? "true" : "false")}}}}}");
+            }
+            else
+            {
+                var offers = new List<string>();
+                foreach (var o in j["offers"]!.AsArray())
+                    offers.Add(new JsonObject { ["provider"] = "gateway", ["event"] = "work.offered", ["item"] = o!["item"]!.DeepClone(), ["column"] = o["column"]!.DeepClone(), ["reason"] = o["reason"]!.DeepClone() }.ToJsonString());
+                hub.SetOffers(offers);
+                Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":{{\"offers\":{offers.Count},\"actions\":{acts.Count},\"errors\":{j["errors"]!.AsArray().Count}}}}}");
+            }
+            foreach (var a in acts) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweepAction\":{a!.ToJsonString()}}}");
+            foreach (var er in j["errors"]!.AsArray()) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweepError\":{er!.ToJsonString()}}}");
+        }
+        else plant.OperatorPlantEvent("sweep-failed", 0, detail: "exit-" + code);
+        // the items of a failed incremental pass are asked for again (the next pass or full sweep takes them)
+        if (code != 0 && items != null) foreach (var i in items) hub.RequestSweep(i);
+        if (code != 0) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"failed\",\"kind\":\"{kind}\",\"exit\":{code},\"out\":{JsonSerializer.Serialize(output.Length > 300 ? output[..300] : output)}}}");
+        return unconfirmedOut;
     }
 }
 

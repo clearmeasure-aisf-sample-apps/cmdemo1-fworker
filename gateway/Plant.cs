@@ -1239,7 +1239,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // owner the sweep no longer lists (an idle release, a card moved away by a person) is dropped once the grace from its accept has passed. Not
     // dropped: an item the sweep could not read this time (`keep`), and an owner set through the test seam. An item whose merge is settling has no
     // owner any more: it was released at item.merged (Merged).
-    void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now)
+    // scope (issue 92): an incremental pass read only these items; the owners of every other item are not touched (nor their counts of misses)
+    void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now, IReadOnlyCollection<int>? scope = null)
     {
         var kept = new HashSet<int>(keep);
         var listed = new Dictionary<int, OwnedInfo>();
@@ -1251,6 +1252,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
         foreach (var (item, name) in ownerOf.ToList())
         {
+            if (scope != null && !scope.Contains(item)) continue;
             if (listed.TryGetValue(item, out var li) && li.Holder == name) { ownedInfo[item] = li; ownedMisses.Remove(item); continue; }
             if (kept.Contains(item) || seamOwned.Contains(item)) { ownedMisses.Remove(item); continue; }
             if (!ownedSince.TryGetValue(item, out var since)) ownedSince[item] = since = now;
@@ -1806,9 +1808,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // owned and keep (step 5a): what the sweep says of every owned claim, and the items it must not drop an owner of; used only while messaging or the
     // supervisor is on, so a deployment with both off plans exactly as before.
     // priorities (docs/design/plant-manager.md 10e): the items with a priority label (top, high); after the pins they are offered first, top before high
+    // scope (issue 92): the items of an incremental pass. Only they were read, so owners and unanswered assignments of every other item are kept.
     // sweepStarted: when the sweep that made this plan started reading the board. An owner it names for an item that was merged after that is not
     // put back: the sweep read the claim before the merge removed it (issue 107).
-    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, JsonObject? priorities = null, DateTime? sweepStarted = null)
+    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, JsonObject? priorities = null, DateTime? sweepStarted = null, IReadOnlyCollection<int>? scope = null)
     {
         lock (gate)
         {
@@ -1821,7 +1824,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 if (Msg.On && !(ownerOf.TryGetValue(oi, out var cur) && cur == on)) { ownedSince[oi] = planNow; seamOwned.Remove(oi); ownedMisses.Remove(oi); ownedInfo.Remove(oi); }
                 ownerOf[oi] = on;
             }
-            if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow);
+            if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow, scope);
             var wanted = new HashSet<string>();
             // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can; then by priority (the
             // order is stable, so items of one rank keep the sweep's order)
@@ -1885,7 +1888,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             foreach (var i in pinFallback.Keys.Where(i => !wanted.Any(k => k.StartsWith(i + "|", StringComparison.Ordinal))).ToList()) pinFallback.Remove(i);
             foreach (var i in pinWaitSince.Keys.Where(i => !wanted.Any(k => k.StartsWith(i + "|", StringComparison.Ordinal))).ToList()) pinWaitSince.Remove(i);
             // an unanswered or unwanted assignment that the sweep no longer asks for is dropped
-            foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
+            foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k]) && (scope == null || scope.Contains(assignments[k].Item))).ToList()) assignments.Remove(k);
         }
     }
 

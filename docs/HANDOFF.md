@@ -229,6 +229,28 @@ z. **Done (2026-10-14, issue 93): the journal folds its repeats** (`plugin/scrip
    against the cap. The state keeps `journal.kinds.<event>` (count, first, last) and `journal.fold.<event>`. `waiting` lines are written at
    most once per `timing.journalWaitingMinutes` (30). The metrics read the first line of a kind as before (the folded comment keeps the first
    line's marker and time). Open: the items that are already full stay full.
+y. **Done (2026-10-14, issue 92): the sweep is throttled and the gateway keeps a GitHub budget.**
+   - Before, every webhook with an event and every `complete`, `validation-verdict`, `claim-item`, `accept`, `settle`, `merge` and
+     `approve-pr` started a full sweep 2 s later (about 50 REST calls), so a busy plant swept about once a minute. Now a full sweep runs every
+     `FACTORY_SWEEP_SECONDS` (180) and, when a trigger asks for one, at most every `timing.sweepMinSeconds` (60, `FACTORY_SWEEP_MIN_SECONDS`;
+     never more than the interval). A trigger of one item queues the item: between full sweeps the queued items get an incremental pass
+     (`sync-board` with `items`: the same rules for those items, each read by itself, no claim-ref reaping and no QC sync; at most 50, the
+     rest stay queued, and the items of a failed pass are queued again). A trigger of no item (master moved, a build of master, a new
+     session) and a pull request event (the QC offers and teardowns are made only in a full sweep) ask for a full sweep. The second look at
+     new items (sweepSeenCount) is such a pass after 20 s. `/api/v1/status` `sweep`: full and incremental passes, requests, coalesced,
+     queued, last of each.
+   - Every rule-script answer carries what GitHub said of the rate limit (`_github`, from the `x-ratelimit-*` headers, per resource);
+     `Runner` takes it out of the answer and the budget (`gateway/GitHubBudget.cs`) keeps the latest numbers per resource (`core`,
+     `graphql`) and window, of the gateway's own identity only (calls made as the reviewer App are not counted). Below
+     `github.budgetReserve` (300, `FACTORY_GITHUB_RESERVE`) of a resource whose window has not ended: the full sweep skips its claim-ref
+     reaping and QC sync and the back-merge check; the gateway's journal lines, back-merge calls and metrics are not made (a journal line
+     is dropped, as any failed one); verbs other than `accept`, `claim-item`, `release` and `my-items` answer 503, exit 20 `github-budget`
+     with `retryAfterSeconds` and `resetAt` (an owner told to wait still counts as active). `/api/v1/status` `github`: per resource limit,
+     remaining, reset; low; refusals.
+   - A 403 or 429 is a rate limit (`github-rate-limited`, exit 20, `retryAfterSeconds` from `Retry-After` or the reset) only when GitHub
+     says so: `x-ratelimit-remaining: 0`, a `Retry-After`, or the message of a primary or secondary rate limit; GraphQL's `RATE_LIMITED`
+     error too. Any other 403 is `github-forbidden`, exit 30, with GitHub's message (before, every 403 was a rate limit and retried).
+   - The fake GitHub sends the rate-limit headers (a limit no suite reaches) and `/_fake/rate` sets what is left.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
@@ -363,7 +385,7 @@ Closed on 2026-10-13 (pull request "hardening"):
   pull_request_review); a card moved on the board is a `projects_v2_item` event, which only an organization webhook or an App delivers, so
   the gateway never hears of the move. And an item new in a column is offered by the SECOND sweep that sees it (`timing.sweepSeenCount` 2,
   so a card dragged across starts nothing): up to two intervals, 6 minutes at 180 s. That is the wait seen, and the sweep "that did not
-  match" was the first look. Fixed: after a sweep that saw such an item the next one runs 20 s later (`FACTORY_SWEEP_CONFIRM_SECONDS`), so
+  match" was the first look. Fixed: after a sweep that saw such an item a pass over it runs 20 s later (`FACTORY_SWEEP_CONFIRM_SECONDS`; an incremental pass since issue 92), so
   the first offer comes at most one interval plus 20 s after the move. To make it seconds: deliver `projects_v2_item` (organization
   webhook); the gateway already turns it into a sweep.
 - **(h) `factory.ps1 update-pr --item N --body-file <file>`** replaces the body of the item's own open pull request (item token, owner role),
