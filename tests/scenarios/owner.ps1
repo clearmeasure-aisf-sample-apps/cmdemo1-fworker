@@ -344,7 +344,7 @@ $OwnerScenarios['owner: a pinned item is only ever offered to its worker: after 
     Start-Sleep -Seconds 6
     Check 'the idle worker beside it was never offered the item' ((Get-Assigned 'pin-b' $n1).Count -eq 0 -and @((& $offersOf $n1) | Where-Object { $_ -ne 'pin-a' }).Count -eq 0) ((& $offersOf $n1) -join ',')
     $j = Get-Journal $n1
-    Check 'the journal says waiting, and never reassigned' ($j -contains 'waiting' -and $j -notcontains 'reassigned' -and @((Get-FakeIssue $n1).comments | Where-Object { $_.body -match "the pinned worker 'pin-a' did not confirm" }).Count -eq 1) ($j -join ',')
+    Check 'the journal says waiting, and never reassigned' ($j -contains 'waiting' -and $j -notcontains 'reassigned' -and @((Get-FakeIssue $n1).comments | Where-Object { $_.body -match "the pinned worker 'pin-a' did not confirm" -and $_.body -notlike '<!-- factory-state:*' }).Count -eq 1) ($j -join ',')
     $ev = (Get-Assigned 'pin-a' $n1)[-1]
     $r = Wait-Until -Seconds 30 { $script:PinAccept = Fo 'pin-a' @('accept', '--item', $n1, '--assignment', ((Get-Assigned 'pin-a' $n1)[-1]).assignment); $script:PinAccept.exit -eq 0 }
     Check 'the pinned worker accepts a later offer and owns the item' ($r -and @((Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n1" -and $_.Value -eq 'pin-a' }).Count -eq 1) ($script:PinAccept | ConvertTo-Json -Compress)
