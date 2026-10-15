@@ -248,6 +248,18 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Closed on 2026-10-15 (issues #79 and #82):
+
+- **#79 A flaky master Build parked merged items as master-broken** (276, 272, 280). The settle step asked GitHub to re-run the failed jobs
+  while the Build run was still in progress (GitHub refuses that; the answer was ignored), then parked the item a minute later. Now it waits
+  until every workflow run of the merge commit has completed, re-runs the failed ones once, records the runs and attempts (`merge.rerun_runs`,
+  `rerun_at`) and judges only a newer, completed attempt; the master-green timeout counts again from the re-run. The comment says whether the
+  failure looks flaky (`masterFlakyChecks` patterns, or the same check failed on one of the last 5 master commits). The fake GitHub now lists
+  workflow runs per commit and refuses a re-run of a run in progress, as GitHub does.
+- **#82 A closed item stayed parked.** The sweep removes the park of a closed item whose flow has ended (journal `unparked`, by the sweep), and
+  `POST /api/v1/items/{n}/unpark` accepts a closed item, removing only the park (no hand-off, no offer). Released parks leave the digest's
+  parks list at once.
+
 Closed on 2026-10-14 (issue #42):
 
 - **#42 A video item could not pass Functional Testing without a person.** `factory.ps1 publish-demo --item N --file <mp4>` (item token,

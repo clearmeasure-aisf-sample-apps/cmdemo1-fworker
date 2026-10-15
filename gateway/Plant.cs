@@ -1443,6 +1443,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
     }
 
+    // Issue 82: parks released (unpark) or removed from a closed item by the sweep leave the digest's parks list at once, not 24 hours later.
+    public void ClearParks(IEnumerable<int> items) { var set = items.Where(i => i > 0).ToHashSet(); if (set.Count == 0) return; lock (gate) parks.RemoveAll(x => set.Contains(x.Item)); }
     public bool SetDraining(string name, bool on) { lock (gate) { if (!workers.TryGetValue(name, out var w)) return false; w.Draining = on; return true; } }
 
     long Push(WorkerInfo w, string json, bool toBuffer = true)

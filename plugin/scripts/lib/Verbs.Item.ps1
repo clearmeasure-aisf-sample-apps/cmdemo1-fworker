@@ -134,7 +134,8 @@ function Verb_unpark_item($a) {
     if (-not $reason) { Reject 2 'usage' 'a reason is required: why the park is released early' }
     if ($reason.Length -gt 500) { Reject 2 'usage' 'the reason is at most 500 characters' }
     $by = if ((Test-Has $a 'by') -and "$($a.by)".Trim()) { "$($a.by)".Trim() } else { 'the operator' }
-    $info = Get-ItemInfo $n; Assert-Open $info
+    # issue 82: a closed item may be unparked too; only the park is removed (no hand-off, no new offer)
+    $info = Get-ItemInfo $n
     $st = Get-State $n; $s = $st.state
     if (-not (Test-Has $s 'park')) { Reject 10 'not-parked' "item #$n is not parked" }
     $park = $s.park; $code = "$($park.reason)"
@@ -143,10 +144,10 @@ function Verb_unpark_item($a) {
     $expired = -not (Get-Park $s)
     $s.Remove('park')
     $offered = $false
-    if (-not (Test-ClaimLive $s) -and (Test-NameIn "$($info.column)" $c.columns.ai)) { $s.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $offered = $true }
-    [void](Add-Journal $n $st 'unparked' @{ column = $info.column; code = $code; by = $by; reason = $reason } "$($park.at)")
+    if ($info.open -and -not (Test-ClaimLive $s) -and (Test-NameIn "$($info.column)" $c.columns.ai)) { $s.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $offered = $true }
+    [void](Add-Journal $n $st 'unparked' @{ column = $info.column; code = $code; by = $by; reason = $reason; closed = (-not $info.open) } "$($park.at)")
     Save-State $n $st
-    return @{ ok = $true; id = $n; unparked = $true; column = $info.column; park = $park; expired = $expired; reoffer = $offered }
+    return @{ ok = $true; id = $n; unparked = $true; column = $info.column; park = $park; expired = $expired; reoffer = $offered; closed = (-not $info.open) }
 }
 
 function Verb_claim_item($a) {

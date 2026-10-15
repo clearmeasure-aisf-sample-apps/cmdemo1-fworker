@@ -656,6 +656,7 @@ app.MapPost("/api/v1/items/{n:int}/unpark", async (int n, HttpContext ctx) =>
         // release), so the sweep this call requests offers the item afresh instead of first waiting to find that session gone
         try { if (ownerMode && JsonNode.Parse(output)?["reoffer"] is JsonValue ro && ro.TryGetValue<bool>(out var reoffer) && reoffer) plant.OnVerb("release", new JsonObject { ["item"] = n }, Who(ctx), new JsonObject()); }
         catch (Exception e) { Console.Error.WriteLine($"plant hook unpark-item: {e.Message}"); }
+        if (ownerMode) plant.ClearParks(new[] { n });   // issue 82: the digest no longer reports a park that was released
         hub.RequestSweep();
     }
     var status = code switch { 0 => 200, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, _ => 500 };
@@ -1586,6 +1587,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                         foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
                         plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep);
                         plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray);
+                        if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
                         // a merge the gateway made after a PASS and the round-trip of one it could not make (Verbs.Merge.ps1 -Gateway)
                         foreach (var a in acts)
                             if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))

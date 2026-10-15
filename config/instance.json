@@ -42,6 +42,7 @@
     "^\\.github/ISSUE_TEMPLATE/"
   ],
   "releaseCheckName": "release",
+  "masterFlakyChecks": ["^Acceptance Tests \\[shard \\d+/\\d+\\]$"],
   "octopus": {
     "url": "https://clearmeasure.octopus.app",
     "space": "Spaces-355",
