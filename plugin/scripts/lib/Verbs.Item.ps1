@@ -19,7 +19,7 @@ function Remove-ClaimRef([int]$Item) {
 
 function Get-PublicState($s) {
     $o = @{}
-    foreach ($k in 'claim', 'park', 'verdict', 'merge', 'pr', 'reviews', 'demotions', 'fix_forward_rounds', 'awaiting_checks', 'handoff', 'qc') { if (Test-Has $s $k) { $o[$k] = $s[$k] } }
+    foreach ($k in 'claim', 'park', 'verdict', 'merge', 'pr', 'reviews', 'demotions', 'fix_forward_rounds', 'awaiting_checks', 'awaiting_base', 'handoff', 'qc') { if (Test-Has $s $k) { $o[$k] = $s[$k] } }
     return $o
 }
 
@@ -126,7 +126,8 @@ function Verb_comment($a) {
 # owner relaxed or reworded a criterion. The park leaves the state comment (written by the gateway's own author, Save-State), a journal line records
 # who and why, and an item with no live claim gets a handoff to its current column, so the next sweep offers it again there at once instead of after
 # sweepSeenCount sightings. Two parks are waits of the gateway, not holds for a person, and are refused: awaiting checks (the sweep ends it when the
-# checks finish) and the inspector's escalation (only a human approval of the head clears it: clear-hold).
+# checks finish) and the inspector's escalation (only a human approval of the head clears it: clear-hold). The wait for master (development:
+# awaiting-base) may last hours, so a person may end it: the wait goes with the park and the item is offered in Development again.
 function Verb_unpark_item($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg
     # one line, no HTML comment markers: the reason goes into a journal comment whose hidden marker is machine-read
@@ -142,7 +143,7 @@ function Verb_unpark_item($a) {
     if ($code -eq 'development:awaiting-checks') { Reject 10 'gateway-wait' 'the item waits for its pull request checks, not for a person; the sweep ends that wait by itself' }
     if ($code -eq 'inspector-escalated') { Reject 10 'needs-approval' 'the inspector''s hold clears only on a human approval of the head commit (clear-hold), not by unpark' }
     $expired = -not (Get-Park $s)
-    $s.Remove('park')
+    $s.Remove('park'); if ($code -eq 'development:awaiting-base') { $s.Remove('awaiting_base') }   # a person ends the wait for master: the sweep no longer re-runs
     $offered = $false
     if ($info.open -and -not (Test-ClaimLive $s) -and (Test-NameIn "$($info.column)" $c.columns.ai)) { $s.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $offered = $true }
     [void](Add-Journal $n $st 'unparked' @{ column = $info.column; code = $code; by = $by; reason = $reason; closed = (-not $info.open) } "$($park.at)")
@@ -337,7 +338,7 @@ function Finish-ColumnExit($n, $info, $st, [string]$CommentText, [hashtable]$Ext
     if ($CommentText) { Add-Comment $n $CommentText }
     $to = Move-NextInternal $info 'complete'
     $owned = Test-OwnedClaim $s
-    foreach ($k in 'park', 'awaiting_checks') { $s.Remove($k) }
+    foreach ($k in 'park', 'awaiting_checks', 'awaiting_base') { $s.Remove($k) }
     if ($owned) { Move-OwnerTo $n $s $to }          # the owner keeps the item and carries on in the next column
     else { $s.Remove('claim'); $s.handoff = @{ column = $to; at = ConvertTo-Iso (Get-UtcNow) } }
     Save-State $n $st
@@ -403,6 +404,27 @@ function Verb_complete($a) {
     $chk = Get-ChecksFor $prd.head.sha
     if ($chk.status -eq 'failure') {
         $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url; failed_checks = $chk.failed_checks }
+        # Outside blockers: every failed check fails on master too (Get-OutsideFailures, Checks.ps1). No session is held for the base branch, a
+        # re-run or a time of day: the item waits parked development:awaiting-base, the sweep re-runs the failed jobs once the same checks are green
+        # on master and then advances it (Complete-AwaitingBase, Verbs.Sweep.ps1). The claim ends here, owned or not: the session's part is over.
+        $outside = Get-OutsideFailures $prd $chk
+        if ($outside) {
+            $names = @($outside | ForEach-Object { Protect-CheckText "$($_.name)" 200 })   # (check names are the pull request's text)
+            # a second complete for the same head keeps the wait as it is: its start, its retries and its budget
+            $same = (Test-Has $s 'awaiting_base') -and [int]$s.awaiting_base.pr -eq [int]$pr.number -and "$($s.awaiting_base.sha)" -eq "$($prd.head.sha)" -and (Test-Has $s 'park') -and "$($s.park.reason)" -eq 'development:awaiting-base'
+            if (-not $same) {
+                $s.awaiting_base = @{ pr = $pr.number; sha = "$($prd.head.sha)"; comment = $comment; since = ConvertTo-Iso (Get-UtcNow); checks = $names; reruns = 0 }
+                Set-Park $s 'development:awaiting-base' ((Get-AwaitingBaseTimeout) + 60)
+            }
+            if (Test-Has $s 'claim') {
+                $was = "$($s.claim.holder)"; $owned = Test-OwnedClaim $s; $s.Remove('claim')
+                if ($owned) { [void](Add-Journal $n $st 'released' @{ worker = $was; reason = 'every failed check fails on master too: the gateway waits for master' } "awaiting-base|$($prd.head.sha)") }
+            }
+            Save-State $n $st; Remove-ClaimRef $n
+            $list = ($outside | ForEach-Object { "``$(Protect-CheckText "$($_.name)" 200)`` (master: $($_.masterConclusion), failed on $($_.failedOfLast5) of its last 5 commits)" }) -join ', '
+            if (-not $same) { Add-Comment $n "PR #$($pr.number) checks failed only where master fails too: $list. Parked **development:awaiting-base**: the gateway re-runs the failed jobs once these checks are green on master again, then advances the item. The worker's part is done." }
+            Reject 21 'accepted-awaiting-base' "every failed check fails on master too ($($names -join ', ')): the gateway waits for master, re-runs them and advances the item. Your part of this item is over: end the session." @{ prNumber = $pr.number; released = $true; awaiting = $outside; checks = (Get-PublicChecks $chk) }
+        }
         Save-State $n $st
         Reject 10 'checks-not-green' 'pull request checks are not green' @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
     }

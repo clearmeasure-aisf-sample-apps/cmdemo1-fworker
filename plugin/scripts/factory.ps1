@@ -2,6 +2,8 @@
 # factory.ps1 <verb> [--flag value ...]        client: sends the verb to the gateway (no GitHub or Octopus secret on this machine)
 # factory.ps1 --server <verb>  < args.json     server: runs the rule script (gateway only; holds GH_TOKEN, OCTOPUS_API_KEY)
 # factory.ps1 build-slot --item N [--release] [--ttl S]   a private-build slot of this host: acquire before the private build, release after it
+# factory.ps1 private-build --item N --worktree <path> [--dotnet <path>] [--log <file>]   the private build of a worktree under the host's build slot (lib/Client.Build.ps1)
+# factory.ps1 <verb> ... --max-chars N        an answer over N characters is saved whole to the work directory and printed cut, as one JSON line
 # factory.ps1 pr-checks --item N [--check NAME] [--tail N] [--brief] | --full-log [--save FILE] | --artifact NAME [--entry PATH] [--save FILE]   why a check failed
 # factory.ps1 subscribe --own --name N [--spawn]  client: register as a worker; assignments arrive as item.assigned (token saved, not printed)
 # factory.ps1 wait-event --item N [--messages] | worker-token --name N [--role manager]
@@ -100,6 +102,37 @@ function ConvertFrom-Flags([string[]]$Tokens) {
         }
     }
     return $a
+}
+
+# --max-chars N, with any verb but subscribe: an answer longer than N characters is saved whole to a file in the work directory (lib/Paths.ps1) and
+# printed as ONE short JSON line: ok, verb, exit and code of the answer, truncated, chars, the file (saved) and the start of the answer (text), the
+# line at most N characters long. A session keeps an answer short this way, never with a pipe (| head). The verb runs in a child process of this
+# script with the same arguments less --max-chars, and this process exits with its exit code.
+$mcAt = [Array]::IndexOf($Rest, '--max-chars')
+if ($mcAt -ge 1) {
+    $mc = 0
+    if ($mcAt + 1 -ge $Rest.Count -or -not [int]::TryParse($Rest[$mcAt + 1], [ref]$mc) -or $mc -lt 400) { Write-Out @{ ok = $false; code = 'usage'; reason = '--max-chars takes a number of characters, 400 or more' } 2 }
+    if ($Rest[0] -eq 'subscribe') { Write-Out @{ ok = $false; code = 'usage'; reason = '--max-chars cuts one answer; subscribe prints a stream' } 2 }
+    $psi = [Diagnostics.ProcessStartInfo]::new((Get-Process -Id $PID).Path)
+    foreach ($x in @('-NoProfile', '-NonInteractive', '-File', $(if ($PSCommandPath) { $PSCommandPath } else { Join-Path $here 'factory.ps1' }))) { $psi.ArgumentList.Add($x) }
+    for ($i = 0; $i -lt $Rest.Count; $i++) { if ($i -ne $mcAt -and $i -ne $mcAt + 1) { $psi.ArgumentList.Add($Rest[$i]) } }
+    $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.StandardOutputEncoding = [Console]::OutputEncoding   # (what the child writes with)
+    $child = [Diagnostics.Process]::Start($psi); $text = $child.StandardOutput.ReadToEnd(); $child.WaitForExit(); $code = $child.ExitCode
+    $text = $text.TrimEnd("`r", "`n")
+    if ($text.Length -le $mc) { [Console]::Out.WriteLine($text); exit $code }
+    $j = $null; try { $j = $text | ConvertFrom-Json -AsHashtable } catch { }
+    if ($j -isnot [System.Collections.IDictionary]) { $j = $null }
+    $file = Join-Path (Get-FwWorkDir) ("answer-$($Rest[0] -replace '[^A-Za-z0-9-]', '')-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0, 4))$(if ($j) { '.json' } else { '.txt' })")
+    [IO.File]::WriteAllText($file, $text + "`n", [Text.UTF8Encoding]::new($false))
+    $w = [ordered]@{ ok = $(if ($j -and $j.Contains('ok')) { [bool]$j.ok } else { $code -eq 0 }); verb = $Rest[0]; exit = $code }
+    if ($j -and $j.Contains('code')) { $w.code = "$($j.code)" }
+    $w.truncated = $true; $w.chars = $text.Length; $w.maxChars = $mc; $w.saved = $file; $w.note = 'the whole answer is in the file saved: read it with the Read tool'; $w.text = ''
+    # the start of the answer: as much of it as fits in the line once escaped
+    $room = $mc - ($w | ConvertTo-Json -Compress).Length; $lo = 0; $hi = [Math]::Min($text.Length, [Math]::Max(0, $room))
+    while ($lo -lt $hi) { $mid = [int][Math]::Ceiling(($lo + $hi) / 2); if ((ConvertTo-Json $text.Substring(0, $mid) -Compress).Length - 2 -le $room) { $lo = $mid } else { $hi = $mid - 1 } }
+    if ($lo -gt 0 -and [char]::IsHighSurrogate($text[$lo - 1])) { $lo-- }   # never half a character
+    $w.text = $text.Substring(0, $lo)
+    [Console]::Out.WriteLine(($w | ConvertTo-Json -Compress)); exit $code
 }
 
 $verb = if ($Rest.Count -gt 0) { $Rest[0] } else { '' }
@@ -215,6 +248,11 @@ if ($verb -eq 'build-slot') {
     if (-not $j) { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)" } 20 }
     $j.verb = $verb; Write-Out $j $(if ($null -ne $j.exit) { [int]$j.exit } else { 20 })
 }
+# private-build --item N --worktree <path> [--dotnet <path>]: the repository's private build of the item's worktree, on this machine (lib/Client.Build.ps1):
+# the host's build slot, DATABASE_ENGINE=SQLite, the dotnet of ensure-tools.ps1, `. ./build.ps1 ; Build`, the log in <work>/build-N.log, the slot given
+# back. Exit 0 passed, 10 build-failed, 21 build-slot-busy (the slot stayed busy for --slot-wait-minutes, 30: nothing was built). Without --worktree the verb is
+# the gateway's (private-build --attest SHA records a passing build for the push gate) and goes the ordinary way below.
+if ($verb -eq 'private-build' -and $a.ContainsKey('worktree')) { . (Join-Path $here 'lib/Client.Build.ps1'); Invoke-PrivateBuild $a $cfg $callToken $here }
 # publish-demo --item N --file F: the MP4 goes as the raw body of POST /api/v1/demo/{item} (the gateway checks again; these checks only save the upload)
 if ($verb -eq 'publish-demo') {
     $file = if ($a.ContainsKey('file')) { "$($a.file)" } else { '' }

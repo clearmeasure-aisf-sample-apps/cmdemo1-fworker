@@ -274,6 +274,27 @@ function Get-CheckBaseline([string]$Name, $History) {
     return @{ available = $true; branch = $History.branch; conclusion = $(if ($null -eq $newest) { 'absent' } else { $newest }); failedOfLast5 = $failed; ranOfLast5 = $ran; commits = @($History.commits).Count }
 }
 
+# Outside blockers (complete, Verbs.Item.ps1): the failed checks of a pull request head when EVERY one of them fails on the base branch too, each
+# with what master says: its newest finished result there is a failure (likelyPreexisting), or one of its last 5 commits failed it (baseline-red:
+# a flaky or time-of-day check). $null when one failed check does not, or when the base branch could not be read: a baseline nobody could read
+# decides nothing, and the answer stays checks-not-green. The reads of the base branch take 30 s at most.
+function Get-OutsideFailures($Prd, $Chk) {
+    $failed = @($Chk.failed_checks | Where-Object { $_ })
+    if ($failed.Count -eq 0) { return $null }
+    $base = "$(Get-CkProp (Get-CkProp $Prd 'base') 'ref')"; if (-not $base) { $base = "$((Get-Cfg).defaultBranch)" }
+    $script:CkDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    try { $history = Get-BaseHistory $base } finally { $script:CkDeadline = $null }
+    $out = @()
+    foreach ($name in $failed) {
+        $b = Get-CheckBaseline "$name" $history
+        if (-not $b.available) { return $null }
+        $pre = "$($b.conclusion)" -in $script:CkFailed
+        if (-not $pre -and [int]$b.failedOfLast5 -le 0) { return $null }
+        $out += @{ name = "$name"; masterConclusion = "$($b.conclusion)"; failedOfLast5 = [int]$b.failedOfLast5; likelyPreexisting = $pre }
+    }
+    return , @($out)
+}
+
 function Get-CheckBrief($r) {
     @{ name = "$($r.name)"; status = "$($r.status)"; conclusion = (Get-CkProp $r 'conclusion'); startedAt = (ConvertTo-IsoOrNull (Get-CkProp $r 'started_at')); completedAt = (ConvertTo-IsoOrNull (Get-CkProp $r 'completed_at'))
         detailsUrl = (Protect-CheckText "$(Get-CkProp $r 'details_url')" 500) }

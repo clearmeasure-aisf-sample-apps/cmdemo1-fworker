@@ -97,6 +97,8 @@
     "offerCoolDownMinutes": 5,
     "parkHours": 24,
     "awaitingChecksParkMinutes": 60,
+    "awaitingBaseTimeoutMinutes": 720,
+    "awaitingBaseMaxReruns": 2,
     "docsOnlyReleaseGraceSeconds": 120,
     "qcLinkDays": 7,
     "qcLeaseMinutes": 5,

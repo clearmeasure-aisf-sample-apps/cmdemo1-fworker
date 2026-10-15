@@ -37,6 +37,141 @@ function Complete-AwaitingChecks([int]$n, $info, $st) {
     return @{ outcome = 'waiting'; checks = (Get-PublicChecks $chk) }
 }
 
+# Outside blockers (Verb_complete answered accepted-awaiting-base): the item waits, parked development:awaiting-base and with no claim, until every
+# check that failed on its pull request is green on master. Then it is tried again ONCE: a branch behind master is brought up to date (GitHub's update
+# branch: the new run has master's fix in it; a re-run of a pull request run would test the old merge commit again), otherwise the failed jobs are
+# re-run. Green checks advance the item (Finish-ColumnExit, offered in the next column). A check that still fails once master is green is the change's
+# own: back to Development to fix forward, as Complete-AwaitingChecks does. When master is red again after a retry, the item waits again, up to
+# timing.awaitingBaseMaxReruns retries; master red for timing.awaitingBaseTimeoutMinutes parks it for a person (base-still-red). The retry is judged
+# only on a newer, completed attempt of each re-run workflow run (GitHub creates the new check runs a moment after the call), as Invoke-Settle does.
+function Get-AwaitingBaseTimeout { $t = (Get-Cfg).timing; if (Test-Has $t 'awaitingBaseTimeoutMinutes') { [double]$t.awaitingBaseTimeoutMinutes } else { 720 } }
+function Get-AwaitingBaseMaxReruns { $t = (Get-Cfg).timing; if (Test-Has $t 'awaitingBaseMaxReruns') { [int]$t.awaitingBaseMaxReruns } else { 2 } }
+
+function Complete-AwaitingBase([int]$n, $info, $st) {
+    $c = Get-Cfg; $t = $c.timing; $s = $st.state; $aw = $s.awaiting_base; $now = Get-UtcNow
+    if ("$($info.column)" -ine "$($c.columns.development)") {
+        # a person moved the card: the wait for master is over, and the item is where the person put it
+        $s.Remove('awaiting_base'); $s.Remove('park'); Save-State $n $st
+        return @{ outcome = 'left-development'; column = "$($info.column)" }
+    }
+    $pr = Get-Pr ([int]$aw.pr)
+    if ("$($pr.state)" -ne 'open') {
+        # (a merged pull request was picked up before this by the sweep; one closed without a merge is a person's decision)
+        $s.Remove('awaiting_base'); Set-Park $s 'pr-closed' ($t.parkHours * 60); Save-State $n $st
+        Add-Comment $n "PR #$($pr.number) was closed while the item waited for master - parked for a human."
+        return @{ outcome = 'parked'; reason = 'pr-closed' }
+    }
+    $sha = "$($pr.head.sha)"; $chk = Get-ChecksFor $sha
+    $rt = if (Test-Has $aw 'retry') { $aw.retry } else { $null }
+    $rtAt = if ($rt) { ConvertFrom-Iso $rt.at } else { $null }
+    # the head was tried again: re-run (same head) or updated from master (a new head)
+    $retried = $rt -and ((("$($rt.kind)" -eq 'rerun') -and "$($rt.from)" -eq $sha) -or (("$($rt.kind)" -eq 'update') -and "$($rt.from)" -ne $sha))
+    if ($chk.status -eq 'success') {
+        $s.Remove('fix_forward_rounds'); $s.Remove('awaiting_base')
+        if (Test-Has $s 'pr') { foreach ($k in 'rejection', 'failed_checks') { $s.pr.Remove($k) } }
+        $r = Finish-ColumnExit $n $info $st "PR #$($pr.number) checks are green$(if ($retried) { ' after the gateway tried them again' }); development complete. $($aw.comment)" @{ prNumber = $pr.number }
+        return @{ outcome = 'completed'; moved_to = $r.moved_to }
+    }
+    $timedOut = { param($From) $From -and ($now - $From).TotalMinutes -gt [double]$t.devChecksTimeoutMinutes }
+    $stuck = {
+        param($What)
+        $s.Remove('awaiting_base'); Set-Park $s 'stuck' ($t.parkHours * 60); Save-State $n $st
+        Add-Comment $n "PR #$($pr.number) checks were still not finished $($t.devChecksTimeoutMinutes) min after $What - parked for a human (a hung CI run, not a code problem)."
+        return @{ outcome = 'parked'; reason = 'stuck' }
+    }
+    # an update of the branch that has not landed yet: wait, and re-run instead when it never does
+    if ($rt -and "$($rt.kind)" -eq 'update' -and "$($rt.from)" -eq $sha) {
+        if (-not (& $timedOut $rtAt)) { return @{ outcome = 'waiting'; reason = 'update-pending' } }
+        $rt = $null; $retried = $false; $s.awaiting_base.Remove('retry'); $s.awaiting_base.reruns = [Math]::Max(0, [int]$aw.reruns - 1); $s.awaiting_base.no_update = $true
+    }
+    # the latest thing that started a run: the retry, else the moment master was seen green again, else the completion
+    $lastStart = @(@($rtAt, $(if (Test-Has $aw 'green_at') { ConvertFrom-Iso $aw.green_at }), (ConvertFrom-Iso $aw.since)) | Where-Object { $_ } | Sort-Object -Descending)[0]
+    if ($chk.status -eq 'pending') {
+        if (& $timedOut $lastStart) { return (& $stuck $(if ($rt) { 'the gateway tried them again' } else { 'they started' })) }
+        return @{ outcome = 'waiting'; reason = 'checks-running'; checks = (Get-PublicChecks $chk) }
+    }
+    # failed. Workflow runs of the head: a run still going cannot be re-run, and a re-run is judged only once each run has a newer, completed attempt.
+    $runs = @((Invoke-Gh -Path "$(Get-RepoPath)/actions/runs?head_sha=$sha&per_page=50").workflow_runs | Where-Object { $_ })
+    if ($retried -and "$($rt.kind)" -eq 'rerun') {
+        $inFlight = @(@($rt.runs) | Where-Object { $_ } | Where-Object { $rr = $_; $cur = @($runs | Where-Object { [long]$_.id -eq [long]$rr.id }) | Select-Object -First 1
+            (-not $cur) -or ([int]$cur.run_attempt -le [int]$rr.attempt) -or ("$($cur.status)" -ne 'completed') })
+        if ($inFlight.Count -gt 0) {
+            if (& $timedOut $rtAt) { return (& $stuck 'the gateway re-ran them') }
+            return @{ outcome = 'waiting'; reason = 'rerun-in-progress' }
+        }
+    }
+    # is master green again for every failed check?
+    $base = "$($pr.base.ref)"; if (-not $base) { $base = "$($c.defaultBranch)" }
+    $script:CkDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    try { $history = Get-BaseHistory $base } finally { $script:CkDeadline = $null }
+    $red = @()
+    foreach ($name in @($chk.failed_checks)) {
+        $b = Get-CheckBaseline "$name" $history
+        if (-not ($b.available -and "$($b.conclusion)" -in 'success', 'neutral', 'skipped')) { $red += "$(Protect-CheckText "$name" 200) (master: $(if ($b.available) { $b.conclusion } else { "not read, $($b.code)" }))" }
+    }
+    if ($red.Count -gt 0) {
+        $since = ConvertFrom-Iso $aw.since
+        if ($since -and ($now - $since).TotalMinutes -gt (Get-AwaitingBaseTimeout)) {
+            $s.Remove('awaiting_base'); Set-Park $s 'base-still-red' ($t.parkHours * 60); Save-State $n $st
+            Add-Comment $n "PR #$($pr.number) still waits for master: $($red -join ', '), $(Get-AwaitingBaseTimeout) min after the completion - parked for a human."
+            return @{ outcome = 'parked'; reason = 'base-still-red' }
+        }
+        # master turned red again after a retry: the retry proved nothing, so the next green master may try once more (within the budget)
+        if ($retried -or (Test-Has $aw 'green_at')) { $s.awaiting_base.Remove('retry'); $s.awaiting_base.Remove('green_at'); Save-State $n $st }
+        return @{ outcome = 'waiting'; reason = 'base-red'; red = $red }
+    }
+    if (-not (Test-Has $aw 'green_at')) { $s.awaiting_base.green_at = ConvertTo-Iso $now; Save-State $n $st }
+    $failedNames = (@($chk.failed_checks) | ForEach-Object { Protect-CheckText "$_" 200 }) -join ', '   # (check names are the pull request's text)
+    if (-not $retried -and [int]$aw.reruns -lt (Get-AwaitingBaseMaxReruns)) {
+        # try once more: update a branch that is behind master, else re-run the failed jobs of every completed workflow run of the head
+        if (@($runs | Where-Object { "$($_.status)" -ne 'completed' }).Count -gt 0 -and -not (& $timedOut (ConvertFrom-Iso $s.awaiting_base.green_at))) { return @{ outcome = 'waiting'; reason = 'failed-run-in-progress' } }
+        $behind = Get-BehindBy "$($pr.head.ref)"
+        if ($behind -gt 0 -and -not (Test-Has $aw 'no_update') -and $pr.mergeable -ne $false -and "$($pr.mergeable_state)" -ne 'dirty') {
+            $u = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$($pr.number)/update-branch" -Body @{ expected_head_sha = $sha } -Allow 409, 422
+            if (-not ($u -is [hashtable] -and $u.ContainsKey('status'))) {
+                $s.awaiting_base.retry = @{ kind = 'update'; from = $sha; at = ConvertTo-Iso $now }; $s.awaiting_base.reruns = [int]$aw.reruns + 1; Save-State $n $st
+                Add-Comment $n "master is green again for $failedNames; the branch of PR #$($pr.number) was $behind commit(s) behind it, so the gateway brought it up to date (a new run with master's changes), then judges the new head."
+                return @{ outcome = 'updated'; behind = $behind }
+            }
+        }
+        $started = @(); $refused = @()
+        foreach ($r0 in @($runs | Where-Object { "$($_.status)" -eq 'completed' -and "$($_.conclusion)" -in 'failure', 'timed_out', 'startup_failure' })) {
+            $res = Invoke-GhRaw -Method POST -Path "$(Get-RepoPath)/actions/runs/$($r0.id)/rerun-failed-jobs"
+            if ([int]$res.status -in 200, 201) { $started += @{ id = [long]$r0.id; attempt = $(if ($r0.run_attempt) { [int]$r0.run_attempt } else { 1 }) } } else { $refused += "$($r0.id): $([int]$res.status)" }
+        }
+        if ($started.Count -gt 0) {
+            $s.awaiting_base.retry = @{ kind = 'rerun'; from = $sha; at = ConvertTo-Iso $now; runs = $started }; $s.awaiting_base.reruns = [int]$aw.reruns + 1; Save-State $n $st
+            Add-Comment $n "master is green again for $failedNames; the gateway re-runs the failed jobs of PR #$($pr.number) once (workflow run $(($started | ForEach-Object { $_.id }) -join ', ')), then judges the new attempt."
+            return @{ outcome = 'rerun'; runs = $started }
+        }
+        # nothing could be tried again (GitHub refused, or the failed check is no Actions job): that says nothing about the change, so a person decides
+        $why = "the failed jobs could not be re-run ($(if ($refused.Count) { 'GitHub refused: ' + ($refused -join ', ') } else { 'no failed workflow run found: not an Actions job' }))"
+        $s.Remove('awaiting_base'); Set-Park $s 'base-retry-impossible' ($t.parkHours * 60)
+        if (-not (Test-Has $s 'pr')) { $s.pr = @{} }
+        $s.pr.number = $pr.number; $s.pr.branch = $pr.head.ref; $s.pr.url = $pr.html_url; $s.pr.failed_checks = $chk.failed_checks
+        $s.pr.rejection = "PR #$($pr.number) checks fail ($failedNames) although master is green again, and $why. Find out whether the failure is the change's (fix it) or the check's (say so on the item)."
+        Save-State $n $st
+        Add-Comment $n "PR #$($pr.number): master is green again for $failedNames, but $why and the branch is not behind master - parked for a human (re-run the checks, or release the park so Development looks again)."
+        return @{ outcome = 'parked'; reason = 'base-retry-impossible' }
+    } else { $why = "they still fail with master green$(if ($retried) { ', after the gateway tried them again' })" }
+    # the change's own failure: back to Development (fix forward), as Complete-AwaitingChecks
+    $rounds = $(if (Test-Has $s 'fix_forward_rounds') { [int]$s.fix_forward_rounds } else { 0 }) + 1
+    $s.fix_forward_rounds = $rounds; $s.Remove('awaiting_base'); $s.Remove('park')
+    if ($rounds -gt [int]$t.fixForwardMaxRounds) {
+        Set-Park $s 'fix-forward-exhausted' ($t.parkHours * 60); Save-State $n $st
+        Add-Comment $n "PR #$($pr.number) has failed CI after $($rounds - 1) fix-forward Development rounds - parked for a human."
+        return @{ outcome = 'parked'; reason = 'fix-forward-exhausted' }
+    }
+    if (-not (Test-Has $s 'pr')) { $s.pr = @{} }
+    $s.pr.number = $pr.number; $s.pr.branch = $pr.head.ref; $s.pr.url = $pr.html_url
+    $s.pr.rejection = "PR #$($pr.number) checks fail although master is green again: $failedNames ($why). The failure is the change's own: fix it."
+    $s.pr.failed_checks = $chk.failed_checks
+    $s.handoff = @{ column = $c.columns.development; at = ConvertTo-Iso $now }
+    Save-State $n $st
+    Add-Comment $n "REJECTED a Development completion - PR #$($pr.number) checks fail ($failedNames) although master is green again: $why. Re-dispatching Development to fix forward (round $rounds)."
+    return @{ outcome = 'fix-forward'; round = $rounds; offer = $true }
+}
+
 # A pull request of the item was merged outside the merge verb (a person pressed the button): the item is settled from wherever it was. Under the
 # item lock on a fresh read (the sweep holds no lock, and the merge verb may have recorded the same merge a moment ago): the merge is recorded once,
 # the verdict is closed, and whatever held the item (claim, park, handoff, a wait for checks, an inspector lease) ends. Returns whether it recorded.
@@ -47,7 +182,7 @@ function Invoke-MergePickup([int]$n, $pr) {
         else {
             $fs.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = [int]$pr.number; by = 'person' }
             if (Test-Has $fs 'verdict') { $fs.verdict.processed = $true; $fs.verdict.Remove('wait') }
-            foreach ($k in 'claim', 'park', 'handoff', 'awaiting_checks', 'bot') { $fs.Remove($k) }
+            foreach ($k in 'claim', 'park', 'handoff', 'awaiting_checks', 'awaiting_base', 'bot') { $fs.Remove($k) }
             Save-State $n $f; Remove-ClaimRef $n; $true
         }
     }
@@ -273,6 +408,25 @@ function Verb_sync_board($a) {
                         elseif (-not (Test-ClaimLive $s)) { $offers += @{ item = $n; column = $col; reason = 'ready-to-merge'; kind = 'own-item'; mode = 'resume' } }
                     }
                     elseif (-not (Test-ClaimLive $s)) { $offers += @{ item = $n; column = $col; reason = $(if ($has) { 'ready-to-merge' } else { 'needs-approval' }) } }
+                }
+                continue
+            }
+            # outside blockers: the wait for master is the sweep's to end, whether or not the park's own time has run out
+            if ((Test-Has $s 'park') -and "$($s.park.reason)" -eq 'development:awaiting-base' -and (Test-Has $s 'awaiting_base')) {
+                if (-not $dry) {
+                    # under the item lock on a fresh read: an unpark or another sweep may have changed the state since the sweep read it (a busy lock skips one sweep)
+                    try {
+                        $r = Use-ItemLock $n {
+                            $f = Get-State $n
+                            if (-not ((Test-Has $f.state 'park') -and "$($f.state.park.reason)" -eq 'development:awaiting-base' -and (Test-Has $f.state 'awaiting_base'))) { @{ outcome = 'ended-meanwhile' } }
+                            else { Complete-AwaitingBase $n (Get-ItemInfo $n) $f }
+                        } 3
+                    } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; $r = @{ outcome = 'busy' } }
+                    $actions += @{ item = $n; action = 'awaiting-base'; result = $r }
+                    if ($r.outcome -in 'completed', 'fix-forward') { $seen.Remove("$n") }
+                    if ($r.outcome -eq 'completed') { $offers += @{ item = $n; column = $r.moved_to; reason = 'handoff' } }
+                    elseif ($r.outcome -eq 'fix-forward') { $offers += @{ item = $n; column = $c.columns.development; reason = 'fix-forward' } }
+                    elseif ($r.outcome -eq 'parked') { $triggers += @{ item = $n; event = 'item.parked'; reason = $r.reason } }
                 }
                 continue
             }

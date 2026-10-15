@@ -215,8 +215,9 @@ t. **Done (2026-10-14): the Release Queue age** (enhancement 9). The sweep lists
    the gateway promotes: uat and prod stay with the owner and the cmdemo1 session. Open: the supervisor's skill (owner review) does not
    yet say what to do with `release-queue-aged`; not yet seen live on tdd.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
-m. **The sweep still saves a state it read without the item lock in two places** of `Verb_sync_board` (Verbs.Sweep.ps1): the
-   awaiting-checks path (`Complete-AwaitingChecks`) and the settle path (`Invoke-Settle`, which reads fresh but holds no lock). They were
+m. **The sweep still saves a state it read without the item lock in three places** of `Verb_sync_board` (Verbs.Sweep.ps1): the
+   awaiting-checks path (`Complete-AwaitingChecks`), the wait for master (`Complete-AwaitingBase`, modelled on it) and the settle path
+   (`Invoke-Settle`, which reads fresh but holds no lock). They were
    left because they call GitHub and Octopus for a long time between the read and the save: under the item lock a verb for the same item
    would wait and be refused `item-busy`. They need the read-decide part outside and a short locked write of their own keys. The
    merge-detected and owner-released-idle writes are fixed (locked, on a fresh read), as is the QC step.
@@ -247,6 +248,28 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    was saved and whose plan was applied more than 20 s after it. The check now prints the item's journal: a `reassigned` line in the next
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
+
+Done on 2026-10-15 (worker sessions carry out their instructions; from 45 worker transcripts of 14 and 15 October):
+
+- **Outside blockers.** `complete` on red checks where every failed check fails on master too (its newest result there, `likelyPreexisting`, or
+  one of its last 5 master commits) answers exit 21 `accepted-awaiting-base`, ends the claim and parks the item `development:awaiting-base`
+  (state `awaiting_base`). The sweep (`Complete-AwaitingBase`, Verbs.Sweep.ps1) waits until each failed check is green on master, then tries once:
+  GitHub's update branch when the branch is behind master (a re-run of a pull request run would test the old merge commit), else a re-run of the
+  failed jobs, judged on a newer completed attempt. Green advances the item; still red with master green is the change's own (fix forward).
+  `timing.awaitingBaseMaxReruns` (2) tries in all; master red for `timing.awaitingBaseTimeoutMinutes` (720) parks it `base-still-red`; a failed
+  check nothing can try again (not an Actions job, a refused re-run) parks it `base-retry-impossible`; a card a person moves ends the wait.
+- **`factory.ps1 private-build --item N --worktree <path> [--dotnet <path>] [--log <file>]`** (client side, lib/Client.Build.ps1): the host's
+  build slot (waited for up to `--slot-wait-minutes`, 30; then exit 21 `build-slot-busy`, nothing built), `DATABASE_ENGINE=SQLite`, the
+  dotnet of `ensure-tools.ps1` first on PATH, no credential of the session in the build's environment, `. ./build.ps1 ; Build` with its output in
+  `<work>/build-N.log`, the slot given back in finally, answer `{ok, failed[], log, tail}` (exit 10 `build-failed`). Without `--worktree` the name stays free for the push gate's server verb (`private-build --attest SHA`, pull request 61);
+  a passing build of a clean worktree on the item's branch attests through it where the gateway has it.
+- **`--max-chars N`** on any client verb but subscribe: a longer answer is saved whole to the work directory and printed as one JSON line
+  (`ok`, `exit`, `code`, `truncated`, `saved`, the start of the answer in `text`), so a session never pipes a verb (`| head`).
+- **Skills**: one bare absolute-path command per factory verb (through the `<BASE>/fw` wrapper when the prompt names one) and a classifier
+  refusal is final (comment, release, end the session); no `merge` call after a PASS (`next: "merge"` ends the session); the already-merged
+  guard of Functional Testing; evidence from the running app only, and reviews recorded as the reviewer subagent wrote them; the Qodana and
+  code-style check before the first push; the reviewer of a design checks every sentence of Notes, Constraints and Out-of-scope and flags a new
+  value of a shared enumeration; `Depends on: #M` with a release when a design needs an unmerged item.
 
 Closed on 2026-10-15 (issues #79 and #82):
 
