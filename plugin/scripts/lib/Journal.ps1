@@ -35,6 +35,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'reassigned' { return "$($F.reason); offering to the next worker." }
         'tier' { return "model tier raised to **$($F.name)** ($($F.reasons))." }
         'waiting' { return "waiting: $($F.reason)." }
+        'pin-fallback' { return "the pinned worker **$($F.pin)** could not take the item for $($F.minutes) min ($($F.code)): the pin is set aside and it is offered to **$($F.worker)**. A new worker label pins it again." }
         'skipped' { return "not assigned: $($F.reason)." }
         'qc-offered' { return "a QC environment is offered for PR #$($F.pr) at head $($F.sha7); nothing runs until a person presses Start." }
         'qc-requested' { return "a person asked for a QC environment for PR #$($F.pr) at head $($F.sha7) (attempt $($F.attempt))." }
@@ -52,7 +53,8 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         }
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
-        'unparked' { if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }
+        'board-added' { return "the item has the factory label but had no column on the board: the sweep put it in $($F.column), where it is offered like any new item." }
+        'unparked' { if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; if ($F.code -eq 'master-broken') { return "park ``master-broken`` released early by $($F.by): $($F.reason). The item waits for master green again, then for its release candidate." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
         # the plant manager's flow verbs (Verbs.Manager.ps1, docs/design/plant-manager.md 10e): who acted, what, under which policy code, and why
         'manager-action' { return "$(if ("$($F.by)" -eq 'operator') { 'the operator' } else { "the plant manager (**$($F.by)**)" }) $($F.detail), under policy ``$($F.policy)``$(if ($F.ContainsKey('reason') -and $F.reason) { ": $($F.reason)" })." }
@@ -103,7 +105,7 @@ function Get-JournalKeys($State) { if (Test-Has $State 'journal') { return @($St
 # Admin verb: the gateway journals the decisions it makes itself (matched, offered, reassigned, waiting, skipped).
 function Verb_journal($a) {
     $n = Get-ItemNumber $a; $ev = "$(Need $a 'event')"
-    if ($ev -notin 'matched', 'offered', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated', 'base-updated', 'branch-updated', 'manager-action') { Reject 2 'usage' "unknown journal event '$ev'" }
+    if ($ev -notin 'matched', 'offered', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated', 'base-updated', 'branch-updated', 'manager-action', 'pin-fallback') { Reject 2 'usage' "unknown journal event '$ev'" }
     $f = @{}; if (Test-Has $a 'fields') { foreach ($k in $a.fields.Keys) { $f[$k] = $a.fields[$k] } }
     # a 'waiting' note is rate-limited: at most one per 30 minutes per item
     if ($ev -eq 'waiting') {

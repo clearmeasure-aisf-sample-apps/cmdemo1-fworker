@@ -150,11 +150,21 @@ sealed class World
             if (method == "DELETE") return li.Labels.Remove(Uri.UnescapeDataString(m.Groups[3].Value)) ? (200, new JsonArray()) : (404, "{\"message\":\"Label does not exist\"}");
         }
         if (path == root + "/labels" && method == "GET") return (200, new JsonArray(labelNames.Select(n => (JsonNode)J(("name", n))).ToArray()));
+        if (path == $"{root}/issues" && method == "GET")
+        {   // the repository's issues, as GitHub lists them: state (default open), labels (all of a comma list), per_page (default 30, at most 100), page
+            var st = q["state"].ToString() is { Length: > 0 } sv ? sv : "open";
+            var want = q["labels"].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            int per = Math.Clamp(int.TryParse(q["per_page"], out var pp) ? pp : 30, 1, 100), pg = Math.Max(1, int.TryParse(q["page"], out var pq) ? pq : 1);
+            var rows = issues.Values.Where(i => st == "all" || (st == "open") == i.Open).Where(i => want.All(w => i.Labels.Contains(w, StringComparer.OrdinalIgnoreCase)))
+                .OrderByDescending(i => i.Number).Skip((pg - 1) * per).Take(per)
+                .Select(i => (JsonNode)J(("number", i.Number), ("node_id", i.Node), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))).ToArray();
+            return (200, new JsonArray(rows));
+        }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)$")).Success)
         {
             var i = issues[int.Parse(m.Groups[1].Value)];
             if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
-            return (200, J(("number", i.Number)));
+            return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body)));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)/comments$")).Success)
         {
@@ -495,7 +505,7 @@ sealed class World
         if (q.Contains("items(first"))
         {
             var nodes = issues.Values.Where(i => i.Card != null).Select(i => (JsonNode)J(("id", i.Card), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column))),
-                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
+                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
             return (200, Data(J(("organization", J(("projectV2", J(("items", J(("pageInfo", J(("hasNextPage", false), ("endCursor", null))), ("nodes", new JsonArray(nodes)))))))))));
         }
         if (q.Contains("fields(first"))

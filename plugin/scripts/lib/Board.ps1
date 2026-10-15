@@ -66,6 +66,15 @@ function Get-ItemPriority($Labels) {
     return ''
 }
 
+# Issue 109: the labels by which a person holds an item for themselves (holdLabels, default "hold:owner"). Honoured like the Demo label: no offer,
+# an open offer is dropped (the sweep no longer asks for it), claim-item is refused. Returns the first such label the item carries, or ''.
+function Get-HoldLabel($Labels) {
+    $c = Get-Cfg
+    $hold = if (Test-Has $c 'holdLabels') { @($c.holdLabels) } else { @('hold:owner') }
+    foreach ($h in $hold) { if ("$h" -and (Test-NameIn "$h" $Labels)) { return "$h" } }
+    return ''
+}
+
 function Move-Card([hashtable]$Info, [string]$Column) {
     $meta = Get-ProjectMeta
     if (-not $meta.options.Contains($Column)) { Reject 10 'unknown-column' "board has no column '$Column'" }
@@ -86,7 +95,7 @@ function Get-BoardList {
     $q = @'
 query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(number:$n){ items(first:100, after:$after){ pageInfo{ hasNextPage endCursor }
   nodes{ id fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
-    content{ ... on Issue{ number state title labels(first:30){ nodes{ name } } } } } } } } }
+    content{ ... on Issue{ number state title body labels(first:30){ nodes{ name } } } } } } } } }
 '@
     $after = $null; $out = @()
     do {
@@ -95,6 +104,7 @@ query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(numbe
         foreach ($n in $items.nodes) {
             if (-not $n.content -or -not $n.content.PSObject.Properties['number']) { continue }
             $out += @{ cardId = $n.id; number = [int]$n.content.number; open = ($n.content.state -eq 'OPEN'); title = $n.content.title
+                body = $(if ($n.content.PSObject.Properties['body']) { "$($n.content.body)" } else { '' })
                 column = $(if ($n.fieldValueByName) { $n.fieldValueByName.name } else { $null })
                 labels = @($n.content.labels.nodes | ForEach-Object { $_.name }) }
         }
