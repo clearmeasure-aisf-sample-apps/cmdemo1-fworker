@@ -1826,6 +1826,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     }
 
     // One pass of sync-board: the whole board (items null) or the given items. Returns the items it saw for the first time in their column (unconfirmed).
+    readonly HashSet<int> ownerHolds = new(); bool holdsComplete;
     async Task<List<int>> SweepOnce(List<int>? items)
     {
         var unconfirmedOut = new List<int>();
@@ -1853,8 +1854,12 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 var keep = new List<int>();
                 foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
                 plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, items);
-                // (the hold:owner items of the whole board: a full sweep only; the name actions wait for the next one)
-                if (items == null) plant.SetOwnerHeld((j["holds"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var hi) ? hi : 0));
+                // the hold:owner items of the whole board: a full sweep replaces them, an incremental pass updates its own items; the plant hears
+                // them once a full sweep has read the whole board (until then its name actions wait, sweep-pending)
+                var holds = (j["holds"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var hi) ? hi : 0).Where(i => i > 0);
+                if (items == null) { ownerHolds.Clear(); holdsComplete = true; } else foreach (var i in items) ownerHolds.Remove(i);
+                ownerHolds.UnionWith(holds);
+                if (holdsComplete) plant.SetOwnerHeld(ownerHolds.ToList());
                 plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray, items);
                 plant.SetHeld(j["held"] as JsonArray, items);   // issue 65: items that wait for their dependencies
                 if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
