@@ -11,5 +11,17 @@
   },
   "operator": {
     "enabled": true
+  },
+  "runtimes": {
+    "preferConnected": true,
+    "routing": [],
+    "caeJob": {
+      "enabled": true,
+      "maxConcurrent": 1,
+      "maxExecutionsPerDay": 10,
+      "jobResourceId": "/subscriptions/SUBSCRIPTION-ID/resourceGroups/rg-cmdemo1-nonprod/providers/Microsoft.App/jobs/caj-cmdemo1-tdd-fwrunner",
+      "managedIdentityClientId": "",
+      "gatewayUrl": "http://ca-cmdemo1-tdd-fworker"
+    }
   }
 }
