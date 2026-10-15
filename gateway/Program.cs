@@ -128,7 +128,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir) };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir) };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -628,8 +628,9 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && messaging.OperatorEnabled) { try { plant.OperatorVerbEvent(verb, code, who, authorized, output); } catch { } }
     if (ownerMode && code == 0) { try { plant.OnVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"plant hook {verb}: {e.Message}"); } }
     if (accepting) plant.EndAccept(who.Assignment);
-    // issue 31: a session that calls a verb successfully is answering: its count of lapsed offers starts again
-    if (ownerMode && code == 0 && who.Kind is "item" or "worker") plant.NoteAnswered(who.Name);
+    // issue 31: a session that calls a verb successfully is answering: its count of lapsed offers starts again. Issue 100: not the accept its stream
+    // client makes by itself (accepted_by client): a blocked session's client accepts every offer, and that is no sign that the session works
+    if (ownerMode && code == 0 && who.Kind is "item" or "worker" && !(verb == "accept" && authorized["accepted_by"]?.ToString() == "client")) plant.NoteAnswered(who.Name);
     // any call of the owner for its item is its activity and renews the lease when due (gateway/Lease.cs); after OnVerb, which records an accept
     if (ownerMode && who.Kind == "item" && who.Role == "owner") { try { JsonObject? vr = null; try { vr = JsonNode.Parse(output) as JsonObject; } catch { } plant.NoteItemCall(who.Name, who.Item, verb, authorized, vr, code == 0); } catch (Exception e) { Console.Error.WriteLine($"lease hook {verb}: {e.Message}"); } }
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
@@ -1572,7 +1573,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             try
             {
                 var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
-                var (code, output) = await runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(280));
+                // free_workers: the auto-unpark of a park caused by session trouble needs a session that could take the item (Verbs.Sweep.ps1)
+                var (code, output) = await runner.RunAsync("sync-board", ownerMode ? new JsonObject { ["free_workers"] = plant.FreeOwnerSessions() }.ToJsonString() : "{}", TimeSpan.FromSeconds(280));
                 hub.LastSweep = DateTime.UtcNow;
                 if (code == 0)
                 {
@@ -1717,7 +1719,7 @@ function groupedRows(list,rowHtml,cols,top){const w=[],q=[];for(const x of list|
 return{order:ord,html:(top||'')+(w.length?groupHead('Workers',cols)+w.map(x=>rowHtml(x,i++)).join(''):'')+(q.length?groupHead('QC: workers that also run pull request environments',cols)+q.map(x=>rowHtml(x,i++)).join(''):'')}}
 function workerRowHtml(x){const qc=(x.roles||[]).includes('qc');
 const qcCell=qc?QC_BADGE+`${esc(x.qcActive)}/${esc(x.qcCapacity)} <span class="pill ${x.qcProfile?'on':'dr'}">${x.qcProfile?'profile set':'no profile'}</span> <span class="mut">${esc(x.qcAddress||'no address')}</span>`:'<span class="mut">-</span>';
-return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td><span class="pill ${x.connected?(x.draining?'dr':'on'):'off'}">${x.connected?(x.draining?'draining':'connected'):'gone'}</span>${x.coolDownUntil?` <span class="pill dr" title="it let offers lapse; offered nothing new until ${esc(x.coolDownUntil)} or its next verb">cool-down</span>`:''}</td><td>${esc(x.owned)}</td><td>${esc(x.capacity)}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${x.connected?`<button data-n="${esc(x.name)}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:''}${revokeButton(esc(x.name))}</td></tr>`}
+return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td><span class="pill ${x.connected?(x.draining?'dr':'on'):'off'}">${x.connected?(x.draining?'draining':'connected'):'gone'}</span>${x.coolDownUntil?` <span class="pill dr" title="it let offers lapse; offered nothing new until ${esc(x.coolDownUntil)} or its next verb">cool-down</span>`:''}${x.blocked?` <span class="pill off" title="items were taken back from it; offered nothing since ${esc(x.blockedSince)} until it calls a verb of its own">blocked</span>`:''}</td><td>${esc(x.owned)}</td><td>${esc(x.capacity)}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${x.connected?`<button data-n="${esc(x.name)}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:''}${revokeButton(esc(x.name))}</td></tr>`}
 function revokeButton(n){return `<button data-n="${n}" data-a="revoke" title="Refuse every credential issued so far for this name and end its stream; a new prompt gives it a new credential">revoke</button>`}
 function qcRowHtml(x,repo){const sha=String(x.sha||'').slice(0,7),head=String(x.head||'').slice(0,7),p=esc(x.pr);
 const env=x.state==='failed'?esc((x.fail&&x.fail.code)||'failed')+(x.fail&&x.fail.reason?` <span class="mut">${esc(x.fail.reason)}</span>`:''):x.url&&/^https?:\/\//i.test(x.url)?`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.url)}</a>`:x.waiting?`<span class="mut">${esc(x.waiting)}</span>`:x.url_note?`<span class="mut">${esc(x.url_note)}</span>`:'-';

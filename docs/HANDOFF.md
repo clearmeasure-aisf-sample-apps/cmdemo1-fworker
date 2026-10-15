@@ -264,6 +264,15 @@ Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
   (`masterCodeChecks`, the jobs that run only for code: all skipped means docs-only) or else the pull request's files, and recorded as
   `merge.docs_only` with `docs_only_from`; only then may a skipped or missing release check finish an item. The master-green verdict ignores
   `masterIgnoredChecks` (`release`, `packages`, `architecture`), which could also park an item master-broken.
+- **#100 A blocked session kept winning items.** Its stream client accepted every offer by itself, which reset the session's missed offers,
+  and the take-back five minutes later counted as nothing. Now the client's own accept (`accepted_by: client`) is no answer, every take-back is
+  a miss, and `timing.offerMissLimit` (2) misses in a row with a take-back among them block the session: it is offered nothing, pinned items
+  included, until it calls a verb of its own or a new session of the name registers (a reconnect of the same session keeps the block). Lapsed
+  offers alone still give the timed cool-down. A block is a `session-blocked` plant event on the operator stream and a `session-blocked` entry
+  of the patrol digest (worker, item, `blockedMinutes`); `/status` shows `blocked`, `blockedSince` and `takenBackInRow` per worker and
+  `sessionsBlocked`. QC environments are not part of the rule (they run outside the model session). Open: the supervisor's and operator
+  session's skills and `docs/design/operator-session.md` (owner review) do not list the new digest kind and the plant event codes
+  `session-blocked` and `session-unblocked`; the block is in memory and a restart forgets it.
 - **#107 The owner session idled from the merge to the Release Queue.** The owner was kept until `item.complete` (master green, release,
   production), doing nothing while the gateway settled the item, so its session was neither free nor told to end. Now the owner hears
   `item.merged` and is released at once (`Plant.Merged`, also on the merge verb and the gateway's merge after a PASS); the Sweeper no longer
