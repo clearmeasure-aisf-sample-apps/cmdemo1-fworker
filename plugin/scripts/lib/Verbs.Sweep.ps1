@@ -409,7 +409,7 @@ function Invoke-Intake($a, $List, $Offers, $Unconfirmed, $Pins, $Seen, [string]$
         # Depends-on (issue 65): read with the sweep's own functions when this gateway has them
         if (Get-Command Get-ItemDependencies -ErrorAction SilentlyContinue) {
             $body = if ($it.ContainsKey('body')) { "$($it.body)" } else { "$((Get-ItemInfo ([int]$it.number)).body)" }
-            $deps = @(Get-ItemDependencies ([int]$it.number) $body)
+            $deps = Get-ItemDependencies ([int]$it.number) $body
             if (@($deps | Where-Object { -not (Test-DependencyMet $_ $byNumber $depCache) }).Count -gt 0) { continue }
         }
         $n = [int]$it.number
