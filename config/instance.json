@@ -134,6 +134,7 @@
     "baseUpdateDebounceSeconds": 20
   },
   "baseUpdate": {
+    "mode": "conflict-or-merge",
     "enabled": true,
     "autoUpdateBranch": true,
     "autoUpdateDelaySeconds": 120,

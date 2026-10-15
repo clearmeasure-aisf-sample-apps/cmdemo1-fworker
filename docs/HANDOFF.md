@@ -248,6 +248,13 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Closed on 2026-10-15 (issue #103):
+
+- **#103 Base updates restarted CI on every open pull request.** New setting `baseUpdate.mode`, default `conflict-or-merge`: an owner gets
+  `base.updated` only when its pull request has a merge conflict with master (`reason: "conflict"`, also covers the silent wait of #56), and the
+  gateway brings a behind branch up to date only right before it merges a PASS (once per verdict). `every-move` keeps the old behaviour (the owner
+  suite runs with it; `FACTORY_BASE_UPDATE_MODE` overrides). `docs/design/plant-manager.md` 6a. Open: not yet seen live on tdd.
+
 Closed on 2026-10-15 (issues #79 and #82):
 
 - **#79 A flaky master Build parked merged items as master-broken** (276, 272, 280). The settle step asked GitHub to re-run the failed jobs
