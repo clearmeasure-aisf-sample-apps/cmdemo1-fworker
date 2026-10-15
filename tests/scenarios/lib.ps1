@@ -30,6 +30,9 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     # one item per session (plant.oneItemPerSession) is on in the source defaults; the suites let one scripted session take many items, so it is off here
     # unless a suite sets it. The scenarios of the rule turn it on for their own gateway (FACTORY_ONE_ITEM_PER_SESSION, owner.ps1).
     $cfg.plant = @{ oneItemPerSession = $false }
+    # work intake (issue 104) is on in the source defaults; the suites create their items in the columns they need, so it is off here unless a
+    # scenario switches it on (FACTORY_INTAKE, owner.ps1)
+    $cfg.intake = @{ enabled = $false }
     foreach ($k in $Config.Keys) { $cfg[$k] = $Config[$k] }
     $cfgPath = Join-Path $work 'instance.test.json'; $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
     $fakeDll = Join-Path $script:Root 'tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll'

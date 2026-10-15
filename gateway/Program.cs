@@ -1571,7 +1571,9 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             var soon = false;
             try
             {
-                var (code, output) = await runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(280));
+                // work intake (issue 104): the sweep may pull a Todo item onto the board when an owner session has a free slot
+                var sweepInput = ownerMode ? new JsonObject { ["intake"] = new JsonObject { ["freeSlots"] = plant.IntakeSlots() } }.ToJsonString() : "{}";
+                var (code, output) = await runner.RunAsync("sync-board", sweepInput, TimeSpan.FromSeconds(280));
                 hub.LastSweep = DateTime.UtcNow;
                 if (code == 0)
                 {
@@ -1593,6 +1595,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                             if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
                                 plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
                         plant.SetReleaseQueue(j["release_queue"] as JsonArray);
+                        foreach (var a in acts)   // issue 104: an item the sweep pulled from Todo, for the operator stream
+                            if (a is JsonObject io && io["action"]?.ToString() == "intake-pulled" && io["item"] is JsonValue iv && iv.TryGetValue<int>(out var pulled)) plant.OperatorPlantEvent("pulled", pulled, column: io["column"]?.ToString() ?? "");
                         try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
                         foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
                             if (t is JsonObject to && to["item"] is JsonNode ti)

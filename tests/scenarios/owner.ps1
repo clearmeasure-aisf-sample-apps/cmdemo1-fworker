@@ -1126,3 +1126,40 @@ $OwnerScenarios['unpark: the operator releases a park early with a reason; the n
     $r = F 'op' @('unpark', '--item', $n, '--reason', 'again'); CheckExit 'an item with no park' $r 10 'not-parked'
     Stop-OwnerClient 'una'
 }
+
+# Issue 104: work intake. With a worker slot free and nothing waiting in Technical Design, the sweep pulls the top Todo item that is not held, pinned
+# or waiting on another item, at most intake.wipLimit items in the AI columns. The suites run with intake off; this scenario restarts the gateway
+# with FACTORY_INTAKE=1 and a limit of 2 (FACTORY_INTAKE_WIP).
+$OwnerScenarios['intake: a free slot and an empty Technical Design pull the top Todo item that is not held, pinned or waiting, up to the WIP limit [full]'] = {
+    $old = @{ i = $env:FACTORY_INTAKE; w = $env:FACTORY_INTAKE_WIP }; $env:FACTORY_INTAKE = '1'; $env:FACTORY_INTAKE_WIP = '2'
+    $col = { param($n) "$((Get-FakeIssue $n).column)" }
+    try {
+        # Todo, top first: one held, one pinned, one that depends on an open item, then the two that may come, then one for after the limit
+        $other = New-Item-Fake 'Intake: an open item elsewhere' 'x' $OwnerLabels 'In Progress'
+        $held = New-Item-Fake 'Intake: held' 'x' ($OwnerLabels + 'hold:owner') 'Todo'
+        $pinned = New-Item-Fake 'Intake: pinned' 'x' ($OwnerLabels + 'worker:nobody-here') 'Todo'
+        $waits = New-Item-Fake 'Intake: waits' "Depends on #$other" $OwnerLabels 'Todo'
+        $a = New-Item-Fake 'Intake: first' 'x' $OwnerLabels 'Todo'
+        $b = New-Item-Fake 'Intake: second' 'x' $OwnerLabels 'Todo'
+        $c3 = New-Item-Fake 'Intake: third' 'x' $OwnerLabels 'Todo'
+        Restart-Gateway
+        Start-Sleep -Seconds 6
+        Check 'with no session connected nothing is pulled' ((& $col $a) -eq 'Todo' -and (& $col $b) -eq 'Todo')
+        Start-OwnerClient 'in1' 'persistent-local' '--capacity 1 --no-auto-accept'
+        Check 'a free slot pulls the top item that may come: moved to Technical Design and offered' (Wait-Until -Seconds 60 { (& $col $a) -eq 'Technical Design' -and (Get-Assigned 'in1' $a).Count -gt 0 }) "a: $(& $col $a)"
+        Check 'the held, the pinned and the waiting item stay in Todo' ((& $col $held) -eq 'Todo' -and (& $col $pinned) -eq 'Todo' -and (& $col $waits) -eq 'Todo')
+        Check 'the journal says why it was pulled' (@((Get-FakeIssue $a).comments | Where-Object { $_.body -like '*pulled from **Todo** into*plant event=pulled*' }).Count -eq 1)
+        Start-Sleep -Seconds 6
+        Check 'while it waits for its session nothing more is pulled' ((& $col $b) -eq 'Todo')
+        $r = Fo 'in1' @('accept', '--item', $a, '--assignment', @(Get-Assigned 'in1' $a)[-1].assignment); CheckExit 'in1 accepts it' $r 0
+        Start-OwnerClient 'in2' 'persistent-local' '--capacity 1 --no-auto-accept'
+        Check 'the next free slot pulls the next item' (Wait-Until -Seconds 60 { (& $col $b) -eq 'Technical Design' -and (Get-Assigned 'in2' $b).Count -gt 0 }) "b: $(& $col $b)"
+        $r = Fo 'in2' @('accept', '--item', $b, '--assignment', @(Get-Assigned 'in2' $b)[-1].assignment); CheckExit 'in2 accepts it' $r 0
+        Start-OwnerClient 'in3' 'persistent-local' '--capacity 1 --no-auto-accept'
+        Start-Sleep -Seconds 10
+        Check 'at the WIP limit (2 items in the AI columns) a free slot pulls nothing' ((& $col $c3) -eq 'Todo' -and (Get-Assigned 'in3' $c3).Count -eq 0) "third: $(& $col $c3)"
+    } finally {
+        foreach ($w in 'in1', 'in2', 'in3') { Stop-OwnerClient $w }
+        $env:FACTORY_INTAKE = $old.i; $env:FACTORY_INTAKE_WIP = $old.w; Restart-Gateway
+    }
+}

@@ -58,6 +58,12 @@
   "plant": {
     "oneItemPerSession": true
   },
+  "intake": {
+    "enabled": true,
+    "fromColumn": "Todo",
+    "wipLimit": 6,
+    "holdLabels": ["Needs Human Review"]
+  },
   "schedule": {
     "hostOwnedDefault": 0,
     "hostBuildsDefault": 1,

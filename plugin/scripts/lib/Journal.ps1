@@ -51,6 +51,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
         'unparked' { if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
+        'pulled' { return "pulled from **$($F.from)** into $col: a worker slot was free and nothing waited there ($($F.wip) of at most $($F.wipLimit) items in the AI columns)." }
         default { return "$Event" }
     }
 }
