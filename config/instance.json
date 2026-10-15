@@ -99,6 +99,7 @@
     "offerMissLimit": 2,
     "offerCoolDownMinutes": 5,
     "parkHours": 24,
+    "autoUnparkMax": 3,
     "awaitingChecksParkMinutes": 60,
     "docsOnlyReleaseGraceSeconds": 120,
     "qcLinkDays": 7,

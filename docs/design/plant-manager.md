@@ -354,3 +354,21 @@ alone, a card without a column gets the intake column (the first column of `colu
 there. Each placement is journalled once (`board-added`); from there the item is offered like any new item, after `timing.sweepSeenCount`
 sightings. At most 20 attempts per sweep (the rest follow at the next sweeps); a rate limit, or three failures in a row, end the pass. A failed listing is reported in the
 sweep's `errors` (item 0), a failed placement in its `actions` (`board-add-failed`); both are tried again at the next sweep.
+
+## 16. Auto-unpark (2026-10-15, issue 90)
+
+A park whose cause has cleared is lifted by the sweep (`Test-AutoUnpark` and `Invoke-AutoUnpark` in `Verbs.Sweep.ps1`), under the item lock on a
+fresh read (only the same park), with a journal line `unparked` "by the sweep" and the reason; the gateway forgets the park (`unparked` of
+`sync-board`). An open item without a live claim is handed to its column, so it is offered at that sweep; an owner that still holds the claim gets
+the trigger `item.unparked`.
+
+| Park | Lifted when |
+|---|---|
+| `master-broken` | master's head is green and every check that failed at the park (`park.failed`, recorded since this change) passed on it; a skipped job (a docs-only head) does not count. The item waits for master green again; when its own merge commit is still not green (issue 70), master's green head is judged instead (`merge.judge_sha`). |
+| `verdict-failed`, `fix-forward-exhausted` | the item's open pull request is green on a head newer than the one the park judged (`park.pr`, `park.head`, recorded since this change). |
+| `session-relaunch-budget`, and `watchdog-relaunch-budget` with `last_take_back` | a worker session could take the item now (`free_workers`, which the gateway passes to `sync-board`: connected owner sessions, not draining or cooling, with a free slot, not spent, with room on their host); one lift per free session in a sweep. |
+
+A park written before its facts were recorded (`park.failed`, `park.head`) is left to a person. No item is lifted more than
+`timing.autoUnparkMax` times (default 3) per park code (`state.auto_unparks`): an item that breaks every session or every build is not retried for
+ever. Every other park (worker-failure, demotion-limit, same-criterion-repeated, inspector-escalated, stuck, the release-candidate timeouts) stays
+a decision for a person (`POST /api/v1/items/{n}/unpark`).

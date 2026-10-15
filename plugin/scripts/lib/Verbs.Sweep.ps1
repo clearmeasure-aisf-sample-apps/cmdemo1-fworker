@@ -15,7 +15,7 @@ function Complete-AwaitingChecks([int]$n, $info, $st) {
         $rounds = $(if (Test-Has $s 'fix_forward_rounds') { [int]$s.fix_forward_rounds } else { 0 }) + 1
         $s.fix_forward_rounds = $rounds; $s.Remove('awaiting_checks'); $s.Remove('park')
         if ($rounds -gt [int]$c.timing.fixForwardMaxRounds) {
-            Set-Park $s 'fix-forward-exhausted' ($c.timing.parkHours * 60); Save-State $n $st
+            Set-Park $s 'fix-forward-exhausted' ($c.timing.parkHours * 60); $s.park.pr = [int]$pr.number; $s.park.head = "$($pr.head.sha)"; Save-State $n $st
             Add-Comment $n "PR #$($pr.number) has failed CI after $($rounds - 1) fix-forward Development rounds - parked for a human."
             return @{ outcome = 'parked'; reason = 'fix-forward-exhausted' }
         }
@@ -118,6 +118,73 @@ function Clear-ClosedPark([int]$n) {
     }
 }
 
+# Auto-unpark: a park whose cause has cleared is lifted by the sweep, so nobody has to watch for it (the overnight runs of 2026-10-14 needed a person
+# for each). Returns why the cause cleared, or $null. $Ctx caches master's state for one sweep and carries free_workers from the gateway.
+#   master-broken             master's head is green now AND every check that failed at the park (park.failed) passed on it (a skipped job, as
+#                             on a docs-only head, does not count); a park written before park.failed existed is left to a person
+#   verdict-failed,           the item's open pull request is green on a head newer than the one the park judged (park.head; a park written
+#   fix-forward-exhausted     before park.head existed is left to a person)
+#   session-relaunch-budget   (and a watchdog-relaunch-budget whose last claim was taken back by the gateway): a session that could take it is free
+# No item is lifted more than timing.autoUnparkMax times (default 3) per park code: after that the park is a person's again, so an item that
+# breaks every session it gets is not retried for ever.
+function Test-AutoUnpark([int]$n, $s, $Park, $Ctx) {
+    $code = "$($Park.reason)"
+    $t = (Get-Cfg).timing; $max = if (Test-Has $t 'autoUnparkMax') { [int]$t.autoUnparkMax } else { 3 }
+    $cnt = if ((Test-Has $s 'auto_unparks') -and (Test-Has $s.auto_unparks $code)) { [int]$s.auto_unparks[$code] } else { 0 }
+    if ($cnt -ge $max) { return $null }   # (0 switches the lifts off)
+    switch ($code) {
+        'master-broken' {
+            if (-not (Test-Has $Park 'failed') -or @($Park.failed).Count -eq 0) { return $null }
+            if (-not $Ctx.ContainsKey('master')) {
+                $Ctx.master = $null
+                try { $head = Get-BaseHead; $chk = Get-ChecksFor $head; $Ctx.master = @{ sha = $head; green = ($chk.status -eq 'success'); runs = $chk.runs } } catch { }
+            }
+            $mc = $Ctx.master
+            if (-not $mc -or -not $mc.green) { return $null }
+            foreach ($f in @($Park.failed)) { $r = $mc.runs["$f"]; if (-not $r -or "$($r.conclusion)" -ne 'success') { return $null } }
+            return "master is green again at $($mc.sha.Substring(0, 7)), with $(@($Park.failed) -join ', ') passing"
+        }
+        { $_ -in 'verdict-failed', 'fix-forward-exhausted' } {
+            if (-not (Test-Has $Park 'head') -or -not "$($Park.head)") { return $null }
+            $prn = if (Test-Has $Park 'pr') { [int]$Park.pr } elseif ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }
+            if ($prn -le 0) { return $null }
+            $pr = try { Get-Pr $prn } catch { $null }
+            if (-not $pr -or "$($pr.state)" -ne 'open' -or "$($pr.head.sha)" -eq "$($Park.head)") { return $null }
+            if ((Get-ChecksFor "$($pr.head.sha)").status -eq 'success') { return "PR #$prn is green on a newer head $("$($pr.head.sha)".Substring(0, 7))" }
+        }
+        { $_ -eq 'session-relaunch-budget' -or ($_ -eq 'watchdog-relaunch-budget' -and (Test-Has $Park 'last_take_back')) } {
+            # one lift per free session in a sweep: six parked items and one free session lift one
+            if ([int]$Ctx.free_workers -gt 0) { return "the relaunches were lost to session trouble ($(if (Test-Has $Park 'last_take_back') { $Park.last_take_back } else { 'take-backs' })) and a worker session can take it now" }
+        }
+    }
+    return $null
+}
+# Lifts the park under the item lock on a fresh read (only the same park: one a person or a verb changed meanwhile is left), counts the lift,
+# journals it, and hands an open item without a live claim to its column so the sweep offers it at once. A merged item parked master-broken goes
+# back to waiting for master green, judged on master's green head when its own merge commit is still not green (issue 70). Returns
+# @{ code; handoff; owned } or $null.
+function Invoke-AutoUnpark([int]$n, $Park, [string]$Why, $Ctx) {
+    Use-ItemLock $n {
+        $c = Get-Cfg
+        $info = Get-ItemInfo $n; $f = Get-State $n; $fs = $f.state
+        if (-not (Test-Has $fs 'park') -or "$($fs.park.at)" -ne "$($Park.at)" -or "$($fs.park.reason)" -ne "$($Park.reason)") { return $null }
+        $code = "$($fs.park.reason)"; $fs.Remove('park')
+        if (-not (Test-Has $fs 'auto_unparks')) { $fs.auto_unparks = @{} }
+        $fs.auto_unparks[$code] = $(if (Test-Has $fs.auto_unparks $code) { [int]$fs.auto_unparks[$code] } else { 0 }) + 1
+        $handoff = $false
+        if ($code -eq 'master-broken' -and (Test-Has $fs 'merge')) {
+            $m = $fs.merge; $m.awaiting = 'master-green'
+            if ($Ctx.master -and "$($m.sha)" -and (Get-ChecksFor "$($m.sha)").status -ne 'success') { $m.judge_sha = $Ctx.master.sha } elseif (Test-Has $m 'judge_sha') { $m.Remove('judge_sha') }
+        } elseif ($info.open -and -not (Test-ClaimLive $fs) -and (Test-NameIn "$($info.column)" $c.columns.ai)) {
+            $fs.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $handoff = $true
+        }
+        $why2 = "$Why (automatic lift $($fs.auto_unparks[$code]) of at most $(if (Test-Has $c.timing 'autoUnparkMax') { $c.timing.autoUnparkMax } else { 3 }))"
+        [void](Add-Journal $n $f 'unparked' @{ column = "$($info.column)"; code = $code; by = 'the sweep'; reason = $why2 } "auto|$($Park.at)")
+        Save-State $n $f
+        return @{ code = $code; handoff = $handoff; owned = (Test-OwnedClaim $fs) -and (Test-ClaimLive $fs) }
+    } 3
+}
+
 # Board guard: an open issue with the factory label that has no card on the board, or a card with no column, is invisible to the sweep (on
 # 2026-10-14 nine new items sat unseen until a person added them). Each sweep lists the open labelled issues (REST, paged, pull requests and the
 # rival label skipped) and, for each one the board snapshot shows without a column, reads the issue again (a person may have placed it meanwhile):
@@ -197,6 +264,7 @@ function Verb_sync_board($a) {
     $unparked = @()
     $list = Get-BoardList
     $last = Get-LastColumn
+    $unparkCtx = @{ free_workers = $(if (Test-Has $a 'free_workers') { [int]$a.free_workers } else { 0 }) }
     foreach ($it in $list) {
         # a closed item is still followed when its merged pull request closed it and the flow after the merge is not finished
         if (-not (Test-NameIn $c.label $it.labels)) { continue }
@@ -352,6 +420,19 @@ function Verb_sync_board($a) {
                     } else {
                         if ($r.outcome -eq 'completed') { $offers += @{ item = $n; column = $r.moved_to; reason = 'handoff' } }
                         if ($r.outcome -eq 'fix-forward') { $offers += @{ item = $n; column = $c.columns.development; reason = 'fix-forward' } }
+                    }
+                }
+                elseif (-not $dry) {
+                    $why = Test-AutoUnpark $n $s $park $unparkCtx
+                    if ($why) {
+                        $u = Invoke-AutoUnpark $n $park $why $unparkCtx
+                        if ($u) {
+                            $actions += @{ item = $n; action = 'auto-unparked'; code = $u.code; reason = $why }; $unparked += $n
+                            if ($u.code -in 'session-relaunch-budget', 'watchdog-relaunch-budget') { $unparkCtx.free_workers = [int]$unparkCtx.free_workers - 1 }
+                            if ($u.handoff) { $offers += @{ item = $n; column = $col; reason = 'handoff' } }
+                            # an owner that still holds the claim (owner mode keeps it across a fix-forward wait) is told, so it carries on
+                            if ($u.owned) { $triggers += @{ item = $n; event = 'item.unparked'; code = $u.code; reason = $why } }
+                        }
                     }
                 }
                 continue

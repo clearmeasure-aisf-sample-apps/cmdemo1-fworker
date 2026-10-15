@@ -1571,7 +1571,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             var soon = false;
             try
             {
-                var (code, output) = await runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(280));
+                // free_workers: the auto-unpark of a park caused by session trouble needs a session that could take the item (Verbs.Sweep.ps1)
+                var (code, output) = await runner.RunAsync("sync-board", ownerMode ? new JsonObject { ["free_workers"] = plant.FreeOwnerSessions() }.ToJsonString() : "{}", TimeSpan.FromSeconds(280));
                 hub.LastSweep = DateTime.UtcNow;
                 if (code == 0)
                 {
