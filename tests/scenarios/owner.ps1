@@ -918,6 +918,38 @@ $OwnerScenarios['owner: one item per session: a spent session that owns nothing 
     }
 }
 
+# Issue 107: the owner is released at item.merged. The gateway settles the item from the merge on (master green, release, Done), so the owner's
+# session is spent and owns nothing at once: it is told session.end instead of idling until the item reaches the Release Queue or Done.
+$OwnerScenarios['owner: the owner is released at item.merged, its session is told session.end, and the gateway settles the item to Done'] = {
+    $oldOne = $env:FACTORY_ONE_ITEM_PER_SESSION; $oldGrace = $env:FACTORY_TIMING_sessionEndGraceSeconds; $oldEnd = $env:FACTORY_SESSION_END_FILE
+    $mk = Join-Path $script:Work 'mrg1-work/session-ended'
+    try {
+        $env:FACTORY_ONE_ITEM_PER_SESSION = '1'; $env:FACTORY_TIMING_sessionEndGraceSeconds = '3'; Restart-Gateway
+        # the item is taken to Functional Testing by the scripted holder first, with no session connected, so its first offer is the FT hand-off
+        $x = Pm-ToValidation ($OwnerLabels + 'worker:mrg1')
+        $env:FACTORY_SESSION_END_FILE = $mk
+        Start-OwnerClient 'mrg1' 'persistent-local'
+        $env:FACTORY_SESSION_END_FILE = $oldEnd
+        Check 'the item is offered in Functional Testing' (Wait-Until -Seconds 40 { (Get-Assigned 'mrg1' $x.n).Count -gt 0 })
+        $r = Fo 'mrg1' @('accept', '--item', $x.n, '--assignment', (Get-Assigned 'mrg1' $x.n)[-1].assignment); CheckExit 'the session accepts it' $r 0
+        Check 'the plant names mrg1 its owner' (@((Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$($x.n)" -and $_.Value -eq 'mrg1' }).Count -eq 1)
+        $v = Do-Verdict $x.n $x.pr 'mrg1'; CheckExit 'the PASS verdict' $v 0
+        Check 'the gateway merged it' (Wait-Until -Seconds 40 { (Get-FakePr $x.pr).merged })
+        Check 'the owner heard item.merged' (Wait-Until -Seconds 20 { @(Get-WorkerEvents 'mrg1' | Where-Object { $_.event -eq 'item.merged' -and $_.item -eq $x.n }).Count -ge 1 })
+        $owned = { @((Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$($x.n)" }).Count -gt 0 }
+        Check 'and is released at once: the plant names no owner for the merged item' (Wait-Until -Seconds 10 { -not (& $owned) }) ((Get-Plant).plant.owners | ConvertTo-Json -Compress)
+        # (sampled while it settles: a sweep that read the claim before the merge must not name the owner again)
+        $back = $false; foreach ($i in 1..6) { if (& $owned) { $back = $true }; Start-Sleep -Seconds 1 }
+        Check 'no sweep gives the merged item an owner again' (-not $back)
+        Check 'its spent session is told session.end and its client writes the launcher marker' (Wait-Until -Seconds 30 { @(Get-WorkerEvents 'mrg1' | Where-Object { $_.event -eq 'session.end' }).Count -gt 0 -and (Test-Path $mk) })
+        Check 'the gateway settles the item to Done without an owner' (Wait-Until -Seconds 60 { (Get-FakeIssue $x.n).column -eq 'Done' }) "column $((Get-FakeIssue $x.n).column)"
+    } finally {
+        Stop-OwnerClient 'mrg1'
+        $env:FACTORY_SESSION_END_FILE = $oldEnd
+        $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; $env:FACTORY_TIMING_sessionEndGraceSeconds = $oldGrace; Restart-Gateway
+    }
+}
+
 # Issue 98: a pinned item whose worker cannot take it (away here) is offered to any eligible worker after timing.pinFallbackMinutes, with a journal
 # line, and the pin stays set aside while the label names the same worker.
 $OwnerScenarios['owner: a pin that waits too long falls back to another worker and is journalled'] = {

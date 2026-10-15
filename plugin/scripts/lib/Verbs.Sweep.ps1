@@ -253,8 +253,8 @@ function Verb_sync_board($a) {
     $seenFile = Get-SeenFile
     $seen = if (Test-Path $seenFile) { Get-Content -Raw $seenFile | ConvertFrom-Json -AsHashtable } else { @{} }
     $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @()
-    # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled, whose
-    # owner still waits for item.complete although the claim ended at the merge
+    # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled (their
+    # owner was released at item.merged)
     $owned = @{}; $settling = @(); $unconfirmed = @()
     # pass_unmerged: every item with a PASS verdict that the gateway is to merge and has not merged yet, with why (a reason code) and since when
     $passUnmerged = @()
