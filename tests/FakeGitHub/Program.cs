@@ -31,7 +31,22 @@ app.Run(async ctx =>
     // /_fake/latency: the answer to a matching request is held back, as a slow GitHub would (the test control itself is never slowed)
     int wait; lock (gate) { wait = world.LatencyFor(method, path, body); }
     if (wait > 0) await Task.Delay(wait);
-    lock (gate) { res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString()); }
+    // as GitHub: every answer of the API carries the rate limit of the caller's resource (core, or graphql for /graphql); an exhausted one answers
+    // 403 with x-ratelimit-remaining 0 and the documented message (/_fake/rate sets what is left)
+    (string Resource, int Limit, int Remaining, long Reset, int Used)? rate = null;
+    lock (gate)
+    {
+        rate = world.RateFor(path);
+        // (GraphQL answers 200 with an error of type RATE_LIMITED, REST 403)
+        if (rate is { Remaining: <= 0, Resource: "graphql" }) res = (200, "{\"errors\":[{\"type\":\"RATE_LIMITED\",\"message\":\"API rate limit exceeded for installation ID 7.\"}]}");
+        else if (rate is { Remaining: <= 0 }) res = (403, "{\"message\":\"API rate limit exceeded for installation ID 7. If you reach out to GitHub Support for help, please include the request ID.\",\"documentation_url\":\"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting\"}");
+        else res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString());
+    }
+    if (rate is { } rl)
+    {
+        ctx.Response.Headers["x-ratelimit-limit"] = rl.Limit.ToString(); ctx.Response.Headers["x-ratelimit-remaining"] = Math.Max(0, rl.Remaining).ToString();
+        ctx.Response.Headers["x-ratelimit-used"] = rl.Used.ToString(); ctx.Response.Headers["x-ratelimit-reset"] = rl.Reset.ToString(); ctx.Response.Headers["x-ratelimit-resource"] = rl.Resource;
+    }
     ctx.Response.StatusCode = res.Item1;
     // as GitHub: a job log and an artifact archive are answered with a redirect to a signed address of another store
     if (res.Item2 is Redirect go) { ctx.Response.Headers.Location = $"http://127.0.0.1:{port}{go.To}"; return; }
@@ -202,6 +217,13 @@ sealed class World
             if (method == "DELETE") return li.Labels.Remove(Uri.UnescapeDataString(m.Groups[3].Value)) ? (200, new JsonArray()) : (404, "{\"message\":\"Label does not exist\"}");
         }
         if (path == root + "/labels" && method == "GET") return (200, new JsonArray(labelNames.Select(n => (JsonNode)J(("name", n))).ToArray()));
+        if (path == root + "/issues" && method == "POST")
+        {   // as GitHub: a new open issue with its labels (a label that does not exist yet is created with it), on no board until it is added
+            var ni = new Issue { Number = nextNumber++, Title = b!["title"]!.ToString(), Body = b["body"]?.ToString() ?? "" };
+            ni.Node = "I_" + ni.Number; foreach (var l in b["labels"]?.AsArray() ?? new JsonArray()) { if (!ni.Labels.Contains(l!.ToString())) ni.Labels.Add(l.ToString()); labelNames.Add(l.ToString()); }
+            issues[ni.Number] = ni;
+            return (201, J(("number", ni.Number), ("node_id", ni.Node), ("state", "open"), ("title", ni.Title), ("html_url", $"https://fake/issues/{ni.Number}")));
+        }
         if (path == $"{root}/issues" && method == "GET")
         {   // the repository's issues, as GitHub lists them: state (default open), labels (all of a comma list), per_page (default 30, at most 100), page
             var st = q["state"].ToString() is { Length: > 0 } sv ? sv : "open";
@@ -214,6 +236,7 @@ sealed class World
         }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)$")).Success)
         {
+            if (!issues.ContainsKey(int.Parse(m.Groups[1].Value))) return (404, "{\"message\":\"Not Found\"}");
             var i = issues[int.Parse(m.Groups[1].Value)];
             if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
             return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body)));
@@ -320,9 +343,11 @@ sealed class World
                 case "merge": return Merge(pr, b);
                 default:
                     if (method == "PATCH")
-                    {   // title and body only, and only while open (as GitHub: a closed pull request's text can be edited there, the product never does)
+                    {   // title and body only, and only while open (as GitHub: a closed pull request's text can be edited there, the product never does);
+                        // state "closed" closes an open pull request without merging it, as GitHub does
                         if (b?["body"] is { } nb) pr.Body = nb.ToString();
                         if (b?["title"] is { } nt) pr.Title = nt.ToString();
+                        if (b?["state"]?.ToString() == "closed" && !pr.Merged) pr.Open = false;
                     }
                     return (200, PrJson(pr, true));
             }
@@ -373,6 +398,14 @@ sealed class World
         {
             var x = artifacts.FirstOrDefault(y => y.Id == long.Parse(m.Groups[1].Value)); if (x == null) return (404, "{\"message\":\"Not Found\"}");
             return x.Expired ? (410, "{\"message\":\"Artifact has expired\"}") : (302, new Redirect($"/_blob/artifacts/{x.Id}"));
+        }
+        if ((m = Regex.Match(path, $"^{root}/actions/jobs/(\\d+)/rerun$")).Success && method == "POST")
+        {   // as GitHub: the job runs again; here it passes at once (rerunJobs counts the reruns, for the scenarios)
+            var id = long.Parse(m.Groups[1].Value);
+            var c = checks.Values.SelectMany(l => l).FirstOrDefault(c => c.Id == id);
+            if (c == null) return (404, "{\"message\":\"Not Found\"}");
+            c.Conclusion = "success"; rerunJobs++;
+            return (201, null);
         }
         if (path == root + "/actions/runs" && method == "GET")
         {   // the workflow runs of a commit (head_sha), as GitHub lists them: one per run id of its check runs, judged on the latest attempt of each job
@@ -595,7 +628,22 @@ sealed class World
         return (404, null);
     }
 
-    int latencyMs; Regex? latencyMatch; int refPage;   // refPage 0: matching-refs does not page (GitHub)
+    // The rate limit of the caller's identity per resource (core, graphql), counted per request as GitHub does within its hourly window. The default
+    // limit is far above what a suite spends, so nothing runs out unless a scenario says so with /_fake/rate { resource, remaining, resetSeconds, limit }.
+    sealed class Rate { public int Limit = 1_000_000, Remaining = 1_000_000; public long Reset; }
+    readonly Dictionary<string, Rate> rates = new();
+    public (string, int, int, long, int)? RateFor(string path)
+    {
+        if (path.StartsWith("/_fake/") || path.StartsWith("/octopus/") || path.StartsWith("/_blob/") || path.StartsWith("/_uploads/") || path == "/_healthcheck") return null;
+        var res = path == "/graphql" ? "graphql" : "core";
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (!rates.TryGetValue(res, out var r)) rates[res] = r = new Rate { Reset = now + 3600 };
+        if (now >= r.Reset) { r.Remaining = r.Limit; r.Reset = now + 3600; }
+        if (r.Remaining > 0) r.Remaining--;
+        else return (res, r.Limit, 0, r.Reset, r.Limit);
+        return (res, r.Limit, r.Remaining, r.Reset, r.Limit - r.Remaining);
+    }
+    int latencyMs; Regex? latencyMatch; int refPage; int rerunJobs;   // refPage 0: matching-refs does not page (GitHub)
     public int LatencyFor(string method, string path, string body) => latencyMs > 0 && !path.StartsWith("/_fake/") && latencyMatch!.IsMatch(method + " " + path + "\n" + body) ? latencyMs : 0;
     (int, object?) Control(string method, string what, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b)
     {
@@ -603,6 +651,14 @@ sealed class World
         {
             case "latency":   // { ms, match }: every request whose "METHOD path" line plus body matches the regular expression waits ms first; ms 0 ends it
                 latencyMs = b?["ms"]?.GetValue<int>() ?? 0; latencyMatch = latencyMs > 0 ? new Regex(b?["match"]?.ToString() ?? ".") : null; return (200, J(("ok", true)));
+            case "rate":   // { resource (core), remaining, resetSeconds (3600), limit }: what is left of the rate limit; remaining 0 makes every request of it a 403
+            {
+                var res = b?["resource"]?.ToString() ?? "core"; var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if (!rates.TryGetValue(res, out var r)) rates[res] = r = new Rate();
+                if (b?["limit"] is { } lim) r.Limit = lim.GetValue<int>();
+                r.Remaining = b?["remaining"]?.GetValue<int>() ?? r.Limit; r.Reset = now + (long)(b?["resetSeconds"]?.GetValue<double>() ?? 3600);
+                return (200, J(("ok", true), ("resource", res), ("remaining", r.Remaining), ("reset", r.Reset)));
+            }
             case "ref-page":   // { size }: matching-refs pages, with at most size refs a page (1 to 100); size 0 or none: it does not page, as GitHub
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "arm": return (200, ArmState());
@@ -616,7 +672,7 @@ sealed class World
                 return (200, J(("ok", true), ("name", e.Name)));
             }
             case "reset":
-                latencyMs = 0; latencyMatch = null; refPage = 0;
+                latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();
                 artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
                 masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; return (200, J(("ok", true)));
@@ -747,10 +803,10 @@ sealed class World
                 return (200, J(("ok", true)));
             case "state":
                 return (200, J(
-                    ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
+                    ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("title", i.Title), ("body", i.Body), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
                         ("comments", new JsonArray(i.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())))).ToArray())),
                     ("appMints", appMints), ("scopedMints", new JsonArray(scopedMints.Select(x => (JsonNode)x).ToArray())), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
-                    ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("releases", releases.Count), ("requests", log.Count)));
+                    ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("rerunJobs", rerunJobs), ("releases", releases.Count), ("requests", log.Count)));
             case "health": healthStatus = b?["status"]?.GetValue<int>() ?? 200; return (200, J(("ok", true)));
             case "log": return (200, new JsonArray(log.Select(l => (JsonNode)l).ToArray()));
         }

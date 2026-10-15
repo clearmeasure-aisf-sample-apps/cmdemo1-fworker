@@ -186,7 +186,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             w.Type = type; w.Caps = new(caps); w.Capacity = capOverride.TryGetValue(name, out var capSet) ? capSet : Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
-            w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name);   // issue 80: only the operator clears its drain
+            w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name) || mgrDrained.Contains(name);   // issue 80: only the operator clears its drain (and the plant manager its own, Manager.cs)
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
             w.RestartSent = 0;                                // and session.restart again, if it is still due
             w.Model = model; w.Effort = effort; w.Runtime = runtime;
@@ -1241,7 +1241,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // owner the sweep no longer lists (an idle release, a card moved away by a person) is dropped once the grace from its accept has passed. Not
     // dropped: an item the sweep could not read this time (`keep`), and an owner set through the test seam. An item whose merge is settling has no
     // owner any more: it was released at item.merged (Merged).
-    void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now)
+    // scope (issue 92): an incremental pass read only these items; the owners of every other item are not touched (nor their counts of misses)
+    void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now, IReadOnlyCollection<int>? scope = null)
     {
         var kept = new HashSet<int>(keep);
         var listed = new Dictionary<int, OwnedInfo>();
@@ -1253,6 +1254,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
         foreach (var (item, name) in ownerOf.ToList())
         {
+            if (scope != null && !scope.Contains(item)) continue;
             if (listed.TryGetValue(item, out var li) && li.Holder == name) { ownedInfo[item] = li; ownedMisses.Remove(item); continue; }
             if (kept.Contains(item) || seamOwned.Contains(item)) { ownedMisses.Remove(item); continue; }
             if (!ownedSince.TryGetValue(item, out var since)) ownedSince[item] = since = now;
@@ -1496,6 +1498,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             if (store.Slot is { } s && s.Name == name && s.Out != null) { closed = true; s.Out.Writer.TryComplete(); s.Out = null; store.Get(name).GoneAt = DateTime.UtcNow; }
             if (RevokeOperator(name)) closed = true;
+            if (RevokeKeeper(name)) closed = true;
             return closed;
         }
     }
@@ -1511,8 +1514,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         lock (gate)
         {
             if (!workers.TryGetValue(name, out var w)) return false;
-            if (byOperator) { if (on) drainedNames.Add(name); else drainedNames.Remove(name); }
-            w.Draining = on || drainedNames.Contains(name);
+            // the operator's resume lifts the plant manager's drain of the name too (Manager.cs); a session's own resume lifts neither
+            if (byOperator) { if (on) drainedNames.Add(name); else { drainedNames.Remove(name); mgrDrained.Remove(name); } }
+            w.Draining = on || drainedNames.Contains(name) || mgrDrained.Contains(name);
             return true;
         }
     }
@@ -1535,6 +1539,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         {
             var json = evt.ToJsonString();
             OperatorRouted(item, evt);
+            if (evt["event"]?.ToString() == "item.parked") KeeperPark(item, evt["reason"]?.ToString() ?? "");
             if (Msg.On && ownerOf.ContainsKey(item)) lastRouted[item] = evt["event"]?.ToString() ?? "";
             if (Msg.On && evt["event"]?.ToString() == "item.parked") { parks.Add((DateTime.UtcNow, item, GatedCode(evt["reason"]?.ToString()))); if (parks.Count > 200) parks.RemoveAt(0); }
             if (!mailboxes.TryGetValue(item, out var box)) mailboxes[item] = box = new();
@@ -1809,18 +1814,32 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     // owned and keep (step 5a): what the sweep says of every owned claim, and the items it must not drop an owner of; used only while messaging or the
     // supervisor is on, so a deployment with both off plans exactly as before.
+    // priorities (docs/design/plant-manager.md 10e): the items with a priority label (top, high); after the pins they are offered first, top before high
+    // scope (issue 92): the items of an incremental pass. Only they were read, so owners and unanswered assignments of every other item are kept.
     // sweepStarted: when the sweep that made this plan started reading the board. An owner it names for an item that was merged after that is not
     // put back: the sweep read the claim before the merge removed it (issue 107).
-    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, DateTime? sweepStarted = null, JsonObject? runtimes = null, JsonObject? profiles = null)
+    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, JsonObject? priorities = null, DateTime? sweepStarted = null, IReadOnlyCollection<int>? scope = null, JsonObject? runtimes = null, JsonObject? profiles = null)
     {
-        try { PlanLocked(offers, owners, pins, owned, keep, sweepStarted, runtimes, profiles); }
+        try { PlanLocked(offers, owners, pins, owned, keep, priorities, sweepStarted, scope, runtimes, profiles); }
         finally { LaunchProvisions(); }
     }
-    void PlanLocked(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned, IEnumerable<int>? keep, DateTime? sweepStarted, JsonObject? runtimes, JsonObject? profiles)
+    void PlanLocked(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned, IEnumerable<int>? keep, JsonObject? priorities, DateTime? sweepStarted, IReadOnlyCollection<int>? scope, JsonObject? runtimes, JsonObject? profiles)
     {
         lock (gate)
         {
-            runtimeLabels = runtimes ?? new JsonObject(); itemProfiles = profiles ?? new JsonObject();
+            // runtime labels and model profiles: a full sweep replaces them; an incremental pass (scope) replaces only the items it read
+            if (scope == null) { runtimeLabels = runtimes ?? new JsonObject(); itemProfiles = profiles ?? new JsonObject(); }
+            else
+            {
+                static JsonObject Merge(JsonObject old, JsonObject? fresh, IReadOnlyCollection<int> sc)
+                {
+                    var o = (JsonObject)old.DeepClone();
+                    foreach (var i in sc) o.Remove(i.ToString());
+                    if (fresh != null) foreach (var kv in fresh) o[kv.Key] = kv.Value?.DeepClone();
+                    return o;
+                }
+                runtimeLabels = Merge(runtimeLabels, runtimes, scope); itemProfiles = Merge(itemProfiles, profiles, scope);
+            }
             var planNow = DateTime.UtcNow;
             foreach (var k in mergedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) mergedAt.Remove(k);
             if (owners != null) foreach (var kv in owners)
@@ -1830,10 +1849,12 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 if (Msg.On && !(ownerOf.TryGetValue(oi, out var cur) && cur == on)) { ownedSince[oi] = planNow; seamOwned.Remove(oi); ownedMisses.Remove(oi); ownedInfo.Remove(oi); }
                 ownerOf[oi] = on;
             }
-            if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow);
+            if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow, scope);
             var wanted = new HashSet<string>();
-            // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can
-            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0))
+            // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can; then by priority (the
+            // order is stable, so items of one rank keep the sweep's order)
+            static int Rank(string? p) => p == "top" ? 0 : p == "high" ? 1 : 2;
+            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0).ThenBy(x => Rank(priorities?[x!["item"]!.ToString()]?.ToString())))
             {
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
                 var key = $"{item}|{kind}|{role}"; wanted.Add(key);
@@ -1898,7 +1919,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             foreach (var i in pinFallback.Keys.Where(i => !wanted.Any(k => k.StartsWith(i + "|", StringComparison.Ordinal))).ToList()) pinFallback.Remove(i);
             foreach (var i in pinWaitSince.Keys.Where(i => !wanted.Any(k => k.StartsWith(i + "|", StringComparison.Ordinal))).ToList()) pinWaitSince.Remove(i);
             // an unanswered or unwanted assignment that the sweep no longer asks for is dropped
-            foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
+            foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k]) && (scope == null || scope.Contains(assignments[k].Item))).ToList()) assignments.Remove(k);
         }
     }
 

@@ -193,7 +193,7 @@ sealed partial class Plant
             }
             var now = DateTime.UtcNow;
             // (rule 3 needs no retry of its own: its check was removed before the take-back was queued, so a still quiet owner is checked again)
-            if (!(ownerOf.TryGetValue(item, out var cur) && cur == name)) { RequestSweepAfterTakeBack?.Invoke(); return; }   // released or re-owned meanwhile
+            if (!(ownerOf.TryGetValue(item, out var cur) && cur == name)) { RequestSweepAfterTakeBack?.Invoke(item); return; }   // released or re-owned meanwhile
             {
                 takenBack++;
                 if (workers.TryGetValue(name, out var w)) Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "item.taken_back", ["item"] = item, ["reason"] = reason }.ToJsonString());
@@ -202,12 +202,18 @@ sealed partial class Plant
                 takenBackFrom[item] = name;
                 // issue 100: a take-back is a miss of the session; two in a row (or with lapsed offers) block it until it calls a verb of its own
                 var blocked = NoteTakeBack(name, item);
-                Journal(item, "reassigned", new JsonObject { ["reason"] = (reason == "client-accepted-not-started" ? $"{name} accepted by its client but did not start within the lease; offered again" : $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again") + blocked, ["opCode"] = reason }, "back|" + item + "|" + now.Ticks);
+                Journal(item, "reassigned", new JsonObject { ["reason"] = (reason switch
+                {
+                    "client-accepted-not-started" => $"{name} accepted by its client but did not start within the lease; offered again",
+                    "released-by-plant-manager" => $"the plant manager released {name} from this item (Manager.cs); offered again",
+                    _ => $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again"
+                }) + blocked, ["opCode"] = reason }, "back|" + item + "|" + now.Ticks);
             }
         }
-        RequestSweepAfterTakeBack?.Invoke();
+        RequestSweepAfterTakeBack?.Invoke(item);
     }
-    public Action? RequestSweepAfterTakeBack { get; set; }
+    // the item's incremental pass (issue 92): it is offered again without waiting for the next full sweep
+    public Action<int>? RequestSweepAfterTakeBack { get; set; }
 
     // Plan's hook for a new own-item assignment: the worker it was just taken back from is not offered it first.
     // Only while another session could take it: a plant with that one worker offers the item to it again rather than to nobody.
