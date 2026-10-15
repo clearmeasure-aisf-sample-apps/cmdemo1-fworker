@@ -14,6 +14,11 @@
 /config/deploy.overrides.json                 @jeffreypalermo
 /config/apply-overrides.ps1                   @jeffreypalermo
 
+# the cloud worker runtime: the runner image, its entrypoint, auto-mode settings and prompt template, and the adapter that holds the ARM right
+/Dockerfile.fwrunner                          @jeffreypalermo
+/runner/                                      @jeffreypalermo
+/gateway/Runtimes/                            @jeffreypalermo
+
 # the operator session: its powers, its skill and guard rails, and the tests of them
 /gateway/Operator.cs                          @jeffreypalermo
 /plugin/skills/factory-operator/              @jeffreypalermo
