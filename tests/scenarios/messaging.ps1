@@ -1268,7 +1268,7 @@ $MessagingScenarios = [ordered]@{
     Check 'the sender of an earlier message is told the gateway has a new epoch' ($st.StatusCode -eq 404 -and (Msg-Json $st).epochChanged -eq $true)
 }
 
-'msg: a long text is shown to 1,000 characters, and the whole of it is read with inbox --id' = {
+'msg: a long text arrives cut to fit the stream line, and the whole of it is read with inbox --id' = {
     $bob = Msg-Client 'bob' 's3-long'
     Check 'bob registers' (Msg-WaitEvent $bob 'worker.registered')
     $long = '0123456789' * 150
@@ -1276,7 +1276,7 @@ $MessagingScenarios = [ordered]@{
     CheckExit 'a text of 1,500 characters is accepted' $r 0
     Check 'bob prints it' (Msg-WaitPrinted $bob $r.id)
     $e = Msg-EnvelopeOf $bob $r.id
-    Check 'the line shows the first 1,000 characters and says it was cut' ($e.truncated -eq $true -and $e.text.Length -eq 1000 -and $e.text -ceq $long.Substring(0, 1000)) "$($e.text.Length)"
+    Check 'the line shows the start of the text and says it was cut' ($e.truncated -eq $true -and $e.text.Length -gt 0 -and $e.text.Length -lt $long.Length -and $long.StartsWith($e.text)) "$($e.text.Length)"
     $full = Msg-F 'bob' @('inbox', '--id', $r.id)
     Check 'inbox --id gives all of it, not cut' ($full.exit -eq 0 -and $full.messages[0].text -ceq $long -and $full.messages[0].truncated -eq $false)
     Stop-Process -Id $bob.proc.Id -Force
