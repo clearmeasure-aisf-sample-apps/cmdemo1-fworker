@@ -948,11 +948,15 @@ $OwnerScenarios['owner: auto-unpark: a park of session trouble is lifted once a 
         $m = New-Item-Fake 'Auto-unpark session trouble' 'x' $OwnerLabels
         $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design'); CheckExit 'a claim writes the state' $r 0
         Set-ItemState $m { param($st) $st.Remove('claim'); $st.park = (New-TestPark 'session-relaunch-budget' @{ last_take_back = 'client-accepted-not-started' }) }
-        Start-Sleep -Seconds 12
-        Check 'no free worker: still parked' ((Get-ItemState $m).ContainsKey('park'))
+        # sessions left connected by earlier scenarios may be free already: the "still parked" check holds only when none is
+        $freeBefore = @((Get-Plant).plant.workers | Where-Object { $_.connected -and -not $_.draining -and [int]$_.owned -lt [int]$_.capacity -and "$($_.name)" -ne 'unpark1' }).Count
+        if ($freeBefore -eq 0) {
+            Start-Sleep -Seconds 12
+            Check 'no free worker: still parked' ((Get-ItemState $m).ContainsKey('park'))
+        }
         Start-OwnerClient 'unpark1' 'persistent-local'
         Check 'a free worker: the park is lifted' (Wait-Until -Seconds 40 { -not (Get-ItemState $m).ContainsKey('park') })
-        Check 'and the item is offered to it' (Wait-Until -Seconds 40 { (Get-Assigned 'unpark1' $m).Count -gt 0 })
+        if ($freeBefore -eq 0) { Check 'and the item is offered to it' (Wait-Until -Seconds 40 { (Get-Assigned 'unpark1' $m).Count -gt 0 }) }
         Check 'journalled as unparked by the sweep' ((Get-SweepUnparks $m) -eq 1)
     } finally { Stop-OwnerClient 'unpark1' }
 }
