@@ -179,8 +179,11 @@ Code: `gateway/Lease.cs`; settings `schedule.*` in `config/instance.json` (each 
 
 Taking back: the plant lets go only after the rule script `expire-claim` (gateway only) succeeded (a failure keeps the owner and is tried again later). It ends the claim's lease and marks it `taken_back` (journal `lease-expired`), so
 `claim-item --renew` of the old owner is refused; the old owner gets `item.taken_back`; the plant forgets the owner (journal `reassigned`) and asks
-for a sweep, which offers the item again with mode `resume`. That offer goes to another session first when one is connected. A take-back counts as a
-relaunch against `timing.maxRelaunches`, like any lease that lapsed.
+for a sweep, which offers the item again with mode `resume`. That offer goes to another session first when one is connected. Since 2026-10-15
+(issue 91) a take-back is session trouble, not a failure of the item: the relaunch after it does not count against `timing.maxRelaunches` (only a
+lease that lapsed by itself does). It counts against `timing.maxSessionRelaunches` (default 10) of take-backs in a row instead (a lapse by itself or a finished stage starts the run again); past that the item is
+parked `session-relaunch-budget` (with `last_take_back`), a park the sweep lifts once a worker session is free. A Functional Testing round that spends
+`maxRelaunches` without a verdict is parked `validation-no-verdict`, not `watchdog-relaunch-budget`.
 
 ## 7. Bots (separate sessions)
 
