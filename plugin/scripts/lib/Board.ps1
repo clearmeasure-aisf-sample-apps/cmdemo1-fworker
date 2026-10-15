@@ -48,6 +48,15 @@ query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number
 
 function Test-Label($Info, [string]$Name) { Test-NameIn $Name $Info.labels }
 
+# Issue 109: the labels by which a person holds an item for themselves (holdLabels, default "hold:owner"). Honoured like the Demo label: no offer,
+# an open offer is dropped (the sweep no longer asks for it), claim-item is refused. Returns the first such label the item carries, or ''.
+function Get-HoldLabel($Labels) {
+    $c = Get-Cfg
+    $hold = if (Test-Has $c 'holdLabels') { @($c.holdLabels) } else { @('hold:owner') }
+    foreach ($h in $hold) { if ("$h" -and (Test-NameIn "$h" $Labels)) { return "$h" } }
+    return ''
+}
+
 function Move-Card([hashtable]$Info, [string]$Column) {
     $meta = Get-ProjectMeta
     if (-not $meta.options.Contains($Column)) { Reject 10 'unknown-column' "board has no column '$Column'" }

@@ -56,6 +56,13 @@ function Verb_merge($a, [switch]$Gateway) {
     Assert-Open $info
     if ($info.column -ine $c.columns.validation) { Reject 10 'wrong-column' "merging happens only from '$($c.columns.validation)'; the item is in '$($info.column)'" }
     if (-not (Test-Has $s 'verdict') -or -not $s.verdict.passed -or $s.verdict.processed) { Reject 10 'no-pass-verdict' 'no unprocessed PASS verdict is recorded for this item' }
+    # issue 109: a person holds the item (a hold label): its PASS is not merged, neither by the gateway (the verdict's own merge, the sweep) nor by a
+    # session, until the label is removed; the sweep merges it then
+    $holdLabel = Get-HoldLabel $info.labels
+    if ($holdLabel) {
+        if ($Gateway) { return @{ ok = $true; id = $n; outcome = 'waiting'; reason = 'held-by-label' } }
+        Reject 10 'held-by-label' "item carries the '$holdLabel' label: a person holds it; the PASS is not merged until the label is removed" @{ label = $holdLabel }
+    }
     $prNum = if (Test-Has $a 'pr') { [int]$a.pr } else { [int]$s.verdict.pr }
     if ($prNum -ne [int]$s.verdict.pr) { Reject 10 'pr-mismatch' "the verdict names PR #$($s.verdict.pr), not #$prNum" }
     # Without the Auto Merge label only the QC merge gate lets an item through: owner mode, mergePolicy peer-approved, qc.requireRun / qc.requireApproval

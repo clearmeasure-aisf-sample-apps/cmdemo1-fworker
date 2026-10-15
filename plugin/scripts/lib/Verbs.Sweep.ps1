@@ -191,6 +191,10 @@ function Verb_sync_board($a) {
                 $settling += $n; $triggers += @{ item = $n; event = 'item.merged' }
                 continue
             }
+            # a hold label (holdLabels, issue 109): a person holds the item. Nothing is offered or merged for it (its open offer is dropped because the
+            # plan no longer asks for it); a merge the person makes is still picked up above and settled.
+            $hold = Get-HoldLabel $it.labels
+            if ($hold) { $actions += @{ item = $n; action = 'skip'; reason = 'held-by-label'; label = $hold }; continue }
             if ($unprocessedPass) {
                 # the pull request of a PASS verdict was closed without merging: the verdict is void, so the item goes back to Development
                 if ($pr -and -not $pr.merged -and "$($pr.state)" -eq 'closed') {

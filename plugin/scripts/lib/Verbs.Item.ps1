@@ -164,6 +164,8 @@ function Verb_claim_item($a) {
     if (-not (Test-Label $info $c.label)) { Reject 10 'no-worker-label' "item does not carry the label '$($c.label)'" }
     if (Test-Label $info $c.rivalLabel) { Reject 10 'ambiguous-owner' "item carries both '$($c.label)' and '$($c.rivalLabel)'; one owner per item" }
     if (Test-Label $info $c.demoLabel) { Reject 10 'demo-exclusion' "item carries the '$($c.demoLabel)' label" }
+    $holdLabel = Get-HoldLabel $info.labels
+    if ($holdLabel) { Reject 10 'held-by-label' "item carries the '$holdLabel' label: a person holds it; no session takes it until the label is removed" @{ label = $holdLabel } }
     if (-not (Test-NameIn "$($info.column)" $c.columns.ai)) { Reject 10 'not-ai-column' "item is in '$($info.column)', which this worker does not work" }
     if ((Test-Has $a 'column') -and $a.column -and $a.column -ine $info.column) {
         if ((Get-ColumnIndex $info.column) -gt (Get-ColumnIndex $a.column)) { Reject 11 'column-changed' "item moved on to '$($info.column)'" }

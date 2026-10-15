@@ -918,6 +918,29 @@ $OwnerScenarios['owner: one item per session: a spent session that owns nothing 
     }
 }
 
+# Issue 109: a hold label (holdLabels, default hold:owner) is honoured like Demo: a person holds the item, so nothing is offered for it, its open offer
+# is dropped and claim-item is refused; without the label it is offered again.
+$OwnerScenarios['owner: a hold:owner label holds the item for a person: no offer, the open one dropped, claim-item refused; offered again without it'] = {
+    $api = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"; $gh = @{ Authorization = 'Bearer fake-operator' }
+    try {
+        Start-OwnerClient 'hld1' 'persistent-local'
+        $n = New-Item-Fake 'Held by the owner' 'x' ($OwnerLabels + 'worker:hld1')
+        Check 'the item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'hld1' $n).Count -gt 0 })
+        $open = { @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $n }) }
+        Check 'its offer is open in the plant' (@(& $open).Count -eq 1)
+        Invoke-RestMethod "$api/issues/$n/labels" -Method POST -Headers $gh -Body (@{ labels = @('hold:owner') } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+        Check 'with the label the next sweep drops the open offer' (Wait-Until -Seconds 30 { @(& $open).Count -eq 0 }) ((& $open) | ConvertTo-Json -Compress)
+        $seen = (Get-Assigned 'hld1' $n).Count
+        Start-Sleep -Seconds 8
+        Check 'and offers it to nobody' ((Get-Assigned 'hld1' $n).Count -eq $seen -and @(& $open).Count -eq 0)
+        $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim-item is refused' $r 10 'held-by-label'
+        $r = Fo 'hld1' @('accept', '--item', $n, '--assignment', (Get-Assigned 'hld1' $n)[-1].assignment)
+        Check 'an accept of the old offer is refused: it is no longer standing' ($r.exit -eq 11 -and $r.code -eq 'stale-assignment') ($r | ConvertTo-Json -Compress)
+        Invoke-RestMethod "$api/issues/$n/labels/hold%3Aowner" -Method DELETE -Headers $gh | Out-Null
+        Check 'without the label it is offered again' (Wait-Until -Seconds 40 { (Get-Assigned 'hld1' $n).Count -gt $seen })
+    } finally { Stop-OwnerClient 'hld1' }
+}
+
 # Issue 80: the operator's drain belongs to the name; a new session of the name (the launcher's next one) is still draining until the operator resumes.
 $OwnerScenarios['owner: an operator drain holds across a new session of the name until the operator resumes it'] = {
     $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'drn1' })[0] }
