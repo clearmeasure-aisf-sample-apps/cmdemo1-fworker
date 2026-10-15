@@ -183,4 +183,52 @@ $BaseUpdateScenarios = [ordered]@{
     } finally { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/base-update?autoUpdateBranch=true" -Method POST -Headers $h) }
 }
 }
+
+# issue 103: baseUpdate.mode conflict-or-merge (the default; the owner suite runs with every-move): the owner is told only of a merge conflict, and the
+# gateway updates a behind branch only right before it merges a PASS. These scenarios restart the suite's gateway with FACTORY_BASE_UPDATE_MODE.
+function Bu-InMode([string]$Mode, [scriptblock]$Body) {
+    $old = $env:FACTORY_BASE_UPDATE_MODE; $env:FACTORY_BASE_UPDATE_MODE = $Mode; Restart-Gateway
+    try { & $Body } finally { $env:FACTORY_BASE_UPDATE_MODE = $old; Restart-Gateway }
+}
+
+$BaseUpdateScenarios['base update (conflict mode): master moves; a clean branch that is behind is left alone, and the owner of a conflicting one is told once, reason conflict'] = {
+    Bu-InMode 'conflict-or-merge' {
+        Bu-Worker 'bc1'; Bu-Worker 'bc2'
+        $a = Bu-OwnedPr 'bc1' @('docs/clean.md'); $b = Bu-OwnedPr 'bc2' @('docs/conflict.md')
+        Bu-Synced
+        Check 'the gateway runs in the conflict mode' ((Bu-Status).mode -eq 'conflict-or-merge') ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
+        # GitHub has not computed the mergeability of b yet (null twice), then says it conflicts
+        Fake 'pr' @{ number = $b.pr; conflict = $true; mergeableNullReads = 2 } | Out-Null
+        [void](Fake 'master-merge' @{ files = @('docs/other.md') })
+        Check 'the owner of the conflicting pull request is told: base.updated, reason conflict' (Wait-Until -Seconds 45 { (Bu-Events 'bc2' $b.item).Count -ge 1 }) ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
+        $e = (Bu-Events 'bc2' $b.item)[0]
+        Check 'the event names the pull request and the conflict' ($e.reason -eq 'conflict' -and $e.conflict -eq $true -and $e.pr -eq $b.pr -and $e.behind -ge 1) ($e | ConvertTo-Json -Compress)
+        Start-Sleep -Seconds 12
+        Check 'once: later looks at the same heads tell nothing again' ((Bu-Events 'bc2' $b.item).Count -eq 1) ((Bu-Events 'bc2' $b.item) | ConvertTo-Json -Compress)
+        Check 'the owner of the clean branch, only behind, is told nothing and its branch is not updated' ((Bu-Events 'bc1' $a.item).Count -eq 0 -and (Bu-Puts $a.pr) -eq 0 -and (Bu-Puts $b.pr) -eq 0)
+        Check 'the journal says the pull request has a merge conflict' (@((Get-FakeIssue $b.item).comments | Where-Object { $_.body -like '*has a merge conflict with master*plant event=base-updated*' }).Count -eq 1)
+        Check '/status counts it' ((Bu-Status).conflictsTold -ge 1 -and (Bu-Status).conflicting -ge 1) ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
+        # the owner merges master and pushes: a new head that still conflicts is told again, once
+        Fake 'push-branch' @{ branch = $b.branch; files = @('docs/conflict.md', 'docs/more.md') } | Out-Null
+        Check 'a new head that still conflicts is told again' (Wait-Until -Seconds 30 { (Bu-Events 'bc2' $b.item).Count -eq 2 })
+    }
+}
+
+$BaseUpdateScenarios['base update (conflict mode): right before the gateway merges a PASS, a branch behind master is brought up to date once, and the new head is merged [full]'] = {
+    Bu-InMode 'conflict-or-merge' {
+        $x = Pm-ToValidation
+        # the new head's checks take 20 s (the fake applies the delay to the head the update makes)
+        Fake 'pr' @{ number = $x.pr; behind = 2; delaySeconds = 20 } | Out-Null
+        Fake 'checks' @{ sha = (Get-Head $x.pr); name = 'Build result'; conclusion = 'success' } | Out-Null; Fake 'checks' @{ sha = (Get-Head $x.pr); name = 'secret-scan'; conclusion = 'success' } | Out-Null
+        $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+        Check 'the verdict call waits: the branch is being brought up to date' ($v.merge.outcome -eq 'waiting' -and $v.merge.reason -eq 'branch-updated') ($v | ConvertTo-Json -Compress -Depth 5)
+        Check 'the update is recorded as the verdict''s head at once' ((Pm-State $x.n).verdict.head_sha -eq (Get-FakePr $x.pr).sha) ((Pm-State $x.n).verdict | ConvertTo-Json -Compress)
+        # the session's own merge call (the skill makes one after a PASS) waits for the new head's checks like the gateway, quickly, and parks nothing
+        $sw = [Diagnostics.Stopwatch]::StartNew(); $m = F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
+        Check 'the session''s merge call answers waiting at once (checks of the new head pending)' ($m.exit -eq 0 -and $m.outcome -eq 'waiting' -and $m.reason -eq 'checks-pending' -and $sw.Elapsed.TotalSeconds -lt 40) "$($m | ConvertTo-Json -Compress) in $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'merged on the gateway''s update commit, with no session' (Wait-Until -Seconds 90 { (Get-FakePr $x.pr).merged })
+        $st = Pm-State $x.n
+        Check 'one update of the branch, recorded as the update before the merge; the verdict names the update commit' ((Bu-Puts $x.pr) -eq 1 -and $st.verdict.pre_merge_update -eq $true -and $st.verdict.head_sha -eq (Get-FakePr $x.pr).sha) ($st.verdict | ConvertTo-Json -Compress)
+    }
+}
 foreach ($k in $BaseUpdateScenarios.Keys) { $OwnerScenarios[$k] = $BaseUpdateScenarios[$k] }
