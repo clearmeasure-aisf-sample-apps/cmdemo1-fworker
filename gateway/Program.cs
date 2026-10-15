@@ -128,7 +128,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir) };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir) };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -364,34 +364,46 @@ app.MapPost("/api/v1/base-update", (HttpContext c) =>
     return Results.Text(baseWatch.Status().ToJsonString(), "application/json");
 });
 
-// Cycle-time metrics (enhancement 13), operator token only: computed by the rule script `metrics` from the items' journal comments and state
-// comments on GitHub, so they survive a restart. since: an ISO date or 30m, 24h, 7d (default 7d, at most 90d); max: items read, newest first
-// (default 100, at most 300); fresh=1 skips the cache. One computation reads every item's comments: answers are cached for metricsCacheSeconds and
-// computed one at a time.
+// Cycle-time metrics (enhancement 13), operator token and the active operator session (read-only): computed by the rule script `metrics` from the
+// items' journal comments and state comments on GitHub, so they survive a restart. since: an ISO date or 30m, 24h, 7d (default 7d, at most 90d);
+// max: items read, newest first (default 100, at most 300); fresh=1 skips the cache. One computation reads every item's comments: answers are cached
+// per since|max for metricsCacheSeconds and computed one at a time. A failed computation (any exit but 0 and 2, a timeout included) is cached too,
+// for metricsFailSeconds, for every caller except the operator token's fresh=1: a caller that retries cannot make the gateway read GitHub again and
+// again. The operator session may ask only since=24h or 7d (none is read as 7d, the script's default), with no max and no fresh: its answers come
+// from two cache entries, so it causes at most one computation per entry in 120 s while they succeed, and one in 30 s while they fail.
 var metricsCache = new Dictionary<string, (DateTime At, int Code, string Json)>();
 var metricsGate = new SemaphoreSlim(1, 1);
-const int metricsCacheSeconds = 120;
+const int metricsCacheSeconds = 120, metricsFailSeconds = 30;
+static bool MetricsFresh((DateTime At, int Code, string Json) e) => (DateTime.UtcNow - e.At).TotalSeconds < (e.Code is 0 or 2 ? metricsCacheSeconds : metricsFailSeconds);
+static int MetricsStatus(int code) => code == 0 ? 200 : code == 2 ? 400 : 502;
 app.MapGet("/api/v1/metrics", async (HttpContext c) =>
 {
-    if (Who(c).Kind != "admin") return Results.StatusCode(403);
+    if (Admitted(c).Kind != "admin") return Results.StatusCode(403);
     var since = c.Request.Query["since"].ToString().Trim(); var maxText = c.Request.Query["max"].ToString().Trim();
+    if (OperatorActive(c))
+    {
+        if (since is not ("" or "24h" or "7d") || maxText != "" || c.Request.Query.ContainsKey("fresh"))
+            return Results.Json(new { ok = false, code = "usage", reason = "the operator session reads the metrics with since=24h or 7d (or none), no max and no fresh: answers come from a 120 s cache and a miss computes them", exit = 2 }, statusCode: 400);
+        if (since == "") since = "7d";   // the script's default: one cache entry for both spellings
+    }
     if (since.Length > 40 || maxText.Length > 4 || (maxText != "" && !int.TryParse(maxText, out _))) return Results.Json(new { ok = false, code = "usage", reason = "since is an ISO date or 30m, 24h, 7d; max a number", exit = 2 }, statusCode: 400);
     var key = since + "|" + maxText;
     var fresh = c.Request.Query["fresh"].ToString() == "1";
     // a cached answer does not wait behind a computation that is running
-    lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit0) && (DateTime.UtcNow - hit0.At).TotalSeconds < metricsCacheSeconds) return Results.Text(hit0.Json, "application/json", Encoding.UTF8, hit0.Code == 0 ? 200 : 400);
+    lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit0) && MetricsFresh(hit0)) return Results.Text(hit0.Json, "application/json", Encoding.UTF8, MetricsStatus(hit0.Code));
     await metricsGate.WaitAsync(c.RequestAborted);
     try
     {
-        lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit) && (DateTime.UtcNow - hit.At).TotalSeconds < metricsCacheSeconds) return Results.Text(hit.Json, "application/json", Encoding.UTF8, hit.Code == 0 ? 200 : 400);
+        lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit) && MetricsFresh(hit)) return Results.Text(hit.Json, "application/json", Encoding.UTF8, MetricsStatus(hit.Code));
         var args = new JsonObject(); if (since != "") args["since"] = since; if (maxText != "") args["max"] = int.Parse(maxText);
         var (code, output) = await runner.RunAsync("metrics", args.ToJsonString(), TimeSpan.FromMinutes(3));
         lock (metricsCache)
         {
-            foreach (var k in metricsCache.Where(kv => (DateTime.UtcNow - kv.Value.At).TotalSeconds >= metricsCacheSeconds).Select(kv => kv.Key).ToList()) metricsCache.Remove(k);
-            if (code == 0 || code == 2) metricsCache[key] = (DateTime.UtcNow, code, output);
+            foreach (var k in metricsCache.Where(kv => !MetricsFresh(kv.Value)).Select(kv => kv.Key).ToList()) metricsCache.Remove(k);
+            // a failed fresh=1 of the operator token never replaces a good entry
+            if (!fresh || code is 0 or 2 || !metricsCache.ContainsKey(key)) metricsCache[key] = (DateTime.UtcNow, code, output);
         }
-        return Results.Text(output, "application/json", Encoding.UTF8, code == 0 ? 200 : code == 2 ? 400 : 502);
+        return Results.Text(output, "application/json", Encoding.UTF8, MetricsStatus(code));
     }
     finally { metricsGate.Release(); }
 });
@@ -424,8 +436,9 @@ app.MapGet("/api/v1/plugin", (HttpContext c) =>
 // The messaging and manager blocks of /status and of the dashboard JSON (worker-messaging.md 7, 8): the plant's states and counts with the
 // Messenger's counters. /status carries counts and states only; the dashboard adds the last digest and the decision log for the operator's page.
 // The operator SESSION credential (o1., Auth.cs) is admitted at exactly the endpoints that call Admitted or OperatorActive, and nowhere else: there it
-// acts as the operator does (its notes are operator notes). It must hold the operator slot, and messaging must be switched on. Everywhere else its
-// kind is "operator", which no endpoint accepts: it cannot mint or revoke a credential, switch messaging, set a capacity, drain, or call a verb.
+// acts as the operator does (its notes are operator notes). It must hold the operator slot, and messaging must be switched on. Since 2026-10-14 that
+// includes a worker's capacity, drain and resume (POST /workers/{name}/...) and the read-only cycle-time metrics. Everywhere else its kind is
+// "operator", which no endpoint accepts: it cannot mint or revoke a credential, switch messaging, read the dashboard JSON or call a verb.
 bool OperatorActive(HttpContext c) => Who(c) is { Kind: "operator" } w && ownerMode && messaging.OperatorEnabled && messaging.Enabled && plant.ActiveOperator() == w.Name;
 // The principal it acts as carries the session's NAME: the admin token's has none. What the session sends is stamped with that name and the kind
 // "operator-session" (Messaging.cs), never as the person's "operator"; log lines name it too (By).
@@ -628,8 +641,9 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && messaging.OperatorEnabled) { try { plant.OperatorVerbEvent(verb, code, who, authorized, output); } catch { } }
     if (ownerMode && code == 0) { try { plant.OnVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"plant hook {verb}: {e.Message}"); } }
     if (accepting) plant.EndAccept(who.Assignment);
-    // issue 31: a session that calls a verb successfully is answering: its count of lapsed offers starts again
-    if (ownerMode && code == 0 && who.Kind is "item" or "worker") plant.NoteAnswered(who.Name);
+    // issue 31: a session that calls a verb successfully is answering: its count of lapsed offers starts again. Issue 100: not the accept its stream
+    // client makes by itself (accepted_by client): a blocked session's client accepts every offer, and that is no sign that the session works
+    if (ownerMode && code == 0 && who.Kind is "item" or "worker" && !(verb == "accept" && authorized["accepted_by"]?.ToString() == "client")) plant.NoteAnswered(who.Name);
     // any call of the owner for its item is its activity and renews the lease when due (gateway/Lease.cs); after OnVerb, which records an accept
     if (ownerMode && who.Kind == "item" && who.Role == "owner") { try { JsonObject? vr = null; try { vr = JsonNode.Parse(output) as JsonObject; } catch { } plant.NoteItemCall(who.Name, who.Item, verb, authorized, vr, code == 0); } catch (Exception e) { Console.Error.WriteLine($"lease hook {verb}: {e.Message}"); } }
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
@@ -796,14 +810,21 @@ app.MapGet("/api/v1/wait", async (HttpContext ctx) =>
 app.MapPost("/api/v1/workers/{name}/{action}", (string name, string action, HttpContext ctx) =>
 {
     var who = Who(ctx);
-    // the operator session sets a session's messaging mode, as the operator does, and nothing else here (no capacity, no drain or resume)
-    var opMode = action == "messaging" && OperatorActive(ctx);
-    if (!(opMode || who.Kind == "admin" || (who.Kind == "worker" && who.Name == name))) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"a worker may only change itself\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+    // the operator session acts here as the operator does for exactly four actions: a session's messaging mode, its capacity, drain and resume
+    // (owner decision 2026-10-14). It never revokes or mints here (those are routes of their own, admin token only).
+    var opMode = action is "messaging" or "capacity" or "drain" or "resume" && OperatorActive(ctx);
+    var asOperator = who.Kind == "admin" || opMode;
+    if (!(asOperator || (who.Kind == "worker" && who.Name == name))) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"a worker may only change itself\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     if (action == "capacity")
-    {   // operator only: how many items this worker name may own at once
-        if (who.Kind != "admin") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"only the operator sets a worker's capacity\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+    {   // the operator (or the active operator session): how many items this worker name may own at once
+        if (!asOperator) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"only the operator sets a worker's capacity\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+        if (opMode && (!Auth.ValidName(name) || messaging.ManagerNames.Contains(name) || messaging.OperatorNames.Contains(name))) return Fail(400, "usage", "the name is a worker session's", 2);
+        // a name that has not registered since the gateway started gets no override from the session (the overrides are kept per name, so they
+        // must not grow without bound)
+        if (opMode && !plant.IsWorker(name)) return Results.Text("{\"ok\":false,\"code\":\"not-found\",\"reason\":\"no such worker\",\"exit\":12}", "application/json", Encoding.UTF8, 404);
         if (!int.TryParse(ctx.Request.Query["value"], out var cv) || cv < 1 || cv > 20) return Results.Text("{\"ok\":false,\"code\":\"usage\",\"reason\":\"value must be 1 to 20\",\"exit\":2}", "application/json", Encoding.UTF8, 400);
         plant.SetCapacity(name, cv);
+        if (opMode) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["worker"] = "capacity", ["name"] = name, ["capacity"] = Math.Clamp(cv, 1, 20), ["by"] = By(ctx) }.ToJsonString());
         return Results.Text(JsonSerializer.Serialize(new { ok = true, name, capacity = Math.Clamp(cv, 1, 20) }), "application/json");
     }
     if (action == "messaging" && messaging.Configured && ownerMode)
@@ -814,9 +835,12 @@ app.MapPost("/api/v1/workers/{name}/{action}", (string name, string action, Http
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["message"] = "mode", ["name"] = name, ["mode"] = mode, ["by"] = By(ctx) }.ToJsonString());
         return Results.Json(new { ok = true, name, messaging = mode, exit = 0 });
     }
-    if (action is not ("drain" or "resume") || opMode) return Results.NotFound();
-    return plant.SetDraining(name, action == "drain", who.Kind == "admin") ? Results.Text(JsonSerializer.Serialize(new { ok = true, name, draining = plant.IsDraining(name) }), "application/json")
-        : Results.Text("{\"ok\":false,\"code\":\"not-found\",\"reason\":\"no such worker\",\"exit\":12}", "application/json", Encoding.UTF8, 404);
+    if (action is not ("drain" or "resume")) return Results.NotFound();
+    if (opMode && (!Auth.ValidName(name) || messaging.ManagerNames.Contains(name) || messaging.OperatorNames.Contains(name))) return Fail(400, "usage", "the name is a worker session's", 2);
+    // the operator session's drain is the operator's: it belongs to the name and holds across its reconnects and new sessions (issue 80)
+    if (!plant.SetDraining(name, action == "drain", asOperator)) return Results.Text("{\"ok\":false,\"code\":\"not-found\",\"reason\":\"no such worker\",\"exit\":12}", "application/json", Encoding.UTF8, 404);
+    if (opMode) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["worker"] = action, ["name"] = name, ["by"] = By(ctx) }.ToJsonString());
+    return Results.Text(JsonSerializer.Serialize(new { ok = true, name, draining = plant.IsDraining(name) }), "application/json");
 });
 
 app.MapGet("/api/v1/events", async (HttpContext ctx) =>
@@ -1268,7 +1292,7 @@ if (messaging.Enabled && messaging.TestHooks)
         return ok ? Results.Json(new { ok = true, id = answerId, exit = 0 }) : Fail(409, code, reason, 10);
     });
 
-    // one sweep's `owned` and the items it must keep (settling, or not read this time), as the Sweeper hands them to Plan
+    // one sweep's `owned` and the items it must keep (not read this time), as the Sweeper hands them to Plan
     app.MapPost("/api/v1/_test/plan", async (HttpContext ctx) =>
     {
         var (b, err) = await SeamBody(ctx, "the body is a JSON object with owned and keep");
@@ -1571,7 +1595,9 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             var soon = false;
             try
             {
-                var (code, output) = await runner.RunAsync("sync-board", "{}", TimeSpan.FromSeconds(280));
+                var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
+                // free_workers: the auto-unpark of a park caused by session trouble needs a session that could take the item (Verbs.Sweep.ps1)
+                var (code, output) = await runner.RunAsync("sync-board", ownerMode ? new JsonObject { ["free_workers"] = plant.FreeOwnerSessions() }.ToJsonString() : "{}", TimeSpan.FromSeconds(280));
                 hub.LastSweep = DateTime.UtcNow;
                 if (code == 0)
                 {
@@ -1580,12 +1606,11 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                     var acts = j["actions"]!.AsArray();
                     if (ownerMode)
                     {
-                        // step 5a (worker-messaging.md 3.9): the sweep's `owned` replaces the plant's owner list, except for items whose merge is settling
-                        // and items the sweep could not read this time
+                        // step 5a (worker-messaging.md 3.9): the sweep's `owned` replaces the plant's owner list, except for items the sweep could not read
+                        // this time. A settling item keeps no owner: its owner was released at item.merged (Plant.Merged).
                         var keep = new List<int>();
-                        foreach (var x in j["settling"] as JsonArray ?? new JsonArray()) if (x is JsonValue sv && sv.TryGetValue<int>(out var si)) keep.Add(si);
                         foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
-                        plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep);
+                        plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, sweepStarted);
                         plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray);
                         if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
                         // a merge the gateway made after a PASS and the round-trip of one it could not make (Verbs.Merge.ps1 -Gateway)
@@ -1717,7 +1742,7 @@ function groupedRows(list,rowHtml,cols,top){const w=[],q=[];for(const x of list|
 return{order:ord,html:(top||'')+(w.length?groupHead('Workers',cols)+w.map(x=>rowHtml(x,i++)).join(''):'')+(q.length?groupHead('QC: workers that also run pull request environments',cols)+q.map(x=>rowHtml(x,i++)).join(''):'')}}
 function workerRowHtml(x){const qc=(x.roles||[]).includes('qc');
 const qcCell=qc?QC_BADGE+`${esc(x.qcActive)}/${esc(x.qcCapacity)} <span class="pill ${x.qcProfile?'on':'dr'}">${x.qcProfile?'profile set':'no profile'}</span> <span class="mut">${esc(x.qcAddress||'no address')}</span>`:'<span class="mut">-</span>';
-return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td><span class="pill ${x.connected?(x.draining?'dr':'on'):'off'}">${x.connected?(x.draining?'draining':'connected'):'gone'}</span>${x.coolDownUntil?` <span class="pill dr" title="it let offers lapse; offered nothing new until ${esc(x.coolDownUntil)} or its next verb">cool-down</span>`:''}</td><td>${esc(x.owned)}</td><td>${esc(x.capacity)}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${x.connected?`<button data-n="${esc(x.name)}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:''}${revokeButton(esc(x.name))}</td></tr>`}
+return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td><span class="pill ${x.connected?(x.draining?'dr':'on'):'off'}">${x.connected?(x.draining?'draining':'connected'):'gone'}</span>${x.coolDownUntil?` <span class="pill dr" title="it let offers lapse; offered nothing new until ${esc(x.coolDownUntil)} or its next verb">cool-down</span>`:''}${x.blocked?` <span class="pill off" title="items were taken back from it; offered nothing since ${esc(x.blockedSince)} until it calls a verb of its own">blocked</span>`:''}</td><td>${esc(x.owned)}</td><td>${esc(x.capacity)}</td><td>${esc((x.roles||[]).join(', '))}</td><td>${qcCell}</td><td>${x.connected?`<button data-n="${esc(x.name)}" data-a="${x.draining?'resume':'drain'}">${x.draining?'resume':'drain'}</button> `:''}${revokeButton(esc(x.name))}</td></tr>`}
 function revokeButton(n){return `<button data-n="${n}" data-a="revoke" title="Refuse every credential issued so far for this name and end its stream; a new prompt gives it a new credential">revoke</button>`}
 function qcRowHtml(x,repo){const sha=String(x.sha||'').slice(0,7),head=String(x.head||'').slice(0,7),p=esc(x.pr);
 const env=x.state==='failed'?esc((x.fail&&x.fail.code)||'failed')+(x.fail&&x.fail.reason?` <span class="mut">${esc(x.fail.reason)}</span>`:''):x.url&&/^https?:\/\//i.test(x.url)?`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.url)}</a>`:x.waiting?`<span class="mut">${esc(x.waiting)}</span>`:x.url_note?`<span class="mut">${esc(x.url_note)}</span>`:'-';

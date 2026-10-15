@@ -8,7 +8,8 @@ using System.Text.Json.Nodes;
 //   item      "i1.<payload>.<hmac>" minted at an assignment for ONE item and ONE role: the only credential that acts on an item.
 //   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs and nothing else (worker-messaging.md 4.6).
 //   operator  "o1.<name>.<generation>.<hmac>" the factory operator SESSION (Operator.cs, docs/design/operator-session.md): not the admin token. It
-//             calls no verb, mints and revokes nothing, and is admitted only at the endpoints that name it (Program.cs, Admitted).
+//             calls no verb, mints and revokes nothing, and is admitted only at the endpoints that name it (Program.cs, Admitted and OperatorActive):
+//             messaging, the questions, the supervisor's budget, its release checks, a worker's capacity, drain and resume, and the read-only metrics.
 // The secret never leaves the gateway host. Design: docs/design/plant-manager.md section 5.
 // Revocation (operator, POST /workers/{name}/revoke): tokens are stateless, so each name has a generation, 0 until its first revocation. Every
 // token of a name is bound to the generation it was minted at (generation 0 gives exactly the formats above); a revocation raises the generation,

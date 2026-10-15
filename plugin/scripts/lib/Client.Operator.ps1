@@ -5,6 +5,8 @@
 #     traffic [--to NAME] [--worker NAME] [--item N] [--limit N] [--unread] [--refused]
 #     send --to NAME | --all  --text "..." | --text-file F  [--subject S] [--item N] [--in-reply-to ID]
 #     answer --id Q --text "..." | --text-file F | read --ids a,b | --all | mode --name N --value on|mute|inbound-off|off | grant --extra N
+#     drain --name N | resume --name N | capacity --name N --value 1-20   a worker name, as the operator does (the drain belongs to the name)
+#     metrics [--since 24h|7d]                                              the cycle-time metrics, read-only (served from a 120 s cache; a miss computes)
 # The credential is the operator SESSION credential of the connect prompt, in FACTORY_OPERATOR_SESSION_TOKEN. It is not the gateway's admin token:
 # the gateway admits it at these endpoints and refuses it everywhere else.
 
@@ -90,8 +92,8 @@ function Invoke-OperatorSubscribe($a) {
 }
 
 # One call of the gateway with the operator session credential: prints the gateway's JSON and exits with its exit code.
-function Invoke-OperatorCall($Cfg, [string]$Method, [string]$Path, $Body = $null) {
-    $p = @{ Uri = "$($Cfg.url)$Path"; Method = $Method; Headers = @{ Authorization = "Bearer $(Get-OperatorCredential)" }; SkipHttpErrorCheck = $true; TimeoutSec = 150 }
+function Invoke-OperatorCall($Cfg, [string]$Method, [string]$Path, $Body = $null, [int]$TimeoutSec = 150) {
+    $p = @{ Uri = "$($Cfg.url)$Path"; Method = $Method; Headers = @{ Authorization = "Bearer $(Get-OperatorCredential)" }; SkipHttpErrorCheck = $true; TimeoutSec = $TimeoutSec }
     if ($null -ne $Body) { $p.Body = ($Body | ConvertTo-Json -Depth 6 -Compress); $p.ContentType = 'application/json; charset=utf-8' }
     try { $resp = Invoke-WebRequest @p } catch { Write-Out @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
     $text = $resp.Content; if ($text -is [byte[]]) { $text = [Text.Encoding]::UTF8.GetString($text) }
@@ -159,6 +161,21 @@ function Invoke-OperatorVerb([string]$Sub, $a, $cfg) {
             if ("$($a.extra)" -notmatch '^\d{1,3}$') { Usage '--extra is 1 to 100 deliveries' }
             Invoke-OperatorCall $cfg 'POST' "/api/v1/supervisor/budget?extra=$($a.extra)" @{}
         }
-        default { Usage 'operator verbs: release-check, record-release, status, peers, digest, questions, traffic, send, answer, read, mode, grant' }
+        { $_ -in 'drain', 'resume' } {
+            if ("$($a.name)" -notmatch $name) { Usage '--name is a worker session name' }
+            $act = if ($Sub -ieq 'drain') { 'drain' } else { 'resume' }
+            Invoke-OperatorCall $cfg 'POST' "/api/v1/workers/$($a.name)/$act" @{}
+        }
+        'capacity' {
+            if ("$($a.name)" -notmatch $name -or "$($a.value)" -notmatch '^\d{1,2}$' -or [int]$a.value -lt 1 -or [int]$a.value -gt 20) { Usage '--name is a worker session name and --value is 1 to 20' }
+            Invoke-OperatorCall $cfg 'POST' "/api/v1/workers/$($a.name)/capacity?value=$([int]$a.value)" @{}
+        }
+        'metrics' {
+            $since = if ($a.ContainsKey('since')) { "$($a.since)" } else { '' }
+            if ($since -cnotin '', '24h', '7d') { Usage '--since is 24h or 7d (the default is 7d)' }
+            # the gateway may wait up to 180 s for a computation that runs, then run one of up to 180 s
+            Invoke-OperatorCall $cfg 'GET' "/api/v1/metrics$(if ($since) { "?since=$since" })" $null 420
+        }
+        default { Usage 'operator verbs: release-check, record-release, status, peers, digest, questions, traffic, send, answer, read, mode, grant, drain, resume, capacity, metrics' }
     }
 }

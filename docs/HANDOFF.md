@@ -15,7 +15,8 @@ Technical Design, Development and Functional Testing to a merged pull request, a
   the connect prompt and the plugin download, and carries worker messaging. Workers never hold a GitHub credential: they call verbs.
 - **Workers**: AI sessions (Claude Code local or cloud, Cursor cloud) started by a person with the connect prompt of the dashboard.
   The prompt downloads PowerShell and the plugin and runs `subscribe --own`; the session owns each item it is given until its pull request
-  is merged and master is green. Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
+  is merged (the gateway settles it from there, issue #107; the connect prompt still says "and master is green": its text is pinned by a
+  hash in the operator suite, a code-owner path). Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
   `factory test` selects the cheapest model profile.
 - **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask and reads the gateway's patrol
   digest. It advises; it changes nothing.
@@ -83,8 +84,13 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   2. deploy only when the plant is quiet; announce the restart to the connected sessions, verify that they reconnect, roll back otherwise;
   3. protected areas need the owner: credentials and tokens, authorization, revoke, the deploy pipeline, the operator's own skill and
      guard rails, uat and prod;
-  4. a daily limit of self-merged releases, with a report;
+  4. a daily limit of self-merged releases, with a report (12 a day since 2026-10-14, with small changes batched; 3 before);
   5. every change is recorded as an issue in this repository.
+- **The operator session acts without a person inside its guard rails** (2026-10-14, pull request "operator authority", owner review): it takes
+  the recommended option and builds it, the owner hearing of it in the changelog issue; it merges its own green, unprotected pull requests
+  as soon as guard rails a to e allow, without waiting; it may drain, resume and set the capacity of a worker name as the operator does, and read the
+  cycle-time metrics. It still cannot mint, revoke, switch messaging or call a verb, and container logs stay with the operator (no read-only
+  wrapper exists).
 - **uat and prod stay manual.**
 - **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so; the connect prompt text is unchanged because its hash is pinned by the operator suite, a protected path), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
@@ -263,6 +269,24 @@ Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
   (`masterCodeChecks`, the jobs that run only for code: all skipped means docs-only) or else the pull request's files, and recorded as
   `merge.docs_only` with `docs_only_from`; only then may a skipped or missing release check finish an item. The master-green verdict ignores
   `masterIgnoredChecks` (`release`, `packages`, `architecture`), which could also park an item master-broken.
+- **#100 A blocked session kept winning items.** Its stream client accepted every offer by itself, which reset the session's missed offers,
+  and the take-back five minutes later counted as nothing. Now the client's own accept (`accepted_by: client`) is no answer, every take-back is
+  a miss, and `timing.offerMissLimit` (2) misses in a row with a take-back among them block the session: it is offered nothing, pinned items
+  included, until it calls a verb of its own or a new session of the name registers (a reconnect of the same session keeps the block). Lapsed
+  offers alone still give the timed cool-down. A block is a `session-blocked` plant event on the operator stream and a `session-blocked` entry
+  of the patrol digest (worker, item, `blockedMinutes`); `/status` shows `blocked`, `blockedSince` and `takenBackInRow` per worker and
+  `sessionsBlocked`. QC environments are not part of the rule (they run outside the model session). Open: the supervisor's and operator
+  session's skills and `docs/design/operator-session.md` (owner review) do not list the new digest kind and the plant event codes
+  `session-blocked` and `session-unblocked`; the block is in memory and a restart forgets it.
+- **#107 The owner session idled from the merge to the Release Queue.** The owner was kept until `item.complete` (master green, release,
+  production), doing nothing while the gateway settled the item, so its session was neither free nor told to end. Now the owner hears
+  `item.merged` and is released at once (`Plant.Merged`, also on the merge verb and the gateway's merge after a PASS); the Sweeper no longer
+  keeps the owners of settling items. The spent session gets `session.end` after `timing.sessionEndGraceSeconds` and settle carries the item.
+  The owner skill says the item ends for the session at `item.merged`.
+- **#109 `hold:owner` was ignored** (296). A setting `holdLabels` (default `["hold:owner"]`) is honoured like `Demo`: the sweep offers nothing
+  for an item that carries one (its open offer is dropped at the next plan), its PASS is not merged (`merge` answers exit 10 `held-by-label`,
+  the gateway's merge waits), and `claim-item` (so `accept` and a live owner's `--renew`, whose lease then lapses as with `Demo`) answers exit 10
+  `held-by-label`. A merge the person makes is still picked up and settled. Remove the label to hand the item back.
 
 Closed on 2026-10-15 (issues #79 and #82):
 
@@ -440,7 +464,7 @@ The role is on in the deployed image (`operator.enabled` in `config/deploy.overr
    It does not get the operator token, the Octopus key or any GitHub App key.
 3. The prompt clones this repository, has the session read `CLAUDE.md` and this file, and hands over to
    `plugin/skills/factory-operator/SKILL.md`. The dashboard shows it in the group "Factory operator" with its model check and the
-   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 3).
+   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 12).
 4. To stop it: revoke the name `operator-session` on the dashboard, or switch messaging off (both act at once). To stop the role: set
    `operator.enabled` false in the overrides. Its GitHub connection is removed on GitHub.
 
