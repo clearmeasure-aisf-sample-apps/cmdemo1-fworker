@@ -42,7 +42,8 @@ $LeaseScenarios['lease: the client accepts an owner offer itself (acceptedBy cli
         $bob = Msg-Open 'name=bob&capacity=20&messaging=1' (Msg-Token 'bob'); Msg-Registered $bob
         try {
             Check 'after clientStartMinutes the lease is ended: taken_back in the state, lease-expired in the journal' (Wait-Until -Seconds 40 { $s = Ls-State $n; $s.ContainsKey('claim') -and "$(Ls-Taken $s)" -eq 'client-accepted-not-started' -and (Ls-Journal $n 'lease-expired').Count -eq 1 }) ((Ls-State $n) | ConvertTo-Json -Compress -Depth 6)
-            Check 'the plant forgot the owner and counted the take-back' ((Ls-Owner $n) -eq '' -and (Ls-Status).lease.takenBack -ge 1) ((Ls-Status).lease | ConvertTo-Json -Compress -Depth 5)
+            # (the rule script saved the state before it ended; the plant lets go when its answer is back)
+            Check 'the plant forgot the owner and counted the take-back' (Wait-Until -Seconds 15 { (Ls-Owner $n) -eq '' -and (Ls-Status).lease.takenBack -ge 1 }) ((Ls-Status).lease | ConvertTo-Json -Compress -Depth 5)
             Msg-Read $bob 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' -and $_.data['item'] -eq $n }).Count -ge 1 }
             $re = Msg-First @(Msg-Of $bob 'item.assigned' | Where-Object { $_.data['item'] -eq $n })
             Check 'the next sweep offers it again, in resume mode' ($re -and $re.data.mode -eq 'resume') ($re | ConvertTo-Json -Compress -Depth 5)
