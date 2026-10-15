@@ -950,6 +950,28 @@ $OwnerScenarios['owner: the owner is released at item.merged, its session is tol
     }
 }
 
+# Issue 65: an item whose body says "Depends on #N" is offered to nobody while #N is neither merged nor closed; the status shows it held with the code
+# depends-on and what it waits for; once #N is closed the next sweep offers it (a dependency off the board is read through the REST API).
+$OwnerScenarios['owner: an item waits for the items it depends on and is offered once they are closed'] = {
+    try {
+        Start-OwnerClient 'dep1' 'persistent-local' '--capacity 3'
+        $d1 = New-Item-Fake 'Dependency on the board' 'x' $OwnerLabels 'Todo'
+        $d2 = (Fake 'issue' @{ title = 'Dependency off the board'; body = 'x'; labels = @('bug') }).number
+        $n = New-Item-Fake 'Dependent item' "Builds on the others.`n`nDepends on #$d1 and #$d2`n" ($OwnerLabels + 'worker:dep1')
+        $free = New-Item-Fake 'Unrelated item' "depends on nothing" ($OwnerLabels + 'worker:dep1')
+        Check 'an item without dependencies is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'dep1' $free).Count -gt 0 })
+        $script:HeldRow = $null
+        Check 'the dependent is held: code depends-on, waiting for both' (Wait-Until -Seconds 30 { $script:HeldRow = @((Get-Plant).plant.held | Where-Object { $_.item -eq $n })[0]; $script:HeldRow -and $script:HeldRow.code -eq 'depends-on' -and @($script:HeldRow.on).Count -eq 2 }) ($script:HeldRow | ConvertTo-Json -Compress)
+        Check 'it is not offered' ((Get-Assigned 'dep1' $n).Count -eq 0)
+        $repo = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues"
+        [void](Invoke-RestMethod "$repo/$d1" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json')
+        Check 'one dependency closed: still held, waiting for the other only' (Wait-Until -Seconds 30 { $h = @((Get-Plant).plant.held | Where-Object { $_.item -eq $n })[0]; $h -and @($h.on).Count -eq 1 -and @($h.on)[0] -eq $d2 })
+        Check 'still not offered' ((Get-Assigned 'dep1' $n).Count -eq 0)
+        [void](Invoke-RestMethod "$repo/$d2" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json')
+        Check 'both closed: the item is offered and no longer held' (Wait-Until -Seconds 40 { (Get-Assigned 'dep1' $n).Count -gt 0 -and @((Get-Plant).plant.held | Where-Object { $_.item -eq $n }).Count -eq 0 }) ((Get-Plant).plant | ConvertTo-Json -Compress -Depth 5)
+    } finally { Stop-OwnerClient 'dep1' }
+}
+
 # The launcher watchdog (docs/launcher.md): a spent session that owns nothing and is still connected sessionRestartMinutes later (it did not act on
 # session.end) is told session.restart; its client writes the end marker and the reason next to it for the launcher's log.
 $OwnerScenarios['owner: launcher watchdog: a spent session still idle after session.end is told session.restart and the client writes the reason'] = {
