@@ -1949,6 +1949,8 @@ $ManagerScenarios = [ordered]@{
 }
 
 'mgr: open questions are asked once more after a gateway restart, by the stream and by the poll [full]' = {
+    # the askers' stores start empty: an open question an earlier scenario of the same group left with ivan or kate would be asked again too
+    foreach ($nm in 'ivan', 'kate') { Remove-Item -LiteralPath (Join-Path (Msg-WorkerDir $nm) "questions-$nm.json") -Force -ErrorAction SilentlyContinue }
     $stream = Msg-Client 'ivan' 's3-reask'
     Check 'ivan registers' (Msg-WaitEvent $stream 'worker.registered')
     $f1 = Msg-F 'ivan' @('ask', '--text', 'which column is next?', '--item', '91')
