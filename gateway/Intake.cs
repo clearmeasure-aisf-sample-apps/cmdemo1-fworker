@@ -13,8 +13,10 @@ sealed partial class Plant
             {
                 if (!w.Connected || w.Draining || !w.Roles.Contains("owner") || Cooling(w)) continue;
                 if (OneItemPerSession && w.SessionItems.Count > 0) continue;
-                var load = ownerOf.Values.Count(o => o == w.Name) + assignments.Values.Count(a => a.Worker == w.Name && a.Kind == "own-item" && !a.Accepted);
+                // the load as Choose counts it (owned items, bot jobs, open offers, and the slots a waiting pin claims), and the host's limit
+                var load = Owned(w.Name) + PinnedWaiting(w.Name);
                 if (OneItemPerSession && load > 0) continue;
+                if (!HostHasRoom(w.Name)) continue;
                 free += Math.Max(0, w.Capacity - load);
             }
             return free;

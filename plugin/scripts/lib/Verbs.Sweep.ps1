@@ -416,7 +416,8 @@ function Invoke-Intake($a, $List, $Offers, $Unconfirmed, $Pins, $Seen, [string]$
         Move-Card @{ number = $n; cardId = $it.cardId } $td
         # offered at once by this sweep, and by the next ones as a card that was seen in its column
         $Seen["$n"] = @{ column = $td; count = [int]$c.timing.sweepSeenCount }; $Seen | ConvertTo-Json -Depth 5 | Set-Content $SeenFile
-        [void](Add-Journal $n $null 'pulled' @{ column = $td; from = $set.from; slots = [int]$a.intake.freeSlots; wip = $wip; wipLimit = $set.wip } "intake|$((Get-UtcNow).Ticks)")
+        $jf = @{ column = $td; from = $set.from; slots = [int]$a.intake.freeSlots; wip = $wip; wipLimit = $set.wip }; $jk = "intake|$((Get-UtcNow).Ticks)"
+        try { [void](Use-ItemLock $n { $f = Get-State $n; if (Add-Journal $n $f 'pulled' $jf $jk) { Save-State $n $f } } 5) } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw } }
         return @{ action = @{ item = $n; action = 'intake-pulled'; column = $td; from = $set.from; wip = $wip }; offer = @{ item = $n; column = $td; reason = 'intake' } }
     }
     return $null

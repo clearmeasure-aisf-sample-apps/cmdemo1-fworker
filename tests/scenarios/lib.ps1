@@ -30,7 +30,7 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     # one item per session (plant.oneItemPerSession) is on in the source defaults; the suites let one scripted session take many items, so it is off here
     # unless a suite sets it. The scenarios of the rule turn it on for their own gateway (FACTORY_ONE_ITEM_PER_SESSION, owner.ps1).
     $cfg.plant = @{ oneItemPerSession = $false }
-    # work intake (issue 104) is on in the source defaults; the suites create their items in the columns they need, so it is off here unless a
+    # work intake (issue 104) is off in the source defaults (an environment turns it on); the suites create their items in the columns they need, so it is off here unless a
     # scenario switches it on (FACTORY_INTAKE, owner.ps1)
     $cfg.intake = @{ enabled = $false }
     foreach ($k in $Config.Keys) { $cfg[$k] = $Config[$k] }

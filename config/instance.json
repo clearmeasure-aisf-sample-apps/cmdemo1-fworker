@@ -59,7 +59,7 @@
     "oneItemPerSession": true
   },
   "intake": {
-    "enabled": true,
+    "enabled": false,
     "fromColumn": "Todo",
     "wipLimit": 6,
     "holdLabels": ["Needs Human Review"]
