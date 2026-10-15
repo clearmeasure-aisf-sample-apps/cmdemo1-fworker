@@ -269,9 +269,17 @@ m. **The sweep still saves a state it read without the item lock in two places**
    left because they call GitHub and Octopus for a long time between the read and the save: under the item lock a verb for the same item
    would wait and be refused `item-busy`. They need the read-decide part outside and a short locked write of their own keys. The
    merge-detected and owner-released-idle writes are fixed (locked, on a fresh read), as is the QC step.
-n. **Rule scripts run as one `pwsh` per call with no limit on how many at once** (`runner.pool` is 0 in the deployed configuration). A
-   burst of verbs is a burst of processes: the likeliest way for the container to run out of memory. Either a concurrency limit in `Runner`
-   (Program.cs) or `runner.pool` in `config/deploy.overrides.json` (a protected file: the owner decides).
+n. **Done (2026-10-14, issue 89): at most `runner.maxProcesses` (6) rule scripts run at once** (`gateway/RunnerGate.cs`). Every call of
+   `Runner`, pooled or a process of its own, holds a slot; waiting calls start by class: the sweep, `accept`, `claim-item`, `expire-claim`
+   (take-backs) and the gateway's own start and stop calls first (one slot is kept for them), other verbs next, long polls
+   (`wait-for-checks`, `metrics`, `publish-demo`) at most half the slots, the journal last. A call that waits too long is answered exit 20
+   `runner-busy`: an ordinary or long-poll verb after 2 minutes, a critical call after its own timeout (at most 150 s), a journal line after
+   5 minutes; the wait is taken from the time the call may run. `/api/v1/status` shows `runner`: limit, running and waiting by class, peaks,
+   refusals, the last starts, and `memory` (the gateway, its live rule-script processes, the container's cgroup current, peak and limit).
+   Under saturation two things follow from the order: a webhook whose intake is refused busy is lost (its delivery id is already seen; the
+   sweep catches up), and an `accept` that waited its bounded time for the item's earlier journal lines may be journaled before them.
+   Open: `runner.pool` is still 0 in the deployed configuration; turning it on is `config/deploy.overrides.json`, a code-owner path (pull
+   request for the owner).
 d. **The state comment can be edited by anyone with write access; the gateway trusts it by author login only.** A signed state was
    built and taken out again on 2026-10-13 (pull request 22, three review rounds). What a next attempt must have from the start:
    1. one shared guard that refuses every verb that reads the state BEFORE the verb acts on GitHub (claim ref, board move, pull request,
@@ -437,7 +445,7 @@ new start in the Container Apps console log, and the system log of the revision 
 | Cause | In the code or platform | How to confirm |
 |---|---|---|
 | Scale-in (tdd and uat scale to zero) or a replica move | The platform's HTTP scale rule decides; whether an open event stream counts as a request for it is not visible in this repository. A new revision or a node drain does the same | Console log ends with `"gateway":"stopping"` (with `upSeconds`); the system log has a scale, revision or replica event at that time. If streams do not count, set a minimum of one replica for tdd (operator, the demo-environment kit) |
-| Out of memory | One `pwsh` per rule-script call, unlimited (entry n) | No `stopping` and no `unhandled-exception` line before the new start; the system log says OOMKilled or exit code 137 |
+| Out of memory | One `pwsh` per rule-script call, at most `runner.maxProcesses` at once since issue 89 (entry n); `/api/v1/status` `runner.memory` shows the container's current and peak | No `stopping` and no `unhandled-exception` line before the new start; the system log says OOMKilled or exit code 137 |
 | A probe failing | `/health` and `/alive` answer 200 from the first moment and wait on nothing; `/ready` is 503 until the revoked credentials are read (each read has 45 s, a failed one is tried again after 5 s doubling to 60 s; after 3 minutes one `"level":"error"` line with `"waitingFor":"revocations"`). `/ready` must not be the liveness probe | The system log shows failed probes, then a restart; the console log has `stopping` |
 | An unhandled exception | Fixed here: the sweeper let a cancellation that was not the shutdown escape (the default of .NET then stops the host); the runner pool's exit handler ran unguarded. A background service that throws no longer stops the host | A `"gateway":"unhandled-exception"` or `"unobserved-task-exception"` line, or a `crit:` line of the host |
 

@@ -59,6 +59,11 @@
   "plant": {
     "oneItemPerSession": true
   },
+  "runner": {
+    "pool": 0,
+    "poolMaxCalls": 200,
+    "maxProcesses": 6
+  },
   "github": {
     "budgetReserve": 300
   },
