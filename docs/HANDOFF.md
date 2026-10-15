@@ -260,6 +260,15 @@ Closed on 2026-10-15 (issue #101):
   ever. `/status` `lease.progress`. `docs/design/plant-manager.md` 6b rule 4.
   Open: not yet seen live on tdd; #83 (renewals that did not reach the lease watchdog) is a separate cause.
 
+Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
+
+- **#87 A code change was moved to Done when its master Build had been re-run** (272, 276). The Release and Architecture workflows start when a
+  Build completes and GitHub attaches their check runs to master's head at that moment, so a merge commit whose first attempt failed keeps the
+  skipped `release` check of that attempt; settle read it as docs-only. Docs-only is now decided from the merge commit's own Build
+  (`masterCodeChecks`, the jobs that run only for code: all skipped means docs-only) or else the pull request's files, and recorded as
+  `merge.docs_only` with `docs_only_from`; only then may a skipped or missing release check finish an item. The master-green verdict ignores
+  `masterIgnoredChecks` (`release`, `packages`, `architecture`), which could also park an item master-broken.
+
 Closed on 2026-10-15 (issues #79 and #82):
 
 - **#79 A flaky master Build parked merged items as master-broken** (276, 272, 280). The settle step asked GitHub to re-run the failed jobs
