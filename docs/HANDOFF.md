@@ -377,6 +377,21 @@ Closed on 2026-10-13 (pull request "hardening"):
   merge gate is unchanged and deterministic: recorded inspector approval, approval on GitHub, QC run, person's approval. Same pattern
   elsewhere: entry m.
 
+Closed on 2026-10-14 (operator-session notes in the inbox, stream lines whole):
+
+- **Operator-session notes and the inbox.** The gateway already stored them like operator notes (`Plant.SendMessage` delivers every
+  message with `Operator` set, the operator's and the operator session's alike, into each recipient's inbox); nothing in the client, the
+  skill or the scenarios said or proved it. The peer-messaging skill now says it (handle once, `ack`), `docs/design/worker-messaging.md` 3.4
+  states it, and scenarios of the operator suite prove it: a worker offline at the send, a note to all, `--from-message`, an answer.
+- **Stream lines arrive whole.** The Monitor of Claude Code shows at most 500 characters of one line (measured: 500 arrive, 501 end in
+  `...(truncated)`); a message line was up to about 1,650 characters, and over 500 with a two-letter text for every sender but the
+  operator (the long warnings come before the text), so a session saw the warning and little or none of the text, and the supervisor saw
+  part of the first question of a batch. Every stream line now fits `FACTORY_STREAM_LINE_MAX` (500): a message keeps a short warning and
+  its text is cut with `truncated` and `read` (`factory.ps1 inbox --id <id>`); a batch, a patrol or another event that does not fit says
+  so and names the command that reads it whole (`docs/design/worker-messaging.md` 5.2). `inbox` and `wait-event --messages` stop at about
+  24,000 characters (`more`). Open: the operator skill (code-owner path, another pull request in flight) does not yet mention that a long
+  `operator.inbox` line is cut; the line itself names the command (`read`).
+
 ### Flaky qc-gate-lease scenario (fixed 2026-10-14)
 
 Cause: the QC lease was renewed only when a verb of the worker had finished (accept, qc-progress, qc-report), so a worker whose verb was still

@@ -427,6 +427,7 @@ function Verb_complete($a) {
     $chk = Get-ChecksFor $prd.head.sha
     if ($chk.status -eq 'failure') {
         $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url; failed_checks = $chk.failed_checks }
+        [void](Add-ChecksRed $s "$($prd.head.sha)")
         Save-State $n $st
         Reject 10 'checks-not-green' 'pull request checks are not green' @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
     }
