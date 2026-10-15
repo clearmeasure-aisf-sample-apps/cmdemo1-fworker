@@ -30,6 +30,8 @@ sealed partial class Plant
                 }).ToArray()),
                 ["owners"] = new JsonObject(ownerOf.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
                 ["drained"] = new JsonArray(drainedNames.OrderBy(x => x, StringComparer.Ordinal).Select(x => (JsonNode)x).ToArray()),   // issue 80
+                ["managerDrained"] = new JsonArray(mgrDrained.OrderBy(x => x, StringComparer.Ordinal).Select(x => (JsonNode)x).ToArray()),   // the plant manager's drains (Manager.cs)
+                ["managerMode"] = mgrModeOverride, ["managerSummaryDay"] = summaryDay,   // the operator's run-time mode and the day the summary was due (Manager.cs)
                 ["bots"] = new JsonObject(botOf.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
                 ["ownedSince"] = new JsonObject(ownedSince.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value.ToString("o")))),
                 ["owned"] = new JsonObject(ownedInfo.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)new JsonObject
@@ -81,6 +83,11 @@ sealed partial class Plant
             // issue 80: the operator's drains of names (an older snapshot has none); a name already registered is draining at once
             foreach (var d in s["drained"] as JsonArray ?? new JsonArray())
                 if (Name(d) is { Length: > 0 } dn && drainedNames.Add(dn) && workers.TryGetValue(dn, out var dw)) dw.Draining = true;
+            // only an operator's advise comes back: the snapshot is a ref others can write, and nothing in it may turn the plant manager's actions on
+            if (s["managerMode"]?.ToString() == "advise" && mgrModeOverride == "") mgrModeOverride = "advise";
+            if (s["managerSummaryDay"]?.ToString() is { Length: 10 } sd && System.Text.RegularExpressions.Regex.IsMatch(sd, @"^\d{4}-\d{2}-\d{2}\z") && string.CompareOrdinal(sd, summaryDay) > 0 && string.CompareOrdinal(sd, DateTime.UtcNow.ToString("yyyy-MM-dd")) <= 0) summaryDay = sd;
+            foreach (var d in s["managerDrained"] as JsonArray ?? new JsonArray())
+                if (Name(d) is { Length: > 0 } dn && mgrDrained.Add(dn) && workers.TryGetValue(dn, out var dw)) dw.Draining = true;
             if (Msg.On)
             {
                 foreach (var kv in s["ownedSince"] as JsonObject ?? new JsonObject())

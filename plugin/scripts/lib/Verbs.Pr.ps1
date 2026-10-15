@@ -8,6 +8,57 @@ function Get-PrBodyText([string]$Body, [int]$Item) {
     return "$t`n`n$ref"
 }
 
+# ---- push gate after repeated red checks -------------------------------------------------------------------------------
+# Every head of an item's pull request whose checks went red is counted once (state checks_red). From timing.redChecksGate (2) red heads on,
+# open-pr and update-pr are refused until the session attests with private-build --attest <sha> that the private build passed on the head of the
+# branch; an item that owes no private build (docs-only, Get-BuildOwed) is not gated. A red check alone on one platform that the base branch fails
+# too (likelyPreexisting) is not counted at first: wait-for-checks reruns its job once.
+function Get-RedChecksGate { $t = (Get-Cfg).timing; if (Test-Has $t 'redChecksGate') { [int]$t.redChecksGate } else { 2 } }
+function Get-ChecksRedCount($s) { if ((Test-Has $s 'checks_red') -and (Test-Has $s.checks_red 'count')) { [int]$s.checks_red.count } else { 0 } }
+
+# counts a red head once; true when it was not counted before
+function Add-ChecksRed($s, [string]$Sha) {
+    if (-not $Sha) { return $false }
+    if (-not (Test-Has $s 'checks_red')) { $s.checks_red = @{ count = 0; shas = @() } }
+    $shas = @($s.checks_red.shas | Where-Object { $_ })
+    if ($shas -contains $Sha) { return $false }
+    $s.checks_red.shas = @(@($shas + $Sha) | Select-Object -Last 10); $s.checks_red.count = (Get-ChecksRedCount $s) + 1; $s.checks_red.last_at = ConvertTo-Iso (Get-UtcNow)
+    return $true
+}
+
+# for a verb that holds no item lock (wait-for-checks): counted under the lock on a fresh read
+function Save-ChecksRed([int]$n, [string]$Sha) {
+    Use-ItemLock $n { $st = Get-State $n; if (Add-ChecksRed $st.state $Sha) { Save-State $n $st } }
+}
+
+# $HeadSha: the head the pull request has (or would have); empty for a pull request not yet created, where an attestation newer than the last red
+# head is enough (the head of a branch that is not a pull request is not read)
+function Assert-PushGate([int]$n, $info, $s, [string]$HeadSha, $PrNumber) {
+    $limit = Get-RedChecksGate; $count = Get-ChecksRedCount $s
+    if ($limit -le 0 -or $count -lt $limit) { return }
+    if (Test-Has $s 'private_build') {
+        $pb = $s.private_build
+        if ($HeadSha -and "$($pb.sha)" -eq $HeadSha) { return }
+        if (-not $HeadSha -and (ConvertFrom-Iso $pb.at) -ge (ConvertFrom-Iso $s.checks_red.last_at)) { return }
+    }
+    if ($PrNumber) { $bo = Get-BuildOwed $info ([int]$PrNumber) $s; if (-not $bo.build_owed) { return } }
+    $shown = if ($HeadSha) { $HeadSha.Substring(0, [Math]::Min(7, $HeadSha.Length)) } else { 'the head of the branch' }
+    Reject 10 'private-build-required' "the checks of this item's pull request went red on $count heads: run the private build on $shown until it passes, then record it with private-build --item $n --attest <full sha of that commit>, and call this again. No push without a passing private build." @{ checks_red = $count; head_sha = $HeadSha; gate = $limit }
+}
+
+# private-build --attest SHA: the session states that the private build passed on that commit. Recorded in the item's state for the push gate.
+function Verb_private_build($a) {
+    $n = Get-ItemNumber $a
+    $sha = "$(Need $a 'attest')".Trim().ToLowerInvariant()
+    if ($sha -notmatch '^[0-9a-f]{40}$') { Reject 2 'usage' 'attest takes the full 40-character sha of the commit the private build passed on' }
+    $info = Get-ItemInfo $n; Assert-Open $info
+    $holder = if (Test-Has $a 'holder') { "$($a.holder)" } else { 'anonymous' }
+    $st = Get-State $n; $s = $st.state
+    $s.private_build = @{ sha = $sha; at = ConvertTo-Iso (Get-UtcNow); holder = $holder }
+    Save-State $n $st
+    return @{ ok = $true; id = $n; attested = $true; sha = $sha; checks_red = (Get-ChecksRedCount $s); gate = (Get-RedChecksGate) }
+}
+
 # update-pr: replaces the body of the item's own open pull request (a worker corrects what open-pr wrote; nothing else of the pull request changes).
 # The pull request is the open one on the item's branch; --pr may name it, and any other number is refused.
 function Verb_update_pr($a) {
@@ -31,6 +82,7 @@ function Verb_update_pr($a) {
         if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { Reject 10 'pr-not-open' "pull request #$($s.pr.number) of this item is no longer open; only an open pull request is changed" }
         Reject 10 'no-open-pr' 'no open pull request linked to this work item'
     }
+    Assert-PushGate $n $info (Get-State $n).state "$($own.head.sha)" $own.number
     $r = Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($own.number)" -Body @{ body = (Get-PrBodyText $body $n) }
     return @{ ok = $true; id = $n; updated = $true; pullRequest = @{ number = $own.number; url = $own.html_url; head_sha = $own.head.sha; branch = $own.head.ref } }
 }
@@ -45,10 +97,13 @@ function Verb_open_pr($a) {
     $base = if (Test-Has $a 'base') { "$($a.base)" } else { $c.defaultBranch }
     $body = if (Test-Has $a 'body') { "$($a.body)" } else { '' }
     $existing = Find-ItemPr $n
+    $gs = (Get-State $n).state
     if ($existing -and $existing.head.ref -eq $head) {
-        $bo = Get-BuildOwed $info $existing.number (Get-State $n).state
+        Assert-PushGate $n $info $gs "$($existing.head.sha)" $existing.number
+        $bo = Get-BuildOwed $info $existing.number $gs
         return @{ ok = $true; id = $n; created = $false; pullRequest = @{ number = $existing.number; url = $existing.html_url; head_sha = $existing.head.sha; branch = $head }; build_owed = $bo.build_owed; build_reason = $bo.build_reason }
     }
+    Assert-PushGate $n $info $gs '' $null
     $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls" -Allow 422 -Body @{ title = $title; head = $head; base = $base; body = (Get-PrBodyText $body $n); draft = $false }
     if ($r -is [hashtable] -and $r.ContainsKey('status')) {
         $msg = try { ($r.body.errors | ForEach-Object { $_.message }) -join '; ' } catch { '' }
@@ -93,11 +148,34 @@ function Verb_wait_for_checks($a) {
         if ($r.status -eq 'failure') {
             $poll.Remove('brief'); $poll.Remove('tail')   # (a wrong --tail must not change this answer)
             $d = try { Verb_pr_checks $poll 25 } catch { $r }   # 25 s: the gateway ends this verb 40 s after the longest wait
+            if (Test-Has $a 'item') {
+                $n = [int]$a.item
+                if (Invoke-PreexistingRerun $n $r $d) { Reject 21 'rerun-started' "the one failed check ($(@($r.failed_checks) -join ', ')) fails on the base branch too (likelyPreexisting): the gateway reran its job once. Call wait-for-checks again." @{ checks = $d } }
+                Save-ChecksRed $n "$($r.sha)"
+            }
             Reject 10 'checks-red' "checks failed: $($r.failed_checks -join ', '). 'checks' holds, per failed check, its log excerpt or annotations (data.*) and its baseline on the base branch (likelyPreexisting)." @{ checks = $d }
         }
         Start-Sleep -Seconds 10
     } while ((Get-Date) -lt $end)
     Reject 21 'still-pending' 'checks are still running; call again' @{ checks = $r }
+}
+
+# One failed check, red on the base branch as well, an Actions job: its job is rerun once per head (state preexisting_reruns). True when the rerun
+# was started; a rerun GitHub refuses (no Actions write permission, a run still going) leaves the red as it is.
+function Invoke-PreexistingRerun([int]$n, $r, $d) {
+    $failed = @($r.failed_checks | Where-Object { $_ })
+    if ($failed.Count -ne 1 -or -not "$($r.sha)") { return $false }
+    $ck = @(@($d.checks) | Where-Object { $_ -and "$($_.name)" -eq "$($failed[0])" }) | Select-Object -First 1
+    if (-not $ck -or -not $ck.likelyPreexisting -or -not $ck.job -or -not $ck.job.available -or -not $ck.job.id) { return $false }
+    return [bool](Use-ItemLock $n {
+        $st = Get-State $n; $s = $st.state
+        $done = @(if (Test-Has $s 'preexisting_reruns') { $s.preexisting_reruns | Where-Object { $_ } })
+        if ($done -contains "$($r.sha)") { return $false }
+        $x = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/actions/jobs/$($ck.job.id)/rerun" -Allow 403, 404, 409, 422
+        if ($x -is [hashtable] -and $x.ContainsKey('status') -and $x.status -in 403, 404, 409, 422) { return $false }
+        $s.preexisting_reruns = @(@($done + "$($r.sha)") | Select-Object -Last 10); Save-State $n $st
+        return $true
+    })
 }
 
 function Invoke-Demote([int]$n, $info, $st, [string]$Reason, [string]$Cause) {
@@ -218,6 +296,8 @@ function Verb_validation_verdict($a) {
             # (a merge that a FAIL verdict judged is not picked up by the sweep as a finished change: the gaps are still to be closed)
             if ($prd -and $prd.merged) { if (-not (Test-Has $s 'pr')) { $s.pr = @{} }; $s.pr.residual = $true }
             $d = Invoke-Demote $n $info $st $cause 'verdict'
+            # auto-unpark (Verbs.Sweep.ps1): the head this park judged, so the sweep can lift it once the pull request is green on a newer head
+            if ($d.outcome -eq 'parked' -and $prd -and -not $prd.merged -and (Test-Has $s 'park')) { $s.park.pr = $pr; $s.park.head = $(if ($headSha) { "$headSha" } else { "$($prd.head.sha)" }); Save-State $n $st }
             $res.next = $d.outcome; $res.detail = $d
         } else {
             Set-Park $s 'verdict-failed' ($c.timing.parkHours * 60); $s.Remove('claim'); Remove-ClaimRef $n; Save-State $n $st

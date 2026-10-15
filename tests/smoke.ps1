@@ -59,4 +59,14 @@ Check 'testing profile is haiku 5.5 at low effort' ($tp.model -eq 'claude-haiku-
 Check 'testing profile never climbs, whatever the tier' ((Resolve-ModelFor 'orchestrator' 2 $mc 'testing').model -eq 'claude-haiku-5-5' -and -not $tp.escalates)
 Check 'an unknown profile falls back to the ladder' ((Resolve-ModelFor 'subagent' 1 $mc 'nope').model -eq 'claude-sonnet-5-5')
 Check 'the testing profile wins over fixed mode too' ((Resolve-ModelFor 'subagent' 0 $fx 'testing').effort -eq 'low')
+"config"
+# docs/design/cloud-worker-runtimes.md section 5: every runtime is off in the source defaults; one is switched on and sized only in
+# config/deploy.overrides.json (a code-owner path). A default that starts executions would spend money from any build of this repository.
+$rtCfg = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).runtimes
+Check 'runtimes: the source defaults exist' ($rtCfg -is [System.Collections.IDictionary] -and $rtCfg.caeJob -is [System.Collections.IDictionary])
+Check 'runtimes: no routing rule in the source defaults' (@($rtCfg.routing).Count -eq 0)
+foreach ($rk in @($rtCfg.Keys | Where-Object { $rtCfg[$_] -is [System.Collections.IDictionary] })) {
+    $rv = $rtCfg[$rk]
+    Check "runtimes.${rk}: off in the source defaults (enabled false, maxConcurrent 0, maxExecutionsPerDay 0, no job named)" ($rv.enabled -eq $false -and $rv.maxConcurrent -eq 0 -and $rv.maxExecutionsPerDay -eq 0 -and "$($rv.jobResourceId)" -eq '')
+}
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }
