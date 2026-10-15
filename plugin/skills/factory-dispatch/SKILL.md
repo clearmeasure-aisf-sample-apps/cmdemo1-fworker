@@ -19,7 +19,7 @@ An event is a hint. Its column is never trusted: re-read the item.
    `factory.ps1 claim-item --item N --column "<column>"`.
    - exit 0: continue.
    - exit 40 (`claim-held`): another session owns it. Stop.
-   - exit 10 (`no-worker-label`, `ambiguous-owner`, `demo-exclusion`, `parked`, `verdict-already-recorded`, `not-ai-column`) or 11 (`column-changed`, `item-closed`): stop and log the `code`. Never retry around a refusal.
+   - exit 10 (`no-worker-label`, `ambiguous-owner`, `demo-exclusion`, `held-by-label`, `parked`, `verdict-already-recorded`, `not-ai-column`) or 11 (`column-changed`, `item-closed`): stop and log the `code`. Never retry around a refusal.
 4. Run the skill for the claimed column (use `mode` from the claim: `first`, `fix-forward`, `relaunch`):
    - Technical Design: `factory-technical-design`
    - Development: `factory-development`

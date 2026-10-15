@@ -42,7 +42,7 @@ $LeaseScenarios['lease: the client accepts an owner offer itself (acceptedBy cli
         $bob = Msg-Open 'name=bob&capacity=20&messaging=1' (Msg-Token 'bob'); Msg-Registered $bob
         try {
             Check 'after clientStartMinutes the lease is ended: taken_back in the state, lease-expired in the journal' (Wait-Until -Seconds 40 { $s = Ls-State $n; $s.ContainsKey('claim') -and "$(Ls-Taken $s)" -eq 'client-accepted-not-started' -and (Ls-Journal $n 'lease-expired').Count -eq 1 }) ((Ls-State $n) | ConvertTo-Json -Compress -Depth 6)
-            # (the rule script saved the state before it ended; the plant lets go when its answer is back)
+            # (the state is saved inside expire-claim; the plant lets go when that rule script has returned, a moment later)
             Check 'the plant forgot the owner and counted the take-back' (Wait-Until -Seconds 15 { (Ls-Owner $n) -eq '' -and (Ls-Status).lease.takenBack -ge 1 }) ((Ls-Status).lease | ConvertTo-Json -Compress -Depth 5)
             Msg-Read $bob 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' -and $_.data['item'] -eq $n }).Count -ge 1 }
             $re = Msg-First @(Msg-Of $bob 'item.assigned' | Where-Object { $_.data['item'] -eq $n })
@@ -89,5 +89,42 @@ $LeaseScenarios['lease: a verb and a heartbeat that names the item renew its lea
             Check 'its lease is ended in the state and the journal says why' (Wait-Until -Seconds 30 { "$(Ls-Taken (Ls-State $n2))" -eq 'no-answer-to-item-check' -and (Ls-Journal $n2 'lease-expired').Count -eq 1 }) ((Ls-State $n2) | ConvertTo-Json -Compress -Depth 6)
             Check 'the plant still names carol for the answered item only' ((Ls-Owner $n1) -eq 'carol' -and (Ls-Owner $n2) -eq '') ((Ls-Status).plant.owners | ConvertTo-Json -Compress)
         } finally { Msg-Close $carol }
+    }
+}
+
+# Issue 100: a blocked session kept winning items. Its client accepted every offer by itself (accepted_by client), which counted as answering, and
+# the take-back that followed counted as nothing. Now the client's accept is no answer, every take-back is a miss, and two misses in a row with a
+# take-back among them block the session until it calls a verb of its own: the plant event session-blocked, the digest entry, no offer meanwhile.
+$LeaseScenarios['lease: items taken back from a session count as misses and the client''s accept is no answer; after two in a row the session is blocked until it calls a verb of its own'] = {
+    $n = New-Item-Fake 'Blocked session' 'x' @('factory worker')
+    Msg-OnGateway (Ls-Env 'instance.lease-c.json' @{ FACTORY_TIMING_clientStartMinutes = '0.1'; FACTORY_TIMING_staleItemMinutes = '600'; FACTORY_TIMING_offerCoolDownMinutes = '600' }) {
+        param($g)
+        Ls-Swept
+        $c = Msg-Client 'alice' 'lease-c' '' @{ FACTORY_AUTO_ACCEPT = '1' } @('--capacity', '1')
+        $alice = { Msg-First @((Ls-Status).plant.workers | Where-Object { $_.name -eq 'alice' }) }
+        try {
+            Check 'the client registers' (Msg-WaitEvent $c 'worker.registered' 30)
+            [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design' }); pins = @{}; owned = @{}; keep = @() })
+            # the client accepts by itself, the session never starts: taken back; the sweep that follows offers the item to alice again (no other session)
+            Check 'the item is accepted by the client and taken back twice' (Wait-Until -Seconds 120 { (Ls-Journal $n 'lease-expired').Count -ge 2 }) "lease-expired $((Ls-Journal $n 'lease-expired').Count)"
+            Check 'the client accepted it each time (acceptedBy client)' (@(Msg-ClientEvents $c | Where-Object { $_.event -eq 'item.accepted' -and $_['item'] -eq $n -and $_.acceptedBy -eq 'client' }).Count -ge 2)
+            Check 'two take-backs in a row block the session: the client''s accept between them did not count as answering' (Wait-Until -Seconds 20 { $w = & $alice; $w -and $w.blocked -eq $true -and "$($w.blockedSince)" -ne '' }) ((& $alice) | ConvertTo-Json -Compress)
+            Check 'the journal says why' (Wait-Until -Seconds 20 { @((Ls-Journal $n 'reassigned') | Where-Object { $_.body -like '*is offered nothing until it calls a verb of its own*' }).Count -eq 1 })
+            Check 'the status counts it' ((Ls-Status).plant.sessionsBlocked -ge 1)
+            $dg = (Msg-Admin '/api/v1/digest').digest
+            $e = Msg-First @($dg.attention | Where-Object { $_.kind -eq 'session-blocked' -and $_.worker -eq 'alice' })
+            Check 'the digest reports session-blocked with the item, in the schema' ($e -and $e.item -eq $n -and @(Mgr-DigestProblems $dg).Count -eq 0) (($dg | ConvertTo-Json -Compress -Depth 6) + ' ' + (@(Mgr-DigestProblems $dg) -join ','))
+            $acc = @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'item.accepted' -and $_['item'] -eq $n }).Count
+            [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design' }); pins = @{}; owned = @{}; keep = @() })
+            Start-Sleep -Seconds 4
+            $wt = Msg-First @((Ls-Status).plant.assignments | Where-Object { $_.item -eq $n -and $_.kind -eq 'own-item' })
+            Check 'a blocked session is offered nothing: the item waits' ($wt -and "$($wt.worker)" -eq '' -and @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'item.accepted' -and $_['item'] -eq $n }).Count -eq $acc) ($wt | ConvertTo-Json -Compress)
+            # a verb of the session's own (my-items with its worker credential) ends the block
+            $r = Msg-Json (Msg-Verb 'my-items' (Msg-Token 'alice') @{})
+            Check 'alice calls a verb of its own' ($r.exit -eq 0) ($r | ConvertTo-Json -Compress)
+            Check 'that ends the block' (Wait-Until -Seconds 10 { (& $alice).blocked -eq $false }) ((& $alice) | ConvertTo-Json -Compress)
+            [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design' }); pins = @{}; owned = @{}; keep = @() })
+            Check 'and the item is offered to alice again' (Wait-Until -Seconds 30 { @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'item.accepted' -and $_['item'] -eq $n }).Count -gt $acc })
+        } finally { Mgr-Stop $c }
     }
 }
