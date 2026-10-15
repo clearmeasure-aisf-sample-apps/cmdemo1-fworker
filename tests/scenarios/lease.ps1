@@ -128,7 +128,8 @@ $LeaseScenarios['lease: local progress sent with the heartbeat keeps a busy owne
             Check 'progress answers the open check (counted, no check open)' (Wait-Until -Seconds 10 { $x = (Ls-Status).lease; $x.checksAnsweredByProgress -ge 1 -and @($x.checksOpen | Where-Object { $_.item -eq $n }).Count -eq 0 }) ((Ls-Status).lease | ConvertTo-Json -Compress -Depth 5)
             # the subagent goes on writing: the item stays carol's past staleConfirmMinutes
             $end = (Get-Date).AddSeconds(30); while ((Get-Date) -lt $end) { [void](Msg-Post '/api/v1/presence' @{ progress = @(@{ item = $n; ageSeconds = 0; source = 'marker' }) } (Msg-Token 'carol')); Msg-Read $carol 3 }
-            Check 'the item is not taken back after staleConfirmMinutes: carol still owns it' (@(Msg-Of $carol 'item.taken_back').Count -eq 0 -and (Ls-Owner $n) -eq 'carol' -and "$(Ls-Taken (Ls-State $n))" -eq '') ((Ls-Status).plant.owners | ConvertTo-Json -Compress)
+            $tb = Msg-Of $carol 'item.taken_back'
+            Check 'the item is not taken back after staleConfirmMinutes: carol still owns it' ($tb.Count -eq 0 -and (Ls-Owner $n) -eq 'carol' -and "$(Ls-Taken (Ls-State $n))" -eq '') ((Ls-Status).plant.owners | ConvertTo-Json -Compress)
         } finally { Msg-Close $carol }
     }
 }
