@@ -49,7 +49,9 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'base-updated' { return "master moved to ``$($F.sha7)``$(if ($F.ContainsKey('prs') -and $F.prs) { " (merged: $($F.prs))" }); told the owner (**$($F.worker)**) to merge master into the branch now: $($F.behind) commit(s) behind$(if ($F.ContainsKey('overlap') -and $F.overlap) { ", files changed on both sides: $($F.overlap)" })." }
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
-        'unparked' { if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }
+        'settle-rearmed' { return "the settle step of this merged item is re-armed by $($F.by) (awaiting ``$($F.awaiting)``): $($F.reason). The gateway carries it on; it is not offered to a worker." }
+        'unparked' { if ($F.ContainsKey('merged') -and $F.merged) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is merged: the gateway settles it, nothing is offered." }
+            if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }; return "park ``$($F.code)`` released early by $($F.by): $($F.reason). The next sweep takes it up again in $col." }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
         default { return "$Event" }
     }
