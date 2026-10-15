@@ -13,6 +13,7 @@
 # factory.ps1 subscribe --own --supervisor --name N --model ID --effort E   the supervisor session (6.4); its verbs, with FACTORY_SUPERVISOR_TOKEN:
 # factory.ps1 answer --id M --text-file F [--note "..."] | answer --batch-file F | direct --to NAME|--all [--kind directive|announcement] --text-file F [--item N]
 # factory.ps1 questions [--state open|all] | plant-digest | patrol-ack --seq N --note "..." | send --to operator | get-item, pr-checks, get-delivery
+# factory.ps1 act <action> --item N --policy CODE [--reason "..."] | act drain|resume|restart-session --name W --policy CODE | act-log | metrics [--since 24h]
 # factory.ps1 subscribe --own --operator --name N --model ID --effort E | operator <verb>   the factory operator session (lib/Client.Operator.ps1), with FACTORY_OPERATOR_SESSION_TOKEN
 # factory.ps1 unpark --item N --reason "..."   the operator (FACTORY_TOKEN = the operator token) releases a park early; the next sweep offers the item
 # factory.ps1 subscribe [--spawn]              client: prints one normalized event per line; with --spawn starts a headless worker per offer
@@ -26,7 +27,7 @@ $here = $PSScriptRoot
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'update-pr', 'pr-checks',
     'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
-    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'expire-claim', 'unpark-item')
+    'qc-sync', 'qc-link', 'qc-view', 'qc-request', 'qc-reset', 'qc-teardown', 'qc-list', 'qc-job', 'qc-progress', 'qc-report', 'qc-fail', 'qc-stopped', 'qc-transition', 'qc-approval', 'revocations', 'revoke-worker', 'operator-releases', 'operator-release', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics', 'expire-claim', 'private-build', 'unpark-item', 'manager-action')
 $NoLockVerbs = @('inspect-facts', 'get-item', 'pr-checks', 'wait-for-checks', 'get-delivery', 'sync-board', 'ingest-event', 'check-secrets', 'qc-sync', 'qc-list', 'qc-view', 'qc-job', 'base-watch', 'base-update-branch', 'publish-demo', 'plant-snapshot-save', 'plant-snapshot-load', 'plant-snapshot-clear', 'metrics')
 
 function Write-Out($obj, [int]$code) {
@@ -38,7 +39,7 @@ function Write-Out($obj, [int]$code) {
 # ---------------------------------------------------------------- server mode
 if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
     $verb = $Rest[1]
-    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'PlantSnapshot', 'Metrics') { . (Join-Path $here "lib/$f.ps1") }
+    foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'PlantSnapshot', 'Metrics', 'Verbs.Manager') { . (Join-Path $here "lib/$f.ps1") }
     $ErrorActionPreference = 'Stop'
     try {
         if ($verb -notin $ServerVerbs) { Reject 2 'unknown-verb' "unknown verb '$verb'" }
@@ -150,6 +151,12 @@ if ($verb -eq 'wait-event') { . (Join-Path $here 'lib/Client.Own.ps1'); Invoke-W
 if ($verb -in 'peers', 'send', 'inbox', 'ack', 'ask', 'presence', 'message-status', 'answer', 'direct', 'questions', 'plant-digest', 'patrol-ack') {
     . (Join-Path $here 'lib/Client.Own.ps1'); . (Join-Path $here 'lib/Client.Messages.ps1')
     Invoke-MessageVerb $verb (ConvertFrom-Flags $flagTokens) (Get-ClientConfig)
+}
+
+# the plant manager's flow verbs (docs/design/plant-manager.md 10e), with the supervisor credential: act <action> ..., act-log, metrics
+if ($verb -in 'act', 'act-log', 'metrics') {
+    . (Join-Path $here 'lib/Client.Own.ps1'); . (Join-Path $here 'lib/Client.Messages.ps1'); . (Join-Path $here 'lib/Client.Manager.ps1')
+    Invoke-ManagerVerb $verb ([string[]]@($flagTokens)) (Get-ClientConfig)
 }
 
 # unpark --item N --reason "...": the operator releases a park early (POST /api/v1/items/{n}/unpark, operator token only: FACTORY_TOKEN)

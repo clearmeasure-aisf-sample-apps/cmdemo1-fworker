@@ -18,8 +18,10 @@ Technical Design, Development and Functional Testing to a merged pull request, a
   is merged (the gateway settles it from there, issue #107; the connect prompt still says "and master is green": its text is pinned by a
   hash in the operator suite, a code-owner path). Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
   `factory test` selects the cheapest model profile.
-- **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask and reads the gateway's patrol
-  digest. It advises; it changes nothing.
+- **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask, reads the gateway's patrol
+  digest and keeps the flow moving with the flow verbs of `manager-action` (unpark, release-owner, pin and unpin, requeue, prioritize,
+  rerun-failed, drain and resume, restart-session) within guard rails the gateway enforces (`docs/design/plant-manager.md` 10e). It never
+  merges, approves, records a verdict or clears a hold; `manager.mode` `advise` turns its verbs off.
 - **Operator**: the person (or script) with the operator token: dashboard, credentials for workers, revoke, messaging on and off,
   notes to any session.
 - **Operator session**: one AI session (name `operator-session`) with a credential of its own kind, not the operator token. It watches
@@ -84,8 +86,13 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   2. deploy only when the plant is quiet; announce the restart to the connected sessions, verify that they reconnect, roll back otherwise;
   3. protected areas need the owner: credentials and tokens, authorization, revoke, the deploy pipeline, the operator's own skill and
      guard rails, uat and prod;
-  4. a daily limit of self-merged releases, with a report;
+  4. a daily limit of self-merged releases, with a report (12 a day since 2026-10-14, with small changes batched; 3 before);
   5. every change is recorded as an issue in this repository.
+- **The operator session acts without a person inside its guard rails** (2026-10-14, pull request "operator authority", owner review): it takes
+  the recommended option and builds it, the owner hearing of it in the changelog issue; it merges its own green, unprotected pull requests
+  as soon as guard rails a to e allow, without waiting; it may drain, resume and set the capacity of a worker name as the operator does, and read the
+  cycle-time metrics. It still cannot mint, revoke, switch messaging or call a verb, and container logs stay with the operator (no read-only
+  wrapper exists).
 - **uat and prod stay manual.**
 - **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so; the connect prompt text is unchanged because its hash is pinned by the operator suite, a protected path), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
@@ -203,6 +210,18 @@ v. **Done (2026-10-14): lasting cycle-time metrics** (enhancement 13). `GET /api
    changes nothing. One computation reads every item's comments: answers are cached 120 s per query and computed one at a time. The dashboard
    section "Cycle times" loads it when opened. Limits: `dispatched_at` keeps the last dispatch of a column (a column visited twice counts from
    its last visit); items worked before the journal existed have no match or accept time; at most 300 items and 90 days.
+w. **Built (2026-10-14), awaiting the owner's review: the plant manager acts on the flow** (`docs/design/plant-manager.md` 10e). The supervisor's
+   `manager-action` (`factory.ps1 act`): unpark, release-owner, pin, unpin, requeue, prioritize (labels `priority:top`, `priority:high`; the plan
+   offers them first after the pins), rerun-failed (failed jobs only, once per head), drain, resume, restart-session (`session.restart`, the
+   client writes the launcher's end marker). Guard rails in code: never merge, approve, record a verdict or clear a hold; the label `hold:owner`
+   refuses every action (and a restart of a session that owns such an item); 3 actions per item in 24 hours (in the item state), 3 drains or
+   restarts per session name in 24 hours and 30 actions an hour (both in memory); a policy code from `manager.actions.policies` on every
+   action, journaled; `manager.mode` `advise` (any unknown value too) turns them off; the operator token can switch it at run time, and a
+   graceful restart brings back an `advise`, never an `act`. Once a day `supervisor.summary-due` (`manager.dailySummaryHourUtc`; the day is
+   kept in the plant snapshot): the skill sends one summary from `GET /api/v1/metrics` and `act-log` instead of a note per event. Open: not yet
+   seen live on tdd; the hourly and per-name counts and the log of actions are in memory (the per-item count is not); `mode: act` and the
+   summary hour ship in `config/instance.json`, so the one image carries them to uat and prod; the supervisor's skill and its connect prompt
+   changed (owner review).
 z. **Done (2026-10-14, issue 93): the journal folds its repeats** (`plugin/scripts/lib/Journal.ps1`, `docs/design/plant-manager.md` 8). 23
    items had filled their 30 journal comments with `matched`, `waiting` and `reassigned` lines while they waited for a worker, and then
    journaled nothing more. A repeat of one of these kinds now edits the comment its kind last posted (the latest line, how often, from when to
@@ -365,6 +384,21 @@ Closed on 2026-10-13 (pull request "hardening"):
   merge gate is unchanged and deterministic: recorded inspector approval, approval on GitHub, QC run, person's approval. Same pattern
   elsewhere: entry m.
 
+Closed on 2026-10-14 (operator-session notes in the inbox, stream lines whole):
+
+- **Operator-session notes and the inbox.** The gateway already stored them like operator notes (`Plant.SendMessage` delivers every
+  message with `Operator` set, the operator's and the operator session's alike, into each recipient's inbox); nothing in the client, the
+  skill or the scenarios said or proved it. The peer-messaging skill now says it (handle once, `ack`), `docs/design/worker-messaging.md` 3.4
+  states it, and scenarios of the operator suite prove it: a worker offline at the send, a note to all, `--from-message`, an answer.
+- **Stream lines arrive whole.** The Monitor of Claude Code shows at most 500 characters of one line (measured: 500 arrive, 501 end in
+  `...(truncated)`); a message line was up to about 1,650 characters, and over 500 with a two-letter text for every sender but the
+  operator (the long warnings come before the text), so a session saw the warning and little or none of the text, and the supervisor saw
+  part of the first question of a batch. Every stream line now fits `FACTORY_STREAM_LINE_MAX` (500): a message keeps a short warning and
+  its text is cut with `truncated` and `read` (`factory.ps1 inbox --id <id>`); a batch, a patrol or another event that does not fit says
+  so and names the command that reads it whole (`docs/design/worker-messaging.md` 5.2). `inbox` and `wait-event --messages` stop at about
+  24,000 characters (`more`). Open: the operator skill (code-owner path, another pull request in flight) does not yet mention that a long
+  `operator.inbox` line is cut; the line itself names the command (`read`).
+
 ### Flaky qc-gate-lease scenario (fixed 2026-10-14)
 
 Cause: the QC lease was renewed only when a verb of the worker had finished (accept, qc-progress, qc-report), so a worker whose verb was still
@@ -451,7 +485,7 @@ The role is on in the deployed image (`operator.enabled` in `config/deploy.overr
    It does not get the operator token, the Octopus key or any GitHub App key.
 3. The prompt clones this repository, has the session read `CLAUDE.md` and this file, and hands over to
    `plugin/skills/factory-operator/SKILL.md`. The dashboard shows it in the group "Factory operator" with its model check and the
-   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 3).
+   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 12).
 4. To stop it: revoke the name `operator-session` on the dashboard, or switch messaging off (both act at once). To stop the role: set
    `operator.enabled` false in the overrides. Its GitHub connection is removed on GitHub.
 
