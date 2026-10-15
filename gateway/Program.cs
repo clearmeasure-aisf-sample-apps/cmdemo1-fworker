@@ -363,6 +363,8 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode && messaging.ManagerEnabled) o["managerActions"] = plant.ManagerActionsStatus(false);
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
+    // the rule scripts running and waiting, the processes and memory (gateway/RunnerGate.cs, issue 89)
+    o["runner"] = runner.Status();
     // the GitHub budget and the sweep's passes (issue 92)
     o["github"] = githubBudget.Status();
     o["sweep"] = hub.SweepStatus(sweepMinSeconds);
@@ -390,7 +392,7 @@ var metricsCache = new Dictionary<string, (DateTime At, int Code, string Json)>(
 var metricsGate = new SemaphoreSlim(1, 1);
 const int metricsCacheSeconds = 120, metricsFailSeconds = 30;
 static bool MetricsFresh((DateTime At, int Code, string Json) e) => (DateTime.UtcNow - e.At).TotalSeconds < (e.Code is 0 or 2 ? metricsCacheSeconds : metricsFailSeconds);
-static int MetricsStatus(int code) => code == 0 ? 200 : code == 2 ? 400 : 502;
+static int MetricsStatus(int code) => code == 0 ? 200 : code == 2 ? 400 : code == 20 ? 503 : 502;
 app.MapGet("/api/v1/metrics", async (HttpContext c) =>
 {
     // the operator, and the active supervisor for its daily summary (docs/design/plant-manager.md 10e): a step of its hourly budget, like a read verb
@@ -1670,6 +1672,11 @@ sealed class Runner(string entry)
 {
     // runner.pool > 0: long-lived pwsh workers take the calls (RunnerPool.cs); null (the default): one process per call, as below.
     readonly RunnerPool? pool = RunnerPool.Create(entry);
+    // at most runner.maxProcesses calls at once, pooled and spawned together, started by priority (RunnerGate.cs, issue 89)
+    readonly RunnerGate limiter = RunnerGate.Create(entry);
+    // the processes of calls that run now (not the pool's workers), for the process count and memory of /status
+    readonly ConcurrentDictionary<long, Process> live = new();
+    long liveKey;
     // the shared GitHub budget (GitHubBudget.cs, issue 92): every answer's _github field is recorded there and taken out of the answer
     public GitHubBudget? Budget { get; set; }
     public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
@@ -1686,17 +1693,41 @@ sealed class Runner(string entry)
 
     async Task<(int Code, string Output)> RunProcessAsync(string verb, string stdin, TimeSpan timeout)
     {
+        var queuedAt = DateTime.UtcNow;
+        using var slot = await limiter.EnterAsync(verb, RunnerGate.MaxWait(RunnerGate.ClassOf(verb), timeout));
+        if (slot is null)
+        {
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runner"] = "busy", ["verb"] = verb, ["limit"] = limiter.Limit }.ToJsonString());
+            return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "runner-busy", reason = $"the gateway runs {limiter.Limit} rule scripts at once and none came free in time; try again", retryAfterSeconds = 15, exit = 20 }));
+        }
+        // the wait for the slot is taken from the time the call may run, down to a quarter of it: a caller that set a timeout is not kept much longer
+        var waited = DateTime.UtcNow - queuedAt;
+        if (waited > TimeSpan.Zero) timeout = timeout - waited > timeout / 4 ? timeout - waited : timeout / 4;
         if (pool is not null && await pool.TryRunAsync(verb, stdin, timeout) is { } pooled) return pooled;
         var psi = new ProcessStartInfo("pwsh") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", entry, "--server", verb }) psi.ArgumentList.Add(a);
         using var p = Process.Start(psi)!;
-        await p.StandardInput.WriteAsync(stdin); p.StandardInput.Close();
-        var outTask = p.StandardOutput.ReadToEndAsync(); var errTask = p.StandardError.ReadToEndAsync();
-        using var cts = new CancellationTokenSource(timeout);
-        try { await p.WaitForExitAsync(cts.Token); }
-        catch (OperationCanceledException) { try { p.Kill(true); } catch { } return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "timeout", reason = "the rule script did not finish in time", retryAfterSeconds = 30, exit = 20 })); }
-        var err = await errTask; if (!string.IsNullOrWhiteSpace(err)) Console.Error.WriteLine($"[{verb}] {err.Trim()}");
-        return (p.ExitCode, (await outTask).Trim());
+        var key = Interlocked.Increment(ref liveKey); live[key] = p;
+        try
+        {
+            await p.StandardInput.WriteAsync(stdin); p.StandardInput.Close();
+            var outTask = p.StandardOutput.ReadToEndAsync(); var errTask = p.StandardError.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(timeout);
+            try { await p.WaitForExitAsync(cts.Token); }
+            catch (OperationCanceledException) { try { p.Kill(true); } catch { } return (20, JsonSerializer.Serialize(new { ok = false, verb, code = "timeout", reason = "the rule script did not finish in time", retryAfterSeconds = 30, exit = 20 })); }
+            var err = await errTask; if (!string.IsNullOrWhiteSpace(err)) Console.Error.WriteLine($"[{verb}] {err.Trim()}");
+            return (p.ExitCode, (await outTask).Trim());
+        }
+        finally { live.TryRemove(key, out _); }
+    }
+
+    // /status: the gate (limit, running and waiting by class, peaks, the last starts), the pool's size, and the processes and memory now
+    public JsonObject Status()
+    {
+        var o = limiter.Status();
+        o["pool"] = pool?.Size ?? 0;
+        o["memory"] = RunnerMemory.Read(live.Values.Concat(pool?.Processes() ?? Enumerable.Empty<Process>()).ToList());
+        return o;
     }
 }
 
@@ -1943,6 +1974,12 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 foreach (var a in acts)
                     if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
                         plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
+                // issue 102: a red that only repeats a defect of the base branch is reported once to the operator (it costs the item nothing)
+                foreach (var a in acts)
+                    if (a is JsonObject mo && mo["item"] is JsonValue mi && mi.TryGetValue<int>(out var mItem)
+                        && ((mo["action"]?.ToString() == "awaiting-checks" && mo["result"] is JsonObject mr && mr["outcome"]?.ToString() == "master-defect" && mr["new"] is JsonValue mn && mn.TryGetValue<bool>(out var mNew) && mNew)
+                            || (mo["action"]?.ToString() == "pass-merge" && mo["masterDefectNew"] is JsonValue pn && pn.TryGetValue<bool>(out var pNew) && pNew)))
+                        plant.OperatorPlantEvent("master-defect", mItem);
                 if (items == null)
                 {
                     plant.SetReleaseQueue(j["release_queue"] as JsonArray);
