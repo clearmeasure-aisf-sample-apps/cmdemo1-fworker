@@ -201,6 +201,18 @@
     "requiredEffort": "low",
     "maxSelfMergesPerDay": 3
   },
+  "keeper": {
+    "enabled": false,
+    "allowedNames": ["backlog-keeper"],
+    "tokenGeneration": 1,
+    "requiredModelTier": "premium",
+    "requiredEffort": "medium",
+    "maxNewItemsPerDay": 10,
+    "minTechnicalDesign": 3,
+    "newItemColumn": "Technical Design",
+    "jobCodes": ["same-criterion-repeated", "worker-failure", "fix-forward-exhausted", "demotion-limit", "watchdog-relaunch-budget", "verdict-failed", "stuck", "master-broken"],
+    "policies": ["criterion-dispute", "ambiguous-wording", "oversized-item", "compatibility-conflict", "flaky-test", "backlog-low", "dependency-order", "operator-request"]
+  },
   "secrets": {
     "patterns": [
       "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)",

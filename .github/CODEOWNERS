@@ -32,5 +32,13 @@
 /plugin/scripts/lib/Client.Manager.ps1        @jeffreypalermo
 /tests/scenarios/manager-actions.ps1          @jeffreypalermo
 
+# the backlog keeper: its powers, its guard rails, its skill and the owner's rules it follows
+/gateway/Keeper.cs                            @jeffreypalermo
+/plugin/scripts/lib/Verbs.Keeper.ps1          @jeffreypalermo
+/plugin/scripts/lib/Client.Keeper.ps1         @jeffreypalermo
+/plugin/skills/factory-backlog-keeper/        @jeffreypalermo
+/docs/owner-rules.md                          @jeffreypalermo
+/tests/scenarios/keeper.ps1                   @jeffreypalermo
+
 # uat and prod
 /docs/deploy/activate-prod.sh                 @jeffreypalermo

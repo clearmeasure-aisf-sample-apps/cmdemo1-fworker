@@ -150,8 +150,16 @@ sealed class World
             if (method == "DELETE") return li.Labels.Remove(Uri.UnescapeDataString(m.Groups[3].Value)) ? (200, new JsonArray()) : (404, "{\"message\":\"Label does not exist\"}");
         }
         if (path == root + "/labels" && method == "GET") return (200, new JsonArray(labelNames.Select(n => (JsonNode)J(("name", n))).ToArray()));
+        if (path == root + "/issues" && method == "POST")
+        {   // as GitHub: a new open issue with its labels (a label that does not exist yet is created with it), on no board until it is added
+            var ni = new Issue { Number = nextNumber++, Title = b!["title"]!.ToString(), Body = b["body"]?.ToString() ?? "" };
+            ni.Node = "I_" + ni.Number; foreach (var l in b["labels"]?.AsArray() ?? new JsonArray()) { if (!ni.Labels.Contains(l!.ToString())) ni.Labels.Add(l.ToString()); labelNames.Add(l.ToString()); }
+            issues[ni.Number] = ni;
+            return (201, J(("number", ni.Number), ("node_id", ni.Node), ("state", "open"), ("title", ni.Title), ("html_url", $"https://fake/issues/{ni.Number}")));
+        }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)$")).Success)
         {
+            if (!issues.ContainsKey(int.Parse(m.Groups[1].Value))) return (404, "{\"message\":\"Not Found\"}");
             var i = issues[int.Parse(m.Groups[1].Value)];
             if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
             return (200, J(("number", i.Number)));
@@ -258,9 +266,11 @@ sealed class World
                 case "merge": return Merge(pr, b);
                 default:
                     if (method == "PATCH")
-                    {   // title and body only, and only while open (as GitHub: a closed pull request's text can be edited there, the product never does)
+                    {   // title and body only, and only while open (as GitHub: a closed pull request's text can be edited there, the product never does);
+                        // state "closed" closes an open pull request without merging it, as GitHub does
                         if (b?["body"] is { } nb) pr.Body = nb.ToString();
                         if (b?["title"] is { } nt) pr.Title = nt.ToString();
+                        if (b?["state"]?.ToString() == "closed" && !pr.Merged) pr.Open = false;
                     }
                     return (200, PrJson(pr, true));
             }
@@ -675,7 +685,7 @@ sealed class World
                 return (200, J(("ok", true)));
             case "state":
                 return (200, J(
-                    ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
+                    ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("title", i.Title), ("body", i.Body), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
                         ("comments", new JsonArray(i.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())))).ToArray())),
                     ("appMints", appMints), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
                     ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("releases", releases.Count), ("requests", log.Count)));

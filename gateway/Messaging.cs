@@ -84,6 +84,7 @@ sealed class MessagingSettings
     // required one or higher; undeclared: nothing was sent; weak: anything else. Declared, never verified.
     public string ModelCheck(string model, string effort) => ModelCheck(model, effort, RequiredModelTier, RequiredEffort);
     public string OperatorModelCheck(string model, string effort) => ModelCheck(model, effort, OperatorRequiredModelTier, OperatorRequiredEffort);
+    public string ModelCheckFor(string model, string effort, string tier, string needEffort) => ModelCheck(model, effort, tier, needEffort);
     string ModelCheck(string model, string effort, string tier, string needEffort)
     {
         if (model == "" && effort == "") return "undeclared";
