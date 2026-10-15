@@ -327,3 +327,16 @@ Local first, in this order: (1) worker registry, `subscribe --own`, `accept`, `m
 Open question closed: nobody provisions a cloud environment automatically. A person starts a Claude cloud session (or a Cursor cloud agent) and gives it the connect prompt; from then on it behaves exactly like a persistent local session (`subscribe --own`, same credentials, same skills). The registry only labels it `claude-cloud` / `cursor-cloud` (assignment preference: persistent-local, then cloud, then ephemeral-local). No cloud adapter is built.
 
 The worker dashboard (`GET /dashboard`, data from `GET /api/v1/dashboard`, operator token) shows the connected sessions of one running factory (the gateway's `FACTORY_ENVIRONMENT`: tdd, uat or prod), their state, load and assignments, drain/resume, and generates the connect prompt. Creating the prompt issues a one-time worker credential for the chosen name (`POST /api/v1/workers/{name}/credential`); the gateway does not store it. `revoke` on a session row refuses every credential issued so far for that name (section 5).
+
+## 17. Work already started first; why every unowned item waits (2026-10-15, issues 97 and 99)
+
+`Plan` offers, after pinned items, the offers of columns past the intake column (`columns.ai[0]`, Technical Design) before new work: an item
+orphaned in Development, Functional Testing or Review by a take-back, a park or a lost session takes a free worker before a new item does.
+`/api/v1/status` shows:
+
+- `plant.orphans`: each unowned item past the intake column that waits for an owner, with its column, since when and `minutes`.
+- `plant.unowned`: every unowned item the factory knows of with why it waits, one row each, the first that applies: `parked` (code, since,
+  until; from the sweep's `parks`), `held` (`depends-on`, `on`), `offered` (worker, until), `waiting` (the waiting code, since); an orphan,
+  offered or waiting, also has `orphanSince` and `orphanMinutes`; `pass-unmerged` (a PASS the gateway is to merge, with its reason code),
+  `unconfirmed` (seen once on the board, offered at the next sweep), `release-queue` (merged, waiting for production). Column names and codes are
+  gated like the digest's. The lists are rebuilt by every sweep and are in memory.

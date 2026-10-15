@@ -58,6 +58,18 @@ static double AckSeconds(string scriptsDir)
     catch { }
     return 120;
 }
+// issue 97: the first column the factory works (columns.ai[0] of the configuration), its intake of new work
+static string IntakeColumnOf(string scriptsDir)
+{
+    try
+    {
+        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
+        if (root?["columns"]?["ai"] is JsonArray ai && ai.Count > 0 && ai[0]?.ToString() is { Length: > 0 } c) return c;
+    }
+    catch { }
+    return "Technical Design";
+}
+
 // timing.<key> of the config, FACTORY_TIMING_<key> first (tests); a value that is not a number of 0 or more is the default
 static double TimingValue(string scriptsDir, string key, double fallback)
 {
@@ -128,7 +140,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir) };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), IntakeColumn = IntakeColumnOf(scriptsDir), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir) };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -1594,6 +1606,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                                 plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
                         plant.SetReleaseQueue(j["release_queue"] as JsonArray);
                         plant.SetHeld(j["held"] as JsonArray);   // issue 65: items that wait for their dependencies
+                        plant.SetSweepFacts(j["parks"] as JsonArray, j["unconfirmed"] as JsonArray);   // issue 99: why each unowned item waits
                         try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
                         foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
                             if (t is JsonObject to && to["item"] is JsonNode ti)

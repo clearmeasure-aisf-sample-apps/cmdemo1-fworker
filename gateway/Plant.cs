@@ -75,6 +75,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // issue 72: how long a spent session may own nothing (and have no offer of its item open) before it is told session.end; the pause covers a
     // column move in which the same session is offered its item again (timing.sessionEndGraceSeconds, FACTORY_TIMING_sessionEndGraceSeconds)
     public double SessionEndGraceSeconds { get; set; } = 90;
+    // issue 97: the first column of the factory (new work); offers of later columns (work already started, orphaned by a take-back, a park or a lost
+    // session) go first, and an unowned item past it is an orphan whose age the status shows
+    public string IntakeColumn { get; set; } = "Technical Design";
+    readonly Dictionary<int, DateTime> orphanSince = new();
     public string Epoch => store.Epoch;
     readonly Dictionary<string, WorkerInfo> workers = new();
     readonly Dictionary<string, Assignment> assignments = new();
@@ -1769,7 +1773,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow);
             var wanted = new HashSet<string>();
             // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can
-            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0))
+            // then (issue 97) work already started before new work: an orphan in a column past the intake (Development, Functional Testing) takes a
+            // free worker before an item in the intake column
+            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0)
+                .ThenBy(x => string.Equals(x!["column"]?.ToString() ?? "", IntakeColumn, StringComparison.OrdinalIgnoreCase) ? 1 : 0))
             {
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
                 var key = $"{item}|{kind}|{role}"; wanted.Add(key);
@@ -1789,6 +1796,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     Id = "a-" + Interlocked.Increment(ref counter).ToString("x") + DateTime.UtcNow.Ticks.ToString("x")[^4..], Key = key, Item = item, Column = o["column"]?.ToString() ?? "",
                     Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
                 };
+                if (ReferenceEquals(a, ex) && o["column"]?.ToString() is { Length: > 0 } nc) a.Column = nc;   // a waiting assignment follows its card (issue 97)
                 assignments[key] = a;
                 if (!ReferenceEquals(a, ex)) DeclineTakenBack(a);      // a new assignment: not first to the worker it was just taken back from
                 a.Pin = pin ?? "";
@@ -1806,6 +1814,11 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             // an unanswered or unwanted assignment that the sweep no longer asks for is dropped
             foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
+            // issue 97: since when each unowned own-item past the intake column has waited for an owner
+            var orphans = assignments.Values.Where(a => a.Kind == "own-item" && !a.Accepted && !IsQc(a) && !ownerOf.ContainsKey(a.Item)
+                && !string.Equals(a.Column, IntakeColumn, StringComparison.OrdinalIgnoreCase)).Select(a => a.Item).ToHashSet();
+            foreach (var i in orphanSince.Keys.Where(i => !orphans.Contains(i)).ToList()) orphanSince.Remove(i);
+            foreach (var i in orphans) orphanSince.TryAdd(i, planNow);
         }
     }
 
@@ -1947,6 +1960,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             {
                 ["oneItemPerSession"] = OneItemPerSession,
                 ["held"] = HeldJson(),
+                ["unowned"] = UnownedJson(),
+                ["orphans"] = new JsonArray(orphanSince.Where(kv => !ownerOf.ContainsKey(kv.Key)).OrderBy(kv => kv.Value).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key,
+                    ["column"] = Gated(assignments.Values.FirstOrDefault(a => a.Item == kv.Key && a.Kind == "own-item")?.Column), ["since"] = kv.Value.ToString("o"),
+                    ["minutes"] = (int)(DateTime.UtcNow - kv.Value).TotalMinutes }).ToArray()),
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null,

@@ -134,7 +134,58 @@ sealed partial class Plant
     public JsonArray HeldJson()
     {
         lock (gate)
-            return new JsonArray(held.OrderBy(kv => kv.Key).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key, ["code"] = kv.Value.Code, ["column"] = kv.Value.Column,
+            return new JsonArray(held.OrderBy(kv => kv.Key).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key, ["code"] = GatedCode(kv.Value.Code), ["column"] = Gated(kv.Value.Column),
                 ["on"] = new JsonArray(kv.Value.On.Select(d => (JsonNode)d).ToArray()), ["since"] = kv.Value.Since.ToString("o") }).ToArray());
+    }
+
+    // Issue 99: what the sweep read of parks and of items it saw once (unconfirmed), for the status's list of unowned items and why each waits
+    readonly Dictionary<int, (string Column, string Code, string Since, string Until)> sweepParks = new();
+    readonly HashSet<int> sweepUnconfirmed = new();
+    public void SetSweepFacts(JsonArray? parks, JsonArray? unconfirmed)
+    {
+        lock (gate)
+        {
+            if (parks != null)
+            {
+                sweepParks.Clear();
+                foreach (var x in parks)
+                    if (x is JsonObject o && o["item"] is JsonValue iv && iv.TryGetValue<int>(out var item) && item >= 1 && sweepParks.Count < ReleaseQueueCap)
+                        sweepParks[item] = (Gated(o["column"]?.ToString()), GatedCode(o["code"]?.ToString()), Time(o["since"])?.ToString("o") ?? "", Time(o["until"])?.ToString("o") ?? "");
+            }
+            if (unconfirmed != null)
+            {
+                sweepUnconfirmed.Clear();
+                foreach (var x in unconfirmed) if (int.TryParse(x?.ToString(), out var u) && u >= 1) sweepUnconfirmed.Add(u);
+            }
+        }
+    }
+
+    // Issue 99: every unowned item the factory knows of, with why it waits, so nobody has to read the item's comments. One row per item, the first
+    // that applies: parked (code, since, until), held (depends-on), offered (to whom, until when), waiting (the waiting code), unconfirmed (seen once
+    // on the board, offered at the next sweep), release-queue (merged, waiting for production). Orphans (issue 97): an unowned item past the intake
+    // column, with how long it has been without an owner.
+    public JsonArray UnownedJson()
+    {
+        lock (gate)
+        {
+            var now = DateTime.UtcNow; var rows = new SortedDictionary<int, JsonObject>();
+            void Add(int item, JsonObject o) { if (!ownerOf.ContainsKey(item) && !rows.ContainsKey(item)) { o["item"] = item; rows[item] = o; } }
+            foreach (var (item, h) in held) Add(item, new JsonObject { ["state"] = "held", ["code"] = GatedCode(h.Code), ["column"] = Gated(h.Column), ["on"] = new JsonArray(h.On.Select(d => (JsonNode)d).ToArray()), ["since"] = h.Since.ToString("o") });
+            foreach (var a in assignments.Values.Where(a => a.Kind == "own-item" && !a.Accepted && !IsQc(a)).OrderBy(a => a.Item))
+            {
+                var o = a.Worker != ""
+                    ? new JsonObject { ["state"] = "offered", ["worker"] = a.Worker, ["until"] = a.AckBy.ToString("o"), ["column"] = Gated(a.Column) }
+                    : new JsonObject { ["state"] = "waiting", ["code"] = GatedCode(a.WaitingCode) is { Length: > 0 } wc ? wc : "not-yet-offered", ["since"] = a.WaitingSince?.ToString("o"), ["column"] = Gated(a.Column) };
+                if (orphanSince.TryGetValue(a.Item, out var os)) { o["orphanSince"] = os.ToString("o"); o["orphanMinutes"] = (int)(now - os).TotalMinutes; }
+                Add(a.Item, o);
+            }
+            // (an assignment means the sweep offered the item, so its park is gone: a park row of the same sweep may be stale)
+            foreach (var (item, p) in sweepParks) Add(item, new JsonObject { ["state"] = "parked", ["code"] = p.Code, ["column"] = p.Column, ["since"] = p.Since, ["until"] = p.Until });
+            // (the sweep's unconfirmed also holds items whose PASS waits for the gateway's merge: those say so)
+            foreach (var (item, p) in passUnmerged) Add(item, new JsonObject { ["state"] = "pass-unmerged", ["code"] = p.Code, ["since"] = p.Since.ToString("o"), ["pr"] = p.Pr });
+            foreach (var item in sweepUnconfirmed) Add(item, new JsonObject { ["state"] = "unconfirmed", ["code"] = "seen-once" });
+            foreach (var q in releaseQueue) Add(q.Item, new JsonObject { ["state"] = "release-queue", ["release"] = q.Release, ["since"] = q.Since.ToString("o") });
+            return new JsonArray(rows.Values.Select(r => (JsonNode)r).ToArray());
+        }
     }
 }
