@@ -55,7 +55,7 @@ sealed partial class Plant
     // a start has reported them, restart-session waits (sweep-pending)
     readonly HashSet<int> ownerHeld = new();
     bool ownerHeldKnown;
-    public void SetOwnerHeld(IEnumerable<int> items, IReadOnlyCollection<int>? scope = null) { lock (gate) { if (scope == null) ownerHeld.Clear(); else foreach (var i in scope) ownerHeld.Remove(i); foreach (var i in items) if (i > 0) ownerHeld.Add(i); ownerHeldKnown = true; } }
+    public void SetOwnerHeld(IEnumerable<int> items) { lock (gate) { ownerHeld.Clear(); foreach (var i in items) if (i > 0) ownerHeld.Add(i); ownerHeldKnown = true; } }
     public bool KnowsWorker(string name) { lock (gate) return workers.ContainsKey(name); }
     // The plant snapshot is restored after the listener is up (Program.cs): until then the operator's run-time mode and the day of the last summary are
     // not known, so the mode is advise and no summary is due. At most 60 s after the start, as the Sweeper waits.
