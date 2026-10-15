@@ -248,6 +248,18 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
+
+- **#100 A blocked session kept winning items.** Its stream client accepted every offer by itself, which reset the session's missed offers,
+  and the take-back five minutes later counted as nothing. Now the client's own accept (`accepted_by: client`) is no answer, every take-back is
+  a miss, and `timing.offerMissLimit` (2) misses in a row with a take-back among them block the session: it is offered nothing, pinned items
+  included, until it calls a verb of its own or a new session of the name registers (a reconnect of the same session keeps the block). Lapsed
+  offers alone still give the timed cool-down. A block is a `session-blocked` plant event on the operator stream and a `session-blocked` entry
+  of the patrol digest (worker, item, `blockedMinutes`); `/status` shows `blocked`, `blockedSince` and `takenBackInRow` per worker and
+  `sessionsBlocked`. QC environments are not part of the rule (they run outside the model session). Open: the supervisor's and operator
+  session's skills and `docs/design/operator-session.md` (owner review) do not list the new digest kind and the plant event codes
+  `session-blocked` and `session-unblocked`; the block is in memory and a restart forgets it.
+
 Closed on 2026-10-15 (issues #79 and #82):
 
 - **#79 A flaky master Build parked merged items as master-broken** (276, 272, 280). The settle step asked GitHub to re-run the failed jobs

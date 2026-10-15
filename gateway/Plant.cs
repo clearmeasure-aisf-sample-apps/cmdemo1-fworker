@@ -16,6 +16,13 @@ sealed class WorkerInfo
     public Channel<(long, string)>? Out;
     public int Missed;                                        // offers in a row this session let lapse (issue 31); any successful verb resets it
     public DateTime CoolUntil = DateTime.MinValue;            // until then it is offered no new work (unpinned)
+    // issue 100: an item taken back from the session (its client accepted it and the session never started, or it did not answer item.check) is a
+    // miss too; TakeBackMisses counts those among the misses in a row. A streak of OfferMissLimit misses with a take-back in it blocks the session:
+    // it is offered nothing, pinned items included, until it calls a verb of its own (the client's own accept is not one) or a new session of the
+    // name registers. BlockedItem is the item of the take-back that blocked it (for the plant event and the digest).
+    public int TakeBackMisses;
+    public DateTime? BlockedSince;
+    public int BlockedItem;
     public List<(long Id, string Json)> Buffer = new();      // item triggers for replay; the event counter itself is the name's Recipient.Next
     public string Model = "", Effort = "";                   // declared at registration (worker-messaging.md 2.2), never verified
     // QC (design pr-qc-environment.md 4.2): environments this session may run at once, the address it declared for URL checks, free memory from its heartbeat
@@ -143,9 +150,14 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         lock (gate)
         {
             if (!workers.TryGetValue(name, out var w)) workers[name] = w = new WorkerInfo { Name = name };
-            w.Missed = 0; w.CoolUntil = DateTime.MinValue;   // a (re)registration answers: offers lapsed while the gateway or the session was away do not count
+            // a (re)registration answers: offers lapsed while the gateway or the session was away do not count. A streak with a take-back in it is the
+            // session's, not the stream's: a reconnect of the same session keeps it (and a block), a new session of the name starts clean (issue 100).
+            if (newSession || w.Session == 0 || w.TakeBackMisses == 0) w.Missed = 0;
+            w.CoolUntil = DateTime.MinValue;
             if (newSession || w.Session == 0)
             {   // a new session starts with what the name still owns: it resumes that item and is given no other
+                w.TakeBackMisses = 0;
+                if (w.BlockedSince != null) Unblock(w, "new-session");
                 w.Session++; w.SessionStarted = DateTime.UtcNow;
                 w.SessionItems = new(ownerOf.Where(kv => kv.Value == name).Select(kv => kv.Key));
                 w.Sessions.Add((w.Session, w.SessionStarted, w.SessionItems.ToList()));
@@ -796,6 +808,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         foreach (var k in mergeRefused.Where(kv => (now - kv.Value.At).TotalMinutes > Msg.NoteMinutes).Select(kv => kv.Key).ToList()) mergeRefused.Remove(k);
         foreach (var (item, mr) in mergeRefused.OrderBy(kv => kv.Key)) d.MergeRefused.Add((item, mr.RoundTrip, mr.At));
         AddPassUnmerged(d, now);
+        // (a blocked session that went away for good is no more news: only the connected ones are reported)
+        foreach (var w in workers.Values.Where(w => Blocked(w) && w.Connected && Auth.ValidName(w.Name)).OrderBy(w => w.Name, StringComparer.Ordinal)) d.BlockedSessions.Add((w.Name, w.BlockedItem, w.BlockedSince!.Value));
         if (returned.Count > 0 && (now - startedAt).TotalMinutes < Msg.RestartMinutes)
             d.Restart = (returned.Count, d.Owned.Select(o => o.Holder).Distinct().Count(n => !d.Sessions.Any(x => x.Name == n && x.Connected)), (int)(now - startedAt).TotalMinutes);
         foreach (var a in assignments.Values.Where(a => a.WaitingSince != null && a.Worker == "" && !a.Accepted && !IsQc(a)).OrderBy(a => a.Item)) d.Waiting.Add((a.Item, GatedCode(a.WaitingCode), a.WaitingSince!.Value));
@@ -1576,13 +1590,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         if (!string.IsNullOrEmpty(pin))
         {
             chooseCode = "pinned-unavailable";
-            var p = withRole.FirstOrDefault(w => w.Name == pin && !w.Draining);
+            var p = withRole.FirstOrDefault(w => w.Name == pin && !w.Draining && !Blocked(w));
             if (p != null && SessionSpent(p, a)) { chooseCode = "session-spent"; return (null, $"the pinned worker '{pin}' already held a work item in this session; the item waits for its next session"); }
             return p != null && Owned(p.Name) < p.Capacity && HostHasRoom(p.Name) ? (p, "") : (null, $"the pinned worker '{pin}' is not available");
         }
-        var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name) && !Cooling(w)).ToList();
+        var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name) && !Cooling(w) && !Blocked(w)).ToList();
         chooseCode = "all-draining-or-declined";
-        if (live.Count == 0) return (null, "every eligible session is draining, has declined, or is cooling down after offers it let lapse");
+        if (live.Count == 0) return (null, "every eligible session is draining, has declined, is cooling down after offers it let lapse, or is blocked after items were taken back from it");
         // a slot that a pinned item waits for is that item's (issue 46): an unpinned item takes only the slots no waiting pin claims
         var free = live.Where(w => Owned(w.Name) + PinnedWaiting(w.Name) < w.Capacity).ToList();
         chooseCode = "at-capacity";
@@ -1826,7 +1840,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     continue;
                 }
                 a.Declined.Add(was); a.Worker = "";
-                var cool = IsQc(a) ? "" : NoteMissed(was);
+                var cool = IsQc(a) ? "" : NoteMissed(was, a.Item);
                 Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s{cool}" }, "ack|" + a.Id + "|" + was);
                 var (w, why) = IsQc(a) ? ChooseQc(a) : Choose(a, null);
                 if (w == null) { if (!IsQc(a)) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = chooseCode; Journal(a.Item, "waiting", new JsonObject { ["reason"] = why }, ""); } continue; }
@@ -1947,8 +1961,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             {
                 ["oneItemPerSession"] = OneItemPerSession,
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
+                ["sessionsBlocked"] = sessionsBlocked,
                 ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
-                    ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null,
+                    ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null, ["takenBackInRow"] = w.TakeBackMisses,
+                    ["blocked"] = Blocked(w), ["blockedSince"] = w.BlockedSince?.ToString("o"),
                     ["session"] = w.Session, ["sessionStarted"] = w.SessionStarted.ToString("o"), ["sessionItems"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),
                     ["sessionSpent"] = OneItemPerSession && w.SessionItems.Count > 0,
                     ["itemsPerSession"] = new JsonArray(w.Sessions.Select(x => (JsonNode)new JsonObject { ["session"] = x.No, ["started"] = x.Started.ToString("o"), ["items"] = new JsonArray(x.Items.Select(i => (JsonNode)i).ToArray()) }).ToArray()),

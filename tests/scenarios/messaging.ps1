@@ -2527,7 +2527,7 @@ function Mgr-DigestProblems($D) {
         'waiting' = 'item', 'code', 'waitingMinutes'; 'refusals' = 'item', 'code', 'count', 'windowMinutes'; 'parked' = 'item', 'code', 'ageMinutes'
         'item-quiet' = 'worker', 'item', 'column', 'quietMinutes'; 'last-review-round' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'; 'review-rounds-exhausted' = 'worker', 'item', 'column', 'round', 'maxRounds', 'ageMinutes'
         'worker-blocked-note' = 'worker', 'item', 'id', 'count', 'ageMinutes'; 'verb-errors' = 'worker', 'item', 'count', 'byCode', 'windowMinutes'; 'merge-refused' = 'item', 'roundTrip', 'ageMinutes'; 'gateway-restarted' = 'reconnected', 'notReconnected', 'upMinutes'
-        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'pass-unmerged' = 'item', 'pr', 'code', 'waitingMinutes' }
+        'release-queue-aged' = 'count', 'item', 'oldestMinutes', 'releases', 'promotionRequested'; 'pass-unmerged' = 'item', 'pr', 'code', 'waitingMinutes'; 'session-blocked' = 'worker', 'item', 'blockedMinutes' }
     foreach ($e in @($D.attention)) {
         if (-not $fields.ContainsKey("$($e.kind)")) { $bad += "kind $($e.kind)"; continue }
         foreach ($k in $e.Keys) {
