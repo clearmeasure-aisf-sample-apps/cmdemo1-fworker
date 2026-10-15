@@ -250,6 +250,12 @@ q. **Item state signing is still open**: entry d. Until then the state comment i
 
 Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
 
+- **#87 A code change was moved to Done when its master Build had been re-run** (272, 276). The Release and Architecture workflows start when a
+  Build completes and GitHub attaches their check runs to master's head at that moment, so a merge commit whose first attempt failed keeps the
+  skipped `release` check of that attempt; settle read it as docs-only. Docs-only is now decided from the merge commit's own Build
+  (`masterCodeChecks`, the jobs that run only for code: all skipped means docs-only) or else the pull request's files, and recorded as
+  `merge.docs_only` with `docs_only_from`; only then may a skipped or missing release check finish an item. The master-green verdict ignores
+  `masterIgnoredChecks` (`release`, `packages`, `architecture`), which could also park an item master-broken.
 - **#100 A blocked session kept winning items.** Its stream client accepted every offer by itself, which reset the session's missed offers,
   and the take-back five minutes later counted as nothing. Now the client's own accept (`accepted_by: client`) is no answer, every take-back is
   a miss, and `timing.offerMissLimit` (2) misses in a row with a take-back among them block the session: it is offered nothing, pinned items
