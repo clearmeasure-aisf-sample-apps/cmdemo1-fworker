@@ -37,6 +37,9 @@ function Write-Out($obj, [int]$code) {
 }
 
 # ---------------------------------------------------------------- server mode
+# the rate limit this call saw on GitHub, for the gateway's shared budget (gateway/GitHubBudget.cs, issue 92); the gateway takes the field out of
+# the answer before anyone else reads it
+function Add-GhReport($o) { try { $g = Get-GhRateReport; if ($g -and $o -is [System.Collections.IDictionary]) { $o['_github'] = $g } } catch { } }
 if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
     $verb = $Rest[1]
     foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner', 'Qc', 'OperatorRelease', 'BaseUpdate', 'PlantSnapshot', 'Metrics', 'Verbs.Manager') { . (Join-Path $here "lib/$f.ps1") }
@@ -49,6 +52,7 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
         $r = if ((Test-Has $a 'item') -and $verb -notin $NoLockVerbs) { Use-ItemLock ([int]$a.item) { & $fn $a } } else { & $fn $a }
         $r.verb = $verb
         if (-not $r.ContainsKey('ok')) { $r.ok = $true }
+        Add-GhReport $r
         Write-Out $r 0
     } catch [FactoryReject] {
         $e = $_.Exception
@@ -56,10 +60,12 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
         if ($e.Exit -eq 10 -and $verb -in 'complete', 'record-review', 'validation-verdict', 'approve-pr', 'merge', 'open-pr', 'append-body' -and (Test-Has $a 'item')) { try { Add-Refusal ([int]$a.item) } catch { } }
         $o = @{ ok = $false; verb = $verb; code = $e.Code; reason = $e.Message }
         foreach ($k in $e.Extra.Keys) { $o[$k] = $e.Extra[$k] }
+        Add-GhReport $o
         Write-Out $o $e.Exit
     } catch {
         [Console]::Error.WriteLine("internal error in $verb : $($_.Exception.Message)`n$($_.ScriptStackTrace)")
-        Write-Out @{ ok = $false; verb = $verb; code = 'internal-error'; reason = "$($_.Exception.Message)"; retryAfterSeconds = 30 } 20
+        $o = @{ ok = $false; verb = $verb; code = 'internal-error'; reason = "$($_.Exception.Message)"; retryAfterSeconds = 30 }; Add-GhReport $o
+        Write-Out $o 20
     }
 }
 
