@@ -184,9 +184,9 @@ function Start-OwnerWorker($ev, $cfg, [string]$Name, [int]$Max, [bool]$ItemCrede
 # The client's own acceptance of an owner offer (gateway/Lease.cs, rule 1), on a thread so the stream is read on: POST accept with the item token
 # and accepted_by "client", then one line for the model: item.accepted (the item is this session's now: start it) or item.accept-failed with the
 # gateway's code (then the model accepts by the skill, or not at all). Console.Out is synchronized, so the line never splits another.
-function Start-ClientAccept([string]$Url, [string]$ItemToken, $Ev) {
+function Start-ClientAccept([string]$Url, [string]$ItemToken, $Ev, [string]$OwningFile = '') {
     $null = Start-ThreadJob -ThrottleLimit 64 -ScriptBlock {
-        param($u, $t, $item, $asg, $col, $mode)
+        param($u, $t, $item, $asg, $col, $mode, $of)
         $line = [ordered]@{ provider = 'client'; event = 'item.accept-failed'; item = $item; assignment = $asg }
         try {
             $h = [Net.Http.HttpClient]::new(); $h.Timeout = [TimeSpan]::FromSeconds(150)
@@ -199,8 +199,10 @@ function Start-ClientAccept([string]$Url, [string]$ItemToken, $Ev) {
                     next = "item #$item is yours: the client accepted it. Start it now by the owner-session skill from step 2 (accept again is not needed and does no harm). Until this session calls a verb for it, the gateway takes it back when the lease ends." }
             } else { $line.code = $(if ($j -is [hashtable] -and $j.code) { "$($j.code)" } else { "http-$([int]$r.StatusCode)" }); $line.exit = $(if ($j -is [hashtable] -and $null -ne $j.exit) { [int]$j.exit } else { 20 }) }
         } catch { $line.code = 'gateway-unreachable'; $line.reason = "$($_.Exception.Message)" }
+        # the launcher watchdog's note that the session holds an item (written on the offer) goes when the client's accept failed
+        if ($line.event -eq 'item.accept-failed' -and $of) { Remove-Item -LiteralPath $of -Force -ErrorAction SilentlyContinue }
         [Console]::Out.WriteLine(($line | ConvertTo-Json -Compress)); [Console]::Out.Flush()
-    } -ArgumentList $Url, $ItemToken, ([int]$Ev.item), "$($Ev.assignment)", "$($Ev.column)", "$($Ev.mode)"
+    } -ArgumentList $Url, $ItemToken, ([int]$Ev.item), "$($Ev.assignment)", "$($Ev.column)", "$($Ev.mode)", $OwningFile
 }
 
 # The heartbeat of a stream session (worker-messaging.md 4.6, 6.2): POST /presence every 30 s from a background thread, no model turn. Started only when
@@ -590,12 +592,18 @@ function Invoke-SubscribeOwn($a) {
     # lastId is opaque (today a number, "<epoch>.<seq>" with messaging on): kept for the life of this process and sent back unchanged. It moves only
     # once the data line of its event was handled, so a stream cut between the two lines cannot skip that event.
     $lastId = ''; $pendingId = ''; $backoff = 2; $dropN = 0; $heartbeat = $null; $seen = $null; $msgOn = $false
+    # the launcher watchdog's files, next to the launcher's end marker; only for a launcher session (not --spawn)
+    $wdir = if ($env:FACTORY_SESSION_END_FILE -and -not $spawn) { Split-Path -Parent $env:FACTORY_SESSION_END_FILE } else { '' }
+    $aliveFile = if ($wdir) { Join-Path $wdir 'stream-alive' } else { '' }; $owningFile = if ($wdir) { Join-Path $wdir 'session-owning' } else { '' }; $aliveAt = [DateTime]::MinValue
+    if ($wdir) { try { New-Item -ItemType Directory -Force -Path $wdir | Out-Null } catch { } }
     [Console]::Out.WriteLine((@{ provider = 'client'; event = 'session.start'; name = $name; type = $type; at = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress)); [Console]::Out.Flush()
     Write-TwoCredentialWarning
     . (Join-Path $here 'lib/Client.Plugin.ps1')
     while ($true) {
         # a downloaded plugin follows the gateway: checked at every (re)connect and again at every assignment; a working copy is never touched
         try { $ps = Sync-Plugin $cfg; if ($ps.ok -and $ps.updated) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'plugin.updated'; from = $ps.from; to = $ps.to; restart_needed = $true } | ConvertTo-Json -Compress)); [Console]::Out.Flush() } } catch { }
+        # the launcher watchdog: every connect attempt, failed ones included, shows the client is alive; a gateway outage is not a dead session
+        if ($aliveFile) { try { Set-Content -LiteralPath $aliveFile -Value ([DateTime]::UtcNow.ToString('o')) -NoNewline; $aliveAt = [DateTime]::UtcNow } catch { } }
         $http = [Net.Http.HttpClient]::new(); $http.Timeout = [TimeSpan]::FromHours(24)
         try {
             # handover=1: this client reconnects on stream.replaced with reconnect (a newer gateway process took over, issue 94)
@@ -625,6 +633,8 @@ function Invoke-SubscribeOwn($a) {
             $backoff = 2; $dropN = 0
             while (-not $reader.EndOfStream) {
                 $line = $reader.ReadLine()
+                # the launcher watchdog (docs/launcher.md): every line, a `: ping` included, shows the stream is alive; stamped at most every 20 s
+                if ($aliveFile -and ([DateTime]::UtcNow - $aliveAt).TotalSeconds -ge 20) { try { Set-Content -LiteralPath $aliveFile -Value ([DateTime]::UtcNow.ToString('o')) -NoNewline; $aliveAt = [DateTime]::UtcNow } catch { } }
                 if ($line.StartsWith('id:')) { $pendingId = $line.Substring(3).Trim() }
                 elseif ($line.StartsWith('data:')) {
                     $ev = try { $line.Substring(5).Trim() | ConvertFrom-Json -AsHashtable } catch { $null }
@@ -685,12 +695,21 @@ function Invoke-SubscribeOwn($a) {
                     # issue 72: the gateway says this session is spent and owns nothing (its item ended or was taken back). The end marker the launcher
                     # watches (FACTORY_SESSION_END_FILE) is written here, mechanically, so the loop starts a fresh session even when the model does not
                     # run end-session; the model is told on the same line. Never for a replayed event or a --spawn client (it is no launcher session).
-                    if ($ev.event -eq 'session.end' -and -not $replayed -and -not $spawn -and $env:FACTORY_SESSION_END_FILE) {
+                    # session.restart (the launcher watchdog) is the same for the launcher, with the gateway's reason written next to the marker for its log
+                    if (($ev.event -in 'session.end', 'session.restart') -and -not $replayed -and -not $spawn -and $env:FACTORY_SESSION_END_FILE) {
                         try {
                             $mdir = Split-Path -Parent $env:FACTORY_SESSION_END_FILE; if ($mdir) { New-Item -ItemType Directory -Force -Path $mdir | Out-Null }
-                            Set-Content -Path $env:FACTORY_SESSION_END_FILE -Value ([DateTime]::UtcNow.ToString('o')) -NoNewline; $ev['markerWritten'] = $true
+                            $why = if ($ev.event -eq 'session.restart') { "gateway-$($ev.code): $($ev.reason)" } else { 'gateway-session-end: the session held its item and owns nothing' }
+                            try { Set-Content -LiteralPath ($env:FACTORY_SESSION_END_FILE + '.reason') -Value $why -NoNewline } catch { }   # the log line only: never in the marker's way
+                            Set-Content -LiteralPath $env:FACTORY_SESSION_END_FILE -Value ([DateTime]::UtcNow.ToString('o')) -NoNewline; $ev['markerWritten'] = $true
                         } catch { $ev['markerWritten'] = $false; $ev['note'] = "marker not written: $($_.Exception.Message)" }
                     }
+                    # the launcher watchdog counts silence only while the session holds an item: the client notes it on an owner offer (the client
+                    # accepts it itself; a failed accept removes the note) and on ownership restored after a reconnect
+                    if ($owningFile -and -not $replayed -and (($ev.event -eq 'item.assigned' -and $ev['job'] -eq 'own-item' -and "$($ev.role)" -eq 'owner') -or $ev.event -eq 'ownership.restored')) {
+                        try { Set-Content -LiteralPath $owningFile -Value "$($ev.item)$($ev.items -join ',')" -NoNewline } catch { }
+                    }
+                    if ($owningFile -and -not $replayed -and ($ev.event -in 'session.end', 'session.restart', 'item.taken_back')) { Remove-Item -LiteralPath $owningFile -Force -ErrorAction SilentlyContinue }
                     [Console]::Out.WriteLine(($ev | ConvertTo-Json -Compress -Depth 6)); [Console]::Out.Flush()
                     # the client accepts an owner offer itself (gateway/Lease.cs, rule 1): the gateway offers only into a free slot, and an offer the model
                     # answers late is offered to the next worker. The model is told with item.accepted; if it does not start within the lease, the
@@ -698,7 +717,7 @@ function Invoke-SubscribeOwn($a) {
                     # issue 81: a resent assignment (resent: true) is one this name accepted already; the gateway sends it again after a reconnect or to a
                     # new session so the session works it. The token is saved and the model told; it is not accepted again here and spawns nothing
                     $resent = $ev['resent'] -eq $true
-                    if ($itemTok -and -not $resent -and -not $spawn -and $autoAccept -and $ev['job'] -eq 'own-item' -and "$($ev.role)" -eq 'owner') { try { Start-ClientAccept $cfg.url $itemTok $ev } catch { [Console]::Error.WriteLine("client accept not started: $($_.Exception.Message)") } }
+                    if ($itemTok -and -not $resent -and -not $spawn -and $autoAccept -and $ev['job'] -eq 'own-item' -and "$($ev.role)" -eq 'owner') { try { Start-ClientAccept $cfg.url $itemTok $ev $owningFile } catch { [Console]::Error.WriteLine("client accept not started: $($_.Exception.Message)") } }
                     if ($evId) { $lastId = $evId }
                     if ($replayed -or $resent) { }
                     elseif ($spawn -and $ev.event -eq 'item.assigned' -and $ev['job'] -eq 'qc-env') { try { Start-QcWorker $ev $cfg $name $qcMax $msgOn } catch { [Console]::Error.WriteLine("qc spawn failed: $($_.Exception.Message)") } }
