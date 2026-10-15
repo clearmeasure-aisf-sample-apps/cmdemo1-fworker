@@ -1713,6 +1713,33 @@ $ManagerScenarios = [ordered]@{
     }
 }
 
+# the launcher watchdog (docs/launcher.md): a session that asks one question more than twice is stuck in a loop and is told session.restart
+'mgr: a session that asks the same question a third time is told session.restart' = {
+    Msg-OnGateway @{} {
+        param($g)
+        $st = Msg-Open 'name=kate&messaging=1' (Msg-Token 'kate'); Msg-Registered $st
+        try {
+            # one stock question about three different items is no loop: only the same question about the same item (or about none) counts
+            foreach ($i in 61, 62, 63) { [void](Msg-F 'kate' @('ask', '--text', 'Is the shared build slot free?', '--item', "$i")) }
+            Msg-Read $st 5
+            Check 'the same question about three different items: no restart' ((Msg-Of $st 'session.restart').Count -eq 0)
+            # the open-question cap (3) is reached: the scenario's gateway forgets them so the same session can ask again
+            foreach ($q in @((Invoke-RestMethod (Msg-Url '/api/v1/questions') -Headers @{ Authorization = 'Bearer test-token' }).questions | Where-Object { $_.from -eq 'kate' })) {
+                [void](Msg-Post '/api/v1/_test/answer' @{ id = $q.id; text = 'Yes.'; model = 'claude-opus-5-5' })
+            }
+            foreach ($i in 1, 2) { [void](Msg-F 'kate' @('ask', '--text', 'Which criterion governs the search?')) }
+            Msg-Read $st 5
+            Check 'asked twice: no restart' ((Msg-Of $st 'session.restart').Count -eq 0)
+            [void](Msg-F 'kate' @('ask', '--text', '  which CRITERION   governs the search? '))
+            Msg-Read $st 15 { param($e) @($e | Where-Object { $_.data.event -eq 'session.restart' }).Count -gt 0 }
+            $ev = @(Msg-Of $st 'session.restart')
+            Check 'the third time (case and spacing ignored) the session is told session.restart, code repeated-question' ($ev.Count -eq 1 -and $ev[0].data.code -eq 'repeated-question' -and $ev[0].data.name -eq 'kate') ($ev | ForEach-Object { $_.data } | ConvertTo-Json -Compress -Depth 4)
+            $rs = (Invoke-RestMethod (Msg-Url '/api/v1/status') -Headers @{ Authorization = 'Bearer test-token' }).plant.sessionRestarts
+            Check 'the status counts the restart with its reason' ($rs.sent -ge 1 -and @($rs.recent | Where-Object { $_.worker -eq 'kate' -and $_.code -eq 'repeated-question' }).Count -eq 1) ($rs | ConvertTo-Json -Compress -Depth 4)
+        } finally { Msg-Close $st }
+    }
+}
+
 'mgr: ask --wait returns the answer as an envelope, once, and closes the question' = {
     $sup = Msg-Open 'name=supervisor&supervisor=1&model=claude-opus-5-5&effort=high&messaging=1' (Msg-Supervisor); Msg-Registered $sup
     try {

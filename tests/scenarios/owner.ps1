@@ -940,6 +940,118 @@ $OwnerScenarios['owner: board guard: a labelled issue missing from the board is 
     } finally { Stop-OwnerClient 'guard1' }
 }
 
+# Issue 65: an item whose body says "Depends on #N" is offered to nobody while #N is neither merged nor closed; the status shows it held with the code
+# depends-on and what it waits for; once #N is closed the next sweep offers it (a dependency off the board is read through the REST API).
+$OwnerScenarios['owner: an item waits for the items it depends on and is offered once they are closed'] = {
+    try {
+        Start-OwnerClient 'dep1' 'persistent-local' '--capacity 3'
+        $d1 = New-Item-Fake 'Dependency on the board' 'x' $OwnerLabels 'Todo'
+        $d2 = (Fake 'issue' @{ title = 'Dependency off the board'; body = 'x'; labels = @('bug') }).number
+        $n = New-Item-Fake 'Dependent item' "Builds on the others.`n`nDepends on #$d1 and #$d2`n" ($OwnerLabels + 'worker:dep1')
+        $free = New-Item-Fake 'Unrelated item' "depends on nothing" ($OwnerLabels + 'worker:dep1')
+        Check 'an item without dependencies is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'dep1' $free).Count -gt 0 })
+        $script:HeldRow = $null
+        Check 'the dependent is held: code depends-on, waiting for both' (Wait-Until -Seconds 30 { $script:HeldRow = @((Get-Plant).plant.held | Where-Object { $_.item -eq $n })[0]; $script:HeldRow -and $script:HeldRow.code -eq 'depends-on' -and @($script:HeldRow.on).Count -eq 2 }) ($script:HeldRow | ConvertTo-Json -Compress)
+        Check 'it is not offered' ((Get-Assigned 'dep1' $n).Count -eq 0)
+        $repo = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues"
+        [void](Invoke-RestMethod "$repo/$d1" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json')
+        Check 'one dependency closed: still held, waiting for the other only' (Wait-Until -Seconds 30 { $h = @((Get-Plant).plant.held | Where-Object { $_.item -eq $n })[0]; $h -and @($h.on).Count -eq 1 -and @($h.on)[0] -eq $d2 })
+        Check 'still not offered' ((Get-Assigned 'dep1' $n).Count -eq 0)
+        [void](Invoke-RestMethod "$repo/$d2" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json')
+        Check 'both closed: the item is offered and no longer held' (Wait-Until -Seconds 40 { (Get-Assigned 'dep1' $n).Count -gt 0 -and @((Get-Plant).plant.held | Where-Object { $_.item -eq $n }).Count -eq 0 }) ((Get-Plant).plant | ConvertTo-Json -Compress -Depth 5)
+    } finally { Stop-OwnerClient 'dep1' }
+}
+
+# The launcher watchdog (docs/launcher.md): a spent session that owns nothing and is still connected sessionRestartMinutes later (it did not act on
+# session.end) is told session.restart; its client writes the end marker and the reason next to it for the launcher's log.
+$OwnerScenarios['owner: launcher watchdog: a spent session still idle after session.end is told session.restart and the client writes the reason'] = {
+    $oldOne = $env:FACTORY_ONE_ITEM_PER_SESSION; $oldGrace = $env:FACTORY_TIMING_sessionEndGraceSeconds; $oldRs = $env:FACTORY_TIMING_sessionRestartMinutes; $oldEnd = $env:FACTORY_SESSION_END_FILE
+    $mk = Join-Path $script:Work 'stuck1-work/session-ended'
+    try {
+        $env:FACTORY_ONE_ITEM_PER_SESSION = '1'; $env:FACTORY_TIMING_sessionEndGraceSeconds = '2'; $env:FACTORY_TIMING_sessionRestartMinutes = '0.4'; Restart-Gateway
+        $env:FACTORY_SESSION_END_FILE = $mk
+        Start-OwnerClient 'stuck1' 'persistent-local'
+        $env:FACTORY_SESSION_END_FILE = $oldEnd
+        $a = New-Item-Fake 'Stuck session' 'x' ($OwnerLabels + 'worker:stuck1')
+        Check 'the item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'stuck1' $a).Count -gt 0 })
+        $r = Fo 'stuck1' @('accept', '--item', $a, '--assignment', (Get-Assigned 'stuck1' $a)[-1].assignment)
+        Check 'the session holds the item' ($r.exit -eq 0 -or (Wait-Until -Seconds 20 { @(Get-WorkerEvents 'stuck1' | Where-Object { $_.event -eq 'item.accepted' }).Count -gt 0 })) ($r | ConvertTo-Json -Compress)
+        Check 'the client noted that the session holds an item' (Wait-Until -Seconds 10 { Test-Path (Join-Path (Split-Path $mk) 'session-owning') })
+        Check 'the client stamps the stream as alive' (Test-Path (Join-Path (Split-Path $mk) 'stream-alive'))
+        Start-Sleep -Seconds 4
+        Check 'while it owns its item it is not restarted' (@(Get-WorkerEvents 'stuck1' | Where-Object { $_.event -eq 'session.restart' }).Count -eq 0)
+        $r = Fo 'stuck1' @('release', '--item', $a, '--reason', 'scenario: the item leaves the session'); CheckExit 'the item leaves the session' $r 0
+        Check 'session.end comes first' (Wait-Until -Seconds 30 { @(Get-WorkerEvents 'stuck1' | Where-Object { $_.event -eq 'session.end' }).Count -gt 0 })
+        Remove-Item $mk -Force -ErrorAction SilentlyContinue   # the session did not act on it: no launcher ended it
+        Check 'the session, still connected, is told session.restart' (Wait-Until -Seconds 40 { @(Get-WorkerEvents 'stuck1' | Where-Object { $_.event -eq 'session.restart' }).Count -gt 0 })
+        $ev = @(Get-WorkerEvents 'stuck1' | Where-Object { $_.event -eq 'session.restart' })
+        Check 'code spent-idle, the marker written with the reason next to it' ($ev[0].code -eq 'spent-idle' -and $ev[0].markerWritten -eq $true -and (Test-Path $mk) -and (Get-Content -Raw "$mk.reason") -like 'gateway-spent-idle*') ($ev | ConvertTo-Json -Compress -Depth 4)
+        Check 'the owning note is gone after the session was told to end' (-not (Test-Path (Join-Path (Split-Path $mk) 'session-owning')))
+        $w = @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'stuck1' })[0]
+        Check 'the status shows the restart' ($w.restartSent -eq $true -and @((Get-Plant).plant.sessionRestarts.recent | Where-Object { $_.worker -eq 'stuck1' -and $_.code -eq 'spent-idle' }).Count -eq 1) ($w | ConvertTo-Json -Compress -Depth 4)
+        Start-Sleep -Seconds 5
+        Check 'once per session' (@(Get-WorkerEvents 'stuck1' | Where-Object { $_.event -eq 'session.restart' }).Count -eq 1)
+    } finally {
+        Stop-OwnerClient 'stuck1'
+        $env:FACTORY_SESSION_END_FILE = $oldEnd
+        $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; $env:FACTORY_TIMING_sessionEndGraceSeconds = $oldGrace; $env:FACTORY_TIMING_sessionRestartMinutes = $oldRs; Restart-Gateway
+    }
+}
+
+# The launchers' own watchdog, with a fake claude (it only sleeps, or writes what a session or its client would): each cause ends the session, a new
+# one starts, and the reason is in BASE/work/launcher.log. Both launchers; the bash one where bash is.
+function Invoke-LauncherCase([string]$Kind, [string]$Mode, [string[]]$Opts, [string]$Expect, [string]$Screen = '', [switch]$None) {
+    $base = Join-Path $script:Work "launch-$Kind-$Mode"; Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $prompt = Join-Path $base 'prompt.txt'; Set-Content $prompt 'connect prompt'
+    $fake = Join-Path $base 'fake-claude.ps1'
+    Set-Content $fake @"
+`$d = Split-Path -Parent `$env:FACTORY_SESSION_END_FILE
+switch ('$Mode') {
+    'owning' { Set-Content (Join-Path `$d 'session-owning') '77'; Set-Content (Join-Path `$d 'stream-alive') 'x' }
+    'gateway' { Set-Content "`$(`$env:FACTORY_SESSION_END_FILE).reason" 'gateway-repeated-question: asked 3 times'; Set-Content `$env:FACTORY_SESSION_END_FILE 'x' }
+}
+Start-Sleep -Seconds 40
+"@
+    $log = Join-Path $base 'work/launcher.log'
+    if ($Screen) {   # the screen the watchdog reads: a file, printed by a command without spaces in its quoting (Start-Process joins arguments with spaces)
+        $sf = Join-Path $base 'screen.txt'; Set-Content $sf $Screen
+        $Opts += @($(if ($Kind -eq 'sh') { '--screen-cmd' } else { '-ScreenCmd' }), "`"$(if ($IsWindows) { 'type' } else { 'cat' }) $sf`"")
+    }
+    if ($Kind -eq 'sh') {
+        $sh = Join-Path $base 'fake-claude.sh'; Set-Content $sh "#!/usr/bin/env bash`nexec pwsh -NoProfile -File '$fake'"; & chmod +x $sh
+        $p = Start-Process bash -ArgumentList (@((Join-Path $script:Root 'plugin/launcher/fworker-loop.sh'), '--dir', $base, '--prompt-file', $prompt, '--claude', $sh, '--backoff', '1') + $Opts) -PassThru -RedirectStandardOutput (Join-Path $base 'out.txt') -RedirectStandardError (Join-Path $base 'err.txt')
+    } else {
+        $p = Start-Process pwsh -ArgumentList (@('-NoProfile', '-File', (Join-Path $script:Root 'plugin/launcher/fworker-loop.ps1'), '-Dir', $base, '-PromptFile', $prompt, '-Claude', $fake, '-Backoff', '1') + $Opts) -PassThru -RedirectStandardOutput (Join-Path $base 'out.txt') -RedirectStandardError (Join-Path $base 'err.txt')
+    }
+    $script:Procs += $p
+    try {
+        if ($None) {
+            Start-Sleep -Seconds 14
+            Check "launcher ($Kind) ${Mode}: no restart" (-not (Test-Path $log) -and (Get-Content -Raw (Join-Path $base 'out.txt')) -notmatch 'session 2 starts') "$(Get-Content -Raw $log -ErrorAction SilentlyContinue) | $(Get-Content -Raw (Join-Path $base 'out.txt') -ErrorAction SilentlyContinue)"
+        } else {
+            $ok = Wait-Until -Seconds 40 { (Test-Path $log) -and ((Get-Content -Raw $log) -match [regex]::Escape($Expect)) -and (Get-Content -Raw (Join-Path $base 'out.txt')) -match 'session 2 starts' }
+            Check "launcher ($Kind) ${Mode}: the session is restarted and the log names '$Expect'" $ok "$(Get-Content -Raw $log -ErrorAction SilentlyContinue) | $(Get-Content -Raw (Join-Path $base 'out.txt') -ErrorAction SilentlyContinue)"
+        }
+    } finally {
+        New-Item -ItemType File -Force -Path (Join-Path $base 'work/STOP') | Out-Null
+        try { Stop-Process -Id $p.Id -Force } catch { }
+    }
+}
+$OwnerScenarios['owner: launcher watchdog: stream silence, unsent input, screen silence while owning and a gateway reason each restart the session'] = {
+    $kinds = @('ps1'); if (-not $IsWindows -and (Get-Command bash -ErrorAction SilentlyContinue)) { $kinds += 'sh' }
+    foreach ($k in $kinds) {
+        $o = if ($k -eq 'sh') { @{ stale = '--stream-stale'; silent = '--silent'; unsent = '--unsent' } } else { @{ stale = '-StreamStale'; silent = '-Silent'; unsent = '-Unsent' } }
+        Invoke-LauncherCase $k 'quiet' @($o.stale, '3', $o.silent, '0', $o.unsent, '0') 'watchdog stream-disconnected'
+        Invoke-LauncherCase $k 'typed' @($o.stale, '0', $o.silent, '0', $o.unsent, '3') 'watchdog unsent-input' '│ > please go on'
+        Invoke-LauncherCase $k 'padded' @($o.stale, '0', $o.silent, '0', $o.unsent, '3') 'watchdog unsent-input' ("> Connect to the factory`n│ > typed text   │" + ("`n" * 12))
+        # an earlier message in the transcript above an empty prompt box, the placeholder and a menu row are no typed input
+        Invoke-LauncherCase $k 'transcript' @($o.stale, '0', $o.silent, '0', $o.unsent, '3') '' "> Connect to the factory`n❯ 1. Yes`nwaiting for an offer`n│ > Try `"fix lint`"   │" -None
+        Invoke-LauncherCase $k 'emptybox' @($o.stale, '0', $o.silent, '0', $o.unsent, '3') '' "> Connect to the factory`nwaiting`n│ >          │" -None
+        Invoke-LauncherCase $k 'owning' @($o.stale, '0', $o.silent, '3', $o.unsent, '0') 'watchdog no-output-while-owning' 'working on it'
+        Invoke-LauncherCase $k 'gateway' @($o.stale, '0') 'gateway-repeated-question: asked 3 times'
+    }
+}
+
 # Issue 80: the operator's drain belongs to the name; a new session of the name (the launcher's next one) is still draining until the operator resumes.
 $OwnerScenarios['owner: an operator drain holds across a new session of the name until the operator resumes it'] = {
     $me = { @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'drn1' })[0] }
