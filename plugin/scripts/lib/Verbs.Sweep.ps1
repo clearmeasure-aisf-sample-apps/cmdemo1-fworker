@@ -207,6 +207,24 @@ function Clear-ClosedPark([int]$n) {
     }
 }
 
+# Issue 94: an owner's claim whose lease ran out while no gateway was up (between the predecessor's last renewal, or its release, and this gateway's
+# first sweep) is renewed instead of being offered again as a relaunch: nothing could renew it then. Under the item lock on a fresh read, only a
+# claim that was not taken back and whose lease ended inside the gap. Returns the holder, or $null.
+function Invoke-GapRenew([int]$n, $Gap) {
+    Use-ItemLock $n {
+        $f = Get-State $n; $fs = $f.state
+        if (-not ((Test-OwnedClaim $fs) -and -not (Test-ClaimLive $fs))) { return $null }
+        if ((Test-Has $fs.claim 'taken_back') -and $fs.claim.taken_back) { return $null }
+        $lu = ConvertFrom-Iso $fs.claim.lease_until
+        if (-not $lu -or $lu -lt $Gap.since -or $lu -gt $Gap.until) { return $null }
+        $t = (Get-Cfg).timing; $now = Get-UtcNow
+        $fs.claim.lease_until = ConvertTo-Iso ($now.AddMinutes($t.leaseMinutes)); $fs.claim.gap_renewed = ConvertTo-Iso $now
+        [void](Add-Journal $n $f 'gap-renewed' @{ worker = "$($fs.claim.holder)"; lapsed = (ConvertTo-Iso $lu); since = (ConvertTo-Iso $Gap.since); minutes = $t.leaseMinutes } "gap|$(ConvertTo-Iso $lu)")
+        Save-State $n $f
+        "$($fs.claim.holder)"
+    }
+}
+
 # Issue 102: a park that ended by expiry gives the item a fresh start. Its fix-forward rounds and demotions are counted from 0 again (they parked it,
 # or they would park it again at the first red), and the expired park leaves the state; a journal line says so. Not the gateway's own wait for
 # checks (development:awaiting-checks): that one is not a person's park. Under the item lock on a fresh read. Returns the park code, or $null.
@@ -359,6 +377,9 @@ function Test-DependencyMet([int]$Dep, $ByNumber, $Cache) {
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
+    # gap { since, until }: the gateway was down in between (Leader.cs); see Invoke-GapRenew
+    $gap = $null
+    if ((Test-Has $a 'gap') -and (Test-Has $a.gap 'since') -and (Test-Has $a.gap 'until')) { $gap = @{ since = (ConvertFrom-Iso $a.gap.since); until = (ConvertFrom-Iso $a.gap.until) } }
     $only = $null
     if (Test-Has $a 'items') { $only = @($a.items | ForEach-Object { [int]$_ } | Where-Object { $_ -gt 0 } | Select-Object -Unique -First 50) }
     $low = (Test-Has $a 'low') -and $a.low
@@ -429,6 +450,13 @@ function Verb_sync_board($a) {
             }
             # a closed item outside Functional Testing and the hold columns is followed no further, as before (only its park was of interest)
             if (-not $it.open -and -not (("$($it.column)" -ieq $c.columns.validation) -or (Test-NameIn "$($it.column)" $c.columns.hold))) { continue }
+            if ($gap -and -not $dry -and (Test-OwnedClaim $s) -and -not (Test-ClaimLive $s)) {
+                $lu0 = ConvertFrom-Iso $s.claim.lease_until
+                if ($lu0 -and $lu0 -ge $gap.since -and $lu0 -le $gap.until) {
+                    $gh = Invoke-GapRenew $n $gap
+                    if ($gh) { $st = Get-State $n; $s = $st.state; $actions += @{ item = $n; action = 'claim-renewed-after-gap'; holder = $gh; lapsed = (ConvertTo-Iso $lu0) } }
+                }
+            }
             if ((Test-OwnedClaim $s) -and (Test-ClaimLive $s)) {
                 $owners["$n"] = "$($s.claim.holder)"
                 $owned["$n"] = @{ holder = "$($s.claim.holder)"; column = $col; lease_until = $s.claim.lease_until; heartbeat = $(if (Test-Has $s.claim 'heartbeat') { $s.claim.heartbeat } else { $null }); parked = [bool](Get-Park $s) }

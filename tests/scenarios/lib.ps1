@@ -2,13 +2,14 @@
 Set-StrictMode -Version Latest
 $script:Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # Every port a suite uses derives from ONE base (a private range of 100 ports per suite slot), so any number of suites can run at once:
-#   +0 fake GitHub   +10 gateway API   +11 gateway webhooks   +20 a worker-declared QC port (never listened on)   +29 a port nothing listens on
+#   +0 fake GitHub   +10 gateway API   +11 gateway webhooks   +12/+13 a second gateway   +14 the fake's forwarder in front of a gateway
+#   +20 a worker-declared QC port (never listened on)   +29 a port nothing listens on
 #   +30 a loopback public-URL literal (never listened on)   +40..+89 stub applications of the QC worker scenarios (range 40-59, clash 60-69, flaky 70-79, never 80-89)
 # The base comes from TEST_PORT_BASE (run.ps1 sets it from the suite slot); TEST_FAKE_PORT and TEST_API_PORT still override the two main ports.
 function Set-TestPorts([int]$Base) {
     $script:PortBase = $Base
     $script:FakePort = $(if ($env:TEST_FAKE_PORT) { [int]$env:TEST_FAKE_PORT } else { $Base }); $script:ApiPort = $(if ($env:TEST_API_PORT) { [int]$env:TEST_API_PORT } else { $Base + 10 }); $script:HookPort = $script:ApiPort + 1
-    $script:ReportPort = $Base + 20; $script:DeadPort = $Base + 29; $script:PublicPort = $Base + 30
+    $script:ReportPort = $Base + 20; $script:DeadPort = $Base + 29; $script:PublicPort = $Base + 30; $script:ProxyPort = $Base + 26   # not 14: qc-pool.ps1 starts a gateway there
 }
 Set-TestPorts $(if ($env:TEST_PORT_BASE) { [int]$env:TEST_PORT_BASE } else { 6100 })
 $script:VerbCalls = 0; $script:VerbSeconds = 0.0; $script:ClientCrashes = 0
@@ -38,6 +39,7 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     $gwDll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'
     foreach ($d in $fakeDll, $gwDll) { if (-not (Test-Path $d)) { throw "build first: $d is missing" } }
     $env:FAKE_PORT = "$($script:FakePort)"; $env:FACTORY_CONFIG = $cfgPath   # (the fake reads docsOnlyPaths from it)
+    $env:FAKE_PROXY_PORT = "$($script:ProxyPort)"   # the fake's TCP forwarder in front of a gateway (leader.ps1): idle until a scenario names a backend
     $script:Procs += Start-Process dotnet -ArgumentList $fakeDll -PassThru -RedirectStandardOutput (Join-Path $work 'fake.out') -RedirectStandardError (Join-Path $work 'fake.err')
     $env:GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; $env:GH_TOKEN = 'fake-operator'; $env:OCTOPUS_API_KEY = 'fake'
     $env:FACTORY_CONFIG = $cfgPath; $env:FACTORY_STATE_DIR = Join-Path $work 'state'; $(if ($env:TEST_REAL_APPS) { Remove-Item Env:FACTORY_FAKE_APPS -ErrorAction SilentlyContinue } else { $env:FACTORY_FAKE_APPS = '1' })

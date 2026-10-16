@@ -103,8 +103,10 @@ entry has every runtime off. Only tdd has one today.
    deployment, treat it as an outage: find the cause or roll back.
 7. uat and prod are manual promotions by the operator (Octopus sign-off, the demo-environment kit). A session does not promote to them.
 
-A gateway restart drops the in-memory state (below) except the plant, which a graceful stop snapshots to GitHub and the next start restores: deploy to tdd only when the plant is quiet, say so beforehand, and check afterwards
-that the workers reconnected. Roll back by reverting the pull request.
+A gateway restart drops the in-memory state (below) except the plant: the process that holds the leader lease (`gateway/Leader.cs`) snapshots it
+to GitHub on every change and at its stop, and hands it over to the next process (which waits for that snapshot before its first sweep, and
+renews the owners' claims that ran out while no gateway was up). Deploy to tdd only when the plant is quiet, say so beforehand, and check
+afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting, `plantSnapshot.restore.how`). Roll back by reverting the pull request.
 
 ## Rules
 
@@ -123,8 +125,9 @@ that the workers reconnected. Roll back by reverting the pull request.
   and the revocation refs in the work-orders repository. Do not design a feature that assumes a message survives a restart.
 - **The plugin assumes nothing about the worker's machine**: any OS, x64 or arm64, only what the prompt downloads or clones; no fixed
   paths, no preinstalled `gh`, `jq`, `python` or `dotnet`, no shell variables in commands of skills and agents. The author suite checks this.
-- **Only one gateway may sweep the board.** Do not start `run-gateway.sh` or `run-owner-gateway.sh` against the real repository while
-  tdd is the acting gateway.
+- **Only one gateway may sweep the board.** The leader lease enforces it: the newest process with a GitHub identity takes the lease and the
+  one before stands down. So do not start `run-gateway.sh` or `run-owner-gateway.sh` against the real repository while tdd is the acting
+  gateway: it would take the plant over from tdd (`FACTORY_LEADER_LEASE=0` turns the lease off for a local gateway, and then two would sweep).
 - **Protected areas need the owner**: credentials and tokens, authorization, revoke, the deploy pipeline (`.github/workflows/`,
   `Dockerfile`, `config/deploy.overrides.json`), uat and prod. `build.yml`, `release.yml`, `secret-scan.yml` and `architecture.yml` come
   from the demo-environment kit: the only local addition is the `tests` job of `build.yml`.

@@ -84,6 +84,13 @@
   "timing": {
     "assignAckSeconds": 120,
     "plantSnapshotMaxAgeMinutes": 30,
+    "plantSnapshotDebounceSeconds": 30,
+    "plantSnapshotRefreshMinutes": 10,
+    "leaderLeaseSeconds": 360,
+    "leaderRenewSeconds": 120,
+    "leaderCheckSeconds": 15,
+    "leaderHandoverSeconds": 90,
+    "gapRenewMaxMinutes": 120,
     "leaseMinutes": 30,
     "redChecksGate": 2,
     "maxRelaunches": 3,

@@ -13,6 +13,28 @@ builder.Logging.SetMinimumLevel(LogLevel.Warning);
 var app = builder.Build();
 var world = new World();
 var gate = new object();
+// FAKE_PROXY_PORT: a TCP forwarder in front of a gateway, as the platform's ingress is (the leader scenarios, issue 94). A connection goes to the
+// backend that /_fake/proxy { port } named when it was opened and stays there (as a stream stays on the old revision); 0 refuses connections.
+if (int.TryParse(Environment.GetEnvironmentVariable("FAKE_PROXY_PORT"), out var proxyPort) && proxyPort > 0)
+{
+    var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, proxyPort); listener.Start();
+    _ = Task.Run(async () =>
+    {
+        while (true)
+        {
+            System.Net.Sockets.TcpClient inbound; try { inbound = await listener.AcceptTcpClientAsync(); } catch { return; }
+            int backend; lock (gate) backend = world.ProxyBackend;
+            _ = Task.Run(async () =>
+            {
+                using var a = inbound; if (backend <= 0) return;
+                using var b = new System.Net.Sockets.TcpClient();
+                try { await b.ConnectAsync(System.Net.IPAddress.Loopback, backend); } catch { return; }
+                var sa = a.GetStream(); var sb = b.GetStream();
+                await Task.WhenAny(sa.CopyToAsync(sb), sb.CopyToAsync(sa));
+            });
+        }
+    });
+}
 
 app.Run(async ctx =>
 {
@@ -31,6 +53,7 @@ app.Run(async ctx =>
     // /_fake/latency: the answer to a matching request is held back, as a slow GitHub would (the test control itself is never slowed)
     int wait; lock (gate) { wait = world.LatencyFor(method, path, body); }
     if (wait > 0) await Task.Delay(wait);
+    string? etag = null;
     // as GitHub: every answer of the API carries the rate limit of the caller's resource (core, or graphql for /graphql); an exhausted one answers
     // 403 with x-ratelimit-remaining 0 and the documented message (/_fake/rate sets what is left)
     (string Resource, int Limit, int Remaining, long Reset, int Used)? rate = null;
@@ -40,13 +63,14 @@ app.Run(async ctx =>
         // (GraphQL answers 200 with an error of type RATE_LIMITED, REST 403)
         if (rate is { Remaining: <= 0, Resource: "graphql" }) res = (200, "{\"errors\":[{\"type\":\"RATE_LIMITED\",\"message\":\"API rate limit exceeded for installation ID 7.\"}]}");
         else if (rate is { Remaining: <= 0 }) res = (403, "{\"message\":\"API rate limit exceeded for installation ID 7. If you reach out to GitHub Support for help, please include the request ID.\",\"documentation_url\":\"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting\"}");
-        else res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString());
+        else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString()); etag = world.Etag; }
     }
     if (rate is { } rl)
     {
         ctx.Response.Headers["x-ratelimit-limit"] = rl.Limit.ToString(); ctx.Response.Headers["x-ratelimit-remaining"] = Math.Max(0, rl.Remaining).ToString();
         ctx.Response.Headers["x-ratelimit-used"] = rl.Used.ToString(); ctx.Response.Headers["x-ratelimit-reset"] = rl.Reset.ToString(); ctx.Response.Headers["x-ratelimit-resource"] = rl.Resource;
     }
+    if (etag != null) ctx.Response.Headers.ETag = etag;
     ctx.Response.StatusCode = res.Item1;
     // as GitHub: a job log and an artifact archive are answered with a redirect to a signed address of another store
     if (res.Item2 is Redirect go) { ctx.Response.Headers.Location = $"http://127.0.0.1:{port}{go.To}"; return; }
@@ -124,7 +148,9 @@ sealed class World
     readonly HashSet<string> refs = new();
     // what a ref points at (a ref created before this was kept points at master's head) and the commits written through git/commits (the plant snapshot)
     readonly Dictionary<string, string> refSha = new();
-    readonly Dictionary<string, (string Message, string Tree)> commits = new();
+    readonly Dictionary<string, (string Message, string Tree, List<string> Parents)> commits = new();
+    // a conditional read (If-None-Match of the request) and the ETag of the answer, for the one ref by its path (as GitHub: 304 when unchanged)
+    public string IfNoneMatch = ""; public string? Etag;
     readonly Dictionary<string, (string Sha, List<string> Files, List<JsonObject> Objs)> branches = new();
     long nextReview = 1;
     readonly Dictionary<string, (string Profile, double Delay)> branchProfile = new();
@@ -270,19 +296,27 @@ sealed class World
         if ((m = Regex.Match(path, $"^{root}/git/ref/(.+)$")).Success && method == "GET")
         {
             var r = "refs/" + m.Groups[1].Value;
-            return refs.Contains(r) ? (200, J(("ref", r), ("object", J(("sha", refSha.TryGetValue(r, out var rsha) ? rsha : masterSha), ("type", "commit"))))) : (404, "{\"message\":\"Not Found\"}");
+            if (!refs.Contains(r)) return (404, "{\"message\":\"Not Found\"}");
+            var rsha0 = refSha.TryGetValue(r, out var rsha) ? rsha : masterSha;
+            Etag = $"W/\"{rsha0}\"";
+            if (IfNoneMatch != "" && IfNoneMatch == Etag) return (304, null);
+            return (200, J(("ref", r), ("object", J(("sha", rsha0), ("type", "commit")))));
         }
         if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "PATCH")
         {
             var r = "refs/" + m.Groups[1].Value;
             if (!refs.Contains(r)) return (422, "{\"message\":\"Reference does not exist\"}");
             if (b?["sha"]?.ToString() is not { Length: > 0 } ns) return (422, "{\"message\":\"Invalid request.\"}");
+            // as GitHub: without force the ref moves only to a commit that descends from the one it points at (a fast forward)
+            var force = b["force"] is JsonValue fv && fv.TryGetValue<bool>(out var fb) && fb;
+            var curSha = refSha.TryGetValue(r, out var cs0) ? cs0 : masterSha;
+            if (!force && ns != curSha && !Descends(ns, curSha)) return (422, "{\"message\":\"Update is not a fast forward\"}");
             refSha[r] = ns; return (200, J(("ref", r), ("object", J(("sha", ns), ("type", "commit")))));
         }
         if (path == root + "/git/commits" && method == "POST")
         {
             if (b?["tree"]?.ToString() is not { Length: > 0 } tree || b["message"] is null) return (422, "{\"message\":\"Invalid request.\"}");
-            var sha = NewSha(); commits[sha] = (b["message"]!.ToString(), tree);
+            var sha = NewSha(); commits[sha] = (b["message"]!.ToString(), tree, (b["parents"] as JsonArray ?? new JsonArray()).Select(x => x!.ToString()).ToList());
             return (201, J(("sha", sha), ("message", commits[sha].Message), ("tree", J(("sha", tree)))));
         }
         if ((m = Regex.Match(path, $"^{root}/git/commits/([0-9a-f]+)$")).Success && method == "GET")
@@ -478,6 +512,13 @@ sealed class World
     }
 
     Check? FindCheck(long id) => checks.Values.SelectMany(x => x).FirstOrDefault(c => c.Id == id);
+    // whether commit `sha` has `ancestor` among its parents, their parents and so on (the commits written through git/commits)
+    bool Descends(string sha, string ancestor)
+    {
+        var todo = new Stack<string>(); todo.Push(sha); var seen = new HashSet<string>();
+        while (todo.Count > 0) { var c = todo.Pop(); if (!seen.Add(c) || !commits.TryGetValue(c, out var cm)) continue; foreach (var p in cm.Parents) { if (p == ancestor) return true; todo.Push(p); } }
+        return false;
+    }
     // the log of a job nobody wrote a log for: what a runner prints at the least
     static string DefaultLog(Check c) => $"{c.Started:yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[group]Run {c.Name}\n{c.Started.AddSeconds(1):yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[endgroup]\n"
         + (c.Conclusion == "failure" ? $"{c.Started.AddSeconds(2):yyyy-MM-ddTHH:mm:ss.fffffff}Z ##[error]Process completed with exit code 1.\n" : "");
@@ -628,6 +669,7 @@ sealed class World
         return (404, null);
     }
 
+    public int ProxyBackend;   // the gateway port the proxy forwards new connections to (FAKE_PROXY_PORT)
     // The rate limit of the caller's identity per resource (core, graphql), counted per request as GitHub does within its hourly window. The default
     // limit is far above what a suite spends, so nothing runs out unless a scenario says so with /_fake/rate { resource, remaining, resetSeconds, limit }.
     sealed class Rate { public int Limit = 1_000_000, Remaining = 1_000_000; public long Reset; }
@@ -651,6 +693,8 @@ sealed class World
         {
             case "latency":   // { ms, match }: every request whose "METHOD path" line plus body matches the regular expression waits ms first; ms 0 ends it
                 latencyMs = b?["ms"]?.GetValue<int>() ?? 0; latencyMatch = latencyMs > 0 ? new Regex(b?["match"]?.ToString() ?? ".") : null; return (200, J(("ok", true)));
+            case "proxy":   // { port }: new connections of the proxy (FAKE_PROXY_PORT) go to this port; 0 refuses them
+                ProxyBackend = b?["port"]?.GetValue<int>() ?? 0; return (200, J(("ok", true), ("port", ProxyBackend)));
             case "rate":   // { resource (core), remaining, resetSeconds (3600), limit }: what is left of the rate limit; remaining 0 makes every request of it a 403
             {
                 var res = b?["resource"]?.ToString() ?? "core"; var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();

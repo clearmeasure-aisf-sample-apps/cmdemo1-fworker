@@ -178,10 +178,11 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // ---- registry ---------------------------------------------------------------------------------------------------------------------
     // after: the cursor of this stream. With messaging off it is today's bare number (-1: nothing is replayed). With messaging on the caller has
     // parsed "<epoch>.<seq>" and passes 0 for another epoch, a bare number or no header, so the whole Buffer and every undelivered message replay.
-    public (WorkerInfo W, Channel<(long, string)> Ch, List<(long, string)> Replay) Register(string name, string type, IEnumerable<string> caps, int capacity, IEnumerable<string> roles, long after, int qcCapacity = 1, string qcAddress = "", bool qcProfile = false, bool messagingClient = false, string model = "", string effort = "", bool newSession = true, string runtime = "local")
+    public (WorkerInfo W, Channel<(long, string)> Ch, List<(long, string)> Replay) Register(string name, string type, IEnumerable<string> caps, int capacity, IEnumerable<string> roles, long after, int qcCapacity = 1, string qcAddress = "", bool qcProfile = false, bool messagingClient = false, string model = "", string effort = "", bool newSession = true, bool handover = false, string runtime = "local")
     {
         lock (gate)
         {
+            if (handover) handoverClients.Add(name); else handoverClients.Remove(name);
             if (!workers.TryGetValue(name, out var w)) workers[name] = w = new WorkerInfo { Name = name };
             // a (re)registration answers: offers lapsed while the gateway or the session was away do not count. A streak with a take-back in it is the
             // session's, not the stream's: a reconnect of the same session keeps it (and a block), a new session of the name starts clean (issue 100).
@@ -239,6 +240,30 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     }
 
     public void Disconnect(WorkerInfo w, Channel<(long, string)> ch) { lock (gate) { if (w.Out == ch) { w.Connected = false; w.Out = null; w.DisconnectedAt = DateTime.UtcNow; if (Msg.On) store.Get(w.Name).GoneAt = DateTime.UtcNow; } } }
+
+    // ---- the hand-over to a newer gateway process (Leader.cs, issue 94) -----------------------------------------------------------------------
+    // The names whose stream client reconnects on stream.replaced with reconnect (it registered with handover=1); an older client exits on any
+    // stream.replaced, so its stream is only ended (it reconnects as after any drop).
+    readonly HashSet<string> handoverClients = new(StringComparer.Ordinal);
+    public void NoteHandover(string name, bool on) { lock (gate) { if (on) handoverClients.Add(name); else handoverClients.Remove(name); } }
+    // Ends every stream of this process: workers and the supervisor get stream.replaced (reconnect) first when their client knows it; the operator
+    // session's stream is ended (its client reconnects). Returns how many streams were ended.
+    public int HandOver(string reason)
+    {
+        lock (gate)
+        {
+            string Json(string name) => new JsonObject { ["provider"] = "gateway", ["event"] = "stream.replaced", ["name"] = name, ["code"] = "gateway-replaced", ["reconnect"] = true, ["reason"] = reason }.ToJsonString();
+            var n = 0;
+            foreach (var w in workers.Values.Where(w => w.Out != null))
+            {
+                if (handoverClients.Contains(w.Name)) w.Out!.Writer.TryWrite((0, Json(w.Name)));
+                w.Out!.Writer.TryComplete(); n++;
+            }
+            if (store.Slot is { Out: not null } sl) { if (handoverClients.Contains(sl.Name)) sl.Out.Writer.TryWrite((0, Json(sl.Name))); sl.Out.Writer.TryComplete(); n++; }
+            if (opSlot is { Out: not null } op) { op.Out.Writer.TryComplete(); n++; }
+            return n;
+        }
+    }
 
     // ---- messaging: replay, delivery, presence, the supervisor slot (worker-messaging.md 3.4 to 3.6, 4.6). Every method holds the gate. -----
     static string ReplacedJson(string name) => new JsonObject { ["provider"] = "gateway", ["event"] = "stream.replaced", ["name"] = name, ["reason"] = "a newer stream registered with this name; this one ends", ["exit"] = 40 }.ToJsonString();

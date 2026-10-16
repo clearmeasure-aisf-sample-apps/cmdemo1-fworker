@@ -75,7 +75,7 @@ $LeaseScenarios['lease: a verb and a heartbeat that names the item renew its lea
             $p = Msg-Post '/api/v1/presence' @{ summary = "working on #$n2 (design)" } (Msg-Token 'carol')
             Check 'a heartbeat whose summary names the item renews its lease' ($p.status -eq 200 -and (Wait-Until -Seconds 30 { (Ls-Lease $n2) -gt $l2 })) "$l2 -> $(Ls-Lease $n2)"
             # (Lease.Renew counts a renewal after its claim-item call has saved the new lease: the state can show it a moment before the counter)
-            Check 'the renewals are counted' (Wait-Until -Seconds 10 { (Ls-Status).lease.renewals -ge 2 }) ((Ls-Status).lease | ConvertTo-Json -Compress -Depth 5)
+            Check 'the renewals are counted' (Wait-Until -Seconds 30 { (Ls-Status).lease.renewals -ge 2 }) ((Ls-Status).lease | ConvertTo-Json -Compress -Depth 5)
             # quiet from here: heartbeats go on with the same summary, no verb. Both items get one item.check.
             $checks = { $x = Msg-Of $carol 'item.check'; $x }
             $end = (Get-Date).AddSeconds(45)

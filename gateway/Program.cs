@@ -129,10 +129,18 @@ if (qcSettings.TrustProxy)
     });
 // the shared GitHub budget (GitHubBudget.cs, issue 92): fed by every rule-script answer, read by the verb route and the sweeper
 var githubBudget = GitHubBudget.Load(scriptsDir);
-builder.Services.AddSingleton(new Runner(entry) { Budget = githubBudget });
-// The plant snapshot (PlantSnapshot.cs, enhancement 5): written at SIGTERM, read back before the first sweep. Owner mode only, and not for the suites'
+var runnerInstance = new Runner(entry) { Budget = githubBudget };
+builder.Services.AddSingleton(runnerInstance);
+// The plant snapshot (PlantSnapshot.cs, enhancement 5): read back before the first sweep. Owner mode only, and not for the suites'
 // second gateways (FACTORY_TEST_SKIP_REVOCATIONS: their GitHub is a port nothing listens on). FACTORY_PLANT_SNAPSHOT=0 switches it off.
 var snapshotOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_PLANT_SNAPSHOT") != "0";
+// The leader lease (Leader.cs, issue 94): only the process that holds it acts on the board. Owner mode with a GitHub identity, not the suites' second
+// gateways; FACTORY_LEADER_LEASE=0 switches it off (every process acts, and the snapshot is written at SIGTERM and read once, as before).
+var leaderOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && GitHubConfigured();
+var leader = new GatewayLeader(runnerInstance, LeaderSettings.Load(scriptsDir, leaderOn),
+    (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0");
+// claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
+var sweepGap = new SweepGap();
 var snapshotMaxAge = TimingNumber(scriptsDir, "plantSnapshotMaxAgeMinutes", 30);
 var plantRestored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 if (!snapshotOn) plantRestored.SetResult();
@@ -160,7 +168,7 @@ builder.Services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(
 builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
 // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
 var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : TimingValue(scriptsDir, "sweepMinSeconds", 60));
-builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget });
+builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
 if (runtimeManager != null) builder.Services.AddHostedService(sp =>
 {
     var rp = sp.GetRequiredService<Plant>(); var rr = sp.GetRequiredService<Runner>();
@@ -173,9 +181,9 @@ if (runtimeManager != null) builder.Services.AddHostedService(sp =>
         rp.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "runtime-failed" });
     };
     runtimeManager.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
-    return new RuntimeLoop(runtimeManager);
+    return new RuntimeLoop(runtimeManager) { MayAct = () => leader.MayAct };
 });
-builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()));
+builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct });
 // A background loop that throws must not end the process (the default of .NET stops the host): the loops catch and go on, and this is the net under them.
 builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
 // What ended a process is in its last lines: an exception nobody caught (a crash), or "stopping" (the platform asked: SIGTERM at a scale-in, a new
@@ -211,9 +219,10 @@ if (ownerMode)
     };
     plant.RequestSweepAfterTakeBack = item => hub.RequestSweep(item);
 }
-// The restore runs before the first sweep (the Sweeper waits for it, at most 60 s): a sweep that planned first would offer the items of the snapshot
-// anew. One read, bounded; a failure leaves the plant empty, as every restart did before, and the sweep rebuilds from the board.
-if (snapshotOn) _ = Task.Run(async () =>
+baseWatch.MayAct = () => leader.MayAct;
+// The restore runs before the first sweep. Without the leader lease (the Sweeper waits for it, at most 60 s): one read, bounded; a failure leaves the
+// plant empty, as every restart did before, and the sweep rebuilds from the board.
+if (snapshotOn && !leaderOn) _ = Task.Run(async () =>
 {
     try
     {
@@ -229,10 +238,10 @@ if (snapshotOn) _ = Task.Run(async () =>
     catch (Exception e) { Console.Error.WriteLine($"plant snapshot load: {e.Message}"); }
     finally { plantRestored.TrySetResult(); }
 });
-// At SIGTERM (a release, a scale-in, a replica move) the plant is written before the process ends. The host waits for this callback; the platform's
-// grace period (30 s on Container Apps) bounds it, so the write has 20 s. A snapshot is written only after the restore has run: a process stopped
-// during its start must not overwrite the snapshot it has not read yet with an empty plant.
-if (snapshotOn) app.Lifetime.ApplicationStopping.Register(() =>
+// Without the lease, at SIGTERM (a release, a scale-in, a replica move) the plant is written before the process ends. The host waits for this
+// callback; the platform's grace period (30 s on Container Apps) bounds it, so the write has 20 s. A snapshot is written only after the restore has
+// run: a process stopped during its start must not overwrite the snapshot it has not read yet with an empty plant.
+if (snapshotOn && !leaderOn) app.Lifetime.ApplicationStopping.Register(() =>
 {
     try
     {
@@ -243,6 +252,127 @@ if (snapshotOn) app.Lifetime.ApplicationStopping.Register(() =>
     }
     catch (Exception e) { try { Console.Error.WriteLine($"plant snapshot save: {e.Message}"); } catch { } }
 });
+
+// ---- the leader lease, the hand-over and the snapshot of every change (Leader.cs, issue 94) ---------------------------------------------------
+// The epoch whose snapshot holds this process's plant: its own once it wrote one, before that the one it restores from (-1: none). A graceful stop
+// names it in the released lease, so the successor knows which snapshot to accept.
+long snapshotHeldEpoch = -1;
+var snapshotWrite = new SemaphoreSlim(1, 1);
+string lastSnapStructure = "", lastSnapFull = "", snapTree = ""; var lastSnapSave = DateTime.MinValue; long snapSaves = 0, snapFailures = 0;
+static DateTime? IsoTime(JsonNode? n) => DateTime.TryParse(n?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var d) ? d : null;
+static long LongOf(JsonNode? n, long fallback) => n is JsonValue v && v.TryGetValue<long>(out var l) ? l : long.TryParse(n?.ToString(), out var p) ? p : fallback;
+// what changes the plant's hand-over (offers, acceptances, owners, drains, bot holders) and everything else (leases seen by the sweep), as text
+static string SnapStructure(JsonObject snap) => new JsonObject
+{
+    ["a"] = new JsonArray((snap["assignments"] as JsonArray ?? new JsonArray()).Select(x => (JsonNode)new JsonObject { ["id"] = x?["id"]?.DeepClone(), ["w"] = x?["worker"]?.DeepClone(), ["ok"] = x?["accepted"]?.DeepClone() }).ToArray()),
+    ["o"] = snap["owners"]?.DeepClone(), ["d"] = snap["drained"]?.DeepClone(), ["b"] = snap["bots"]?.DeepClone()
+}.ToJsonString();
+static string SnapFull(JsonObject snap) { var c = (JsonObject)snap.DeepClone(); c.Remove("at"); return c.ToJsonString(); }
+async Task<bool> SaveSnapshot(bool final, TimeSpan timeout)
+{
+    // one write at a time, and none that waits longer than it may take: at a stop the final write must not queue behind a periodic one
+    if (!await snapshotWrite.WaitAsync(timeout)) return false;
+    try
+    {
+        // a periodic write that waited while the process stopped acting is not made: it would land after the final one
+        if (!final && !leader.MayAct) return false;
+        var plain = plant.Snapshot(); var ep = leader.Epoch;
+        var snap = (JsonObject)plain.DeepClone(); snap["epoch"] = ep; snap["holder"] = leader.Holder; snap["final"] = final;
+        // every write is guarded: a snapshot of a later epoch (a process that took over) is never overwritten
+        var args = new JsonObject { ["snapshot"] = snap, ["guard_epoch"] = ep };
+        if (snapTree != "") args["tree"] = snapTree;
+        var (code, output) = await runner.RunAsync("plant-snapshot-save", args.ToJsonString(), timeout);
+        if (code == 0)
+        {
+            try { if (JsonNode.Parse(output)?["tree"]?.ToString() is { Length: > 0 } t) snapTree = t; } catch { }
+            lastSnapSave = DateTime.UtcNow; lastSnapStructure = SnapStructure(plain); lastSnapFull = SnapFull(plain); Interlocked.Exchange(ref snapshotHeldEpoch, ep); snapSaves++;
+        }
+        else snapFailures++;
+        if (final || code != 0) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["exit"] = code, ["final"] = final, ["epoch"] = ep, ["assignments"] = (snap["assignments"] as JsonArray)?.Count ?? 0, ["owners"] = (snap["owners"] as JsonObject)?.Count ?? 0 }.ToJsonString());
+        lock (snapshotState) { snapshotState["saves"] = snapSaves; snapshotState["saveFailures"] = snapFailures; snapshotState["lastSave"] = lastSnapSave == DateTime.MinValue ? null : lastSnapSave.ToString("o"); snapshotState["heldEpoch"] = Interlocked.Read(ref snapshotHeldEpoch); }
+        return code == 0;
+    }
+    catch (Exception e) { Console.Error.WriteLine($"plant snapshot save: {e.Message}"); return false; }
+    finally { snapshotWrite.Release(); }
+}
+// Restores the plant from the predecessor's snapshot, and only from its epoch (or, with no predecessor yet, from a snapshot written before the lease
+// existed, which has none). A predecessor that released the lease or whose lease ran out writes nothing more: one read. One that still held it is
+// being superseded right now: wait up to timing.leaderHandoverSeconds for its final snapshot, then take its latest one. The gap (a predecessor that
+// died, or stopped and released) is handed to the first full sweep, which renews the claims that ran out meanwhile.
+async Task RestoreFromPredecessor(JsonObject? pred, string via)
+{
+    try
+    {
+        var now = DateTime.UtcNow;
+        var predEpoch = LongOf(pred?["epoch"], 0); var released = pred?["released"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb;
+        var predUntil = IsoTime(pred?["until"]);
+        var accept = pred == null ? 0 : released && pred["plant_epoch"] is JsonNode pe ? LongOf(pe, -1) : predEpoch;
+        Interlocked.Exchange(ref snapshotHeldEpoch, pred == null ? 0 : accept);
+        string how; JsonNode? snap = null; var final = false; var code = 0;
+        if (!snapshotOn) how = "snapshot-off";
+        else if (pred == null || released || predUntil == null || predUntil < now)
+        {
+            how = pred == null ? "no-predecessor" : released ? "released" : "lapsed";
+            (code, var output) = await runner.RunAsync("plant-snapshot-load", "{}", TimeSpan.FromSeconds(45));
+            var j = code == 0 ? JsonNode.Parse(output) : null;
+            if (j?["found"] is JsonValue fv && fv.TryGetValue<bool>(out var fb) && fb) snap = j["snapshot"];
+        }
+        else
+        {
+            var args = new JsonObject { ["epoch"] = predEpoch, ["wait_seconds"] = leader.Settings.HandoverSeconds, ["until"] = predUntil.Value.ToString("o") };
+            (code, var output) = await runner.RunAsync("plant-snapshot-await", args.ToJsonString(), TimeSpan.FromSeconds(leader.Settings.HandoverSeconds + 45));
+            var j = code == 0 ? JsonNode.Parse(output) : null;
+            snap = j?["snapshot"]; final = j?["final"] is JsonValue fl && fl.TryGetValue<bool>(out var flb) && flb;
+            how = final ? "handover" : "handover-timeout";
+        }
+        var snapEpoch = snap is JsonObject so && so.ContainsKey("epoch") ? LongOf(so["epoch"], -2) : 0;
+        var usable = snap is JsonObject && snapshotOn && accept >= 0 && snapEpoch == accept;
+        // a snapshot of the predecessor's own epoch is its last word however old (a quiet plant writes none for hours): the age limit is for the
+        // snapshot an outright kill left behind, which the epoch already excludes
+        var (na, no, skipped) = code != 0 ? (0, 0, "load-failed") : snap == null ? (0, 0, "none") : !usable ? (0, 0, "other-epoch") : plant.Restore(snap, pred == null ? snapshotMaxAge : 60 * 24 * 365);
+        if (!(usable && skipped == "")) Interlocked.Exchange(ref snapshotHeldEpoch, -1);
+        // the gap: from the predecessor's release, or its last renewal when it died or handed nothing over, to the first full sweep
+        var gapSince = pred == null ? null : released ? IsoTime(pred["released_at"]) : final ? null : IsoTime(pred["renewed_at"]);
+        if (gapSince is { } gs && (DateTime.UtcNow - gs).TotalMinutes <= leader.Settings.GapRenewMaxMinutes) sweepGap.Set(gs);
+        lock (snapshotState) snapshotState["restore"] = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["assignments"] = na, ["owners"] = no, ["skipped"] = skipped, ["how"] = how, ["via"] = via,
+            ["snapshotAt"] = snap?["at"]?.ToString(), ["snapshotEpoch"] = snap == null ? null : snapEpoch, ["predecessorEpoch"] = pred == null ? null : predEpoch, ["final"] = final, ["gapSince"] = gapSince?.ToString("o") };
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-restore", ["how"] = how, ["exit"] = code, ["assignments"] = na, ["owners"] = no, ["skipped"] = skipped, ["epoch"] = leader.Epoch, ["predecessorEpoch"] = predEpoch, ["gapSince"] = gapSince?.ToString("o") }.ToJsonString());
+    }
+    catch (Exception e) { Console.Error.WriteLine($"plant restore: {e.Message}"); }
+    finally { plantRestored.TrySetResult(); }
+}
+if (leaderOn)
+{
+    lock (snapshotState) snapshotState["leader"] = true;
+    // superseded: nothing acts any more (the sweeper and the ticks ask MayAct); the final snapshot, then the streams end with stream.replaced
+    leader.OnSuperseded = async cur =>
+    {
+        var saved = snapshotOn && plantRestored.Task.IsCompleted && await SaveSnapshot(true, TimeSpan.FromSeconds(30));
+        var n = plant.HandOver("a newer gateway process took over the plant; connect again");
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "handed-over", ["epoch"] = leader.Epoch, ["finalSnapshot"] = saved, ["streamsEnded"] = n, ["to"] = cur?["holder"]?.DeepClone() }.ToJsonString());
+    };
+    // a standby that takes the lease again restores from the releaser's snapshot and writes one of its own epoch at once
+    leader.OnReacquired = async pred => { await RestoreFromPredecessor(pred, "reacquired"); lastSnapStructure = ""; lastSnapFull = ""; lastSnapSave = DateTime.MinValue; };
+    // At SIGTERM the holder hands over: nothing acts, the final snapshot (only of a plant that was restored: one stopped during its start has
+    // nothing of its own), then the lease is released naming whose snapshot holds the plant. Bounded by the platform's grace (30 s).
+    app.Lifetime.ApplicationStopping.Register(() =>
+    {
+        try
+        {
+            var was = leader.BeginStop();
+            if (was is not (GatewayLeader.Role.Acting or GatewayLeader.Role.Starting))
+            {   // superseded: its final snapshot was written when it stood down; one still being written is given its time
+                if (snapshotWrite.Wait(TimeSpan.FromSeconds(10))) snapshotWrite.Release();
+                Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"{was.ToString().ToLowerInvariant()}\"}}"); return;
+            }
+            var sw = Stopwatch.StartNew();
+            if (was == GatewayLeader.Role.Acting && snapshotOn && plantRestored.Task.IsCompleted) SaveSnapshot(true, TimeSpan.FromSeconds(12)).GetAwaiter().GetResult();
+            leader.ReleaseAsync(Interlocked.Read(ref snapshotHeldEpoch), TimeSpan.FromSeconds(Math.Max(5, 22 - sw.Elapsed.TotalSeconds))).GetAwaiter().GetResult();
+        }
+        catch (Exception e) { try { Console.Error.WriteLine($"leader stop: {e.Message}"); } catch { } }
+    });
+}
+else leader.StartActing();
 if (qcSettings.TrustProxy) app.UseForwardedHeaders();
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
 var started = DateTime.UtcNow;
@@ -327,6 +457,45 @@ else _ = Task.Run(async () =>
     }
 });
 
+// the leader lease starts once the revoked credentials are read (above): see the leader section near the top
+if (leaderOn)
+{
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            // not before this process can serve sessions: a start that never gets ready (the revoked credentials unreadable) must not take the
+            // plant from a healthy predecessor
+            await revocationsLoaded.Task.WaitAsync(app.Lifetime.ApplicationStopping);
+            var pred = await leader.AcquireAsync(app.Lifetime.ApplicationStopping);
+            await RestoreFromPredecessor(pred, "start");
+            // superseded while it restored (two starts close together): it stands by instead of acting
+            if (await leader.ConfirmAsync()) leader.StartActing();
+            _ = Task.Run(() => leader.LoopAsync(app.Lifetime.ApplicationStopping));
+            // the snapshot of every change: a change of the hand-over at most every plantSnapshotDebounceSeconds (30), any other change at most every
+            // plantSnapshotRefreshMinutes (10); the first right after the restore, with this process's epoch
+            if (snapshotOn) _ = Task.Run(async () =>
+            {
+                var ct = app.Lifetime.ApplicationStopping;
+                while (!ct.IsCancellationRequested)
+                {
+                    try { await Task.Delay(TimeSpan.FromSeconds(Math.Min(5, leader.Settings.SnapshotDebounceSeconds)), ct); } catch (OperationCanceledException) { return; }
+                    try
+                    {
+                        if (!leader.MayAct || !plantRestored.Task.IsCompleted) continue;
+                        var snap = plant.Snapshot(); var since = (DateTime.UtcNow - lastSnapSave).TotalSeconds;
+                        if ((since >= leader.Settings.SnapshotDebounceSeconds && SnapStructure(snap) != lastSnapStructure) || (since >= leader.Settings.SnapshotRefreshMinutes * 60 && SnapFull(snap) != lastSnapFull))
+                            await SaveSnapshot(false, TimeSpan.FromSeconds(60));
+                    }
+                    catch (Exception e) { Console.Error.WriteLine($"plant snapshot loop: {e.Message}"); }
+                }
+            });
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception e) { Console.Error.WriteLine($"leader start: {e.Message}"); }
+    });
+}
+
 static bool FixedEquals(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
 Principal Who(HttpContext c) => (Principal)c.Items["principal"]!;
 static async Task Refuse(HttpContext c, int status, string code, string reason, int exit = 30) { c.Response.StatusCode = status; await c.Response.WriteAsJsonAsync(new { ok = false, code, reason, exit }); }
@@ -336,6 +505,14 @@ app.Use(async (ctx, next) =>
     var port = ctx.Connection.LocalPort;
     var path = ctx.Request.Path.Value ?? "";
     if (port == hookPort && hookPort != apiPort && !(path == "/webhooks/github" && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
+    // a process that a newer one superseded (Leader.cs) serves nothing any more but its status to the operator: calls and new streams are answered
+    // 503 gateway-replaced, so the client tries again and reaches the new process; a webhook too (the new process's sweep catches up)
+    if (leader.Replaced && (path == "/webhooks/github" || path.StartsWith("/qc/") || (path.StartsWith("/api/") && !(path is "/api/v1/status" or "/api/v1/dashboard" && Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
+    {
+        ctx.Response.StatusCode = 503;
+        await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "gateway-replaced", reason = "this gateway process was replaced by a newer one; try again", retryAfterSeconds = 5, exit = 20 });
+        return;
+    }
     // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
     if (port == apiPort && path == "/api/v1/runtime/redeem") { await next(); return; }
     if (port == apiPort && path.StartsWith("/api/"))
@@ -376,7 +553,8 @@ app.MapGet("/health", () => Results.Text("ok"));
 app.MapGet("/alive", () => Results.Text("ok"));
 // readiness: the revoked credentials are read (at once where there is nothing to read), so a session credential is answered without waiting
 // (503 says what the start waits for, how many reads have failed and since when: {"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."})
-app.MapGet("/ready", () => revocationsLoaded.Task.IsCompleted ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = Volatile.Read(ref revAttempts), since = revSince.ToString("o") }, statusCode: 503));
+app.MapGet("/ready", () => leader.Replaced ? Results.Json(new { ready = false, waitingFor = "nothing", replaced = true, reason = "a newer gateway process holds the lease" }, statusCode: 503)
+    : revocationsLoaded.Task.IsCompleted ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = Volatile.Read(ref revAttempts), since = revSince.ToString("o") }, statusCode: 503));
 app.MapGet("/", () => Results.Redirect("/dashboard"));
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
 app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, pluginHash = PluginHash(), started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
@@ -396,6 +574,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode && messaging.ManagerEnabled) o["managerActions"] = plant.ManagerActionsStatus(false);
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
+    if (ownerMode) o["leader"] = leader.Status();
     // the rule scripts running and waiting, the processes and memory (gateway/RunnerGate.cs, issue 89)
     o["runner"] = runner.Status();
     // the GitHub budget and the sweep's passes (issue 92)
@@ -525,6 +704,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode && runtimeManager != null) o["runtimes"] = runtimeManager.Status();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
+    if (ownerMode) o["leader"] = leader.Status();
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // POST /release-queue/promotion-request { "release": "1.2.3" } (enhancement 9): the dashboard's button. Operator token only. It records the request
@@ -677,7 +857,7 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (verb is "revoke-worker" or "revocations")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/workers/{name}/revoke", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // likewise the release records of the operator session: only POST /api/v1/operator/record-release keeps the stored refs and this process in step
-    if (verb is "plant-snapshot-save" or "plant-snapshot-load" or "plant-snapshot-clear")
+    if (verb is "plant-snapshot-save" or "plant-snapshot-load" or "plant-snapshot-clear" or "plant-snapshot-await" or "leader-lease")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the plant snapshot is written and read by the gateway itself, at its stop and its start", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "operator-release" or "operator-releases")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/operator/record-release", exit = 2 }), "application/json", Encoding.UTF8, 400);
@@ -1158,7 +1338,9 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
             int.TryParse(ctx.Request.Query["qc_capacity"], out var qcap) ? qcap : 1, ctx.Request.Query["qc_address"].ToString(), ctx.Request.Query["qc_profile"].ToString() is "1" or "true",
             messagingClient: ctx.Request.Query["messaging"].ToString() == "1", model: model, effort: effort,
             // a stream opened without a cursor is a new session of this name (a reconnect of the same client sends its last id): one item per session
-            newSession: lastEventId == "", runtime: runtime);
+            newSession: lastEventId == "",
+            // a client that reconnects on stream.replaced with reconnect (issue 94); an older one is ended without it, and reconnects as after any drop
+            handover: ctx.Request.Query["handover"].ToString() == "1", runtime: runtime);
         plant.SetHost(name, ctx.Request.Query["host"].ToString(), effort);
         // a new session can take a work item that waited as session-spent: plan now instead of at the next sweep (issue 72)
         if (lastEventId == "") hub.RequestSweep();
@@ -1740,6 +1922,7 @@ async Task SupervisorStream(HttpContext ctx, Principal who, string name, long af
     if (messaging.EnforceModel && messaging.ModelCheck(model, effort) != "ok")
     { await Refuse(ctx, 403, "supervisor-model-too-weak", $"this gateway enforces the supervisor's model: the {messaging.RequiredModelTier} tier at effort {messaging.RequiredEffort} or higher, declared with --model and --effort"); return; }
     var (ok, active, since, ch, replay) = plant.RegisterSupervisor(name, model, effort, after);
+    if (ok) plant.NoteHandover(name, ctx.Request.Query["handover"].ToString() == "1");
     if (!ok) { ctx.Response.StatusCode = 409; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "supervisor-active", reason = "another supervisor session is active and was heard within timing.mgrTakeoverSeconds", name = active, since, exit = 40 }); return; }
     ctx.Response.Headers.ContentType = "text/event-stream"; ctx.Response.Headers.CacheControl = "no-cache";
     try { await Pump(ctx, ch!, replay, new JsonObject { ["provider"] = "gateway", ["event"] = "supervisor.registered", ["name"] = name, ["epoch"] = plant.Epoch, ["modelCheck"] = messaging.ModelCheck(model, effort) }.ToJsonString()); }
@@ -1934,6 +2117,8 @@ sealed class EventHub
 
 sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runner) : BackgroundService
 {
+    // the ticks act on the plant and on GitHub (lapsed offers, take-backs, QC): only in the process that holds the leader lease (Leader.cs)
+    public Func<bool>? MayAct { get; init; }
     // The journal comment of an escalated question (worker-messaging.md 3.8). The journal verb waits up to 45 s for the item lock and answers exit 20
     // while an owner's merge holds it, so the comment is tried again every mgrEscalateRetrySeconds for mgrEscalateRetryMinutes; a final failure is
     // written to stdout with its code and kept on the question for the dashboard. The comment carries a name and a number of minutes, never text.
@@ -1980,6 +2165,7 @@ sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runn
     {
         while (!ct.IsCancellationRequested)
         {
+            if (MayAct?.Invoke() == false) { try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { } continue; }
             try { plant.Tick(); } catch (Exception e) { Console.Error.WriteLine($"plant tick: {e.Message}"); }
             try { plant.LeaseTick(); } catch (Exception e) { Console.Error.WriteLine($"lease tick: {e.Message}"); }
             try { plant.ManagerTick(); } catch (Exception e) { Console.Error.WriteLine($"manager tick: {e.Message}"); }
@@ -1993,6 +2179,10 @@ sealed class PlantTicker(Plant plant, QcHub qc, Messenger messenger, Runner runn
 
 sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int seconds, bool ownerMode, BaseWatch? baseWatch = null, Task? restored = null) : BackgroundService
 {
+    // the leader lease (Leader.cs): only the holder sweeps; with the lease on, the first sweep waits for the restore however long the hand-over takes
+    public Func<bool>? MayAct { get; init; }
+    public bool LeaderOn { get; init; }
+    public SweepGap? Gap { get; init; }
     readonly HashSet<(int, string)> flagged = new();
     // issue 92: a full sweep (sync-board over the whole board, about 50 REST calls) runs every `seconds` (180), and at most every MinSeconds (60) when
     // a trigger asks for one. A trigger of one item (a webhook, a verb, a take-back, an unpark) queues the item: between full sweeps the queued items
@@ -2004,8 +2194,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         try { await Task.Delay(TimeSpan.FromSeconds(3), ct); } catch (OperationCanceledException) { return; }
-        // the plant snapshot is restored before the first plan (PlantSnapshot.cs); a read that hangs holds the sweep back 60 s at most
-        if (restored != null) try { await Task.WhenAny(restored, Task.Delay(TimeSpan.FromSeconds(60), ct)); } catch (OperationCanceledException) { return; }
+        // the plant snapshot is restored before the first plan (PlantSnapshot.cs); without the lease a read that hangs holds the sweep back 60 s at most
+        if (restored != null) try { await Task.WhenAny(restored, Task.Delay(TimeSpan.FromSeconds(LeaderOn ? 3600 : 60), ct)); } catch (OperationCanceledException) { return; }
         // An item new in a working column is offered by the second sweep that sees it there (timing.sweepSeenCount, so a card dragged across the
         // board starts nothing). That second look must not cost a whole interval: after a sweep that saw such an item it gets a pass of its own
         // after FACTORY_SWEEP_CONFIRM_SECONDS (20). Before, a new item waited up to two intervals (6 minutes at 180 s) for its first offer.
@@ -2013,6 +2203,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         var lastFull = DateTime.MinValue; DateTime? confirmAt = null; var confirmItems = new HashSet<int>();
         while (!ct.IsCancellationRequested)
         {
+            if (MayAct?.Invoke() == false) { try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { } continue; }
             try
             {
                 var now = DateTime.UtcNow; var sinceFull = (now - lastFull).TotalSeconds;
@@ -2071,7 +2262,14 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         // free_workers: the auto-unpark of a park caused by session trouble needs a session that could take the item (Verbs.Sweep.ps1)
         if (ownerMode) args["free_workers"] = plant.FreeOwnerSessions();
         var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
-        var (code, output) = await runner.RunAsync("sync-board", args.ToJsonString(), TimeSpan.FromSeconds(280));
+        // the first full sweep after a gap (no gateway was up): the owners' claims that ran out in it are renewed, not offered again (issue 94)
+        var gapTaken = items == null ? Gap?.Take() : null;
+        if (gapTaken is { } gap) args["gap"] = new JsonObject { ["since"] = gap.ToString("o"), ["until"] = DateTime.UtcNow.ToString("o") };
+        int code; string output;
+        try { (code, output) = await runner.RunAsync("sync-board", args.ToJsonString(), TimeSpan.FromSeconds(280)); }
+        catch { if (gapTaken is { } g1) Gap?.Set(g1); throw; }
+        // a sweep that failed renewed nothing: the next one gets the gap again
+        if (code != 0 && gapTaken is { } g0) Gap?.Set(g0);
         if (items == null) hub.LastSweep = DateTime.UtcNow;
         hub.NoteSweep(items == null, items?.Count ?? 0, low); if (low) Budget?.CountLowSweep();
         var kind = items == null ? "full" : "incremental";
@@ -2150,6 +2348,14 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         if (code != 0) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"failed\",\"kind\":\"{kind}\",\"exit\":{code},\"out\":{JsonSerializer.Serialize(output.Length > 300 ? output[..300] : output)}}}");
         return unconfirmedOut;
     }
+}
+
+// The gap that the first sweep after a start renews claims for (Program.cs, Leader.cs): set once by the restore, taken by one sweep.
+sealed class SweepGap
+{
+    DateTime? since;
+    public void Set(DateTime s) { lock (this) since = s; }
+    public DateTime? Take() { lock (this) { var s = since; since = null; return s; } }
 }
 
 static class DashboardPage

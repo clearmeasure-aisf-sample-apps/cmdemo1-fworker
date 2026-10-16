@@ -44,6 +44,7 @@ foreach ($k in $QcPoolScenarios.Keys) { $QcScenarios[$k] = $QcPoolScenarios[$k] 
 . (Join-Path $PSScriptRoot 'runner-gate.ps1') # the gate of the rule scripts (gateway/RunnerGate.cs): scenarios named "runner gate: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'lease.ps1')       # owner leases kept by the plant (gateway/Lease.cs): scenarios named "lease: ..." join the manager suite
 foreach ($k in $LeaseScenarios.Keys) { $ManagerScenarios[$k] = $LeaseScenarios[$k] }
+. (Join-Path $PSScriptRoot 'leader.ps1')      # one acting gateway (Leader.cs): the leader lease, the hand-over, the gap; scenarios named "leader: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'runtime.ps1')     # cloud worker runtimes: w2, the nonce, git-credential; suite 'runtime' (uses the helpers of owner.ps1)
 . (Join-Path $PSScriptRoot 'journal-fold.ps1') # the journal folds its repeats (Journal.ps1): scenarios named "journal fold: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'manager-actions.ps1')   # the plant manager's flow verbs (gateway/Manager.cs): scenarios named "act: ..." join the manager suite
@@ -174,12 +175,13 @@ function Get-SuiteEnv([string]$Kind) {
     switch ($Kind) {
         # 8 s: a late accept is refused now (stale-assignment), and a loaded runner takes several seconds per client call
         # the plant snapshot (PlantSnapshot.cs) is off in the suites: its read at start would hold every first sweep back; its own scenario switches it on
-        'owner' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8' } }
+        # the leader lease (Leader.cs) is off as well: a restarted suite gateway would wait for its predecessor's hand-over; its own scenarios switch it on
+        'owner' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8' } }
         # the runtime suite: owner mode and the bearer token of the fake ARM (taken by the gateway only for a loopback ARM endpoint)
-        'runtime' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_TEST_ARM_TOKEN = 'fake-arm' } }
+        'runtime' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_TEST_ARM_TOKEN = 'fake-arm' } }
         'qc' {
             $adminTokens = Join-Path $script:SuiteRoot 'qc-admin-tokens'; New-Item -ItemType Directory -Force -Path $adminTokens | Out-Null
-            return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '60'; FACTORY_PUBLIC_URL = "http://127.0.0.1:$($script:ApiPort)"; FACTORY_TOKEN_DIR = $adminTokens }
+            return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '60'; FACTORY_PUBLIC_URL = "http://127.0.0.1:$($script:ApiPort)"; FACTORY_TOKEN_DIR = $adminTokens }
         }
         'author' {
             $pem = (& openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>$null) -join "`n"

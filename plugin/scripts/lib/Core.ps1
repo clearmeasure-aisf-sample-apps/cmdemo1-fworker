@@ -58,7 +58,7 @@ function Get-GhToken {
 function Invoke-GhRaw {
     # -OutFile: the body of the answer goes to that file and not through the JSON reader (job logs, artifact archives). GitHub answers those
     # with a redirect to a signed address; the Authorization header is not sent there (the default of Invoke-RestMethod, and what that store needs).
-    param([string]$Method = 'GET', [string]$Path, $Body = $null, [string]$Accept = 'application/vnd.github+json', [string]$OutFile = '', [int]$TimeoutSec = 0, [int]$Tries = 3)
+    param([string]$Method = 'GET', [string]$Path, $Body = $null, [string]$Accept = 'application/vnd.github+json', [string]$OutFile = '', [int]$TimeoutSec = 0, [int]$Tries = 3, [hashtable]$Headers = @{})
     # -TimeoutSec: the longest one attempt may take (0: the default of the client); -Tries: attempts on a network error or a 502-504.
     # The author identity: an organization GitHub App (cloud gateways; FACTORY_AUTHOR_APP=1) or the GH_TOKEN of a local gateway. The value
     # 'unset' is the vault placeholder written before an identity exists: it counts as no token.
@@ -66,6 +66,7 @@ function Invoke-GhRaw {
     $base = if ($env:GITHUB_API_URL) { $env:GITHUB_API_URL.TrimEnd('/') } else { 'https://api.github.com' }   # tests point this at the fake server
     $uri = if ($Path -match '^https?://') { $Path } else { "$base/$($Path.TrimStart('/'))" }
     $h = @{ Authorization = "Bearer $tok"; Accept = $Accept; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'factory-worker-gateway' }
+    foreach ($k in $Headers.Keys) { if ($k -notin 'Authorization', 'Accept') { $h[$k] = $Headers[$k] } }   # (-Headers: a conditional read, If-None-Match)
     $params = @{ Uri = $uri; Method = $Method; Headers = $h; SkipHttpErrorCheck = $true; StatusCodeVariable = 'sc'; ResponseHeadersVariable = 'rh' }
     if ($null -ne $Body) { $params.Body = ($Body | ConvertTo-Json -Depth 20 -Compress); $params.ContentType = 'application/json' }
     if ($OutFile) { $params.OutFile = $OutFile }
