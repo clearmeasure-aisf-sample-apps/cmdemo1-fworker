@@ -82,8 +82,27 @@ try {
 $rtCfg = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).runtimes
 Check 'runtimes: the source defaults exist' ($rtCfg -is [System.Collections.IDictionary] -and $rtCfg.caeJob -is [System.Collections.IDictionary])
 Check 'runtimes: no routing rule in the source defaults' (@($rtCfg.routing).Count -eq 0)
-foreach ($rk in @($rtCfg.Keys | Where-Object { $rtCfg[$_] -is [System.Collections.IDictionary] })) {
+Check 'runtimes: no environment block in the source defaults' ($rtCfg.environments -is [System.Collections.IDictionary] -and $rtCfg.environments.Count -eq 0)
+foreach ($rk in @($rtCfg.Keys | Where-Object { $_ -ne 'environments' -and $rtCfg[$_] -is [System.Collections.IDictionary] })) {
     $rv = $rtCfg[$rk]
     Check "runtimes.${rk}: off in the source defaults (enabled false, maxConcurrent 0, maxExecutionsPerDay 0, no job named)" ($rv.enabled -eq $false -and $rv.maxConcurrent -eq 0 -and $rv.maxExecutionsPerDay -eq 0 -and "$($rv.jobResourceId)" -eq '')
 }
+# The deployed settings: the overrides merge over the defaults as the Dockerfile merges them, and only tdd has a runtime switched on
+# (runtimes.environments.<FACTORY_ENVIRONMENT> is the block of that environment; one without an entry has every runtime off).
+$cfgDir = Join-Path $PSScriptRoot '..' 'config'; $merged = Join-Path ([IO.Path]::GetTempPath()) "fw-merged-$PID.json"
+try {
+    $null = & pwsh -NoProfile -File (Join-Path $cfgDir 'apply-overrides.ps1') -Base (Join-Path $cfgDir 'instance.json') -Overrides (Join-Path $cfgDir 'deploy.overrides.json') -Out $merged 2>&1
+    Check 'config: the deploy overrides merge over the defaults' ($LASTEXITCODE -eq 0)
+    $envs = if (Test-Path $merged) { (Get-Content -Raw $merged | ConvertFrom-Json -AsHashtable).runtimes.environments } else { @{} }
+    $t = $envs.tdd
+    # apply-overrides adds an environment's block as written, so its names are checked here: each key exists in the base runtimes block
+    # (a misspelt setting would otherwise ship as its default), and environment names are lower case (FACTORY_ENVIRONMENT is matched lower-cased).
+    $baseRt = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).runtimes
+    $badKeys = @(foreach ($en in @($envs.Keys)) { foreach ($k in @($envs[$en].Keys)) { if ($k -eq 'environments' -or -not $baseRt.Contains($k)) { "$en.$k" } elseif ($envs[$en][$k] -is [System.Collections.IDictionary]) { foreach ($k2 in @($envs[$en][$k].Keys)) { if (-not $baseRt[$k].Contains($k2)) { "$en.$k.$k2" } } } } })
+    Check 'config: every environment names only settings of the base runtimes block' ($badKeys.Count -eq 0); if ($badKeys) { "       unknown: $($badKeys -join ', ')" }
+    Check 'config: environment names are lower case' (@($envs.Keys | Where-Object { $_ -cne $_.ToLowerInvariant() }).Count -eq 0)
+    Check 'config: tdd routes every phase to cae-job, connected workers first' ($t.preferConnected -eq $true -and @($t.routing | Where-Object { $_.phase -eq '*' -and $_.runtime -eq 'cae-job' }).Count -eq 1)
+    Check 'config: tdd runs at most 2 executions at a time and 30 a day' ($t.caeJob.enabled -eq $true -and $t.caeJob.maxConcurrent -eq 2 -and $t.caeJob.maxExecutionsPerDay -eq 30)
+    Check 'config: no runtime is switched on outside tdd' (@($envs.Keys | Where-Object { $_ -ne 'tdd' -and $envs[$_].caeJob.enabled -eq $true }).Count -eq 0)
+} finally { Remove-Item -LiteralPath $merged -ErrorAction SilentlyContinue }
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }

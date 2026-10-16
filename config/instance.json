@@ -234,6 +234,7 @@
     "policies": ["criterion-dispute", "ambiguous-wording", "oversized-item", "compatibility-conflict", "flaky-test", "backlog-low", "dependency-order", "operator-request"]
   },
   "runtimes": {
+    "environments": {},
     "preferConnected": true,
     "routing": [],
     "caeJob": {
