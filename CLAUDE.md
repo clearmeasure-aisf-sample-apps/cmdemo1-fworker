@@ -80,7 +80,9 @@ The pull request runs the smoke test and every suite at the full tier (`tests.ym
 worker. To change what a deployed gateway runs with, change the overrides file in a pull request; an override that names no existing
 setting fails the image build. To see the effective configuration without docker:
 `pwsh -NoProfile -File config/apply-overrides.ps1 -Base config/instance.json -Overrides config/deploy.overrides.json -Out /tmp/effective.json`.
-The same image is promoted to uat and prod, so the settings travel with it.
+The same image is promoted to uat and prod, so the settings travel with it. Runtimes are the exception: `runtimes.environments.<name>`
+holds one whole runtimes block per environment, the gateway uses the entry named by `FACTORY_ENVIRONMENT`, and an environment without an
+entry has every runtime off. Only tdd has one today.
 
 ## Release
 

@@ -37,8 +37,14 @@ sealed class RuntimeSettings
     {
         var path = Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json");
         JsonNode? root = null; try { root = JsonNode.Parse(File.ReadAllText(path)); } catch { }
-        return From(root?["runtimes"]);
+        return From(ForEnvironment(root?["runtimes"], Environment.GetEnvironmentVariable("FACTORY_ENVIRONMENT") ?? "tdd"));
     }
+
+    // One image runs in every environment, so the runtimes block may carry environments.<name>: when it does, the entry of FACTORY_ENVIRONMENT
+    // is the block, and an environment without an entry has every runtime off. Without environments (or with an empty one, as in the source defaults) the block applies
+    // as it is. The names are lower case in the file; FACTORY_ENVIRONMENT is matched trimmed and lower-cased, so a mismatch fails closed.
+    public static JsonNode? ForEnvironment(JsonNode? r, string environment) =>
+        r is JsonObject o && o["environments"] is JsonObject { Count: > 0 } envs ? envs[environment.Trim().ToLowerInvariant()] : r;
 
     public static RuntimeSettings From(JsonNode? r)
     {
