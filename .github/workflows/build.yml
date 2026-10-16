@@ -184,10 +184,85 @@ jobs:
     permissions:
       contents: read
 
+  # The cloud worker runner image (Dockerfile.fwrunner, docs/design/cloud-worker-runtimes.md 2.3): built only when Dockerfile.fwrunner (which
+  # holds the pinned versions), runner/** or tests/runner/** changed, or when Build is started by hand. Tagged fwrunner:<claude-code version>-<run
+  # number>; the shell test of the entrypoint runs inside the built image. A push keeps the image as artifact fwrunner-image for release.yml.
+  fwrunner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Changed?
+        id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then echo "build=true" >> "$GITHUB_OUTPUT"; echo "Started by hand: the runner image is built."; exit 0; fi
+          if [ "$EVENT" = "pull_request" ]; then base="$BASE_SHA"; else base="$BEFORE"; fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; echo "No base commit to compare with: the runner image is built."; exit 0
+          fi
+          files=$(git diff --name-only "$base" "$GITHUB_SHA" -- Dockerfile.fwrunner runner tests/runner)
+          if [ -n "$files" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; printf 'Runner files changed:\n%s\n' "$files"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"; echo "No runner file changed: the runner image is not built."
+          fi
+
+      - name: Build the runner image
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          claude=$(sed -nE 's/^ARG CLAUDE_CODE_VERSION=([0-9][0-9A-Za-z._-]*)$/\1/p' Dockerfile.fwrunner)
+          test -n "$claude" || { echo "::error::Dockerfile.fwrunner pins no ARG CLAUDE_CODE_VERSION"; exit 1; }
+          tag="${claude}-${GITHUB_RUN_NUMBER}"
+          echo "FWRUNNER_TAG=${tag}" >> "$GITHUB_ENV"
+          docker build --file Dockerfile.fwrunner \
+            --label "org.opencontainers.image.version=${tag}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --tag "fwrunner:${tag}" .
+          echo "Runner image fwrunner:${tag}: $(docker image inspect "fwrunner:${tag}" --format '{{.Size}}' | numfmt --to=iec) uncompressed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Test the entrypoint inside the image
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/src:ro" \
+            -e FWRUNNER_SH=/usr/local/bin/fwrunner.sh --entrypoint bash "fwrunner:${FWRUNNER_TAG}" /src/tests/runner/fwrunner.test.sh
+          docker run --rm --entrypoint bash "fwrunner:${FWRUNNER_TAG}" -c \
+            'set -e; claude --version; claude --help | grep -q -- --effort; pwsh --version; dotnet --version; node --version; sqlite3 --version; git --version; test "$(id -u)" != 0; test -x /usr/bin/tini; ls /ms-playwright | grep -q chromium; test ! -w /etc/fworker/settings.json'
+
+      - name: Save the runner image
+        if: steps.changed.outputs.build == 'true' && github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          docker save "fwrunner:${FWRUNNER_TAG}" | gzip > fwrunner-image.tar.gz
+          printf '%s\n' "${FWRUNNER_TAG}" > fwrunner-image.version
+          echo "Runner image saved: $(du -h fwrunner-image.tar.gz | cut -f1) compressed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the runner image
+        if: steps.changed.outputs.build == 'true' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: fwrunner-image
+          path: |
+            fwrunner-image.tar.gz
+            fwrunner-image.version
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
   # The one check the default-branch ruleset requires: it reports the outcome of the image job and of the tests under a fixed name.
   result:
     name: Build result
-    needs: [image, tests]
+    needs: [image, tests, fwrunner]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -204,3 +279,9 @@ jobs:
         run: |
           echo "tests: ${TESTS_RESULT} (${EVENT})"
           test "${TESTS_RESULT}" = "success" || { test "${EVENT}" = "push" && test "${TESTS_RESULT}" = "skipped"; }
+      - name: The runner image job succeeded
+        env:
+          FWRUNNER_RESULT: ${{ needs.fwrunner.result }}
+        run: |
+          echo "fwrunner: ${FWRUNNER_RESULT}"
+          test "${FWRUNNER_RESULT}" = "success"

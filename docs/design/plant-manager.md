@@ -45,7 +45,7 @@ All types share the registry, the assignment protocol, tokens and journaling. On
 - The gateway keeps the registry in memory. Durable truth is the claim in each item's state comment (`claim.holder` = worker name), so a gateway restart is rebuilt as workers reconnect.
 
 ### Choosing a worker
-For each job the plant manager takes the workers that: hold the `owner` (or bot) role, have every capability the item needs, have free capacity, and are not draining. A `worker:<name>` label on the item pins it: the item is offered to that worker and to no other. If that worker is not connected, is draining, is at capacity or lets the accept window pass, the item waits (journal `waiting`, the assignment without a worker on the dashboard) and is offered to the same worker again when it can take it. A pinned item comes first: a sweep offers its pinned items before the unpinned ones, and a free slot of a worker that a pinned item waits for is held for that item, so an unpinned item is offered to a worker only when no pinned item waits for it (issue 46). Among candidates the order is: persistent-local, then cloud, then ephemeral-local; ties go to the worker with the fewest owned items.
+For each job the plant manager takes the workers that: hold the `owner` (or bot) role, have every capability the item needs, have free capacity, and are not draining. A `worker:<name>` label on the item pins it: the item is offered to that worker and to no other. If that worker is not connected, is draining, is at capacity or lets the accept window pass, the item waits (journal `waiting`, the assignment without a worker on the dashboard) and is offered to the same worker again when it can take it. A pinned item comes first: a sweep offers its pinned items before the unpinned ones, and a free slot of a worker that a pinned item waits for is held for that item, so an unpinned item is offered to a worker only when no pinned item waits for it (issue 46). Among candidates the order is: persistent-local, then cloud, then ephemeral-local; ties go to the worker with the fewest owned items. Since 2026-10-15 (issue 98) a pinned item that has waited for its worker (away, at capacity, spent) for `timing.pinFallbackMinutes` (default 30, 0 off) is offered to any eligible worker instead, journalled `pin-fallback`; the pin stays set aside (`plant.pinsSetAside` in the status) while the label names the same worker, and a new label pins it again.
 
 ### Directed assignment
 `item.assigned` is sent to **one** worker, not broadcast:
@@ -59,7 +59,7 @@ For each job the plant manager takes the workers that: hold the `owner` (or bot)
 
 ### Ownership lifetime
 - The claim is **per item** and spans columns: `complete` moves the column and keeps the claim; the lease is renewed by the session's heartbeat.
-- It ends when: the item is complete (merged, master green), is parked or held and the idle limit passes, the session releases it, or the lease expires.
+- It ends when: the item's pull request is merged (the gateway settles it from there and releases the owner at `item.merged`, so its session ends; issue 107), is parked or held and the idle limit passes, the session releases it, or the lease expires.
 - **Idle limit:** an owner waiting on a hold longer than 60 minutes releases ownership (journaled); the next trigger assigns it again and a new owner **resumes** from the item state.
 - **Lost session:** the lease expires, the item is offered again with `mode: resume`, and the relaunch budget applies.
 
@@ -176,11 +176,30 @@ Code: `gateway/Lease.cs`; settings `schedule.*` in `config/instance.json` (each 
    `schedule.staleConfirmMinutes` (3) and the item is taken back. Not while the item waits for something else: parked, or its last trigger was
    `item.parked`, `qc.requested`, `qc.reset`, `item.merged` or `inspector.escalated`. Watched are the owners the plant saw accept, and the owners a
    sweep listed with a lease; never an owner set by a test seam.
+4. **A busy owner is not quiet** (issue 101, 2026-10-15). An owner that waits on a long subagent (a private build, an app run, a functional test)
+   calls no verb for many minutes. Its stream client (`plugin/scripts/lib/Progress.ps1`) looks at its own machine and sends the latest work it saw
+   per owned item with the heartbeat (`POST /presence` body `progress: [{ item, ageSeconds, source }]`, at most 20; the age by the client's clock,
+   so a client whose clock is off still reports what is recent): `marker` (a file `<work>/progress/<N>.txt` a subagent wrote), `work` (any other
+   file written in the work directory), `commit` (a worktree's index or HEAD log changed), `files` (a file of the worktree changed; builds write
+   `obj/` and `bin/`), `process` (Linux: a build or test process in the worktree that used CPU since the last look). A time in the future is no work.
+   A place is the item's when its path or branch names the item number as a token; while the session owns one item, every worktree of its
+   checkouts and its whole work directory are. Only items the name owns count. Progress counts for rule 3 like a verb (the quiet spell starts at the
+   latest of the last call, the last summary change and the last progress), renews the lease like a summary that names the item (rule 2), and
+   progress newer than the start of the quiet spell answers an open `item.check`. **Cap**: progress counts only while the session itself (a verb or
+   poll of its own, or a changed summary) was active within `schedule.progressMaxMinutes` (180; 0 is no cap): a machine that stays busy (an orphaned
+   browser, a spinning test host) while the session is stuck does not hold the item for ever; past it the `item.check` carries
+   `progressCounts: false` and only the session itself answers it. When an `item.check` arrives within the cap (no heartbeat, messaging off) and
+   the client saw work on the item within `FACTORY_PROGRESS_RECENT_MINUTES` (10), it answers the check itself with `claim-item --renew`
+   (`renewed_by: "client"`: progress, not the session's own verb; the line carries `answeredBy: "client"`, then `item.check-answered`).
+   `/status` `lease` shows `progress`, `progressReports` and `checksAnsweredByProgress`. `FACTORY_PROGRESS=0` switches the client's watching off.
 
 Taking back: the plant lets go only after the rule script `expire-claim` (gateway only) succeeded (a failure keeps the owner and is tried again later). It ends the claim's lease and marks it `taken_back` (journal `lease-expired`), so
 `claim-item --renew` of the old owner is refused; the old owner gets `item.taken_back`; the plant forgets the owner (journal `reassigned`) and asks
-for a sweep, which offers the item again with mode `resume`. That offer goes to another session first when one is connected. A take-back counts as a
-relaunch against `timing.maxRelaunches`, like any lease that lapsed.
+for a sweep, which offers the item again with mode `resume`. That offer goes to another session first when one is connected. Since 2026-10-15
+(issue 91) a take-back is session trouble, not a failure of the item: the relaunch after it does not count against `timing.maxRelaunches` (only a
+lease that lapsed by itself does). It counts against `timing.maxSessionRelaunches` (default 10) of take-backs in a row instead (a lapse by itself or a finished stage starts the run again); past that the item is
+parked `session-relaunch-budget` (with `last_take_back`), a park the sweep lifts once a worker session is free. A Functional Testing round that spends
+`maxRelaunches` without a verdict is parked `validation-no-verdict`, not `watchdog-relaunch-budget`.
 
 ## 7. Bots (separate sessions)
 
@@ -205,6 +224,8 @@ Order: the lines of one item are written one after the other, in the order the d
 
 Rules: hidden machine marker on every comment (`<!-- plant event=assigned key=… -->`) and a journal ledger in the state comment, so redelivered webhooks and repeated sweeps never duplicate; best-effort with one retry and never blocks a dispatch; redacts token-like strings; at most ~1,500 characters; never includes item bodies or raw payloads; a per-item cap of 30 comments, then one final "journal full" note; no `@mention`. Worker names and model/effort are shown; machine names and user names are not.
 
+Folding (issue 93): `matched`, `waiting` and `reassigned` repeat while an item waits for a worker (23 items filled their 30 comments with them). A repeat of one of these kinds edits the comment its kind last posted instead of posting a new one, as long as only lines of these kinds or `offered` came after that comment: the comment shows the latest line, how many times and from when to when, and the latest 5 lines with their times; its marker stays the one of the first line (`fold=N` is added), so a reader of the markers (the metrics) sees one line of the kind at the time it first happened. Any other line (`assigned`, `released`, `lease-expired`, `unparked`, a QC line...) ends the folds, so the next `matched` after it is a new comment in its place. Only a new comment counts against the cap. The state keeps `journal.kinds.<event>` (count, first, last) for every kind and `journal.fold.<event>` (the comment, its count, the latest lines) for the open folds. A `waiting` line is written at most once per `timing.journalWaitingMinutes` (30) per item.
+
 ## 9. Model selection
 
 - A machine's `models.json` maps ladder rungs to models; the gateway decides when to climb (`model-tier`: relaunches, repeated review findings, demotions, fix-forward rounds, refused gate calls; never lowered within a column). Default: haiku 5.5 `xhigh` → sonnet 5.5 `medium` → opus 5.5 `medium`.
@@ -215,6 +236,39 @@ Rules: hidden machine marker on every comment (`<!-- plant event=assigned key=�
 ## 10. Merge queue, policy, and CI rules (already built)
 
 `mergeQueueDepth` limits merged items waiting for their release candidate (the Release workflow keeps one queued run). `mergePolicy` is `auto` or `peer-approved`. A merged docs-only change finishes after master has been green for a grace period even if no release run appears. CI is classified strictly: zero check runs is pending, and each configured gate must be present and successful.
+
+### 10e. One CI rule for flakes and pre-existing failures (issue 102, 2026-10-15)
+
+Code: `plugin/scripts/lib/Prs.ps1` (`Get-ChecksFor`, `Get-RedCauses`, `Get-RedHeadRuling`, `Register-MasterDefect`), used by `complete`
+(Verbs.Item.ps1), the sweep's wait for checks (`Complete-AwaitingChecks`, Verbs.Sweep.ps1) and `merge` (Verbs.Merge.ps1, also as the gateway's
+merge after a PASS).
+
+1. **Only the gates decide.** A head is red when a gate (`ciGates`, the checks the ruleset requires) failed, pending while a gate is absent or
+   running, green when every gate succeeded. A failed check that is not a gate is listed (`failed_checks`, and `nongate_failed` in the public
+   answer) and never makes the head red by itself. Without configured gates any failed check is red, as before. `-Ignore` (master's
+   `masterIgnoredChecks`) still leaves checks out of the verdict.
+2. **The causes.** The checks that made a head red: the failed or cancelled checks that are not gates, and failed gates that are not aggregating
+   ones (`ciAggregateGates`, default `Build result`, which fails because a job it needs failed; `secret-scan` is a cause of its own); when there are
+   none of those, the failed gates themselves.
+3. **A red head is judged once its workflow runs completed.** Then, once per head, the failed jobs are re-run (`rerun-failed-jobs` of each failed
+   or cancelled run) when the causes include checks other than the gates, match `masterFlakyChecks` (both acceptance shard families,
+   `Acceptance Tests [shard n/6]` and `Acceptance Tests (ARM SQLite) [shard n/6]`), or fail on master too. The runs and attempts are recorded in the
+   item state, `pr.rerun[<sha>]` (the last 5 heads), and the head is judged again on the newer, completed attempt of each run. A re-run started from
+   the sweep's wait restarts its timeout (`devChecksTimeoutMinutes`). `complete` on such a head answers 21 `accepted-checks-pending` and leaves the
+   rest to the sweep; `merge` waits (`checks-rerun`). When master's checks cannot be read, the head is judged later (no round for a GitHub blip).
+4. **A master defect costs nothing.** A head still red whose causes all fail on master as well (the newest finished run of each on the last 5
+   master commits failed) costs no fix-forward round and no demotion. It is reported once per set of checks: a comment on the item, the state
+   `master_defect`, and one `plant.event` `master-defect` on the operator stream. The item waits (`merge` with reason `master-defect`); the gateway
+   looks at master again every `timing.masterDefectCheckMinutes` (5). Once master passes those checks the ruling says so (fixed), once per defect:
+   the gateway merges master into the branch (GitHub's update branch; for a PASS this is the one head accepted without a new verdict, as for an
+   out-of-date branch), and the new head is judged as any head. If GitHub reports a conflict, Development is dispatched to merge master, without
+   counting a round; a PASS that waits for its merge waits for a person then. A defect that outlasts `timing.parkHours` in Development parks the item
+   (`master-defect`) for a person; a waiting PASS is parked after `timing.verdictTimeoutMinutes` as any unmerged PASS. A green head, the end of a park and `unpark` clear `master_defect`.
+5. **Anything else is red, as before**: a fix-forward round in Development (the comment says when it was still red after the re-run), or a
+   demotion at the merge.
+6. **A park that ends gives a fresh start.** When a park ends by expiry (the sweep removes it, journal `unparked` by `expiry`) or by `unpark`,
+   `fix_forward_rounds` and `demotions` are counted from 0 again (and with them the model tier's and the inspector's counts). Not for the gateway's
+   own wait for checks (`development:awaiting-checks`).
 
 ### 10b. The verdict and the merge: the gateway merges (owner decision 2026-10-13)
 
@@ -251,6 +305,10 @@ Without `Auto Merge`, or under `peer-approved`, nothing changes: the gateway doe
 - A session that let `timing.offerMissLimit` (2) offers in a row lapse is offered nothing new (unpinned) for `timing.offerCoolDownMinutes`
   (5), or until it calls a verb successfully. The `reassigned` journal line says so; `/status` shows `missedOffers` and `coolDownUntil` per
   worker and the dashboard a `cool-down` pill. 0 for the limit turns the rule off.
+- Issue 100: an item taken back from a session (lease rule 1 or 3, section 6b) is a miss too, and the accept the stream client makes by itself
+  (`accepted_by: client`) is no answer. `offerMissLimit` misses in a row with a take-back among them block the session: no offer at all, pinned
+  items included, until the session calls a verb of its own or a new session of the name registers. The plant event `session-blocked` and the
+  digest kind `session-blocked` report it; `/status` shows `blocked` and `blockedSince`.
 
 ### 10a. Docs-only fast path (owner decision 2026-10-12)
 
@@ -299,6 +357,51 @@ curl -X POST -H "Authorization: Bearer $FACTORY_OPERATOR_TOKEN" -H 'Content-Type
 An expired park (past its `until`) is removed the same way (`expired: true` in the answer); the two refused codes are refused even then. In a column outside `columns.ai` the park is removed with no handoff (`reoffer: false`). The item's column is not changed: to send it back to
 an earlier column, move the card as before.
 
+### 10e. The plant manager acts on the flow (owner decision 2026-10-14)
+
+The supervisor session (the plant manager) used to advise only: every stuck item waited for a person. It now holds flow verbs that move an item
+without deciding about the work itself, within guard rails the gateway enforces. Code: `gateway/Manager.cs`, the `manager-action` parts of
+`gateway/Program.cs` and `gateway/Auth.cs`, `plugin/scripts/lib/Verbs.Manager.ps1` (the rule verb), `plugin/scripts/lib/Client.Manager.ps1` (the
+client), the skill `plugin/skills/factory-supervisor`. Scenarios: `tests/scenarios/manager-actions.ps1` (`act: ...`, in the manager suite).
+
+One verb, `manager-action` (`POST /api/v1/verbs/manager-action`, client `factory.ps1 act <action> ...`), with the supervisor credential of the
+active supervisor (each call is a step of its hourly budget) or the operator token. Auth.cs keeps `item`, `action`, `policy`, `reason`, `worker`
+and `level` of the body and stamps `by` with the credential's name.
+
+| Action | What it changes | Refused when |
+|---|---|---|
+| `unpark --item N` | removes the park from the state; an item with no live claim in a working column gets a hand-off to its column, so the sweep this call requests offers it again; the plant forgets the earlier assignment and the park leaves the digest | not parked (`not-parked`); the parks that only a person or the gateway ends: `inspector-escalated` (`needs-approval`, clear-hold), `development:awaiting-checks` (`gateway-wait`), any park of an item with a PASS verdict on record (`needs-merge`) |
+| `release-owner --item N` | ends the owner's lease as a take-back does (`taken_back: released-by-plant-manager`, the old owner cannot renew); the plant lets the owner go at once (`item.taken_back` to it, journal `reassigned`) and the item is offered again in resume mode (a relaunch, counted against `maxRelaunches`) | no owner with a live lease (`no-owner`) |
+| `pin --item N --worker W`, `unpin --item N` | the label `worker:<name>` (one at most) | a closed item; `already-pinned`, `not-pinned` |
+| `requeue --item N` | a hand-off to its column; the plant drops the item's unanswered offers, so it is offered afresh | not in a working column, a live claim (`owned`), a live park (`parked`), a PASS waiting for the gateway's merge, a merge being settled |
+| `prioritize --item N --level top\|high\|normal` | the labels `priority:top` and `priority:high` (`priorityLabels`); the sweep reports them (`priorities`) and the plan offers pinned items first, then top, then high, then the rest, each in the sweep's order | a closed item; `already` |
+| `rerun-failed --item N` | GitHub's re-run of the failed jobs of every completed, failed workflow run of the head of the item's open pull request; recorded per head (`manager_reruns`) | no open pull request, nothing failed, a run still in progress (`run-in-progress`), the same head a second time (`already-rerun`: a second failure is not a flake) |
+| `drain --name W`, `resume --name W` | the name is offered no new work; the drain holds across reconnects, new sessions of the name and a graceful restart (plant snapshot `managerDrained`) until the supervisor or the operator resumes it. A session that is spent (its one item ended) stays drained after a resume; its next session registers undrained | the operator's drain of the name wins (`operator-drain`); a session's own drain is not lifted (`not-drained-by-manager`); a drain past the name limit (`name-action-limit`; a resume is never limited by it) |
+| `restart-session --name W` | `session.restart` on the session's stream; its client writes the launcher's end marker (as for `session.end`, `docs/launcher.md`); the next session of the name is resent what the name owns. A journal line on each item it owns | no connected session of the name (`not-connected`); the name owns an item labelled `hold:owner` (`owner-hold`, from the last sweep's `holds`; before the first sweep after a start `sweep-pending`, exit 20); the name limit (`name-action-limit`) |
+
+Guard rails, all enforced in code:
+
+| Rule | Enforced by |
+|---|---|
+| Never merge, approve, record a verdict or clear a hold | `Auth.ManagerVerbs` holds the three reads and `manager-action` only (merge, approve-pr, validation-verdict, clear-hold, complete, move-next, claim-item and accept are refused "the manager role cannot call ..."); `unpark` refuses the parks only those end |
+| The owner's hold wins | the rule verb: an item labelled `hold:owner` (`ownerHoldLabel`) refuses every action, exit 10 `owner-hold`, before anything is written; `restart-session` refuses a name that owns such an item (the sweep reports the held items, `holds`) |
+| At most 3 actions per item in 24 hours | the rule verb counts `manager_actions` in the item state (so a restart does not reset it): exit 10 `item-action-limit` with `retryAfterSeconds` (`manager.actions.perItemPerDay`) |
+| At most 30 actions an hour over every item | the gateway, in memory (a restart starts the hour again): HTTP 429 `action-limit` with `retryAfterSeconds` (`manager.actions.perHour`). An action the rule verb refused does not count, and a resume is never held by it |
+| At most 3 name actions per session name in 24 hours | the gateway, in memory: drain and restart-session on one name, exit 10 `name-action-limit` (`manager.actions.perItemPerDay`); a resume is not counted, so a drain can always be lifted |
+| A pin names a real session | the gateway: `pin` refuses a name that has not registered with this gateway since its start (exit 12 `no-such-worker`) |
+| A policy code on every action, journaled | the gateway and the rule verb refuse a code outside `manager.actions.policies` (`unknown-policy`); each item action writes one journal line `manager-action` that names who, what, the code and the reason (one line, at most 300 characters, checked against the credential patterns); every action goes to the operator stream as `plant.event` code `manager-<action>`, and into the log of `GET /api/v1/manager/actions` (24 hours) |
+| Advise mode turns the verbs off | `manager.mode` (`act` by default, `advise`; any other value is advise): every action answers exit 10 `advise-mode`. The owner sets it in the configuration; the operator token can switch it at run time (`POST /api/v1/manager/mode?value=act\|advise`; the plant snapshot brings back an `advise` after a graceful restart, never an `act`, and until the snapshot is read the mode is `advise`); neither the supervisor nor the operator session can |
+
+The daily summary: once per UTC day, at or after `manager.dailySummaryHourUtc` (7; absent: none), the supervisor's stream gets
+`supervisor.summary-due` (no message, no delivery of the budget; the plant snapshot keeps the day, so a release does not send it twice). The skill
+then reads `factory.ps1 metrics --since 24h` (the active supervisor may read `GET /api/v1/metrics` with `since=24h` or `7d` and never `fresh`, one
+step) and `factory.ps1 act-log`, and sends the operator one note instead of a line per event. `/status` carries
+`managerActions` (mode, limits, the hour's count, the drains, the held items of the last sweep `ownerHeld`, the summary's day).
+
+The answer of an item action carries `journaled`: false when its journal line could not be posted (GitHub refused it, or the item's journal is
+full: `manager-action` shares the four extra slots past the cap with `qc-ready`, `qc-failed` and `question-escalated`); the gateway's log then has
+a line `"journaled":false` with the item and the action. The reason of an action loses `<`, `>` and `@` and is one line.
+
 ## 11. Cloud workers (designed, NOT implemented)
 
 ### Shape
@@ -341,6 +444,34 @@ Open question closed: nobody provisions a cloud environment automatically. A per
 
 The worker dashboard (`GET /dashboard`, data from `GET /api/v1/dashboard`, operator token) shows the connected sessions of one running factory (the gateway's `FACTORY_ENVIRONMENT`: tdd, uat or prod), their state, load and assignments, drain/resume, and generates the connect prompt. Creating the prompt issues a one-time worker credential for the chosen name (`POST /api/v1/workers/{name}/credential`); the gateway does not store it. `revoke` on a session row refuses every credential issued so far for that name (section 5).
 
+## 15. Board guard (2026-10-15, issue 88)
+
+An open issue with the factory label (`label` in `config/instance.json`) that has no card on the project board, or a card with no column, is
+invisible to the sweep: on 2026-10-14 nine new items sat unseen until a person added them. Every sweep (`sync-board`, `Invoke-BoardGuard` in
+`Verbs.Sweep.ps1`) lists the open labelled issues through the REST API (paged; pull requests and issues with the rival label skipped). For each one
+the board snapshot shows without a column it reads the issue again, since a person may have placed it meanwhile: a card in a column is left
+alone, a card without a column gets the intake column (the first column of `columns.ai`, Technical Design), and an issue without a card is added
+there. Each placement is journalled once (`board-added`); from there the item is offered like any new item, after `timing.sweepSeenCount`
+sightings. At most 20 attempts per sweep (the rest follow at the next sweeps); a rate limit, or three failures in a row, end the pass. A failed listing is reported in the
+sweep's `errors` (item 0), a failed placement in its `actions` (`board-add-failed`); both are tried again at the next sweep.
+
+## 16. Auto-unpark (2026-10-15, issue 90)
+
+A park whose cause has cleared is lifted by the sweep (`Test-AutoUnpark` and `Invoke-AutoUnpark` in `Verbs.Sweep.ps1`), under the item lock on a
+fresh read (only the same park), with a journal line `unparked` "by the sweep" and the reason; the gateway forgets the park (`unparked` of
+`sync-board`). An open item without a live claim is handed to its column, so it is offered at that sweep; an owner that still holds the claim gets
+the trigger `item.unparked`.
+
+| Park | Lifted when |
+|---|---|
+| `master-broken` | master's head is green and every check that failed at the park (`park.failed`, recorded since this change) passed on it; a skipped job (a docs-only head) does not count. The item waits for master green again; when its own merge commit is still not green (issue 70), master's green head is judged instead (`merge.judge_sha`). |
+| `verdict-failed`, `fix-forward-exhausted` | the item's open pull request is green on a head newer than the one the park judged (`park.pr`, `park.head`, recorded since this change). |
+| `session-relaunch-budget`, and `watchdog-relaunch-budget` with `last_take_back` | a worker session could take the item now (`free_workers`, which the gateway passes to `sync-board`: connected owner sessions, not draining or cooling, with a free slot, not spent, with room on their host); one lift per free session in a sweep. |
+
+A park written before its facts were recorded (`park.failed`, `park.head`) is left to a person. No item is lifted more than
+`timing.autoUnparkMax` times (default 3) per park code (`state.auto_unparks`): an item that breaks every session or every build is not retried for
+ever. Every other park (worker-failure, demotion-limit, same-criterion-repeated, inspector-escalated, stuck, the release-candidate timeouts) stays
+a decision for a person (`POST /api/v1/items/{n}/unpark`).
 ## 17. Work already started first; why every unowned item waits (2026-10-15, issues 97 and 99)
 
 `Plan` offers, after pinned items, the offers of columns past the intake column (`columns.ai[0]`, Technical Design) before new work: an item
