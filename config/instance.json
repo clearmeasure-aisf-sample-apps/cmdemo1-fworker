@@ -34,6 +34,7 @@
   "autoMergeLabel": "Auto Merge",
   "videoLabel": "video",
   "demoLabel": "Demo",
+  "holdLabels": ["hold:owner"],
   "docsOnlyMarker": "<!-- aisf:docs-only -->",
   "docsOnlyPaths": [
     "^docs/.*\\.(md|txt|png|svg|puml)$",
@@ -42,7 +43,7 @@
     "^\\.github/ISSUE_TEMPLATE/"
   ],
   "releaseCheckName": "release",
-  "masterFlakyChecks": ["^Acceptance Tests \\[shard \\d+/\\d+\\]$"],
+  "masterFlakyChecks": ["^Acceptance Tests( \\(ARM SQLite\\))? \\[shard \\d+/\\d+\\]$"],
   "masterIgnoredChecks": ["release", "packages", "architecture"],
   "masterCodeChecks": ["Integration Build (SQL container)"],
   "octopus": {
@@ -58,6 +59,14 @@
   "plant": {
     "oneItemPerSession": true
   },
+  "runner": {
+    "pool": 0,
+    "poolMaxCalls": 200,
+    "maxProcesses": 6
+  },
+  "github": {
+    "budgetReserve": 300
+  },
   "schedule": {
     "hostOwnedDefault": 0,
     "hostBuildsDefault": 1,
@@ -69,13 +78,16 @@
     "leaseRenewMinutes": 5,
     "staleItemMinutes": 15,
     "staleConfirmMinutes": 3,
-    "clientStartMinutes": 5
+    "clientStartMinutes": 5,
+    "progressMaxMinutes": 180
   },
   "timing": {
     "assignAckSeconds": 120,
     "plantSnapshotMaxAgeMinutes": 30,
     "leaseMinutes": 30,
+    "redChecksGate": 2,
     "maxRelaunches": 3,
+    "maxSessionRelaunches": 10,
     "maxReviewRounds": 3,
     "docsOnlyMaxReviewRounds": 2,
     "docsOnlyLegacyBefore": "2026-10-16T00:00:00Z",
@@ -99,7 +111,10 @@
     "offerMissLimit": 2,
     "offerCoolDownMinutes": 5,
     "parkHours": 24,
+    "pinFallbackMinutes": 30,
+    "autoUnparkMax": 3,
     "awaitingChecksParkMinutes": 60,
+    "masterDefectCheckMinutes": 5,
     "docsOnlyReleaseGraceSeconds": 120,
     "qcLinkDays": 7,
     "qcLeaseMinutes": 5,
@@ -134,7 +149,10 @@
     "mgrVerbErrorMinutes": 10,
     "mgrRestartMinutes": 30,
     "mgrReleaseQueueMinutes": 60,
-    "baseUpdateDebounceSeconds": 20
+    "questionDedupeMinutes": 60,
+    "baseUpdateDebounceSeconds": 20,
+    "sweepMinSeconds": 60,
+    "journalWaitingMinutes": 30
   },
   "baseUpdate": {
     "mode": "conflict-or-merge",
@@ -185,7 +203,14 @@
     "turnBudgetPerDay": 96,
     "patrolReservePerHour": 2,
     "stepBudgetPerHour": 60,
-    "digest": { "refusalCount": 3, "verbErrorCount": 3, "releaseQueueCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 }
+    "digest": { "refusalCount": 3, "verbErrorCount": 3, "releaseQueueCount": 3, "waitCodes": ["qc-not-run", "qc-approval-missing", "held"], "maxBytes": 4096 },
+    "mode": "act",
+    "dailySummaryHourUtc": 7,
+    "actions": {
+      "perItemPerDay": 3,
+      "perHour": 30,
+      "policies": ["park-resolved", "stalled-owner", "pinned-worker-absent", "stuck-offer", "outside-blocker", "flaky-check", "repeated-question", "backlog-order", "load-balance", "operator-request"]
+    }
   },
   "operator": {
     "enabled": false,
@@ -193,7 +218,44 @@
     "tokenGeneration": 1,
     "requiredModelTier": "premium",
     "requiredEffort": "low",
-    "maxSelfMergesPerDay": 3
+    "maxSelfMergesPerDay": 12
+  },
+  "keeper": {
+    "enabled": false,
+    "allowedNames": ["backlog-keeper"],
+    "tokenGeneration": 1,
+    "requiredModelTier": "premium",
+    "requiredEffort": "medium",
+    "maxNewItemsPerDay": 10,
+    "minTechnicalDesign": 3,
+    "newItemColumn": "Technical Design",
+    "jobCodes": ["same-criterion-repeated", "worker-failure", "fix-forward-exhausted", "demotion-limit", "watchdog-relaunch-budget", "verdict-failed", "stuck", "master-broken"],
+    "policies": ["criterion-dispute", "ambiguous-wording", "oversized-item", "compatibility-conflict", "flaky-test", "backlog-low", "dependency-order", "operator-request"]
+  },
+  "runtimes": {
+    "preferConnected": true,
+    "routing": [],
+    "caeJob": {
+      "enabled": false,
+      "maxConcurrent": 0,
+      "maxExecutionsPerDay": 0,
+      "ackSeconds": 300,
+      "replicaTimeoutSeconds": 14400,
+      "maxFailuresPerPhase": 2,
+      "unhealthyAfterFailures": 2,
+      "listSeconds": 30,
+      "jobResourceId": "",
+      "armEndpoint": "https://management.azure.com",
+      "apiVersion": "2024-03-01",
+      "managedIdentityClientId": "",
+      "image": "",
+      "containerName": "fwrunner",
+      "cpu": 4,
+      "memory": "8Gi",
+      "gatewayUrl": "",
+      "agent": "claude",
+      "jobs": { "claude": "", "codex": "" }
+    }
   },
   "secrets": {
     "patterns": [
@@ -296,6 +358,8 @@
     "minTierByColumn": {}
   },
   "testLabel": "factory test",
+  "ownerHoldLabel": "hold:owner",
+  "priorityLabels": { "top": "priority:top", "high": "priority:high" },
   "mergeQueueDepth": 0,
   "gatewayMerge": true,
   "ownerSessions": false,
