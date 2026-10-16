@@ -409,6 +409,8 @@ function Verb_sync_board($a) {
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
             $prio = Get-ItemPriority $it.labels; if ($prio) { $priorities["$n"] = $prio }
             if (Test-NameIn $holdLabel $it.labels) { $holds += $n }
+            $merged = (Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha
+            $settled = $merged -and (Test-Has $s.merge 'done_at') -and $s.merge.done_at
             # cloud-worker-runtimes.md 4.4: a runtime:<kind> label forces the item's runtime; the test label selects the cheapest model profile
             $rtl = @($it.labels | Where-Object { $_ -match '^runtime:[a-z0-9-]{1,20}$' } | Select-Object -First 1)
             if ($rtl.Count -gt 0) { $rtLabels["$n"] = ([string]$rtl[0]).Substring(8) }
