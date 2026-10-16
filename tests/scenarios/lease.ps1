@@ -56,7 +56,8 @@ $LeaseScenarios['lease: the client accepts an owner offer itself (acceptedBy cli
 $LeaseScenarios['lease: a verb and a heartbeat that names the item renew its lease; a quiet owner gets item.check, and an item whose check nobody answers is taken back'] = {
     $n1 = New-Item-Fake 'Lease by verb, check answered' 'x' @('factory worker', 'worker:ghost-lease')
     $n2 = New-Item-Fake 'Lease by heartbeat, check unanswered' 'x' @('factory worker', 'worker:ghost-lease')
-    Msg-OnGateway (Ls-Env 'instance.lease-b.json' @{ FACTORY_TIMING_leaseRenewMinutes = '0'; FACTORY_TIMING_staleItemMinutes = '0.25'; FACTORY_TIMING_staleConfirmMinutes = '0.4' }) {
+    # (two offers accepted one after the other: the suite's 8 s to confirm an offer is too short for the second accept on a loaded runner)
+    Msg-OnGateway (Ls-Env 'instance.lease-b.json' @{ FACTORY_TIMING_leaseRenewMinutes = '0'; FACTORY_TIMING_staleItemMinutes = '0.25'; FACTORY_TIMING_staleConfirmMinutes = '0.4'; FACTORY_ASSIGN_ACK_SECONDS = '60' }) {
         param($g)
         Ls-Swept
         $carol = Msg-Open 'name=carol&capacity=5&messaging=1' (Msg-Token 'carol'); Msg-Registered $carol
@@ -73,7 +74,8 @@ $LeaseScenarios['lease: a verb and a heartbeat that names the item renew its lea
             Check 'the other item was not renewed by it' ((Ls-Lease $n2) -eq $l2)
             $p = Msg-Post '/api/v1/presence' @{ summary = "working on #$n2 (design)" } (Msg-Token 'carol')
             Check 'a heartbeat whose summary names the item renews its lease' ($p.status -eq 200 -and (Wait-Until -Seconds 30 { (Ls-Lease $n2) -gt $l2 })) "$l2 -> $(Ls-Lease $n2)"
-            Check 'the renewals are counted' ((Ls-Status).lease.renewals -ge 2) ((Ls-Status).lease | ConvertTo-Json -Compress -Depth 5)
+            # (Lease.Renew counts a renewal after its claim-item call has saved the new lease: the state can show it a moment before the counter)
+            Check 'the renewals are counted' (Wait-Until -Seconds 10 { (Ls-Status).lease.renewals -ge 2 }) ((Ls-Status).lease | ConvertTo-Json -Compress -Depth 5)
             # quiet from here: heartbeats go on with the same summary, no verb. Both items get one item.check.
             $checks = { $x = Msg-Of $carol 'item.check'; $x }
             $end = (Get-Date).AddSeconds(45)
@@ -226,7 +228,11 @@ $LeaseScenarios['lease: items taken back from a session count as misses and the 
             Check 'the client registers' (Msg-WaitEvent $c 'worker.registered' 30)
             [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design' }); pins = @{}; owned = @{}; keep = @() })
             # the client accepts by itself, the session never starts: taken back; the sweep that follows offers the item to alice again (no other session)
-            Check 'the item is accepted by the client and taken back twice' (Wait-Until -Seconds 120 { (Ls-Journal $n 'lease-expired').Count -ge 2 }) "lease-expired $((Ls-Journal $n 'lease-expired').Count)"
+            # the second offer comes from the plan here, not from a sweep: a sweep's timing decided whether the item came back within the wait (issue 154)
+            Check 'the item is accepted by the client and taken back' (Wait-Until -Seconds 60 { (Ls-Journal $n 'lease-expired').Count -ge 1 }) "lease-expired $((Ls-Journal $n 'lease-expired').Count)"
+            [void](Wait-Until -Seconds 20 { -not (Msg-First @((Ls-Status).plant.assignments | Where-Object { $_.item -eq $n -and $_.kind -eq 'own-item' -and "$($_.worker)" -eq 'alice' })) })
+            if ((Ls-Journal $n 'lease-expired').Count -lt 2) { [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n; kind = 'own-item'; column = 'Technical Design' }); pins = @{}; owned = @{}; keep = @() }) }
+            Check 'and accepted and taken back a second time' (Wait-Until -Seconds 60 { (Ls-Journal $n 'lease-expired').Count -ge 2 }) "lease-expired $((Ls-Journal $n 'lease-expired').Count)"
             Check 'the client accepted it each time (acceptedBy client)' (@(Msg-ClientEvents $c | Where-Object { $_.event -eq 'item.accepted' -and $_['item'] -eq $n -and $_.acceptedBy -eq 'client' }).Count -ge 2)
             Check 'two take-backs in a row block the session: the client''s accept between them did not count as answering' (Wait-Until -Seconds 20 { $w = & $alice; $w -and $w.blocked -eq $true -and "$($w.blockedSince)" -ne '' }) ((& $alice) | ConvertTo-Json -Compress)
             Check 'the journal says why' (Wait-Until -Seconds 20 { @((Ls-Journal $n 'reassigned') | Where-Object { $_.body -like '*is offered nothing until it calls a verb of its own*' }).Count -eq 1 })

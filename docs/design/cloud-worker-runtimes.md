@@ -1,4 +1,4 @@
-# Cloud worker runtimes: Container Apps jobs with Claude in Microsoft Foundry
+# Cloud worker runtimes: Container Apps jobs with Codex on Azure OpenAI
 
 Status: design only, 2026-10-15. Nothing here is built or deployed. Asked for by the owner: "a container app that runs as a sidecar app with
 fworker so that worker agents can be provisioned and run in the cae", and "another runtime so that it can run the agent in its container in
@@ -15,6 +15,11 @@ Revised again 2026-10-15 after the owner's Azure session:
 - **The active agent is Codex CLI on Azure OpenAI**: deployment `gpt-6.1-sol` (600k TPM) in the Foundry resource `aif-cmdemo1-tdd`, keyless
   (key auth is disabled on the resource), Entra tokens of the runner's managed identity, in a second job `caj-cmdemo1-tdd-fwrunner-codex`
   (section 3.4). The same fwrunner image runs both agents; `FWRUNNER_AGENT` chooses.
+Revised 2026-10-16: **Claude in Foundry is out of scope by owner decision 2026-10-16** (out of scope, not merely blocked). cmdemo1-system
+#195 removed the `claude-sonnet-5-5` deployment. The `caj-cmdemo1-<env>-fwrunner` (Claude) jobs remain but have no model, and
+`FACTORY_RUNTIME_AGENT=codex` everywhere. Codex on `gpt-6.1-sol` is the hosted agent. The Claude agent path stays in the image, usable only
+with another model source if Claude is ever re-scoped. Section 3.1 to 3.2 is kept as a record only.
+
 - **Consumption, not D4, for now**: the jobs run on the Consumption profile at 4 vCPU / 8 GiB, with no termination-grace setting (2.5).
 
 Diagrams (PlantUML sources and rendered SVG in `docs/design/diagrams/`):
@@ -34,8 +39,8 @@ Diagrams (PlantUML sources and rendered SVG in `docs/design/diagrams/`):
    The execution runs one Claude Code session in auto mode with a settings file shipped in the image, and exits when the gateway sends
    `session.end`. This replaces the launcher loop: the fresh container is the fresh context. Not a literal sidecar (section 2.13).
 2. **Model: Codex CLI on Azure OpenAI `gpt-6.1-sol` is the active agent** (section 3.4): Entra token of the runner's managed identity, no
-   key. Claude Sonnet 5.5 in Microsoft Foundry (section 3.1 to 3.2) is the planned agent, blocked by the Azure Marketplace; it returns by
-   switching `runtimes.caeJob.agent` back to `claude` once the Marketplace accepts the subscription.
+   key. Claude in Microsoft Foundry (section 3.1 to 3.2) is out of scope by owner decision 2026-10-16; the Claude path in the image is
+   usable only with another model source if ever re-scoped.
 3. **A runtime adapter in the gateway**: `runtime` on the worker registration (`local`, `cae-job`), an `IWorkerRuntime`
    interface with provision and deprovision, capacity per runtime, and routing rules by label (section 4).
 
@@ -274,9 +279,15 @@ fworker app is **not recommended**:
 the Key Vault and Application Insights, and reachable only through the gateway. The one literal sidecar that may later earn its place is an
 OTel collector next to the gateway.
 
-## 3. Model: Claude in Microsoft Foundry
+## 3. Model: Codex on Azure OpenAI (Claude in Foundry out of scope)
 
-### 3.1 Facts (re-checked 2026-10-15)
+**Out of scope by owner decision 2026-10-16.** Claude in Microsoft Foundry (the Azure Marketplace Anthropic deployment) is not pursued;
+cmdemo1-system #195 removed the `claude-sonnet-5-5` deployment. Sections 3.1 and 3.2 are kept as a record of the former plan, not as a
+plan. The hosted agent is Codex CLI on `gpt-6.1-sol` (3.4). The Claude agent path in the fwrunner image stays and is usable only with
+another model source if Claude is ever re-scoped; the Claude jobs `caj-cmdemo1-<env>-fwrunner` remain without a model, and
+`FACTORY_RUNTIME_AGENT=codex` everywhere.
+
+### 3.1 Facts (re-checked 2026-10-15; record only)
 
 | Fact | Source |
 |---|---|
@@ -288,7 +299,7 @@ OTel collector next to the gateway.
 | Hosted on Azure lacks code execution, Agent Skills (API tool), Files API and the newer web search/fetch tool versions; Claude Code detects this and adapts | Claude-in-Foundry page, "Additional features not supported when hosted on Azure" |
 | Foundry returns no `anthropic-ratelimit-*` headers; a 429 means the deployment's rate limit, raised through the Azure portal or support | Claude-in-Foundry page, "Rate limiting" |
 
-### 3.2 Model deployment
+### 3.2 Model deployment (former plan; deployment removed by cmdemo1-system #195)
 
 - **Resource and deployment**: a Foundry resource `aif-cmdemo1-<env>` in `rg-cmdemo1-nonprod` (tdd and uat), its own in prod; one deployment
   `claude-sonnet-5-5` (model Claude Sonnet 5.5, Global Standard, Hosted on Azure, a fixed model version, not "auto-update"). Created by the
@@ -328,7 +339,7 @@ OTel collector next to the gateway.
 | Jobs: manual, schedule or event (KEDA) triggers; `replicaTimeout`, `replicaRetryLimit`; platform maintenance can interrupt long jobs; last 100 executions kept; no ingress. The maximum `replicaTimeout` is not documented | learn.microsoft.com/en-us/azure/container-apps/jobs (ms.date 2026-09-16) |
 | Dynamic sessions with custom containers: Hyper-V sandbox, pre-warmed pool, egress off by default; considered and not chosen because a session is driven by HTTP calls into the container, not a batch run | learn.microsoft.com/en-us/azure/container-apps/sessions-custom-container (updated 2026-05-10) |
 
-### 3.4 Active agent: Codex CLI on Azure OpenAI (decided 2026-10-15)
+### 3.4 Hosted agent: Codex CLI on Azure OpenAI (decided 2026-10-15)
 
 | Fact | Source |
 |---|---|
@@ -357,7 +368,7 @@ be chosen once the Codex Linux sandbox is shown to work in a Consumption replica
 The adapter chooses the job by `runtimes.caeJob.agent` and `runtimes.caeJob.jobs.<agent>` and passes `FWRUNNER_AGENT`; the gateway
 identity holds the job-operator role on both jobs. Only the active agent's job is listed and stopped, so a switch of agent is a redeploy
 after the other job's executions have ended. Where sections 1, 2.6, 2.7, 5 and 6 speak of Claude Code, Foundry User and the
-`claude-sonnet-5-5` deployment or the D4 profile, they describe the Claude path, which is planned but blocked; for the active path read
+`claude-sonnet-5-5` deployment or the D4 profile, they describe the Claude path, which is out of scope (owner decision 2026-10-16); for the active path read
 Codex, Cognitive Services OpenAI User on `aif-cmdemo1-tdd`, the `gpt-6.1-sol` deployment and the Consumption profile.
 
 ## 4. The runtime adapter in the gateway
@@ -460,10 +471,10 @@ longer acknowledgement window for adapter workers to cover the container start (
 |---|---|---|
 | 0 | tdd gateway | the read-only check of 2026-10-15 shows 1 vCPU / 2 GiB already (the OOMs were at 1 GiB); verify no OOM for a week with the local workers |
 | 1 | this repository | adapter interface, `runtime` claim, routing with only `local` configured; Tier 1 suites with a fake ARM |
-| 2 | kit and system repo | runner identity, job, D4 profile, log destination, Foundry resource with the `claude-sonnet-5-5` deployment, its quota and the Foundry User assignment (3.2), in tdd only |
+| 2 | kit and system repo | runner identity, job, D4 profile, log destination, Foundry resource with the `gpt-6.1-sol` deployment, its quota and the Cognitive Services OpenAI User assignment (3.4), in tdd only |
 | 3 | tdd | precondition: master ruleset of cmdemo1-workorders verified (2.6), gateway `minReplicas` 1. Then `runtimes.caeJob.enabled` with `maxConcurrent` 1, items labelled `runtime:cae-job` only; 10 docs-only items, then 5 code items |
 | 4 | tdd | routing rule on by default (open question 6 decides `preferConnected`), `maxConcurrent` 3; a week of measurements (time, cost, failures) against the local workers |
-| 5 | uat | manual Octopus promotion of gateway and runner; the uat environment gets its own job and identities, and a Foundry User assignment |
+| 5 | uat | manual Octopus promotion of gateway and runner; the uat environment gets its own job and identities, and a Cognitive Services OpenAI User assignment |
 | 6 | prod | only after `activate-prod.sh`; prod is inert today |
 
 ## 7. Code-owner paths touched
@@ -479,7 +490,7 @@ runner uses its own prompt template rather than changing it.
 
 1. ARM right for the gateway (option A) or a queue between gateway and job (option B)?
 2. ~~Dedicated D4 workload profile, or Consumption?~~ **Decided 2026-10-15**: Consumption at 4 vCPU / 8 GiB for now (2.5).
-3. ~~Model credential for the runner~~ **Decided 2026-10-15**: Claude Sonnet 5.5 in Microsoft Foundry (Global Standard), Entra auth by the runner's managed identity, no key, billed on the Azure bill (section 3). **Blocked the same day** by the Azure Marketplace; **Codex CLI on Azure OpenAI `gpt-6.1-sol`** with Entra is the active agent (3.4).
+3. ~~Model credential for the runner~~ **Decided 2026-10-15**: Claude Sonnet 5.5 in Microsoft Foundry (Global Standard), Entra auth by the runner's managed identity, no key, billed on the Azure bill (section 3). **Blocked the same day** by the Azure Marketplace, then **out of scope by owner decision 2026-10-16** (cmdemo1-system #195 removed the deployment). **Codex CLI on Azure OpenAI `gpt-6.1-sol`** with Entra is the hosted agent (3.4); the Claude path in the image needs another model source if ever re-scoped.
 4. Restricted egress (VNet, NAT, firewall) now, or open egress for tdd?
 5. Pushes through a per-item installation token of the author App (new `git-credential` verb), or a separate "runner" GitHub App?
 6. Should cloud executions be preferred over connected local workers once proven, or stay opt-in by label?
