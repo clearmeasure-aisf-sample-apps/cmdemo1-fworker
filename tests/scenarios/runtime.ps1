@@ -29,7 +29,7 @@ function Rt-Own([string]$Name, [int]$Item) {
     for ($try = 0; $try -lt 5; $try++) {
         $r = Fo $Name @('accept', '--item', $Item, '--assignment', (Get-Assigned $Name $Item)[-1].assignment)
         if ($r.exit -ne 11) { return $r }
-        $seen = @(Get-Assigned $Name $Item).Count; [void](Wait-Until -Seconds 30 { @(Get-Assigned $Name $Item).Count -gt $seen })
+        $seen = (Get-Assigned $Name $Item).Count; [void](Wait-Until -Seconds 30 { (Get-Assigned $Name $Item).Count -gt $seen })
     }
     return $r
 }

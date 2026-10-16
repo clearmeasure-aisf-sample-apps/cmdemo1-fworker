@@ -2261,6 +2261,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         if (low) args["low"] = true;   // the budget is below its reserve: no claim-ref reaping, no QC sync (GitHubBudget.cs)
         // free_workers: the auto-unpark of a park caused by session trouble needs a session that could take the item (Verbs.Sweep.ps1)
         if (ownerMode) args["free_workers"] = plant.FreeOwnerSessions();
+        // work intake (issue 104): a full sweep may pull a Todo item onto the board when an owner session has a free slot
+        if (ownerMode && items == null) args["intake"] = new JsonObject { ["freeSlots"] = plant.IntakeSlots() };
         var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
         // the first full sweep after a gap (no gateway was up): the owners' claims that ran out in it are renewed, not offered again (issue 94)
         var gapTaken = items == null ? Gap?.Take() : null;
@@ -2305,6 +2307,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 foreach (var a in acts)
                     if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
                         plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
+                foreach (var a in acts)   // issue 104: an item the sweep pulled from Todo, for the operator stream
+                    if (a is JsonObject io && io["action"]?.ToString() == "intake-pulled" && io["item"] is JsonValue iv && iv.TryGetValue<int>(out var pulled)) plant.OperatorPlantEvent("pulled", pulled, column: io["column"]?.ToString() ?? "");
                 // issue 102: a red that only repeats a defect of the base branch is reported once to the operator (it costs the item nothing)
                 foreach (var a in acts)
                     if (a is JsonObject mo && mo["item"] is JsonValue mi && mi.TryGetValue<int>(out var mItem)

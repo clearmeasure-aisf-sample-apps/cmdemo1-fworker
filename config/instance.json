@@ -59,6 +59,12 @@
   "plant": {
     "oneItemPerSession": true
   },
+  "intake": {
+    "enabled": false,
+    "fromColumn": "Todo",
+    "wipLimit": 6,
+    "holdLabels": ["Needs Human Review"]
+  },
   "runner": {
     "pool": 0,
     "poolMaxCalls": 200,

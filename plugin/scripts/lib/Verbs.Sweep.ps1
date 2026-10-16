@@ -685,6 +685,12 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "claim-ref-reap: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "claim-ref-reap: $($_.Exception.Message)" } }
     }
+    # work intake (issue 104): with a worker slot free and nothing waiting in Technical Design, the next item comes onto the board from Todo (a full sweep only: it needs the whole board)
+    if (-not $dry -and $null -eq $only) {
+        try { $in = Invoke-Intake $a $list $offers $unconfirmed $pins $seen $seenFile; if ($in) { $actions += $in.action; $offers += $in.offer } }
+        catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "intake: $($_.Exception.Message)" } }
+        catch { $errors += @{ item = 0; code = 'error'; reason = "intake: $($_.Exception.Message)" } }
+    }
     # the board guard: open labelled issues without a card are put on the board in the intake column (they are offered from the next sweeps); it
     # needs the whole board, so a full sweep only, and not on a low budget (it lists every labelled issue)
     if ($null -ne $only) { }
@@ -703,6 +709,57 @@ function Verb_sync_board($a) {
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
     return @{ ok = $true; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
+}
+
+# ---- work intake (issue 104) -----------------------------------------------------------------------------------------
+# When a worker slot is free (the gateway passes intake.freeSlots: owner sessions that could take a new work item now) and nothing waits in Technical
+# Design (no unpinned own-item offer there, no item there seen and not yet offered), the highest-priority open issue labelled for the factory in
+# intake.fromColumn (Todo) is moved to Technical Design and offered at once. Priority is the order of the board column (its top first; a person
+# orders it by dragging). Left in Todo: a closed issue, one without the label or with the rival label, the demo label, a hold label (hold:* or
+# intake.holdLabels), a worker:* pin (a person placed it for one worker), and one whose Depends-on items are not merged or closed. At most one
+# item per sweep, and none while the AI columns hold intake.wipLimit items or more. Switch: intake.enabled (FACTORY_INTAKE 0 or 1 overrides it;
+# FACTORY_INTAKE_WIP overrides the limit). Returns $null or @{ action; offer }.
+function Get-IntakeSettings {
+    $c = Get-Cfg; $i = if (Test-Has $c 'intake') { $c.intake } else { @{} }
+    $on = (Test-Has $i 'enabled') -and [bool]$i.enabled
+    if ($env:FACTORY_INTAKE -in '0', '1') { $on = $env:FACTORY_INTAKE -eq '1' }
+    $wip = if ($env:FACTORY_INTAKE_WIP -match '^\d+$') { [int]$env:FACTORY_INTAKE_WIP } elseif (Test-Has $i 'wipLimit') { [int]$i.wipLimit } else { 6 }
+    return @{ enabled = $on; from = $(if (Test-Has $i 'fromColumn') { "$($i.fromColumn)" } else { 'Todo' }); wip = $wip
+        hold = @(if (Test-Has $i 'holdLabels') { @($i.holdLabels) }) }
+}
+
+function Invoke-Intake($a, $List, $Offers, $Unconfirmed, $Pins, $Seen, [string]$SeenFile) {
+    $set = Get-IntakeSettings
+    if (-not $set.enabled -or -not (Test-Has $a 'intake') -or -not (Test-Has $a.intake 'freeSlots') -or [int]$a.intake.freeSlots -le 0) { return $null }
+    $c = Get-Cfg; $td = "$(@($c.columns.ai)[0])"
+    $byNumber = @{}; foreach ($x in $List) { $byNumber[[int]$x.number] = $x }
+    # something already waits in Technical Design for a session: no intake (an item pinned to one worker waits for that worker, not for a slot)
+    $waiting = @(@($Offers | Where-Object { "$($_.column)" -ieq $td -and (-not $_.ContainsKey('kind') -or "$($_.kind)" -eq 'own-item') -and -not $Pins.ContainsKey("$($_.item)") }) +
+        @($Unconfirmed | Where-Object { $byNumber.ContainsKey([int]$_) -and "$($byNumber[[int]$_].column)" -ieq $td -and -not $Pins.ContainsKey("$_") }))
+    if ($waiting.Count -gt 0) { return $null }
+    $wip = @($List | Where-Object { $_.open -and (Test-NameIn $c.label $_.labels) -and (Test-NameIn "$($_.column)" $c.columns.ai) }).Count
+    if ($wip -ge $set.wip) { return $null }
+    $depCache = @{}
+    foreach ($it in $List) {
+        if (-not $it.open -or "$($it.column)" -ine $set.from -or -not (Test-NameIn $c.label $it.labels)) { continue }
+        if ((Test-NameIn $c.rivalLabel $it.labels) -or (Test-NameIn $c.demoLabel $it.labels)) { continue }
+        if (@($it.labels | Where-Object { "$_" -like 'hold:*' -or "$_" -like 'worker:*' -or (Test-NameIn "$_" $set.hold) }).Count -gt 0) { continue }
+        if (-not $it.cardId) { continue }
+        # Depends-on (issue 65): read with the sweep's own functions when this gateway has them
+        if (Get-Command Get-ItemDependencies -ErrorAction SilentlyContinue) {
+            $body = if ($it.ContainsKey('body')) { "$($it.body)" } else { "$((Get-ItemInfo ([int]$it.number)).body)" }
+            $deps = Get-ItemDependencies ([int]$it.number) $body
+            if (@($deps | Where-Object { -not (Test-DependencyMet $_ $byNumber $depCache) }).Count -gt 0) { continue }
+        }
+        $n = [int]$it.number
+        Move-Card @{ number = $n; cardId = $it.cardId } $td
+        # offered at once by this sweep, and by the next ones as a card that was seen in its column
+        $Seen["$n"] = @{ column = $td; count = [int]$c.timing.sweepSeenCount }; $Seen | ConvertTo-Json -Depth 5 | Set-Content $SeenFile
+        $jf = @{ column = $td; from = $set.from; slots = [int]$a.intake.freeSlots; wip = $wip; wipLimit = $set.wip }; $jk = "intake|$((Get-UtcNow).Ticks)"
+        try { [void](Use-ItemLock $n { $f = Get-State $n; if (Add-Journal $n $f 'pulled' $jf $jk) { Save-State $n $f } } 5) } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw } }
+        return @{ action = @{ item = $n; action = 'intake-pulled'; column = $td; from = $set.from; wip = $wip }; offer = @{ item = $n; column = $td; reason = 'intake' } }
+    }
+    return $null
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------
