@@ -235,8 +235,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         o["replayed"] = true; return o.ToJsonString();
     }
 
-    // The replay snapshot of one (re)connect: the Buffer's triggers and the undelivered inbox entries above the cursor, merged by seq. Taken in the
-    // same critical section that creates the new channel, so a concurrent delivery lands either here or on the new channel, never between.
+    // issue 106: a trigger of an item this name does not own (a message is never one): an earlier session's history, not replayed to a new session
     bool StaleTrigger(string json, string name)
     {
         try
@@ -247,6 +246,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         catch { return false; }
     }
 
+    // The replay snapshot of one (re)connect: the Buffer's triggers and the undelivered inbox entries above the cursor, merged by seq. Taken in the
+    // same critical section that creates the new channel, so a concurrent delivery lands either here or on the new channel, never between.
     List<(long, string)> MergedReplay(string name, List<(long Id, string Json)> buffer, long after, bool messagingClient)
     {
         var all = buffer.Where(b => b.Id > after).Select(b => (b.Id, b.Json)).ToList();

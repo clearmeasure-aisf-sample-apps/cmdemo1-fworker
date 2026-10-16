@@ -460,7 +460,9 @@ $MessagingScenarios = [ordered]@{
     $c2 = Msg-Client 'alice' 'spawn2' '' @{ FACTORY_SANDBOX_REPO = $null } @('--spawn')
     Check 'alice registers again' (Msg-WaitEvent $c2 'worker.registered')
     $rep = @(Msg-ClientEvents $c2 | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq 901 })
-    Check 'the earlier assignment is printed as replayed, without its token' ($rep.Count -eq 1 -and $rep[0].replayed -eq $true -and -not $rep[0].ContainsKey('token')) ($rep | ConvertTo-Json -Compress -Depth 6)
+    # issue 106: a new session is not replayed the triggers of items its name no longer owns (Plant.StaleTrigger), so the gateway drops this one;
+    # (the client's replayed-event rule stays as the second line for a replay that does arrive)
+    Check 'the earlier assignment of an item alice does not own is not replayed to her new session' ($rep.Count -eq 0) ($rep | ConvertTo-Json -Compress -Depth 6)
     Start-Sleep -Seconds 2
     $err = "client-alice-spawn2.err"
     Check 'no spawn was attempted for it and no token saved' (-not (Test-Path (Join-Path $tokDir '901.owner')) -and -not ((Get-Content -Raw (Join-Path $script:Work $err) -ErrorAction SilentlyContinue) -match 'spawn')) (Get-Content -Raw (Join-Path $script:Work $err) -ErrorAction SilentlyContinue)
