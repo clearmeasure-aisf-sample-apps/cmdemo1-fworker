@@ -238,11 +238,14 @@ sealed class RuntimeManager
 // Reads the executions every runtimes.caeJob.listSeconds; the first reading at start is the restart recovery (2.11).
 sealed class RuntimeLoop(RuntimeManager m) : BackgroundService
 {
+    // the leader lease (Leader.cs): only the acting gateway parks items and ends claims for the executions it reads
+    public Func<bool> MayAct { get; init; } = () => true;
+
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            try { await m.Poll(ct); } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; } catch (Exception e) { Console.Error.WriteLine($"runtime poll: {e.Message}"); }
+            try { if (MayAct()) await m.Poll(ct); } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; } catch (Exception e) { Console.Error.WriteLine($"runtime poll: {e.Message}"); }
             try { await Task.Delay(TimeSpan.FromSeconds(m.Settings.CaeJob.ListSeconds), ct); } catch (OperationCanceledException) { return; }
         }
     }

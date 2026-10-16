@@ -198,10 +198,36 @@ u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, 
    window and is pushed again when its worker reconnects, or at once to a worker already reconnected). The start removes the ref after reading it,
    so a snapshot is restored once. A snapshot older than `timing.plantSnapshotMaxAgeMinutes` (30) is ignored, and an
    outright kill (out of memory) writes none. `/status` shows `plantSnapshot.restore`. `FACTORY_PLANT_SNAPSHOT=0` switches it off. Messages,
-   questions and presence are still in memory only. It assumes one replica that stops before the next starts: a new revision that starts
-   before the old replica gets SIGTERM reads no snapshot (the old one's save comes too late) and the sweep rebuilds as before. Open: check the
-   revision mode of the Container App; not yet seen live on tdd (watch the `plant-snapshot` and `plant-restore` log lines
-   at the next release).
+   questions and presence are still in memory only. That was the behaviour without the leader lease (`FACTORY_LEADER_LEASE=0`); with it,
+   entry x.
+x. **Done (2026-10-14, issue 94): one acting gateway across releases** (`gateway/Leader.cs`, `plugin/scripts/lib/Leader.ps1`). In single-revision
+   mode the new revision starts before the old one stops: before, both swept, the new one restored nothing (the old one's snapshot came at its
+   SIGTERM, later) and sessions kept their stream on the old process while their calls reached the new one (#68).
+   - The leader lease is the ref `refs/factory/<instance>/gateway-leader`: a commit whose message is the record (epoch, holder, version,
+     revision, replica, until, released). Every change is a compare-and-swap (the new commit's parent is the one read, the ref moved without
+     force; GitHub refuses a non-fast-forward, 422). A starting process takes epoch+1 at once; only the holder acts (sweep, ticks, back-merge
+     trigger, snapshots). It renews every `timing.leaderRenewSeconds` (120) a lease of `leaderLeaseSeconds` (360) and checks every
+     `leaderCheckSeconds` (15) with one conditional read (304 when unchanged, not counted by GitHub).
+   - A holder that finds a later epoch stands down: it writes its final snapshot (never over a later epoch's), ends its streams with
+     `stream.replaced` (`reconnect`, code `gateway-replaced`; only for clients that registered with `handover=1`, the others' streams are just
+     ended) and answers every call and webhook 503 `gateway-replaced` (`/ready` 503) except the operator's `/status` and dashboard. The stream
+     client prints `stream.handover` and connects again. It stays a standby and takes the lease again when it is released or runs out.
+   - The plant snapshot is written on every change (a change of offers, acceptances, owners, drains or bot holders at most every
+     `plantSnapshotDebounceSeconds`, 30; anything else at most every `plantSnapshotRefreshMinutes`, 10), tagged with the writer's epoch. A
+     start accepts only its predecessor's epoch (the released lease names it as `plant_epoch`): at once when the predecessor released the
+     lease or its lease ran out, else after waiting up to `leaderHandoverSeconds` (90) for the predecessor's final snapshot (then its latest).
+     An outright kill loses at most the debounce. A graceful stop of the holder writes its final snapshot and releases the lease.
+   - The gap: the first full sweep after a start renews the owners' claims whose lease ran out between the predecessor's release (or its last
+     renewal, when it died or handed nothing over) and that sweep, not taken back, and at most `gapRenewMaxMinutes` (120) ago (journal
+     `gap-renewed`, sweep action `claim-renewed-after-gap`).
+   - `/api/v1/status` shows `leader` (role starting, acting, superseded or stopping; epoch; predecessor; superseded by) and
+     `plantSnapshot.restore.how` (`handover`, `handover-timeout`, `released`, `lapsed`, `no-predecessor`). `FACTORY_LEADER_LEASE=0` turns it
+     off (the suites run with it off; `tests/scenarios/leader.ps1` turns it on).
+   Limits: the first release with this change still overlaps (the old process has no lease); a process superseded before its own restore
+   finished hands nothing over; the operator session's stream client (`Client.Operator.ps1`, code-owner path) gets no `stream.replaced`,
+   only the end of its stream, and reconnects as after any drop; the supervisor's and operator session's skills (code-owner paths) do not
+   mention `stream.handover`. Not yet seen live on tdd: at the next release check `leader` and `plantSnapshot.restore.how` on the new
+   process and that no sweep line of the old one follows its `handed-over` line.
 v. **Done (2026-10-14): lasting cycle-time metrics** (enhancement 13). `GET /api/v1/metrics?since=7d|24h|30m|<ISO>[&max=100][&fresh=1]`
    (operator token) runs the admin rule script `metrics` (plugin/scripts/lib/Metrics.ps1). It reads the board's `factory worker` items, newest
    first, and from each item's journal comments (`matched`, `offered`, the owner `assigned`) and state comment (`dispatched_at` per column,

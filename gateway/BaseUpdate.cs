@@ -75,9 +75,11 @@ sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool 
     public void NoteHeadChange(int item) { lock (gate) headChangedAt[item] = DateTime.UtcNow; }
 
     // after each sweep: the fallback for a missed or absent webhook, and the refresh of the behind counts (at most every sweepCheckSeconds)
+    // the back-merge trigger acts on GitHub: only in the process that holds the leader lease (Leader.cs)
+    public Func<bool>? MayAct { get; set; }
     public async Task AfterSweep()
     {
-        if (!ownerMode || !cfg.Enabled) return;
+        if (!ownerMode || !cfg.Enabled || MayAct?.Invoke() == false) return;
         lock (gate) { if (dueAt != null || (DateTime.UtcNow - lastCheck).TotalSeconds < cfg.SweepCheckSeconds) return; lastCheck = DateTime.UtcNow; }
         await Run(new List<int>(), "sweep");
     }
@@ -209,6 +211,7 @@ sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool 
         if (!ownerMode) return;
         while (!ct.IsCancellationRequested)
         {
+            if (MayAct?.Invoke() == false) { try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { } continue; }
             try
             {
                 List<int>? prs = null; var due = new List<PendingUpdate>();

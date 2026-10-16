@@ -19,7 +19,7 @@ sealed class RunnerGate
 {
     public enum Cls { Critical = 0, Normal = 1, Slow = 2, Journal = 3 }
     static readonly string[] ClsNames = { "critical", "normal", "slow", "journal" };
-    static readonly HashSet<string> CriticalVerbs = new(StringComparer.Ordinal) { "sync-board", "accept", "claim-item", "expire-claim", "revocations", "revoke-worker", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-clear", "operator-releases", "operator-release" };
+    static readonly HashSet<string> CriticalVerbs = new(StringComparer.Ordinal) { "sync-board", "accept", "claim-item", "expire-claim", "revocations", "revoke-worker", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-clear", "operator-releases", "operator-release", "leader-lease", "plant-snapshot-await" };
     static readonly HashSet<string> SlowVerbs = new(StringComparer.Ordinal) { "wait-for-checks", "metrics", "publish-demo" };
     public static Cls ClassOf(string verb) => CriticalVerbs.Contains(verb) ? Cls.Critical : verb == "journal" ? Cls.Journal : SlowVerbs.Contains(verb) ? Cls.Slow : Cls.Normal;
 

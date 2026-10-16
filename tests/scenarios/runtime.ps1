@@ -277,3 +277,30 @@ $RuntimeScenarios['runtime: a gateway restart re-lists the running executions an
         Check 'the nonce of the old process is gone with it: the execution cannot redeem' ($r.status -eq 401)
     } finally { Rt-Cleanup @($n) }
 }
+
+# cloud-worker-runtimes.md 5.1: the baked caeJob applies only in tdd (or with no environment named); elsewhere the FACTORY_RUNTIME_* variables
+# of that environment's gateway app switch it on, and only with a job and an identity.
+$RuntimeScenarios['runtime: outside tdd the baked caeJob is off; the FACTORY_RUNTIME_ variables switch it on with a job and an identity'] = {
+    $vars = 'FACTORY_ENVIRONMENT', 'FACTORY_RUNTIME_ENABLED', 'FACTORY_RUNTIME_AGENT', 'FACTORY_RUNTIME_JOB_CLAUDE', 'FACTORY_RUNTIME_JOB_CODEX', 'FACTORY_RUNTIME_IDENTITY_CLIENT_ID', 'FACTORY_RUNTIME_GATEWAY_URL', 'FACTORY_RUNTIME_MAX_CONCURRENT', 'FACTORY_RUNTIME_MAX_PER_DAY'
+    $n = 0
+    try {
+        $env:FACTORY_ENVIRONMENT = 'tdd'; $env:FACTORY_RUNTIME_MAX_PER_DAY = '5'; Restart-Gateway
+        Check 'in tdd a variable overrides the baked value' ((Rt-Status).enabled -eq $true -and (Rt-Status).maxExecutionsPerDay -eq 5) (Rt-Status | ConvertTo-Json -Compress -Depth 4)
+        Remove-Item env:FACTORY_RUNTIME_MAX_PER_DAY
+        $env:FACTORY_ENVIRONMENT = 'uat'; Restart-Gateway
+        function Rt-On { $r = (Get-Plant).runtimes; $c = if ($r -and $r.PSObject.Properties['cae-job']) { $r.'cae-job' } else { $r }; [bool]($c -and $c.enabled -eq $true) }
+        Check 'in uat the baked caeJob is off' (-not (Rt-On)) ((Get-Plant).runtimes | ConvertTo-Json -Compress -Depth 4)
+        $env:FACTORY_RUNTIME_ENABLED = 'true'; $env:FACTORY_RUNTIME_JOB_CODEX = '/subscriptions/s1/resourceGroups/rg-test/providers/Microsoft.App/jobs/caj-test'; Restart-Gateway
+        Check 'enabled with a job but no identity stays off' (-not (Rt-On)) ((Get-Plant).runtimes | ConvertTo-Json -Compress -Depth 4)
+        $env:FACTORY_RUNTIME_IDENTITY_CLIENT_ID = 'test-client'; $env:FACTORY_RUNTIME_AGENT = 'codex'; $env:FACTORY_RUNTIME_GATEWAY_URL = 'http://ca-uat-fworker'
+        $env:FACTORY_RUNTIME_MAX_CONCURRENT = '2'; $env:FACTORY_RUNTIME_MAX_PER_DAY = '7'; Restart-Gateway
+        $s = Rt-Status
+        Check 'with a job and an identity it is on, sized by the variables' ($s.enabled -eq $true -and $s.maxConcurrent -eq 2 -and $s.maxExecutionsPerDay -eq 7) ($s | ConvertTo-Json -Compress -Depth 4)
+        $n = New-Item-Fake 'Runtime by variables' 'x' $RtLabels
+        Check 'an execution is started with the gateway address of the variables' (Wait-Until -Seconds 30 { $e = Rt-Execs $n; $e.Count -gt 0 -and @($e[0].env | Where-Object { $_.name -eq 'FWORKER_GATEWAY_URL' -and $_.value -eq 'http://ca-uat-fworker' }).Count -eq 1 })
+    } finally {
+        Rt-Cleanup @($n)
+        foreach ($v in $vars) { Remove-Item "env:$v" -ErrorAction SilentlyContinue }
+        Restart-Gateway
+    }
+}

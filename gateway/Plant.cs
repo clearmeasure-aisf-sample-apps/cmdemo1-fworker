@@ -89,6 +89,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // issue 72: how long a spent session may own nothing (and have no offer of its item open) before it is told session.end; the pause covers a
     // column move in which the same session is offered its item again (timing.sessionEndGraceSeconds, FACTORY_TIMING_sessionEndGraceSeconds)
     public double SessionEndGraceSeconds { get; set; } = 90;
+    // issue 97: the first column of the factory (new work); offers of later columns (work already started, orphaned by a take-back, a park or a lost
+    // session) go first, and an unowned item past it is an orphan whose age the status shows
+    public string IntakeColumn { get; set; } = "Technical Design";
+    readonly Dictionary<int, DateTime> orphanSince = new();
     // issue 98: a pinned item that has waited this long for its pinned worker (away, at capacity, spent) is offered to any eligible worker, once
     // per pin, with a journal line (timing.pinFallbackMinutes; 0 is off). pinFallback: the items whose pin is set aside, with the pin it was.
     public double PinFallbackMinutes { get; set; } = 30;
@@ -174,10 +178,11 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // ---- registry ---------------------------------------------------------------------------------------------------------------------
     // after: the cursor of this stream. With messaging off it is today's bare number (-1: nothing is replayed). With messaging on the caller has
     // parsed "<epoch>.<seq>" and passes 0 for another epoch, a bare number or no header, so the whole Buffer and every undelivered message replay.
-    public (WorkerInfo W, Channel<(long, string)> Ch, List<(long, string)> Replay) Register(string name, string type, IEnumerable<string> caps, int capacity, IEnumerable<string> roles, long after, int qcCapacity = 1, string qcAddress = "", bool qcProfile = false, bool messagingClient = false, string model = "", string effort = "", bool newSession = true, string runtime = "local")
+    public (WorkerInfo W, Channel<(long, string)> Ch, List<(long, string)> Replay) Register(string name, string type, IEnumerable<string> caps, int capacity, IEnumerable<string> roles, long after, int qcCapacity = 1, string qcAddress = "", bool qcProfile = false, bool messagingClient = false, string model = "", string effort = "", bool newSession = true, bool handover = false, string runtime = "local")
     {
         lock (gate)
         {
+            if (handover) handoverClients.Add(name); else handoverClients.Remove(name);
             if (!workers.TryGetValue(name, out var w)) workers[name] = w = new WorkerInfo { Name = name };
             // a (re)registration answers: offers lapsed while the gateway or the session was away do not count. A streak with a take-back in it is the
             // session's, not the stream's: a reconnect of the same session keeps it (and a block), a new session of the name starts clean (issue 100).
@@ -235,6 +240,30 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     }
 
     public void Disconnect(WorkerInfo w, Channel<(long, string)> ch) { lock (gate) { if (w.Out == ch) { w.Connected = false; w.Out = null; w.DisconnectedAt = DateTime.UtcNow; if (Msg.On) store.Get(w.Name).GoneAt = DateTime.UtcNow; } } }
+
+    // ---- the hand-over to a newer gateway process (Leader.cs, issue 94) -----------------------------------------------------------------------
+    // The names whose stream client reconnects on stream.replaced with reconnect (it registered with handover=1); an older client exits on any
+    // stream.replaced, so its stream is only ended (it reconnects as after any drop).
+    readonly HashSet<string> handoverClients = new(StringComparer.Ordinal);
+    public void NoteHandover(string name, bool on) { lock (gate) { if (on) handoverClients.Add(name); else handoverClients.Remove(name); } }
+    // Ends every stream of this process: workers and the supervisor get stream.replaced (reconnect) first when their client knows it; the operator
+    // session's stream is ended (its client reconnects). Returns how many streams were ended.
+    public int HandOver(string reason)
+    {
+        lock (gate)
+        {
+            string Json(string name) => new JsonObject { ["provider"] = "gateway", ["event"] = "stream.replaced", ["name"] = name, ["code"] = "gateway-replaced", ["reconnect"] = true, ["reason"] = reason }.ToJsonString();
+            var n = 0;
+            foreach (var w in workers.Values.Where(w => w.Out != null))
+            {
+                if (handoverClients.Contains(w.Name)) w.Out!.Writer.TryWrite((0, Json(w.Name)));
+                w.Out!.Writer.TryComplete(); n++;
+            }
+            if (store.Slot is { Out: not null } sl) { if (handoverClients.Contains(sl.Name)) sl.Out.Writer.TryWrite((0, Json(sl.Name))); sl.Out.Writer.TryComplete(); n++; }
+            if (opSlot is { Out: not null } op) { op.Out.Writer.TryComplete(); n++; }
+            return n;
+        }
+    }
 
     // ---- messaging: replay, delivery, presence, the supervisor slot (worker-messaging.md 3.4 to 3.6, 4.6). Every method holds the gate. -----
     static string ReplacedJson(string name) => new JsonObject { ["provider"] = "gateway", ["event"] = "stream.replaced", ["name"] = name, ["reason"] = "a newer stream registered with this name; this one ends", ["exit"] = 40 }.ToJsonString();
@@ -1881,11 +1910,20 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             var wanted = new HashSet<string>();
             // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can; then by priority (the
             // order is stable, so items of one rank keep the sweep's order)
+            // then (issue 97) work already started before new work: an orphan in a column past the intake (Development, Functional Testing) takes a
+            // free worker before an item in the intake column
             static int Rank(string? p) => p == "top" ? 0 : p == "high" ? 1 : 2;
-            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0).ThenBy(x => Rank(priorities?[x!["item"]!.ToString()]?.ToString())))
+            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0).ThenBy(x => Rank(priorities?[x!["item"]!.ToString()]?.ToString())).ThenBy(x => string.Equals(x!["column"]?.ToString() ?? "", IntakeColumn, StringComparison.OrdinalIgnoreCase) ? 1 : 0))
             {
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
-                var key = $"{item}|{kind}|{role}"; wanted.Add(key);
+                var key = $"{item}|{kind}|{role}";
+                // issue 97 with incremental passes (issue 92): a pass over a few items does not see the whole plan, so new work in the intake column is
+                // not offered by it while started work waits for an owner; the next full sweep orders both
+                if (scope != null && kind == "own-item" && string.Equals(o["column"]?.ToString() ?? "", IntakeColumn, StringComparison.OrdinalIgnoreCase)
+                    && !(assignments.TryGetValue(key, out var exi) && exi.Accepted)
+                    && assignments.Values.Any(x => x.Kind == "own-item" && !x.Accepted && !IsQc(x) && x.Worker == "" && !ownerOf.ContainsKey(x.Item) && !string.Equals(x.Column, IntakeColumn, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                wanted.Add(key);
                 var pin = pins?[item.ToString()]?.ToString();
                 // issue 98: a pin set aside after its long wait stays aside while the label names the same worker (a new label is a new pin)
                 if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
@@ -1906,6 +1944,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     Id = "a-" + Interlocked.Increment(ref counter).ToString("x") + DateTime.UtcNow.Ticks.ToString("x")[^4..], Key = key, Item = item, Column = o["column"]?.ToString() ?? "",
                     Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
                 };
+                if (ReferenceEquals(a, ex) && o["column"]?.ToString() is { Length: > 0 } nc) a.Column = nc;   // a waiting assignment follows its card (issue 97)
                 assignments[key] = a;
                 if (!ReferenceEquals(a, ex)) DeclineTakenBack(a);      // a new assignment: not first to the worker it was just taken back from
                 if (string.IsNullOrEmpty(pin))
@@ -1964,6 +2003,11 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 Console.WriteLine(new JsonObject { ["at"] = planNow.ToString("o"), ["plant"] = "stale-assignment-dropped", ["item"] = a.Item, ["worker"] = a.Worker, ["owner"] = ow ?? "", ["assignment"] = a.Id }.ToJsonString());
             }
             if (scope == null) { staleSeen.Clear(); staleSeen.UnionWith(staleNow); }
+            // issue 97: since when each unowned own-item past the intake column has waited for an owner
+            var orphans = assignments.Values.Where(a => a.Kind == "own-item" && !a.Accepted && !IsQc(a) && !ownerOf.ContainsKey(a.Item)
+                && !string.Equals(a.Column, IntakeColumn, StringComparison.OrdinalIgnoreCase)).Select(a => a.Item).ToHashSet();
+            foreach (var i in orphanSince.Keys.Where(i => !orphans.Contains(i)).ToList()) orphanSince.Remove(i);
+            foreach (var i in orphans) orphanSince.TryAdd(i, planNow);
         }
     }
 
@@ -2161,6 +2205,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 ["pinFallbackMinutes"] = PinFallbackMinutes,
                 ["pinsSetAside"] = new JsonObject(pinFallback.Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
                 ["held"] = HeldJson(),
+                ["unowned"] = UnownedJson(),
+                ["orphans"] = new JsonArray(orphanSince.Where(kv => !ownerOf.ContainsKey(kv.Key)).OrderBy(kv => kv.Value).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key,
+                    ["column"] = Gated(assignments.Values.FirstOrDefault(a => a.Item == kv.Key && a.Kind == "own-item")?.Column), ["since"] = kv.Value.ToString("o"),
+                    ["minutes"] = (int)(DateTime.UtcNow - kv.Value).TotalMinutes }).ToArray()),
                 ["sessionRestarts"] = new JsonObject { ["sent"] = restartsSent, ["recent"] = new JsonArray(restarts.Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["worker"] = r.Name, ["session"] = r.Session, ["code"] = r.Reason }).ToArray()) },
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["sessionsBlocked"] = sessionsBlocked,
