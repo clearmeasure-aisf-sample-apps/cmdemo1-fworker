@@ -366,6 +366,15 @@ Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
   for an item that carries one (its open offer is dropped at the next plan), its PASS is not merged (`merge` answers exit 10 `held-by-label`,
   the gateway's merge waits), and `claim-item` (so `accept` and a live owner's `--renew`, whose lease then lapses as with `Demo`) answers exit 10
   `held-by-label`. A merge the person makes is still picked up and settled. Remove the label to hand the item back.
+- **#114 (and #70, #77) The settle state was erased on a master-broken, master-green-timeout or late release-candidate park** (262 and 280
+  stranded closed in Functional Testing, 276 and 272 validated again after their merge). The wait now stays (`merge.awaiting` `master-broken`
+  or `master-timeout`, with the park for a person) and settle keeps polling: the item goes on once the merge commit's latest attempt, or a
+  later master commit that contains it (compare: ahead or identical, at most `timing.masterContainsLookback` (10) commits back), is green
+  (`merge.green_via`); the late release-candidate search keeps looking after `lateReleaseCandidateHours` and says so once. An item with
+  `merge.sha` is never offered to a worker: the sweep re-arms a settle state an older gateway erased (journal `settle-rearmed`; closed items
+  too, instead of only removing their park), an unpark re-arms it and hands nothing off (`reoffer` false, `awaiting` in the answer), and the
+  merge verb's already-merged path keeps the original record and `merged_at`. `POST /api/v1/items/{n}/resettle` (operator token, a reason)
+  puts a finished merged item back into the settle step, for an item a person reopened because no release carried it. No auto-revert.
 
 w. **Built, off (2026-10-15): the cloud worker runtime adapter** (`docs/design/cloud-worker-runtimes.md` phase 3; `gateway/Runtimes/`,
    `gateway/Plant.Runtimes.cs`, credentials in `gateway/Auth.cs`). An item labelled `runtime:cae-job` (or matched by `runtimes.routing`) is

@@ -103,6 +103,7 @@
     "masterGreenTimeoutMinutes": 30,
     "releaseCandidateTimeoutMinutes": 20,
     "lateReleaseCandidateHours": 24,
+    "masterContainsLookback": 10,
     "devChecksTimeoutMinutes": 30,
     "verdictTimeoutMinutes": 180,
     "unprocessedVerdictGraceMinutes": 3,
