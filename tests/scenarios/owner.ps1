@@ -185,6 +185,9 @@ $OwnerScenarios = [ordered]@{
     $seen = Wait-Until -Seconds 20 { @((Invoke-RestMethod "$base/api/v1/dashboard" -Headers $h).plant.workers | Where-Object { $_.name -eq 'ec2-cloud' -and $_.connected -and $_.type -eq 'claude-cloud' }).Count -eq 1 }
     Check 'the cloud session appears on the dashboard as connected' $seen
     $forged = try { Invoke-RestMethod "$base/api/v1/events?name=ec2-cloud&type=claude-cloud" -Headers @{ Authorization = 'Bearer w1.ec2-cloud.0000' } -TimeoutSec 3; $false } catch { $true }; Check 'a forged credential cannot register' $forged
+    # the client would otherwise stay connected for the rest of the suite and offer a free owner slot to later scenarios (work intake)
+    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    Check 'the cloud session is gone once its client stops' (Wait-Until -Seconds 20 { @((Invoke-RestMethod "$base/api/v1/dashboard" -Headers $h).plant.workers | Where-Object { $_.name -eq 'ec2-cloud' -and $_.connected }).Count -eq 0 })
 }
 
 'owner: a refused credential is visible on the event stream, not only on stderr [full]' = {
@@ -1374,9 +1377,11 @@ $OwnerScenarios['intake: a free slot and an empty Technical Design pull the top 
         $a = New-Item-Fake 'Intake: first' 'x' $OwnerLabels 'Todo'
         $b = New-Item-Fake 'Intake: second' 'x' $OwnerLabels 'Todo'
         $c3 = New-Item-Fake 'Intake: third' 'x' $OwnerLabels 'Todo'
+        # clients left running by earlier scenarios reconnect after the restart and would offer a free slot: stop them all first
+        foreach ($w in @($script:Workers.Keys)) { Stop-OwnerClient $w }
         Restart-Gateway
         Start-Sleep -Seconds 6
-        Check 'with no session connected nothing is pulled' ((& $col $a) -eq 'Todo' -and (& $col $b) -eq 'Todo')
+        Check 'with no session connected nothing is pulled' ((& $col $a) -eq 'Todo' -and (& $col $b) -eq 'Todo') "a: $(& $col $a), b: $(& $col $b); connected: $(@((Get-Plant).plant.workers | Where-Object { $_.connected } | ForEach-Object { $_.name }) -join ', ')"
         Start-OwnerClient 'in1' 'persistent-local' '--capacity 1 --no-auto-accept'
         Check 'a free slot pulls the top item that may come: moved to Technical Design and offered' (Wait-Until -Seconds 60 { (& $col $a) -eq 'Technical Design' -and (Get-Assigned 'in1' $a).Count -gt 0 }) "a: $(& $col $a)"
         Check 'the held, the pinned and the waiting item stay in Todo' ((& $col $held) -eq 'Todo' -and (& $col $pinned) -eq 'Todo' -and (& $col $waits) -eq 'Todo')
