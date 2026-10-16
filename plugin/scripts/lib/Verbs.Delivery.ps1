@@ -110,6 +110,42 @@ function Get-MergeDocsOnly($m, $Chk) {
     return $null
 }
 
+# Issue 114: master is green for a merge when the merge commit's latest attempt is green, or when a later commit of the default branch that
+# contains it (compare: ahead or identical) is: a flaky or broken Build of the merge commit itself never turns green, but the next green master
+# carries the change all the same. Reads the newest commits first and stops at the first green one, at most timing.masterContainsLookback (10)
+# commits after the merge commit. Returns @{ sha; own } of the green commit, or $null.
+function Find-GreenMaster([string]$Sha) {
+    $c = Get-Cfg; $ign = Get-MasterIgnoredChecks
+    if ((Get-ChecksFor $Sha -Ignore $ign).status -eq 'success') { return @{ sha = $Sha; own = $true } }
+    $max = if (Test-Has $c.timing 'masterContainsLookback') { [Math]::Max(1, [int]$c.timing.masterContainsLookback) } else { 10 }
+    foreach ($cm in @(Invoke-Gh -Path "$(Get-RepoPath)/commits?sha=$($c.defaultBranch)&per_page=$([Math]::Min(100, $max + 1))" | Where-Object { $_ })) {
+        $later = "$($cm.sha)"
+        if ($later -eq $Sha) { break }   # the merge commit itself: the commits after it in the list are older and cannot contain it
+        if ((Get-ChecksFor $later -Ignore $ign).status -ne 'success') { continue }
+        $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($Sha)...$later`?per_page=1" -Allow 404, 422
+        if ($cmp -isnot [hashtable] -and "$($cmp.status)" -in 'ahead', 'identical') { return @{ sha = $later; own = $false } }
+    }
+    return $null
+}
+
+# Issue 114: re-arms the settle step of an item that has a merge record but no wait and is not done: an older gateway erased the wait when it parked
+# the item master-broken, master-green-timeout or late (262 and 280 were left closed in Functional Testing, 272 and 276 were validated again).
+# The wait is set from where the record says the item was; such an item is settled again and never handed to a worker. Works on the state in
+# hand, the caller saves it. Returns the wait it set, or '' (no merge record, a wait already set, or done; -Force re-arms a done one too).
+function Restore-Settle($s, [switch]$Force) {
+    if (-not (Test-Has $s 'merge') -or -not (Test-Has $s.merge 'sha') -or -not $s.merge.sha) { return '' }
+    $m = $s.merge
+    if ((Test-Has $m 'awaiting') -and $m.awaiting) { return '' }
+    if ((Test-Has $m 'done_at') -and $m.done_at) { if (-not $Force) { return '' }; $m.Remove('done_at') }
+    $t = (Get-Cfg).timing; $now = Get-UtcNow
+    if ((Test-Has $m 'release') -and $m.release) { $m.awaiting = 'release-queue' }
+    elseif ((Test-Has $m 'green_at') -and $m.green_at) { $m.awaiting = 'release-candidate'; $m.rc_deadline = ConvertTo-Iso ($now.AddMinutes($t.releaseCandidateTimeoutMinutes)) }
+    elseif ((Get-Park $s) -and "$($s.park.reason)" -eq 'master-green-timeout') { $m.awaiting = 'master-timeout' }
+    else { $m.awaiting = 'master-broken' }   # polled: it goes on as soon as master is green for it (Find-GreenMaster), with no re-run
+    $m.rearmed_at = ConvertTo-Iso $now
+    return "$($m.awaiting)"
+}
+
 # One idempotent step of the post-merge flow for one item: master green, release candidate, docs-only skip, Release Queue, Done.
 function Invoke-Settle([int]$n) {
     $c = Get-Cfg; $t = $c.timing
@@ -161,9 +197,9 @@ function Invoke-Settle([int]$n) {
                 }
             }
             if ($chk.pending_checks.Count -eq 0) {
-                # auto-unpark (Verbs.Sweep.ps1) lifts it only once each of these checks has passed (not skipped) on a later master head
-                Set-Park $s 'master-broken' ($t.parkHours * 60); $s.park.failed = @($chk.failed_checks); $s.park.sha = "$sha"; $m.awaiting = $null; Save-State $n $st
-                Add-Comment $n "**master is BROKEN** at ``$($sha.Substring(0,7))`` after the merge ($($chk.failed_checks -join ', '))$(if ((Test-Has $m 'rerun_runs') -and @($m.rerun_runs).Count -gt 0) { ', also after one re-run of the failed jobs' }) - parked for a human. Auto-revert is out of scope."
+                # issue 114: the wait stays (master-broken) and is polled; the item goes on once master is green for it, and is never offered meanwhile
+                Set-Park $s 'master-broken' ($t.parkHours * 60); $s.park.failed = @($chk.failed_checks); $s.park.sha = "$sha"; $m.awaiting = 'master-broken'; $m.broken_at = ConvertTo-Iso $now; Save-State $n $st
+                Add-Comment $n "**master is BROKEN** at ``$($sha.Substring(0,7))`` after the merge ($($chk.failed_checks -join ', '))$(if ((Test-Has $m 'rerun_runs') -and @($m.rerun_runs).Count -gt 0) { ', also after one re-run of the failed jobs' }) - parked for a human. The gateway keeps watching: the park is lifted by itself once each check that failed has passed on a green master head, which is then judged. Auto-revert is out of scope."
                 return @{ outcome = 'parked'; reason = 'master-broken' }
             }
         }
@@ -177,11 +213,29 @@ function Invoke-Settle([int]$n) {
         # a re-run started counts the timeout again from the re-run (issue 79): an acceptance re-run takes as long as the first run
         $since = if ($rerunAt -and $mergedAt -and $rerunAt -gt $mergedAt) { $rerunAt } else { $mergedAt }
         if ($since -and ($now - $since).TotalMinutes -gt $t.masterGreenTimeoutMinutes) {
-            Set-Park $s 'master-green-timeout' ($t.parkHours * 60); $m.awaiting = $null; Save-State $n $st
-            Add-Comment $n "master CI did not go green within $($t.masterGreenTimeoutMinutes) min of the merge - parked for a human."
+            Set-Park $s 'master-green-timeout' ($t.parkHours * 60); $m.awaiting = 'master-timeout'; Save-State $n $st
+            Add-Comment $n "master CI did not go green within $($t.masterGreenTimeoutMinutes) min of the merge - parked for a human. The gateway keeps watching: the item goes on by itself once this commit, or a later master commit that contains it, is green."
             return @{ outcome = 'parked'; reason = 'master-green-timeout' }
         }
         return @{ outcome = 'waiting'; awaiting = 'master-green'; checks = (Get-PublicChecks $chk) }
+    }
+    if ($m.awaiting -in 'master-broken', 'master-timeout') {
+        # issue 114: the wait stays through the park. A master-broken park is lifted only by auto-unpark (Verbs.Sweep.ps1: every check that failed
+        # passed on master, then judged on that head, issue 116) or by a person; while it stands the item just waits. Once it is gone (a person
+        # released it, or it expired), and for a master-green-timeout park, the item goes on when master is green for the merge (its own latest
+        # attempt, or a later master commit that contains it).
+        $live = Get-Park $s   # (an expired park no longer holds the item)
+        if ($m.awaiting -eq 'master-broken' -and $live -and "$($live.reason)" -eq 'master-broken') { return @{ outcome = 'waiting'; awaiting = 'master-broken' } }
+        $g = Find-GreenMaster $sha
+        if (-not $g) { return @{ outcome = 'waiting'; awaiting = "$($m.awaiting)" } }
+        $was = "$($m.awaiting)"
+        $m.green_at = ConvertTo-Iso $now; $m.green_via = "$($g.sha)"
+        $m.awaiting = 'release-candidate'; $m.rc_deadline = ConvertTo-Iso ($now.AddMinutes($t.releaseCandidateTimeoutMinutes))
+        if ((Test-Has $s 'park') -and "$($s.park.reason)" -in 'master-broken', 'master-green-timeout') { $s.Remove('park') }   # (only an expired master-broken park reaches here)
+        $green7 = "$($g.sha)".Substring(0, 7); $contains = if ($g.own) { '' } else { ", which contains ``$($sha.Substring(0,7))``" }
+        Add-Comment $n "master is GREEN at ``$green7``$contains - waiting for the release candidate that carries it."
+        Save-State $n $st
+        return @{ outcome = 'advanced'; awaiting = 'release-candidate'; recovered = $was }
     }
     if ($m.awaiting -in 'release-candidate', 'late-rc') {
         $chk = Get-ChecksFor $sha
@@ -218,7 +272,13 @@ function Invoke-Settle([int]$n) {
             Save-State $n $st
             return @{ outcome = 'parked'; reason = 'release-candidate-timeout'; still_looking = $true }
         }
-        if ($m.awaiting -eq 'late-rc' -and (ConvertFrom-Iso $m.late_deadline) -lt $now) { $m.awaiting = $null; Save-State $n $st; return @{ outcome = 'gave-up' } }
+        if ($m.awaiting -eq 'late-rc' -and (ConvertFrom-Iso $m.late_deadline) -lt $now -and -not ((Test-Has $m 'late_reported') -and $m.late_reported)) {
+            # issue 114: the wait is not erased (the item would be offered to a worker again): it keeps looking, and says so once
+            $m.late_reported = ConvertTo-Iso $now; Set-Park $s 'fv:release-candidate-timeout' ($t.parkHours * 60)
+            Add-Comment $n "still no release candidate carrying ``$($sha.Substring(0,7))`` after $($t.lateReleaseCandidateHours) h - parked for a human. The gateway keeps looking."
+            Save-State $n $st
+            return @{ outcome = 'parked'; reason = 'release-candidate-timeout'; still_looking = $true }
+        }
         return @{ outcome = 'waiting'; awaiting = $m.awaiting }
     }
     if ($m.awaiting -eq 'release-queue') {
