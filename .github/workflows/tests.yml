@@ -42,7 +42,11 @@ jobs:
             suites: qc-gate,qc-gate-idle,qc-gate-lifetime,qc-gate-grace,qc-gate-lease,qc-gate-waiting,qc-gate-race
           - name: workers
             runner: run-all
-            suites: qc-worker,owner,author
+            suites: qc-worker,author
+          # the owner suite alone: with qc-worker and author in one job it ran 32-39 minutes against the 40-minute limit (issue 154)
+          - name: owner
+            runner: run-all
+            suites: owner
           - name: qc
             runner: run
             suites: qc
