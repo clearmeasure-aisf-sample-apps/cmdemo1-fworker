@@ -110,6 +110,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     long staleDropped;
     // issue 96: items whose owner was dropped because they sit in the Release Queue (SetReleaseQueue); forgotten when they leave it
     readonly HashSet<int> rqOwnerDropped = new();
+    // when an item's owner released it (kept an hour): a sweep that read the claim before the release does not put the owner back (as mergedAt, issue 107)
+    readonly Dictionary<int, DateTime> releasedAt = new();
     readonly Dictionary<int, string> ownerOf = new(), botOf = new(), lastTrigger = new();
     // Plant data the digest is computed from (worker-messaging.md 3.9, step 5a), kept only while messaging or the supervisor is on: when an owner was
     // recorded (the grace of the sweep's replacement), what the sweep said of each owned item, the last request per (name, item), and the rings of
@@ -1861,11 +1863,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             var planNow = DateTime.UtcNow;
             foreach (var k in mergedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) mergedAt.Remove(k);
+            foreach (var k in releasedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) releasedAt.Remove(k);
             if (owners != null) foreach (var kv in owners)
             {
                 var oi = int.Parse(kv.Key); var on = kv.Value!.ToString();
                 if (rqOwnerDropped.Contains(oi)) continue;   // issue 96: an item in the Release Queue whose owner was dropped keeps no owner while its claim lives on
                 if (sweepStarted is { } ss && mergedAt.TryGetValue(oi, out var ma) && ma >= ss) continue;
+                if (sweepStarted is { } rs && releasedAt.TryGetValue(oi, out var ra) && ra >= rs) continue;
                 if (Msg.On && !(ownerOf.TryGetValue(oi, out var cur) && cur == on)) { ownedSince[oi] = planNow; seamOwned.Remove(oi); ownedMisses.Remove(oi); ownedInfo.Remove(oi); }
                 ownerOf[oi] = on;
             }
@@ -2113,6 +2117,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     }
                     break;
                 case "release":
+                    releasedAt[item] = DateTime.UtcNow;
                     DropOwner(item); foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
                     break;
                 case "merge" when response["outcome"]?.ToString() is "merged" or "already-merged":
