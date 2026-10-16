@@ -5,6 +5,9 @@ using System.Text.Json.Nodes;
 // Credentials. Three kinds, all checked here before a rule script ever runs:
 //   admin     the gateway's own token (the sweep, tests, the operator)
 //   worker    "w1.<name>.<hmac>"  one per worker, issued once: may register, receive assignments, ask my-items. It cannot act on an item.
+//             "w2.<name>.<runtime>.<expiresUnix>.<hmac>" the same rights for a worker that a runtime adapter started (a Container Apps job
+//             execution, docs/design/cloud-worker-runtimes.md 2.6): bound to its runtime and an expiry, delivered only by redeeming a one-time nonce
+//             (RuntimeNonces, POST /api/v1/runtime/redeem). The runtime a registration claims is trusted only from a w2; a w1 is always "local".
 //   item      "i1.<payload>.<hmac>" minted at an assignment for ONE item and ONE role: the only credential that acts on an item.
 //   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs (worker-messaging.md 4.6) and the plant manager's flow verb
 //             manager-action (docs/design/plant-manager.md 10e), which never merges, approves, records a verdict or clears a hold.
@@ -17,7 +20,56 @@ using System.Text.Json.Nodes;
 // so every credential minted before it (worker, supervisor, item) fails here, and one minted afterwards works. The generations are kept in
 // GitHub by the rule scripts (refs/factory/<instance>/revoked/<name>/<generation>) and read back at start, like owners after a restart.
 
-sealed record Principal(string Kind, string Name = "", int Item = 0, string Role = "", string Assignment = "", long Expires = 0, int Pr = 0, string Sha = "", string Ip = "");
+sealed record Principal(string Kind, string Name = "", int Item = 0, string Role = "", string Assignment = "", long Expires = 0, int Pr = 0, string Sha = "", string Ip = "", string Runtime = "");
+
+// One-time nonces of runtime workers (cloud-worker-runtimes.md 2.6). The adapter puts only a nonce into the execution's environment (anyone with
+// read on the job's executions sees it); the execution redeems it once for its w2. Kept as SHA-256 hashes in memory: a gateway restart loses the
+// unredeemed ones, and that execution fails its redemption and is replaced like any failed execution. A spent hash is remembered for a day, so
+// a second redemption is told apart from an unknown nonce in the log (the caller gets the same refusal for both).
+sealed class RuntimeNonces
+{
+    sealed record Entry(string Name, string Runtime, long TokenExpires, DateTime NonceExpires);
+    readonly Dictionary<string, Entry> live = new(StringComparer.Ordinal);
+    readonly Dictionary<string, DateTime> spent = new(StringComparer.Ordinal);
+    readonly object gate = new();
+    static string Hash(string nonce) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(nonce))).ToLowerInvariant();
+
+    // tokenExpires: the w2's expiry (execution timeout plus 15 minutes); ttl: how long the nonce may wait for its redemption
+    public string Mint(string name, string runtime, long tokenExpires, TimeSpan ttl)
+    {
+        if (!Auth.ValidName(name) || !Auth.ValidRuntime(runtime)) throw new ArgumentException("invalid worker name or runtime");
+        var nonce = "n1." + Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
+        lock (gate) { Prune(); live[Hash(nonce)] = new Entry(name, runtime, tokenExpires, DateTime.UtcNow.Add(ttl)); }
+        return nonce;
+    }
+
+    // Returns the claims once; afterwards (or for an unknown, malformed or expired nonce) null with "nonce-spent", "nonce-expired" or "nonce-unknown".
+    public (string Name, string Runtime, long TokenExpires, string? Error) Redeem(string? nonce)
+    {
+        if (string.IsNullOrEmpty(nonce) || nonce.Length > 100 || !nonce.StartsWith("n1.")) return ("", "", 0, "nonce-unknown");
+        var h = Hash(nonce);
+        lock (gate)
+        {
+            Prune();
+            if (spent.ContainsKey(h)) return ("", "", 0, "nonce-spent");
+            if (!live.Remove(h, out var e)) return ("", "", 0, "nonce-unknown");
+            spent[h] = DateTime.UtcNow;
+            if (e.NonceExpires < DateTime.UtcNow || e.TokenExpires < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return ("", "", 0, "nonce-expired");
+            return (e.Name, e.Runtime, e.TokenExpires, null);
+        }
+    }
+
+    // a nonce of an execution that was stopped before it redeemed: never redeemable afterwards
+    public void Forget(string name) { lock (gate) foreach (var k in live.Where(kv => kv.Value.Name == name).Select(kv => kv.Key).ToList()) { live.Remove(k); spent[k] = DateTime.UtcNow; } }
+    public int Live { get { lock (gate) { Prune(); return live.Count; } } }
+
+    void Prune()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var k in live.Where(kv => kv.Value.NonceExpires < now).Select(kv => kv.Key).ToList()) { live.Remove(k); spent[k] = now; }
+        foreach (var k in spent.Where(kv => (now - kv.Value).TotalHours > 24).Select(kv => kv.Key).ToList()) spent.Remove(k);
+    }
+}
 
 // The claims of a "q1." QC link: a capability for ONE pull request at ONE head, carrying no identity.
 sealed record QcClaims(int Pr, string Sha, int Item, string Nonce, long Expires);
@@ -39,6 +91,10 @@ static class Auth
     };
     public static readonly HashSet<string> InspectorVerbs = new() { "get-item", "inspect-facts", "approve-pr", "accept", "pr-checks", "model-tier" };
     public static readonly HashSet<string> WorkerVerbs = new() { "my-items" };
+    // A verb set of its own (cloud-worker-runtimes.md 2.6): a one-hour GitHub installation token for the work-orders repository, contents write
+    // only. Callable only by an item token of role owner minted for a runtime worker (the "rt" claim, from its w2): never by a local worker, an
+    // inspector, a QC session, the supervisor or the operator session.
+    public static readonly HashSet<string> GitCredentialVerbs = new() { "git-credential" };
     // The supervisor's verbs. The body keeps only the fields listed for the verb, whatever the caller sent.
     // manager-action is the plant manager's flow verb (docs/design/plant-manager.md 10e): one action per call, from ManagerItemActions (a rule script,
     // Verbs.Manager.ps1) or ManagerNameActions (the gateway's own plant). Its `by` is the credential's name, never the body's. The verbs that decide
@@ -78,6 +134,7 @@ static class Auth
     static byte[] UnB64(string s) { s = s.Replace('-', '+').Replace('_', '/'); return Convert.FromBase64String(s + new string('=', (4 - s.Length % 4) % 4)); }
     static bool Same(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
     public static bool ValidName(string n) => n.Length is > 0 and <= 40 && n.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_');
+    public static bool ValidRuntime(string s) => s.Length is > 0 and <= 20 && s.All(ch => char.IsAsciiLetterLower(ch) || char.IsAsciiDigit(ch) || ch == '-') && s != "local";
     public static bool ValidTag(string s) => s.Length is > 0 and <= 60 && s.All(ch => char.IsAsciiLetterLower(ch) || char.IsAsciiDigit(ch) || ch is '.' or '_' or '-');
 
     // Compared case-insensitively: "Operator" and "PLANT-MANAGER" name the same thing as the reserved words (worker-messaging.md 4.2).
@@ -95,13 +152,18 @@ static class Auth
 
     // rev: the name's revocation generation; 0 (never revoked) keeps the original format and MAC input
     public static string WorkerToken(string secret, string name, int rev = 0) => $"w1.{name}.{Mac(secret, rev == 0 ? "worker:" + name : $"worker:{name}:{rev}")}";
+    // A runtime worker's credential: name, runtime and expiry are inside the MAC, and the name's revocation generation as for w1.
+    public static string WorkerToken2(string secret, string name, string runtime, long expires, int rev = 0) =>
+        $"w2.{name}.{runtime}.{expires}.{Mac(secret, rev == 0 ? $"worker2:{name}:{runtime}:{expires}" : $"worker2:{name}:{runtime}:{expires}:{rev}")}";
     public static string ManagerToken(string secret, string name, int generation, int rev = 0) => rev == 0
         ? $"m1.{name}.{generation}.{Mac(secret, $"manager:{name}:{generation}")}" : $"m1.{name}.{generation}-{rev}.{Mac(secret, $"manager:{name}:{generation}:{rev}")}";
 
-    public static string MintItemToken(string secret, int item, string role, string assignment, string worker, TimeSpan ttl, int rev = 0)
+    // runtime: the runtime of the worker the assignment is offered to, from its w2 ("" for a local worker); it admits git-credential
+    public static string MintItemToken(string secret, int item, string role, string assignment, string worker, TimeSpan ttl, int rev = 0, string runtime = "")
     {
         var o = new JsonObject { ["i"] = item, ["r"] = role, ["a"] = assignment, ["w"] = worker, ["x"] = DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds() };
         if (rev != 0) o["g"] = rev;
+        if (runtime != "") o["rt"] = runtime;
         var payload = o.ToJsonString();
         var p = B64(Encoding.UTF8.GetBytes(payload));
         return $"i1.{p}.{Mac(secret, p)}";
@@ -119,6 +181,14 @@ static class Auth
             var last = t.LastIndexOf('.'); if (last <= 3) return null;
             var name = t[3..last]; if (!ValidName(name) || msg.Reserved.Contains(name)) return null;
             return Same(t, WorkerToken(secret, name, rev.Of(name))) ? new Principal("worker", name) : null;
+        }
+        if (t.StartsWith("w2."))
+        {
+            var parts = t.Split('.'); if (parts.Length != 5) return null;
+            var (name, runtime) = (parts[1], parts[2]);
+            if (!ValidName(name) || msg.Reserved.Contains(name) || !ValidRuntime(runtime) || !long.TryParse(parts[3], out var x) || parts[3] != x.ToString()) return null;
+            if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
+            return Same(t, WorkerToken2(secret, name, runtime, x, rev.Of(name))) ? new Principal("worker", name, Expires: x, Runtime: runtime) : null;
         }
         if (t.StartsWith("m1."))
         {
@@ -145,7 +215,7 @@ static class Auth
                 var x = j["x"]!.GetValue<long>(); if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
                 // minted before the last revocation of its worker name: refused with everything else of that name
                 if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(j["w"]!.ToString())) return null;
-                return new Principal("item", j["w"]!.ToString(), j["i"]!.GetValue<int>(), j["r"]!.ToString(), j["a"]!.ToString(), x);
+                return new Principal("item", j["w"]!.ToString(), j["i"]!.GetValue<int>(), j["r"]!.ToString(), j["a"]!.ToString(), x, Runtime: j["rt"]?.ToString() ?? "");
             }
             catch { return null; }
         }
@@ -198,6 +268,12 @@ static class Auth
         }
         if (p.Kind == "qc-click")
             return QcClickVerbs.Contains(verb) ? (body, null) : (null, $"a QC link cannot call '{verb}'");
+        if (GitCredentialVerbs.Contains(verb))
+        {
+            if (p.Role != "owner" || p.Runtime == "") return (null, $"'{verb}' is only for the owner of an item that a runtime worker holds");
+            if (body["item"]?.ToString() != p.Item.ToString()) return (null, $"this token is for item #{p.Item} only");
+            return (new JsonObject { ["item"] = p.Item, ["holder"] = p.Name, ["runtime"] = p.Runtime }, null);
+        }
         var allowed = p.Role == "inspector" ? InspectorVerbs : p.Role == "owner" ? OwnerVerbs : p.Role == "qc" ? QcVerbs : new HashSet<string>();
         if (!allowed.Contains(verb)) return (null, $"the {p.Role} role cannot call '{verb}'");
         var item = body["item"]?.ToString();

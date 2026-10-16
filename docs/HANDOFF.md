@@ -376,6 +376,17 @@ Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
   merge verb's already-merged path keeps the original record and `merged_at`. `POST /api/v1/items/{n}/resettle` (operator token, a reason)
   puts a finished merged item back into the settle step, for an item a person reopened because no release carried it. No auto-revert.
 
+w. **Built, off (2026-10-15): the cloud worker runtime adapter** (`docs/design/cloud-worker-runtimes.md` phase 3; `gateway/Runtimes/`,
+   `gateway/Plant.Runtimes.cs`, credentials in `gateway/Auth.cs`). An item labelled `runtime:cae-job` (or matched by `runtimes.routing`) is
+   given to a new execution of the Container Apps job `runtimes.caeJob.jobResourceId`, started through ARM with the gateway's managed identity
+   (package `Azure.Identity`); the execution redeems a one-time nonce for a `w2` credential, registers as `cae-<item>-<6 hex>` and is offered the
+   item with `runtimes.caeJob.ackSeconds`. Capacity, a daily budget, health, take-back of failed executions, park `runtime-failed` after
+   `maxFailuresPerPhase`, re-list at start, `/api/v1/status` and dashboard block `runtimes`, span and metric `fworker.runtime.executions`. The
+   operator marks an unhealthy runtime healthy again with `POST /api/v1/runtimes/cae-job/reset`. Every `runtimes.*` setting is off in
+   `config/instance.json` (smoke check). Open: the job, its identity and the Foundry deployment (rollout step 2), the runner image, the real job
+   resource id in `config/deploy.overrides.json`, and a live proof on tdd; unredeemed nonces are lost at a gateway restart (that execution
+   fails its redemption and is replaced).
+
 Closed on 2026-10-15 (issues #79 and #82):
 
 - **#79 A flaky master Build parked merged items as master-broken** (276, 272, 280). The settle step asked GitHub to re-run the failed jobs

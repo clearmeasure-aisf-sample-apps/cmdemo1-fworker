@@ -338,12 +338,12 @@ function Verb_sync_board($a) {
     $skipped = @()
     $seenFile = Get-SeenFile
     $seen = if (Test-Path $seenFile) { Get-Content -Raw $seenFile | ConvertFrom-Json -AsHashtable } else { @{} }
-    $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @()
+    $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @(); $rtLabels = @{}; $profiles = @{}
     # priorities: the priority label of each item that has one (top, high), for the order of the plan (Plant.Plan)
     $priorities = @{}
     # holds: the items labelled hold:owner (ownerHoldLabel); the plant manager's name actions leave the sessions that own one alone (Manager.cs)
     $holds = @(); $holdLabel = if (Test-Has $c 'ownerHoldLabel') { "$($c.ownerHoldLabel)" } else { 'hold:owner' }
-        # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled (their
+    # owned: every live owned claim with what the digest needs of it (worker-messaging.md 3.9); settling: items whose merge is being settled (their
     # owner was released at item.merged)
     $owned = @{}; $settling = @(); $unconfirmed = @()
     # pass_unmerged: every item with a PASS verdict that the gateway is to merge and has not merged yet, with why (a reason code) and since when
@@ -382,8 +382,10 @@ function Verb_sync_board($a) {
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
             $prio = Get-ItemPriority $it.labels; if ($prio) { $priorities["$n"] = $prio }
             if (Test-NameIn $holdLabel $it.labels) { $holds += $n }
-            $merged = (Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha
-            $settled = $merged -and (Test-Has $s.merge 'done_at') -and $s.merge.done_at
+            # cloud-worker-runtimes.md 4.4: a runtime:<kind> label forces the item's runtime; the test label selects the cheapest model profile
+            $rtl = @($it.labels | Where-Object { $_ -match '^runtime:[a-z0-9-]{1,20}$' } | Select-Object -First 1)
+            if ($rtl.Count -gt 0) { $rtLabels["$n"] = ([string]$rtl[0]).Substring(8) }
+            if ($c.testLabel -and (Test-NameIn $c.testLabel $it.labels)) { $profiles["$n"] = 'testing' }
             if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) {
                 # issue 114: a closed item with a merge record that is not done was stranded by an older gateway (262, 280): its settle is re-armed
                 if ($merged -and -not $settled -and -not $dry) {
@@ -629,7 +631,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------
