@@ -53,6 +53,9 @@ sealed class RunnerPool
     }
 
     void Stop() { stopping = true; foreach (var w in all.Values) Kill(w); }
+    public int Size => size;
+    // the live workers' processes (the memory of /status, gateway/RunnerGate.cs)
+    public IEnumerable<Process> Processes() => all.Values.Select(w => w.P).ToList();
     static void Kill(Worker w) { try { if (!w.P.HasExited) w.P.Kill(true); } catch { } }
 
     // Ends a worker (once) and starts its replacement.
