@@ -177,7 +177,7 @@ again at the merge (two layers: the gateway's start-up check and the verb).
 
 ### 5.3 What a PASS does under `none`
 
-`validation-verdict` with PASS, after recording it as today, calls `Complete-NoMerge`:
+`validation-verdict` with PASS, after recording it as today, calls `Complete-NoMerge` (so do the merge endpoint of 17 and the manager's `merge-now` under `none`):
 
 1. records `verdict = PASS`, `ended = no-merge-policy` in the state;
 2. comments on the item and the pull request: "<env> run complete, not merged by policy";
@@ -447,7 +447,7 @@ New scenarios in a suite `environments` (appended at the end of `$SuiteDefs`, ad
 2. a tdd gateway never writes to board 679: the fake GitHub records every `updateProjectV2ItemFieldValue` and `addProjectV2ItemById` by project;
    the test asserts none names 679 (and, symmetrically, a prod gateway never writes to the tdd board);
 3. a tdd gateway never calls the merge endpoint: PASS on an `Auto Merge` item gives `pass-no-merge`, the comment, a closed unmerged PR, a deleted
-   branch, the card in Done; the fake's merge endpoint records zero calls; a direct `merge` call is refused `merge-disabled`;
+   branch, the card in Done; the fake's merge endpoint records zero calls; a direct `merge` verb call is refused `merge-disabled`;
 4. the start-up check: a gateway with `FACTORY_ENVIRONMENT=uat` and `FACTORY_BOARD_PROJECT=679`, or `FACTORY_MERGE_POLICY=auto`, or the prod
    instance name, never reaches `/ready` 200 and logs why;
 5. default policy: `FACTORY_ENVIRONMENT=tdd` with no `FACTORY_MERGE_POLICY` gives `none`; `prod` gives `auto`;
@@ -457,7 +457,7 @@ New scenarios in a suite `environments` (appended at the end of `$SuiteDefs`, ad
 8. roles: a trigger starts at most one execution per role; budgets stop the next; a role credential is refused for a verb outside its table (8.4);
    the manager's `merge-now` in tdd ends the item by policy and never calls the merge endpoint;
 9. start/stop: Stop refuses every new offer and execution start, lets running ones end, and survives a gateway restart (the snapshot ref);
-   dispatch order is Release Queue, Functional Testing, Development, Technical Design, Todo (16.2), and the capacity is never exceeded;
+   dispatch order is Functional Testing, Development, Technical Design, intake from Todo (16.2), and the capacity is never exceeded;
 10. owner actions: each action endpoint answers the same with the dashboard, the CLI and an MCP call (one journal line each, `via` differs);
    `merge` in tdd ends the item by policy and never calls GitHub's merge endpoint; a destructive MCP tool without `confirm` is refused; an `m1` credential is refused at `/mcp`.
 
