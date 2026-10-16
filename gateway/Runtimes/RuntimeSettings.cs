@@ -1,0 +1,84 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+
+// The runtimes block of the instance configuration (docs/design/cloud-worker-runtimes.md 4.3 to 4.5 and 5). Every runtime is off in the source
+// defaults (config/instance.json, asserted by tests/smoke.ps1); a deployment switches one on only in config/deploy.overrides.json, a code-owner path.
+sealed record RoutingRule(string Phase, string Runtime);
+
+sealed class CaeJobSettings
+{
+    public bool Enabled;
+    public int MaxConcurrent, MaxExecutionsPerDay;
+    public double AckSeconds = 300;                    // the offer window of a worker of this runtime: it covers the container start (4.4)
+    public int ReplicaTimeoutSeconds = 14400;          // the job's replicaTimeout; the w2 expires 15 minutes after it
+    public int MaxFailuresPerPhase = 2;                // failed executions of one item in one phase before the item is parked runtime-failed
+    public int UnhealthyAfterFailures = 2;             // executions in a row that never registered before the runtime is marked unhealthy
+    public double ListSeconds = 30;                    // how often the executions are read from ARM
+    public string JobResourceId = "", ArmEndpoint = "https://management.azure.com", ApiVersion = "2024-03-01", ManagedIdentityClientId = "",
+        Image = "", ContainerName = "fwrunner", Memory = "8Gi", GatewayUrl = "";
+    // The agent the job's container runs (FWRUNNER_AGENT of the fwrunner image): claude or codex. Each agent has its own job (its own identity
+    // and model variables); jobs.<agent> names it, and when it does it replaces jobResourceId. One agent is active at a time: the adapter
+    // lists and stops executions of the active agent's job only, so switching agents (a redeploy) needs the other job's executions drained first.
+    public string Agent = "claude";
+    public Dictionary<string, string> Jobs = new(StringComparer.Ordinal);
+    public static readonly string[] Agents = { "claude", "codex" };
+    public double Cpu = 4;
+    public bool On => Enabled && MaxConcurrent > 0 && JobResourceId != "";
+}
+
+sealed class RuntimeSettings
+{
+    public bool PreferConnected = true;
+    public List<RoutingRule> Routing = new();
+    public CaeJobSettings CaeJob = new();
+    public bool AnyOn => CaeJob.On;
+
+    public static RuntimeSettings Load(string scriptsDir)
+    {
+        var path = Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json");
+        JsonNode? root = null; try { root = JsonNode.Parse(File.ReadAllText(path)); } catch { }
+        return From(root?["runtimes"]);
+    }
+
+    public static RuntimeSettings From(JsonNode? r)
+    {
+        var s = new RuntimeSettings();
+        if (r is not JsonObject) return s;
+        static bool Num(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v >= 0;
+        if (r["preferConnected"] is JsonValue pc && pc.TryGetValue<bool>(out var pcb)) s.PreferConnected = pcb;
+        if (r["routing"] is JsonArray rules)
+            foreach (var x in rules)
+            {
+                var rt = x?["runtime"]?.ToString() ?? "";
+                if (rt == "local" || Auth.ValidRuntime(rt)) s.Routing.Add(new RoutingRule(x?["phase"]?.ToString() is { Length: > 0 } ph ? ph : "*", rt));
+            }
+        var c = r["caeJob"]; var j = s.CaeJob;
+        if (c is JsonObject)
+        {
+            double D(string k, double d) => Num(c[k]?.ToString(), out var v) ? v : d;
+            string S(string k, string d) => c[k] is JsonValue sv && sv.TryGetValue<string>(out var str) ? str : d;
+            j.Enabled = c["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var eb) && eb;
+            j.MaxConcurrent = (int)D("maxConcurrent", 0); j.MaxExecutionsPerDay = (int)D("maxExecutionsPerDay", 0);
+            j.AckSeconds = D("ackSeconds", 300); j.ReplicaTimeoutSeconds = (int)D("replicaTimeoutSeconds", 14400);
+            j.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); j.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
+            j.ListSeconds = Math.Max(1, D("listSeconds", 30)); j.Cpu = D("cpu", 4);
+            j.JobResourceId = S("jobResourceId", ""); j.ArmEndpoint = S("armEndpoint", j.ArmEndpoint).TrimEnd('/'); j.ApiVersion = S("apiVersion", j.ApiVersion);
+            j.ManagedIdentityClientId = S("managedIdentityClientId", ""); j.Image = S("image", ""); j.ContainerName = S("containerName", j.ContainerName);
+            j.Memory = S("memory", j.Memory); j.GatewayUrl = S("gatewayUrl", "");
+            var agent = S("agent", j.Agent).Trim().ToLowerInvariant(); if (CaeJobSettings.Agents.Contains(agent)) j.Agent = agent;
+            if (c["jobs"] is JsonObject jobs)
+                foreach (var (k, v) in jobs)
+                    if (CaeJobSettings.Agents.Contains(k.Trim().ToLowerInvariant()) && v is JsonValue jv && jv.TryGetValue<string>(out var id) && id != "") j.Jobs[k.Trim().ToLowerInvariant()] = id;
+            if (j.Jobs.TryGetValue(j.Agent, out var agentJob)) j.JobResourceId = agentJob;
+        }
+        return s;
+    }
+
+    // The runtime of an item in a phase: the item's runtime: label wins, then the first routing rule whose phase matches ("*" matches any), else local.
+    public string RouteFor(string phase, string label)
+    {
+        if (label != "") return label;
+        foreach (var r in Routing) if (r.Phase == "*" || string.Equals(r.Phase, phase, StringComparison.OrdinalIgnoreCase)) return r.Runtime;
+        return "local";
+    }
+}

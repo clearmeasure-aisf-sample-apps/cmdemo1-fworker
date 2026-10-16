@@ -27,6 +27,7 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     $t.mergeabilityWaitSeconds = 3; $t.mergeabilityPollSeconds = 1; $t.preMergeChecksWaitSeconds = 12; $t.preMergeChecksPollSeconds = 1
     $t.docsOnlyLegacyBefore = '2020-01-01T00:00:00Z'   # every item and state of a test is new; the legacy scenarios date theirs before it
     $t.updatedHeadWaitSeconds = 10; $t.sweepSeenCount = 1; $t.docsOnlyReleaseGraceSeconds = 4; $t.releaseCandidateTimeoutMinutes = 1; $t.masterGreenTimeoutMinutes = 2
+    $t.masterDefectCheckMinutes = 0.05   # (cirule.ps1: a master defect is looked at again every 3 s, not every 5 minutes)
     # one item per session (plant.oneItemPerSession) is on in the source defaults; the suites let one scripted session take many items, so it is off here
     # unless a suite sets it. The scenarios of the rule turn it on for their own gateway (FACTORY_ONE_ITEM_PER_SESSION, owner.ps1).
     $cfg.plant = @{ oneItemPerSession = $false }
@@ -34,7 +35,8 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     # scenario switches it on (FACTORY_INTAKE, owner.ps1)
     $cfg.intake = @{ enabled = $false }
     foreach ($k in $Config.Keys) { $cfg[$k] = $Config[$k] }
-    $cfgPath = Join-Path $work 'instance.test.json'; $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+    # __FAKE_URL__ in a suite's configuration is the fake's address (the fake ARM of the runtime suite)
+    $cfgPath = Join-Path $work 'instance.test.json'; ($cfg | ConvertTo-Json -Depth 12).Replace('__FAKE_URL__', "http://127.0.0.1:$($script:FakePort)") | Set-Content $cfgPath
     $fakeDll = Join-Path $script:Root 'tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll'
     $gwDll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'
     foreach ($d in $fakeDll, $gwDll) { if (-not (Test-Path $d)) { throw "build first: $d is missing" } }
@@ -244,4 +246,20 @@ function To-Verdict([int]$n, [int]$Pr, $Files = @('docs/a.md'), [bool]$DocsOnly 
     if ($HoldMerge) { Fake 'pr' @{ number = $pr2; delaySeconds = 3600 } | Out-Null }
     $v = Do-Verdict $n2 $pr2
     return @{ n = $n2; pr = $pr2; verdict = $v }
+}
+
+# Edits the item's state comment the way a lease end would (the fake keeps it as a comment): $Edit gets the state hashtable.
+function Set-ItemState([int]$Item, [scriptblock]$Edit) {
+    $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
+    $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
+    & $Edit $st
+    $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
+    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+}
+function Get-ItemState([int]$Item) {
+    $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
+    [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```').Groups[1].Value | ConvertFrom-Json -AsHashtable
+}
+function Expire-Claim([int]$Item, [string]$TakenBack = '') {
+    Set-ItemState $Item { param($st) $st.claim.lease_until = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o'); if ($TakenBack) { $st.claim.taken_back = $TakenBack } }
 }
