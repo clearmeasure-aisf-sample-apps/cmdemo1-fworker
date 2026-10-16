@@ -459,7 +459,7 @@ New scenarios in a suite `environments` (appended at the end of `$SuiteDefs`, ad
 9. start/stop: Stop refuses every new offer and execution start, lets running ones end, and survives a gateway restart (the snapshot ref);
    dispatch order is Release Queue, Functional Testing, Development, Technical Design, Todo (16.2), and the capacity is never exceeded;
 10. owner actions: each action endpoint answers the same with the dashboard, the CLI and an MCP call (one journal line each, `via` differs);
-   `merge-now` is refused outside prod; a destructive MCP tool without `confirm` is refused; an `m1` credential is refused at `/mcp`.
+   `merge` in tdd ends the item by policy and never calls GitHub's merge endpoint; a destructive MCP tool without `confirm` is refused; an `m1` credential is refused at `/mcp`.
 
 ## 14. Code-owner paths touched
 
@@ -492,9 +492,11 @@ real checks. Mitigations: docs-only scenarios already skip the code jobs through
 Open questions for the owner:
 
 1. One role job for all roles (chosen) or one job per role for separate identities and quotas?
-4. Adding the `ModelContextProtocol.AspNetCore` package to the gateway (18.1) needs the owner's yes; the fallback is a hand-written JSON-RPC route.
 2. A sandbox fork where tdd may merge, to exercise settle and the Release Queue live outside prod?
 3. Should uat run the whole catalog or only the cheap half (1, 2, 5, 12) to save CI minutes?
+4. Adding the `ModelContextProtocol.AspNetCore` package to the gateway (18.1) needs the owner's yes; the fallback is a hand-written JSON-RPC route.
+5. Entra for `/mcp`: an app registration per environment with app role `Factory.Owner` (18.1), or the operator token only?
+6. `/_build` shows `running` or `stopped` without a credential (16.1): acceptable, or behind the token?
 
 ## 16. Start and stop the factory, and dispatch
 
@@ -507,8 +509,8 @@ technique), read before the first sweep, so it survives a restart and a redeploy
 - **Start** (`POST /api/v1/factory/start`, operator token or MCP, with a reason): sets `running`, journals it, and starts a plant-manager run
   with ticket `factory-started`. The gateway dispatches (16.2) from that moment; the manager run handles what needs judgement on the board
   it reads (parked items, stale questions, the order of ties) and exits.
-- **Stop** (`POST /api/v1/factory/stop`): sets `stopped` (drain). No new offer, no new worker or role execution, no trigger fires (except the
-  owner's own actions). Running executions finish their current phase and end; a PASS still ends or merges by policy so nothing is left
+- **Stop** (`POST /api/v1/factory/stop`): sets `stopped` (drain). No new offer, no new worker, manager or keeper execution, no trigger of theirs fires. The operator
+  role's triggers (7.2: failed release, unhealthy runtime) still fire, and the owner's actions work. Running executions finish their current phase and end; a PASS still ends or merges by policy so nothing is left
   half-merged. When the last execution ends every role is at zero; `/status` shows `drained: true`. The sweep keeps running read-only for
   the dashboard and for settle in prod.
 
@@ -523,11 +525,16 @@ Two options were weighed:
 | Behaviour when the model is down or over quota | dispatch continues | the factory stops |
 | Judgement | the manager can reorder with `dispatch-hint` (pin, prioritize, skip for N minutes), within the same order rules | all |
 
+Admin authentication everywhere in sections 16 to 18 means the gateway's `admin` credential kind, the operator token.
+
 Recommendation: **the gateway dispatches.** At every sweep and every execution end, while `running` and below capacity
-(`runtimes.caeJob.maxConcurrent` and the daily cap), it offers the next ready item in this order: Release Queue (prod only: the items whose
-settle needs a worker), Functional Testing, Development, Technical Design, then intake from Todo (moves one card to Technical Design per free
-slot). Within a column: `priority:top`, `priority:high`, then a manager `dispatch-hint`, then the oldest move into the column. Blocked items
+(`runtimes.caeJob.maxConcurrent` and the daily cap), it offers the next ready item in this order: Functional Testing, Development, Technical Design, then intake from Todo. Intake is new gateway behaviour: it moves one in-scope card (own `env:` label) to Technical Design per free slot,
+within `keeper.maxNewItemsPerDay`. The Release Queue is not dispatched: its items wait for a promotion, which stays with the owner
+(`ReleaseQueue.cs`); the manager only reports `release-queue-aged`. That is the owner's ordering with the one column no worker can move. Within a column: `priority:top`, `priority:high`, then a manager `dispatch-hint`, then the oldest move into the column. Blocked items
 (dependencies, holds, parks, out of scope) are skipped. This is today's offer loop with the sort made explicit and an intake step added.
+
+Pull requests of the fworker repository that an operator run opens: merged by the operator run itself under its existing rules
+(`operator-session.md`, guard rails a to e, daily limit), as today; a protected path waits for the owner. No other role merges there.
 
 ### 16.3 The plant manager while running
 
@@ -548,7 +555,7 @@ the dashboard and a reason in every surface.
 | Start / Stop factory | `POST /api/v1/factory/start`, `/stop` (new) | starting and stopping tmux workers and the supervisor |
 | Unpark item | `POST /api/v1/items/{n}/unpark` (exists) | unparking closed or wrongly parked items (#82) |
 | Re-run failed CI jobs of the item's PR | `POST /api/v1/items/{n}/rerun-failed` (new; the manager's `rerun-failed` exists as a flow verb) | re-running flaky Builds by hand (#79) |
-| Merge a green PR now | `POST /api/v1/items/{n}/merge` (new; calls `Verb_merge -Gateway`, refused `merge-disabled` outside prod) | merging item 239's green PR behind an unprocessed PASS |
+| Merge a green PR now | `POST /api/v1/items/{n}/merge` (new; the gateway's own merge path of the sweep under `auto` in prod, `Complete-NoMerge` in tdd and uat (5.3); refused `no-pass` without a recorded PASS) | merging item 239's green PR behind an unprocessed PASS |
 | Resettle | `POST /api/v1/items/{n}/resettle` (exists) | putting a merged item back in settle (#114) |
 | Release or reassign an item | `POST /api/v1/items/{n}/release`, `/reassign?to=` (new, over the manager's `release-owner` and `pin`) | releasing items held by dropped owners (#74, #101) |
 | Pin / unpin an item to a worker | `POST /api/v1/items/{n}/pin?worker=`, `/unpin` (new over the flow verbs) | adding and removing `worker:` labels |
@@ -600,7 +607,7 @@ Action tools (every one takes `reason`; those marked * also need `confirm: true`
 | `factory_stop` * | `reason, confirm` | `{state:"stopped", draining:N}` |
 | `item_unpark` | `item, reason` | `{ok, park:null}` |
 | `item_rerun_ci` | `item, reason` | `{ok, runs:[id]}` |
-| `item_merge` * | `item, reason, confirm` | `{ok, merged_sha}` or refusal `merge-disabled` (tdd, uat), `checks-not-green`, `no-pass` |
+| `item_merge` * | `item, reason, confirm` | `{ok, merged_sha}` in prod, `{ok, ended:"no-merge-policy"}` in tdd and uat; refusals `checks-not-green`, `no-pass` |
 | `item_release` * | `item, reason, confirm` | `{ok, released:owner}` |
 | `item_reassign` | `item, worker, reason` | `{ok, pinned:worker}` |
 | `item_pin` / `item_unpin` | `item, worker?, reason` | `{ok}` |
@@ -617,10 +624,10 @@ Refusals come back as MCP tool errors carrying the gateway's exit code and refus
 
 - An MCP client is an untrusted model: it gets exactly the endpoint's guard rails, the same as the plant manager's (8.4), plus the owner's
   wider set of actions. It cannot mint or revoke credentials, switch messaging, change a protected path, approve, record a verdict or merge
-  outside prod; those have no tool.
+  on a pull request without a recorded PASS; those have no tool.
 - Destructive tools need `confirm: true` in the call; without it they answer a preview (`{wouldDo: ...}`) and change nothing. The tool
   descriptions say so, so a client shows the user the preview first.
-- Rate limits per token: 60 read calls and 10 action calls per minute, 100 actions per day per environment; `item_merge` follows the
+- Rate limits per token (`mcp.readPerMinute` 60, `mcp.actionsPerMinute` 10, `mcp.actionsPerDay` 100 per environment); `item_merge` follows the
   manager's merge cap; refused with 429 and `retryAfter`.
 - Every call is journaled with `via mcp` and the caller (token kind or Entra object id); MCP tool text from item titles or journals is
   returned as data inside JSON, never as instructions, and the inspector's AI-directed-text patterns (`inspector.aiDirectedText`) mark it.
