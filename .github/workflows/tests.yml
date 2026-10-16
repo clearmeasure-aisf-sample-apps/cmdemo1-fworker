@@ -5,7 +5,7 @@
 # content was tested as the pull request), so the time from a merge to its release is unchanged (a Build of master started by hand does wait for them). Run it alone with `gh workflow run Tests`.
 #
 # The suites are split over jobs so that each stays far below the timeout on a hosted runner (4 cores). The suites qc, messaging and manager
-# split themselves into 4 groups (run.ps1), so each gets a runner of its own; the others run side by side under run-all.ps1.
+# split themselves into 4 groups and owner into 2 (run.ps1; owner alone reached 39.5 of 40 minutes), so each gets a runner of its own; the others run side by side under run-all.ps1.
 # A new suite (a new entry in $SuiteDefs of tests/scenarios/run.ps1) must be added to one of the jobs below: the step "Every suite is in
 # a job" fails the run when one is missing.
 name: Tests

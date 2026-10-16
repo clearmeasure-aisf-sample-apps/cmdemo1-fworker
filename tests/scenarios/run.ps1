@@ -5,7 +5,7 @@
 #   -Suite name  exactly one suite, with its own port slot (see Set-TestPorts in lib.ps1), its own HOME and TMPDIR; run-all.ps1 starts many of these at once
 #   -Tier fast   skips the scenarios tagged [full] (lib.ps1 Get-ScenarioTier) and reports how many; the default here is full (everything), run-all.ps1 defaults to fast
 #   -ListScenarios  prints suite, scenario and tier, tab separated
-#   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json; the suites 'qc', 'messaging' and 'manager' default to 4 groups, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
+#   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json; the suites 'qc', 'messaging' and 'manager' default to 4 groups and 'owner' to 2, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
 #   -ListSuites  prints the suite names, one per line, in slot order (slot = line number, from 0)
 #   Start guards (guard.ps1): refuses with exit 4 when another run.ps1 or run-all.ps1 is active on this machine, or when the temp filesystem has less than
 #   -MinFreeDiskMb (default 2048) free; with less than -MinAvailableMb (default 1500) of memory a suite runs in half its groups. -Force starts anyway.
@@ -109,7 +109,7 @@ if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys
 if ($Suite -and -not @($SuiteDefs | Where-Object { $_.Name -eq $Suite }).Count) { Write-Host "unknown suite '$Suite'; known: $(($SuiteDefs | ForEach-Object { $_.Name }) -join ', ')"; exit 2 }
 
 # ---- qc runs as independent groups: this process starts them, waits (at most -GroupTimeoutMinutes), and adds up their results ---------------
-if ($Groups -le 0) { $Groups = $(if ($Suite -in 'qc', 'messaging', 'manager') { 4 } else { 1 }); if ($lowMemory -and $Groups -gt 1) { $Groups = [int]($Groups / 2); Write-Host "memory is short: $Groups groups at once" } }
+if ($Groups -le 0) { $Groups = $(if ($Suite -in 'qc', 'messaging', 'manager') { 4 } elseif ($Suite -eq 'owner') { 2 } else { 1 }); if ($lowMemory -and $Groups -gt 1) { $Groups = [int]($Groups / 2); Write-Host "memory is short: $Groups groups at once" } }
 if ($Groups -gt 10) { Write-Host "-Groups ${Groups}: at most 10 (each group has a port range of 100 inside the 1000 of its suite)"; exit 2 }
 if ($Group -ge $Groups) { Write-Host "-Group $Group is outside -Groups $Groups (groups are numbered from 0)"; exit 2 }
 if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
