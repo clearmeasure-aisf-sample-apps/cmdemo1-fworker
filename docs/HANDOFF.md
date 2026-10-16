@@ -311,6 +311,23 @@ Closed on 2026-10-15 (issue #103):
   `base.updated` only when its pull request has a merge conflict with master (`reason: "conflict"`, also covers the silent wait of #56), and the
   gateway brings a behind branch up to date only right before it merges a PASS (once per verdict). `every-move` keeps the old behaviour (the owner
   suite runs with it; `FACTORY_BASE_UPDATE_MODE` overrides). `docs/design/plant-manager.md` 6a. Open: not yet seen live on tdd.
+Closed on 2026-10-15 (issue #102):
+
+- **#102 One CI rule for flakes and pre-existing failures** (about 18 rejected rounds a day, 13 on acceptance shards). Only the gates (`ciGates`)
+  decide a head; a red head whose runs completed is re-run once when its failures are non-gate checks, known flaky (`masterFlakyChecks`, now both
+  shard families) or failing on master too (`pr.rerun[sha]`, judged on the new attempt); a failure master has as well costs no fix-forward round
+  and no demotion, is reported once (comment, operator `plant.event` `master-defect`), and once master passes it again the gateway merges master
+  into the branch. A park that ends by expiry or unpark resets `fix_forward_rounds` and `demotions`. `docs/design/plant-manager.md` 10e; scenarios
+  `ci rule: ...` (tests/scenarios/cirule.ps1, suites auto and owner). Open: the code-owner documents that list the operator stream's `plant.event`
+  codes (`docs/design/operator-session.md`, the factory-operator skill) do not name `master-defect` yet (owner pull request).
+Closed on 2026-10-15 (issue #105):
+
+- **#105 Digest noise.** `gateway-restarted` is reported only while an owner has not reconnected (`notReconnected` > 0); what the patrol reported
+  (keys, buckets, acknowledged) is carried over a graceful restart in the plant snapshot, so persisting conditions are not new again
+  (`gateway/DigestCarry.cs`); a question whose text the same session asked about the same item within `timing.questionDedupeMinutes` (60) and that is
+  still open is not relayed again (`202` with the first question's id, `duplicate: true`, `/status` `messaging.questionsDeduped`; it still counts for
+  the watchdog's `repeated-question`). The trust-mapping lines are
+  unchanged. Open: the supervisor's skill (owner review) does not describe `duplicate`; nothing depends on it.
 Closed on 2026-10-15 (issue #101):
 
 - **#101 Busy owners were taken back as quiet** (about 10 items a day, 308, 296 and 310 among them): lease rule 3 counted only verbs and a changed

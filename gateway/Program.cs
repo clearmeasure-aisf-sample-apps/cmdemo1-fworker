@@ -1547,6 +1547,17 @@ if (messaging.Enabled && messaging.TestHooks)
     // the plant data the digest will be computed from (3.9, step 5a): owners as the sweep lists them, activity, waiting codes, refusals, parks
     app.MapGet("/api/v1/_test/plant-data", (HttpContext ctx) => Who(ctx).Kind != "admin" ? Results.StatusCode(403) : Results.Text(plant.PlantData().ToJsonString(), "application/json"));
 
+    // issue 105: the plant snapshot as a graceful stop writes it, and its restore as the next start runs it (the digest's memory is part of it)
+    app.MapGet("/api/v1/_test/plant-snapshot", (HttpContext ctx) => Who(ctx).Kind != "admin" ? Results.StatusCode(403) : Results.Text(plant.Snapshot().ToJsonString(), "application/json"));
+    app.MapPost("/api/v1/_test/plant-restore", async (HttpContext ctx) =>
+    {
+        if (Who(ctx).Kind != "admin") return Results.StatusCode(403);
+        string text; using (var rd = new StreamReader(ctx.Request.Body)) text = await rd.ReadToEndAsync();
+        JsonNode? snap; try { snap = JsonNode.Parse(text); } catch { return Fail(400, "bad-json", "the body is a plant snapshot", 2); }
+        var (na, no, skipped) = plant.Restore(snap, snapshotMaxAge);
+        return Results.Json(new { ok = true, assignments = na, owners = no, skipped, digest = plant.DigestReportedCount() });
+    });
+
     // how many entries each bounded store holds, with its cap (the stress test and the limit scenarios read it); counts only, never a text or a name
     app.MapGet("/api/v1/_test/stores", (HttpContext ctx) =>
     {
@@ -1980,6 +1991,12 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 foreach (var a in acts)
                     if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
                         plant.NoteMergeRefused(dItem, int.TryParse(ao["roundTrip"]?.ToString(), out var drt) ? drt : 1);
+                // issue 102: a red that only repeats a defect of the base branch is reported once to the operator (it costs the item nothing)
+                foreach (var a in acts)
+                    if (a is JsonObject mo && mo["item"] is JsonValue mi && mi.TryGetValue<int>(out var mItem)
+                        && ((mo["action"]?.ToString() == "awaiting-checks" && mo["result"] is JsonObject mr && mr["outcome"]?.ToString() == "master-defect" && mr["new"] is JsonValue mn && mn.TryGetValue<bool>(out var mNew) && mNew)
+                            || (mo["action"]?.ToString() == "pass-merge" && mo["masterDefectNew"] is JsonValue pn && pn.TryGetValue<bool>(out var pNew) && pNew)))
+                        plant.OperatorPlantEvent("master-defect", mItem);
                 if (items == null)
                 {
                     plant.SetReleaseQueue(j["release_queue"] as JsonArray);

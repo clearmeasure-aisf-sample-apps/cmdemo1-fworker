@@ -43,7 +43,7 @@
     "^\\.github/ISSUE_TEMPLATE/"
   ],
   "releaseCheckName": "release",
-  "masterFlakyChecks": ["^Acceptance Tests \\[shard \\d+/\\d+\\]$"],
+  "masterFlakyChecks": ["^Acceptance Tests( \\(ARM SQLite\\))? \\[shard \\d+/\\d+\\]$"],
   "masterIgnoredChecks": ["release", "packages", "architecture"],
   "masterCodeChecks": ["Integration Build (SQL container)"],
   "octopus": {
@@ -113,6 +113,7 @@
     "pinFallbackMinutes": 30,
     "autoUnparkMax": 3,
     "awaitingChecksParkMinutes": 60,
+    "masterDefectCheckMinutes": 5,
     "docsOnlyReleaseGraceSeconds": 120,
     "qcLinkDays": 7,
     "qcLeaseMinutes": 5,
@@ -147,6 +148,7 @@
     "mgrVerbErrorMinutes": 10,
     "mgrRestartMinutes": 30,
     "mgrReleaseQueueMinutes": 60,
+    "questionDedupeMinutes": 60,
     "baseUpdateDebounceSeconds": 20,
     "sweepMinSeconds": 60,
     "journalWaitingMinutes": 30
