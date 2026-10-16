@@ -2115,7 +2115,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                         plant.OperatorPlantEvent("master-defect", mItem);
                 if (items == null)
                 {
-                    plant.SetReleaseQueue(j["release_queue"] as JsonArray);
+                    plant.SetReleaseQueue(j["release_queue"] switch { JsonArray ra => ra, JsonObject ro => new JsonArray(ro.DeepClone()), _ => null });   // (PowerShell sends a one-item queue as an object)
                     try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
                 }
                 foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())

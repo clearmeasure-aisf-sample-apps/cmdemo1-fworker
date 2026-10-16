@@ -1020,6 +1020,44 @@ $OwnerScenarios['owner: one item per session: a spent session that owns nothing 
     }
 }
 
+# Issue 96: an accepted assignment whose worker no longer owns the item is dropped at sweep time (two sweeps in a row), so it does not keep a spent
+# session from session.end. Two ways: another session took the claim over (the sweep names it the owner), and an item that sits in the Release
+# Queue (its item.complete was missed: owner and assignment are dropped once two sweeps found it queued).
+$OwnerScenarios['owner: a stale accepted assignment is dropped by the sweep and the spent session is told session.end [full]'] = {
+    $oldOne = $env:FACTORY_ONE_ITEM_PER_SESSION; $oldGrace = $env:FACTORY_TIMING_sessionEndGraceSeconds
+    $acc = { param($w, $i) @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $i -and $_.accepted -and $_.worker -eq $w }).Count }
+    $ends = { param($w) @(Get-WorkerEvents $w | Where-Object { $_.event -eq 'session.end' }).Count }
+    try {
+        $env:FACTORY_ONE_ITEM_PER_SESSION = '1'; $env:FACTORY_TIMING_sessionEndGraceSeconds = '3'; Restart-Gateway
+        # another session holds the claim now (a take-over the plant did not see)
+        Start-OwnerClient 'stale1' 'persistent-local'
+        $n = New-Item-Fake 'Stale assignment' 'x' ($OwnerLabels + 'worker:stale1')
+        Check 'the item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'stale1' $n).Count -gt 0 })
+        $r = Fo 'stale1' @('accept', '--item', $n, '--assignment', (Get-Assigned 'stale1' $n)[-1].assignment)
+        Check 'stale1 holds it' (Wait-Until -Seconds 20 { (& $acc 'stale1' $n) -eq 1 })
+        Set-ItemState $n { param($st) $st.claim.holder = 'other1'; $st.claim.worker = 'other1'; $st.claim.lease_until = (Get-Date).ToUniversalTime().AddHours(1).ToString('o') }
+        Check 'the sweep names the other session the owner' (Wait-Until -Seconds 40 { "$((Get-Plant).plant.owners."$n")" -eq 'other1' })
+        Check 'the stale accepted assignment is dropped' (Wait-Until -Seconds 120 { (& $acc 'stale1' $n) -eq 0 }) ((Get-Plant).plant.assignments | ConvertTo-Json -Compress)
+        Check 'and the spent session is told session.end' (Wait-Until -Seconds 30 { (& $ends 'stale1') -ge 1 })
+        Check 'the status counts it' ([int](Get-Plant).plant.staleAssignmentsDropped -ge 1)
+
+        # an item in the Release Queue whose item.complete was missed
+        Start-OwnerClient 'stale2' 'persistent-local'
+        $m = New-Item-Fake 'Queued item' 'x' ($OwnerLabels + 'worker:stale2')
+        Check 'the second item is offered' (Wait-Until -Seconds 40 { (Get-Assigned 'stale2' $m).Count -gt 0 })
+        $r = Fo 'stale2' @('accept', '--item', $m, '--assignment', (Get-Assigned 'stale2' $m)[-1].assignment)
+        Check 'stale2 holds it' (Wait-Until -Seconds 20 { (& $acc 'stale2' $m) -eq 1 })
+        $at = (Get-Date).ToUniversalTime().ToString('o')
+        Set-ItemState $m { param($st) $st.merge = @{ sha = ('d' * 40); merged_at = $at; awaiting = 'release-queue'; release = '1.0.1'; queued_at = $at } }
+        [void](Fake 'move' @{ number = $m; column = 'Release Queue' })
+        Check 'owner and assignment are dropped' (Wait-Until -Seconds 180 { (& $acc 'stale2' $m) -eq 0 -and "$m" -notin @((Get-Plant).plant.owners.PSObject.Properties.Name) }) (@{ releaseQueue = (Get-Plant).releaseQueue; owners = (Get-Plant).plant.owners; state = (Get-ItemState $m) } | ConvertTo-Json -Compress -Depth 6)
+        Check 'and the spent session is told session.end' (Wait-Until -Seconds 30 { (& $ends 'stale2') -ge 1 })
+    } finally {
+        Stop-OwnerClient 'stale1'; Stop-OwnerClient 'stale2'
+        $env:FACTORY_ONE_ITEM_PER_SESSION = $oldOne; $env:FACTORY_TIMING_sessionEndGraceSeconds = $oldGrace; Restart-Gateway
+    }
+}
+
 # Issue 109: a hold label (holdLabels, default hold:owner) is honoured like Demo: a person holds the item, so nothing is offered for it, its open offer
 # is dropped and claim-item is refused; without the label it is offered again.
 $OwnerScenarios['owner: a hold:owner label holds the item for a person: no offer, the open one dropped, claim-item refused; offered again without it'] = {
