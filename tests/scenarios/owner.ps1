@@ -185,6 +185,9 @@ $OwnerScenarios = [ordered]@{
     $seen = Wait-Until -Seconds 20 { @((Invoke-RestMethod "$base/api/v1/dashboard" -Headers $h).plant.workers | Where-Object { $_.name -eq 'ec2-cloud' -and $_.connected -and $_.type -eq 'claude-cloud' }).Count -eq 1 }
     Check 'the cloud session appears on the dashboard as connected' $seen
     $forged = try { Invoke-RestMethod "$base/api/v1/events?name=ec2-cloud&type=claude-cloud" -Headers @{ Authorization = 'Bearer w1.ec2-cloud.0000' } -TimeoutSec 3; $false } catch { $true }; Check 'a forged credential cannot register' $forged
+    # (the session is not in $script:Workers: end it here, or it stays connected and is offered the items of later scenarios)
+    try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
+    [void](Wait-Until -Seconds 20 { @((Invoke-RestMethod "$base/api/v1/dashboard" -Headers $h).plant.workers | Where-Object { $_.name -eq 'ec2-cloud' -and $_.connected }).Count -eq 0 })
 }
 
 'owner: a refused credential is visible on the event stream, not only on stderr [full]' = {
@@ -1198,6 +1201,8 @@ $OwnerScenarios['owner: an item waits for the items it depends on and is offered
 # Issues 97 and 99: work already started goes before new work (an orphan in Development is offered before an item in Technical Design), the status
 # lists orphans with their age, and every unowned item with why it waits (waiting, parked, held).
 $OwnerScenarios['owner: orphans are offered before new work, and the status says why every unowned item waits'] = {
+    foreach ($w in @($script:Workers.Keys)) { Stop-OwnerClient $w }    # ord1 must be the only session, so the new item waits at capacity
+    Check 'no session is left connected by an earlier scenario' (Wait-Until -Seconds 20 { @((Get-Plant).plant.workers | Where-Object { $_.connected }).Count -eq 0 }) ((Get-Plant).plant.workers | Where-Object { $_.connected } | ConvertTo-Json -Compress -Depth 3)
     try {
         $new = New-Item-Fake 'New work' 'x' $OwnerLabels
         $orphan = New-Item-Fake 'Started work, ownerless' 'x' $OwnerLabels 'Development'
