@@ -379,6 +379,8 @@ function Verb_sync_board($a) {
     $releaseQueue = @()
     # unparked: items whose park the sweep removed because they are closed (issue 82); the plant forgets their parks
     $unparked = @()
+    # parks: every parked item the sweep read (issue 99)
+    $parks = @()
     # design_waiting: open factory items in the backlog keeper's column (keeper.newItemColumn, Technical Design); fewer than keeper.minTechnicalDesign
     # send the keeper backlog-low (gateway/Keeper.cs)
     $designWaiting = 0; $designCol = if ((Test-Has $c 'keeper') -and (Test-Has $c.keeper 'newItemColumn')) { "$($c.keeper.newItemColumn)" } else { 'Technical Design' }
@@ -505,6 +507,7 @@ function Verb_sync_board($a) {
                 }
                 $held = Get-Park $s
                 if ($held) {
+                    $parks += @{ item = $n; column = $col; code = "$($held.reason)"; since = $held.at; until = $held.until }   # issue 99
                     if ($held.reason -eq 'inspector-escalated' -and $pr -and -not $dry) {
                         $info = Get-ItemInfo $n
                         if (Invoke-ClearHoldIfApproved $n $info $st $pr) {
@@ -584,6 +587,8 @@ function Verb_sync_board($a) {
             }
             $park = Get-Park $s
             if ($park) {
+                # issue 99: every park, for the status's list of unowned items and why they wait
+                $parks += @{ item = $n; column = $col; code = "$($park.reason)"; since = $park.at; until = $park.until }
                 if ($park.reason -eq 'development:awaiting-checks' -and (Test-Has $s 'awaiting_checks') -and -not $dry) {
                     $r = Invoke-AwaitingChecksLocked $n
                     $actions += @{ item = $n; action = 'awaiting-checks'; result = $r }
@@ -669,7 +674,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- event intake ---------------------------------------------------------------------------------------------------

@@ -474,3 +474,15 @@ A park written before its facts were recorded (`park.failed`, `park.head`) is le
 `timing.autoUnparkMax` times (default 3) per park code (`state.auto_unparks`): an item that breaks every session or every build is not retried for
 ever. Every other park (worker-failure, demotion-limit, same-criterion-repeated, inspector-escalated, stuck, the release-candidate timeouts) stays
 a decision for a person (`POST /api/v1/items/{n}/unpark`).
+## 17. Work already started first; why every unowned item waits (2026-10-15, issues 97 and 99)
+
+`Plan` offers, after pinned items, the offers of columns past the intake column (`columns.ai[0]`, Technical Design) before new work: an item
+orphaned in Development, Functional Testing or Review by a take-back, a park or a lost session takes a free worker before a new item does.
+`/api/v1/status` shows:
+
+- `plant.orphans`: each unowned item past the intake column that waits for an owner, with its column, since when and `minutes`.
+- `plant.unowned`: every unowned item the factory knows of with why it waits, one row each, the first that applies: `parked` (code, since,
+  until; from the sweep's `parks`), `held` (`depends-on`, `on`), `offered` (worker, until), `waiting` (the waiting code, since); an orphan,
+  offered or waiting, also has `orphanSince` and `orphanMinutes`; `pass-unmerged` (a PASS the gateway is to merge, with its reason code),
+  `unconfirmed` (seen once on the board, offered at the next sweep), `release-queue` (merged, waiting for production). Column names and codes are
+  gated like the digest's. The lists are rebuilt by every sweep and are in memory.

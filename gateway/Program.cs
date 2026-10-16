@@ -58,6 +58,18 @@ static double AckSeconds(string scriptsDir)
     catch { }
     return 120;
 }
+// issue 97: the first column the factory works (columns.ai[0] of the configuration), its intake of new work
+static string IntakeColumnOf(string scriptsDir)
+{
+    try
+    {
+        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
+        if (root?["columns"]?["ai"] is JsonArray ai && ai.Count > 0 && ai[0]?.ToString() is { Length: > 0 } c) return c;
+    }
+    catch { }
+    return "Technical Design";
+}
+
 // timing.<key> of the config, FACTORY_TIMING_<key> first (tests); a value that is not a number of 0 or more is the default
 static double TimingValue(string scriptsDir, string key, double fallback)
 {
@@ -138,7 +150,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -2085,6 +2097,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 if (holdsComplete) plant.SetOwnerHeld(ownerHolds.ToList());
                 plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray, items);
                 plant.SetHeld(j["held"] as JsonArray, items);   // issue 65: items that wait for their dependencies
+                if (items == null) plant.SetSweepFacts(j["parks"] as JsonArray, j["unconfirmed"] as JsonArray);   // issue 99: why each unowned item waits (a full sweep: it read every item)
                 if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
                 // issue 117: what the sweep flags (a Release Queue card without a merge record): one plant event per item and code in this process
                 foreach (var f in j["flags"] as JsonArray ?? new JsonArray())

@@ -185,6 +185,9 @@ $OwnerScenarios = [ordered]@{
     $seen = Wait-Until -Seconds 20 { @((Invoke-RestMethod "$base/api/v1/dashboard" -Headers $h).plant.workers | Where-Object { $_.name -eq 'ec2-cloud' -and $_.connected -and $_.type -eq 'claude-cloud' }).Count -eq 1 }
     Check 'the cloud session appears on the dashboard as connected' $seen
     $forged = try { Invoke-RestMethod "$base/api/v1/events?name=ec2-cloud&type=claude-cloud" -Headers @{ Authorization = 'Bearer w1.ec2-cloud.0000' } -TimeoutSec 3; $false } catch { $true }; Check 'a forged credential cannot register' $forged
+    # (the session is not in $script:Workers: end it here, or it stays connected and is offered the items of later scenarios)
+    try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { }
+    [void](Wait-Until -Seconds 20 { @((Invoke-RestMethod "$base/api/v1/dashboard" -Headers $h).plant.workers | Where-Object { $_.name -eq 'ec2-cloud' -and $_.connected }).Count -eq 0 })
 }
 
 'owner: a refused credential is visible on the event stream, not only on stderr [full]' = {
@@ -1231,6 +1234,33 @@ $OwnerScenarios['owner: an item waits for the items it depends on and is offered
         [void](Invoke-RestMethod "$repo/$d2" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json')
         Check 'both closed: the item is offered and no longer held' (Wait-Until -Seconds 40 { (Get-Assigned 'dep1' $n).Count -gt 0 -and @((Get-Plant).plant.held | Where-Object { $_.item -eq $n }).Count -eq 0 }) ((Get-Plant).plant | ConvertTo-Json -Compress -Depth 5)
     } finally { Stop-OwnerClient 'dep1' }
+}
+
+# Issues 97 and 99: work already started goes before new work (an orphan in Development is offered before an item in Technical Design), the status
+# lists orphans with their age, and every unowned item with why it waits (waiting, parked, held).
+$OwnerScenarios['owner: orphans are offered before new work, and the status says why every unowned item waits'] = {
+    foreach ($w in @($script:Workers.Keys)) { Stop-OwnerClient $w }    # ord1 must be the only session, so the new item waits at capacity
+    Check 'no session is left connected by an earlier scenario' (Wait-Until -Seconds 20 { @((Get-Plant).plant.workers | Where-Object { $_.connected }).Count -eq 0 }) ((Get-Plant).plant.workers | Where-Object { $_.connected } | ConvertTo-Json -Compress -Depth 3)
+    try {
+        $new = New-Item-Fake 'New work' 'x' $OwnerLabels
+        $orphan = New-Item-Fake 'Started work, ownerless' 'x' $OwnerLabels 'Development'
+        $parked = New-Item-Fake 'Parked work' 'x' $OwnerLabels
+        $r = F 'w1' @('claim-item', '--item', $parked, '--column', 'Technical Design'); CheckExit 'a claim writes the state' $r 0
+        $now = (Get-Date).ToUniversalTime()
+        Set-ItemState $parked { param($st) $st.Remove('claim'); $st.park = @{ reason = 'worker-failure'; at = $now.ToString('o'); until = $now.AddHours(24).ToString('o') } }
+        $dep = New-Item-Fake 'Dependency' 'x' $OwnerLabels 'Todo'
+        $held = New-Item-Fake 'Held work' "Depends on #$dep" $OwnerLabels
+        # a row, or an empty object while the sweep has not listed the item yet (strict mode: no index into an empty array)
+        $row = { param($i) $x = @((Get-Plant).plant.unowned | Where-Object { $_.item -eq $i }); if ($x.Count) { $x[0] } else { [pscustomobject]@{ state = ''; code = '' } } }
+        Check 'no worker yet: both wait, the orphan is listed with its age' (Wait-Until -Seconds 40 { (& $row $new).state -eq 'waiting' -and (& $row $orphan).state -eq 'waiting' -and @((Get-Plant).plant.orphans | Where-Object { $_.item -eq $orphan -and $_.column -eq 'Development' -and $null -ne $_.minutes }).Count -eq 1 }) ((Get-Plant).plant.unowned | ConvertTo-Json -Compress -Depth 4)
+        Check 'the new item is no orphan' (@((Get-Plant).plant.orphans | Where-Object { $_.item -eq $new }).Count -eq 0)
+        Check 'the parked item says parked, with its code' (Wait-Until -Seconds 30 { (& $row $parked).state -eq 'parked' -and (& $row $parked).code -eq 'worker-failure' }) ((& $row $parked) | ConvertTo-Json -Compress)
+        Check 'the held item says held, depends-on' (Wait-Until -Seconds 30 { (& $row $held).state -eq 'held' -and (& $row $held).code -eq 'depends-on' }) ((& $row $held) | ConvertTo-Json -Compress)
+        Start-OwnerClient 'ord1' 'persistent-local'
+        Check 'a free worker takes the orphan first' (Wait-Until -Seconds 40 { (Get-Assigned 'ord1' $orphan).Count -gt 0 })
+        Check 'and is not offered the new item meanwhile' ((Get-Assigned 'ord1' $new).Count -eq 0)
+        Check 'the new item waits, at capacity' ((& $row $new).state -eq 'waiting' -and (& $row $new).code -eq 'at-capacity') ((& $row $new) | ConvertTo-Json -Compress)
+    } finally { Stop-OwnerClient 'ord1' }
 }
 
 # The launcher watchdog (docs/launcher.md): a spent session that owns nothing and is still connected sessionRestartMinutes later (it did not act on
