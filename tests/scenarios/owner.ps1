@@ -344,7 +344,7 @@ $OwnerScenarios['owner: a pinned item is only ever offered to its worker: after 
     Start-Sleep -Seconds 6
     Check 'the idle worker beside it was never offered the item' ((Get-Assigned 'pin-b' $n1).Count -eq 0 -and @((& $offersOf $n1) | Where-Object { $_ -ne 'pin-a' }).Count -eq 0) ((& $offersOf $n1) -join ',')
     $j = Get-Journal $n1
-    Check 'the journal says waiting, and never reassigned' ($j -contains 'waiting' -and $j -notcontains 'reassigned' -and @((Get-FakeIssue $n1).comments | Where-Object { $_.body -match "the pinned worker 'pin-a' did not confirm" }).Count -eq 1) ($j -join ',')
+    Check 'the journal says waiting, and never reassigned' ($j -contains 'waiting' -and $j -notcontains 'reassigned' -and @((Get-FakeIssue $n1).comments | Where-Object { $_.body -match "the pinned worker 'pin-a' did not confirm" -and $_.body -notlike '<!-- factory-state:*' }).Count -eq 1) ($j -join ',')
     $ev = (Get-Assigned 'pin-a' $n1)[-1]
     $r = Wait-Until -Seconds 30 { $script:PinAccept = Fo 'pin-a' @('accept', '--item', $n1, '--assignment', ((Get-Assigned 'pin-a' $n1)[-1]).assignment); $script:PinAccept.exit -eq 0 }
     Check 'the pinned worker accepts a later offer and owns the item' ($r -and @((Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n1" -and $_.Value -eq 'pin-a' }).Count -eq 1) ($script:PinAccept | ConvertTo-Json -Compress)
@@ -644,7 +644,9 @@ $OwnerScenarios['pass-merge: checks still running at the verdict: the answer is 
     Check 'merged when the checks are green, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
     $mw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match '<!-- plant event=merge-waiting ' }).Count
     Check 'journal: merge-waiting once, however many sweeps found it waiting' ($mw -eq 1) "$mw"
-    Check 'merged once' ((Pm-MergeComments $x.n $x.pr) -eq 1)
+    # the merge comment follows the merge after the state write (Verbs.Merge.ps1): wait for it, then make sure no second merge adds another
+    [void](Wait-Until -Seconds 20 { (Pm-MergeComments $x.n $x.pr) -ge 1 }); Start-Sleep -Seconds 3
+    Check 'merged once' ((Pm-MergeComments $x.n $x.pr) -eq 1) "$(Pm-MergeComments $x.n $x.pr)"
     Stop-OwnerClient 'pmw'
 }
 

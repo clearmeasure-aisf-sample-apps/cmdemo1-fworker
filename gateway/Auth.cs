@@ -9,7 +9,8 @@ using System.Text.Json.Nodes;
 //             execution, docs/design/cloud-worker-runtimes.md 2.6): bound to its runtime and an expiry, delivered only by redeeming a one-time nonce
 //             (RuntimeNonces, POST /api/v1/runtime/redeem). The runtime a registration claims is trusted only from a w2; a w1 is always "local".
 //   item      "i1.<payload>.<hmac>" minted at an assignment for ONE item and ONE role: the only credential that acts on an item.
-//   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs and nothing else (worker-messaging.md 4.6).
+//   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs (worker-messaging.md 4.6) and the plant manager's flow verb
+//             manager-action (docs/design/plant-manager.md 10e), which never merges, approves, records a verdict or clears a hold.
 //   operator  "o1.<name>.<generation>.<hmac>" the factory operator SESSION (Operator.cs, docs/design/operator-session.md): not the admin token. It
 //             calls no verb, mints and revokes nothing, and is admitted only at the endpoints that name it (Program.cs, Admitted and OperatorActive):
 //             messaging, the questions, the supervisor's budget, its release checks, a worker's capacity, drain and resume, and the read-only metrics.
@@ -86,7 +87,7 @@ static class Auth
     public static readonly HashSet<string> OwnerVerbs = new()
     {
         "get-item", "append-body", "comment", "accept", "release", "claim-item", "record-review", "complete", "open-pr", "update-pr", "pr-checks",
-        "wait-for-checks", "validation-verdict", "merge", "model-tier", "get-delivery", "publish-demo"
+        "wait-for-checks", "validation-verdict", "merge", "model-tier", "get-delivery", "private-build", "publish-demo"
     };
     public static readonly HashSet<string> InspectorVerbs = new() { "get-item", "inspect-facts", "approve-pr", "accept", "pr-checks", "model-tier" };
     public static readonly HashSet<string> WorkerVerbs = new() { "my-items" };
@@ -95,11 +96,32 @@ static class Auth
     // inspector, a QC session, the supervisor or the operator session.
     public static readonly HashSet<string> GitCredentialVerbs = new() { "git-credential" };
     // The supervisor's verbs. The body keeps only the fields listed for the verb, whatever the caller sent.
-    public static readonly HashSet<string> ManagerVerbs = new() { "get-item", "pr-checks", "get-delivery" };
+    // manager-action is the plant manager's flow verb (docs/design/plant-manager.md 10e): one action per call, from ManagerItemActions (a rule script,
+    // Verbs.Manager.ps1) or ManagerNameActions (the gateway's own plant). Its `by` is the credential's name, never the body's. The verbs that decide
+    // about the work itself are never in this list: merge, approve-pr, validation-verdict, clear-hold, complete, move-next, claim-item, accept.
+    public static readonly HashSet<string> ManagerVerbs = new() { "get-item", "pr-checks", "get-delivery", "manager-action" };
     static readonly Dictionary<string, string[]> ManagerBodyFields = new()
     {
-        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["get-delivery"] = ["item", "commit"]
+        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["get-delivery"] = ["item", "commit"],
+        ["manager-action"] = ["item", "action", "policy", "reason", "worker", "level"]
     };
+    // The backlog keeper (Keeper.cs, docs/design/backlog-keeper.md): two read verbs, the board read, and its five verbs, which never merge, approve,
+    // record a verdict, clear a hold, claim or move an existing card. Its `by` is the credential's name, never the body's.
+    public static KeeperSettings Keeper = new();
+    public static readonly HashSet<string> KeeperVerbs = new() { "get-item", "pr-checks", "backlog", "amend-criteria", "split-item", "create-item", "set-priority", "link-dependency" };
+    static readonly Dictionary<string, string[]> KeeperBodyFields = new()
+    {
+        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["backlog"] = [],
+        ["amend-criteria"] = ["item", "criterion", "replacement", "follow_up", "unpark", "policy", "reason"],
+        ["split-item"] = ["item", "children", "chain", "policy", "reason"],
+        ["create-item"] = ["title", "body", "labels", "priority", "pin", "depends_on", "policy", "reason"],
+        ["set-priority"] = ["item", "level", "policy", "reason"],
+        ["link-dependency"] = ["item", "depends_on", "remove", "policy", "reason"]
+    };
+    public static string KeeperToken(string secret, string name, int generation, int rev = 0) => rev == 0
+        ? $"k1.{name}.{generation}.{Mac(secret, $"keeper:{name}:{generation}")}" : $"k1.{name}.{generation}-{rev}.{Mac(secret, $"keeper:{name}:{generation}:{rev}")}";
+    public static readonly HashSet<string> ManagerItemActions = new() { "unpark", "release-owner", "pin", "unpin", "requeue", "prioritize", "rerun-failed" };
+    public static readonly HashSet<string> ManagerNameActions = new() { "drain", "resume", "restart-session" };
     // Role "qc": the session that runs a PR's environment. No release, no merge, no comment, no approval: only its own job.
     public static readonly HashSet<string> QcVerbs = new() { "get-item", "accept", "qc-job", "qc-progress", "qc-report", "qc-fail", "qc-heartbeat", "qc-stopped" };
     // Principal "qc-click": a person who holds a link. Not a credential: the /qc handlers build it after checking the link, and /api/v1/verbs never yields one.
@@ -178,6 +200,11 @@ static class Auth
             var parts = t.Split('.'); if (parts.Length != 4 || !msg.OperatorEnabled || !msg.OperatorNames.Contains(parts[1])) return null;
             return Same(t, OperatorToken(secret, parts[1], msg.OperatorTokenGeneration, rev.Of(parts[1]))) ? new Principal("operator", parts[1]) : null;
         }
+        if (t.StartsWith("k1."))
+        {   // only while keeper.enabled, only a name of keeper.allowedNames, bound to keeper.tokenGeneration and the name's revocation generation
+            var parts = t.Split('.'); if (parts.Length != 4 || !Keeper.Enabled || !Keeper.Names.Contains(parts[1])) return null;
+            return Same(t, KeeperToken(secret, parts[1], Keeper.TokenGeneration, rev.Of(parts[1]))) ? new Principal("keeper", parts[1]) : null;
+        }
         if (t.StartsWith("i1."))
         {
             var parts = t.Split('.'); if (parts.Length != 3) return null;
@@ -222,6 +249,15 @@ static class Auth
             if (!ManagerVerbs.Contains(verb)) return (null, $"the manager role cannot call '{verb}'");
             var kept = new JsonObject();
             foreach (var f in ManagerBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
+            if (verb == "manager-action") kept["by"] = p.Name;
+            return (kept, null);
+        }
+        if (p.Kind == "keeper")
+        {
+            if (!KeeperVerbs.Contains(verb)) return (null, $"the keeper role cannot call '{verb}'");
+            var kept = new JsonObject();
+            foreach (var f in KeeperBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
+            if (verb is not ("get-item" or "pr-checks" or "backlog")) kept["by"] = p.Name;
             return (kept, null);
         }
         if (p.Kind == "operator") return (null, $"an operator session credential cannot call '{verb}': it calls no verb");

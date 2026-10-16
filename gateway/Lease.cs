@@ -7,13 +7,19 @@ using System.Text.RegularExpressions;
 //    owner for that item arrives before the lease the accept answered (or schedule.clientStartMinutes), the item is taken back.
 // 2. The owner lease is renewed by the gateway: after any verb call of the owner for the item, and at every heartbeat whose activity summary names
 //    the item ("#N"); at most once per schedule.leaseRenewMinutes per item (issue 48).
-// 3. An owned item with no verb or poll of its owner for schedule.staleItemMinutes and an activity summary that did not change meanwhile gets one
-//    item.check trigger; nothing from the owner within schedule.staleConfirmMinutes after it, and the item is taken back.
+// 3. An owned item with no verb or poll of its owner for schedule.staleItemMinutes, an activity summary that did not change meanwhile and no local
+//    progress reported for it gets one item.check trigger; nothing from the owner within schedule.staleConfirmMinutes after it, and the item is taken
+//    back. Local progress (issue 101) is what the owner's stream client sees on its machine while the session waits on a long subagent without
+//    calling a verb: a commit or a changed file in the item's worktree or work directory, a build or test process at work, a progress file a
+//    subagent touched (plugin/scripts/lib/Progress.ps1). The client sends it with its heartbeat; it counts like a verb for rule 3, renews the lease
+//    like a summary that names the item, and answers an open item.check. It counts only while the session itself (a verb of its own or a changed
+//    summary) was active within schedule.progressMaxMinutes (180): a machine that stays busy while the session is stuck does not hold the item for
+//    ever. The client's own claim-item --renew (renewed_by client) is progress, not the session's verb.
 // Taking back = the rule script expire-claim ends the claim's lease (the claim stays, marked taken_back), the plant forgets the owner and the next
 // sweep offers the item again with mode resume, first to another worker. Everything here is in memory, like the rest of the plant.
 sealed class LeaseSettings
 {
-    public double LeaseRenewMinutes = 5, StaleItemMinutes = 15, StaleConfirmMinutes = 3, ClientStartMinutes = 5;
+    public double LeaseRenewMinutes = 5, StaleItemMinutes = 15, StaleConfirmMinutes = 3, ClientStartMinutes = 5, ProgressMaxMinutes = 180;
 
     public static LeaseSettings Load(string scriptsDir)
     {
@@ -25,7 +31,7 @@ sealed class LeaseSettings
         return new LeaseSettings
         {
             LeaseRenewMinutes = D("leaseRenewMinutes", 5), StaleItemMinutes = D("staleItemMinutes", 15), StaleConfirmMinutes = D("staleConfirmMinutes", 3),
-            ClientStartMinutes = D("clientStartMinutes", 5)
+            ClientStartMinutes = D("clientStartMinutes", 5), ProgressMaxMinutes = D("progressMaxMinutes", 180)
         };
     }
 }
@@ -42,10 +48,12 @@ sealed partial class Plant
     // acceptance, and the worker an item was taken back from (it is not offered the item again first)
     readonly Dictionary<int, string> acceptedOwner = new();
     readonly Dictionary<int, DateTime> lastCall = new(), lastRenew = new();
-    readonly Dictionary<int, (string Name, DateTime At, DateTime SummaryAt)> checks = new();
+    readonly Dictionary<int, (string Name, DateTime At, DateTime SummaryAt, DateTime QuietSince)> checks = new();
     readonly Dictionary<int, (string Name, string Assignment, DateTime StartBy)> clientAccepted = new();
     readonly Dictionary<int, string> takenBackFrom = new();
-    long renewals, renewFailures, checksSent, takenBack;
+    // per item: the latest local progress its owner's client reported (who, when it was seen on the machine, what showed it)
+    readonly Dictionary<int, (string Name, DateTime At, string Source)> lastProgress = new();
+    long renewals, renewFailures, checksSent, takenBack, progressReports, checksAnsweredByProgress;
     static readonly Regex ItemRefRx = new(@"#(\d{1,7})\b", RegexOptions.CultureInvariant);
     // the triggers after which an owner waits for something else without calling a verb: no item.check then
     static readonly HashSet<string> LeaseWaits = new() { "item.parked", "qc.requested", "qc.reset", "item.merged", "inspector.escalated" };
@@ -62,7 +70,7 @@ sealed partial class Plant
             // (called after OnVerb, so an accepted own item already names its owner)
             if (verb == "accept" && ok && ownerOf.TryGetValue(item, out var accepter) && accepter == name)
             {
-                acceptedOwner[item] = name; takenBackFrom.Remove(item); checks.Remove(item); lastRenew[item] = now; lastCall[item] = now;
+                acceptedOwner[item] = name; takenBackFrom.Remove(item); checks.Remove(item); lastRenew[item] = now; lastCall[item] = now; lastProgress.Remove(item);
                 if (byClient)
                 {
                     var lease = Time(response?["lease_until"]);
@@ -72,6 +80,12 @@ sealed partial class Plant
             }
             if (!(ownerOf.TryGetValue(item, out var owner) && owner == name)) return;
             if (byClient) return;                                 // the client's own accept is not the session at work
+            // the client's own answer to item.check (it saw work on its machine): progress, not the session's verb, so it counts only within the cap
+            if (verb == "claim-item" && request?["renewed_by"]?.ToString() == "client")
+            {
+                if (ok && ProgressCounts(item, name, now)) { checks.Remove(item); lastProgress[item] = (name, now, "client-renew"); }
+                return;
+            }
             lastCall[item] = now; checks.Remove(item); clientAccepted.Remove(item);
             if (verb is "" or "accept" or "claim-item" or "release") return;
             if (RenewDue(item, now)) renewFor = name;
@@ -92,6 +106,42 @@ sealed partial class Plant
         }
         foreach (var item in due) Renew(item, name);
     }
+
+    // A heartbeat's local progress report: per item, when the owner's client last saw work on it on its machine, and what showed it. Only items this
+    // name owns count; a time in the future is taken as now, and one older than what is known changes nothing. Progress newer than the start of the
+    // quiet spell an open item.check was sent for answers that check. Progress within staleItemMinutes renews the lease when due. Returns the items
+    // it counted for.
+    public List<int> NoteProgress(string name, IEnumerable<(int Item, DateTime At, string Source)> reports)
+    {
+        var counted = new List<int>(); var due = new List<int>();
+        lock (gate)
+        {
+            var now = DateTime.UtcNow;
+            foreach (var (item, reported, source) in reports)
+            {
+                if (item <= 0 || !(ownerOf.TryGetValue(item, out var o) && o == name) || counted.Contains(item)) continue;
+                var at = reported > now ? now : reported;
+                if (lastProgress.TryGetValue(item, out var known) && known.Name == name && known.At >= at) { counted.Add(item); continue; }
+                lastProgress[item] = (name, at, source); progressReports++; counted.Add(item);
+                // recent progress within the cap answers an open check and renews the lease; past the cap only the session itself does
+                if ((now - at).TotalMinutes >= Lease.StaleItemMinutes || !ProgressCounts(item, name, now)) continue;
+                if (checks.TryGetValue(item, out var ck) && ck.Name == name && at > ck.QuietSince) { checks.Remove(item); checksAnsweredByProgress++; }
+                if (RenewDue(item, now)) due.Add(item);
+            }
+        }
+        foreach (var item in due) Renew(item, name);
+        return counted;
+    }
+
+    // The session's own last activity on an item (a verb or poll of it, a change of its summary), and whether local progress still counts: only
+    // within schedule.progressMaxMinutes of it (0 switches the cap off). Under the gate.
+    DateTime SessionActive(int item, string name)
+    {
+        var a = lastCall.TryGetValue(item, out var lc) ? lc : default;
+        var sa = store.Recipients.TryGetValue(name, out var r) ? r.SummaryAt : default;
+        return sa > a ? sa : a;
+    }
+    bool ProgressCounts(int item, string name, DateTime now) => Lease.ProgressMaxMinutes <= 0 || SessionActive(item, name) == default || (now - SessionActive(item, name)).TotalMinutes < Lease.ProgressMaxMinutes;
 
     bool RenewDue(int item, DateTime now)
     {
@@ -133,6 +183,7 @@ sealed partial class Plant
                 if (!(ownerOf.TryGetValue(item, out var o) && o == ca.Name)) { clientAccepted.Remove(item); continue; }
                 if (now >= ca.StartBy) { clientAccepted.Remove(item); back.Add((item, ca.Name, "client-accepted-not-started")); }
             }
+            foreach (var k in lastProgress.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) lastProgress.Remove(k);
             foreach (var (item, owner) in ownerOf.ToList())
             {
                 if (back.Any(b => b.Item == item) || takingBack.Contains(item) || seamOwned.Contains(item)) continue;
@@ -145,7 +196,10 @@ sealed partial class Plant
                 // full quiet window from now, not from when it took the item
                 if (!lastCall.TryGetValue(item, out var lc)) { lastCall[item] = now; continue; }
                 var lastAct = lc;
-                var since = summaryAt > lastAct ? summaryAt : lastAct;   // quiet since the later of the last call and the last change of the summary
+                // quiet since the latest of the last call, the last change of the summary and the last local progress its client reported
+                var since = summaryAt > lastAct ? summaryAt : lastAct;
+                var progressCounts = Lease.ProgressMaxMinutes <= 0 || (now - since).TotalMinutes < Lease.ProgressMaxMinutes;
+                if (progressCounts && lastProgress.TryGetValue(item, out var lp) && lp.Name == owner && lp.At > since) since = lp.At;
                 if (checks.TryGetValue(item, out var ck))
                 {
                     if (ck.Name != owner || summaryAt > ck.SummaryAt) { checks.Remove(item); lastCall[item] = now; continue; }
@@ -153,11 +207,11 @@ sealed partial class Plant
                     continue;
                 }
                 if ((now - since).TotalMinutes < Lease.StaleItemMinutes) continue;
-                checks[item] = (owner, now, summaryAt); checksSent++;
+                checks[item] = (owner, now, summaryAt, since); checksSent++;
                 var hadRouted = lastRouted.TryGetValue(item, out var prevRouted);
                 Route(item, new JsonObject
                 {
-                    ["provider"] = "gateway", ["event"] = "item.check", ["item"] = item, ["quietMinutes"] = (int)(now - since).TotalMinutes,
+                    ["provider"] = "gateway", ["event"] = "item.check", ["item"] = item, ["quietMinutes"] = (int)(now - since).TotalMinutes, ["progressCounts"] = progressCounts,
                     ["reason"] = $"no verb for item #{item} for {Lease.StaleItemMinutes:0.#} min: call any verb for it (factory.ps1 claim-item --item {item} --renew) within {Lease.StaleConfirmMinutes:0.#} min, or it is offered again"
                 });
                 if (hadRouted) lastRouted[item] = prevRouted!; else lastRouted.Remove(item);
@@ -193,7 +247,7 @@ sealed partial class Plant
             }
             var now = DateTime.UtcNow;
             // (rule 3 needs no retry of its own: its check was removed before the take-back was queued, so a still quiet owner is checked again)
-            if (!(ownerOf.TryGetValue(item, out var cur) && cur == name)) { RequestSweepAfterTakeBack?.Invoke(); return; }   // released or re-owned meanwhile
+            if (!(ownerOf.TryGetValue(item, out var cur) && cur == name)) { RequestSweepAfterTakeBack?.Invoke(item); return; }   // released or re-owned meanwhile
             {
                 takenBack++;
                 if (workers.TryGetValue(name, out var w)) Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "item.taken_back", ["item"] = item, ["reason"] = reason }.ToJsonString());
@@ -202,12 +256,18 @@ sealed partial class Plant
                 takenBackFrom[item] = name;
                 // issue 100: a take-back is a miss of the session; two in a row (or with lapsed offers) block it until it calls a verb of its own
                 var blocked = NoteTakeBack(name, item);
-                Journal(item, "reassigned", new JsonObject { ["reason"] = (reason == "client-accepted-not-started" ? $"{name} accepted by its client but did not start within the lease; offered again" : $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again") + blocked, ["opCode"] = reason }, "back|" + item + "|" + now.Ticks);
+                Journal(item, "reassigned", new JsonObject { ["reason"] = (reason switch
+                {
+                    "client-accepted-not-started" => $"{name} accepted by its client but did not start within the lease; offered again",
+                    "released-by-plant-manager" => $"the plant manager released {name} from this item (Manager.cs); offered again",
+                    _ => $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again"
+                }) + blocked, ["opCode"] = reason }, "back|" + item + "|" + now.Ticks);
             }
         }
-        RequestSweepAfterTakeBack?.Invoke();
+        RequestSweepAfterTakeBack?.Invoke(item);
     }
-    public Action? RequestSweepAfterTakeBack { get; set; }
+    // the item's incremental pass (issue 92): it is offered again without waiting for the next full sweep
+    public Action<int>? RequestSweepAfterTakeBack { get; set; }
 
     // Plan's hook for a new own-item assignment: the worker it was just taken back from is not offered it first.
     // Only while another session could take it: a plant with that one worker offers the item to it again rather than to nobody.
@@ -224,6 +284,8 @@ sealed partial class Plant
             return new JsonObject
             {
                 ["renewals"] = renewals, ["renewFailures"] = renewFailures, ["checksSent"] = checksSent, ["takenBack"] = takenBack,
+                ["progressReports"] = progressReports, ["checksAnsweredByProgress"] = checksAnsweredByProgress,
+                ["progress"] = new JsonArray(lastProgress.OrderBy(kv => kv.Key).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key, ["worker"] = kv.Value.Name, ["at"] = kv.Value.At.ToString("o"), ["source"] = kv.Value.Source }).ToArray()),
                 ["checksOpen"] = new JsonArray(checks.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key, ["worker"] = kv.Value.Name, ["at"] = kv.Value.At.ToString("o") }).ToArray()),
                 ["clientAccepted"] = new JsonArray(clientAccepted.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key, ["worker"] = kv.Value.Name, ["acceptedBy"] = "client", ["startBy"] = kv.Value.StartBy.ToString("o") }).ToArray())
             };
