@@ -137,7 +137,10 @@ function Verb_merge($a, [switch]$Gateway) {
     $pr = Get-Pr $prNum
     if (-not (Test-PrBelongs $pr $n)) { return & $park 'pr-mismatch' "PR #$prNum is not a PR belonging to this work item (branch '$($pr.head.ref)'); refusing to merge." }
     if ($pr.merged) {
-        $s.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = $prNum }
+        # issue 114: the merge recorded before (an item validated again after its merge, 276) keeps its record, merged_at and its wait; a record
+        # whose wait an older gateway erased is re-armed instead of starting over at master-green
+        if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and "$($s.merge.sha)" -eq "$($pr.merge_commit_sha)") { [void](Restore-Settle $s) }
+        else { $s.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = $prNum } }
         $s.verdict.processed = $true; $s.Remove('claim'); Remove-ClaimRef $n; Save-State $n $st
         return @{ ok = $true; id = $n; outcome = 'already-merged'; sha = $pr.merge_commit_sha }
     }
