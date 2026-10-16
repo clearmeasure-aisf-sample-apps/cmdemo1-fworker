@@ -303,6 +303,24 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Done on 2026-10-15 (worker sessions carry out their instructions; from 45 worker transcripts of 14 and 15 October):
+
+- **Outside blockers.** No session is held for the base branch: on red checks the worker calls `complete` once and the one CI rule of master
+  (`Get-RedHeadRuling`, Prs.ps1, issue 102) re-runs once and, for a master defect, waits for master without counting a round (exit 21 to the
+  worker).
+- **`factory.ps1 private-build --item N --worktree <path> [--dotnet <path>] [--log <file>]`** (client side, lib/Client.Build.ps1): the host's
+  build slot (waited for up to `--slot-wait-minutes`, 30; then exit 21 `build-slot-busy`, nothing built), `DATABASE_ENGINE=SQLite`, the
+  dotnet of `ensure-tools.ps1` first on PATH, no credential of the session in the build's environment, `. ./build.ps1 ; Build` with its output in
+  `<work>/build-N.log`, the slot given back in finally, answer `{ok, failed[], log, tail}` (exit 10 `build-failed`). Without `--worktree` the name stays free for the push gate's server verb (`private-build --attest SHA`, pull request 61);
+  a passing build of a clean worktree on the item's branch attests through it where the gateway has it.
+- **`--max-chars N`** on any client verb but subscribe: a longer answer is saved whole to the work directory and printed as one JSON line
+  (`ok`, `exit`, `code`, `truncated`, `saved`, the start of the answer in `text`), so a session never pipes a verb (`| head`).
+- **Skills**: one bare absolute-path command per factory verb (through the `<BASE>/fw` wrapper when the prompt names one) and a classifier
+  refusal is final (comment, release, end the session); no `merge` call after a PASS (`next: "merge"` ends the session); the already-merged
+  guard of Functional Testing; evidence from the running app only, and reviews recorded as the reviewer subagent wrote them; the Qodana and
+  code-style check before the first push; the reviewer of a design checks every sentence of Notes, Constraints and Out-of-scope and flags a new
+  value of a shared enumeration; `Depends on: #M` with a release when a design needs an unmerged item.
+
 Closed on 2026-10-15 (issue #106):
 
 - **#106 Stream sidecar.** The launchers run the session's event stream (`subscribe --own`, from step 7 of the prompt file with the credentials of

@@ -433,6 +433,58 @@ $OwnerScenarios['owner: sessions of one host share its limit of owned items and 
     } finally { foreach ($w in 'host-a', 'host-b', 'host-c', 'host-low') { if ($script:Workers.ContainsKey($w)) { Stop-OwnerClient $w } } }
 }
 
+# factory.ps1 private-build (lib/Client.Build.ps1): one command builds a worktree under the host's build slot. The worktree's build.ps1 here only
+# prints what it was given; --dotnet names a stand-in SDK, so ensure-tools.ps1 downloads nothing. A worker credential holds the slot for the item.
+$OwnerScenarios['owner: private-build builds a worktree under the host''s build slot with SQLite and the dotnet path, writes the log and gives the slot back'] = {
+    $oldWork = $env:FACTORY_WORK_DIR; $env:FACTORY_WORK_DIR = Join-Path $script:Work 'work'   # (the log goes to the scenario's own work directory)
+    try {
+    Start-OwnerClient 'pb-a' 'persistent-local' '--capacity 1 --host lab-pb'
+    Start-OwnerClient 'pb-b' 'persistent-local' '--capacity 1 --host lab-pb'
+    $n = New-Item-Fake 'Private build' 'x' @('Auto Merge')
+    $wt = Join-Path $script:Work "pb-wt-$n"; New-Item -ItemType Directory -Force -Path $wt | Out-Null
+    Set-Content -LiteralPath (Join-Path $wt 'build.ps1') -Value @'
+function Build {
+    Set-Content -LiteralPath ./ran.txt -Value 'built'
+    "engine=$env:DATABASE_ENGINE"
+    "first-path=$(@($env:PATH -split [IO.Path]::PathSeparator | Where-Object { $_ -and $_.TrimEnd('/', '\') -ne $PSHOME.TrimEnd('/', '\') })[0])"   # (pwsh puts its own folder first)
+    "dotnet-root=$env:DOTNET_ROOT"
+    "credential=$([bool]$env:FACTORY_TOKEN)$([bool]$env:FACTORY_WORKER_TOKEN)"
+    if (Test-Path ./fail.txt) { '  Failed Some.Tests.WorkOrderTests.Should_Fail [12 ms]'; "$PWD/src/A.cs(3,4): error CS1002: ; expected [$PWD/src/A.csproj]"; throw 'the build failed here' }
+    'BUILD SUCCEEDED'
+}
+'@
+    $sdk = Join-Path $script:Work "pb-sdk-$n"; New-Item -ItemType Directory -Force -Path $sdk | Out-Null; Set-Content -LiteralPath (Join-Path $sdk 'dotnet') -Value ''
+    New-Item -ItemType Directory -Force -Path (Join-Path $sdk 'host/fxr') | Out-Null   # an SDK root, so DOTNET_ROOT is set to it
+    $pb = @('private-build', '--item', $n, '--worktree', $wt, '--dotnet', (Join-Path $sdk 'dotnet'))
+    $slot = { param($Name, $Body) $r = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/build-slot" -Method POST -Headers @{ Authorization = "Bearer $($script:Workers[$Name].token)" } -Body ($Body | ConvertTo-Json -Compress) -ContentType 'application/json' -SkipHttpErrorCheck; $j = $r.Content | ConvertFrom-Json -AsHashtable; $j.status = [int]$r.StatusCode; $j }
+    $h = & $slot 'pb-b' @{ action = 'acquire'; ttlSeconds = 120 }
+    Check 'another session of the host holds the build slot' ($h.status -eq 200 -and $h.granted -eq $true) ($h | ConvertTo-Json -Compress)
+    $r = Fo 'pb-a' ($pb + @('--slot-wait-minutes', '0')); CheckExit 'the slot is busy and no wait is allowed: exit 21 build-slot-busy' $r 21 'build-slot-busy'
+    Check 'it says when to run it again, and nothing was built' ($r.verb -eq 'private-build' -and $r.retryAfterSeconds -ge 5 -and -not (Test-Path -LiteralPath (Join-Path $wt 'ran.txt'))) ($r | ConvertTo-Json -Compress -Depth 4)
+    [void](& $slot 'pb-b' @{ action = 'release' })
+    $h = & $slot 'pb-b' @{ action = 'acquire'; ttlSeconds = 7 }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $r = Fo 'pb-a' $pb; CheckExit 'the slot is busy for some seconds: the verb waits for it, then the build runs and passes' $r 0
+    Check 'it waited for the slot' ($h.granted -eq $true -and [int]$r.slotWaitedSeconds -ge 3) "slotWaitedSeconds $($r.slotWaitedSeconds), $([int]$sw.Elapsed.TotalSeconds) s in all" 
+    $log = if ($r.log -and (Test-Path -LiteralPath $r.log)) { Get-Content -Raw -LiteralPath $r.log } else { '' }
+    Check 'ok, nothing failed, and the log of this item in the work directory' ($r.ok -eq $true -and @($r.failed).Count -eq 0 -and "$($r.log)" -like "*build-$n.log" -and (Split-Path -Leaf (Split-Path -Parent $r.log)) -eq 'work' -and $r.database -eq 'SQLite') ($r | ConvertTo-Json -Compress -Depth 4)
+    Check 'the build ran in the worktree with DATABASE_ENGINE=SQLite and the dotnet folder first on PATH (after the folder of pwsh)' ($log -match 'engine=SQLite' -and $log.Contains("first-path=$sdk") -and $log.Contains("dotnet-root=$sdk") -and $log.Contains('BUILD SUCCEEDED')) $log
+    Check 'no credential of the session reaches the build' ($log.Contains('credential=FalseFalse')) $log
+    Check 'not the item''s branch (no git here): nothing is attested' ($r.attested -eq $false -and $r.attestCode -eq 'not-the-item-branch') ($r | ConvertTo-Json -Compress -Depth 3)
+    $b = & $slot 'pb-b' @{ action = 'acquire'; ttlSeconds = 60 }
+    Check 'the slot was given back' ($b.status -eq 200 -and $b.granted -eq $true) ($b | ConvertTo-Json -Compress)
+    [void](& $slot 'pb-b' @{ action = 'release' })
+    Set-Content -LiteralPath (Join-Path $wt 'fail.txt') -Value 'x'
+    $r = Fo 'pb-a' $pb; CheckExit 'a failing build: exit 10 build-failed' $r 10 'build-failed'
+    Check 'failed names the failed test and the compile error, relative to the worktree' (@($r.failed) -contains 'test Some.Tests.WorkOrderTests.Should_Fail' -and @($r.failed) -contains 'src/A.cs(3,4): error CS1002: ; expected') ($r.failed | ConvertTo-Json -Compress)
+    Check 'the end of the log is in the answer, the error with it' ((@($r.tail) -join "`n") -match 'the build failed here') ($r.tail | ConvertTo-Json -Compress)
+    $b = & $slot 'pb-b' @{ action = 'acquire'; ttlSeconds = 60 }
+    Check 'the slot was given back after the failed build as well' ($b.status -eq 200 -and $b.granted -eq $true) ($b | ConvertTo-Json -Compress)
+    [void](& $slot 'pb-b' @{ action = 'release' })
+    $u = Fo 'pb-a' @('private-build', '--item', $n, '--worktree', (Join-Path $script:Work 'no-such-worktree'), '--dotnet', (Join-Path $sdk 'dotnet')); CheckExit 'a folder without build.ps1 is refused' $u 2 'no-build-script'
+    } finally { foreach ($w in 'pb-a', 'pb-b') { if ($script:Workers.ContainsKey($w)) { Stop-OwnerClient $w } }; $env:FACTORY_WORK_DIR = $oldWork }
+}
+
 # The journal of one item reads in event order. Each line is a rule-script call of its own (the plant's matched and offered, the worker's accept),
 # and with a GitHub that answers slowly those calls used to reach the item lock in any order: live, "offered" was written 40 s after the offer
 # and after "accepted". The fake holds every matched and offered comment back, and the worker accepts the moment the offer arrives.

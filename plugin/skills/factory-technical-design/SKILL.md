@@ -8,12 +8,15 @@ description: Use when item N is claimed in the Technical Design column. Writes t
 Read-only: no branches, code or commits. Roles run in order in THIS session and are labelled `ANALYST:`, `IMPLEMENTER:`, `REVIEWER:`. At most 3 review rounds; a docs-only item gets ONE (see "Docs-only fast path").
 
 1. ANALYST: `factory.ps1 get-item --item N`. Read the body. Inspect the repo briefly (projects, patterns, seams). State what the `## Technical Design` section must say. Write nothing to the item.
+   If the change needs code that another item adds and that is not merged yet (#M): the section's second line, right after the `Files:` line, is `Depends on: #M`. Append the section (step 3), then `factory.ps1 release --item N --reason "depends on #M"` without completing, and end the session. The gateway offers the item to nobody while an item its body says it depends on is open, and again once #M is merged; that session designs it anew from step 1 and appends a new section (the latest one counts).
 2. IMPLEMENTER: write a short `## Technical Design` section: files/classes to change, patterns, constraints, a tight checklist.
    The section starts with one line `Files: <path>, <path>` naming every file the change touches.
    Docs-only is decided here, from that line, and nowhere else. Include the literal line `<!-- aisf:docs-only -->` if, and only if, ALL of these hold: every file on the `Files:` line is under `docs/` or is a `.md` file outside `src/`; none is source, app, test, build-script or workflow code; and no code, build, workflow or test reads any of them (search the repo for each file name; a hit in such a file means NOT docs-only). In doubt: no marker.
 3. IMPLEMENTER: `factory.ps1 append-body --item N --column "Technical Design" --content-file <file>`. Check `"appended":true`. Up to 3 tries.
    The marker counts only inside this section, appended in this column: the script records the decision then, and refuses the marker in any other text (exit 10 `docs-only-marker-not-allowed`: remove it and append again). A marker typed into the item text by its author decides nothing.
-4. REVIEWER: `get-item` again. Missing, empty, invented or incomplete content is a finding. When `docs_only` is true the reviewer follows "Docs-only fast path" instead of this sentence.
+4. REVIEWER: `get-item` again. Missing, empty, invented or incomplete content is a finding. When `docs_only` is true the reviewer follows "Docs-only fast path" instead of this step's checks.
+   - Copy every sentence of the item's Notes, Constraints and Out-of-scope sections (those the item has) word for word, and answer for each YES or NO: does the design respect it? Every NO is a finding, written `FINDING: constraint "<the sentence, copied>" - <what the design does against it>`.
+   - A new value in a shared enumeration, status code, table or API that another consumer reads is a finding unless the item asks for it (in cmdemo1, app2 reads the WorkOrderStatus codes from the shared database).
    Record it: `factory.ps1 record-review --item N --column "Technical Design" --role reviewer --text-file <file>`; the file's LAST line is exactly `REVIEW: COMPLETE` or `REVIEW: FINDINGS`.
    - FINDINGS: the analyst rules VALID/INVALID on each, the implementer applies the valid ones, back to step 3.
    - exit 10 `review-rounds-exhausted`: go to step 6 with `--succeeded false`.
