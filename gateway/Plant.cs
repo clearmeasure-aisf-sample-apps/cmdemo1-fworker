@@ -199,6 +199,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             w.Out?.Writer.TryComplete();
             w.Out = Channel.CreateUnbounded<(long, string)>();
             var replay = Msg.On ? MergedReplay(name, w.Buffer, after, messagingClient) : w.Buffer.Where(b => after >= 0 && b.Id > after).ToList();
+            // issue 106: a new session (a stream without a cursor) is not replayed the triggers of items the name no longer owns: they are the
+            // history of an earlier session's items (a reconnect with a cursor still gets every trigger it missed). Messages are always replayed.
+            if (newSession) replay = replay.Where(rp => !StaleTrigger(rp.Item2, name)).ToList();
             if (Msg.On) { var rec = store.Get(name); rec.MessagingClient = messagingClient; rec.GoneAt = null; rec.Via = "stream"; if (Msg.PresenceAllowed(name)) rec.LastHeard = DateTime.UtcNow; }
             // what this name owns, and any assignment still waiting for its answer, is told again after a (re)connect
             var mine = ownerOf.Where(kv => kv.Value == name).Select(kv => kv.Key).ToList();
@@ -233,6 +236,17 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     {
         if (JsonNode.Parse(json) is not JsonObject o) return json;
         o["replayed"] = true; return o.ToJsonString();
+    }
+
+    // issue 106: a trigger of an item this name does not own (a message is never one): an earlier session's history, not replayed to a new session
+    bool StaleTrigger(string json, string name)
+    {
+        try
+        {
+            if (JsonNode.Parse(json) is not JsonObject o || o["event"]?.ToString() == "message.received") return false;
+            return o["item"] is JsonValue iv && iv.TryGetValue<int>(out var item) && item > 0 && !(ownerOf.TryGetValue(item, out var on) && on == name);
+        }
+        catch { return false; }
     }
 
     // The replay snapshot of one (re)connect: the Buffer's triggers and the undelivered inbox entries above the cursor, merged by seq. Taken in the

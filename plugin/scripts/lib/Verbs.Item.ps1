@@ -488,7 +488,7 @@ function Verb_complete($a) {
     $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url }
     if ($null -ne $rerun) { $s.pr.rerun = $rerun }
     if ($chk.status -eq 'pending' -or $ciWait) {
-        $s.awaiting_checks = @{ pr = $pr.number; sha = $prd.head.sha; comment = $comment; since = ConvertTo-Iso (Get-UtcNow) }
+        $s.awaiting_checks = @{ pr = $pr.number; sha = $prd.head.sha; comment = $comment; since = ConvertTo-Iso (Get-UtcNow); column = $col }
         Set-Park $s 'development:awaiting-checks' $c.timing.awaitingChecksParkMinutes
         if (Test-OwnedClaim $s) { Save-State $n $st } else { $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n }
         $why = if ($ciWait) { "checks failed and the gateway applies the CI rule ($ciWait); it decides when that is over" } else { 'checks are still running' }
