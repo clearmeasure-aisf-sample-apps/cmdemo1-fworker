@@ -22,7 +22,7 @@ sealed class MessagingSettings
     // The factory operator session (Operator.cs): operator.* of the config. Off by default; needs messaging.enabled.
     public bool OperatorEnabled;
     public string[] OperatorNames = Array.Empty<string>();
-    public int OperatorTokenGeneration = 1, OperatorMaxSelfMergesPerDay = 3;
+    public int OperatorTokenGeneration = 1, OperatorMaxSelfMergesPerDay = 12;
     public string OperatorRequiredModelTier = "premium", OperatorRequiredEffort = "low";
     // timing.opSelfAnswerMinutes: how long a question the operator session answered itself keeps its release-check from answering quiet
     public double OperatorSelfAnswerMinutes = 10;
@@ -69,10 +69,12 @@ sealed class MessagingSettings
     // entry is worse once, for the one reminder), mgrVerbErrorMinutes and digest.verbErrorCount (failed verbs of one worker on one item), and
     // mgrRestartMinutes (how long after its start a gateway reports that sessions came back from an earlier process).
     public double QuietMinutes = 20, NoteMinutes = 60, PersistMinutes = 30, VerbErrorMinutes = 10, RestartMinutes = 30;
-    public int VerbErrorCount = 3;
+    public int VerbErrorCount = 3, ChecksRedCount = 2;
     // The Release Queue (enhancement 9): timing.mgrReleaseQueueMinutes (the oldest item waits longer than this) or digest.releaseQueueCount (this many
     // items wait) makes release-queue-aged: the promotion to uat is the owner's, and the digest only says that it is due.
     public double ReleaseQueueMinutes = 60;
+    // timing.questionDedupeMinutes (issue 105): the same question text about the same item from the same name within this window, while it is open, is not relayed again
+    public double QuestionDedupeMinutes = 60;
     public int ReleaseQueueCount = 3;
     // The model requirement (4.7): the ladder of the gateway host's models.default.json, lowest rung first, as (name, model).
     public string RequiredModelTier = "premium", RequiredEffort = "high";
@@ -84,6 +86,7 @@ sealed class MessagingSettings
     // required one or higher; undeclared: nothing was sent; weak: anything else. Declared, never verified.
     public string ModelCheck(string model, string effort) => ModelCheck(model, effort, RequiredModelTier, RequiredEffort);
     public string OperatorModelCheck(string model, string effort) => ModelCheck(model, effort, OperatorRequiredModelTier, OperatorRequiredEffort);
+    public string ModelCheckFor(string model, string effort, string tier, string needEffort) => ModelCheck(model, effort, tier, needEffort);
     string ModelCheck(string model, string effort, string tier, string needEffort)
     {
         if (model == "" && effort == "") return "undeclared";
@@ -168,8 +171,9 @@ sealed class MessagingSettings
         var dg = g?["digest"];
         s.RefusalCount = Limit(dg, "refusalCount", 3); s.DigestMaxBytes = Limit(dg, "maxBytes", 4096, 512);
         s.QuietMinutes = Span("mgrQuietMinutes", 20); s.NoteMinutes = Span("mgrNoteMinutes", 60); s.PersistMinutes = Span("mgrPersistMinutes", 30);
-        s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3);
+        s.VerbErrorMinutes = Span("mgrVerbErrorMinutes", 10); s.RestartMinutes = Span("mgrRestartMinutes", 30); s.VerbErrorCount = Limit(dg, "verbErrorCount", 3); s.ChecksRedCount = Limit(dg, "checksRedCount", 2);
         s.ReleaseQueueMinutes = Span("mgrReleaseQueueMinutes", 60); s.ReleaseQueueCount = Limit(dg, "releaseQueueCount", 3);
+        s.QuestionDedupeMinutes = Span("questionDedupeMinutes", 60);
         if (dg?["waitCodes"] is JsonArray wc) s.WaitCodes = List(wc);
         s.RequiredModelTier = g?["requiredModelTier"]?.ToString() ?? "premium"; s.RequiredEffort = g?["requiredEffort"]?.ToString() ?? "high";
         s.EnforceModel = g?["enforceModel"]?.GetValue<bool>() ?? false; s.AcceptableModels = List(g?["acceptableModels"]);
@@ -190,7 +194,7 @@ sealed class MessagingSettings
         {
             s.OperatorNames = (op?["allowedNames"] is JsonArray oa ? oa.Select(n => n!.ToString()).ToArray() : new[] { "operator-session" }).Where(Auth.ValidName).ToArray();
             s.OperatorTokenGeneration = op?["tokenGeneration"]?.GetValue<int>() ?? 1;
-            s.OperatorMaxSelfMergesPerDay = Limit(op, "maxSelfMergesPerDay", 3, 0);
+            s.OperatorMaxSelfMergesPerDay = Limit(op, "maxSelfMergesPerDay", 12, 0);
             s.OperatorRequiredModelTier = op?["requiredModelTier"]?.ToString() ?? "premium"; s.OperatorRequiredEffort = op?["requiredEffort"]?.ToString() ?? "low";
             s.Reserved = Auth.ReservedNames(names.Concat(s.OperatorNames));
             s.OperatorSelfAnswerMinutes = Timing("opSelfAnswerMinutes", 10) is var sa && double.IsFinite(sa) && sa > 0 ? sa : 10;
@@ -247,6 +251,7 @@ sealed class MessageRecord
     public long N;                                   // the number in the id: the order of arrival
     // a question (3.8): its text and context for the supervisor's batch, when it was put into a batch, who answered, the decision note
     public string QText = "", QContext = "", AnsweredBy = "", Note = "", JournalFailed = "";
+    public int Repeats;   // issue 105: how often the same question was asked again while it was open (not relayed again)
     public string[] QFlags = Array.Empty<string>();
     public DateTime? DeliveredAt, AnsweredAt, EscalatedAt;
     public bool Escalated, OwnedAtAsk, Redeliver;
@@ -469,7 +474,7 @@ static class DigestBuilder
         }
         foreach (var r in d.Refusals.Where(r => r.Code != "" && !cfg.WaitCodes.Contains(r.Code)))
         {
-            var b = Step(r.Count, cfg.RefusalCount);
+            var b = Step(r.Count, r.Code is "checks-red" or "checks-not-green" or "private-build-required" ? cfg.ChecksRedCount : cfg.RefusalCount);   // red checks are reported at 2
             if (b > 0) list.Add(new DigestEntry { Key = $"refusals|{r.Item}|{r.Code}", Kind = "refusals", Bucket = b,
                 Fields = new JsonObject { ["kind"] = "refusals", ["item"] = r.Item, ["code"] = r.Code, ["bucket"] = b, ["count"] = r.Count, ["windowMinutes"] = 60 } });
         }
@@ -529,9 +534,10 @@ static class DigestBuilder
                 Fields = new JsonObject { ["kind"] = "release-queue-aged", ["bucket"] = b, ["count"] = d.ReleaseQueue.Count, ["item"] = oldest.Item, ["oldestMinutes"] = Min(now - oldest.Since),
                     ["releases"] = d.ReleaseQueue.Select(q => q.Release).Distinct().Count(), ["promotionRequested"] = d.PromotionRequested } });
         }
-        if (d.Restart is { } rs)
+        // issue 105: a restart after which every owner came back is no condition; only owners that did not reconnect are reported
+        if (d.Restart is { Missing: > 0 } rs)
         {
-            var b = rs.Missing > 0 ? 2 : 1;
+            var b = 2;
             list.Add(new DigestEntry { Key = "gateway-restarted", Kind = "gateway-restarted", Bucket = b,
                 Fields = new JsonObject { ["kind"] = "gateway-restarted", ["bucket"] = b, ["reconnected"] = rs.Reconnected, ["notReconnected"] = rs.Missing, ["upMinutes"] = rs.UpMinutes } });
         }
@@ -607,19 +613,21 @@ sealed class Messenger
     readonly object leaf = new();
     readonly Dictionary<string, List<DateTime>> sendWin = new(), askWin = new(), pairWin = new(), castWin = new(), supWin = new();
     readonly Dictionary<string, Idem> idem = new();
+    // issue 105: the questions relayed lately, by name, item and normalized text: a repeat within questionDedupeMinutes is that question again
+    readonly Dictionary<string, (string Id, DateTime At)> recentQuestions = new();
     readonly List<TrafficEntry> log = new(), ring = new();
     const int LogCap = 1000, RingCap = 500, RingPerSender = 100;
     static readonly TimeSpan LogAge = TimeSpan.FromHours(24), IdemAge = TimeSpan.FromMinutes(10);
 
     // counters of /status (8): how many messages were accepted, refused per code and flagged; never their text
-    long sentCount, flaggedCount;
+    long sentCount, flaggedCount, questionsDeduped;
     readonly Dictionary<string, long> refusedCount = new();
     public void CountRefusal(string code) { lock (leaf) refusedCount[code] = refusedCount.GetValueOrDefault(code) + 1; }
     public void AddCounters(JsonObject messagingBlock)
     {
         lock (leaf)
         {
-            messagingBlock["sent"] = sentCount; messagingBlock["flaggedAiDirected"] = flaggedCount;
+            messagingBlock["sent"] = sentCount; messagingBlock["flaggedAiDirected"] = flaggedCount; messagingBlock["questionsDeduped"] = questionsDeduped;
             messagingBlock["refused"] = new JsonObject(refusedCount.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value)));
         }
     }
@@ -849,6 +857,7 @@ sealed class Messenger
         {
             log.RemoveAll(t => now - t.At > LogAge); ring.RemoveAll(t => now - t.At > LogAge);
             foreach (var k in idem.Where(kv => now - kv.Value.At > IdemAge).Select(kv => kv.Key).ToList()) idem.Remove(k);
+            foreach (var k in recentQuestions.Where(kv => (now - kv.Value.At).TotalMinutes >= cfg.QuestionDedupeMinutes).Select(kv => kv.Key).ToList()) recentQuestions.Remove(k);
             foreach (var d in new[] { sendWin, askWin, pairWin, castWin, supWin })
                 foreach (var k in d.Where(kv => kv.Value.Count == 0 || now - kv.Value[^1] > TimeSpan.FromHours(1)).Select(kv => kv.Key).ToList()) d.Remove(k);
         }
@@ -1128,6 +1137,26 @@ sealed class Messenger
         // from here on the claim on the clientId is released whatever happens, so that an exception cannot leave a retry waiting on it
         try
         {
+        // issue 105: the same question text about the same item from the same name within questionDedupeMinutes is that question again. It is not
+        // relayed to the supervisor a second time and spends no budget: the answer is the first question's state (with its answer, once there is one)
+        string? qKey = null;
+        if (type == "question" && item != null && cfg.QuestionDedupeMinutes > 0)
+        {
+            qKey = c.From + "\n" + item + "\n" + Regex.Replace(text.Trim(), @"\s+", " ").ToLowerInvariant();
+            (string Id, DateTime At) prev; bool hit;
+            lock (leaf) hit = recentQuestions.TryGetValue(qKey, out prev) && (DateTime.UtcNow - prev.At).TotalMinutes < cfg.QuestionDedupeMinutes;
+            // only while that question is open: one that was answered, expired or became moot is asked anew
+            if (hit && plant.MessageStatus(prev.Id, c.From) is { State: "open" } snap)
+            {
+                var dup = StatusBody(snap); dup.Remove("answer"); dup["kind"] = "question"; dup["duplicate"] = true; dup["duplicateOf"] = prev.Id;
+                dup["reason"] = $"the same question about item #{item} was asked at {prev.At:o} and is still open: it was not relayed again, this is that question";
+                lock (leaf) questionsDeduped++;
+                // the launcher watchdog still counts the repeat (a session that asks one thing again and again is stuck)
+                plant.NoteDuplicateQuestion(c.From, prev.Id);
+                c.Id = prev.Id; LogLine("deduped", c);
+                return Finish(new(202, dup));
+            }
+        }
         // rate limits (3.7); a peer note between two workers also counts in the pair's window
         var pairOther = c.FromKind == "worker" && to != null && to != "operator" ? to : null;
         var (rcode, retry, res) = Reserve(c, pairOther, type == "question", broadcast && c.FromKind == "worker", cast);
@@ -1151,6 +1180,7 @@ sealed class Messenger
         var o = plant.SendMessage(spec, c.Bytes);
         if (!o.Ok) { Rollback(res); return Finish(Refused(c, o.Code, o.Reason)); }
         c.Id = o.Id;
+        if (qKey != null) lock (leaf) recentQuestions[qKey] = (o.Id, DateTime.UtcNow);
 
         var body2 = new JsonObject { ["ok"] = true, ["id"] = o.Id, ["type"] = spec.Type == "operator-note" ? "note" : type, ["epoch"] = plant.Epoch };
         int status;

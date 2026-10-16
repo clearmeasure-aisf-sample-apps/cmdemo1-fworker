@@ -35,7 +35,7 @@ function Fo([string]$Name, [string[]]$FactoryArgs) {
     $env:FACTORY_TOKEN_DIR = $w.dir; $env:FACTORY_WORKER_TOKEN = $w.token; $old.t = $env:FACTORY_TOKEN; $env:FACTORY_TOKEN = $w.token
     try { return (F $Name $FactoryArgs) } finally { $env:FACTORY_TOKEN_DIR = $old.d; $env:FACTORY_WORKER_TOKEN = $old.w; $env:FACTORY_TOKEN = $old.t }
 }
-function Get-Journal([int]$n) { , @((Get-FakeIssue $n).comments | Where-Object { $_.body -match '<!-- plant event=' } | ForEach-Object { [regex]::Match($_.body, 'plant event=(\w+)').Groups[1].Value }) }
+function Get-Journal([int]$n) { , @((Get-FakeIssue $n).comments | Where-Object { $_.body -match '<!-- plant event=' } | ForEach-Object { [regex]::Match($_.body, 'plant event=([\w-]+)').Groups[1].Value }) }
 function Get-Plant { Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } }
 
 $OwnerScenarios = [ordered]@{
@@ -344,7 +344,7 @@ $OwnerScenarios['owner: a pinned item is only ever offered to its worker: after 
     Start-Sleep -Seconds 6
     Check 'the idle worker beside it was never offered the item' ((Get-Assigned 'pin-b' $n1).Count -eq 0 -and @((& $offersOf $n1) | Where-Object { $_ -ne 'pin-a' }).Count -eq 0) ((& $offersOf $n1) -join ',')
     $j = Get-Journal $n1
-    Check 'the journal says waiting, and never reassigned' ($j -contains 'waiting' -and $j -notcontains 'reassigned' -and @((Get-FakeIssue $n1).comments | Where-Object { $_.body -match "the pinned worker 'pin-a' did not confirm" }).Count -eq 1) ($j -join ',')
+    Check 'the journal says waiting, and never reassigned' ($j -contains 'waiting' -and $j -notcontains 'reassigned' -and @((Get-FakeIssue $n1).comments | Where-Object { $_.body -match "the pinned worker 'pin-a' did not confirm" -and $_.body -notlike '<!-- factory-state:*' }).Count -eq 1) ($j -join ',')
     $ev = (Get-Assigned 'pin-a' $n1)[-1]
     $r = Wait-Until -Seconds 30 { $script:PinAccept = Fo 'pin-a' @('accept', '--item', $n1, '--assignment', ((Get-Assigned 'pin-a' $n1)[-1]).assignment); $script:PinAccept.exit -eq 0 }
     Check 'the pinned worker accepts a later offer and owns the item' ($r -and @((Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n1" -and $_.Value -eq 'pin-a' }).Count -eq 1) ($script:PinAccept | ConvertTo-Json -Compress)
@@ -644,7 +644,9 @@ $OwnerScenarios['pass-merge: checks still running at the verdict: the answer is 
     Check 'merged when the checks are green, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
     $mw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match '<!-- plant event=merge-waiting ' }).Count
     Check 'journal: merge-waiting once, however many sweeps found it waiting' ($mw -eq 1) "$mw"
-    Check 'merged once' ((Pm-MergeComments $x.n $x.pr) -eq 1)
+    # the merge comment follows the merge after the state write (Verbs.Merge.ps1): wait for it, then make sure no second merge adds another
+    [void](Wait-Until -Seconds 20 { (Pm-MergeComments $x.n $x.pr) -ge 1 }); Start-Sleep -Seconds 3
+    Check 'merged once' ((Pm-MergeComments $x.n $x.pr) -eq 1) "$(Pm-MergeComments $x.n $x.pr)"
     Stop-OwnerClient 'pmw'
 }
 
@@ -700,8 +702,8 @@ $OwnerScenarios['pass-merge: a pull request merged by a person settles the item 
     $pr = Do-Development $n
     Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
     Check 'the sweep picks the merge up while the item is in Development' (Wait-Until -Seconds 40 { (Pm-State $n).ContainsKey('merge') })
-    $st = Pm-State $n
-    Check 'the merge is recorded, the claim released, the card moved on from Development' ($st.merge.pr -eq $pr -and -not $st.ContainsKey('claim') -and (Get-FakeIssue $n).column -ne 'Development') "$((Get-FakeIssue $n).column) $($st | ConvertTo-Json -Compress -Depth 3)"
+    # (the sweep saves the merge record before it moves the card: wait for both)
+    Check 'the merge is recorded, the claim released, the card moved on from Development' (Wait-Until -Seconds 20 { $st = Pm-State $n; $st.merge.pr -eq $pr -and -not $st.ContainsKey('claim') -and (Get-FakeIssue $n).column -ne 'Development' }) "$((Get-FakeIssue $n).column) $(Pm-State $n | ConvertTo-Json -Compress -Depth 3)"
     Check 'the journal says a person merged it' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "PR #$pr was merged as .* by a person" }).Count -eq 1 })
     $x = Pm-ToValidation @('factory worker')
     $v = Do-Verdict $x.n $x.pr; Check 'parked for a person' ($v.next -eq 'parked')
@@ -1303,4 +1305,68 @@ $OwnerScenarios['unpark: the operator releases a park early with a reason; the n
     Check 'the item stayed in its column' ((Get-FakeIssue $n).column -eq 'Technical Design')
     $r = F 'op' @('unpark', '--item', $n, '--reason', 'again'); CheckExit 'an item with no park' $r 10 'not-parked'
     Stop-OwnerClient 'una'
+}
+
+# Issue 114: the settle state of a merged item is kept when master stays red or does not finish (items 262, 280 stranded closed, 272 and 276
+# validated again). The item keeps awaiting master-broken or master-timeout, is never offered to a worker (not by the sweep, not after unpark),
+# and goes on once the merge commit's latest attempt or a later master commit that contains it is green.
+$OwnerScenarios['settle: a merged item whose master Build stays red keeps its settle state, is never offered, and goes on when a later master commit that contains it is green [full]'] = {
+    try {
+        Fake 'config' @{ masterFlaky = $true; flakyRunSeconds = 2; rerunSeconds = 2; rerunConclusion = 'failure' } | Out-Null
+        Start-OwnerClient 'stl1' 'persistent-local' '--capacity 3'
+        $x = Pm-ToValidation
+        $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+        Check 'the gateway merged it' (Wait-Until -Seconds 40 { (Get-FakePr $x.pr).merged })
+        Check 'master stays red after the re-run: master is BROKEN' (Wait-Until -Seconds 90 { @((Get-FakeIssue $x.n).comments | Where-Object { $_.body -like '*master is BROKEN*' }).Count -eq 1 })
+        $mg = Pv (Pm-State $x.n) 'merge'
+        Check 'the settle state is kept: awaiting master-broken, with the merge commit' ("$(Pv $mg 'awaiting')" -eq 'master-broken' -and "$(Pv $mg 'sha')" -eq "$((Get-FakePr $x.pr).mergeSha)") ($mg | ConvertTo-Json -Compress)
+        $j0 = (Get-Journal $x.n).Count; $a0 = (Get-Assigned 'stl1' $x.n).Count
+        $r = F 'op' @('unpark', '--item', $x.n, '--reason', 'scenario: master is red, a person looks')
+        Check 'unpark removes the park but offers nothing: the item is merged' ($r.exit -eq 0 -and $r.reoffer -eq $false -and "$((Pv (Pv (Pm-State $x.n) 'merge') 'awaiting'))" -eq 'master-broken') ($r | ConvertTo-Json -Compress -Depth 4)
+        Start-Sleep -Seconds 10
+        $after = @((Get-Journal $x.n) | Select-Object -Skip $j0)
+        Check 'no sweep offers the merged item to a worker' (@($after | Where-Object { $_ -in 'matched', 'offered' }).Count -eq 0 -and (Get-Assigned 'stl1' $x.n).Count -eq $a0) ($after -join ',')
+        Check 'it still waits: the card is not moved on' ((Get-FakeIssue $x.n).column -in 'Functional Testing')
+        # a later commit on master that contains the merge builds green
+        Fake 'master-merge' @{ files = @('docs/later.md') } | Out-Null
+        Check 'a green later master commit that contains it carries the item on to Done' (Wait-Until -Seconds 60 { (Get-FakeIssue $x.n).column -eq 'Done' }) "column $((Get-FakeIssue $x.n).column)"
+        Check 'the comment names the later commit' (@((Get-FakeIssue $x.n).comments | Where-Object { $_.body -match 'master is GREEN at `[0-9a-f]{7}`, which contains' }).Count -eq 1)
+    } finally { Stop-OwnerClient 'stl1' }
+}
+
+# Issue 114: an item an older gateway stranded (its wait erased at a master-broken park, then closed by its merged pull request: 262, 280) is
+# re-armed by the sweep and settled; a finished item that was never released (272, 276) is settled again through POST /items/{n}/resettle.
+$OwnerScenarios['settle: a stranded merged item is re-armed by the sweep and settled; a finished one is settled again through resettle [full]'] = {
+    $api = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"; $gh = @{ Authorization = 'Bearer fake-operator' }
+    Fake 'config' @{ masterFlaky = $true; flakyRunSeconds = 2; rerunSeconds = 2; rerunConclusion = 'failure' } | Out-Null
+    $x = Pm-ToValidation
+    $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
+    Check 'master is BROKEN for it' (Wait-Until -Seconds 90 { "$(Pv (Pv (Pm-State $x.n) 'merge') 'awaiting')" -eq 'master-broken' })
+    # what an older gateway left: no wait, and the issue closed by the merged pull request
+    $st = Pm-State $x.n; $cm = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)".StartsWith('<!-- factory-state:') })[0]
+    $st.merge.Remove('awaiting'); $json = $st | ConvertTo-Json -Depth 12
+    $nb = "$($cm.body)" -replace '(?s)```json.*```', "``````json`n$json`n``````"
+    Invoke-RestMethod "$api/issues/comments/$($cm.id)" -Method PATCH -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body (@{ body = $nb } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+    Invoke-RestMethod "$api/issues/$($x.n)" -Method PATCH -Body '{"state":"closed"}' -ContentType 'application/json' -Headers $gh | Out-Null
+    Check 'the sweep re-arms its settle step' (Wait-Until -Seconds 40 { "$(Pv (Pv (Pm-State $x.n) 'merge') 'awaiting')" -eq 'master-broken' -and (Get-Journal $x.n) -contains 'settle-rearmed' }) ((Pm-State $x.n).merge | ConvertTo-Json -Compress)
+    # the park stands until auto-unpark's rule holds: each check that failed (here the acceptance shard) passed on a green master head
+    $later = Fake 'master-merge' @{ files = @('docs/later2.md') }
+    Fake 'checks' @{ sha = $later.sha; name = 'Acceptance Tests [shard 1/6]'; conclusion = 'success' } | Out-Null
+    Check 'and settles it to Done once master is green for it' (Wait-Until -Seconds 60 { (Get-FakeIssue $x.n).column -eq 'Done' }) "column $((Get-FakeIssue $x.n).column)"
+    # settled again on purpose: the operator reopens it, moves its card back to the Release Queue and calls resettle
+    Invoke-RestMethod "$api/issues/$($x.n)" -Method PATCH -Body '{"state":"open"}' -ContentType 'application/json' -Headers $gh | Out-Null
+    $mut = 'mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }'
+    Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/graphql" -Method POST -Headers $gh -Body (@{ query = $mut; variables = @{ p = 'p'; i = "card_$($x.n)"; f = 'f'; o = 'opt_Release_Queue' } } | ConvertTo-Json -Depth 5) -ContentType 'application/json' | Out-Null
+    Check 'the card is back in the Release Queue' ((Get-FakeIssue $x.n).column -eq 'Release Queue')
+    $d = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/verbs/resettle-item" -Method POST -Body (@{ item = $x.n; reason = 'x' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck
+    Check 'the rule verb is reached only through the endpoint' ([int]$d.StatusCode -eq 400 -and ($d.Content | ConvertFrom-Json).code -eq 'use-endpoint') "$([int]$d.StatusCode) $($d.Content)"
+    $d = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/items/$($x.n)/resettle" -Method POST -Body '{"reason":"x"}' -ContentType 'application/json' -Headers @{ Authorization = "Bearer $(New-WorkerToken 'rsx1')" } -SkipHttpErrorCheck
+    Check 'a worker credential cannot resettle' ([int]$d.StatusCode -eq 403) "$([int]$d.StatusCode)"
+    $rs = { param($n, $reason) $r = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/items/$n/resettle" -Method POST -Body (@{ reason = $reason } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck; $j = $r.Content | ConvertFrom-Json -AsHashtable; $j.status = [int]$r.StatusCode; $j }
+    $r = & $rs $x.n 'scenario: the release never carried it'
+    Check 'resettle sets the wait from the merge record (master was green: the release candidate)' ($r.status -eq 200 -and $r.awaiting -eq 'release-candidate' -and -not ((Pm-State $x.n).merge.ContainsKey('done_at'))) ($r | ConvertTo-Json -Compress)
+    Check 'a journal line records it' (@((Get-FakeIssue $x.n).comments | Where-Object { $_.body -match 'plant event=settle-rearmed' -and $_.body -like '*the release never carried it*' }).Count -eq 1)
+    Check 'the item is settled again to Done' (Wait-Until -Seconds 60 { (Get-FakeIssue $x.n).column -eq 'Done' -and -not (Get-FakeIssue $x.n).open })
+    $o = New-Item-Fake 'Not merged' 'x' $OwnerLabels 'Todo'
+    $r = & $rs $o 'x'; Check 'an item without a merge record is refused' ($r.status -eq 409 -and $r.code -eq 'not-merged') ($r | ConvertTo-Json -Compress)
 }
