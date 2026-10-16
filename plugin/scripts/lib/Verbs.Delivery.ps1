@@ -161,7 +161,8 @@ function Invoke-Settle([int]$n) {
         $m.awaiting = $null; $m.done_at = ConvertTo-Iso (Get-UtcNow); Save-State $n $st
     }
     if ($m.awaiting -eq 'master-green') {
-        $chk = Get-ChecksFor $sha -Ignore (Get-MasterIgnoredChecks)
+        # judge_sha: an auto-unpark found master green on a later head while the merge commit's own run stayed red (issue 70): that head is judged
+        $chk = Get-ChecksFor $(if ((Test-Has $m 'judge_sha') -and "$($m.judge_sha)") { "$($m.judge_sha)" } else { $sha }) -Ignore (Get-MasterIgnoredChecks)
         $mergedAt = ConvertFrom-Iso $m.merged_at
         $rerunAt = if (Test-Has $m 'rerun_at') { ConvertFrom-Iso $m.rerun_at } else { $null }
         if ($chk.status -eq 'failure') {
@@ -197,8 +198,8 @@ function Invoke-Settle([int]$n) {
             }
             if ($chk.pending_checks.Count -eq 0) {
                 # issue 114: the wait stays (master-broken) and is polled; the item goes on once master is green for it, and is never offered meanwhile
-                Set-Park $s 'master-broken' ($t.parkHours * 60); $m.awaiting = 'master-broken'; $m.broken_at = ConvertTo-Iso $now; Save-State $n $st
-                Add-Comment $n "**master is BROKEN** at ``$($sha.Substring(0,7))`` after the merge ($($chk.failed_checks -join ', '))$(if ((Test-Has $m 'rerun_runs') -and @($m.rerun_runs).Count -gt 0) { ', also after one re-run of the failed jobs' }) - parked for a human. The gateway keeps watching: the item goes on by itself once this commit, or a later master commit that contains it, is green. Auto-revert is out of scope."
+                Set-Park $s 'master-broken' ($t.parkHours * 60); $s.park.failed = @($chk.failed_checks); $s.park.sha = "$sha"; $m.awaiting = 'master-broken'; $m.broken_at = ConvertTo-Iso $now; Save-State $n $st
+                Add-Comment $n "**master is BROKEN** at ``$($sha.Substring(0,7))`` after the merge ($($chk.failed_checks -join ', '))$(if ((Test-Has $m 'rerun_runs') -and @($m.rerun_runs).Count -gt 0) { ', also after one re-run of the failed jobs' }) - parked for a human. The gateway keeps watching: the park is lifted by itself once each check that failed has passed on a green master head, which is then judged. Auto-revert is out of scope."
                 return @{ outcome = 'parked'; reason = 'master-broken' }
             }
         }
@@ -219,13 +220,18 @@ function Invoke-Settle([int]$n) {
         return @{ outcome = 'waiting'; awaiting = 'master-green'; checks = (Get-PublicChecks $chk) }
     }
     if ($m.awaiting -in 'master-broken', 'master-timeout') {
-        # issue 114: polled until master is green for the merge (its own latest attempt, or a later master commit that contains it)
+        # issue 114: the wait stays through the park. A master-broken park is lifted only by auto-unpark (Verbs.Sweep.ps1: every check that failed
+        # passed on master, then judged on that head, issue 116) or by a person; while it stands the item just waits. Once it is gone (a person
+        # released it, or it expired), and for a master-green-timeout park, the item goes on when master is green for the merge (its own latest
+        # attempt, or a later master commit that contains it).
+        $live = Get-Park $s   # (an expired park no longer holds the item)
+        if ($m.awaiting -eq 'master-broken' -and $live -and "$($live.reason)" -eq 'master-broken') { return @{ outcome = 'waiting'; awaiting = 'master-broken' } }
         $g = Find-GreenMaster $sha
         if (-not $g) { return @{ outcome = 'waiting'; awaiting = "$($m.awaiting)" } }
         $was = "$($m.awaiting)"
         $m.green_at = ConvertTo-Iso $now; $m.green_via = "$($g.sha)"
         $m.awaiting = 'release-candidate'; $m.rc_deadline = ConvertTo-Iso ($now.AddMinutes($t.releaseCandidateTimeoutMinutes))
-        if ((Test-Has $s 'park') -and "$($s.park.reason)" -in 'master-broken', 'master-green-timeout') { $s.Remove('park') }
+        if ((Test-Has $s 'park') -and "$($s.park.reason)" -in 'master-broken', 'master-green-timeout') { $s.Remove('park') }   # (only an expired master-broken park reaches here)
         $green7 = "$($g.sha)".Substring(0, 7); $contains = if ($g.own) { '' } else { ", which contains ``$($sha.Substring(0,7))``" }
         Add-Comment $n "master is GREEN at ``$green7``$contains - waiting for the release candidate that carries it."
         Save-State $n $st

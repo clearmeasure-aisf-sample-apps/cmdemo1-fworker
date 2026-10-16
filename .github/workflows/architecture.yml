@@ -107,8 +107,9 @@ jobs:
           fi
           echo "container image" > ./kind.txt
 
-      # The work-order app's UI as the Release publishes it: the files of its package. A repository with a Dockerfile
-      # runs it as a container, started as the Dockerfile says; without one it is an App Service package.
+      # The work-order app's UI as the Release publishes it: the files of its package. A repository whose Release
+      # builds an image runs it as a container, started as the Dockerfile says; one whose Release zips the files runs
+      # them on App Service, where the entry assembly is the one application of the folder.
       - name: Read the UI package
         if: steps.find.outputs.artifact == 'churchbulletin-nuget-packages'
         shell: pwsh
@@ -123,7 +124,10 @@ jobs:
           Copy-Item -Path (Join-Path $dll.DirectoryName '*') -Destination ./app -Recurse -Force
           $command = ''
           $kind = 'App Service package'
-          if (Test-Path -LiteralPath ./Dockerfile -PathType Leaf) {
+          # The repository has a Dockerfile either way: what says how this build is released is its Release, which
+          # builds an image from it or zips the files for App Service (cmdemo2, 2026-10-13: a zip was called an image).
+          $release = if (Test-Path -LiteralPath ./.github/workflows/release.yml -PathType Leaf) { Get-Content -LiteralPath ./.github/workflows/release.yml -Raw } else { '' }
+          if ((Test-Path -LiteralPath ./Dockerfile -PathType Leaf) -and $release -match '(?m)^\s*docker build\b') {
             $kind = 'container image'
             $start = @(Get-Content -LiteralPath ./Dockerfile | Where-Object { $_ -match '^\s*(ENTRYPOINT|CMD)\s' } | Select-Object -Last 1)
             if ($start.Count -eq 1) { $command = (($start[0] -replace '^\s*(ENTRYPOINT|CMD)\s+', '') -replace '[\[\]",]', ' ' -replace '\s+', ' ').Trim() }
