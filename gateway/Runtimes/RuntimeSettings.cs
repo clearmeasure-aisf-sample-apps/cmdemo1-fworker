@@ -37,7 +37,40 @@ sealed class RuntimeSettings
     {
         var path = Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json");
         JsonNode? root = null; try { root = JsonNode.Parse(File.ReadAllText(path)); } catch { }
-        return From(ForEnvironment(root?["runtimes"], Environment.GetEnvironmentVariable("FACTORY_ENVIRONMENT") ?? "tdd"));
+        var env = (Environment.GetEnvironmentVariable("FACTORY_ENVIRONMENT") ?? "").Trim().ToLowerInvariant();
+        var s = From(ForEnvironment(root?["runtimes"], env == "" ? "tdd" : env));
+        // The baked caeJob (tdd's jobs and identity) applies only in tdd, local (run-owner-gateway.sh) or with no environment named (tests): anywhere else
+        // it starts off, and only the FACTORY_RUNTIME_* variables of that environment's app switch it on (cloud-worker-runtimes.md 5.1).
+        // What is cleared is what names tdd's resources or switches and sizes it; ARM endpoint, timings and container shape stay.
+        if (env is not ("" or "tdd" or "local"))
+        {
+            var j = s.CaeJob; j.Enabled = false; j.MaxConcurrent = 0; j.MaxExecutionsPerDay = 0; j.JobResourceId = ""; j.Jobs.Clear();
+            j.ManagedIdentityClientId = ""; j.GatewayUrl = "";
+        }
+        ApplyVariables(s.CaeJob, Environment.GetEnvironmentVariable);
+        return s;
+    }
+
+    // FACTORY_RUNTIME_* set on the gateway app override the baked caeJob. FACTORY_RUNTIME_ENABLED=true switches it on only together with a
+    // job of the active agent and an identity client id; a value that does not parse is ignored.
+    public static void ApplyVariables(CaeJobSettings j, Func<string, string?> get)
+    {
+        string? V(string n) => get(n) is { } v && v.Trim() != "" ? v.Trim() : null;
+        void Bad(string n) { if (V(n) is { } x) Console.Error.WriteLine($"runtime: {n}='{x}' does not parse; ignored"); }
+        if (V("FACTORY_RUNTIME_AGENT")?.ToLowerInvariant() is { } a && CaeJobSettings.Agents.Contains(a)) j.Agent = a; else Bad("FACTORY_RUNTIME_AGENT");
+        if (V("FACTORY_RUNTIME_JOB_CLAUDE") is { } jc) j.Jobs["claude"] = jc;
+        if (V("FACTORY_RUNTIME_JOB_CODEX") is { } jx) j.Jobs["codex"] = jx;
+        if (j.Jobs.TryGetValue(j.Agent, out var job)) j.JobResourceId = job;
+        if (V("FACTORY_RUNTIME_IDENTITY_CLIENT_ID") is { } id) j.ManagedIdentityClientId = id;
+        if (V("FACTORY_RUNTIME_GATEWAY_URL") is { } gu) j.GatewayUrl = gu;
+        if (int.TryParse(V("FACTORY_RUNTIME_MAX_CONCURRENT"), NumberStyles.None, CultureInfo.InvariantCulture, out var mc)) j.MaxConcurrent = mc; else Bad("FACTORY_RUNTIME_MAX_CONCURRENT");
+        if (int.TryParse(V("FACTORY_RUNTIME_MAX_PER_DAY"), NumberStyles.None, CultureInfo.InvariantCulture, out var md)) j.MaxExecutionsPerDay = md; else Bad("FACTORY_RUNTIME_MAX_PER_DAY");
+        if (bool.TryParse(V("FACTORY_RUNTIME_ENABLED"), out var en))
+        {
+            j.Enabled = en && j.JobResourceId != "" && j.ManagedIdentityClientId != "";
+            if (en && !j.Enabled) Console.Error.WriteLine($"runtime: FACTORY_RUNTIME_ENABLED=true without a job for agent {j.Agent} and an identity client id; caeJob stays off");
+        }
+        else Bad("FACTORY_RUNTIME_ENABLED");
     }
 
     // One image runs in every environment, so the runtimes block may carry environments.<name>: when it does, the entry of FACTORY_ENVIRONMENT

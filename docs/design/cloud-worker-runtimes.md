@@ -431,6 +431,26 @@ longer acknowledgement window for adapter workers to cover the container start (
 - **Operator session**: may read runtime status and drain a runtime; may not change runtime config.
 - **Config**: every `runtimes.*` setting defaults to disabled (`maxConcurrent` 0) in `config/instance.json`, which is not a code-owner
   path; a runtime is switched on and sized only in `config/deploy.overrides.json`, which is. A Tier 1 check asserts the source defaults are off.
+- **Per environment (5.1)**: one image runs in tdd, uat and prod. The block in the image is selected by `FACTORY_ENVIRONMENT`
+  (`runtimes.environments.<name>`), and its caeJob, which names tdd's jobs and identity, applies only in tdd, in `local` (`run-owner-gateway.sh`) or with no environment
+  named (tests). In any other environment caeJob starts off: enabled, sizes, jobs, identity and gateway URL are cleared. The
+  environment's gateway app switches it on with these variables, set by the system's `environmentSettings`; no uat or prod id lives in
+  this repository:
+
+  | Variable | Sets |
+  |---|---|
+  | `FACTORY_RUNTIME_ENABLED` | `true` switches caeJob on, only with a job of the active agent and an identity client id; `false` switches it off |
+  | `FACTORY_RUNTIME_AGENT` | `claude` or `codex` |
+  | `FACTORY_RUNTIME_JOB_CLAUDE` | resource id of the claude job |
+  | `FACTORY_RUNTIME_JOB_CODEX` | resource id of the codex job |
+  | `FACTORY_RUNTIME_IDENTITY_CLIENT_ID` | client id of the gateway's managed identity (`managedIdentityClientId`) |
+  | `FACTORY_RUNTIME_GATEWAY_URL` | the gateway address the execution uses (`FWORKER_GATEWAY_URL`) |
+  | `FACTORY_RUNTIME_MAX_CONCURRENT` | `maxConcurrent` |
+  | `FACTORY_RUNTIME_MAX_PER_DAY` | `maxExecutionsPerDay` |
+
+  The job variable must match the agent: with `FACTORY_RUNTIME_AGENT` unset outside tdd the agent is `claude`, so a codex job alone leaves
+  caeJob off. A variable also overrides the baked value in tdd. A value that does not parse is ignored with a line on stderr. Routing rules are not set by variables, so an
+  environment switched on this way runs only items labelled `runtime:cae-job`.
 - **Adapter workers always run one item per session**: the gateway ignores `FACTORY_ONE_ITEM_PER_SESSION=0` for them.
 - **Gateway replicas**: with runtimes on, the gateway keeps `minReplicas` 1 (today 0), or executions lose their stream when it scales to zero.
 
