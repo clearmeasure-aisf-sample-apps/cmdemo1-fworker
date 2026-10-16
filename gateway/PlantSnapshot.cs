@@ -37,7 +37,8 @@ sealed partial class Plant
                 ["owned"] = new JsonObject(ownedInfo.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)new JsonObject
                 {
                     ["holder"] = kv.Value.Holder, ["column"] = kv.Value.Column, ["leaseUntil"] = kv.Value.LeaseUntil?.ToString("o"), ["heartbeat"] = kv.Value.Heartbeat?.ToString("o"), ["parked"] = kv.Value.Parked
-                })))
+                }))),
+                ["digest"] = DigestSnapshotLocked()   // issue 105: what the patrol digest already reported (DigestCarry.cs)
             };
         }
     }
@@ -95,6 +96,7 @@ sealed partial class Plant
                     if (Num(JsonValue.Create(kv.Key)) is var item and > 0 && kv.Value is JsonObject oi && Name(oi["holder"]) is { Length: > 0 } holder && ownerOf.TryGetValue(item, out var on) && on == holder)
                         ownedInfo[item] = new OwnedInfo(holder, Gated(oi["column"]?.ToString()), Time(oi["leaseUntil"]), Time(oi["heartbeat"]), oi["parked"] is JsonValue pv && pv.TryGetValue<bool>(out var pb) && pb, now);
             }
+            if (Msg.On) RestoreDigestLocked(s["digest"], now);   // issue 105 (DigestCarry.cs)
             foreach (var w in workers.Values.Where(w => w.Out != null))
             {
                 var mine = ownerOf.Where(kv => kv.Value == w.Name).Select(kv => kv.Key).ToList();

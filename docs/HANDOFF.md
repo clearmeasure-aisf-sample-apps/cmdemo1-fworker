@@ -320,6 +320,14 @@ Closed on 2026-10-15 (issue #102):
   into the branch. A park that ends by expiry or unpark resets `fix_forward_rounds` and `demotions`. `docs/design/plant-manager.md` 10e; scenarios
   `ci rule: ...` (tests/scenarios/cirule.ps1, suites auto and owner). Open: the code-owner documents that list the operator stream's `plant.event`
   codes (`docs/design/operator-session.md`, the factory-operator skill) do not name `master-defect` yet (owner pull request).
+Closed on 2026-10-15 (issue #105):
+
+- **#105 Digest noise.** `gateway-restarted` is reported only while an owner has not reconnected (`notReconnected` > 0); what the patrol reported
+  (keys, buckets, acknowledged) is carried over a graceful restart in the plant snapshot, so persisting conditions are not new again
+  (`gateway/DigestCarry.cs`); a question whose text the same session asked about the same item within `timing.questionDedupeMinutes` (60) and that is
+  still open is not relayed again (`202` with the first question's id, `duplicate: true`, `/status` `messaging.questionsDeduped`; it still counts for
+  the watchdog's `repeated-question`). The trust-mapping lines are
+  unchanged. Open: the supervisor's skill (owner review) does not describe `duplicate`; nothing depends on it.
 
 Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
 

@@ -147,6 +147,7 @@
     "mgrVerbErrorMinutes": 10,
     "mgrRestartMinutes": 30,
     "mgrReleaseQueueMinutes": 60,
+    "questionDedupeMinutes": 60,
     "baseUpdateDebounceSeconds": 20,
     "sweepMinSeconds": 60,
     "journalWaitingMinutes": 30
