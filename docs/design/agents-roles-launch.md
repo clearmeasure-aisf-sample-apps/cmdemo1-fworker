@@ -77,8 +77,8 @@ Lifecycle:
 - **manual**: a person connects a CLI with a **manual seat token** (`r1` with role `seat`, minted by the operator on the dashboard where the w1 is minted
   today, but with an expiry, which a w1 does not have). The only tool a seat has is `request_role {role, phase?, capacity?}`. The gateway grants by slot and policy and answers with an
   `r1` for that role, delivered as the result of the call and used by the client from then on, or refuses with a code (`slot-taken`,
-  `role-not-allowed-manual`, `mode-not-allowed`, `drained`). Policy: `roles.<role>.allowManual` (default true for worker, inspector, qc;
-  false for operator and owner unless the owner turns it on), and the existing slot rules (one manager, one operator session, one keeper).
+  `role-not-allowed-manual`, `mode-not-allowed`, `drained`). Policy (owner decision 2026-10-16, 16.1): any role may be taken manually, operator, plant manager and keeper included;
+  `roles.<role>.allowManual` (default true for every role) remains as a kill switch, and the existing slot rules (one manager, one operator session, one keeper).
   A manual seat that holds a role keeps it until it releases it or its slot is taken back by the operator.
 - Dispatch order in the plant (replacing `TypeOrder`): a `worker:<name>` pin wins; then a connected manual session that holds the role with
   free capacity (`roles.preferManual`, default true, which matches today's `preferConnected`); then `hosted` with the agent from
@@ -110,8 +110,8 @@ Rules:
   body rewriting of `AuthorizeVerb` (identity fields from the token, never from the body) is kept unchanged.
 - Revocation by name generation, as today. An item role's `r1` ends with its assignment, like `i1`.
 - **Model limits** belong to the role: `roles.<role>.models` (allowed model profiles) and `roles.<role>.maxTokensPerTask`. The adapter starts
-  hosted agents only with an allowed profile; for manual sessions the limit is advisory (the gateway cannot see a person's model) and is
-  reported in the dashboard.
+  hosted agents only with an allowed profile; for manual sessions the limit is advised, not enforced (owner decision, 16.2): it is in the
+  prompt and reported in the dashboard.
 - Migration: `r1` is minted in parallel from step 2 (section 15); old kinds are accepted until the last step, and refused afterwards behind
   `auth.legacyKinds` (a config switch, so it can be turned back on).
 
@@ -163,6 +163,9 @@ agents:                             # optional overrides, appended as a section 
   with the includes and the agent override resolved, and the `version`.
 - The files ship inside the gateway image (`COPY prompts/`) and are loaded at start and hashed; `/_build` gains `promptsHash`. A merged
   prompt change is live after the gateway release (about 4 minutes in tdd), with no runner image rebuild, and the next task fetches it.
+- The operator may pin a prompt version per role (owner decision, 16.5): `prompts.pins.<role>` = version, set by the operator tool
+  `prompt_pin` / `prompt_unpin` and journaled; the gateway keeps the last 10 versions of each prompt in memory from the image's git
+  history (`prompts/.versions/`, generated at build) for this, so A/B tests compare `pv` in the cycle metrics.
 - A session mid-task keeps the text it already read; the gateway records `pv` per task in the journal, so a change is traceable to the
   tasks it affected.
 
@@ -211,8 +214,9 @@ changed (against `master`); no `factory.ps1` and no shell variable in a body. Th
 
 ### 6.1 Endpoint
 
-Streamable HTTP at `<gateway>/mcp` (`ModelContextProtocol.AspNetCore` 1.0.0, the version the work-order application uses; a new package for
-this repository, owner approval, as in pull request 159 open question 4). `Authorization: Bearer <r1 | legacy | admin | Entra owner>`.
+Streamable HTTP at `<gateway>/mcp` (`ModelContextProtocol.AspNetCore` 1.0.0, the version the work-order application uses; approved by the owner
+2026-10-16, 16.7). `Authorization: Bearer <r1 | legacy | admin>`; the owner role accepts the admin token now and Entra identities once an
+app registration exists (16.8).
 Stateless JSON-RPC for tools; the server is stateful only in the event queue it already keeps per name. Each tool handler calls the same
 in-process function as the matching `/api/v1/...` endpoint, so refusals, exit codes and journaling are identical across the dashboard,
 the CLI and MCP (one implementation, three surfaces, as pull request 159 section 18.2).
@@ -325,8 +329,9 @@ One image, one job per environment (`caj-cmdemo1-<env>-fwrunner`; the separate `
 per agent (`runner/agents/<agent>.sh`): write the MCP config with the gateway URL and the `r1` (in a file readable only by the agent's
 user, never in argv), write the model auth, start the agent headless with `prompts/bootstrap/hosted.md` (fetched from the gateway, so it too
 changes without a rebuild). Model credentials per agent: Codex by the runner identity's Entra token (as today); Claude by Foundry with the
-same identity once unblocked, or an Anthropic key from the job's secret; Copilot by a GitHub token with the Copilot Requests permission
-held by the gateway and passed per execution through the nonce redemption (never an env var of the job); Cursor by `CURSOR_API_KEY`
+same identity once unblocked, or an Anthropic key from the job's secret; Copilot by a fine-grained PAT (Copilot Requests permission) of a
+bot account with a paid Copilot seat, kept in the environment's Key Vault and passed per execution through the nonce redemption (never an
+env var of the job; owner decision 16.3; buying the seat and creating the bot are owner and infra tasks of the cmdemo1 session); Cursor by `CURSOR_API_KEY`
 passed the same way. The runner never stores a GitHub token for the repository: `git_credential` stays the only push path.
 
 ## 10. The api mode: Cursor Cloud Agents
@@ -342,7 +347,7 @@ From cursor.com/docs/cloud-agent/api/endpoints (API v1, public beta, retrieved 2
   `GET .../usage` (tokens). Webhooks only in the legacy v0 API (**UNVERIFIED** fields); v1 uses the SSE stream.
 - **Limits**: 300 repositories per agent, 5 images of 15 MB. Concurrency, maximum runtime and API rate limits are **not documented**
   (**UNVERIFIED**); the adapter therefore keeps its own cap (`api.cursor.maxConcurrent`, start 1) and a deadline (`api.cursor.maxMinutes`,
-  cancel at the deadline).
+  cancel at the deadline), both per environment.
 
 Adapter (`gateway/Runtimes/CursorCloudRuntime.cs`, implements `IWorkerRuntime`): mint the `r1` (mode `api`, agent `cursor-cloud-agent`),
 `POST /v1/agents` with `prompt.text` = `prompts/bootstrap/api.md`, `repos[0]` = cmdemo1-workorders at the item's branch (or `master` for
@@ -354,7 +359,7 @@ and cancels and archives at `session.end`, at the deadline or on revoke; then it
 How it reaches `/mcp`: over the gateway's public ingress (Cursor's VMs are outside the Container Apps environment), so `api` mode needs the
 public `/mcp` with TLS, the per-token rate limit, and an `r1` whose expiry is the deadline. Pushes: the Cursor agent pushes with Cursor's
 GitHub connection to the repository (it does not use `git_credential`), so the repository must have the Cursor GitHub App installed with
-push to non-`master` branches only; this is a second push identity, an open question (16.4). Model limits: `model.id` from the role's
+push to non-`master` branches only; this second push identity is accepted (owner decision, 16.4). Model limits: `model.id` from the role's
 allowed list; cost on the Cursor account, read back by `/usage` into the cycle metrics.
 
 Limits of the mode: no build slot or private build on the gateway's terms (the VM is Cursor's), no SQL Server tests unless Cursor's
@@ -385,10 +390,11 @@ environment provides them, so v1 routes only `docs-only` items and the `inspecto
 - **Token handling.** No `r1` in argv, a prompt, stdout or a transcript. The runner writes it to the agent's MCP config file (mode 0600);
   the api mode puts it in Cursor's MCP configuration for that agent only (section 10 lists what Cursor stores and for how long). Short
   expiry, revoked at `session.end`. The gateway's existing secret patterns gain `r1.` so the outgoing-message scan catches it.
-- **Manual sessions** cannot get hosted-only tools (`git_credential`) and cannot claim `owner` unless the owner turns it on; their agent
-  claim is not trusted.
+- **Manual sessions** may take any role by slot and policy (16.1) but never get hosted-only tools (`git_credential`); their agent and
+  model claims are not trusted.
 - **Egress** unchanged from `cloud-worker-runtimes.md` 5: open in tdd only; restricted egress precedes uat and prod for hosted; for api the
-  agent runs in Cursor's infrastructure, so the `r1` and the repository leave Azure (open question).
+  agent runs in Cursor's infrastructure, so the `r1` and the repository leave Azure: accepted by the owner for tdd, uat and prod from the
+  start (16.4), bounded by the per-environment cap, the deadline and the `r1` expiry.
 - **Rate limits per token** at `/mcp` (pull request 159 18.4 numbers for the owner; per role for the rest).
 
 ## 13. Tier 1 tests
@@ -433,19 +439,20 @@ the operator session can improve how phases are done within its daily release li
 | 6 | Copilot and Cursor CLI adapters in the image; `agents.routing` | each agent off until enabled |
 | 7 | Manual on MCP: seat tokens, `request_role`, dashboard selectors; the connect prompt and plugin download kept for one release, then retired for agents | dashboard offers both for one release |
 | 8 | Role runs of pull request 159 (manager, operator, keeper as hosted roles) through the same dispatcher | per role switch |
-| 9 | api mode: Cursor Cloud Agents adapter | `api.cursor.enabled` false by default |
+| 9 | api mode: Cursor Cloud Agents adapter, then on in tdd, uat and prod (16.4) | `api.cursor.enabled` false in the source defaults, on per environment in the overrides |
 | 10 | Remove `type` from registration and `TypeOrder`; `auth.legacyKinds` false in the overrides | revertible by the switch |
 
-## 16. Open questions for the owner
+## 16. Owner decisions on the open questions (2026-10-16)
 
-1. Manual sessions in operator, manager and keeper roles: allow (by slot, as today) or hosted only once role runs exist?
-2. Should the role pick the model for manual sessions (advisory), or refuse a manual session whose declared agent/model is outside the
-   role's list?
-3. Copilot CLI's model credential: a fine-grained PAT of a bot account with Copilot (seat cost), or no Copilot in hosted mode for now?
-4. Cursor api mode needs the gateway's `/mcp` reachable from Cursor's infrastructure and an `r1` stored in Cursor for the agent's life:
-   accept for tdd only?
-5. Prompt version pinning: should a session always take the newest prompt at the next task (decided default), or may the operator pin a
-   version per role for an experiment (A/B by `pv`)?
-6. Retire the PowerShell client for people too, or keep `factory.ps1` as the operator CLI?
-7. Package approval: `ModelContextProtocol.AspNetCore` 1.0.0 in the gateway (same as pull request 159 question 4).
-8. `owner` role through MCP for Entra identities only, or also the admin token?
+1. **Manual roles**: a manual session may take any role, operator, plant manager and keeper included, granted by slot and policy (3).
+2. **Models on manual sessions**: a role's allowed models are advised, not enforced (4).
+3. **Copilot in hosted mode**: a bot account with a paid Copilot seat; its fine-grained PAT in Key Vault per environment (9). Buying the
+   seat and creating the bot are owner and infra tasks (the cmdemo1 session); the adapter stays off until they exist.
+4. **Cursor api mode**: accepted in all environments (tdd, uat, prod) from the start: public `/mcp`, the `r1` stored at Cursor, Cursor's
+   GitHub App as a second push identity. The per-environment cap and deadline stay (10, 12).
+5. **Prompt version pins**: the operator may pin a prompt version per role, for A/B tests (5.3).
+6. **CLI**: `factory.ps1` stays as the operator and owner CLI; it is retired for agents only.
+7. **Package**: `ModelContextProtocol.AspNetCore` is approved (6.1).
+8. **Owner auth at `/mcp`**: the admin token now; Entra identities once an app registration exists (6.1).
+
+No question is open.
