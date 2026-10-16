@@ -59,8 +59,43 @@ jobs:
       - uses: actions/checkout@v6.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          # The whole history: the ordering check asks whether this commit is an ancestor of the last released one.
+          fetch-depth: 0
+
+      - name: Sign in to Octopus
+        uses: OctopusDeploy/login@v2
+        with:
+          server: ${{ vars.OCTOPUS_URL }}
+          service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
+
+      # Release runs start in the order their Builds finish, not in commit order: a late run for an older commit must
+      # not release, or tdd ends up on older code. The latest release's notes carry its commit; this commit must not be
+      # an ancestor of it. The same commit again (a manual re-release of the head) is allowed.
+      - name: Ordering check
+        id: order
+        env:
+          PROJECT: ${{ vars.SYSTEM_SLUG }}-${{ vars.DEPLOYABLE_NAME }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          api="${OCTOPUS_URL%/}/api"
+          auth=(-H "Authorization: Bearer ${OCTOPUS_ACCESS_TOKEN}")
+          space=$(curl -fsS "${auth[@]}" "$api/spaces/all" | jq -r --arg n "$OCTOPUS_SPACE" '.[] | select(.Name == $n) | .Id')
+          [ -n "$space" ] || { echo "::error::Octopus space '$OCTOPUS_SPACE' not found"; exit 1; }
+          project=$(curl -fsS "${auth[@]}" "$api/$space/projects/all" | jq -r --arg n "$PROJECT" '.[] | select(.Name == $n or .Slug == $n) | .Id')
+          [ -n "$project" ] || { echo "::error::Octopus project '$PROJECT' not found"; exit 1; }
+          notes=$(curl -fsS "${auth[@]}" "$api/$space/projects/$project/releases?take=1" | jq -r '.Items[0].ReleaseNotes // ""')
+          last=$(grep -oE '\b[0-9a-f]{40}\b' <<<"$notes" | head -1 || true)
+          if [ -n "$last" ] && [ "$last" != "$SHA" ] && git cat-file -e "$last^{commit}" 2>/dev/null \
+             && git merge-base --is-ancestor "$SHA" "$last"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipped: commit $SHA is older than $last, the commit of the latest release." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Download the build's image
+        if: steps.order.outputs.skip != 'true'
         uses: actions/download-artifact@v8
         with:
           name: container-image
@@ -71,6 +106,7 @@ jobs:
       # The version is the Build run's MAJOR.MINOR.run_number, or the one the image was built as (container-image.version
       # in the artifact) when that Build reused a pull request's image (build.yml, REUSE_PR_IMAGE).
       - name: Version
+        if: steps.order.outputs.skip != 'true'
         id: version
         shell: pwsh
         run: |
@@ -89,12 +125,14 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - uses: azure/login@v2
+        if: steps.order.outputs.skip != 'true'
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_ACR_PUSH }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Push the image
+        if: steps.order.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/${{ vars.SYSTEM_SLUG }}/${{ vars.DEPLOYABLE_NAME }}:${{ steps.version.outputs.version }}
@@ -110,16 +148,11 @@ jobs:
             --write-enabled false --delete-enabled false --output none
           echo "Pushed $IMAGE" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Sign in to Octopus
-        uses: OctopusDeploy/login@v2
-        with:
-          server: ${{ vars.OCTOPUS_URL }}
-          service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
-
       # The commit's time goes into the release with its notes: the system's delivery facts (lead time) read it there
       # and need not ask this repository for it, which they could not if it were private. Read with this run's own
       # token, which reads this repository and no other.
       - name: Read the commit's time
+        if: steps.order.outputs.skip != 'true'
         id: commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -129,6 +162,7 @@ jobs:
           echo "committed=$committed" >> "$GITHUB_OUTPUT"
 
       - name: Create the release
+        if: steps.order.outputs.skip != 'true'
         uses: OctopusDeploy/create-release-action@v3
         with:
           project: ${{ vars.SYSTEM_SLUG }}-${{ vars.DEPLOYABLE_NAME }}

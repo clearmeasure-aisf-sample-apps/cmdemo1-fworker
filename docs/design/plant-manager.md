@@ -75,6 +75,8 @@ Code: `gateway/Hosts.cs`; settings `schedule.*` in `config/instance.json`; count
   (`POST /api/v1/build-slot`, an owner's item token or a worker credential) takes a slot or extends the caller's own; exit 21 `build-slot-busy`
   (HTTP 429) with `retryAfterSeconds` and the holders when the host's slots are held. `--release` gives it back; a slot not given back frees itself
   after its ttl (`schedule.buildSlotTtlSeconds`, 1800; at most `buildSlotMaxTtlSeconds`, 7200). The slots are in memory: a restart frees them all.
+  The plant also frees them when their work ends (issue 108): an item's slots when it is taken back, released or completed or its owner is
+  dropped; a name's slots when it is revoked, told `session.end`, or disconnected for `schedule.buildSlotDisconnectSeconds` (120).
 - A session that registers with effort `low` gets capacity `schedule.lowEffortCapacity` (1), whatever it declared, unless the operator set its
   capacity on the dashboard.
 

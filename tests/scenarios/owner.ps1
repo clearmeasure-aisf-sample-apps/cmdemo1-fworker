@@ -390,7 +390,7 @@ $OwnerScenarios['owner: a pinned item gets its worker''s free slot first, and ke
 }
 
 # Host capacity (gateway/Hosts.cs): two sessions that declare one host share its limit of owned items (the owner suite sets lab-1 to 1 owned, 1 build),
-# a low-effort session gets capacity 1, and a private-build slot is one per host at a time, freed by release or by its ttl.
+# a low-effort session gets capacity 1, and a private-build slot is one per host at a time, freed by release or by its ttl (and when its work ends, below).
 $OwnerScenarios['owner: sessions of one host share its limit of owned items and its build slot; a low-effort session gets capacity 1'] = {
     foreach ($w in @($script:Workers.Keys)) { Stop-OwnerClient $w }    # only the sessions of this scenario may take its items
     [void](Wait-Until -Seconds 20 { @((Get-Plant).plant.workers | Where-Object { $_.connected }).Count -eq 0 })
@@ -431,6 +431,103 @@ $OwnerScenarios['owner: sessions of one host share its limit of owned items and 
     Start-OwnerClient 'host-low' 'persistent-local' '--capacity 4 --model claude-haiku-5-5 --effort low --host lab-3'
     Check 'a session that registers with effort low gets capacity 1' (@((Get-Plant).plant.workers | Where-Object { $_.name -eq 'host-low' -and $_.capacity -eq 1 }).Count -eq 1) ((Get-Plant).plant.workers | ConvertTo-Json -Compress -Depth 4)
     } finally { foreach ($w in 'host-a', 'host-b', 'host-c', 'host-low') { if ($script:Workers.ContainsKey($w)) { Stop-OwnerClient $w } } }
+}
+
+# Issue 108: a build slot is freed when the work it was for ends, not only by its release or its ttl: the item's slots when the item is released
+# (and on a take-back, at its completion and at every drop of its owner), the name's slots when the name is revoked, its session is told
+# session.end, or it stays disconnected for schedule.buildSlotDisconnectSeconds. lab-4 has no limit of owned items and one build slot (the default).
+$OwnerScenarios['owner: a build slot is freed when its work ends: the item released, the session disconnected for good, the name revoked'] = {
+    foreach ($w in @($script:Workers.Keys)) { Stop-OwnerClient $w }
+    [void](Wait-Until -Seconds 20 { @((Get-Plant).plant.workers | Where-Object { $_.connected }).Count -eq 0 })
+    $old = $env:FACTORY_TIMING_buildSlotDisconnectSeconds
+    try {
+        $env:FACTORY_TIMING_buildSlotDisconnectSeconds = '3'; Restart-Gateway
+        Start-OwnerClient 'slot-a' 'persistent-local' '--capacity 1 --host lab-4'
+        Start-OwnerClient 'slot-b' 'persistent-local' '--capacity 1 --host lab-4'
+        $slot = { param($Name, $Body) $r = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/build-slot" -Method POST -Headers @{ Authorization = "Bearer $($script:Workers[$Name].token)" } -Body ($Body | ConvertTo-Json -Compress) -ContentType 'application/json' -SkipHttpErrorCheck; $j = $r.Content | ConvertFrom-Json -AsHashtable; $j.status = [int]$r.StatusCode; $j }
+        $held = { [int](Get-Plant).hosts.buildSlotsHeld }
+        $n = New-Item-Fake 'Build slot freed' 'x' ($OwnerLabels + 'worker:slot-a')
+        Check 'the item is offered to slot-a' (Wait-Until -Seconds 40 { (Get-Assigned 'slot-a' $n).Count -gt 0 })
+        # (an offer lapses after a few seconds in this suite: accept the one that stands, as often as one lapsed before the call)
+        for ($try = 0; $try -lt 5; $try++) {
+            $r = Fo 'slot-a' @('accept', '--item', $n, '--assignment', (Get-Assigned 'slot-a' $n)[-1].assignment)
+            if ($r.exit -ne 11) { break }
+            $seen = (Get-Assigned 'slot-a' $n).Count; [void](Wait-Until -Seconds 30 { (Get-Assigned 'slot-a' $n).Count -gt $seen })
+        }
+        CheckExit 'slot-a accepts it' $r 0
+        $g = Fo 'slot-a' @('build-slot', '--item', $n, '--ttl', '600'); CheckExit 'the owner takes the build slot of lab-4' $g 0
+        $b = & $slot 'slot-b' @{ action = 'acquire' }
+        Check 'the other session of lab-4 is told busy' ($b.status -eq 429 -and $b.code -eq 'build-slot-busy') ($b | ConvertTo-Json -Compress -Depth 4)
+        $r = Fo 'slot-a' @('release', '--item', $n, '--reason', 'scenario: the item is given up'); CheckExit 'the owner releases the item without releasing the slot' $r 0
+        Check 'the release freed the slot of the item' (Wait-Until -Seconds 10 { (& $held) -eq 0 }) ((Get-Plant).hosts | ConvertTo-Json -Compress -Depth 5)
+        $b = & $slot 'slot-b' @{ action = 'acquire'; ttlSeconds = 600 }
+        Check 'so the other session of the host builds at once' ($b.status -eq 200 -and $b.granted -eq $true) ($b | ConvertTo-Json -Compress)
+        # slot-b goes away without releasing it: after buildSlotDisconnectSeconds (3 s here) its slot is free
+        Stop-OwnerClient 'slot-b'
+        Check 'the slot of a session that stays disconnected is freed' (Wait-Until -Seconds 30 { (& $held) -eq 0 }) ((Get-Plant).hosts | ConvertTo-Json -Compress -Depth 5)
+        $a = & $slot 'slot-a' @{ action = 'acquire'; ttlSeconds = 600 }
+        Check 'and slot-a gets it' ($a.status -eq 200 -and $a.granted -eq $true) ($a | ConvertTo-Json -Compress)
+        # a revoked name's credentials are refused from then on, so it can never release: its slots go with the revoke
+        $rv = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/workers/slot-a/revoke" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -Body '{}' -ContentType 'application/json' -SkipHttpErrorCheck
+        Check 'the operator revokes slot-a' ([int]$rv.StatusCode -eq 200) "$([int]$rv.StatusCode) $($rv.Content)"
+        Check 'its slot is freed' ((& $held) -eq 0) ((Get-Plant).hosts | ConvertTo-Json -Compress -Depth 5)
+        Check 'the frees are counted' ([int](Get-Plant).hosts.buildFreed -ge 3) ((Get-Plant).hosts | ConvertTo-Json -Compress -Depth 5)
+    } finally {
+        foreach ($w in 'slot-a', 'slot-b') { if ($script:Workers.ContainsKey($w)) { Stop-OwnerClient $w } }
+        $env:FACTORY_TIMING_buildSlotDisconnectSeconds = $old; Restart-Gateway
+    }
+}
+
+# factory.ps1 private-build (lib/Client.Build.ps1): one command builds a worktree under the host's build slot. The worktree's build.ps1 here only
+# prints what it was given; --dotnet names a stand-in SDK, so ensure-tools.ps1 downloads nothing. A worker credential holds the slot for the item.
+$OwnerScenarios['owner: private-build builds a worktree under the host''s build slot with SQLite and the dotnet path, writes the log and gives the slot back'] = {
+    $oldWork = $env:FACTORY_WORK_DIR; $env:FACTORY_WORK_DIR = Join-Path $script:Work 'work'   # (the log goes to the scenario's own work directory)
+    try {
+    Start-OwnerClient 'pb-a' 'persistent-local' '--capacity 1 --host lab-pb'
+    Start-OwnerClient 'pb-b' 'persistent-local' '--capacity 1 --host lab-pb'
+    $n = New-Item-Fake 'Private build' 'x' @('Auto Merge')
+    $wt = Join-Path $script:Work "pb-wt-$n"; New-Item -ItemType Directory -Force -Path $wt | Out-Null
+    Set-Content -LiteralPath (Join-Path $wt 'build.ps1') -Value @'
+function Build {
+    Set-Content -LiteralPath ./ran.txt -Value 'built'
+    "engine=$env:DATABASE_ENGINE"
+    "first-path=$(@($env:PATH -split [IO.Path]::PathSeparator | Where-Object { $_ -and $_.TrimEnd('/', '\') -ne $PSHOME.TrimEnd('/', '\') })[0])"   # (pwsh puts its own folder first)
+    "dotnet-root=$env:DOTNET_ROOT"
+    "credential=$([bool]$env:FACTORY_TOKEN)$([bool]$env:FACTORY_WORKER_TOKEN)"
+    if (Test-Path ./fail.txt) { '  Failed Some.Tests.WorkOrderTests.Should_Fail [12 ms]'; "$PWD/src/A.cs(3,4): error CS1002: ; expected [$PWD/src/A.csproj]"; throw 'the build failed here' }
+    'BUILD SUCCEEDED'
+}
+'@
+    $sdk = Join-Path $script:Work "pb-sdk-$n"; New-Item -ItemType Directory -Force -Path $sdk | Out-Null; Set-Content -LiteralPath (Join-Path $sdk 'dotnet') -Value ''
+    New-Item -ItemType Directory -Force -Path (Join-Path $sdk 'host/fxr') | Out-Null   # an SDK root, so DOTNET_ROOT is set to it
+    $pb = @('private-build', '--item', $n, '--worktree', $wt, '--dotnet', (Join-Path $sdk 'dotnet'))
+    $slot = { param($Name, $Body) $r = Invoke-WebRequest "$(Get-GatewayBase)/api/v1/build-slot" -Method POST -Headers @{ Authorization = "Bearer $($script:Workers[$Name].token)" } -Body ($Body | ConvertTo-Json -Compress) -ContentType 'application/json' -SkipHttpErrorCheck; $j = $r.Content | ConvertFrom-Json -AsHashtable; $j.status = [int]$r.StatusCode; $j }
+    $h = & $slot 'pb-b' @{ action = 'acquire'; ttlSeconds = 120 }
+    Check 'another session of the host holds the build slot' ($h.status -eq 200 -and $h.granted -eq $true) ($h | ConvertTo-Json -Compress)
+    $r = Fo 'pb-a' ($pb + @('--slot-wait-minutes', '0')); CheckExit 'the slot is busy and no wait is allowed: exit 21 build-slot-busy' $r 21 'build-slot-busy'
+    Check 'it says when to run it again, and nothing was built' ($r.verb -eq 'private-build' -and $r.retryAfterSeconds -ge 5 -and -not (Test-Path -LiteralPath (Join-Path $wt 'ran.txt'))) ($r | ConvertTo-Json -Compress -Depth 4)
+    [void](& $slot 'pb-b' @{ action = 'release' })
+    $h = & $slot 'pb-b' @{ action = 'acquire'; ttlSeconds = 7 }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $r = Fo 'pb-a' $pb; CheckExit 'the slot is busy for some seconds: the verb waits for it, then the build runs and passes' $r 0
+    Check 'it waited for the slot' ($h.granted -eq $true -and [int]$r.slotWaitedSeconds -ge 3) "slotWaitedSeconds $($r.slotWaitedSeconds), $([int]$sw.Elapsed.TotalSeconds) s in all" 
+    $log = if ($r.log -and (Test-Path -LiteralPath $r.log)) { Get-Content -Raw -LiteralPath $r.log } else { '' }
+    Check 'ok, nothing failed, and the log of this item in the work directory' ($r.ok -eq $true -and @($r.failed).Count -eq 0 -and "$($r.log)" -like "*build-$n.log" -and (Split-Path -Leaf (Split-Path -Parent $r.log)) -eq 'work' -and $r.database -eq 'SQLite') ($r | ConvertTo-Json -Compress -Depth 4)
+    Check 'the build ran in the worktree with DATABASE_ENGINE=SQLite and the dotnet folder first on PATH (after the folder of pwsh)' ($log -match 'engine=SQLite' -and $log.Contains("first-path=$sdk") -and $log.Contains("dotnet-root=$sdk") -and $log.Contains('BUILD SUCCEEDED')) $log
+    Check 'no credential of the session reaches the build' ($log.Contains('credential=FalseFalse')) $log
+    Check 'not the item''s branch (no git here): nothing is attested' ($r.attested -eq $false -and $r.attestCode -eq 'not-the-item-branch') ($r | ConvertTo-Json -Compress -Depth 3)
+    $b = & $slot 'pb-b' @{ action = 'acquire'; ttlSeconds = 60 }
+    Check 'the slot was given back' ($b.status -eq 200 -and $b.granted -eq $true) ($b | ConvertTo-Json -Compress)
+    [void](& $slot 'pb-b' @{ action = 'release' })
+    Set-Content -LiteralPath (Join-Path $wt 'fail.txt') -Value 'x'
+    $r = Fo 'pb-a' $pb; CheckExit 'a failing build: exit 10 build-failed' $r 10 'build-failed'
+    Check 'failed names the failed test and the compile error, relative to the worktree' (@($r.failed) -contains 'test Some.Tests.WorkOrderTests.Should_Fail' -and @($r.failed) -contains 'src/A.cs(3,4): error CS1002: ; expected') ($r.failed | ConvertTo-Json -Compress)
+    Check 'the end of the log is in the answer, the error with it' ((@($r.tail) -join "`n") -match 'the build failed here') ($r.tail | ConvertTo-Json -Compress)
+    $b = & $slot 'pb-b' @{ action = 'acquire'; ttlSeconds = 60 }
+    Check 'the slot was given back after the failed build as well' ($b.status -eq 200 -and $b.granted -eq $true) ($b | ConvertTo-Json -Compress)
+    [void](& $slot 'pb-b' @{ action = 'release' })
+    $u = Fo 'pb-a' @('private-build', '--item', $n, '--worktree', (Join-Path $script:Work 'no-such-worktree'), '--dotnet', (Join-Path $sdk 'dotnet')); CheckExit 'a folder without build.ps1 is refused' $u 2 'no-build-script'
+    } finally { foreach ($w in 'pb-a', 'pb-b') { if ($script:Workers.ContainsKey($w)) { Stop-OwnerClient $w } }; $env:FACTORY_WORK_DIR = $oldWork }
 }
 
 # The journal of one item reads in event order. Each line is a rule-script call of its own (the plant's matched and offered, the worker's accept),
