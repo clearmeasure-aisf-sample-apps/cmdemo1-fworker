@@ -460,7 +460,9 @@ $MessagingScenarios = [ordered]@{
     $c2 = Msg-Client 'alice' 'spawn2' '' @{ FACTORY_SANDBOX_REPO = $null } @('--spawn')
     Check 'alice registers again' (Msg-WaitEvent $c2 'worker.registered')
     $rep = @(Msg-ClientEvents $c2 | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq 901 })
-    Check 'the earlier assignment is printed as replayed, without its token' ($rep.Count -eq 1 -and $rep[0].replayed -eq $true -and -not $rep[0].ContainsKey('token')) ($rep | ConvertTo-Json -Compress -Depth 6)
+    # issue 106: a new session is not replayed the triggers of items its name no longer owns (Plant.StaleTrigger), so the gateway drops this one;
+    # (the client's replayed-event rule stays as the second line for a replay that does arrive)
+    Check 'the earlier assignment of an item alice does not own is not replayed to her new session' ($rep.Count -eq 0) ($rep | ConvertTo-Json -Compress -Depth 6)
     Start-Sleep -Seconds 2
     $err = "client-alice-spawn2.err"
     Check 'no spawn was attempted for it and no token saved' (-not (Test-Path (Join-Path $tokDir '901.owner')) -and -not ((Get-Content -Raw (Join-Path $script:Work $err) -ErrorAction SilentlyContinue) -match 'spawn')) (Get-Content -Raw (Join-Path $script:Work $err) -ErrorAction SilentlyContinue)
@@ -4557,6 +4559,56 @@ $ManagerScenarios['mgr: the Release Queue is reported when it ages or grows, eac
             Check 'every digest fits the schema' (@(Mgr-DigestProblems $dg).Count -eq 0) ((Mgr-DigestProblems $dg) -join '; ')
         } finally { Msg-Close $op }
     }
+}
+
+# Issue 106: what a stream client prints after a reconnect or as a new session of its name: the replayed history of an item the name no longer owns is
+# left out, and a peers.snapshot or supervisor.joined that did not change is not printed again. A second gateway, restarted on the same address.
+function Msg-Sig($E) { "$($E['supervisor'] | ConvertTo-Json -Compress -Depth 4)|$(@(@($E['peers']) | ForEach-Object { "$($_['name']):$(@($_['roles']) -join ','):$(@($_['items']) -join ',')" } | Sort-Object) -join ';')" }
+$MessagingScenarios['msg: a new session leaves out the replayed history of items its name no longer owns, and a reconnect does not repeat an unchanged peers.snapshot [full]'] = {
+    $g = Msg-StartGateway @{}; $script:MsgBase = $g.base; $c1 = $null; $c2 = $null
+    try {
+        $c1 = Msg-Client 'liam' 'replay-1'
+        Check 'the first session registers' (Msg-WaitEvent $c1 'worker.registered' 30)
+        foreach ($i in 9911, 9912) { [void](Msg-Post '/api/v1/_test/roles' @{ item = $i; owner = 'liam' }) }
+        foreach ($i in 9911, 9912) { [void](Msg-Post '/api/v1/_test/deliver' @{ routeItem = $i; event = 'qc.requested' }) }
+        Check 'it sees both triggers live' (Wait-Until -Seconds 20 { @(Msg-ClientEvents $c1 | Where-Object { $_.event -eq 'qc.requested' }).Count -eq 2 })
+        [void](Msg-Post '/api/v1/_test/roles' @{ item = 9912; owner = '' })
+        Mgr-Stop $c1
+        # a new process without a cursor: a new session of the name, and the gateway replays the name's buffer
+        $c2 = Msg-Client 'liam' 'replay-2'
+        Check 'the new session registers' (Msg-WaitEvent $c2 'worker.registered' 30)
+        Start-Sleep -Seconds 3
+        $ev = @(Msg-ClientEvents $c2 | Where-Object { $_.event -eq 'qc.requested' })
+        Check 'the replayed trigger of the owned item is printed, the one of the item it no longer owns is not' (@($ev | Where-Object { $_['item'] -eq 9911 -and $_['replayed'] -eq $true }).Count -eq 1 -and @($ev | Where-Object { $_['item'] -eq 9912 }).Count -eq 0) ($ev | ConvertTo-Json -Compress)
+        Check 'one peers.snapshot so far' (@(Msg-ClientEvents $c2 | Where-Object { $_.event -eq 'peers.snapshot' }).Count -eq 1)
+        # the gateway restarts on the same address: the client registers again and is sent its peers.snapshot again
+        Stop-Process -Id $g.proc.Id -Force; $g = Msg-StartGateway @{}; $script:MsgBase = $g.base
+        Check 'the client registers again after the restart' (Wait-Until -Seconds 40 { @(Msg-ClientEvents $c2 | Where-Object { $_.event -eq 'worker.registered' }).Count -ge 2 })
+        Start-Sleep -Seconds 2
+        # (a client an earlier scenario left running may join the second gateway and change the peers: then a new snapshot is right; an equal one never is)
+        $sigs = @(Msg-ClientEvents $c2 | Where-Object { $_.event -eq 'peers.snapshot' } | ForEach-Object { Msg-Sig $_ })
+        Check 'an unchanged peers.snapshot is not printed again' (@(for ($k = 1; $k -lt $sigs.Count; $k++) { if ($sigs[$k] -eq $sigs[$k - 1]) { $k } }).Count -eq 0) ($sigs -join ' || ')
+    } finally { Mgr-Stop @($c1, $c2); $script:MsgBase = ''; try { Stop-Process -Id $g.proc.Id -Force } catch { } }
+}
+$ManagerScenarios['mgr: the same supervisor joining a restarted gateway is not printed again by a stream client [full]'] = {
+    $env1 = @{ FACTORY_CONFIG = (Mgr-PatrolConfig 'instance.joined.json') }
+    $g = Msg-StartGateway $env1; $script:MsgBase = $g.base; $c = $null; $sup = $null
+    try {
+        $c = Msg-Client 'judy' 'joined'
+        Check 'the client registers' (Msg-WaitEvent $c 'worker.registered' 30)
+        $sup = Mgr-Open
+        Check 'it prints supervisor.joined once' (Wait-Until -Seconds 20 { @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'supervisor.joined' }).Count -eq 1 })
+        Msg-Close $sup; $sup = $null
+        Stop-Process -Id $g.proc.Id -Force; $g = Msg-StartGateway $env1; $script:MsgBase = $g.base
+        Check 'the client registers again after the restart' (Wait-Until -Seconds 40 { @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'worker.registered' }).Count -ge 2 })
+        $sup = Mgr-Open
+        Start-Sleep -Seconds 5
+        $j = @(Msg-ClientEvents $c | Where-Object { $_.event -in 'supervisor.joined', 'supervisor.left' })
+        Check 'the restarted gateway announces the same supervisor: not printed again' ($j.Count -eq 1 -and $j[0].event -eq 'supervisor.joined') ($j | ConvertTo-Json -Compress)
+        # a supervisor that declares another model is a change: printed
+        Msg-Close $sup; $sup = Msg-Open 'name=supervisor&supervisor=1&model=claude-sonnet-5-5&effort=high&messaging=1' (Msg-Supervisor); Msg-Registered $sup
+        Check 'a supervisor with another model is printed' (Wait-Until -Seconds 20 { @(Msg-ClientEvents $c | Where-Object { $_.event -eq 'supervisor.joined' -and $_.model -eq 'claude-sonnet-5-5' }).Count -eq 1 }) (Get-Content -Raw $c.out)
+    } finally { if ($sup) { Msg-Close $sup }; Mgr-Stop $c; $script:MsgBase = ''; try { Stop-Process -Id $g.proc.Id -Force } catch { } }
 }
 
 # issue 105: the patrol digest's memory survives a graceful restart (the plant snapshot carries it, gateway/DigestCarry.cs), and a question repeated
