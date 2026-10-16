@@ -419,6 +419,10 @@ w. **Built, off (2026-10-15): the cloud worker runtime adapter** (`docs/design/c
    `config/instance.json` (smoke check). Open: the job, its identity and the Foundry deployment (rollout step 2), the runner image, the real job
    resource id in `config/deploy.overrides.json`, and a live proof on tdd; unredeemed nonces are lost at a gateway restart (that execution
    fails its redemption and is replaced).
+- **#108 Build slots were freed only by their release or their ttl** (30 min). Now an item's slots go when it is taken back, released or
+  completed and whenever its owner is dropped, and a name's slots go when it is revoked, when its session is told `session.end`, and when it
+  stays disconnected for `schedule.buildSlotDisconnectSeconds` (120). `/status` `hosts.buildFreed` counts them; each free is one log line
+  (`"buildSlot":"freed"`) with its reason.
 
 Closed on 2026-10-15 (issues #79 and #82):
 

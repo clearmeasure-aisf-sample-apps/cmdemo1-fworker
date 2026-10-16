@@ -42,6 +42,7 @@ sealed class WorkerInfo
     // number a session.end event was sent for; the client writes the launcher's end marker on that event, so the loop does not rely on the model
     public DateTime? SpentIdleSince;
     public int SessionEndSent;
+    public DateTime? DisconnectedAt;                          // when its stream ended (cleared by the next registration): its build slots go after a while
     // the launcher watchdog (docs/launcher.md): since when this session is spent and owns nothing, counted across reconnects (a reconnect is no
     // progress), the session number a session.restart was sent for, and a reason noted elsewhere (a repeated question) for the next tick to send
     public DateTime? StuckSince;
@@ -133,7 +134,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     readonly DateTime startedAt = DateTime.UtcNow;
     // An item loses its owner: everything the plant kept about that ownership goes with it, so the next owner starts clean (it must not inherit a
     // sweep that missed the previous one, nor its lease).
-    void DropOwner(int item) { ownerOf.Remove(item); ownedMisses.Remove(item); ownedSince.Remove(item); ownedInfo.Remove(item); lastRouted.Remove(item); reviews.Remove(item); }
+    // Its build slots go too (issue 108): a take-back, a release, the item's completion and every drop of an owner come through here.
+    void DropOwner(int item) { var was = ownerOf.TryGetValue(item, out var o) ? o : null; ownerOf.Remove(item); ownedMisses.Remove(item); ownedSince.Remove(item); ownedInfo.Remove(item); lastRouted.Remove(item); reviews.Remove(item); if (was != null) FreeItemSlots(item, was, "owner-dropped"); }
     static readonly Regex CodeRx = new(@"^[A-Za-z0-9: ._-]{1,60}\z", RegexOptions.CultureInvariant);
     // A column or code that may enter the digest: the pattern of 3.9, or nothing.
     static string Gated(string? s) => s != null && CodeRx.IsMatch(s) ? s : "";
@@ -187,6 +189,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             w.Type = type; w.Caps = new(caps); w.Capacity = capOverride.TryGetValue(name, out var capSet) ? capSet : Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
             w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name) || mgrDrained.Contains(name);   // issue 80: only the operator clears its drain (and the plant manager its own, Manager.cs)
+            w.DisconnectedAt = null;
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
             w.RestartSent = 0;                                // and session.restart again, if it is still due
             w.Model = model; w.Effort = effort; w.Runtime = runtime;
@@ -224,7 +227,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
     }
 
-    public void Disconnect(WorkerInfo w, Channel<(long, string)> ch) { lock (gate) { if (w.Out == ch) { w.Connected = false; w.Out = null; if (Msg.On) store.Get(w.Name).GoneAt = DateTime.UtcNow; } } }
+    public void Disconnect(WorkerInfo w, Channel<(long, string)> ch) { lock (gate) { if (w.Out == ch) { w.Connected = false; w.Out = null; w.DisconnectedAt = DateTime.UtcNow; if (Msg.On) store.Get(w.Name).GoneAt = DateTime.UtcNow; } } }
 
     // ---- messaging: replay, delivery, presence, the supervisor slot (worker-messaging.md 3.4 to 3.6, 4.6). Every method holds the gate. -----
     static string ReplacedJson(string name) => new JsonObject { ["provider"] = "gateway", ["event"] = "stream.replaced", ["name"] = name, ["reason"] = "a newer stream registered with this name; this one ends", ["exit"] = 40 }.ToJsonString();
@@ -1507,11 +1510,12 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             var closed = false;
             if (workers.TryGetValue(name, out var w))
             {
-                if (w.Out != null) { closed = true; w.Out.Writer.TryComplete(); w.Out = null; w.Connected = false; if (Msg.On) store.Get(name).GoneAt = DateTime.UtcNow; }
+                if (w.Out != null) { closed = true; w.Out.Writer.TryComplete(); w.Out = null; w.Connected = false; w.DisconnectedAt = DateTime.UtcNow; if (Msg.On) store.Get(name).GoneAt = DateTime.UtcNow; }
                 foreach (var a in assignments.Values.Where(a => a.Worker == name && !a.Accepted)) { a.Worker = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = a.Pin != "" ? "pinned-unavailable" : "no-session"; }
             }
             if (store.Slot is { } s && s.Name == name && s.Out != null) { closed = true; s.Out.Writer.TryComplete(); s.Out = null; store.Get(name).GoneAt = DateTime.UtcNow; }
             if (RevokeOperator(name)) closed = true;
+            FreeNameSlots(name, "revoked");   // its credentials are refused from now on: it cannot release them (issue 108)
             if (RevokeKeeper(name)) closed = true;
             return closed;
         }
@@ -1986,10 +1990,12 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 w.SpentIdleSince ??= DateTime.UtcNow;
                 if (w.SessionEndSent == w.Session || (DateTime.UtcNow - w.SpentIdleSince.Value).TotalSeconds < SessionEndGraceSeconds) continue;
                 w.SessionEndSent = w.Session;
+                FreeNameSlots(w.Name, "session-end");   // the session is told to end: its builds end with it (issue 108)
                 Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "session.end", ["name"] = w.Name, ["session"] = w.Session,
                     ["items"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),
                     ["reason"] = "this session held its one work item and no longer owns it (completed, taken back, released, demoted or reassigned): end it; a new session takes the next item" }.ToJsonString(), false);
             }
+            FreeSlotsOfGoneSessions(DateTime.UtcNow);
             RestartStuckSessions();
             // a Start that found no worker keeps its place: it is offered as soon as a qualified worker connects (it is the person's earlier Start, not a new automatic one)
             foreach (var a in assignments.Values.Where(a => IsQc(a) && !a.Accepted && a.Worker == "").ToList())
