@@ -674,6 +674,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway parks an item runtime-failed by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "unpark-item")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/items/{n}/unpark (client: factory.ps1 unpark --item N --reason \"...\")", exit = 2 }), "application/json", Encoding.UTF8, 400);
+    if (verb is "resettle-item")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/items/{n}/resettle", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // the demo video arrives as a file: only POST /api/v1/demo/{item} streams it to the place the rule script reads it from
     if (verb is "publish-demo")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "send the MP4 as the body of POST /api/v1/demo/{item} (client: factory.ps1 publish-demo --item N --file F)", exit = 2 }), "application/json", Encoding.UTF8, 400);
@@ -923,6 +925,23 @@ app.MapPost("/api/v1/items/{n:int}/unpark", async (int n, HttpContext ctx) =>
         if (ownerMode) plant.ClearParks(new[] { n });   // issue 82: the digest no longer reports a park that was released
         hub.RequestSweep(n);
     }
+    var status = code switch { 0 => 200, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, _ => 500 };
+    return Results.Text(output, "application/json", Encoding.UTF8, status);
+});
+
+// Settle a merged item again (operator token only, issue 114): for an item an older gateway finished or stranded without a release, after a person
+// reopened it and moved its card. The rule verb resettle-item sets the wait from the merge record and journals the reason; never a hand-off.
+app.MapPost("/api/v1/items/{n:int}/resettle", async (int n, HttpContext ctx) =>
+{
+    if (Who(ctx).Kind != "admin") return Fail(403, "forbidden", "only the operator settles an item again", 30);
+    string text; using (var rd = new StreamReader(ctx.Request.Body)) text = await rd.ReadToEndAsync();
+    JsonObject body; try { body = string.IsNullOrWhiteSpace(text) ? new JsonObject() : (JsonNode.Parse(text) as JsonObject ?? new JsonObject()); } catch { return Fail(400, "bad-json", "the body is JSON: {\"reason\": \"...\"}", 2); }
+    var reason = body["reason"] is JsonValue rv && rv.TryGetValue<string>(out var rs) ? rs.Trim() : "";
+    if (reason.Length == 0 || reason.Length > 500) return Fail(400, "usage", "a reason of 1 to 500 characters is required", 2);
+    var (code, output) = await runner.RunAsync("resettle-item", new JsonObject { ["item"] = n, ["reason"] = reason, ["holder"] = "operator", ["by"] = "the operator" }.ToJsonString(), TimeSpan.FromSeconds(120));
+    Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"resettle-item\",\"item\":\"{n}\",\"caller\":\"admin\",\"exit\":{code}}}");
+    if (string.IsNullOrWhiteSpace(output)) output = JsonSerializer.Serialize(new { ok = false, code = "no-output", reason = "the rule script produced no output", exit = code == 0 ? 20 : code });
+    if (code == 0) hub.RequestSweep();
     var status = code switch { 0 => 200, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, _ => 500 };
     return Results.Text(output, "application/json", Encoding.UTF8, status);
 });
