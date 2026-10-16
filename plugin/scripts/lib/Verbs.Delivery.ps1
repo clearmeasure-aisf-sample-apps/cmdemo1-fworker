@@ -257,8 +257,10 @@ function Invoke-Settle([int]$n) {
         }
         $d = Get-Delivery $sha
         if ($d.candidate) {
-            $next = Get-NextColumn $info.column
+            # issue 117: the card moves on only from Functional Testing; one that is elsewhere (already in the Release Queue, or moved by a person) stays
+            $next = if ("$($info.column)" -ieq "$($c.columns.validation)") { Get-NextColumn $info.column } else { $null }
             if ($next -and $next -ine (Get-LastColumn)) { Move-Card $info $next }
+            if (-not $next) { $next = "$($info.column)" }
             $m.awaiting = 'release-queue'; $m.release = $d.candidate.version; $m.queued_at = ConvertTo-Iso $now
             Add-Comment $n "release candidate **$($d.candidate.version)** carries ``$($sha.Substring(0,7))`` - waiting in **$next** for the production deployment."
             Save-State $n $st
