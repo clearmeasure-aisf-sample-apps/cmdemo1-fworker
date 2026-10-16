@@ -1863,7 +1863,14 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0).ThenBy(x => Rank(priorities?[x!["item"]!.ToString()]?.ToString())).ThenBy(x => string.Equals(x!["column"]?.ToString() ?? "", IntakeColumn, StringComparison.OrdinalIgnoreCase) ? 1 : 0))
             {
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
-                var key = $"{item}|{kind}|{role}"; wanted.Add(key);
+                var key = $"{item}|{kind}|{role}";
+                // issue 97 with incremental passes (issue 92): a pass over a few items does not see the whole plan, so new work in the intake column is
+                // not offered by it while started work waits for an owner; the next full sweep orders both
+                if (scope != null && kind == "own-item" && string.Equals(o["column"]?.ToString() ?? "", IntakeColumn, StringComparison.OrdinalIgnoreCase)
+                    && !(assignments.TryGetValue(key, out var exi) && exi.Accepted)
+                    && assignments.Values.Any(x => x.Kind == "own-item" && !x.Accepted && !IsQc(x) && x.Worker == "" && !ownerOf.ContainsKey(x.Item) && !string.Equals(x.Column, IntakeColumn, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                wanted.Add(key);
                 var pin = pins?[item.ToString()]?.ToString();
                 // issue 98: a pin set aside after its long wait stays aside while the label names the same worker (a new label is a new pin)
                 if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
