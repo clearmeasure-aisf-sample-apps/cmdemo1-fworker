@@ -14,9 +14,9 @@ Technical Design, Development and Functional Testing to a merged pull request, a
   (`plugin/scripts/factory.ps1 --server <verb>`), sweeps the board, keeps the plant (workers, assignments, owners), serves the dashboard,
   the connect prompt and the plugin download, and carries worker messaging. Workers never hold a GitHub credential: they call verbs.
 - **Workers**: AI sessions (Claude Code local or cloud, Cursor cloud) started by a person with the connect prompt of the dashboard.
-  The prompt downloads PowerShell and the plugin and runs `subscribe --own`; the session owns each item it is given until its pull request
-  is merged (the gateway settles it from there, issue #107; the connect prompt still says "and master is green": its text is pinned by a
-  hash in the operator suite, a code-owner path). Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
+  The prompt downloads PowerShell and the plugin and runs `subscribe --own` under the Monitor tool (loaded first where it is deferred; a
+  background command only where there is no Monitor tool); the session owns each item it is given until its pull request is merged (the
+  gateway settles it from there, issue #107). Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
   `factory test` selects the cheapest model profile.
 - **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask, reads the gateway's patrol
   digest and keeps the flow moving with the flow verbs of `manager-action` (unpark, release-owner, pin and unpin, requeue, prioritize,
@@ -94,7 +94,7 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   cycle-time metrics. It still cannot mint, revoke, switch messaging or call a verb, and container logs stay with the operator (no read-only
   wrapper exists).
 - **uat and prod stay manual.**
-- **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so; the connect prompt text is unchanged because its hash is pinned by the operator suite, a protected path), and a launcher loop starts a new session from the
+- **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so, and the worker connect prompt says an item is owned until its pull request is merged; changing that text changes a hash pinned by the operator suite, a protected path, so it needs the owner's review), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
 - **Messaging and the supervisor are on for every registered worker** (`allowedWorkers` and `allowedAskers` are `*`), set in
   `config/deploy.overrides.json`; the source default stays off.
@@ -419,6 +419,10 @@ w. **Built, off (2026-10-15): the cloud worker runtime adapter** (`docs/design/c
    `config/instance.json` (smoke check). Open: the job, its identity and the Foundry deployment (rollout step 2), the runner image, the real job
    resource id in `config/deploy.overrides.json`, and a live proof on tdd; unredeemed nonces are lost at a gateway restart (that execution
    fails its redemption and is replaced).
+- **#108 Build slots were freed only by their release or their ttl** (30 min). Now an item's slots go when it is taken back, released or
+  completed and whenever its owner is dropped, and a name's slots go when it is revoked, when its session is told `session.end`, and when it
+  stays disconnected for `schedule.buildSlotDisconnectSeconds` (120). `/status` `hosts.buildFreed` counts them; each free is one log line
+  (`"buildSlot":"freed"`) with its reason.
 
 Closed on 2026-10-15 (issues #79 and #82):
 
