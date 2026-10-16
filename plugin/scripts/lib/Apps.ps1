@@ -58,3 +58,40 @@ function Use-GhAs([string]$Kind, [scriptblock]$Body) {
     $script:AsToken = Get-AppToken $Kind
     try { & $Body } finally { $script:AsToken = $null }
 }
+
+# git-credential (docs/design/cloud-worker-runtimes.md 2.6): a GitHub installation token of the author App for the item of a runtime worker, scoped by
+# GitHub itself to the work-orders repository with contents write and nothing else, valid one hour. The gateway admits the verb only for an item
+# token of role owner minted for a runtime worker (Auth.GitCredentialVerbs); the git credential helper of the runner image calls it again when the
+# token nears its expiry. The App key never leaves this process; the token is minted per call and never cached on disk (the cache of Get-AppToken
+# holds the App's own, unscoped token). In Tier 1 (FACTORY_FAKE_APPS) no key exists: the request goes to the fake with a JWT-shaped placeholder.
+function Verb_git_credential($a) {
+    $n = Get-ItemNumber $a; $c = Get-Cfg
+    $info = Get-AppInfo 'author'
+    $base = if ($env:GITHUB_API_URL) { $env:GITHUB_API_URL.TrimEnd('/') } else { 'https://api.github.com' }
+    if ($env:FACTORY_FAKE_APPS) { $jwt = 'eyJhbGciOiJSUzI1NiJ9.' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"iss":"0"}')).TrimEnd('=') + '.fake'; $inst = 0 }
+    else {
+        if (-not $info.installation_id) { Reject 30 'app-not-installed' "the 'author' GitHub App has no installation recorded" }
+        $pem = [Environment]::GetEnvironmentVariable('FACTORY_APP_AUTHOR_KEY')
+        if (-not $pem) { $pem = (& secret-tool lookup service factory-worker kind github-app-private-key app author 2>$null) -join "`n" }
+        if ($pem -and $pem.Trim() -eq 'unset') { $pem = $null }
+        if (-not $pem) { Reject 30 'secret-missing' 'no private key for the author GitHub App' }
+        $jwt = New-AppJwt $pem $info.id; $pem = $null; $inst = $info.installation_id
+    }
+    $req = @{ repositories = @("$($c.repo)"); permissions = @{ contents = 'write' } } | ConvertTo-Json -Compress
+    $r = Invoke-RestMethod -Method POST -Uri "$base/app/installations/$inst/access_tokens" -Body $req -ContentType 'application/json' -SkipHttpErrorCheck -StatusCodeVariable sc `
+        -Headers @{ Authorization = "Bearer $jwt"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'factory-worker-gateway' }
+    $jwt = $null
+    if ($sc -ne 201) { Reject 20 'app-token-failed' "GitHub answered $sc when minting the item's git credential" @{ retryAfterSeconds = 30 } }
+    # GitHub answers the scope it granted (every App token also carries metadata: read): a token wider than asked for is revoked, not handed out
+    $prop = { param($o, $k) if ($o -and $o.PSObject.Properties[$k]) { $o.$k } else { $null } }
+    $perms = & $prop $r 'permissions'
+    $repos = @(& $prop $r 'repositories' | Where-Object { $_ } | ForEach-Object { @{ name = "$(& $prop $_ 'name')"; full = "$(& $prop $_ 'full_name')" } })
+    $grant = @{}; if ($perms) { foreach ($pp in $perms.PSObject.Properties) { $grant[$pp.Name] = "$($pp.Value)" } }
+    $okPerms = $grant['contents'] -eq 'write' -and @($grant.Keys | Where-Object { -not (($_ -eq 'contents') -or ($_ -eq 'metadata' -and $grant[$_] -eq 'read')) }).Count -eq 0
+    $okRepo = $repos.Count -eq 1 -and $repos[0].name -eq "$($c.repo)" -and ($repos[0].full -eq '' -or $repos[0].full -eq "$($c.owner)/$($c.repo)")
+    if (-not ($okPerms -and $okRepo)) {
+        try { [void](Invoke-RestMethod -Method DELETE -Uri "$base/installation/token" -SkipHttpErrorCheck -Headers @{ Authorization = "Bearer $($r.token)"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'factory-worker-gateway' }) } catch { }
+        Reject 20 'git-credential-scope' 'GitHub granted a different scope than asked for (one repository, contents write); the token was revoked and nothing is handed out'
+    }
+    return @{ ok = $true; item = $n; token = "$($r.token)"; expires_at = "$($r.expires_at)"; repository = "$($c.owner)/$($c.repo)"; permissions = @{ contents = 'write' }; username = 'x-access-token' }
+}

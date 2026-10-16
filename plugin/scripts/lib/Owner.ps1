@@ -12,6 +12,8 @@ function Move-OwnerTo([int]$n, $s, [string]$Column) {
     if (-not (Test-Has $s 'dispatched_at')) { $s.dispatched_at = @{} }
     $s.dispatched_at[$Column] = ConvertTo-Iso (Get-UtcNow)
     if (Test-Has $s 'reviews') { $s.reviews.Remove($Column) }
+    # a stage finished is progress: the run of session take-backs (issue 91) starts again, and a take-back mark of an earlier session goes
+    foreach ($k in 'session_launches', 'taken_back') { if (Test-Has $s.claim $k) { $s.claim.Remove($k) } }
 }
 
 # accept: the answer to a directed assignment. Own-item: the per-item claim (every claim rule applies). Bot job: a separate bot lease.
@@ -47,7 +49,8 @@ function Verb_accept($a) {
 
 # expire-claim: the gateway takes an owned item back (gateway/Lease.cs): the owner's client accepted it and the session never started, or the owner
 # did not answer an item.check. Called by the gateway only (no role lists it). The claim stays and its lease ends now, marked taken_back, so the next
-# sweep offers the item with mode resume (a relaunch, counted against maxRelaunches) and claim-item --renew of the old owner is refused.
+# sweep offers the item with mode resume (a relaunch that counts against maxSessionRelaunches, not maxRelaunches: issue 91) and claim-item --renew
+# of the old owner is refused.
 function Verb_expire_claim($a) {
     $n = Get-ItemNumber $a; $holder = "$(Need $a 'holder')"
     $reason = if (Test-Has $a 'reason') { "$($a.reason)" } else { 'taken-back' }

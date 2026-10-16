@@ -127,12 +127,14 @@ sealed partial class Plant
     // Issue 65: the items the sweep holds back because an item they depend on is neither merged nor closed (sync-board `held`), with since when the
     // gateway has seen each held (kept across sweeps while the item stays held). Replaced by every sweep; shown in the status as plant.held.
     readonly Dictionary<int, (string Code, string Column, int[] On, DateTime Since)> held = new();
-    public void SetHeld(JsonArray? list)
+    // scope (issue 92): the items of an incremental pass; the held items outside it are kept as they were
+    public void SetHeld(JsonArray? list, IReadOnlyCollection<int>? scope = null)
     {
         if (list == null) return;
         lock (gate)
         {
             var now = DateTime.UtcNow; var next = new Dictionary<int, (string, string, int[], DateTime)>();
+            if (scope != null) foreach (var kv in held) if (!scope.Contains(kv.Key)) next[kv.Key] = kv.Value;
             foreach (var x in list)
             {
                 if (x is not JsonObject o || !(o["item"] is JsonValue iv && iv.TryGetValue<int>(out var item) && item >= 1)) continue;
