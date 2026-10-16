@@ -48,6 +48,33 @@ query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number
 
 function Test-Label($Info, [string]$Name) { Test-NameIn $Name $Info.labels }
 
+# Labels of an issue. GitHub creates a label that does not exist yet when it is added to an issue; removing one the issue does not carry is a 404,
+# which is no failure here.
+function Add-ItemLabels([int]$Item, [string[]]$Names) { Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$Item/labels" -Body @{ labels = @($Names) } | Out-Null }
+function Remove-ItemLabel([int]$Item, [string]$Name) { Invoke-Gh -Method DELETE -Path "$(Get-RepoPath)/issues/$Item/labels/$([uri]::EscapeDataString($Name))" -Allow 404 | Out-Null }
+
+# Priority (docs/design/plant-manager.md 10e): a label priority:top or priority:high (priorityLabels of the config) puts an item ahead of the others
+# when the plant offers work; no label is normal. Pins keep their place: a pinned item still takes its worker's slot first.
+function Get-PriorityLabels {
+    $c = Get-Cfg; $p = if (Test-Has $c 'priorityLabels') { $c.priorityLabels } else { @{} }
+    return @{ top = $(if (Test-Has $p 'top') { "$($p.top)" } else { 'priority:top' }); high = $(if (Test-Has $p 'high') { "$($p.high)" } else { 'priority:high' }) }
+}
+function Get-ItemPriority($Labels) {
+    $pl = Get-PriorityLabels
+    if (Test-NameIn $pl.top $Labels) { return 'top' }
+    if (Test-NameIn $pl.high $Labels) { return 'high' }
+    return ''
+}
+
+# Issue 109: the labels by which a person holds an item for themselves (holdLabels, default "hold:owner"). Honoured like the Demo label: no offer,
+# an open offer is dropped (the sweep no longer asks for it), claim-item is refused. Returns the first such label the item carries, or ''.
+function Get-HoldLabel($Labels) {
+    $c = Get-Cfg
+    $hold = if (Test-Has $c 'holdLabels') { @($c.holdLabels) } else { @('hold:owner') }
+    foreach ($h in $hold) { if ("$h" -and (Test-NameIn "$h" $Labels)) { return "$h" } }
+    return ''
+}
+
 function Move-Card([hashtable]$Info, [string]$Column) {
     $meta = Get-ProjectMeta
     if (-not $meta.options.Contains($Column)) { Reject 10 'unknown-column' "board has no column '$Column'" }
