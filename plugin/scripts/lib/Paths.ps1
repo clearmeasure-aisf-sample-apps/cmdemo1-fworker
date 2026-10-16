@@ -29,6 +29,16 @@ function Get-FwSubDir([string]$Name, [string]$Override) {
     return $d
 }
 
+# The work directory of a session (<BASE>/work of the connect prompt, beside its data directory <BASE>/data): build logs and saved answers go
+# there, never into a repository checkout. FACTORY_WORK_DIR wins; else the sibling "work" of FACTORY_DATA_DIR; else "work" in the data directory.
+function Get-FwWorkDir {
+    $d = if ($env:FACTORY_WORK_DIR) { $env:FACTORY_WORK_DIR }
+         elseif ($env:FACTORY_DATA_DIR) { Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($env:FACTORY_DATA_DIR).TrimEnd('/', '\'))) 'work' }
+         else { Join-Path (Get-FwDataDir) 'work' }
+    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    return $d
+}
+
 # Optional operator configuration (client.json, models.json, App ids). Never created, may not exist: $null when the machine has no home.
 function Get-FwConfigPath([string]$Relative) {
     $h = Get-FwHome
