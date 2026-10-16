@@ -127,6 +127,22 @@ function Verb_comment($a) {
 # who and why, and an item with no live claim gets a handoff to its current column, so the next sweep offers it again there at once instead of after
 # sweepSeenCount sightings. Two parks are waits of the gateway, not holds for a person, and are refused: awaiting checks (the sweep ends it when the
 # checks finish) and the inspector's escalation (only a human approval of the head clears it: clear-hold).
+# The gateway parks an item itself (cloud-worker-runtimes.md 2.11: runtime-failed after the executions of one phase failed). Admin only (the
+# gateway's runner); the operator releases it with POST /api/v1/items/{n}/unpark. Body: item, code (a park code), phase, by.
+function Verb_park_item($a) {
+    $n = Get-ItemNumber $a; $c = Get-Cfg
+    $code = "$(Need $a 'code')"
+    if ($code -notmatch '^[a-z0-9-]{1,40}$') { Reject 2 'usage' 'the park code is lowercase letters, digits and dashes' }
+    $st = Get-State $n; $s = $st.state
+    if (Get-Park $s) { return @{ ok = $true; id = $n; parked = $true; already = $true; park = $s.park } }
+    Set-Park $s $code ($c.timing.parkHours * 60)
+    $phase = if (Test-Has $a 'phase') { ("$($a.phase)" -replace '<!--|-->', '' -replace '\s+', ' ').Trim() } else { '' }
+    $by = if (Test-Has $a 'by') { ("$($a.by)" -replace '<!--|-->', '' -replace '\s+', ' ').Trim() } else { 'the gateway' }
+    [void](Add-Journal $n $st 'parked' @{ code = $code; phase = $phase; by = $by } "$($s.park.at)")
+    Save-State $n $st
+    return @{ ok = $true; id = $n; parked = $true; park = $s.park }
+}
+
 function Verb_unpark_item($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg
     # one line, no HTML comment markers: the reason goes into a journal comment whose hidden marker is machine-read

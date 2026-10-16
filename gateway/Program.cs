@@ -126,6 +126,10 @@ var plantRestored = new TaskCompletionSource(TaskCreationOptions.RunContinuation
 if (!snapshotOn) plantRestored.SetResult();
 var snapshotState = new JsonObject { ["enabled"] = snapshotOn, ["maxAgeMinutes"] = snapshotMaxAge };
 var revocations = new Revocations();
+var runtimeNonces = new RuntimeNonces();   // the one-time nonces of runtime workers (Auth.cs, cloud-worker-runtimes.md 2.6)
+// the runtime adapter (gateway/Runtimes/, cloud-worker-runtimes.md 4): only in owner mode with a token secret and a runtime switched on in the configuration
+var runtimeSettings = RuntimeSettings.Load(scriptsDir);
+var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new RuntimeManager(runtimeSettings, new CaeJobRuntime(runtimeSettings.CaeJob), runtimeNonces) : null;
 builder.Services.AddSingleton(sp =>
 {
     var runner = sp.GetRequiredService<Runner>();
@@ -134,7 +138,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -145,6 +149,20 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
 // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
 var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : TimingValue(scriptsDir, "sweepMinSeconds", 60));
 builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget });
+if (runtimeManager != null) builder.Services.AddHostedService(sp =>
+{
+    var rp = sp.GetRequiredService<Plant>(); var rr = sp.GetRequiredService<Runner>();
+    runtimeManager.Plant = rp;
+    // the gateway's own hands for the adapter: park an item runtime-failed, end the claim a lost execution left, revoke a failed execution's name
+    runtimeManager.Park = async (item, phase) =>
+    {
+        var (code, _) = await rr.RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "runtime-failed", ["phase"] = phase, ["by"] = "the runtime adapter" }.ToJsonString(), TimeSpan.FromSeconds(120));
+        if (code != 0) throw new InvalidOperationException($"park-item answered exit {code}");
+        rp.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "runtime-failed" });
+    };
+    runtimeManager.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
+    return new RuntimeLoop(runtimeManager);
+});
 builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()));
 // A background loop that throws must not end the process (the default of .NET stops the host): the loops catch and go on, and this is the net under them.
 builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
@@ -306,6 +324,8 @@ app.Use(async (ctx, next) =>
     var port = ctx.Connection.LocalPort;
     var path = ctx.Request.Path.Value ?? "";
     if (port == hookPort && hookPort != apiPort && !(path == "/webhooks/github" && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
+    // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
+    if (port == apiPort && path == "/api/v1/runtime/redeem") { await next(); return; }
     if (port == apiPort && path.StartsWith("/api/"))
     {
         var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
@@ -360,6 +380,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
+    if (ownerMode) o["runtimes"] = runtimeManager?.Status() ?? new JsonObject { ["enabled"] = false };
     if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode && messaging.ManagerEnabled) o["managerActions"] = plant.ManagerActionsStatus(false);
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
@@ -490,6 +511,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
+    if (ownerMode && runtimeManager != null) o["runtimes"] = runtimeManager.Status();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
     return Results.Text(o.ToJsonString(), "application/json");
 });
@@ -546,23 +568,39 @@ app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) 
     if (revocationsOff) return Fail(403, "revocations-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot revoke", 30);
     if (revSkipReason != "") return Fail(409, "revocations-unavailable", $"revocations are not read on this gateway ({revSkipReason}): it cannot revoke", 30);
     if (!revocationsLoaded.Task.IsCompleted) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
+    var (rok, gen, closed) = await RevokeName(name, "operator");
+    if (!rok) return Results.Json(new { ok = false, code = "not-recorded", reason = "the revocation could not be written to GitHub, so nothing was revoked; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
+    // the execution of a runtime worker is stopped with its name (cloud-worker-runtimes.md 5)
+    if (runtimeManager != null && runtimeManager.IsRuntimeWorker(name)) _ = Task.Run(() => runtimeManager.Deprovision(name, "revoked"));
+    return Results.Json(new { ok = true, name, generation = gen, streamClosed = closed, exit = 0 });
+});
+// The operator marks a runtime healthy again after it was marked unhealthy (cloud-worker-runtimes.md 2.11): operator token only.
+app.MapPost("/api/v1/runtimes/{kind}/reset", (string kind, HttpContext c) =>
+{
+    if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator resets a runtime", 30);
+    if (runtimeManager == null || kind != "cae-job") return Fail(404, "no-runtime", "no such runtime is switched on", 12);
+    runtimeManager.ResetHealth();
+    return Results.Json(new { ok = true, runtime = kind, exit = 0 });
+});
+// The revocation itself: the new generation is written to GitHub, then raised here; the name's open stream and pending nonces end with it.
+async Task<(bool Ok, int Generation, bool Closed)> RevokeName(string name, string by)
+{
+    if (revocationsOff || revSkipReason != "" || !revocationsLoaded.Task.IsCompleted) return (false, 0, false);
     await revokeGate.WaitAsync();
     try
     {
         var next = revocations.Of(name) + 1;
-        var (code, output) = await runner.RunAsync("revoke-worker", new JsonObject { ["name"] = name, ["generation"] = next }.ToJsonString(), TimeSpan.FromSeconds(120));
-        if (code != 0)
-        {
-            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"failed\":{code}}}");
-            return Results.Json(new { ok = false, code = "not-recorded", reason = "the revocation could not be written to GitHub, so nothing was revoked; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
-        }
+        var (code, _) = await runner.RunAsync("revoke-worker", new JsonObject { ["name"] = name, ["generation"] = next }.ToJsonString(), TimeSpan.FromSeconds(120));
+        if (code != 0) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"failed\":{code}}}"); return (false, 0, false); }
         revocations.Raise(name, next);
+        runtimeNonces.Forget(name);   // a nonce of the name not yet redeemed is spent with it
         var closed = plant.Revoke(name);
-        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"generation\":{next},\"streamClosed\":{(closed ? "true" : "false")},\"by\":\"operator\"}}");
-        return Results.Json(new { ok = true, name, generation = next, streamClosed = closed, exit = 0 });
+        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"generation\":{next},\"streamClosed\":{(closed ? "true" : "false")},\"by\":\"{by}\"}}");
+        return (true, next, closed);
     }
     finally { revokeGate.Release(); }
-});
+}
+if (runtimeManager != null) runtimeManager.Revoke = async n => { await RevokeName(n, "runtime"); };
 
 app.MapPost("/webhooks/github", async (HttpContext ctx) =>
 {
@@ -621,6 +659,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":{JsonSerializer.Serialize(refusal)}}}");
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "forbidden", reason = refusal, exit = 30 }), "application/json", Encoding.UTF8, 403);
     }
+    if (verb == "git-credential" && who.Kind == "item" && !(ownerMode && plant.OwnsAccepted(who.Name, who.Item)))
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "not-owner", reason = $"this session does not own item #{who.Item} through an accepted assignment: no git credential", exit = 10 }), "application/json", Encoding.UTF8, 409);
     // the rule scripts of a revocation run only inside POST /workers/{name}/revoke, which keeps the stored generation and this process in step
     if (verb is "revoke-worker" or "revocations")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/workers/{name}/revoke", exit = 2 }), "application/json", Encoding.UTF8, 400);
@@ -630,6 +670,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (verb is "operator-release" or "operator-releases")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/operator/record-release", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // a person releases a park early only through POST /api/v1/items/{n}/unpark (operator token, with a reason)
+    if (verb is "park-item")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway parks an item runtime-failed by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "unpark-item")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/items/{n}/unpark (client: factory.ps1 unpark --item N --reason \"...\")", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "resettle-item")
@@ -809,6 +851,28 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
     if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep(int.TryParse(item, out var swItem) ? swItem : 0);
     return Results.Text(output, "application/json", Encoding.UTF8, status);
+});
+
+// A runtime worker's one-time nonce (cloud-worker-runtimes.md 2.6) is redeemed here for its w2, once. No Authorization header: the nonce is the
+// credential. Body {"nonce": "n1.<hex>"}. Every refusal is the same 401 for the caller (unknown, spent, expired); the log says which.
+app.MapPost("/api/v1/runtime/redeem", async (HttpContext ctx) =>
+{
+    if (!revocationsLoaded.Task.IsCompleted)
+    {
+        await Task.WhenAny(revocationsLoaded.Task, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
+        if (!revocationsLoaded.Task.IsCompleted) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
+    }
+    string text; using (var rd = new StreamReader(ctx.Request.Body)) text = await rd.ReadToEndAsync();
+    if (text.Length > 1000) return Results.Json(new { ok = false, code = "usage", reason = "the body is {\"nonce\": \"...\"}", exit = 2 }, statusCode: 400);
+    string? nonce = null; try { nonce = (JsonNode.Parse(text) as JsonObject)?["nonce"]?.ToString(); } catch { }
+    var (name, rt, expires, error) = runtimeNonces.Redeem(nonce);
+    if (error != null || tokenSecret.Length == 0)
+    {
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "redeem-refused", ["code"] = error ?? "no-token-secret" }.ToJsonString());
+        return Results.Json(new { ok = false, code = "unauthorized", reason = "unknown, spent or expired nonce", exit = 30 }, statusCode: 401);
+    }
+    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "redeemed", ["worker"] = name, ["kind"] = rt, ["expires"] = expires }.ToJsonString());
+    return Results.Json(new { ok = true, name, runtime = rt, expires, token = Auth.WorkerToken2(tokenSecret, name, rt, expires, revocations.Of(name)), exit = 0 });
 });
 
 // The plant manager's actions of the last 24 hours, its mode and its limits (Manager.cs): the operator, and the active supervisor (a step of its budget).
@@ -1071,6 +1135,10 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
         var roles = ctx.Request.Query["roles"].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var type = string.IsNullOrEmpty(ctx.Request.Query["type"]) ? "persistent-local" : ctx.Request.Query["type"].ToString();
         var model = ctx.Request.Query["model"].ToString(); var effort = ctx.Request.Query["effort"].ToString();
+        // the runtime is the credential's (cloud-worker-runtimes.md 4.1): a w2 names it, a w1 or the admin token is local; a claim that differs is refused
+        var runtime = who.Kind == "worker" && who.Runtime != "" ? who.Runtime : "local";
+        var claimedRuntime = ctx.Request.Query["runtime"].ToString();
+        if (claimedRuntime != "" && claimedRuntime != runtime) { await Refuse(ctx, 403, "runtime-not-trusted", $"this credential registers runtime '{runtime}' only: a runtime is taken from the credential the gateway minted, never from the claim"); return; }
         if (!Auth.ValidRegistration(type, roles, caps, model, effort))
         { await Refuse(ctx, 400, "usage", "type, roles, capabilities (10 at most), model and effort must use the registration values (worker-messaging.md 2.2)", 2); return; }
         ctx.Response.Headers.ContentType = "text/event-stream"; ctx.Response.Headers.CacheControl = "no-cache";
@@ -1078,7 +1146,7 @@ app.MapGet("/api/v1/events", async (HttpContext ctx) =>
             int.TryParse(ctx.Request.Query["qc_capacity"], out var qcap) ? qcap : 1, ctx.Request.Query["qc_address"].ToString(), ctx.Request.Query["qc_profile"].ToString() is "1" or "true",
             messagingClient: ctx.Request.Query["messaging"].ToString() == "1", model: model, effort: effort,
             // a stream opened without a cursor is a new session of this name (a reconnect of the same client sends its last id): one item per session
-            newSession: lastEventId == "");
+            newSession: lastEventId == "", runtime: runtime);
         plant.SetHost(name, ctx.Request.Query["host"].ToString(), effort);
         // a new session can take a work item that waited as session-spent: plan now instead of at the next sweep (issue 72)
         if (lastEventId == "") hub.RequestSweep();
@@ -1455,6 +1523,16 @@ if (messaging.Enabled && messaging.TestHooks)
         catch { return (null, Fail(400, "usage", shape, 2)); }
     }
 
+    // a runtime worker's nonce, as the adapter mints one at provisioning: {"name", "runtime", "tokenSeconds", "ttlSeconds"}
+    app.MapPost("/api/v1/_test/runtime-nonce", async (HttpContext ctx) =>
+    {
+        var (b, err) = await SeamBody(ctx, "the body is a JSON object with name and runtime");
+        if (b == null) return err!;
+        var nm = b["name"]?.ToString() ?? ""; var rk = b["runtime"]?.ToString() ?? "";
+        if (!Auth.ValidName(nm) || !Auth.ValidRuntime(rk)) return Fail(400, "usage", "a valid worker name and a runtime other than local", 2);
+        var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (long)(double.TryParse(b["tokenSeconds"]?.ToString(), out var ts) ? ts : 3600);
+        return Results.Json(new { ok = true, nonce = runtimeNonces.Mint(nm, rk, exp, TimeSpan.FromSeconds(double.TryParse(b["ttlSeconds"]?.ToString(), out var tt) ? tt : 600)) });
+    });
     app.MapPost("/api/v1/_test/deliver", async (HttpContext ctx) =>
     {
         var (b, err) = await SeamBody(ctx, "the body is a JSON object with to and text, trigger or assigned");
@@ -1996,7 +2074,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 // item.merged (Plant.Merged).
                 var keep = new List<int>();
                 foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
-                plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, items);
+                plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, items, j["runtimes"] as JsonObject, j["profiles"] as JsonObject);
                 if (items == null && j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);   // a full sweep only: an incremental one reads a few items
                 // the hold:owner items of the whole board: a full sweep replaces them, an incremental pass updates its own items; the plant hears
                 // them once a full sweep has read the whole board (until then its name actions wait, sweep-pending)
@@ -2101,6 +2179,7 @@ pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monos
 <h2>Assignments</h2><div id="basecnt" class="mut"></div><table><tbody id="asg"><tr><td class="mut">none</td></tr></tbody></table>
 <div id="rqsec" hidden><h2>Release Queue</h2><div id="rqtext" class="mut"></div><table><tbody id="rqrows"><tr><td class="mut">none</td></tr></tbody></table>
 <div class="row"><button id="rqreq">Request promotion to UAT</button><span class="mut">Records and announces the request on the operator stream only. The owner and the cmdemo1 session promote to uat and prod.</span></div></div>
+<div id="rtsec" hidden><h2>Runtimes</h2><div id="rttext" class="mut"></div><table><tbody id="rtrows"><tr><td class="mut">none</td></tr></tbody></table></div>
 <div id="qcsec" hidden><h2>Waiting for PR QC</h2>
 <div class="wrap"><table><thead><tr><th>PR</th><th>Title</th><th>Item</th><th>Head</th><th>Author</th><th>Age</th><th>QC state</th><th>Environment</th><th>Worker</th><th>Actions</th></tr></thead><tbody id="qcrows"><tr><td colspan="10" class="mut">none</td></tr></tbody></table></div></div>
 <details id="metbox"><summary><b>Cycle times</b> <span class="mut">(from the item journals on GitHub; survives a restart)</span></summary>
@@ -2327,6 +2406,7 @@ if(!await sendNote(rb.dataset.n,text,id))return;delete drafts[k]}
 if(id)await act('/api/v1/messages/read',{ids:[id]});if(document.activeElement)document.activeElement.blur();refresh();return}
 const b=e.target.closest('button[data-a="mute"]');if(!b||!confirm('Mute '+b.dataset.n+'? It can still ask the supervisor.'))return;say(await act('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/messaging?value=mute'));refresh()};
 // The Release Queue: the waiting items, oldest first, and the button that only records a promotion request (the gateway never promotes).
+function refreshRt(r){const c=r&&r['cae-job'];$('rtsec').hidden=!c;if(!c)return;$('rttext').textContent=`cae-job: ${c.enabled?'on':'off'}, ${esc(c.running)} of ${esc(c.maxConcurrent)} running, ${esc(c.today)} of ${esc(c.maxExecutionsPerDay)} today, ${c.healthy?'healthy':'UNHEALTHY: '+esc(c.unhealthyReason)}`;const ex=c.executions||[],la=c.last||[];$('rtrows').innerHTML=ex.length||la.length?ex.map(x=>`<tr><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${esc(x.status)}</td><td>${x.registered?'registered':'starting'}</td></tr>`).join('')+la.slice().reverse().map(x=>`<tr class="mut"><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${esc(x.outcome)}</td><td>${esc(x.ended||'')}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>'}
 function refreshRq(q){const items=q&&q.items||[],reqs=q&&q.requests||[];$('rqsec').hidden=!q;if(!q)return;const req={};reqs.forEach(r=>req[r.release]=r);
 $('rqtext').textContent=items.length?`${items.length} item(s) waiting; the oldest for ${items[0].minutes} min (aged after ${q.agedMinutes} min or at ${q.agedCount} items)`:'No item waits for production.';
 $('rqrows').innerHTML=items.length?items.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.release||'no release')}</td><td>${esc(x.minutes)} min</td><td>${req[x.release]?'promotion requested by '+esc(req[x.release].by):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';
@@ -2339,7 +2419,7 @@ $('logbox').ontoggle=()=>refresh();
 // the token box is hidden; it comes back only when the gateway refuses the token or after Disconnect.
 function showConn(on){$('tokrow').hidden=on;$('conn').hidden=!on}
 // What a token showed is taken off the page when that token goes (Disconnect, or the gateway refused it): nothing of it stays readable.
-function clearData(){hideMessaging();$('metagg').innerHTML='<tr><td colspan="5" class="mut">open to load</td></tr>';$('metrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('metinfo').textContent='';metAt=0;$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;$('rqsec').hidden=true;$('rqrows').innerHTML='<tr><td class="mut">none</td></tr>';$('rqtext').textContent='';
+function clearData(){hideMessaging();$('metagg').innerHTML='<tr><td colspan="5" class="mut">open to load</td></tr>';$('metrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('metinfo').textContent='';metAt=0;$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;$('rqsec').hidden=true;$('rtsec').hidden=true;$('rqrows').innerHTML='<tr><td class="mut">none</td></tr>';$('rqtext').textContent='';
 $('oprows').innerHTML='<tr><td colspan="9" class="mut">Nothing was sent to the operator.</td></tr>';$('qrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('dlog').innerHTML='<tr><td class="mut">none</td></tr>';$('logrows').innerHTML='<tr><td colspan="8" class="mut">none</td></tr>';
 $('qcounts').textContent=$('digest').textContent=$('costtext').textContent='';$('opbadge').hidden=$('qbadge').hidden=true}
 // t: the token this refresh started with. An answer that arrives after Disconnect (or after another token was entered) is dropped, and what the
@@ -2348,7 +2428,7 @@ async function refresh(){if(!tok)return;const t=tok;try{const d=await api('/api/
 const w=info.plant.workers||[];if(info.messaging&&info.messaging.enabled)await refreshMessaging(w);else{hideMessaging();
 $('rows').innerHTML=w.length?groupedRows(w,workerRowHtml,8).html:'<tr><td colspan="8" class="mut">No session has connected yet.</td></tr>'}
 if(tok!==t){if(!tok)clearData();return}
-const a=info.plant.assignments||[];const bu=info.baseUpdate||null,bh=bu&&bu.behind||{};$('basecnt').textContent=bu?`master ${esc((bu.head||'').slice(0,7))}: ${esc(bu.itemsBehind)} owned item(s) behind; ${esc(bu.triggers)} trigger(s), ${esc(bu.eventsSent)} sent, ${esc(bu.gatewayUpdates)} branch(es) updated by the gateway, ${esc(bu.workerBackMerges)} back-merged by workers`:'';$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td><td>${x.kind==='own-item'&&bh[x.item]!=null?(bh[x.item]>0?esc(bh[x.item])+' behind master':'up to date with master'):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';refreshRq(info.releaseQueue);await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
+const a=info.plant.assignments||[];const bu=info.baseUpdate||null,bh=bu&&bu.behind||{};$('basecnt').textContent=bu?`master ${esc((bu.head||'').slice(0,7))}: ${esc(bu.itemsBehind)} owned item(s) behind; ${esc(bu.triggers)} trigger(s), ${esc(bu.eventsSent)} sent, ${esc(bu.gatewayUpdates)} branch(es) updated by the gateway, ${esc(bu.workerBackMerges)} back-merged by workers`:'';$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td><td>${x.kind==='own-item'&&bh[x.item]!=null?(bh[x.item]>0?esc(bh[x.item])+' behind master':'up to date with master'):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';refreshRq(info.releaseQueue);refreshRt(info.runtimes);await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
 $('go').onclick=()=>{const v=$('tok').value.trim();if(!v){$('msg').textContent='paste the operator token first';return}tok=v;sessionStorage.setItem('ftok',tok);$('tok').value='';refresh()};
 $('bye').onclick=()=>{tok='';info=null;sessionStorage.removeItem('ftok');$('tok').value='';showConn(false);clearData();$('prompt').value='';$('msg').textContent='Disconnected.'};
 $('rows').onclick=async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.a==='message'){askNote(b.dataset.n,b.dataset.n);return}if(b.dataset.a==='revoke'&&!confirm('Revoke every credential of '+b.dataset.n+'? Its session stops; create a new prompt to connect it again.'))return;if(document.activeElement)document.activeElement.blur();try{await api('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/'+b.dataset.a,'POST');refresh()}catch(x){$('msg').textContent=x.message}};
