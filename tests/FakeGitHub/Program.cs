@@ -728,6 +728,11 @@ sealed class World
                 issues[i.Number] = i; if (i.Column != null || b["onBoard"]?.GetValue<bool>() == true) i.Card = "card_" + i.Number;
                 return (200, J(("number", i.Number)));
             }
+            case "move":
+            {   // { number, column }: a person moves the card (null: no column); an issue without a card gets one
+                var i = issues[b!["number"]!.GetValue<int>()]; i.Column = b["column"]?.ToString(); i.Card ??= "card_" + i.Number;
+                return (200, J(("ok", true)));
+            }
             case "push-branch":
             {
                 var br = b!["branch"]!.ToString(); var objs = new List<JsonObject>();
