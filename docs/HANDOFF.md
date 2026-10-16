@@ -303,6 +303,16 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
 
+Closed on 2026-10-15 (issue #106):
+
+- **#106 Stream sidecar.** The launchers run the session's event stream (`subscribe --own`, from step 7 of the prompt file with the credentials of
+  step 4 or the environment) as a sidecar for the session's whole lifetime and append its lines to `<BASE>/work/events.log`; the session's first
+  message carries a launcher note: do not start `subscribe`, Monitor `tail -n0 -F` of that file (the first arm from line 1), so a re-arm neither
+  registers nor replays. A dead sidecar is started again (not after exit 30 or 40). The client leaves out replayed triggers of items the name no
+  longer owns (`worker.registered` now says `owned`) and prints `peers.snapshot` and `supervisor.joined` only when they changed.
+  `--sidecar auto|on|off`, `docs/launcher.md`. Open: not yet run live on tdd; batch 3's connect-prompt change (PR 121, owner review) and this note
+  must agree on step 7.
+
 Closed on 2026-10-15 (issue #103):
 
 - **#103 Base updates restarted CI on every open pull request.** New setting `baseUpdate.mode`, default `conflict-or-merge`: an owner gets
