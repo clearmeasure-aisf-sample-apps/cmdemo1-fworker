@@ -2,14 +2,14 @@
 Set-StrictMode -Version Latest
 $script:Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 # Every port a suite uses derives from ONE base (a private range of 100 ports per suite slot), so any number of suites can run at once:
-#   +0 fake GitHub   +10 gateway API   +11 gateway webhooks   +12/+13 a second gateway   +14 the fake's forwarder in front of a gateway
+#   +0 fake GitHub   +10 gateway API   +11 gateway webhooks   +12/+13 and +14/+15 further gateways   +16 the fake's forwarder in front of a gateway
 #   +20 a worker-declared QC port (never listened on)   +29 a port nothing listens on
 #   +30 a loopback public-URL literal (never listened on)   +40..+89 stub applications of the QC worker scenarios (range 40-59, clash 60-69, flaky 70-79, never 80-89)
 # The base comes from TEST_PORT_BASE (run.ps1 sets it from the suite slot); TEST_FAKE_PORT and TEST_API_PORT still override the two main ports.
 function Set-TestPorts([int]$Base) {
     $script:PortBase = $Base
     $script:FakePort = $(if ($env:TEST_FAKE_PORT) { [int]$env:TEST_FAKE_PORT } else { $Base }); $script:ApiPort = $(if ($env:TEST_API_PORT) { [int]$env:TEST_API_PORT } else { $Base + 10 }); $script:HookPort = $script:ApiPort + 1
-    $script:ReportPort = $Base + 20; $script:DeadPort = $Base + 29; $script:PublicPort = $Base + 30; $script:ProxyPort = $Base + 14
+    $script:ReportPort = $Base + 20; $script:DeadPort = $Base + 29; $script:PublicPort = $Base + 30; $script:ProxyPort = $Base + 16
 }
 Set-TestPorts $(if ($env:TEST_PORT_BASE) { [int]$env:TEST_PORT_BASE } else { 6100 })
 $script:VerbCalls = 0; $script:VerbSeconds = 0.0; $script:ClientCrashes = 0

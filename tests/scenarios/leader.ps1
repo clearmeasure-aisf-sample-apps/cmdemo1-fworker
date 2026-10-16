@@ -82,7 +82,7 @@ $LeaderScenarios['leader: two gateways overlap: the newer takes the lease, the o
         Start-OwnerClient 'lena' 'persistent-local' '--capacity 2'
         $ia = New-Item-Fake 'Leader owned' 'x' ($OwnerLabels + 'worker:lena'); $ib = New-Item-Fake 'Leader offered' 'x' ($OwnerLabels + 'worker:lena')
         [void](Wait-Until -Seconds 40 { (Get-Assigned 'lena' $ia).Count -gt 0 -and (Get-Assigned 'lena' $ib).Count -gt 0 })
-        $ea = @(Get-Assigned 'lena' $ia)[-1]; $eb = @(Get-Assigned 'lena' $ib)[-1]
+        $ea = (Get-Assigned 'lena' $ia)[-1]; $eb = (Get-Assigned 'lena' $ib)[-1]
         $r = Fo 'lena' @('accept', '--item', $ia, '--assignment', $ea.assignment); CheckExit 'lena accepts the first item' $r 0
         $acceptedAt = [DateTime]::UtcNow
         Check 'the holder writes a snapshot of the change without being stopped' (Wait-Until -Seconds 20 { $ps = (Ld-Status $gwA).plantSnapshot; (Ld-Get $ps 'saves') -ge 1 -and (Ld-Get $ps 'heldEpoch') -eq 1 -and [DateTime]::Parse("$(Ld-Get $ps 'lastSave')", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) -gt $acceptedAt }) ((Ld-Status $gwA).plantSnapshot | ConvertTo-Json -Compress -Depth 4)
@@ -99,8 +99,8 @@ $LeaderScenarios['leader: two gateways overlap: the newer takes the lease, the o
         Check 'the owner and the accepted assignment keep their ids on the new process' (@($sb.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$ia" -and $_.Value -eq 'lena' }).Count -eq 1 -and @($sb.plant.assignments | Where-Object { $_.item -eq $ia -and $_.id -eq $ea.assignment -and $_.accepted }).Count -eq 1) ($sb.plant | ConvertTo-Json -Compress -Depth 4)
         Check 'the session''s client is told of the hand-over and connects to the new process by itself' (Wait-Until -Seconds 40 { @(Get-WorkerEvents 'lena' | Where-Object { $_.event -eq 'stream.handover' }).Count -ge 1 -and @((Ld-Status $b.base).plant.workers | Where-Object { $_.name -eq 'lena' -and $_.connected }).Count -eq 1 }) (@(Get-WorkerEvents 'lena' | Select-Object -Last 6) | ConvertTo-Json -Compress -Depth 3)
         Check 'its client keeps running (no exit 40)' (-not $script:Workers['lena'].proc.HasExited)
-        Check 'the unanswered offer is pushed again by the new process, the same assignment' (Wait-Until -Seconds 30 { @(Get-Assigned 'lena' $ib).Count -ge 2 -and @(Get-Assigned 'lena' $ib)[-1].assignment -eq $eb.assignment }) (@(Get-Assigned 'lena' $ib) | ConvertTo-Json -Compress)
-        $r2 = Fo 'lena' @('accept', '--item', $ib, '--assignment', @(Get-Assigned 'lena' $ib)[-1].assignment); CheckExit 'and accepted there' $r2 0
+        Check 'the unanswered offer is pushed again by the new process, the same assignment' (Wait-Until -Seconds 30 { (Get-Assigned 'lena' $ib).Count -ge 2 -and (Get-Assigned 'lena' $ib)[-1].assignment -eq $eb.assignment }) ((Get-Assigned 'lena' $ib) | ConvertTo-Json -Compress)
+        $r2 = Fo 'lena' @('accept', '--item', $ib, '--assignment', (Get-Assigned 'lena' $ib)[-1].assignment); CheckExit 'and accepted there' $r2 0
         $va = Invoke-WebRequest "$gwA/api/v1/verbs/get-item" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -Body (@{ item = $ia } | ConvertTo-Json) -ContentType 'application/json' -SkipHttpErrorCheck
         $ra = Invoke-WebRequest "$gwA/ready" -SkipHttpErrorCheck
         Check 'the old process answers every call 503 gateway-replaced, and is not ready' ([int]$va.StatusCode -eq 503 -and "$($va.Content)" -match 'gateway-replaced' -and [int]$ra.StatusCode -eq 503) "$([int]$va.StatusCode) $($va.Content) / ready $([int]$ra.StatusCode)"
@@ -124,7 +124,7 @@ $LeaderScenarios['leader: a graceful stop releases the lease; the next start res
         Start-OwnerClient 'gina' 'persistent-local' '--capacity 2'
         $n = New-Item-Fake 'Leader gap' 'x' ($OwnerLabels + 'worker:gina')
         [void](Wait-Until -Seconds 40 { (Get-Assigned 'gina' $n).Count -gt 0 })
-        $r = Fo 'gina' @('accept', '--item', $n, '--assignment', @(Get-Assigned 'gina' $n)[-1].assignment); CheckExit 'gina accepts the item' $r 0
+        $r = Fo 'gina' @('accept', '--item', $n, '--assignment', (Get-Assigned 'gina' $n)[-1].assignment); CheckExit 'gina accepts the item' $r 0
         $leaseUntil = [DateTime]::Parse("$($r.lease_until)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal)
         # the platform stops the process (SIGTERM) and starts the next one only after the claim's lease has passed
         $logA = Ld-SuiteLog
