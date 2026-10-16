@@ -34,8 +34,39 @@ function Get-MergeWaitText([string]$Code) {
         'mergeability-unknown' { return 'GitHub has not yet said whether it can be merged' }
         'verdict-head-unknown' { return 'the verdict does not name the head it was given for' }
         'merge-queue' { return 'the merge queue is full (an earlier merge is still waiting for its release candidate)' }
+        'checks-rerun' { return 'its checks failed and the failed jobs are re-run once (or a run of the head is still going); the new attempt decides' }
+        'master-defect' { return 'its checks fail only where the base branch fails as well (a defect of the base branch, not of this change); it waits for the base branch to pass them again' }
         default { return $Code }
     }
+}
+
+# A red head right before the merge, under the one CI rule (issue 102, Prs.ps1): a re-run once, or a run still going, is a wait; a defect of the base
+# branch is a wait too and costs no demotion (reported once); only a red of the change's own demotes. Returns @{ wait = code } or @{ result = the
+# answer of the demotion }. The state is saved here when the rule recorded something.
+# (every answer has every key: the rule scripts run under strict mode)
+function Resolve-RedBeforeMerge([int]$n, $info, $st, [int]$PrNum, [string]$Sha, $Chk, [string]$When) {
+    $s = $st.state
+    $out = @{ wait = ''; result = $null; causes = @(); new = $false; fixed = $false }
+    $rule = Get-RedHeadRuling $s $Sha $Chk
+    $out.causes = @($rule.causes)
+    switch ($rule.ruling) {
+        'rerun' {
+            Save-State $n $st
+            Add-Comment $n "PR #$PrNum checks failed $When at ``$($Sha.Substring(0,7))`` ($($rule.causes -join ', ')) - $($rule.reason); re-running the failed jobs once (workflow run $(($rule.runs | ForEach-Object { $_.id }) -join ', ')) before deciding. No demotion is counted for it."
+            $out.wait = 'checks-rerun'; return $out
+        }
+        { $_ -in 'running', 'rerun-wait', 'deferred' } { $out.wait = 'checks-rerun'; return $out }
+        'master-defect' {
+            # (cached: judged less than masterDefectCheckMinutes ago, nothing read; fixed: the base branch passes those checks again, the caller updates)
+            $out.wait = 'master-defect'
+            if ($rule.cached) { return $out }
+            $out.new = Register-MasterDefect $n $s $PrNum $Sha $rule.causes; $s.master_defect.checked_at = ConvertTo-Iso (Get-UtcNow); Save-State $n $st
+            $out.fixed = [bool]$rule.fixed; return $out
+        }
+    }
+    $d = Invoke-Demote $n $info $st "PR #$PrNum checks are red $When ($($Chk.failed_checks -join ', ')$(if ($rule.reason -match '^still red') { '; still red after one re-run of the failed jobs' }))" 'merge'
+    $out.result = @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d }
+    return $out
 }
 
 function Wait-HeadChange([int]$Pr, [string]$OldSha, [int]$Seconds) {
@@ -56,6 +87,13 @@ function Verb_merge($a, [switch]$Gateway) {
     Assert-Open $info
     if ($info.column -ine $c.columns.validation) { Reject 10 'wrong-column' "merging happens only from '$($c.columns.validation)'; the item is in '$($info.column)'" }
     if (-not (Test-Has $s 'verdict') -or -not $s.verdict.passed -or $s.verdict.processed) { Reject 10 'no-pass-verdict' 'no unprocessed PASS verdict is recorded for this item' }
+    # issue 109: a person holds the item (a hold label): its PASS is not merged, neither by the gateway (the verdict's own merge, the sweep) nor by a
+    # session, until the label is removed; the sweep merges it then
+    $holdLabel = Get-HoldLabel $info.labels
+    if ($holdLabel) {
+        if ($Gateway) { return @{ ok = $true; id = $n; outcome = 'waiting'; reason = 'held-by-label' } }
+        Reject 10 'held-by-label' "item carries the '$holdLabel' label: a person holds it; the PASS is not merged until the label is removed" @{ label = $holdLabel }
+    }
     $prNum = if (Test-Has $a 'pr') { [int]$a.pr } else { [int]$s.verdict.pr }
     if ($prNum -ne [int]$s.verdict.pr) { Reject 10 'pr-mismatch' "the verdict names PR #$($s.verdict.pr), not #$prNum" }
     # Without the Auto Merge label only the QC merge gate lets an item through: owner mode, mergePolicy peer-approved, qc.requireRun / qc.requireApproval
@@ -99,7 +137,10 @@ function Verb_merge($a, [switch]$Gateway) {
     $pr = Get-Pr $prNum
     if (-not (Test-PrBelongs $pr $n)) { return & $park 'pr-mismatch' "PR #$prNum is not a PR belonging to this work item (branch '$($pr.head.ref)'); refusing to merge." }
     if ($pr.merged) {
-        $s.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = $prNum }
+        # issue 114: the merge recorded before (an item validated again after its merge, 276) keeps its record, merged_at and its wait; a record
+        # whose wait an older gateway erased is re-armed instead of starting over at master-green
+        if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and "$($s.merge.sha)" -eq "$($pr.merge_commit_sha)") { [void](Restore-Settle $s) }
+        else { $s.merge = @{ sha = $pr.merge_commit_sha; awaiting = 'master-green'; merged_at = ConvertTo-Iso (Get-UtcNow); pr = $prNum } }
         $s.verdict.processed = $true; $s.Remove('claim'); Remove-ClaimRef $n; Save-State $n $st
         return @{ ok = $true; id = $n; outcome = 'already-merged'; sha = $pr.merge_commit_sha }
     }
@@ -148,7 +189,27 @@ function Verb_merge($a, [switch]$Gateway) {
     $end = (Get-Date).AddSeconds($t.preMergeChecksWaitSeconds)
     while ($true) {
         $chk = Get-ChecksFor $pr.head.sha
-        if ($chk.status -eq 'failure') { $d = Invoke-Demote $n $info $st "PR #$prNum checks are red right before merge ($($chk.failed_checks -join ', '))" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
+        if ($chk.status -eq 'failure') {
+            $red = Resolve-RedBeforeMerge $n $info $st $prNum "$($pr.head.sha)" $chk 'right before merge'
+            if (-not $red.wait) { return $red.result }
+            # the base branch passes the checks of its defect again: under 'auto' the gateway merges it into the branch once per head (GitHub's update
+            # branch, the one head a PASS accepts without a new verdict, as for an out-of-date branch below); the new head's checks decide
+            if ($red.wait -eq 'master-defect' -and $red.fixed -and $c.mergePolicy -eq 'auto' -and -not (Test-Has $s.master_defect 'updated_for')) {
+                $s.master_defect.updated_for = "$($pr.head.sha)"; $s.master_defect.updated_at = ConvertTo-Iso (Get-UtcNow); $s.verdict.updated_from = "$($pr.head.sha)"; Save-State $n $st
+                $u = try { Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/update-branch" -Body @{ expected_head_sha = "$($pr.head.sha)" } -Allow 202, 422, 409 } catch { @{ status = 0; body = @{ message = "$($_.Exception.Message)" } } }
+                if ($u -is [hashtable] -and $u.ContainsKey('status') -and $u.status -ne 202) {
+                    # refused: no update to vouch for, and the next look tries again
+                    $s.verdict.Remove('updated_from'); $s.master_defect.Remove('updated_for'); $s.master_defect.Remove('updated_at'); Save-State $n $st
+                }
+                else {
+                    if ($u -isnot [hashtable] -and $u.PSObject.Properties.Name -contains 'sha' -and $u.sha) { $s.verdict.updated_to = "$($u.sha)"; Save-State $n $st }
+                    Add-Comment $n "**$($c.defaultBranch)** passes $($red.causes -join ', ') again: the gateway merged $($c.defaultBranch) into the branch of PR #$prNum; the checks of the new head decide the merge."
+                    if ($Gateway) { return & $wait 'branch-updated' }
+                }
+            }
+            if ($Gateway) { $w = & $wait $red.wait; if ($red.new) { $w.masterDefectNew = $true }; return $w }
+            Reject 21 $red.wait "PR #$prNum is not merged yet: $(Get-MergeWaitText $red.wait). Call merge again later; nothing was demoted." @{ retryAfterSeconds = 300 }
+        }
         if ($chk.status -eq 'success') { break }
         if ($gatewayOwns) { return & $wait 'checks-pending' }
         if ((Get-Date) -gt $end) { break }
@@ -218,7 +279,11 @@ function Verb_merge($a, [switch]$Gateway) {
                 if ($Gateway) { return & $wait 'branch-updated' }
                 $end = (Get-Date).AddSeconds($t.preMergeChecksWaitSeconds)
                 while ($true) { $chk = Get-ChecksFor $pr.head.sha; if ($chk.status -ne 'pending' -or (Get-Date) -gt $end) { break }; Start-Sleep -Seconds $t.preMergeChecksPollSeconds }
-                if ($chk.status -eq 'failure') { $d = Invoke-Demote $n $info $st "PR #$prNum checks went red after updating the branch ($($chk.failed_checks -join ', '))" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
+                if ($chk.status -eq 'failure') {
+                    $red = Resolve-RedBeforeMerge $n $info $st $prNum "$($pr.head.sha)" $chk 'after updating the branch'
+                    if (-not $red.wait) { return $red.result }
+                    Reject 21 $red.wait "PR #$prNum is not merged yet: $(Get-MergeWaitText $red.wait). Call merge again later; nothing was demoted." @{ retryAfterSeconds = 300 }
+                }
                 Start-Sleep -Seconds ([Math]::Min(120, 15 * [Math]::Pow(2, $attempt - 1))); continue
             }
             if ($gatewayOwns -and $r.status -eq 405 -and $msg -match 'status check') { return & $wait 'checks-pending' }

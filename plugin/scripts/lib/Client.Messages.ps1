@@ -169,12 +169,16 @@ function Invoke-MsgInbox($a, $cfg) {
             $after = 0; $cur = $null
             $reasked += @(Invoke-QuestionReask $cfg $cred $name $epoch -Quiet)
         }
-        $shown = @()
-        if ([int]$j.count -gt 0) { $shown = @(ConvertTo-PresentedMessages @($j.messages) $cfg $cred $name $epoch -IncludeSeen:($include -or [bool]$id) -Full:([bool]$id)) }
+        $shown = @(); $held = 0
+        # (the answer stays under the size a command's output arrives whole at: what does not fit waits for the next call, more says how many)
+        if ([int]$j.count -gt 0) { $shown = @(ConvertTo-PresentedMessages @($j.messages) $cfg $cred $name $epoch -IncludeSeen:($include -or [bool]$id) -Full:([bool]$id) -MaxChars $script:AnswerMaxChars); $held = $script:PresentedHeld }
         if ($shown.Count -gt 0) {
             if ($a.ContainsKey('ack') -and $a.ack -eq $true) { [void](Send-MessageAck $cfg $cred @($shown | ForEach-Object { "$($_.id)" }) 'handled') }
-            if ($name -and $useCursor) { Save-InboxCursor $name $epoch ([long]$j.last) }
-            $out = [ordered]@{ ok = $true; epoch = $epoch; count = $shown.Count; last = [long]$j.last; messages = $shown }
+            $lastShown = if ($held -gt 0) { [long]$script:PresentedLastSeq } else { [long]$j.last }
+            if ($name -and $useCursor) { Save-InboxCursor $name $epoch $lastShown }
+            $out = [ordered]@{ ok = $true; epoch = $epoch; count = $shown.Count; last = $lastShown }
+            if ($held -gt 0) { $out['more'] = $held; $out['note'] = 'more messages wait than one answer holds: run inbox again (with --after the last of this answer when you passed --after or --include)' }
+            $out['messages'] = $shown
             if ($reasked.Count -gt 0) { $out['reasked'] = @($reasked | ForEach-Object { [ordered]@{ was = $_.was; id = $_.id } }) }
             $out['exit'] = 0
             [Console]::Out.WriteLine(($out | ConvertTo-Json -Compress -Depth 8)); exit 0
@@ -298,7 +302,8 @@ function Invoke-MsgAsk($a, $cfg) {
     $r = Invoke-GatewayJsonRetry $cfg 'POST' '/api/v1/messages' $body $cred
     if (-not $r.transport -or $r.status -ne 202 -or -not $r.body -or -not $r.body.id) { Write-GatewayResult $r }
     $qid = "$($r.body.id)"
-    if ($name) {
+    # a question the gateway recognised as one asked before and still open (issue 105: same item, same text, within an hour) is that question: stored once
+    if ($name -and -not ($r.body.duplicate -eq $true -and (Find-Question $name $qid))) {
         $rec = @{ id = $qid; ids = @(); text = $text; item = $item; context = $context; clientId = $clientId; epoch = "$($r.body.epoch)"; reasked = ''; askedAt = [DateTime]::UtcNow.ToString('o') }
         try { Add-Question $name $rec } catch { [Console]::Error.WriteLine("the question could not be stored for a re-ask: $($_.Exception.Message)") }
     }

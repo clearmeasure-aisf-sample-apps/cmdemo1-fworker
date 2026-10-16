@@ -38,6 +38,41 @@ function Set-CkQodana($T) {
 
 $CheckScenarios = [ordered]@{
 
+'push gate: after red checks on 2 heads, open-pr and update-pr wait for a private-build attestation' = {
+    $t = New-CkRedPr
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the first head is red' $r 10 'checks-red'
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the same head asked again' $r 10 'checks-red'
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b1'); CheckExit 'one red head (asked twice) does not gate' $r 0
+    $sha2 = (Fake 'push-branch' @{ branch = "factory-worker/$($t.n)-development"; files = @('src/App.cs'); profile = 'red' }).sha
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the second head is red' $r 10 'checks-red'
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b2'); CheckExit 'update-pr is refused' $r 10 'private-build-required'
+    Check 'the refusal names the count and the head' ($r.checks_red -eq 2 -and $r.head_sha -eq $sha2) ($r | ConvertTo-Json -Compress)
+    $r = F 'w1' @('open-pr', '--item', $t.n, '--head', "factory-worker/$($t.n)-development", '--title', 'again'); CheckExit 'open-pr is refused' $r 10 'private-build-required'
+    $r = F 'w1' @('private-build', '--item', $t.n, '--attest', 'abc'); CheckExit 'an attestation takes a full sha' $r 2 'usage'
+    $r = F 'w1' @('private-build', '--item', $t.n, '--attest', ('0' * 40)); CheckExit 'an attestation of another commit is recorded' $r 0
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b3'); CheckExit 'but does not open the gate for this head' $r 10 'private-build-required'
+    $r = F 'w1' @('private-build', '--item', $t.n, '--attest', $sha2); CheckExit 'the attestation of the head' $r 0
+    Check 'answers the count' ($r.attested -eq $true -and $r.checks_red -eq 2 -and $r.gate -eq 2) ($r | ConvertTo-Json -Compress)
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b4'); CheckExit 'opens the gate for that head' $r 0
+    $r = F 'w1' @('open-pr', '--item', $t.n, '--head', "factory-worker/$($t.n)-development", '--title', 'again'); CheckExit 'open-pr as well' $r 0
+    Fake 'push-branch' @{ branch = "factory-worker/$($t.n)-development"; files = @('src/App.cs'); profile = 'green' } | Out-Null
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b5'); CheckExit 'a new head needs its own attestation' $r 10 'private-build-required'
+}
+
+'push gate: one failed check that the base branch fails too is rerun once by the gateway, and not counted' = {
+    $t = New-CkRedPr
+    Fake 'base-history' @{ name = 'Build result'; conclusions = @('failure', 'failure', 'success') } | Out-Null
+    $before = [int](Get-FakeState).rerunJobs
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the red is answered as a rerun' $r 21 'rerun-started'
+    Check 'the job was rerun once' ([int](Get-FakeState).rerunJobs -eq $before + 1) "$((Get-FakeState).rerunJobs)"
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'the rerun passed' $r 0
+    $sha2 = (Fake 'push-branch' @{ branch = "factory-worker/$($t.n)-development"; files = @('src/App.cs'); profile = 'red' }).sha
+    Fake 'checks' @{ sha = $sha2; name = 'Other platform'; conclusion = 'failure' } | Out-Null
+    $r = F 'w1' @('wait-for-checks', '--item', $t.n); CheckExit 'two failed checks are not rerun' $r 10 'checks-red'
+    Check 'no further rerun' ([int](Get-FakeState).rerunJobs -eq $before + 1) "$((Get-FakeState).rerunJobs)"
+    $r = F 'w1' @('update-pr', '--item', $t.n, '--body', 'b'); CheckExit 'the rerun head was not counted: one red head, no gate' $r 0
+}
+
 'pr-checks: a failed Actions job returns its failed step, the end of its log and the error lines, cleaned and redacted' = {
     $t = New-CkRedPr; Set-CkBuildFailure $t
     $r = F 'w1' @('pr-checks', '--item', $t.n); CheckExit 'pr-checks answers' $r 0
@@ -173,85 +208,6 @@ $CheckScenarios = [ordered]@{
     $b = F 'w1' @('pr-checks', '--item', $t.n, '--artifact', 'qodana-report', '--entry', 'shot.png'); CheckExit 'a binary file is not returned' $b 10 'artifact-not-text'
     $o = F 'w1' @('pr-checks', '--item', $t.n, '--artifact', 'memory-dump'); CheckExit 'an oversize artifact is not downloaded' $o 10 'artifact-too-large'
     $x = F 'w1' @('pr-checks', '--item', $t.n, '--artifact', 'no-such'); CheckExit 'an unknown artifact is refused' $x 12 'artifact-not-found'
-}
-
-# --max-chars (factory.ps1): a session keeps an answer short without a pipe. The answer is saved whole to the work directory and printed as one line.
-'max-chars: a long answer is saved whole and printed as one short JSON line with its exit and code; a short answer is unchanged' = {
-    $t = New-CkRedPr; Set-CkBuildFailure $t 60
-    $full = F 'w1' @('pr-checks', '--item', $t.n); CheckExit 'pr-checks answers' $full 0
-    $oldWork = $env:FACTORY_WORK_DIR; $env:FACTORY_WORK_DIR = Join-Path $script:Work 'work'   # (saved answers go to the scenario's own work directory)
-    try {
-    $env:FACTORY_HOLDER = 'w1'
-    $raw = @(& pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/factory.ps1') pr-checks --item $t.n --max-chars 400 2>$null); $code = $LASTEXITCODE
-    $line = ($raw -join "`n").Trim()
-    Check 'one line of at most 400 characters, and the exit code of the verb' ($raw.Count -eq 1 -and $line.Length -le 400 -and $code -eq 0) "lines $($raw.Count), length $($line.Length), exit $code"
-    $r = $line | ConvertFrom-Json -AsHashtable
-    Check 'it says it was cut, how long the answer was, its exit, and starts with the answer' ($r.truncated -eq $true -and $r.ok -eq $true -and $r.verb -eq 'pr-checks' -and $r.exit -eq 0 -and [int]$r.chars -gt 400 -and $r.maxChars -eq 400 -and "$($r.text)".StartsWith('{') -and "$($r.text)".Length -gt 20) $line
-    $saved = if ($r.saved -and (Test-Path -LiteralPath $r.saved)) { Get-Content -Raw -LiteralPath $r.saved | ConvertFrom-Json -AsHashtable } else { $null }
-    Check 'the saved file holds the whole answer, in the work directory' ($saved -and $saved.sha -eq $t.sha -and @($saved.checks).Count -eq @($full.checks).Count -and (Split-Path -Leaf (Split-Path -Parent $r.saved)) -eq 'work') "$($r.saved)"
-    $w = F 'w1' @('wait-for-checks', '--item', $t.n, '--max-chars', '450')
-    CheckExit 'a refusal is cut too and keeps its exit and code' $w 10 'checks-red'
-    Check 'and says so' ($w.truncated -eq $true -and $w.ok -eq $false -and $w.maxChars -eq 450) ($w | ConvertTo-Json -Compress)
-    $g = F 'w1' @('get-item', '--item', $t.n, '--max-chars', '100000'); CheckExit 'a short answer' $g 0
-    Check 'is printed as it is' (-not $g.ContainsKey('truncated') -and $g.id -eq $t.n -and $g.status -eq 'Development') ($g.Keys -join ',')
-    $u = F 'w1' @('get-item', '--item', $t.n, '--max-chars', '300'); CheckExit 'fewer than 400 characters is a usage error' $u 2 'usage'
-    } finally { $env:FACTORY_WORK_DIR = $oldWork }
-}
-
-# Outside blockers (Verb_complete, Complete-AwaitingBase in Verbs.Sweep.ps1): a session is never held for the base branch, a re-run or a time of day.
-'awaiting-base: complete on checks red only where master is red parks the item; once master is green the sweep re-runs them and advances it' = {
-    $t = New-CkRedPr
-    Fake 'checks' @{ sha = $t.sha; name = 'Build result'; conclusion = 'failure'; runId = 7101 } | Out-Null   # its own workflow run, so a re-run restarts only it
-    $r = Do-DevComplete $t.n; CheckExit 'a red check that master does not fail: checks-not-green, as before' $r 10 'checks-not-green'
-    Fake 'base-history' @{ name = 'Build result'; conclusions = @('failure', 'failure') } | Out-Null
-    $r = Do-DevComplete $t.n; CheckExit 'red only where master is red too: accepted-awaiting-base' $r 21 'accepted-awaiting-base'
-    $aw = @(Pv $r 'awaiting')
-    Check 'the answer names the check and what master says, and the claim has ended' ($r.released -eq $true -and $aw.Count -eq 1 -and $aw[0].name -eq 'Build result' -and $aw[0].likelyPreexisting -eq $true -and $aw[0].failedOfLast5 -eq 2) ($r | ConvertTo-Json -Compress -Depth 4)
-    $g = F 'w1' @('get-item', '--item', $t.n)
-    Check 'parked development:awaiting-base, in Development, with no claim' ($g.state.park.reason -eq 'development:awaiting-base' -and $g.status -eq 'Development' -and -not (Pv $g.state 'claim') -and $g.state.awaiting_base.pr -eq $t.pr) ($g.state | ConvertTo-Json -Compress -Depth 4)
-    $c = F 'w9' @('claim-item', '--item', $t.n, '--column', 'Development'); CheckExit 'no session can claim it while it waits' $c 10 'parked'
-    $since = "$($g.state.awaiting_base.since)"
-    $again = Do-DevComplete $t.n; CheckExit 'a second complete for the same head is answered the same' $again 21 'accepted-awaiting-base'
-    $g2 = F 'w1' @('get-item', '--item', $t.n)
-    $waits = @((Get-FakeIssue $t.n).comments | Where-Object { "$($_.body)" -match 'Parked \*\*development:awaiting-base' }).Count
-    Check 'and keeps the wait as it was: same start, posted once' ("$($g2.state.awaiting_base.since)" -eq $since -and $waits -eq 1) "since $since -> $($g2.state.awaiting_base.since), $waits comments"
-    Start-Sleep -Seconds 6
-    Check 'while master stays red nothing is re-run and the item stays where it is' ((Get-FakeState).reruns -eq 0 -and (Get-FakeIssue $t.n).column -eq 'Development') "reruns $((Get-FakeState).reruns)"
-    Fake 'base-history' @{ name = 'Build result'; conclusions = @('success', 'failure') } | Out-Null
-    Check 'master is green again: the sweep re-runs the failed jobs' (Wait-Until -Seconds 30 { (Get-FakeState).reruns -ge 1 })
-    Check 'the re-run is green: the item advances to Functional Testing' (Wait-Until -Seconds 40 { (Get-FakeIssue $t.n).column -eq 'Functional Testing' }) "column $((Get-FakeIssue $t.n).column)"
-    Check 'one re-run and no more' ((Get-FakeState).reruns -eq 1) "reruns $((Get-FakeState).reruns)"
-    $g = F 'w1' @('get-item', '--item', $t.n)
-    Check 'the wait and the park are gone' (-not (Pv $g.state 'park') -and -not (Pv $g.state 'awaiting_base')) ($g.state | ConvertTo-Json -Compress -Depth 4)
-    $bodies = ((Get-FakeIssue $t.n).comments | ForEach-Object { $_.body }) -join "`n"
-    Check 'the item says why it waited, the re-run and the advance' ($bodies -match 'development:awaiting-base' -and $bodies -match 're-runs the failed jobs' -and $bodies -match 'checks are green after the gateway tried them again') ''
-}
-
-'awaiting-base: a branch behind master is brought up to date instead of re-run; a check that still fails with master green goes back to Development [full]' = {
-    $t = New-CkRedPr
-    Fake 'base-history' @{ name = 'Build result'; conclusions = @('success', 'failure', 'success') } | Out-Null   # green now, red on one recent commit
-    Fake 'pr' @{ number = $t.pr; behind = 1 } | Out-Null
-    $r = Do-DevComplete $t.n; CheckExit 'a check red on one recent master commit counts as well: accepted-awaiting-base' $r 21 'accepted-awaiting-base'
-    $aw = @(Pv $r 'awaiting')
-    Check 'not likelyPreexisting, but red on 1 of the last 5 master commits' ($aw.Count -eq 1 -and $aw[0].likelyPreexisting -eq $false -and $aw[0].failedOfLast5 -eq 1 -and $aw[0].masterConclusion -eq 'success') ($aw | ConvertTo-Json -Compress)
-    Check 'master is green and the branch behind it: the gateway brings it up to date (a new head)' (Wait-Until -Seconds 30 { (Get-Head $t.pr) -ne $t.sha })
-    Check 'the new head still fails with master green: back to Development to fix forward' (Wait-Until -Seconds 40 { "$(Pv (Pv (F 'w1' @('get-item', '--item', $t.n)) 'existing_pr') 'rejection')" -match 'master is green again' })
-    Check 'nothing was re-run' ((Get-FakeState).reruns -eq 0) "reruns $((Get-FakeState).reruns)"
-    $g = F 'w1' @('get-item', '--item', $t.n)
-    Check 'no park and no wait left, one fix-forward round, in Development' (-not (Pv $g.state 'park') -and -not (Pv $g.state 'awaiting_base') -and $g.state.fix_forward_rounds -eq 1 -and $g.status -eq 'Development') ($g.state | ConvertTo-Json -Compress -Depth 4)
-    $c = F 'w9' @('claim-item', '--item', $t.n, '--column', 'Development'); CheckExit 'a session can take it again' $c 0
-    Check 'in fix-forward mode' ($c.mode -eq 'fix-forward') ($c | ConvertTo-Json -Compress)
-}
-
-'awaiting-base: when nothing can try the checks again (GitHub refuses the re-run) the item is parked for a person, the change not blamed [full]' = {
-    $t = New-CkRedPr
-    Fake 'checks' @{ sha = $t.sha; name = 'Build result'; conclusion = 'failure'; runId = 7301 } | Out-Null
-    Fake 'base-history' @{ name = 'Build result'; conclusions = @('success', 'failure') } | Out-Null
-    Fake 'fault' @{ match = 'POST .*/actions/runs/7301/rerun-failed-jobs'; status = 403; count = 50 } | Out-Null
-    $r = Do-DevComplete $t.n; CheckExit 'accepted-awaiting-base' $r 21 'accepted-awaiting-base'
-    Check 'parked base-retry-impossible, with no fix-forward round' (Wait-Until -Seconds 40 { "$((F 'w1' @('get-item', '--item', $t.n)).state.park.reason)" -eq 'base-retry-impossible' })
-    $g = F 'w1' @('get-item', '--item', $t.n)
-    Check 'the wait is over, the rejection says why, no round was spent' (-not (Pv $g.state 'awaiting_base') -and "$($g.state.pr.rejection)" -match 'could not be re-run' -and -not (Pv $g.state 'fix_forward_rounds') -and $g.status -eq 'Development') ($g.state | ConvertTo-Json -Compress -Depth 4)
 }
 
 }
