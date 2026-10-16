@@ -162,10 +162,35 @@ function Verb_unpark_item($a) {
     $reset = (Test-Has $s 'fix_forward_rounds') -or (Test-Has $s 'demotions')
     $s.Remove('park'); $s.Remove('fix_forward_rounds'); $s.Remove('demotions'); $s.Remove('master_defect')
     $offered = $false
-    if ($info.open -and -not (Test-ClaimLive $s) -and (Test-NameIn "$($info.column)" $c.columns.ai)) { $s.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $offered = $true }
-    [void](Add-Journal $n $st 'unparked' @{ column = $info.column; code = $code; by = $by; reason = $reason; closed = (-not $info.open); reset = $reset } "$($park.at)")
+    # issue 114: an item with a merge record is never handed to a worker: unpark re-arms its settle step when it has none (or leaves the one it has)
+    $merged = (Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha
+    $rearmed = if ($merged) { Restore-Settle $s } else { '' }
+    if (-not $merged -and $info.open -and -not (Test-ClaimLive $s) -and (Test-NameIn "$($info.column)" $c.columns.ai)) { $s.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $offered = $true }
+    [void](Add-Journal $n $st 'unparked' @{ column = $info.column; code = $code; by = $by; reason = $reason; closed = (-not $info.open); merged = [bool]$merged; reset = $reset } "$($park.at)")
     Save-State $n $st
-    return @{ ok = $true; id = $n; unparked = $true; column = $info.column; park = $park; expired = $expired; reoffer = $offered; closed = (-not $info.open); countersReset = $reset }
+    $out = @{ ok = $true; id = $n; unparked = $true; column = $info.column; park = $park; expired = $expired; reoffer = $offered; closed = (-not $info.open); countersReset = $reset }
+    if ($merged) { $out.merged = $true; $out.awaiting = $(if ($rearmed) { $rearmed } elseif ((Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { "$($s.merge.awaiting)" } else { '' }); $out.rearmed = [bool]$rearmed }
+    return $out
+}
+
+# Admin verb, reached only through POST /api/v1/items/{n}/resettle (operator token): issue 114. A person puts a merged item back into the settle
+# step, for example one an older gateway moved to Done although no release carried it (272, 276), after reopening it and moving its card. The
+# wait is set from the merge record (Restore-Settle -Force); a journal line records who and why. Never a hand-off: a merged item is not a worker's.
+function Verb_resettle_item($a) {
+    $n = Get-ItemNumber $a
+    $reason = ("$(Need $a 'reason')" -replace '<!--|-->', '' -replace '\s+', ' ').Trim()
+    if (-not $reason) { Reject 2 'usage' 'a reason is required: why the item is settled again' }
+    if ($reason.Length -gt 500) { Reject 2 'usage' 'the reason is at most 500 characters' }
+    $by = if ((Test-Has $a 'by') -and "$($a.by)".Trim()) { "$($a.by)".Trim() } else { 'the operator' }
+    $info = Get-ItemInfo $n
+    $st = Get-State $n; $s = $st.state
+    if (-not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha)) { Reject 10 'not-merged' "item #$n has no merge record: it is not settled, it is worked" }
+    if ((Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { Reject 10 'already-settling' "item #$n is already in the settle step (awaiting $($s.merge.awaiting))" }
+    if ("$($info.column)" -ieq (Get-LastColumn)) { Reject 10 'done-column' "item #$n is in '$($info.column)', which the sweep does not read: move its card out of it first (the Release Queue, or Functional Testing)" }
+    $w = Restore-Settle $s -Force
+    [void](Add-Journal $n $st 'settle-rearmed' @{ awaiting = $w; by = $by; reason = $reason } "resettle|$($s.merge.rearmed_at)")
+    Save-State $n $st
+    return @{ ok = $true; id = $n; awaiting = $w; column = $info.column; open = $info.open }
 }
 
 function Verb_claim_item($a) {

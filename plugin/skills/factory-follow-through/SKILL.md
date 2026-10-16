@@ -7,7 +7,7 @@ description: Use when a merged item is parked at master-broken, release-candidat
 
 The post-merge flow (master green, release candidate, docs-only skip, Release Queue, Done on production) is deterministic and runs in the gateway (`settle`, called by the sweep). This skill only reads and explains.
 
-1. `factory.ps1 get-item --item N`; read `state.merge`, `state.park`.
+1. `factory.ps1 get-item --item N`; read `state.merge`, `state.park`. A master-broken or master-green-timeout park keeps the settle step (`merge.awaiting` `master-broken` or `master-timeout`): the gateway goes on by itself once the merge commit's latest attempt, or a later master commit that contains it, is green (`merge.green_via`). A merged item is never handed to a worker again.
 2. `factory.ps1 settle --item N` is safe to call repeatedly: it makes at most one transition and returns `outcome` (`waiting`, `advanced`, `done`, `parked`, `rerun`).
 3. `factory.ps1 get-delivery --item N` shows the release candidate and the tdd/uat/prod deployment states (Octopus, read-only).
 4. Some parks lift themselves (auto-unpark, `docs/design/plant-manager.md` section 16): `master-broken` once every check that failed has passed on a later master head, `fix-forward-exhausted` and `verdict-failed` once the pull request is green on a newer head, at most 3 times per park code. Report such a park as waiting for that, not as needing a person, unless `state.auto_unparks` shows the limit is reached.

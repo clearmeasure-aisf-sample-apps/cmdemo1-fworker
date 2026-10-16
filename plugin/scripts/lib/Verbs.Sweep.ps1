@@ -153,6 +153,18 @@ function Invoke-ClaimRefReap($List) {
     return , @($acts)
 }
 
+# Issue 114: re-arms the settle step of an item with a merge record that has no wait and is not done (Restore-Settle), under the item lock on a
+# fresh read, and journals it. Returns the wait it set, or ''.
+function Invoke-RearmSettle([int]$n, [string]$Why) {
+    Use-ItemLock $n {
+        $f = Get-State $n; $w = Restore-Settle $f.state
+        if (-not $w) { return '' }
+        [void](Add-Journal $n $f 'settle-rearmed' @{ awaiting = $w; by = 'the sweep'; reason = $Why } "rearm|$($f.state.merge.sha)|$($f.state.merge.rearmed_at)")
+        Save-State $n $f
+        return $w
+    } 3
+}
+
 # Issue 82: removes the park of a closed item under the item lock, on a fresh read, and journals it. Returns the park's code, or $null when there
 # was none any more or the item is open again (reopened meanwhile: its park is a person's to release).
 function Clear-ClosedPark([int]$n) {
@@ -372,11 +384,18 @@ function Verb_sync_board($a) {
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
             $prio = Get-ItemPriority $it.labels; if ($prio) { $priorities["$n"] = $prio }
             if (Test-NameIn $holdLabel $it.labels) { $holds += $n }
+            $merged = (Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha
+            $settled = $merged -and (Test-Has $s.merge 'done_at') -and $s.merge.done_at
             # cloud-worker-runtimes.md 4.4: a runtime:<kind> label forces the item's runtime; the test label selects the cheapest model profile
             $rtl = @($it.labels | Where-Object { $_ -match '^runtime:[a-z0-9-]{1,20}$' } | Select-Object -First 1)
             if ($rtl.Count -gt 0) { $rtLabels["$n"] = ([string]$rtl[0]).Substring(8) }
             if ($c.testLabel -and (Test-NameIn $c.testLabel $it.labels)) { $profiles["$n"] = 'testing' }
             if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) {
+                # issue 114: a closed item with a merge record that is not done was stranded by an older gateway (262, 280): its settle is re-armed
+                if ($merged -and -not $settled -and -not $dry) {
+                    $w = try { Invoke-RearmSettle $n 'closed with a merge record and no settle step' } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; '' }
+                    if ($w) { $actions += @{ item = $n; action = 'settle-rearmed'; awaiting = $w }; $settling += $n; continue }
+                }
                 # issue 82: a closed item whose flow has ended keeps no park (280 stayed parked master-broken after it was closed)
                 if ((Test-Has $s 'park') -and -not $dry) { $r = Clear-ClosedPark $n; if ($r) { $actions += @{ item = $n; action = 'park-cleared'; reason = 'item-closed'; code = $r }; $unparked += $n } }
                 continue
@@ -388,13 +407,34 @@ function Verb_sync_board($a) {
                 $owned["$n"] = @{ holder = "$($s.claim.holder)"; column = $col; lease_until = $s.claim.lease_until; heartbeat = $(if (Test-Has $s.claim 'heartbeat') { $s.claim.heartbeat } else { $null }); parked = [bool](Get-Park $s) }
             }
             if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) {
-                $settling += $n
+                # (an item that waits for a person, master red or no release candidate for a day, keeps no owner: issue 114)
+                if ("$($s.merge.awaiting)" -notin 'master-broken', 'master-timeout' -and -not ((Test-Has $s.merge 'late_reported') -and $s.merge.late_reported)) { $settling += $n }
+                # a master-broken park is lifted only by auto-unpark's rule (the checks that failed passed on master; judged on that head): it puts
+                # the wait back to master-green, and the next sweep settles it
+                $mbPark = Get-Park $s
+                if ("$($s.merge.awaiting)" -eq 'master-broken' -and $mbPark -and "$($mbPark.reason)" -eq 'master-broken') {
+                    if (-not $dry) {
+                        $why = Test-AutoUnpark $n $s $mbPark $unparkCtx
+                        if ($why) { $u = Invoke-AutoUnpark $n $mbPark $why $unparkCtx; if ($u) { $actions += @{ item = $n; action = 'auto-unparked'; code = $u.code; reason = $why }; $unparked += $n } }
+                    }
+                    continue
+                }
                 if (-not $dry) { $r = Invoke-Settle $n; $actions += @{ item = $n; action = 'settle'; result = $r } }
                 if (-not $dry -and $r.outcome -in 'advanced', 'waiting' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue') {
                     $releaseQueue += @{ item = $n; release = $(if (Test-Has $r 'release') { "$($r.release)" } else { '' }); since = $(if (Test-Has $r 'queued_at') { $r.queued_at } else { $null }) }
                 }
                 if (-not $dry -and ($r.outcome -eq 'done' -or ($r.outcome -eq 'advanced' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue'))) { $triggers += @{ item = $n; event = 'item.complete'; path = $(if (Test-Has $r 'path') { "$($r.path)" } else { '' }) } }
                 elseif (-not $dry -and $r.outcome -eq 'parked') { $triggers += @{ item = $n; event = 'item.parked'; reason = $r.reason } }
+                if (-not $dry -and (Test-Has $r 'recovered') -and $r.recovered) { $unparked += $n }   # its master-broken or timeout park is gone
+                continue
+            }
+            # issue 114: an item with a merge record is never offered to a worker (272 and 276 were validated again after their merge): one without a
+            # settle step and not done gets it back (an older gateway erased it), a done one is left alone
+            if ($merged) {
+                if (-not $settled -and -not $dry) {
+                    $w = try { Invoke-RearmSettle $n 'merged with no settle step' } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; '' }
+                    if ($w) { $actions += @{ item = $n; action = 'settle-rearmed'; awaiting = $w }; $settling += $n }
+                }
                 continue
             }
             if ($isHold) { continue }

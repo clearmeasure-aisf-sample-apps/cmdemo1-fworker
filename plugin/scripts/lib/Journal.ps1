@@ -66,9 +66,11 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         }
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
+        'settle-rearmed' { return "the settle step of this merged item is re-armed by $($F.by) (awaiting ``$($F.awaiting)``): $($F.reason). The gateway carries it on; it is not offered to a worker." }
         'board-added' { return "the item has the factory label but had no column on the board: the sweep put it in $($F.column), where it is offered like any new item." }
         'unparked' {
             $rs = if ($F.ContainsKey('reset') -and $F.reset) { ' Its fix-forward rounds and demotions count from 0 again.' } else { '' }
+            if ($F.ContainsKey('merged') -and $F.merged) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is merged: the gateway settles it, nothing is offered." }
             if ($F.ContainsKey('closed') -and $F.closed) { return "park ``$($F.code)`` removed by $($F.by): $($F.reason). The item is closed: nothing is offered." }
             if ($F.code -eq 'master-broken' -and "$($F.by)" -ne 'expiry') { return "park ``master-broken`` released early by $($F.by): $($F.reason).$rs The item waits for master green again, then for its release candidate." }
             if ("$($F.by)" -eq 'expiry') { return "park ``$($F.code)`` expired ($($F.reason)).$rs The next sweep takes it up again in $col." }
