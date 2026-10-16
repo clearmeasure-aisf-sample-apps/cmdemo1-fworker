@@ -733,6 +733,9 @@ $OwnerScenarios['pass-merge: checks still running at the verdict: the answer is 
     Start-OwnerClient 'pmw' 'persistent-local' '--capacity 3'
     $x = Pm-ToValidation
     Fake 'pr' @{ number = $x.pr; delaySeconds = 20 } | Out-Null    # the checks of the head run again, for 20 s
+    # the handoff offer of the item's arrival in Functional Testing (before the verdict) may still be on its way: let it land, then count from here
+    [void](Wait-Until -Seconds 8 { @((Get-Assigned 'pmw' $x.n) | Where-Object { (Pv $_ 'column') -eq 'Functional Testing' }).Count -gt 0 })
+    $offersBefore = (Get-Assigned 'pmw' $x.n).Count
     $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
     Check 'the verdict answer: merge waiting for checks-pending' ((Pv $v 'merge') -and $v.merge.outcome -eq 'waiting' -and $v.merge.reason -eq 'checks-pending') ($v | ConvertTo-Json -Compress -Depth 5)
     [void](F 'w1' @('claim-item', '--item', $x.n, '--release', 'true'))     # the session is gone: no live claim
@@ -740,7 +743,8 @@ $OwnerScenarios['pass-merge: checks still running at the verdict: the answer is 
     $pu = @((Get-Plant).plant.passUnmerged | Where-Object { $_.item -eq $x.n })
     Check '/status lists it as pass-unmerged with its reason' ($pu.Count -eq 1 -and $pu[0].code -eq 'checks-pending' -and $pu[0].pr -eq $x.pr) ((Get-Plant).plant.passUnmerged | ConvertTo-Json -Compress)
     # (an offer before the verdict, while the scripted holder moved the item between columns, is not one of this state)
-    Check 'no offer for it reached a worker (it is the gateway''s to merge)' (@((Get-Assigned 'pmw' $x.n) | Where-Object { (Pv $_ 'column') -eq 'Functional Testing' }).Count -eq 0) ((Get-Assigned 'pmw' $x.n) | ConvertTo-Json -Compress)
+    $offersAfter = @((Get-Assigned 'pmw' $x.n) | Select-Object -Skip $offersBefore)
+    Check 'no offer for it reached a worker (it is the gateway''s to merge)' (@($offersAfter | Where-Object { (Pv $_ 'column') -eq 'Functional Testing' }).Count -eq 0) ($offersAfter | ConvertTo-Json -Compress)
     Check 'merged when the checks are green, with no session' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
     $mw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match '<!-- plant event=merge-waiting ' }).Count
     Check 'journal: merge-waiting once, however many sweeps found it waiting' ($mw -eq 1) "$mw"
