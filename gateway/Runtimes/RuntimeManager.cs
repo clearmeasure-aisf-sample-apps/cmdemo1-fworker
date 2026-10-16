@@ -119,6 +119,9 @@ sealed class RuntimeManager
         {
             if (!execs.TryGetValue(name, out e) || e.Ended) return;
             e.Ended = true; e.EndedAt = DateTime.UtcNow; e.Outcome = outcome;
+            // a failure is counted before the plant takes the item back (RuntimeEnded): a plan in between would otherwise see the phase not yet
+            // exhausted and start one execution more than maxFailuresPerPhase
+            if (failed) { var n0 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n0 == cfg.CaeJob.MaxFailuresPerPhase; }
             if (e.RegisteredAt == null && (failed || startFailure))
             {
                 startFailuresInRow++;
@@ -131,12 +134,14 @@ sealed class RuntimeManager
         if (unhealthyNow) Log("unhealthy", name, e.Item, unhealthyWhy);
         var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }
         // an execution that exited by itself while its worker still held the item did not finish it: a failure like any other
-        if (tookBack && !failed && e.StopReason == "" && outcome == "succeeded") { failed = true; outcome = "ended-with-item"; lock (gate) e.Outcome = outcome; }
+        if (tookBack && !failed && e.StopReason == "" && outcome == "succeeded")
+        {
+            failed = true; outcome = "ended-with-item";
+            lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == cfg.CaeJob.MaxFailuresPerPhase; }
+        }
         Executions.Add(1, new KeyValuePair<string, object?>("runtime", cae.Kind), new KeyValuePair<string, object?>("outcome", outcome));
         if (tookBack && ReleaseClaim != null) { try { await ReleaseClaim(e.Item, name); } catch (Exception x) { Log("release-claim-failed", name, e.Item, x.Message); } }
         // a failure costs the item one of its executions in this phase: the one that failed, or the one whose offer was lost with it
-        if (failed)
-            lock (gate) { var n = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n == cfg.CaeJob.MaxFailuresPerPhase; }
         if (failed && Revoke != null && e.RegisteredAt != null) { try { await Revoke(name); } catch (Exception x) { Log("revoke-failed", name, e.Item, x.Message); } }
         // at the limit the next plan of the item parks it (Plant.RouteRuntime), so the park happens once, on the plant's side
         if (park) Log("failures-exhausted", name, e.Item, e.Phase);

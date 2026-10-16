@@ -67,6 +67,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'gap-renewed' { return "the lease of **$($F.worker)** ran out at $($F.lapsed) while no gateway was running (down since $($F.since)); renewed for $($F.minutes) min instead of offering the item again." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
+        'flagged' { return "flagged ``$($F.code)`` in $($col): $($F.reason)." }
         'settle-rearmed' { return "the settle step of this merged item is re-armed by $($F.by) (awaiting ``$($F.awaiting)``): $($F.reason). The gateway carries it on; it is not offered to a worker." }
         'board-added' { return "the item has the factory label but had no column on the board: the sweep put it in $($F.column), where it is offered like any new item." }
         'unparked' {

@@ -2170,6 +2170,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     public Func<bool>? MayAct { get; init; }
     public bool LeaderOn { get; init; }
     public SweepGap? Gap { get; init; }
+    readonly HashSet<(int, string)> flagged = new();
     // issue 92: a full sweep (sync-board over the whole board, about 50 REST calls) runs every `seconds` (180), and at most every MinSeconds (60) when
     // a trigger asks for one. A trigger of one item (a webhook, a verb, a take-back, an unpark) queues the item: between full sweeps the queued items
     // get an incremental pass (sync-board with items: the same rules for those items only, no claim-ref reaping, no QC sync). Before, every trigger
@@ -2282,6 +2283,10 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray, items);
                 plant.SetHeld(j["held"] as JsonArray, items);   // issue 65: items that wait for their dependencies
                 if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
+                // issue 117: what the sweep flags (a Release Queue card without a merge record): one plant event per item and code in this process
+                foreach (var f in j["flags"] as JsonArray ?? new JsonArray())
+                    if (f is JsonObject fo && fo["item"] is JsonValue fv && fv.TryGetValue<int>(out var fi) && flagged.Add((fi, fo["code"]?.ToString() ?? "")))
+                        plant.OperatorPlantEvent(fo["code"]?.ToString() ?? "flagged", fi, "", fo["column"]?.ToString() ?? "");
                 // a merge the gateway made after a PASS and the round-trip of one it could not make (Verbs.Merge.ps1 -Gateway)
                 foreach (var a in acts)
                     if (a is JsonObject ao && ao["action"]?.ToString() == "pass-merge" && ao["outcome"]?.ToString() == "demoted" && ao["item"] is JsonValue di && di.TryGetValue<int>(out var dItem))
