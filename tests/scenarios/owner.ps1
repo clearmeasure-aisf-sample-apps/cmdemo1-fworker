@@ -1332,6 +1332,64 @@ $OwnerScenarios['unpark: the operator releases a park early with a reason; the n
     Stop-OwnerClient 'una'
 }
 
+# Issue 106: the launcher runs the session's event stream as a sidecar for the session's lifetime (docs/launcher.md). Both launchers, with a fake
+# claude that only records its first message, and a prompt in the shape of the connect prompt (step 4's credentials, step 7's stream command): the
+# real stream client registers with the suite's gateway and its lines land in BASE/work/events.log.
+function Invoke-SidecarCase([string]$Kind) {
+    $name = "sidecar-$Kind"; $base = Join-Path $script:Work "launch-sidecar-$Kind"; Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $tok = New-WorkerToken $name
+    $prompt = Join-Path $base 'prompt.txt'
+    Set-Content $prompt @"
+4. Credentials (never print them). Set in your shell, and again in any new shell: FACTORY_URL=http://127.0.0.1:$($script:ApiPort) FACTORY_TOKEN=$tok FACTORY_HOLDER=$name FACTORY_DATA_DIR=<BASE>/data
+7. Start the event stream. With a Monitor tool: Monitor on <PWSH> <SCRIPTS>/factory.ps1 subscribe --own --name $name --type persistent-local --capacity 1
+   Without a Monitor tool: run the same command in the background writing to <BASE>/work/events.log.
+"@
+    $fake = Join-Path $base 'fake-claude.ps1'
+    Set-Content $fake "Set-Content -LiteralPath '$(Join-Path $base 'first-message.txt')' -Value `$args[-1]; Set-Content -LiteralPath '$(Join-Path $base 'claude-env.txt')' -Value `$(if (`$env:FACTORY_TOKEN) { 'token' } else { 'none' }); Start-Sleep -Seconds 90"
+    $events = Join-Path $base 'work/events.log'; $out = Join-Path $base 'out.txt'
+    $saved = @{}; foreach ($k in 'FACTORY_URL', 'FACTORY_TOKEN', 'FACTORY_HOLDER', 'FACTORY_WORKER_TOKEN', 'FACTORY_TOKEN_DIR') { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $null) }
+    try {
+        if ($Kind -eq 'sh') {
+            $sh = Join-Path $base 'fake-claude.sh'; Set-Content $sh "#!/usr/bin/env bash`nexec pwsh -NoProfile -File '$fake' `"`$@`""; & chmod +x $sh
+            $p = Start-Process bash -ArgumentList @((Join-Path $script:Root 'plugin/launcher/fworker-loop.sh'), '--dir', $base, '--prompt-file', $prompt, '--claude', $sh, '--backoff', '1', '--stream-stale', '0') -PassThru -RedirectStandardOutput $out -RedirectStandardError (Join-Path $base 'err.txt')
+        } else {
+            $p = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', (Join-Path $script:Root 'plugin/launcher/fworker-loop.ps1'), '-Dir', $base, '-PromptFile', $prompt, '-Claude', $fake, '-Backoff', '1', '-StreamStale', '0') -PassThru -RedirectStandardOutput $out -RedirectStandardError (Join-Path $base 'err.txt')
+        }
+    } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
+    $script:Procs += $p
+    $lines = { if (Test-Path $events) { @(Get-Content $events | ForEach-Object { try { $_ | ConvertFrom-Json -AsHashtable } catch { $null } } | Where-Object { $_ }) } else { @() } }
+    # the sidecars this launcher started, by the process ids it prints (never by a name pattern)
+    $pids = { @([regex]::Matches("$(Get-Content -Raw $out -ErrorAction SilentlyContinue)", 'stream sidecar started[^(]*\(pid (\d+)\)') | ForEach-Object { [int]$_.Groups[1].Value }) }
+    $sidecars = { @(& $pids | ForEach-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue } | Where-Object { $_ -and -not $_.HasExited }) }
+    try {
+        Check "sidecar ($Kind): the launcher's stream client registers and its lines go to events.log" (Wait-Until -Seconds 40 { @(& $lines | Where-Object { $_.event -eq 'worker.registered' -and $_.name -eq $name }).Count -ge 1 }) "$(Get-Content -Raw $out -ErrorAction SilentlyContinue) | $(Get-Content -Raw (Join-Path $base 'work/events.err') -ErrorAction SilentlyContinue)"
+        Check "sidecar ($Kind): the gateway lists the name as connected" (Wait-Until -Seconds 20 { @((Get-Plant).plant.workers | Where-Object { $_.name -eq $name -and $_.connected }).Count -eq 1 })
+        $fm = Join-Path $base 'first-message.txt'
+        [void](Wait-Until -Seconds 20 { Test-Path $fm })
+        $m = if (Test-Path $fm) { Get-Content -Raw $fm } else { '' }
+        Check "sidecar ($Kind): the session's first message carries the launcher note: do not start subscribe, tail events.log" ($m -match 'LAUNCHER NOTE' -and $m -match 'Do not start factory\.ps1 subscribe' -and $m.Contains($events) -and ($m -match 'tail -n0 -F' -or $m -match 'Get-Content')) $m
+        Check "sidecar ($Kind): the credential reaches the sidecar only, not the claude process" ((Get-Content -Raw (Join-Path $base 'claude-env.txt') -ErrorAction SilentlyContinue).Trim() -eq 'none')
+        # a sidecar that dies while the session runs is started again (the scenario stops it by its process id)
+        $before = @(& $sidecars)
+        Check "sidecar ($Kind): one sidecar runs" ($before.Count -eq 1) ($before | ForEach-Object { $_.CommandLine } | Out-String)
+        foreach ($sp in $before) { Stop-Process -Id $sp.Id -Force }
+        Check "sidecar ($Kind): a sidecar that died is started again and registers again" (Wait-Until -Seconds 40 { @(& $lines | Where-Object { $_.event -eq 'worker.registered' }).Count -ge 2 -and (Get-Content -Raw $out) -match 'started again \(pid' }) "$(Get-Content -Raw $out -ErrorAction SilentlyContinue)"
+        # the session ends (end marker): its sidecar ends with it
+        New-Item -ItemType File -Force -Path (Join-Path $base 'work/STOP') | Out-Null
+        Set-Content (Join-Path $base 'work/session-ended') 'x'
+        Check "sidecar ($Kind): the sidecar ends with its session" (Wait-Until -Seconds 40 { @(& $sidecars).Count -eq 0 -and $p.HasExited }) "$(@(& $sidecars).Count) $(Get-Content -Raw $out -ErrorAction SilentlyContinue)"
+        Check "sidecar ($Kind): the gateway sees the stream go" (Wait-Until -Seconds 20 { @((Get-Plant).plant.workers | Where-Object { $_.name -eq $name -and $_.connected }).Count -eq 0 })
+    } finally {
+        New-Item -ItemType File -Force -Path (Join-Path $base 'work/STOP') | Out-Null
+        try { Stop-Process -Id $p.Id -Force } catch { }
+        foreach ($sp in @(& $sidecars)) { try { Stop-Process -Id $sp.Id -Force } catch { } }
+    }
+}
+$OwnerScenarios['owner: stream sidecar: the launcher runs the session''s stream into events.log, tells the session so, restarts a dead sidecar and stops it with the session [full]'] = {
+    $kinds = @('ps1'); if (-not $IsWindows -and (Get-Command bash -ErrorAction SilentlyContinue)) { $kinds += 'sh' }
+    foreach ($k in $kinds) { Invoke-SidecarCase $k }
+}
+
 # Issue 114: the settle state of a merged item is kept when master stays red or does not finish (items 262, 280 stranded closed, 272 and 276
 # validated again). The item keeps awaiting master-broken or master-timeout, is never offered to a worker (not by the sweep, not after unpark),
 # and goes on once the merge commit's latest attempt or a later master commit that contains it is green.
