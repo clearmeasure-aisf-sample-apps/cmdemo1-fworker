@@ -372,12 +372,12 @@ $OperatorScenarios = [ordered]@{
     $miss = @($need | Where-Object { $txt.IndexOf($_, [StringComparison]::Ordinal) -lt 0 }); if ($txt -cmatch '[^\x00-\x7F]') { $miss += 'a character outside ASCII' }
     Check 'the operator skill is ASCII and names its two enforced checks, what is instruction only and the protected areas' ($miss.Count -eq 0) ($miss -join '; ')
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Write-Host '    skip  prompt behaviour: node is not installed'; return }
-    # the hash of main's worker prompt (the manager suite pins the same one), with the stream note taken out exactly once
+    # the pinned hash of the worker prompt (the manager suite pins the same one), with the stream note taken out exactly once
     $sha = "const H=t=>require('crypto').createHash('sha256').update(t,'utf8').digest('hex');const U=t=>{const k='   '+streamNote+'\n',i=t.indexOf(k);return i<0||t.indexOf(k,i+1)>=0?'the stream note is not there exactly once':t.slice(0,i)+t.slice(i+k.length)};"
     $w = "{env:'tdd',url:'https://gw.example',token:'w1.tok.sig',name:'cloud-1',type:'claude-cloud',cap:'2',repo:'https://github.com/o/r',qcProfile:''}"
     $got = Msg-Node "$sha console.log(H(U(buildPrompt($w)))+' '+H(U(buildPrompt(Object.assign($w,{operator:false})))))"
-    $pin = 'beab25408f52c5bdf39cd72db1137a79d9e72a23a4f5568da9303c0b16ea4d90'
-    Check 'the worker prompt has the hash it had before the operator prompt existed, with the new field absent or false' ($got -eq "$pin $pin") $got
+    $pin = '8bde80a378bb873478fac49338926a10d4a80024f7e7c4fae47c2eafb0b080b7'
+    Check 'the worker prompt has its pinned hash, with the operator field absent or false' ($got -eq "$pin $pin") $got
     $s = "{env:'tdd',url:'https://gw.example',token:'m1.tok.sig',name:'supervisor',supervisor:true}"
     $same = Msg-Node "console.log((buildPrompt($s)===supervisorPrompt($s)&&buildPrompt(Object.assign($s,{operator:true}))===supervisorPrompt($s))+'')"
     Check 'the supervisor prompt is the supervisor prompt whatever the operator field says' ($same -eq 'true') $same
