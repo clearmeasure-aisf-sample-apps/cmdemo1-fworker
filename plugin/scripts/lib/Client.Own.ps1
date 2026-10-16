@@ -956,7 +956,9 @@ function Invoke-SubscribeOwn($a) {
                         $cp = if ($ctok) { try { Get-RecentProgress $progress $ci } catch { $null } } else { $null }
                         if ($cp) {
                             $ev['answeredBy'] = 'client'; $ev['progress'] = [ordered]@{ at = ([DateTime]$cp.at).ToString('o'); source = "$($cp.source)" }
-                            $ev['next'] = "the client saw work on #$ci on this machine $([int]([DateTime]::UtcNow - [DateTime]$cp.at).TotalMinutes) min ago ($($cp.source)) and renews the claim itself: nothing to do unless the item.check-answered line that follows says otherwise"
+                            $ev['next'] = "the client saw work on #$ci here $([int]([DateTime]::UtcNow - [DateTime]$cp.at).TotalMinutes) min ago ($($cp.source)) and renews the claim itself: nothing to do unless the item.check-answered line says otherwise"
+                            # (the gateway's reason asks the session to answer; the client does, and the line must keep its progress within the stream's line limit)
+                            if ($ev.Contains('reason')) { $ev.Remove('reason') }
                             $renewFor = @{ item = $ci; token = $ctok; seen = $cp }
                         }
                     }
