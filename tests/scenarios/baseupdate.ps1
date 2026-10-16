@@ -31,12 +31,21 @@ function Bu-MergeHook([int]$Pr, [string]$Ref, [string]$Sha) {
 function Bu-Journal([int]$n, [string]$Event) { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match "<!-- plant event=$Event " }).Count -gt 0 }
 function Bu-Puts([int]$Pr) { @((Fake 'log') | Where-Object { $_ -match "^PUT /repos/[^ ]+/pulls/$Pr/update-branch$" }).Count }
 
-function Bu-SetVerdict([int]$Item, [int]$Pr) {
-    $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
-    $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
-    $st.verdict = @{ passed = $true; processed = $false; pr = $Pr; head_sha = (Get-FakePr $Pr).sha }
-    $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
-    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+# A PASS verdict written into the item's state comment, under the item lock the rule scripts take (as a verdict verb would): a journal line that
+# read the state before this edit would otherwise save it back over the verdict (the runner gate runs journal lines last, so one can come late).
+function Bu-SetVerdict([int]$Item, [int]$Pr, [switch]$NoHead) {
+    $lock = $null; $end = (Get-Date).AddSeconds(45)
+    while ($true) {
+        try { $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$Item.lock"), 'OpenOrCreate', 'ReadWrite', 'None'); break }
+        catch { if ((Get-Date) -gt $end) { throw }; Start-Sleep -Milliseconds 200 }
+    }
+    try {
+        $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
+        $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
+        $st.verdict = @{ passed = $true; processed = $false; pr = $Pr }; if (-not $NoHead) { $st.verdict.head_sha = (Get-FakePr $Pr).sha }
+        $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
+        [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+    } finally { $lock.Dispose() }
 }
 
 $BaseUpdateScenarios = [ordered]@{
@@ -145,11 +154,7 @@ $BaseUpdateScenarios = [ordered]@{
     Bu-Worker 'bm1'
     $a = Bu-OwnedPr 'bm1' @('docs/pass.md'); $b = Bu-OwnedPr 'bm1' @('docs/pass2.md')
     # the state of a PASS verdict that the gateway has not merged yet (pass-unmerged)
-    $sc = @((Get-FakeIssue $a.item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
-    $mm = [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```'); $st = $mm.Groups[1].Value | ConvertFrom-Json -AsHashtable
-    $st.verdict = @{ passed = $true; processed = $false; pr = $a.pr }
-    $body = $sc.body.Substring(0, $mm.Groups[1].Index) + ($st | ConvertTo-Json -Depth 12 -Compress) + $sc.body.Substring($mm.Groups[1].Index + $mm.Groups[1].Length)
-    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+    Bu-SetVerdict $a.item $a.pr -NoHead
     Bu-Synced
     [void](Fake 'master-merge' @{ files = @('docs/z.md') })
     $got = Wait-Until -Seconds 30 { (Bu-Events 'bm1' $b.item).Count -gt 0 }
@@ -195,17 +200,24 @@ $BaseUpdateScenarios['base update (conflict mode): master moves; a clean branch 
         # GitHub has not computed the mergeability of b yet (null twice), then says it conflicts
         Fake 'pr' @{ number = $b.pr; conflict = $true; mergeableNullReads = 2 } | Out-Null
         [void](Fake 'master-merge' @{ files = @('docs/other.md') })
-        Check 'the owner of the conflicting pull request is told: base.updated, reason conflict' (Wait-Until -Seconds 45 { (Bu-Events 'bc2' $b.item).Count -ge 1 }) ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
-        $e = (Bu-Events 'bc2' $b.item)[0]
+        # told once per pull request head and master head (BaseUpdate.cs, issue 103). Under load a look can find the conflict before the fake's master
+        # merge lands: that earlier master head is then told once too. The checks read the line of the moved master, and that no heads are told twice.
+        $mh = (Get-FakeState).masterSha
+        Check 'the owner of the conflicting pull request is told: base.updated, reason conflict' (Wait-Until -Seconds 45 { @((Bu-Events 'bc2' $b.item) | Where-Object { (Pv $_ 'sha') -eq $mh }).Count -ge 1 }) ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
+        $e = @((Bu-Events 'bc2' $b.item) | Where-Object { (Pv $_ 'sha') -eq $mh })[0]
         Check 'the event names the pull request and the conflict' ($e.reason -eq 'conflict' -and $e.conflict -eq $true -and $e.pr -eq $b.pr -and $e.behind -ge 1) ($e | ConvertTo-Json -Compress)
         Start-Sleep -Seconds 12
-        Check 'once: later looks at the same heads tell nothing again' ((Bu-Events 'bc2' $b.item).Count -eq 1) ((Bu-Events 'bc2' $b.item) | ConvertTo-Json -Compress)
+        $ev = Bu-Events 'bc2' $b.item; $shas = @($ev | ForEach-Object { "$(Pv $_ 'sha')" })
+        Check 'once: later looks at the same heads tell nothing again' ($ev.Count -le 2 -and @($shas | Select-Object -Unique).Count -eq $shas.Count -and $shas[-1] -eq $mh) ($ev | ConvertTo-Json -Compress)
         Check 'the owner of the clean branch, only behind, is told nothing and its branch is not updated' ((Bu-Events 'bc1' $a.item).Count -eq 0 -and (Bu-Puts $a.pr) -eq 0 -and (Bu-Puts $b.pr) -eq 0)
-        Check 'the journal says the pull request has a merge conflict' (@((Get-FakeIssue $b.item).comments | Where-Object { $_.body -like '*has a merge conflict with master*plant event=base-updated*' }).Count -eq 1)
+        # the journal line is written by the rule script after the event (gateway Journal, not awaited): wait for it
+        [void](Wait-Until -Seconds 30 { @((Get-FakeIssue $b.item).comments | Where-Object { $_.body -like '*has a merge conflict with master*plant event=base-updated*' }).Count -ge $ev.Count })
+        $told = @((Get-FakeIssue $b.item).comments | Where-Object { $_.body -like '*has a merge conflict with master*plant event=base-updated*' }).Count
+        Check 'the journal says the pull request has a merge conflict, once per line told' ($told -eq $ev.Count) "$told comments, $($ev.Count) lines"
         Check '/status counts it' ((Bu-Status).conflictsTold -ge 1 -and (Bu-Status).conflicting -ge 1) ((Bu-Status) | ConvertTo-Json -Compress -Depth 3)
         # the owner merges master and pushes: a new head that still conflicts is told again, once
         Fake 'push-branch' @{ branch = $b.branch; files = @('docs/conflict.md', 'docs/more.md') } | Out-Null
-        Check 'a new head that still conflicts is told again' (Wait-Until -Seconds 30 { (Bu-Events 'bc2' $b.item).Count -eq 2 })
+        Check 'a new head that still conflicts is told again' (Wait-Until -Seconds 30 { (Bu-Events 'bc2' $b.item).Count -eq $ev.Count + 1 })
     }
 }
 

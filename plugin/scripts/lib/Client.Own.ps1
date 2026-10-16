@@ -211,28 +211,58 @@ function Start-ClientAccept([string]$Url, [string]$ItemToken, $Ev, [string]$Owni
 # The thread job takes an explicit -ThrottleLimit: the default of 5 thread jobs is shared with the spawn watchers (one job per spawned worker), so a
 # heartbeat started behind five watchers would wait in NotStarted for as long as they live, and its session would turn away. The limit is
 # session-wide in the ThreadJob module, so it also lifts the cap that would queue a sixth watcher.
-function Start-Heartbeat([string]$Url, [string]$Cred, [double]$Every = 30) {
+function Start-Heartbeat([string]$Url, [string]$Cred, [double]$Every = 30, $Progress = $null) {
     $secs = if ($env:FACTORY_HEARTBEAT_SECONDS -match '^\d+(\.\d+)?$') { [Math]::Max(1, [double]$env:FACTORY_HEARTBEAT_SECONDS) } else { $Every }
     Start-ThreadJob -ThrottleLimit 64 -ScriptBlock {
-        param($u, $t, $s)
+        param($u, $t, $s, $pg)
+        # an owner's heartbeat also carries the local progress of its items (lib/Progress.ps1, gateway/Lease.cs rule 3)
+        if ($pg) { try { . $pg.lib } catch { $pg = $null } }
         $h = [Net.Http.HttpClient]::new(); $h.Timeout = [TimeSpan]::FromSeconds(20)
         while ($true) {
             try {
+                $rep = @(); if ($pg -and $pg.report) { $rep = @(try { Get-ProgressReport $pg } catch { @() }) }
+                $body = if ($rep.Count -gt 0) { @{ progress = @($rep | ForEach-Object { [ordered]@{ item = $_.item; ageSeconds = $_.ageSeconds; source = $_.source } }) } | ConvertTo-Json -Compress -Depth 4 } else { '{}' }
                 $rq = [Net.Http.HttpRequestMessage]::new('POST', "$u/api/v1/presence"); $rq.Headers.Add('Authorization', "Bearer $t")
-                $rq.Content = [Net.Http.StringContent]::new('{}', [Text.Encoding]::UTF8, 'application/json')
+                $rq.Content = [Net.Http.StringContent]::new($body, [Text.Encoding]::UTF8, 'application/json')
                 $r = $h.SendAsync($rq).GetAwaiter().GetResult(); if ([int]$r.StatusCode -in 401, 403, 404) { return }
+                if ($rep.Count -gt 0 -and [int]$r.StatusCode -eq 200) { foreach ($e in $rep) { $pg.sent[[int]$e.item] = [DateTime]::Parse($e.seen, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) } }
+                # a gateway that does not know the field refuses the body (400): no progress is sent to it again, the beat goes on without
+                elseif ($rep.Count -gt 0 -and [int]$r.StatusCode -eq 400) { $pg.report = $false; continue }
             } catch { }
             Start-Sleep -Milliseconds ([int]($s * 1000))
         }
-    } -ArgumentList $Url, $Cred, $secs
+    } -ArgumentList $Url, $Cred, $secs, $Progress
 }
 
 # The restart check: a heartbeat job that is running, or queued and not yet started, is kept (a second one would beat twice when the first starts);
 # one that ended (it stops itself on 401, 403 or 404), failed or was stopped is removed and replaced.
-function Confirm-Heartbeat($Job, [string]$Url, [string]$Cred, [double]$Every = 30) {
+function Confirm-Heartbeat($Job, [string]$Url, [string]$Cred, [double]$Every = 30, $Progress = $null) {
     if ($Job -and "$($Job.State)" -in 'Running', 'NotStarted') { return $Job }
     if ($Job) { Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue }
-    return (Start-Heartbeat $Url $Cred $Every)
+    return (Start-Heartbeat $Url $Cred $Every $Progress)
+}
+
+# The client's own answer to item.check (gateway/Lease.cs rule 3) when it saw work on the item recently (lib/Progress.ps1): claim-item --renew with
+# the item token, on a thread so the stream is read on, then one line item.check-answered (ok, or the gateway's code). Never for a token it lacks.
+function Start-ClientRenew([string]$Url, [string]$ItemToken, [int]$Item, $Seen) {
+    $null = Start-ThreadJob -ThrottleLimit 64 -ScriptBlock {
+        param($u, $t, $item, $at, $src)
+        $line = [ordered]@{ provider = 'client'; event = 'item.check-answered'; item = $item; by = 'client'; progressAt = $at; source = $src; ok = $false }
+        try {
+            $h = [Net.Http.HttpClient]::new(); $h.Timeout = [TimeSpan]::FromSeconds(150)
+            $rq = [Net.Http.HttpRequestMessage]::new('POST', "$u/api/v1/verbs/claim-item"); $rq.Headers.Add('Authorization', "Bearer $t")
+            # renewed_by client: the gateway counts it as the machine's work, not as the session's own verb (gateway/Lease.cs, progressMaxMinutes)
+            $rq.Content = [Net.Http.StringContent]::new((@{ item = $item; renew = $true; renewed_by = 'client' } | ConvertTo-Json -Compress), [Text.Encoding]::UTF8, 'application/json')
+            $r = $h.SendAsync($rq).GetAwaiter().GetResult(); $body = $r.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            $j = try { $body | ConvertFrom-Json -AsHashtable } catch { $null }
+            if ([int]$r.StatusCode -eq 200 -and $j -is [hashtable] -and $j.ok) { $line.ok = $true; $line.next = "nothing to do: the claim of #$item is renewed; keep working" }
+            else {
+                $line.code = $(if ($j -is [hashtable] -and $j.code) { "$($j.code)" } else { "http-$([int]$r.StatusCode)" })
+                $line.next = if ($line.code -eq 'claim-not-held') { "the item was taken back from this session: stop all work on #$item" } else { "answer the check yourself: factory.ps1 claim-item --item $item --renew" }
+            }
+        } catch { $line.code = 'gateway-unreachable'; $line.next = "answer the check yourself: factory.ps1 claim-item --item $item --renew" }
+        [Console]::Out.WriteLine(($line | ConvertTo-Json -Compress)); [Console]::Out.Flush()
+    } -ArgumentList $Url, $ItemToken, $Item, ([DateTime]$Seen.at).ToString('o'), "$($Seen.source)"
 }
 
 # The ids of the messages this worker already printed, per gateway epoch, in the worker directory (3.5, 6.2): a restarted client (plugin update,
@@ -755,7 +785,9 @@ function Invoke-QuestionReask($Cfg, [string]$Cred, [string]$Name, [string]$Epoch
     return @($done)
 }
 
-# subscribe --own --name N [--type persistent-local|ephemeral-local] [--capabilities a,b] [--capacity 1] [--roles owner,inspector,qc] [--qc-capacity 1] [--qc-address HOST] [--qc-profile] [--model ID] [--effort E] [--host H] [--spawn]
+# subscribe --own --name N [--type persistent-local|ephemeral-local] [--capabilities a,b] [--capacity 1] [--roles owner,inspector,qc] [--qc-capacity 1] [--qc-address HOST] [--qc-profile] [--model ID] [--effort E] [--host H] [--spawn] [--work-dir D] [--repo R]
+# --work-dir and --repo name the work directory and the checkout the client watches for work on the owned items (lib/Progress.ps1); without them it
+# finds them from FACTORY_WORK_DIR, the launcher's end marker, FACTORY_DATA_DIR (<BASE>/work, <BASE>/repo), FACTORY_REPO_DIR and the current directory.
 # An owner offer (item.assigned, job own-item) is accepted by this client itself and announced with item.accepted (gateway/Lease.cs); --no-auto-accept or
 # FACTORY_AUTO_ACCEPT=0 leaves the accept to the model, and with --spawn the spawned session accepts.
 # --host (else FACTORY_HOST, else the computer's name) is the host whose limits this session shares (gateway/Hosts.cs).
@@ -795,6 +827,9 @@ function Invoke-SubscribeOwn($a) {
     $autoAccept = -not ($a.ContainsKey('no_auto_accept') -or $env:FACTORY_AUTO_ACCEPT -eq '0')
     $cred = Get-WorkerCredential $cfg $name -Supervisor:$sup
     $beat = if ($sup) { 20 } else { 30 }
+    # an owner's client watches its machine for work on the items it owns (lib/Progress.ps1): sent with the heartbeat, and the client's own answer to item.check
+    $progress = $null
+    if (-not $sup) { try { . (Join-Path $here 'lib/Progress.ps1'); $progress = New-ProgressState "$($a['work_dir'])" @(if ($a.ContainsKey('repo')) { "$($a.repo)" }) } catch { [Console]::Error.WriteLine("local progress is off: $($_.Exception.Message)") } }
     # lastId is opaque (today a number, "<epoch>.<seq>" with messaging on): kept for the life of this process and sent back unchanged. It moves only
     # once the data line of its event was handled, so a stream cut between the two lines cannot skip that event.
     $lastId = ''; $pendingId = ''; $backoff = 2; $dropN = 0; $heartbeat = $null; $seen = $null; $msgOn = $false
@@ -857,7 +892,7 @@ function Invoke-SubscribeOwn($a) {
                     # the supervisor's two deliveries travel like messages: an envelope, the seen set, an acknowledgement (delivered)
                     $isMsg = $ev.event -eq 'message.received' -or ($sup -and $ev.event -in 'supervisor.questions', 'supervisor.patrol')
                     if ($ev.event -eq 'worker.registered' -and $ev.messaging -eq $true) {
-                        try { $heartbeat = Confirm-Heartbeat $heartbeat $cfg.url $cred } catch { [Console]::Error.WriteLine("heartbeat not started: $($_.Exception.Message)") }
+                        try { $heartbeat = Confirm-Heartbeat $heartbeat $cfg.url $cred 30 $progress } catch { [Console]::Error.WriteLine("heartbeat not started: $($_.Exception.Message)") }
                         # a gateway that runs under a new epoch lost the open questions: each is asked once more from this client's own store (3.6)
                         if ($ev.epoch) { try { [void](Invoke-QuestionReask $cfg $cred $name "$($ev.epoch)") } catch { [Console]::Error.WriteLine("question re-ask failed: $($_.Exception.Message)") } }
                     }
@@ -883,7 +918,7 @@ function Invoke-SubscribeOwn($a) {
                     # starts with it, without a restart of the session, and the model gets one line
                     if ($ev.event -in 'messaging.disabled', 'messaging.enabled') {
                         $msgOn = $ev.event -eq 'messaging.enabled'
-                        if ($msgOn) { try { $heartbeat = Confirm-Heartbeat $heartbeat $cfg.url $cred $beat } catch { [Console]::Error.WriteLine("heartbeat not started: $($_.Exception.Message)") } }
+                        if ($msgOn) { try { $heartbeat = Confirm-Heartbeat $heartbeat $cfg.url $cred $beat $progress } catch { [Console]::Error.WriteLine("heartbeat not started: $($_.Exception.Message)") } }
                         elseif ($heartbeat) { try { Stop-Job -Job $heartbeat -ErrorAction SilentlyContinue; Remove-Job -Job $heartbeat -Force -ErrorAction SilentlyContinue } catch { }; $heartbeat = $null }
                         $line = if ($msgOn) { [ordered]@{ provider = 'client'; event = 'peer.enabled'; reason = 'the operator switched messaging on for this gateway' } }
                                 else { [ordered]@{ provider = 'client'; event = 'peer.disabled'; reason = 'the operator switched messaging off for this gateway: send nothing more; every messaging verb answers messaging-disabled until it is switched on' } }
@@ -916,7 +951,31 @@ function Invoke-SubscribeOwn($a) {
                         try { Set-Content -LiteralPath $owningFile -Value "$($ev.item)$($ev.items -join ',')" -NoNewline } catch { }
                     }
                     if ($owningFile -and -not $replayed -and ($ev.event -in 'session.end', 'session.restart', 'item.taken_back')) { Remove-Item -LiteralPath $owningFile -Force -ErrorAction SilentlyContinue }
+                    # busy owners are not quiet (gateway/Lease.cs rule 3): an item.check for an item on which this machine saw work within the last
+                    # minutes (lib/Progress.ps1) is answered by the client itself, claim-item --renew with the item token, and the line says so
+                    $renewFor = $null
+                    # (not past schedule.progressMaxMinutes: then the gateway says progressCounts false, and only the session itself can answer)
+                    if ($ev.event -eq 'item.check' -and -not $replayed -and $progress -and "$($ev['item'])" -match '^\d+$' -and $ev['progressCounts'] -ne $false) {
+                        $ci = [int]$ev['item']; $ctf = Join-Path (Get-TokenDir) "$ci.owner"
+                        $ctok = try { if (Test-Path -LiteralPath $ctf) { (Get-Content -Raw -LiteralPath $ctf).Trim() } else { '' } } catch { '' }
+                        $cp = if ($ctok) { try { Get-RecentProgress $progress $ci } catch { $null } } else { $null }
+                        if ($cp) {
+                            $ev['answeredBy'] = 'client'; $ev['progress'] = [ordered]@{ at = ([DateTime]$cp.at).ToString('o'); source = "$($cp.source)" }
+                            $ev['next'] = "the client saw work on #$ci here $([int]([DateTime]::UtcNow - [DateTime]$cp.at).TotalMinutes) min ago ($($cp.source)) and renews the claim itself: nothing to do unless the item.check-answered line says otherwise"
+                            # (the gateway's reason asks the session to answer; the client does, and the line must keep its progress within the stream's line limit)
+                            if ($ev.Contains('reason')) { $ev.Remove('reason') }
+                            $renewFor = @{ item = $ci; token = $ctok; seen = $cp }
+                        }
+                    }
                     Write-StreamLine (Format-StreamLine $ev (Get-StreamReadHint $ev))
+                    if ($renewFor) { try { Start-ClientRenew $cfg.url $renewFor.token $renewFor.item $renewFor.seen } catch { [Console]::Error.WriteLine("client renew not started: $($_.Exception.Message)") } }
+                    # the items this client's machine is watched for: what it was given or accepted, until it is taken back, complete or the session ends
+                    if ($progress -and -not $replayed -and "$($ev['item'])" -match '^\d+$') {
+                        $oi = [int]$ev['item']
+                        if (($ev.event -eq 'item.assigned' -and $ev['job'] -eq 'own-item' -and "$($ev['role'])" -eq 'owner') -or $ev.event -eq 'item.accepted') { $progress.owned[$oi] = [DateTime]::UtcNow }
+                        elseif ($ev.event -in 'item.taken_back', 'item.complete') { $progress.owned.Remove($oi); $progress.progress.Remove($oi); $progress.sent.Remove($oi) }
+                    }
+                    if ($progress -and -not $replayed -and $ev.event -eq 'session.end') { $progress.owned.Clear() }
                     # the client accepts an owner offer itself (gateway/Lease.cs, rule 1): the gateway offers only into a free slot, and an offer the model
                     # answers late is offered to the next worker. The model is told with item.accepted; if it does not start within the lease, the
                     # gateway takes the item back. Not with --spawn (the spawned session accepts) and not with FACTORY_AUTO_ACCEPT=0.

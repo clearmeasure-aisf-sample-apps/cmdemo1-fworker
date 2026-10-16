@@ -127,6 +127,22 @@ function Verb_comment($a) {
 # who and why, and an item with no live claim gets a handoff to its current column, so the next sweep offers it again there at once instead of after
 # sweepSeenCount sightings. Two parks are waits of the gateway, not holds for a person, and are refused: awaiting checks (the sweep ends it when the
 # checks finish) and the inspector's escalation (only a human approval of the head clears it: clear-hold).
+# The gateway parks an item itself (cloud-worker-runtimes.md 2.11: runtime-failed after the executions of one phase failed). Admin only (the
+# gateway's runner); the operator releases it with POST /api/v1/items/{n}/unpark. Body: item, code (a park code), phase, by.
+function Verb_park_item($a) {
+    $n = Get-ItemNumber $a; $c = Get-Cfg
+    $code = "$(Need $a 'code')"
+    if ($code -notmatch '^[a-z0-9-]{1,40}$') { Reject 2 'usage' 'the park code is lowercase letters, digits and dashes' }
+    $st = Get-State $n; $s = $st.state
+    if (Get-Park $s) { return @{ ok = $true; id = $n; parked = $true; already = $true; park = $s.park } }
+    Set-Park $s $code ($c.timing.parkHours * 60)
+    $phase = if (Test-Has $a 'phase') { ("$($a.phase)" -replace '<!--|-->', '' -replace '\s+', ' ').Trim() } else { '' }
+    $by = if (Test-Has $a 'by') { ("$($a.by)" -replace '<!--|-->', '' -replace '\s+', ' ').Trim() } else { 'the gateway' }
+    [void](Add-Journal $n $st 'parked' @{ code = $code; phase = $phase; by = $by } "$($s.park.at)")
+    Save-State $n $st
+    return @{ ok = $true; id = $n; parked = $true; park = $s.park }
+}
+
 function Verb_unpark_item($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg
     # one line, no HTML comment markers: the reason goes into a journal comment whose hidden marker is machine-read
@@ -142,12 +158,39 @@ function Verb_unpark_item($a) {
     if ($code -eq 'development:awaiting-checks') { Reject 10 'gateway-wait' 'the item waits for its pull request checks, not for a person; the sweep ends that wait by itself' }
     if ($code -eq 'inspector-escalated') { Reject 10 'needs-approval' 'the inspector''s hold clears only on a human approval of the head commit (clear-hold), not by unpark' }
     $expired = -not (Get-Park $s)
-    $s.Remove('park')
+    # issue 102: the item starts afresh, so the fix-forward rounds and demotions that parked it are counted from 0 again
+    $reset = (Test-Has $s 'fix_forward_rounds') -or (Test-Has $s 'demotions')
+    $s.Remove('park'); $s.Remove('fix_forward_rounds'); $s.Remove('demotions'); $s.Remove('master_defect')
     $offered = $false
-    if ($info.open -and -not (Test-ClaimLive $s) -and (Test-NameIn "$($info.column)" $c.columns.ai)) { $s.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $offered = $true }
-    [void](Add-Journal $n $st 'unparked' @{ column = $info.column; code = $code; by = $by; reason = $reason; closed = (-not $info.open) } "$($park.at)")
+    # issue 114: an item with a merge record is never handed to a worker: unpark re-arms its settle step when it has none (or leaves the one it has)
+    $merged = (Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha
+    $rearmed = if ($merged) { Restore-Settle $s } else { '' }
+    if (-not $merged -and $info.open -and -not (Test-ClaimLive $s) -and (Test-NameIn "$($info.column)" $c.columns.ai)) { $s.handoff = @{ column = $info.column; at = ConvertTo-Iso (Get-UtcNow) }; $offered = $true }
+    [void](Add-Journal $n $st 'unparked' @{ column = $info.column; code = $code; by = $by; reason = $reason; closed = (-not $info.open); merged = [bool]$merged; reset = $reset } "$($park.at)")
     Save-State $n $st
-    return @{ ok = $true; id = $n; unparked = $true; column = $info.column; park = $park; expired = $expired; reoffer = $offered; closed = (-not $info.open) }
+    $out = @{ ok = $true; id = $n; unparked = $true; column = $info.column; park = $park; expired = $expired; reoffer = $offered; closed = (-not $info.open); countersReset = $reset }
+    if ($merged) { $out.merged = $true; $out.awaiting = $(if ($rearmed) { $rearmed } elseif ((Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { "$($s.merge.awaiting)" } else { '' }); $out.rearmed = [bool]$rearmed }
+    return $out
+}
+
+# Admin verb, reached only through POST /api/v1/items/{n}/resettle (operator token): issue 114. A person puts a merged item back into the settle
+# step, for example one an older gateway moved to Done although no release carried it (272, 276), after reopening it and moving its card. The
+# wait is set from the merge record (Restore-Settle -Force); a journal line records who and why. Never a hand-off: a merged item is not a worker's.
+function Verb_resettle_item($a) {
+    $n = Get-ItemNumber $a
+    $reason = ("$(Need $a 'reason')" -replace '<!--|-->', '' -replace '\s+', ' ').Trim()
+    if (-not $reason) { Reject 2 'usage' 'a reason is required: why the item is settled again' }
+    if ($reason.Length -gt 500) { Reject 2 'usage' 'the reason is at most 500 characters' }
+    $by = if ((Test-Has $a 'by') -and "$($a.by)".Trim()) { "$($a.by)".Trim() } else { 'the operator' }
+    $info = Get-ItemInfo $n
+    $st = Get-State $n; $s = $st.state
+    if (-not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha)) { Reject 10 'not-merged' "item #$n has no merge record: it is not settled, it is worked" }
+    if ((Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { Reject 10 'already-settling' "item #$n is already in the settle step (awaiting $($s.merge.awaiting))" }
+    if ("$($info.column)" -ieq (Get-LastColumn)) { Reject 10 'done-column' "item #$n is in '$($info.column)', which the sweep does not read: move its card out of it first (the Release Queue, or Functional Testing)" }
+    $w = Restore-Settle $s -Force
+    [void](Add-Journal $n $st 'settle-rearmed' @{ awaiting = $w; by = $by; reason = $reason } "resettle|$($s.merge.rearmed_at)")
+    Save-State $n $st
+    return @{ ok = $true; id = $n; awaiting = $w; column = $info.column; open = $info.open }
 }
 
 function Verb_claim_item($a) {
@@ -425,21 +468,34 @@ function Verb_complete($a) {
         Reject 10 'development-docs-only-pr' "the pull request changes only documentation and the item's technical design did not record it as docs-only ($($c.docsOnlyMarker) inside the design section)" @{ prNumber = $pr.number }
     }
     $chk = Get-ChecksFor $prd.head.sha
+    # the one CI rule (issue 102, Prs.ps1): a red head is re-run once, or waits for a run still going or for a defect of the base branch, before it
+    # is refused; the re-runs it made (pr.rerun) are kept with the pull request record
+    $rerun = if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rerun') -and [int]$s.pr.number -eq [int]$pr.number) { $s.pr.rerun } else { $null }
+    $ciWait = ''
     if ($chk.status -eq 'failure') {
-        $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url; failed_checks = $chk.failed_checks }
-        [void](Add-ChecksRed $s "$($prd.head.sha)")
-        Save-State $n $st
-        Reject 10 'checks-not-green' 'pull request checks are not green' @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
+        if ($null -eq $rerun) { $s.pr = @{ number = $pr.number } } else { $s.pr.number = $pr.number }
+        $rule = Get-RedHeadRuling $s "$($prd.head.sha)" $chk
+        $rerun = $s.pr.rerun
+        if ($rule.ruling -eq 'red') {
+            $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url; failed_checks = $chk.failed_checks; rerun = $rerun }
+            [void](Add-ChecksRed $s "$($prd.head.sha)")
+            Save-State $n $st
+            Reject 10 'checks-not-green' "pull request checks are not green ($($rule.reason))" @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
+        }
+        if ($rule.ruling -eq 'master-defect' -and -not $rule.cached) { [void](Register-MasterDefect $n $s ([int]$pr.number) "$($prd.head.sha)" $rule.causes); $s.master_defect.checked_at = ConvertTo-Iso (Get-UtcNow) }
+        $ciWait = "$($rule.ruling): $($rule.reason)"
     }
     $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url }
-    if ($chk.status -eq 'pending') {
+    if ($null -ne $rerun) { $s.pr.rerun = $rerun }
+    if ($chk.status -eq 'pending' -or $ciWait) {
         $s.awaiting_checks = @{ pr = $pr.number; sha = $prd.head.sha; comment = $comment; since = ConvertTo-Iso (Get-UtcNow) }
         Set-Park $s 'development:awaiting-checks' $c.timing.awaitingChecksParkMinutes
         if (Test-OwnedClaim $s) { Save-State $n $st } else { $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n }
-        Add-Comment $n "PR #$($pr.number) checks are still running; the gateway is watching them and will advance the item when green. The worker's job here is done."
-        Reject 21 'accepted-checks-pending' 'pull request checks are still running; the gateway is watching them and will advance the item when they are green. Your work here is done - stop now.' @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
+        $why = if ($ciWait) { "checks failed and the gateway applies the CI rule ($ciWait); it decides when that is over" } else { 'checks are still running' }
+        Add-Comment $n "PR #$($pr.number) $why; the gateway is watching them and will advance the item when green. The worker's job here is done."
+        Reject 21 'accepted-checks-pending' "pull request $why; the gateway is watching them and will advance the item when they are green. Your work here is done - stop now." @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
     }
-    $s.Remove('fix_forward_rounds')
+    $s.Remove('fix_forward_rounds'); $s.Remove('master_defect')
     if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
     return Finish-ColumnExit $n $info $st "$comment" @{ prNumber = $pr.number; build_owed = -not ($docsOnly -and (Test-ItemDocsOnly $s $info)) }
 }

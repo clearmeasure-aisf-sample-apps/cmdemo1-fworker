@@ -176,6 +176,22 @@ Code: `gateway/Lease.cs`; settings `schedule.*` in `config/instance.json` (each 
    `schedule.staleConfirmMinutes` (3) and the item is taken back. Not while the item waits for something else: parked, or its last trigger was
    `item.parked`, `qc.requested`, `qc.reset`, `item.merged` or `inspector.escalated`. Watched are the owners the plant saw accept, and the owners a
    sweep listed with a lease; never an owner set by a test seam.
+4. **A busy owner is not quiet** (issue 101, 2026-10-15). An owner that waits on a long subagent (a private build, an app run, a functional test)
+   calls no verb for many minutes. Its stream client (`plugin/scripts/lib/Progress.ps1`) looks at its own machine and sends the latest work it saw
+   per owned item with the heartbeat (`POST /presence` body `progress: [{ item, ageSeconds, source }]`, at most 20; the age by the client's clock,
+   so a client whose clock is off still reports what is recent): `marker` (a file `<work>/progress/<N>.txt` a subagent wrote), `work` (any other
+   file written in the work directory), `commit` (a worktree's index or HEAD log changed), `files` (a file of the worktree changed; builds write
+   `obj/` and `bin/`), `process` (Linux: a build or test process in the worktree that used CPU since the last look). A time in the future is no work.
+   A place is the item's when its path or branch names the item number as a token; while the session owns one item, every worktree of its
+   checkouts and its whole work directory are. Only items the name owns count. Progress counts for rule 3 like a verb (the quiet spell starts at the
+   latest of the last call, the last summary change and the last progress), renews the lease like a summary that names the item (rule 2), and
+   progress newer than the start of the quiet spell answers an open `item.check`. **Cap**: progress counts only while the session itself (a verb or
+   poll of its own, or a changed summary) was active within `schedule.progressMaxMinutes` (180; 0 is no cap): a machine that stays busy (an orphaned
+   browser, a spinning test host) while the session is stuck does not hold the item for ever; past it the `item.check` carries
+   `progressCounts: false` and only the session itself answers it. When an `item.check` arrives within the cap (no heartbeat, messaging off) and
+   the client saw work on the item within `FACTORY_PROGRESS_RECENT_MINUTES` (10), it answers the check itself with `claim-item --renew`
+   (`renewed_by: "client"`: progress, not the session's own verb; the line carries `answeredBy: "client"`, then `item.check-answered`).
+   `/status` `lease` shows `progress`, `progressReports` and `checksAnsweredByProgress`. `FACTORY_PROGRESS=0` switches the client's watching off.
 
 Taking back: the plant lets go only after the rule script `expire-claim` (gateway only) succeeded (a failure keeps the owner and is tried again later). It ends the claim's lease and marks it `taken_back` (journal `lease-expired`), so
 `claim-item --renew` of the old owner is refused; the old owner gets `item.taken_back`; the plant forgets the owner (journal `reassigned`) and asks
@@ -220,6 +236,39 @@ Folding (issue 93): `matched`, `waiting` and `reassigned` repeat while an item w
 ## 10. Merge queue, policy, and CI rules (already built)
 
 `mergeQueueDepth` limits merged items waiting for their release candidate (the Release workflow keeps one queued run). `mergePolicy` is `auto` or `peer-approved`. A merged docs-only change finishes after master has been green for a grace period even if no release run appears. CI is classified strictly: zero check runs is pending, and each configured gate must be present and successful.
+
+### 10e. One CI rule for flakes and pre-existing failures (issue 102, 2026-10-15)
+
+Code: `plugin/scripts/lib/Prs.ps1` (`Get-ChecksFor`, `Get-RedCauses`, `Get-RedHeadRuling`, `Register-MasterDefect`), used by `complete`
+(Verbs.Item.ps1), the sweep's wait for checks (`Complete-AwaitingChecks`, Verbs.Sweep.ps1) and `merge` (Verbs.Merge.ps1, also as the gateway's
+merge after a PASS).
+
+1. **Only the gates decide.** A head is red when a gate (`ciGates`, the checks the ruleset requires) failed, pending while a gate is absent or
+   running, green when every gate succeeded. A failed check that is not a gate is listed (`failed_checks`, and `nongate_failed` in the public
+   answer) and never makes the head red by itself. Without configured gates any failed check is red, as before. `-Ignore` (master's
+   `masterIgnoredChecks`) still leaves checks out of the verdict.
+2. **The causes.** The checks that made a head red: the failed or cancelled checks that are not gates, and failed gates that are not aggregating
+   ones (`ciAggregateGates`, default `Build result`, which fails because a job it needs failed; `secret-scan` is a cause of its own); when there are
+   none of those, the failed gates themselves.
+3. **A red head is judged once its workflow runs completed.** Then, once per head, the failed jobs are re-run (`rerun-failed-jobs` of each failed
+   or cancelled run) when the causes include checks other than the gates, match `masterFlakyChecks` (both acceptance shard families,
+   `Acceptance Tests [shard n/6]` and `Acceptance Tests (ARM SQLite) [shard n/6]`), or fail on master too. The runs and attempts are recorded in the
+   item state, `pr.rerun[<sha>]` (the last 5 heads), and the head is judged again on the newer, completed attempt of each run. A re-run started from
+   the sweep's wait restarts its timeout (`devChecksTimeoutMinutes`). `complete` on such a head answers 21 `accepted-checks-pending` and leaves the
+   rest to the sweep; `merge` waits (`checks-rerun`). When master's checks cannot be read, the head is judged later (no round for a GitHub blip).
+4. **A master defect costs nothing.** A head still red whose causes all fail on master as well (the newest finished run of each on the last 5
+   master commits failed) costs no fix-forward round and no demotion. It is reported once per set of checks: a comment on the item, the state
+   `master_defect`, and one `plant.event` `master-defect` on the operator stream. The item waits (`merge` with reason `master-defect`); the gateway
+   looks at master again every `timing.masterDefectCheckMinutes` (5). Once master passes those checks the ruling says so (fixed), once per defect:
+   the gateway merges master into the branch (GitHub's update branch; for a PASS this is the one head accepted without a new verdict, as for an
+   out-of-date branch), and the new head is judged as any head. If GitHub reports a conflict, Development is dispatched to merge master, without
+   counting a round; a PASS that waits for its merge waits for a person then. A defect that outlasts `timing.parkHours` in Development parks the item
+   (`master-defect`) for a person; a waiting PASS is parked after `timing.verdictTimeoutMinutes` as any unmerged PASS. A green head, the end of a park and `unpark` clear `master_defect`.
+5. **Anything else is red, as before**: a fix-forward round in Development (the comment says when it was still red after the re-run), or a
+   demotion at the merge.
+6. **A park that ends gives a fresh start.** When a park ends by expiry (the sweep removes it, journal `unparked` by `expiry`) or by `unpark`,
+   `fix_forward_rounds` and `demotions` are counted from 0 again (and with them the model tier's and the inspector's counts). Not for the gateway's
+   own wait for checks (`development:awaiting-checks`).
 
 ### 10b. The verdict and the merge: the gateway merges (owner decision 2026-10-13)
 

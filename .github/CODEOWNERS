@@ -14,6 +14,11 @@
 /config/deploy.overrides.json                 @jeffreypalermo
 /config/apply-overrides.ps1                   @jeffreypalermo
 
+# the cloud worker runtime: the runner image, its entrypoint, auto-mode settings and prompt template, and the adapter that holds the ARM right
+/Dockerfile.fwrunner                          @jeffreypalermo
+/runner/                                      @jeffreypalermo
+/gateway/Runtimes/                            @jeffreypalermo
+
 # the operator session: its powers, its skill and guard rails, and the tests of them
 /gateway/Operator.cs                          @jeffreypalermo
 /plugin/skills/factory-operator/              @jeffreypalermo
@@ -31,6 +36,14 @@
 /plugin/scripts/lib/Verbs.Manager.ps1         @jeffreypalermo
 /plugin/scripts/lib/Client.Manager.ps1        @jeffreypalermo
 /tests/scenarios/manager-actions.ps1          @jeffreypalermo
+
+# the backlog keeper: its powers, its guard rails, its skill and the owner's rules it follows
+/gateway/Keeper.cs                            @jeffreypalermo
+/plugin/scripts/lib/Verbs.Keeper.ps1          @jeffreypalermo
+/plugin/scripts/lib/Client.Keeper.ps1         @jeffreypalermo
+/plugin/skills/factory-backlog-keeper/        @jeffreypalermo
+/docs/owner-rules.md                          @jeffreypalermo
+/tests/scenarios/keeper.ps1                   @jeffreypalermo
 
 # uat and prod
 /docs/deploy/activate-prod.sh                 @jeffreypalermo
