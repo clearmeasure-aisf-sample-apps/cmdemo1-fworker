@@ -328,6 +328,17 @@ Closed on 2026-10-15 (issue #105):
   still open is not relayed again (`202` with the first question's id, `duplicate: true`, `/status` `messaging.questionsDeduped`; it still counts for
   the watchdog's `repeated-question`). The trust-mapping lines are
   unchanged. Open: the supervisor's skill (owner review) does not describe `duplicate`; nothing depends on it.
+Closed on 2026-10-15 (issue #101):
+
+- **#101 Busy owners were taken back as quiet** (about 10 items a day, 308, 296 and 310 among them): lease rule 3 counted only verbs and a changed
+  summary, so an owner waiting on a long subagent was taken back about 18 min after its last verb. The stream client now watches its machine
+  (`plugin/scripts/lib/Progress.ps1`: a progress file `<work>/progress/<N>.txt`, files of the work directory, commits and changed files of the
+  item's worktrees, on Linux a build or test process at work there) and sends the latest per owned item with its heartbeat (`progress`, each
+  entry's age in seconds); rule 3 counts it like a verb, it renews the lease, and it answers an open `item.check`. An `item.check` that arrives
+  anyway is answered by the client itself (`claim-item --renew` with `renewed_by: "client"`) when it saw work within 10 minutes. Progress counts
+  only while the session itself was active within `schedule.progressMaxMinutes` (180), so a busy machine cannot hold a stuck session's item for
+  ever. `/status` `lease.progress`. `docs/design/plant-manager.md` 6b rule 4.
+  Open: not yet seen live on tdd; #83 (renewals that did not reach the lease watchdog) is a separate cause.
 
 Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
 
