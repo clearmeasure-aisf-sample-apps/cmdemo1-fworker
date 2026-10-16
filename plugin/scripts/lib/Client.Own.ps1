@@ -832,6 +832,9 @@ function Invoke-SubscribeOwn($a) {
     # lastId is opaque (today a number, "<epoch>.<seq>" with messaging on): kept for the life of this process and sent back unchanged. It moves only
     # once the data line of its event was handled, so a stream cut between the two lines cannot skip that event.
     $lastId = ''; $pendingId = ''; $backoff = 2; $dropN = 0; $heartbeat = $null; $seen = $null; $msgOn = $false
+    # issue 106 (the launcher's stream sidecar lives as long as its session, through every reconnect): the last peers.snapshot and supervisor.joined
+    # printed, so a reconnect prints them only when they changed
+    $lastPeers = ''; $lastJoined = ''
     # the launcher watchdog's files, next to the launcher's end marker; only for a launcher session (not --spawn)
     $wdir = if ($env:FACTORY_SESSION_END_FILE -and -not $spawn) { Split-Path -Parent $env:FACTORY_SESSION_END_FILE } else { '' }
     $aliveFile = if ($wdir) { Join-Path $wdir 'stream-alive' } else { '' }; $owningFile = if ($wdir) { Join-Path $wdir 'session-owning' } else { '' }; $aliveAt = [DateTime]::MinValue
@@ -883,6 +886,20 @@ function Invoke-SubscribeOwn($a) {
                     # the heartbeat starts once messaging is on, and again after a reconnect if its job ended (401, 403 or 404); a job still queued is kept, not
                     # duplicated; a failure to start it is reported, never fatal
                     if ($ev.event -eq 'worker.registered') { $msgOn = ($ev['messaging'] -eq $true) }
+                    # a reconnect repeats the peers.snapshot and, after a restart of the gateway or the supervisor, supervisor.joined: printed only when
+                    # they changed (the peers' names, roles and items and the supervisor's presence and model; the join's name, model and effort)
+                    if ($ev.event -eq 'peers.snapshot' -and -not $sup) {
+                        $sig = try { ([ordered]@{ s = $(if ($ev['supervisor'] -is [hashtable]) { "$($ev.supervisor['present'])|$($ev.supervisor['model'])" } else { '' })
+                                    p = @(@($ev['peers']) | Where-Object { $_ -is [hashtable] } | ForEach-Object { "$($_['name'])|$((@($_['roles']) | Sort-Object) -join ',')|$((@($_['items']) | Sort-Object) -join ',')" } | Sort-Object) } | ConvertTo-Json -Compress) } catch { [guid]::NewGuid().ToString() }
+                        if ($sig -eq $lastPeers) { if ($evId) { $lastId = $evId }; continue }
+                        $lastPeers = $sig
+                    }
+                    if ($ev.event -eq 'supervisor.joined' -and -not $sup) {
+                        $sig = "$($ev['name'])|$($ev['model'])|$($ev['effort'])"
+                        if ($sig -eq $lastJoined) { if ($evId) { $lastId = $evId }; continue }
+                        $lastJoined = $sig
+                    }
+                    if ($ev.event -eq 'supervisor.left') { $lastJoined = '' }
                     if ($sup -and $ev.event -eq 'supervisor.registered') { $msgOn = $true; try { $heartbeat = Confirm-Heartbeat $heartbeat $cfg.url $cred $beat } catch { [Console]::Error.WriteLine("heartbeat not started: $($_.Exception.Message)") } }
                     # the supervisor's two deliveries travel like messages: an envelope, the seen set, an acknowledgement (delivered)
                     $isMsg = $ev.event -eq 'message.received' -or ($sup -and $ev.event -in 'supervisor.questions', 'supervisor.patrol')
