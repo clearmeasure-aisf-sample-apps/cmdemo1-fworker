@@ -2,8 +2,18 @@
 
 function Get-SeenFile { Join-Path (Get-StateDir) 'seen.json' }
 
+# Issue 117: called under the item lock on a fresh read (Invoke-AwaitingChecksLocked). The card moves on only from the column the wait began in
+# (Development): a card that is elsewhere was moved by a person, or by an earlier pass that a stale read did not see (290 went from Development
+# to Functional Testing and on to the Release Queue in two passes 5 s apart, its pull request unmerged), so the wait ends without a move.
 function Complete-AwaitingChecks([int]$n, $info, $st) {
     $c = Get-Cfg; $s = $st.state; $aw = $s.awaiting_checks
+    $expect = if ((Test-Has $aw 'column') -and $aw.column) { "$($aw.column)" } else { "$($c.columns.development)" }
+    if ("$($info.column)" -ine $expect) {
+        $s.Remove('awaiting_checks'); if ((Test-Has $s 'park') -and "$($s.park.reason)" -eq 'development:awaiting-checks') { $s.Remove('park') }
+        Save-State $n $st
+        Add-Comment $n "the wait for the checks of PR #$($aw.pr) ended without moving the card: it is in **$($info.column)**, not in **$expect** where the wait began."
+        return @{ outcome = 'column-moved'; column = "$($info.column)"; expected = $expect }
+    }
     $pr = Get-Pr ([int]$aw.pr); $sha = "$($pr.head.sha)"
     $chk = Get-ChecksFor $sha
     if ($chk.status -eq 'success') {
@@ -85,6 +95,23 @@ function Complete-AwaitingChecks([int]$n, $info, $st) {
         return @{ outcome = 'parked'; reason = 'stuck' }
     }
     return @{ outcome = 'waiting'; checks = (Get-PublicChecks $chk) }
+}
+
+# Issue 117: the sweep's two long steps that save an item's state, settle and the end of a wait for checks, run under the item lock on a fresh read
+# (the sweep read the state earlier, without the lock, and a verb or an earlier pass may have changed it since). A lock still busy after 3 s skips
+# the item for this sweep (outcome busy); the next sweep takes it up. Use-ItemLock is a lock of this machine: one gateway sweeps the board.
+function Invoke-SettleLocked([int]$n) {
+    try { return (Use-ItemLock $n { Invoke-Settle $n } 3) }
+    catch [FactoryReject] { if ($_.Exception.Code -eq 'item-busy') { return @{ outcome = 'busy' } }; throw }
+}
+function Invoke-AwaitingChecksLocked([int]$n) {
+    try {
+        return (Use-ItemLock $n {
+            $f = Get-State $n
+            if (-not (Test-Has $f.state 'awaiting_checks')) { @{ outcome = 'settled-meanwhile' } }
+            else { Complete-AwaitingChecks $n (Get-ItemInfo $n) $f }
+        } 3)
+    } catch [FactoryReject] { if ($_.Exception.Code -eq 'item-busy') { return @{ outcome = 'busy' } }; throw }
 }
 
 # A pull request of the item was merged outside the merge verb (a person pressed the button): the item is settled from wherever it was. Under the
@@ -338,7 +365,7 @@ function Verb_sync_board($a) {
     $skipped = @()
     $seenFile = Get-SeenFile
     $seen = if (Test-Path $seenFile) { Get-Content -Raw $seenFile | ConvertFrom-Json -AsHashtable } else { @{} }
-    $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @(); $rtLabels = @{}; $profiles = @{}
+    $offers = @(); $actions = @(); $errors = @(); $owners = @{}; $pins = @{}; $triggers = @(); $flags = @(); $rtLabels = @{}; $profiles = @{}
     # priorities: the priority label of each item that has one (top, high), for the order of the plan (Plant.Plan)
     $priorities = @{}
     # holds: the items labelled hold:owner (ownerHoldLabel); the plant manager's name actions leave the sessions that own one alone (Manager.cs)
@@ -417,7 +444,9 @@ function Verb_sync_board($a) {
                     }
                     continue
                 }
-                if (-not $dry) { $r = Invoke-Settle $n; $actions += @{ item = $n; action = 'settle'; result = $r } }
+                if (-not $dry) { $r = Invoke-SettleLocked $n; $actions += @{ item = $n; action = 'settle'; result = $r } }
+                # (a busy lock skips this sweep: an item that waits in the Release Queue is still listed, from the state the sweep read)
+                if (-not $dry -and $r.outcome -eq 'busy' -and "$($s.merge.awaiting)" -eq 'release-queue') { $r = @{ outcome = 'waiting'; awaiting = 'release-queue'; release = "$($s.merge.release)"; queued_at = $(if (Test-Has $s.merge 'queued_at') { $s.merge.queued_at } else { $null }) } }
                 if (-not $dry -and $r.outcome -in 'advanced', 'waiting' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue') {
                     $releaseQueue += @{ item = $n; release = $(if (Test-Has $r 'release') { "$($r.release)" } else { '' }); since = $(if (Test-Has $r 'queued_at') { $r.queued_at } else { $null }) }
                 }
@@ -435,7 +464,15 @@ function Verb_sync_board($a) {
                 }
                 continue
             }
-            if ($isHold) { continue }
+            if ($isHold) {
+                # issue 117: only settle moves a card into the Release Queue, and only a merged one: an open item there without a merge record got
+                # there some other way (290). It is flagged once (a journal line, and the sweep's flags for the operator stream); nothing moves it.
+                if ($it.open -and -not $merged) {
+                    $flags += @{ item = $n; code = 'release-queue-without-merge'; column = $col }
+                    if (-not $dry) { try { [void](Use-ItemLock $n { $f = Get-State $n; if (-not ((Test-Has $f.state 'merge') -and (Test-Has $f.state.merge 'sha') -and $f.state.merge.sha)) { if (Add-Journal $n $f 'flagged' @{ column = $col; code = 'release-queue-without-merge'; reason = 'the card is in the Release Queue but the item has no merge record (its pull request is not merged by the factory); a person moves it back' } "rq-no-merge") { Save-State $n $f } } } 3) } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw } } }
+                }
+                continue
+            }
             if (Test-NameIn $c.demoLabel $it.labels) { continue }
             # A person merged the item's pull request: pick the merge up, whatever state the item was in (a PASS waiting for the gateway's merge, a
             # PASS parked for a person because the item has no Auto Merge label, an item still in Development, a parked or unowned item). The pull
@@ -548,8 +585,7 @@ function Verb_sync_board($a) {
             $park = Get-Park $s
             if ($park) {
                 if ($park.reason -eq 'development:awaiting-checks' -and (Test-Has $s 'awaiting_checks') -and -not $dry) {
-                    $info = Get-ItemInfo $n
-                    $r = Complete-AwaitingChecks $n $info $st
+                    $r = Invoke-AwaitingChecksLocked $n
                     $actions += @{ item = $n; action = 'awaiting-checks'; result = $r }
                     if ($r.outcome -in 'completed', 'fix-forward') { $seen.Remove("$n") }
                     if (Test-OwnedClaim $s) {
@@ -639,7 +675,7 @@ function Verb_sync_board($a) {
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
-    return @{ ok = $true; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- work intake (issue 104) -----------------------------------------------------------------------------------------
