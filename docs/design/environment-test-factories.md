@@ -22,6 +22,8 @@ item without a merge. Only prod merges to `master`. Code, not instruction, enfor
 3. `mergePolicy` per environment, `none` outside prod by default; PASS under `none` closes the PR and ends the item (section 5).
 4. Every role runs as a Container Apps job execution started by the gateway on a trigger; the gateway's code holds what must be deterministic (sections 7 to 9).
 5. A test catalog of twelve scenarios, a seed verb and a catalog report (section 6).
+6. Start/Stop per environment, deterministic dispatch closest to Done first (16); an Owner actions panel and an MCP server at `/mcp` over the
+   same endpoints (17, 18).
 
 ## 1. Owner decisions (2026-10-16, fixed)
 
@@ -35,7 +37,12 @@ item without a merge. Only prod merges to `master`. Code, not instruction, enfor
 6. Workers in tdd and uat are cloud jobs only (each environment's own Codex Container Apps jobs); no local sessions.
 7. The plant manager and the operator run as cloud jobs too, per environment, with that environment's tokens.
 8. (Widened the same day) Everything is on demand and none of it relies on a local session: the gateway provisions every role (workers, plant
-   manager, operator, backlog keeper, stand-in owner) in all three environments, prod included, and starts each on a trigger.
+   manager, operator, backlog keeper) in all three environments, prod included, and starts each on a trigger.
+9. (Same day) No stand-in owner role. The plant manager unsticks, merges green pull requests within policy and keeps things moving.
+10. Start factory and Stop factory buttons per environment, admin-authenticated; Start begins a plant-manager run that dispatches closest to
+    Done first; Stop drains; the running or stopped state survives a restart (section 16).
+11. The owner's interventions become deterministic Owner actions on the dashboard, with no model, each journaled (section 17).
+12. Every Owner action is also an MCP tool of the gateway and a CLI verb: one endpoint, three surfaces (section 18).
 
 ## 2. The three environments
 
@@ -289,7 +296,7 @@ Cleanup runs only on `catalog-run:` labels of the gateway's own environment.
 | Plant manager (supervisor) | one long-lived session, `m1` credential | a role run per attention batch |
 | Operator session | one long-lived session, `o1` credential | a role run per operator condition |
 | Backlog keeper | one long-lived session, `k1` credential | a role run per keeper job |
-| Stand-in owner | the owner's supervising local session (this kind of Claude session) unsticks, merges green fworker pull requests, refills the backlog | a role run per stand-in condition, with a narrower power set (8.4) |
+| (Owner's supervising local session) | unsticks items, merges green pull requests, re-runs CI, refills the backlog by hand | no role: the plant manager does it automatically while the factory runs (8.4), the owner by Owner actions (17) |
 
 ### 7.2 Triggers
 
@@ -303,10 +310,10 @@ The gateway already computes every condition below (patrol digest codes, keeper 
 | keeper job codes (park codes of `keeper.jobCodes`), `backlog-low` | backlog keeper (`backlog-low` only in prod; tdd and uat refill from the catalog, never the keeper) |
 | `gateway-restarted` with errors, a release of fworker whose `/ready` is not 200 after 5 min, repeated `verb-errors` of one verb, a runtime marked unhealthy, a failed catalog scenario | operator |
 | a new tdd release live and ready (tdd only); an owner's request on the endpoint | catalog seed (deterministic, no model, 6.3) |
-| a green, unprotected pull request of the fworker repository that an operator run opened (the stand-in merges it); an item `pass-unmerged` in prod for over 30 min; the board ran dry | stand-in owner |
+| an item `pass-unmerged` (prod) or a PASS not yet ended (tdd, uat) for over 30 min; the board ran dry; the owner pressed Start (16) | plant manager |
 | `POST /api/v1/roles/{role}/runs` with a reason (operator token) | that role, by hand |
 
-A trigger is level-based and de-duplicated: a role has at most `roles.<role>.maxConcurrent` runs (1 for manager, operator, keeper, stand-in),
+A trigger is level-based and de-duplicated: a role has at most `roles.<role>.maxConcurrent` runs (1 for manager, operator, keeper),
 a condition that is still being handled by a running execution does not start another, and a daily execution budget per role
 (`roles.<role>.maxExecutionsPerDay`) and per environment caps cost. When nothing triggers, no execution exists: scale to zero.
 
@@ -338,7 +345,7 @@ the nonce). A periodic safety net exists in the gateway, not ARM: the patrol tic
 ### 8.2 Stream, identity, credential
 
 - Start: the adapter starts an execution with `FACTORY_ROLE=<role>`, `FACTORY_URL` (the environment's internal gateway URL), a one-time nonce and
-  the ticket id. The execution redeems the nonce for a credential of the role's existing kind (`m1`, `o1`, `k1`, and new `s1` for the stand-in),
+  the ticket id. The execution redeems the nonce for a credential of the role's existing kind (`m1`, `o1`, `k1`),
   name `<role>-<6 hex>`, valid until `replicaTimeout` + 15 min, revoked at `done` or at execution end (the adapter lists executions every 30 s
   and revokes the credential of one that ended).
 - The slot rules stay: the manager, operator and keeper roles have one slot each; a cloud run takes the slot, a local session holding the slot
@@ -370,10 +377,9 @@ Under Codex:
 | Role | Credential | Verbs (existing unless marked) | Caps |
 |---|---|---|---|
 | Worker | `w2` | item verbs of its item | one item, one phase |
-| Plant manager | `m1` | `manager-action` flow verbs (`plant-manager.md` 10e), answer questions, notes | the 10e guard rails; never merge, approve, verdict, clear a hold |
+| Plant manager | `m1` | `manager-action` flow verbs (`plant-manager.md` 10e), answer questions, notes; new: `merge-now` (asks the gateway's own merge of a recorded PASS, the same endpoint as the owner's action, 17), `rerun-failed` on an item's PR, `move-back` one column, `dispatch-hint` (16.3) | the 10e guard rails; a merge only through the gateway's policy check (prod `auto`; tdd and uat end by policy, 5.3); never approve, record a verdict, clear a hold, touch the fworker repository or a protected path; `roles.manager.maxMergesPerDay` |
 | Operator | `o1` | `operator.md` 3; `catalog` (new, seed and cleanup); `roles/runs` (new, start a run by hand); runtime reset | the daily release limit; protected paths need the owner; never mint or revoke |
 | Backlog keeper | `k1` | keeper verbs; new items carry the gateway's `env:` | `maxNewItemsPerDay`; prod only for `backlog-low` |
-| Stand-in owner (new) | `s1` | merge a green pull request of the **fworker repository** that is not on a CODEOWNERS path and was reviewed (the operator's rules a to e); `resettle`; the manager's unpark; open a fworker issue | never prod's work-order `master` (that is the gateway's own merge under `auto`); never a protected path; at most `roles.standIn.maxMergesPerDay` (12, the operator's limit, shared) |
 
 ### 8.5 What stays deterministic in gateway code
 
@@ -389,8 +395,8 @@ journal is ambiguous, what a fix to the gateway is). The gateway, not a run, own
 ## 9. Prod under the same frame
 
 prod runs the same image, the same role triggers and its own jobs, with `mergePolicy auto`, delivery on, no catalog. Its first role runs
-come after `activate-prod.sh` (owner). Until the stand-in owner and operator roles have run a week in tdd and uat without an owner
-intervention, prod keeps `roles.standIn.enabled` false (the setting is per environment, from `FACTORY_ROLE_STANDIN`).
+come after `activate-prod.sh` (owner) and after the owner presses Start on prod (16). The plant manager's `merge-now` stays off in prod
+(`roles.manager.mergeNow`, from `FACTORY_MANAGER_MERGE_NOW`) until its runs have gone a week in tdd and uat without an owner intervention.
 
 ## 10. GitHub Apps and rate limits
 
@@ -407,7 +413,8 @@ GitHub's secondary limits (content-creating requests per minute) are per App and
 
 Local sessions (omarchy tmux, the owner's Claude Code sessions, the launcher loop) keep working: they connect with a connect prompt and the
 same credential kinds. None is required. A role slot held by a local session receives the trigger's ticket instead of a new execution. When the
-owner's supervising session goes away, the stand-in owner role and the operator role do its work. In tdd and uat local workers are refused
+owner's supervising session goes away, the plant manager and the operator role do its work automatically and the owner intervenes through
+Owner actions (17), from the dashboard or from any AI session through MCP (18). In tdd and uat local workers are refused
 (`runtime-required`: the plant offers items only to `cae-job` workers there; owner decision 6), the other local roles are allowed.
 
 ## 12. Migration and rollout (ordered)
@@ -422,11 +429,11 @@ owner's supervising session goes away, the stand-in owner role and the operator 
    tdd job ids out of `config/deploy.overrides.json`. The gateway's start-up check refuses a non-prod gateway pointed at 679.
 4. **Merge policy `none` and `Complete-NoMerge` (5)**, with their Tier 1 tests.
 5. **Catalog v1 (6)**: scenarios 1, 2, 3, 5, 12, the seed and report endpoints, cleanup. Run in tdd by hand.
-6. **Role job and triggers (7, 8) in tdd**: plant manager first, then operator, keeper (with catalog 6, 7), stand-in owner. Catalog 4, 8, 9, 10,
+6. **Role job and triggers (7, 8) in tdd**: plant manager first, then operator, keeper (with catalog 6, 7); Start/Stop and dispatch (16); Owner actions and MCP (17, 18). Catalog 4, 8, 9, 10,
    11 as their roles arrive.
 7. **uat**: create its jobs, identities and App; promote; run the catalog.
 8. **prod**: `activate-prod.sh` (owner) now only gives prod its credentials and board 679; tdd is no longer made inert. Roles on one by one;
-   stand-in owner last (9).
+   the manager's `merge-now` last (9).
 9. **Local roles retired:** the owner's supervising session and tmux workers are stopped once their cloud roles have run a week; they remain
    usable as optional clients.
 
@@ -448,7 +455,11 @@ New scenarios in a suite `environments` (appended at the end of `$SuiteDefs`, ad
    not take a `factory-worker/tdd/` branch for a prod item;
 7. catalog: `catalog-seed` is refused on prod; seeded issues carry the gateway's `env:` and catalog labels; cleanup touches only its run;
 8. roles: a trigger starts at most one execution per role; budgets stop the next; a role credential is refused for a verb outside its table (8.4);
-   a stand-in merge of a CODEOWNERS path is refused.
+   the manager's `merge-now` in tdd ends the item by policy and never calls the merge endpoint;
+9. start/stop: Stop refuses every new offer and execution start, lets running ones end, and survives a gateway restart (the snapshot ref);
+   dispatch order is Release Queue, Functional Testing, Development, Technical Design, Todo (16.2), and the capacity is never exceeded;
+10. owner actions: each action endpoint answers the same with the dashboard, the CLI and an MCP call (one journal line each, `via` differs);
+   `merge-now` is refused outside prod; a destructive MCP tool without `confirm` is refused; an `m1` credential is refused at `/mcp`.
 
 ## 14. Code-owner paths touched
 
@@ -457,7 +468,7 @@ New scenarios in a suite `environments` (appended at the end of `$SuiteDefs`, ad
 | `config/deploy.overrides.json` | tdd job ids and URLs leave it (4.1) |
 | `gateway/Runtimes/` | role job start, per-execution role env (8) |
 | `runner/`, `Dockerfile.fwrunner` | `FWRUNNER_ROLE`, role prompts, the catalog fixture switches honoured outside prod only (6.2, 8.3) |
-| `gateway/Auth.cs` | `s1` credential kind, role credentials from nonces (8.2) |
+| `gateway/Auth.cs` | role credentials from nonces (8.2); `/mcp` authentication (18.4) |
 | `gateway/Operator.cs`, `plugin/skills/factory-operator/`, `plugin/scripts/lib/Client.Operator.ps1` | catalog and roles rights; Codex section of the skill |
 | `gateway/Manager.cs`, `plugin/scripts/lib/Verbs.Manager.ps1` | scope guard in flow verbs; ticketed runs |
 | `gateway/Keeper.cs`, `plugin/scripts/lib/Verbs.Keeper.ps1`, `plugin/skills/factory-backlog-keeper/` | `env:` on created items, `env-mismatch` |
@@ -466,7 +477,7 @@ New scenarios in a suite `environments` (appended at the end of `$SuiteDefs`, ad
 | `docs/deploy/activate-prod.sh` | no longer makes tdd inert (12.8) |
 
 Ordinary paths: `plugin/scripts/lib/Board.ps1`, `Verbs.Sweep.ps1`, `Verbs.Merge.ps1`, `Verbs.Delivery.ps1`, `Prs.ps1`, `BaseUpdate.ps1`,
-`gateway/Program.cs`, new `gateway/EnvironmentSettings.cs`, `gateway/Roles.cs`, `catalog/`, `tests/scenarios/environments.ps1`,
+`gateway/Program.cs` (dashboard panel), new `gateway/EnvironmentSettings.cs`, `gateway/Roles.cs`, `gateway/Factory.cs` (start/stop, dispatch), `gateway/OwnerActions.cs`, `gateway/Mcp.cs`, `catalog/`, `tests/scenarios/environments.ps1`,
 `tests/FakeGitHub` (project-scoped write log). Outside this repository: labels and the issue template of cmdemo1-workorders, two boards,
 three Apps, the role jobs and identities (the demo-environment kit, owner).
 
@@ -481,5 +492,136 @@ real checks. Mitigations: docs-only scenarios already skip the code jobs through
 Open questions for the owner:
 
 1. One role job for all roles (chosen) or one job per role for separate identities and quotas?
+4. Adding the `ModelContextProtocol.AspNetCore` package to the gateway (18.1) needs the owner's yes; the fallback is a hand-written JSON-RPC route.
 2. A sandbox fork where tdd may merge, to exercise settle and the Release Queue live outside prod?
 3. Should uat run the whole catalog or only the cheap half (1, 2, 5, 12) to save CI minutes?
+
+## 16. Start and stop the factory, and dispatch
+
+### 16.1 The factory state
+
+Each gateway has a factory state, `running` or `stopped` (new default: `stopped` on a new environment; prod's first start sets it). It is
+held in `refs/factory/<instance>/factory-state` (a parentless commit whose message is `{state, since, by, reason}`, the plant-snapshot
+technique), read before the first sweep, so it survives a restart and a redeploy. `/_build` shows it without a credential.
+
+- **Start** (`POST /api/v1/factory/start`, operator token or MCP, with a reason): sets `running`, journals it, and starts a plant-manager run
+  with ticket `factory-started`. The gateway dispatches (16.2) from that moment; the manager run handles what needs judgement on the board
+  it reads (parked items, stale questions, the order of ties) and exits.
+- **Stop** (`POST /api/v1/factory/stop`): sets `stopped` (drain). No new offer, no new worker or role execution, no trigger fires (except the
+  owner's own actions). Running executions finish their current phase and end; a PASS still ends or merges by policy so nothing is left
+  half-merged. When the last execution ends every role is at zero; `/status` shows `drained: true`. The sweep keeps running read-only for
+  the dashboard and for settle in prod.
+
+### 16.2 Dispatch lives in the gateway (recommended)
+
+Two options were weighed:
+
+| | Gateway schedules deterministically, a manager run for judgement (recommended) | The plant manager dispatches through verbs |
+|---|---|---|
+| Order "closest to Done first" | a sort in code, tested in Tier 1 | an instruction in a skill, not provable |
+| Cost | no model run per dispatch | a model run for every free slot |
+| Behaviour when the model is down or over quota | dispatch continues | the factory stops |
+| Judgement | the manager can reorder with `dispatch-hint` (pin, prioritize, skip for N minutes), within the same order rules | all |
+
+Recommendation: **the gateway dispatches.** At every sweep and every execution end, while `running` and below capacity
+(`runtimes.caeJob.maxConcurrent` and the daily cap), it offers the next ready item in this order: Release Queue (prod only: the items whose
+settle needs a worker), Functional Testing, Development, Technical Design, then intake from Todo (moves one card to Technical Design per free
+slot). Within a column: `priority:top`, `priority:high`, then a manager `dispatch-hint`, then the oldest move into the column. Blocked items
+(dependencies, holds, parks, out of scope) are skipped. This is today's offer loop with the sort made explicit and an intake step added.
+
+### 16.3 The plant manager while running
+
+It is started on Start, on the digest triggers of 7.2 and on PASS items waiting too long. It unsticks (unpark, release-owner, requeue,
+restart a run), asks the gateway's merge of a green PASS (`merge-now`; the gateway checks policy: a merge in prod, the end by policy in tdd and
+uat), re-runs failed CI jobs once, moves a card back a column when its phase must be redone, sets `dispatch-hint`s, and exits. Every one of
+these is the same endpoint as an Owner action (17), with the manager's caps.
+
+## 17. Owner actions panel
+
+A panel "Owner actions" on the dashboard of each gateway, shown only after the operator token is entered, one button per action. No model is
+involved: each button calls one gateway endpoint, which checks policy, acts, and writes one journal line (`owner-action <name> by <who> via
+<dashboard|mcp|cli>: <reason>`) on the item, or on the operator stream for factory-wide actions. Destructive actions ask for confirmation in
+the dashboard and a reason in every surface.
+
+| Action | Endpoint (existing or new) | Replaces what the local session did by hand |
+|---|---|---|
+| Start / Stop factory | `POST /api/v1/factory/start`, `/stop` (new) | starting and stopping tmux workers and the supervisor |
+| Unpark item | `POST /api/v1/items/{n}/unpark` (exists) | unparking closed or wrongly parked items (#82) |
+| Re-run failed CI jobs of the item's PR | `POST /api/v1/items/{n}/rerun-failed` (new; the manager's `rerun-failed` exists as a flow verb) | re-running flaky Builds by hand (#79) |
+| Merge a green PR now | `POST /api/v1/items/{n}/merge` (new; calls `Verb_merge -Gateway`, refused `merge-disabled` outside prod) | merging item 239's green PR behind an unprocessed PASS |
+| Resettle | `POST /api/v1/items/{n}/resettle` (exists) | putting a merged item back in settle (#114) |
+| Release or reassign an item | `POST /api/v1/items/{n}/release`, `/reassign?to=` (new, over the manager's `release-owner` and `pin`) | releasing items held by dropped owners (#74, #101) |
+| Pin / unpin an item to a worker | `POST /api/v1/items/{n}/pin?worker=`, `/unpin` (new over the flow verbs) | adding and removing `worker:` labels |
+| Drain / resume a worker | `POST /api/v1/workers/{name}/drain`, `/resume` (exists) | re-applying lost drains (#80) |
+| Restart a worker run | `POST /api/v1/runs/{id}/restart` (new: stops the execution through ARM; the item is re-offered) | killing a blocked session (#100) |
+| Move a card back a column | `POST /api/v1/items/{n}/move-back` (new; one column, never into or out of Done or the Release Queue in prod) | dragging cards on the board |
+| Seed / clean the test catalog | `POST /api/v1/catalog/runs`, `DELETE .../{run}` (6.3, 6.6; tdd and uat only) | writing test items by hand |
+| Set capacity and daily cap | `POST /api/v1/runtimes/cae-job/capacity` (new; `maxConcurrent`, `maxExecutionsPerDay`, in memory and in the factory-state ref; bounded by the configured maximum) | editing the overrides and redeploying |
+| Reset an unhealthy runtime | `POST /api/v1/runtimes/{kind}/reset` (exists) | |
+
+The plant manager does the same things automatically while the factory runs; the buttons are the owner's manual override and work also while
+the factory is stopped.
+
+## 18. MCP server: the factory from any AI session
+
+### 18.1 Endpoint
+
+The gateway has no MCP endpoint today (no `ModelContextProtocol` reference, no `/mcp` route). Design: Streamable HTTP at `/mcp` on each
+gateway (`<gateway url>/mcp`, one per environment), stateless JSON-RPC, through the `ModelContextProtocol.AspNetCore` package already used
+by the work-order application (adding it to the gateway needs the owner's yes, open question 4). Authentication: `Authorization: Bearer`
+with the operator token, or an Entra token of a named owner identity (app role `Factory.Owner` on an app registration per environment).
+Worker, manager, keeper and operator-session credentials are refused at `/mcp`.
+
+### 18.2 One implementation, three surfaces
+
+Every action is one gateway endpoint (17). The dashboard button, the MCP tool and the CLI verb (`factory.ps1 owner <action>`) call that
+endpoint; policy checks, caps, journaling and refusals live only there. The MCP handler maps a tool call to the endpoint in-process and
+returns its JSON. A Tier 1 check (13.10) proves the three surfaces give the same result.
+
+### 18.3 Tools
+
+Read tools (no confirmation, no reason):
+
+| Tool | Parameters | Returns |
+|---|---|---|
+| `factory_status` | none | `{environment, state, drained, board, mergePolicy, capacity:{max,running,today,cap}, roles:[{role,running,lastRun}]}` |
+| `board_by_column` | `column?` | `{columns:[{name, items:[{n,title,labels,owner,park?}]}]}` |
+| `item_detail` | `item` | `{n,title,column,labels,state,journal:[{at,text}],pr?:{number,head,checks}}` |
+| `workers_and_runs` | none | `{workers:[{name,presence,items,drained}], runs:[{id,role,item?,started,status}]}` |
+| `patrol_digest` | none | `{entries:[{code,item?,since,detail}]}` |
+| `metrics` | `days?` (default 7) | the `metrics` verb's JSON (cycle times by column) |
+| `catalog_report` | `run?` (default latest) | the report of 6.4 |
+
+Action tools (every one takes `reason`; those marked * also need `confirm: true`):
+
+| Tool | Parameters | Returns |
+|---|---|---|
+| `factory_start` | `reason` | `{state:"running", since}` |
+| `factory_stop` * | `reason, confirm` | `{state:"stopped", draining:N}` |
+| `item_unpark` | `item, reason` | `{ok, park:null}` |
+| `item_rerun_ci` | `item, reason` | `{ok, runs:[id]}` |
+| `item_merge` * | `item, reason, confirm` | `{ok, merged_sha}` or refusal `merge-disabled` (tdd, uat), `checks-not-green`, `no-pass` |
+| `item_release` * | `item, reason, confirm` | `{ok, released:owner}` |
+| `item_reassign` | `item, worker, reason` | `{ok, pinned:worker}` |
+| `item_pin` / `item_unpin` | `item, worker?, reason` | `{ok}` |
+| `worker_drain` / `worker_resume` | `name, reason` | `{ok, drained}` |
+| `run_restart` * | `run, reason, confirm` | `{ok, stopped:run}` |
+| `card_move_back` * | `item, reason, confirm` | `{ok, from, to}` |
+| `catalog_seed` | `scenarios?, reason` | `{run, items:[{scenario,n}]}`; refused `catalog-prod` in prod |
+| `catalog_cleanup` * | `run, reason, confirm` | `{ok, closed:N}` |
+| `capacity_set` | `maxConcurrent?, maxExecutionsPerDay?, reason` | `{capacity:{max,cap}}` (bounded by the configured maximum) |
+
+Refusals come back as MCP tool errors carrying the gateway's exit code and refusal code, unchanged.
+
+### 18.4 Safety
+
+- An MCP client is an untrusted model: it gets exactly the endpoint's guard rails, the same as the plant manager's (8.4), plus the owner's
+  wider set of actions. It cannot mint or revoke credentials, switch messaging, change a protected path, approve, record a verdict or merge
+  outside prod; those have no tool.
+- Destructive tools need `confirm: true` in the call; without it they answer a preview (`{wouldDo: ...}`) and change nothing. The tool
+  descriptions say so, so a client shows the user the preview first.
+- Rate limits per token: 60 read calls and 10 action calls per minute, 100 actions per day per environment; `item_merge` follows the
+  manager's merge cap; refused with 429 and `retryAfter`.
+- Every call is journaled with `via mcp` and the caller (token kind or Entra object id); MCP tool text from item titles or journals is
+  returned as data inside JSON, never as instructions, and the inspector's AI-directed-text patterns (`inspector.aiDirectedText`) mark it.
+- Per environment: the tdd `/mcp` acts only on tdd (scope, 3), so a client connected to tdd cannot touch prod.
