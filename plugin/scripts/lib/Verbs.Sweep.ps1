@@ -403,6 +403,16 @@ function Verb_sync_board($a) {
             if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) {
                 # (an item that waits for a person, master red or no release candidate for a day, keeps no owner: issue 114)
                 if ("$($s.merge.awaiting)" -notin 'master-broken', 'master-timeout' -and -not ((Test-Has $s.merge 'late_reported') -and $s.merge.late_reported)) { $settling += $n }
+                # a master-broken park is lifted only by auto-unpark's rule (the checks that failed passed on master; judged on that head): it puts
+                # the wait back to master-green, and the next sweep settles it
+                $mbPark = Get-Park $s
+                if ("$($s.merge.awaiting)" -eq 'master-broken' -and $mbPark -and "$($mbPark.reason)" -eq 'master-broken') {
+                    if (-not $dry) {
+                        $why = Test-AutoUnpark $n $s $mbPark $unparkCtx
+                        if ($why) { $u = Invoke-AutoUnpark $n $mbPark $why $unparkCtx; if ($u) { $actions += @{ item = $n; action = 'auto-unparked'; code = $u.code; reason = $why }; $unparked += $n } }
+                    }
+                    continue
+                }
                 if (-not $dry) { $r = Invoke-Settle $n; $actions += @{ item = $n; action = 'settle'; result = $r } }
                 if (-not $dry -and $r.outcome -in 'advanced', 'waiting' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue') {
                     $releaseQueue += @{ item = $n; release = $(if (Test-Has $r 'release') { "$($r.release)" } else { '' }); since = $(if (Test-Has $r 'queued_at') { $r.queued_at } else { $null }) }

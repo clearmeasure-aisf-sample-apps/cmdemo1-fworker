@@ -702,8 +702,8 @@ $OwnerScenarios['pass-merge: a pull request merged by a person settles the item 
     $pr = Do-Development $n
     Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
     Check 'the sweep picks the merge up while the item is in Development' (Wait-Until -Seconds 40 { (Pm-State $n).ContainsKey('merge') })
-    $st = Pm-State $n
-    Check 'the merge is recorded, the claim released, the card moved on from Development' ($st.merge.pr -eq $pr -and -not $st.ContainsKey('claim') -and (Get-FakeIssue $n).column -ne 'Development') "$((Get-FakeIssue $n).column) $($st | ConvertTo-Json -Compress -Depth 3)"
+    # (the sweep saves the merge record before it moves the card: wait for both)
+    Check 'the merge is recorded, the claim released, the card moved on from Development' (Wait-Until -Seconds 20 { $st = Pm-State $n; $st.merge.pr -eq $pr -and -not $st.ContainsKey('claim') -and (Get-FakeIssue $n).column -ne 'Development' }) "$((Get-FakeIssue $n).column) $(Pm-State $n | ConvertTo-Json -Compress -Depth 3)"
     Check 'the journal says a person merged it' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "PR #$pr was merged as .* by a person" }).Count -eq 1 })
     $x = Pm-ToValidation @('factory worker')
     $v = Do-Verdict $x.n $x.pr; Check 'parked for a person' ($v.next -eq 'parked')
@@ -1349,7 +1349,9 @@ $OwnerScenarios['settle: a stranded merged item is re-armed by the sweep and set
     Invoke-RestMethod "$api/issues/comments/$($cm.id)" -Method PATCH -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Body (@{ body = $nb } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
     Invoke-RestMethod "$api/issues/$($x.n)" -Method PATCH -Body '{"state":"closed"}' -ContentType 'application/json' -Headers $gh | Out-Null
     Check 'the sweep re-arms its settle step' (Wait-Until -Seconds 40 { "$(Pv (Pv (Pm-State $x.n) 'merge') 'awaiting')" -eq 'master-broken' -and (Get-Journal $x.n) -contains 'settle-rearmed' }) ((Pm-State $x.n).merge | ConvertTo-Json -Compress)
-    Fake 'master-merge' @{ files = @('docs/later2.md') } | Out-Null
+    # the park stands until auto-unpark's rule holds: each check that failed (here the acceptance shard) passed on a green master head
+    $later = Fake 'master-merge' @{ files = @('docs/later2.md') }
+    Fake 'checks' @{ sha = $later.sha; name = 'Acceptance Tests [shard 1/6]'; conclusion = 'success' } | Out-Null
     Check 'and settles it to Done once master is green for it' (Wait-Until -Seconds 60 { (Get-FakeIssue $x.n).column -eq 'Done' }) "column $((Get-FakeIssue $x.n).column)"
     # settled again on purpose: the operator reopens it, moves its card back to the Release Queue and calls resettle
     Invoke-RestMethod "$api/issues/$($x.n)" -Method PATCH -Body '{"state":"open"}' -ContentType 'application/json' -Headers $gh | Out-Null
