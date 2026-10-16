@@ -264,11 +264,9 @@ t. **Done (2026-10-14): the Release Queue age** (enhancement 9). The sweep lists
    the gateway promotes: uat and prod stay with the owner and the cmdemo1 session. Open: the supervisor's skill (owner review) does not
    yet say what to do with `release-queue-aged`; not yet seen live on tdd.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
-m. **The sweep still saves a state it read without the item lock in two places** of `Verb_sync_board` (Verbs.Sweep.ps1): the
-   awaiting-checks path (`Complete-AwaitingChecks`) and the settle path (`Invoke-Settle`, which reads fresh but holds no lock). They were
-   left because they call GitHub and Octopus for a long time between the read and the save: under the item lock a verb for the same item
-   would wait and be refused `item-busy`. They need the read-decide part outside and a short locked write of their own keys. The
-   merge-detected and owner-released-idle writes are fixed (locked, on a fresh read), as is the QC step.
+m. **Done (2026-10-15, #117): the sweep saves no state it read without the item lock.** Settle (`Invoke-SettleLocked`) and the end of a
+   wait for checks (`Invoke-AwaitingChecksLocked`) run under the item lock on a fresh read; a lock still busy after 3 s skips the item for
+   one sweep. A verb of the same item waits for them at most its own 45 s.
 n. **Done (2026-10-14, issue 89): at most `runner.maxProcesses` (6) rule scripts run at once** (`gateway/RunnerGate.cs`). Every call of
    `Runner`, pooled or a process of its own, holds a slot; waiting calls start by class: the sweep, `accept`, `claim-item`, `expire-claim`
    (take-backs) and the gateway's own start and stop calls first (one slot is kept for them), other verbs next, long polls
@@ -304,6 +302,16 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    was saved and whose plan was applied more than 20 s after it. The check now prints the item's journal: a `reassigned` line in the next
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
+
+Closed on 2026-10-15 (issue #106):
+
+- **#106 Stream sidecar.** The launchers run the session's event stream (`subscribe --own`, from step 7 of the prompt file with the credentials of
+  step 4 or the environment) as a sidecar for the session's whole lifetime and append its lines to `<BASE>/work/events.log`; the session's first
+  message carries a launcher note: do not start `subscribe`, Monitor `tail -n0 -F` of that file (the first arm from line 1), so a re-arm neither
+  registers nor replays. A dead sidecar is started again (not after exit 30 or 40). The client leaves out replayed triggers of items the name no
+  longer owns (`worker.registered` now says `owned`) and prints `peers.snapshot` and `supervisor.joined` only when they changed.
+  `--sidecar auto|on|off`, `docs/launcher.md`. Open: not yet run live on tdd; batch 3's connect-prompt change (PR 121, owner review) and this note
+  must agree on step 7.
 
 Closed on 2026-10-15 (issue #103):
 
@@ -375,6 +383,13 @@ Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
   too, instead of only removing their park), an unpark re-arms it and hands nothing off (`reoffer` false, `awaiting` in the answer), and the
   merge verb's already-merged path keeps the original record and `merged_at`. `POST /api/v1/items/{n}/resettle` (operator token, a reason)
   puts a finished merged item back into the settle step, for an item a person reopened because no release carried it. No auto-revert.
+
+- **#117 Two sweep passes moved an unmerged item to the Release Queue** (290: Development, Functional Testing, Release Queue 5 s apart, its
+  pull request unmerged). Settle and the end of a wait for checks run under the item lock on a fresh read (entry m). A card is moved only
+  from the column the step expects: the wait for checks ends without a move when the card left the column it began in
+  (`awaiting_checks.column`), and settle moves a card to the Release Queue only from Functional Testing. An open Release Queue card without a
+  merge record is flagged once (journal `flagged`, code `release-queue-without-merge`, and a plant event on the operator stream); nothing
+  moves it.
 
 w. **Built, off (2026-10-15): the cloud worker runtime adapter** (`docs/design/cloud-worker-runtimes.md` phase 3; `gateway/Runtimes/`,
    `gateway/Plant.Runtimes.cs`, credentials in `gateway/Auth.cs`). An item labelled `runtime:cae-job` (or matched by `runtimes.routing`) is
