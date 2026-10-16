@@ -9,7 +9,7 @@ $script:Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 function Set-TestPorts([int]$Base) {
     $script:PortBase = $Base
     $script:FakePort = $(if ($env:TEST_FAKE_PORT) { [int]$env:TEST_FAKE_PORT } else { $Base }); $script:ApiPort = $(if ($env:TEST_API_PORT) { [int]$env:TEST_API_PORT } else { $Base + 10 }); $script:HookPort = $script:ApiPort + 1
-    $script:ReportPort = $Base + 20; $script:DeadPort = $Base + 29; $script:PublicPort = $Base + 30; $script:ProxyPort = $Base + 14
+    $script:ReportPort = $Base + 20; $script:DeadPort = $Base + 29; $script:PublicPort = $Base + 30; $script:ProxyPort = $Base + 26   # not 14: qc-pool.ps1 starts a gateway there
 }
 Set-TestPorts $(if ($env:TEST_PORT_BASE) { [int]$env:TEST_PORT_BASE } else { 6100 })
 $script:VerbCalls = 0; $script:VerbSeconds = 0.0; $script:ClientCrashes = 0
