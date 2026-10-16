@@ -1600,7 +1600,8 @@ if (messaging.Enabled && messaging.TestHooks)
     {
         var (b, err) = await SeamBody(ctx, "the body is a JSON object with owned and keep");
         if (b == null) return err!;
-        plant.Plan(b["offers"]?.DeepClone() as JsonArray ?? new JsonArray(), b["owners"]?.DeepClone() as JsonObject, b["pins"]?.DeepClone() as JsonObject, b["owned"]?.DeepClone() as JsonObject ?? new JsonObject(), (b["keep"] as JsonArray ?? new JsonArray()).Select(x => x!.GetValue<int>()).ToList(), b["priorities"]?.DeepClone() as JsonObject);
+        plant.Plan(b["offers"]?.DeepClone() as JsonArray ?? new JsonArray(), b["owners"]?.DeepClone() as JsonObject, b["pins"]?.DeepClone() as JsonObject, b["owned"]?.DeepClone() as JsonObject ?? new JsonObject(), (b["keep"] as JsonArray ?? new JsonArray()).Select(x => x!.GetValue<int>()).ToList(), b["priorities"]?.DeepClone() as JsonObject,
+            DateTime.TryParse(b["sweepStarted"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var seamStart) ? seamStart : null);
         return Results.Json(new { ok = true, exit = 0 });
     });
 
