@@ -59,8 +59,43 @@ jobs:
       - uses: actions/checkout@v6.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          # The whole history: the ordering check asks whether this commit is an ancestor of the last released one.
+          fetch-depth: 0
+
+      - name: Sign in to Octopus
+        uses: OctopusDeploy/login@v2
+        with:
+          server: ${{ vars.OCTOPUS_URL }}
+          service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
+
+      # Release runs start in the order their Builds finish, not in commit order: a late run for an older commit must
+      # not release, or tdd ends up on older code. The latest release's notes carry its commit; this commit must not be
+      # an ancestor of it. The same commit again (a manual re-release of the head) is allowed.
+      - name: Ordering check
+        id: order
+        env:
+          PROJECT: ${{ vars.SYSTEM_SLUG }}-${{ vars.DEPLOYABLE_NAME }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          api="${OCTOPUS_URL%/}/api"
+          auth=(-H "Authorization: Bearer ${OCTOPUS_ACCESS_TOKEN}")
+          space=$(curl -fsS "${auth[@]}" "$api/spaces/all" | jq -r --arg n "$OCTOPUS_SPACE" '.[] | select(.Name == $n) | .Id')
+          [ -n "$space" ] || { echo "::error::Octopus space '$OCTOPUS_SPACE' not found"; exit 1; }
+          project=$(curl -fsS "${auth[@]}" "$api/$space/projects/all" | jq -r --arg n "$PROJECT" '.[] | select(.Name == $n or .Slug == $n) | .Id')
+          [ -n "$project" ] || { echo "::error::Octopus project '$PROJECT' not found"; exit 1; }
+          notes=$(curl -fsS "${auth[@]}" "$api/$space/projects/$project/releases?take=1" | jq -r '.Items[0].ReleaseNotes // ""')
+          last=$(grep -oE '\b[0-9a-f]{40}\b' <<<"$notes" | head -1 || true)
+          if [ -n "$last" ] && [ "$last" != "$SHA" ] && git cat-file -e "$last^{commit}" 2>/dev/null \
+             && git merge-base --is-ancestor "$SHA" "$last"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Skipped: commit $SHA is older than $last, the commit of the latest release." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Download the build's image
+        if: steps.order.outputs.skip != 'true'
         uses: actions/download-artifact@v8
         with:
           name: container-image
@@ -71,6 +106,7 @@ jobs:
       # The version is the Build run's MAJOR.MINOR.run_number, or the one the image was built as (container-image.version
       # in the artifact) when that Build reused a pull request's image (build.yml, REUSE_PR_IMAGE).
       - name: Version
+        if: steps.order.outputs.skip != 'true'
         id: version
         shell: pwsh
         run: |
@@ -89,12 +125,14 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - uses: azure/login@v2
+        if: steps.order.outputs.skip != 'true'
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID_ACR_PUSH }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Push the image
+        if: steps.order.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
           IMAGE: ${{ vars.ACR_LOGIN_SERVER }}/${{ vars.SYSTEM_SLUG }}/${{ vars.DEPLOYABLE_NAME }}:${{ steps.version.outputs.version }}
@@ -110,16 +148,11 @@ jobs:
             --write-enabled false --delete-enabled false --output none
           echo "Pushed $IMAGE" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Sign in to Octopus
-        uses: OctopusDeploy/login@v2
-        with:
-          server: ${{ vars.OCTOPUS_URL }}
-          service_account_id: ${{ vars.OCTOPUS_SERVICE_ACCOUNT_ID }}
-
       # The commit's time goes into the release with its notes: the system's delivery facts (lead time) read it there
       # and need not ask this repository for it, which they could not if it were private. Read with this run's own
       # token, which reads this repository and no other.
       - name: Read the commit's time
+        if: steps.order.outputs.skip != 'true'
         id: commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -129,9 +162,65 @@ jobs:
           echo "committed=$committed" >> "$GITHUB_OUTPUT"
 
       - name: Create the release
+        if: steps.order.outputs.skip != 'true'
         uses: OctopusDeploy/create-release-action@v3
         with:
           project: ${{ vars.SYSTEM_SLUG }}-${{ vars.DEPLOYABLE_NAME }}
           release_number: ${{ steps.version.outputs.version }}
           ignore_existing: true
           release_notes: "Build ${{ github.event.workflow_run.html_url }} of ${{ github.event.workflow_run.head_sha }}, committed ${{ steps.commit.outputs.committed }}"
+
+  # The cloud worker runner image (Dockerfile.fwrunner), when this Build made one (build.yml builds it only when runner files changed):
+  # pushed as <registry>/<slug>/fwrunner:<claude-code version>-<build> and its tag write-locked. No Octopus release: the gateway's config
+  # names the runner tag (runtimes.caeJob.image), so the runner reaches an environment with the gateway release that names it.
+  fwrunner:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Find the build's runner image
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          count=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/artifacts" \
+            --jq '[.artifacts[] | select(.name == "fwrunner-image")] | length')
+          if [ "$count" -gt 0 ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; echo "This Build made no runner image."; fi
+
+      - name: Download the build's runner image
+        if: steps.find.outputs.found == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: fwrunner-image
+          path: ./fwrunner
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - uses: azure/login@v2
+        if: steps.find.outputs.found == 'true'
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID_ACR_PUSH }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Push the runner image
+        if: steps.find.outputs.found == 'true'
+        run: |
+          set -euo pipefail
+          tag=$(tr -d '[:space:]' < ./fwrunner/fwrunner-image.version)
+          [[ "$tag" =~ ^[0-9][0-9A-Za-z._-]*-[0-9]+$ ]] || { echo "::error::fwrunner-image.version is not <claude-code version>-<build>: $tag"; exit 1; }
+          image="${{ vars.ACR_LOGIN_SERVER }}/${{ vars.SYSTEM_SLUG }}/fwrunner:${tag}"
+          az acr login --name "${{ vars.ACR_NAME }}"
+          # a re-run of the same Build has the same tag, which is write-locked after the first push
+          if az acr repository show-tags --name "${{ vars.ACR_NAME }}" --repository "${{ vars.SYSTEM_SLUG }}/fwrunner" --output tsv 2>/dev/null | grep -qx "$tag"; then
+            echo "$image is already pushed" >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          gunzip --stdout ./fwrunner/fwrunner-image.tar.gz | docker load
+          docker tag "fwrunner:${tag}" "$image"
+          docker push "$image"
+          az acr repository update --name "${{ vars.ACR_NAME }}" --image "${{ vars.SYSTEM_SLUG }}/fwrunner:${tag}" \
+            --write-enabled false --delete-enabled false --output none
+          echo "Pushed $image" >> "$GITHUB_STEP_SUMMARY"

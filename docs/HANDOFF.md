@@ -14,11 +14,14 @@ Technical Design, Development and Functional Testing to a merged pull request, a
   (`plugin/scripts/factory.ps1 --server <verb>`), sweeps the board, keeps the plant (workers, assignments, owners), serves the dashboard,
   the connect prompt and the plugin download, and carries worker messaging. Workers never hold a GitHub credential: they call verbs.
 - **Workers**: AI sessions (Claude Code local or cloud, Cursor cloud) started by a person with the connect prompt of the dashboard.
-  The prompt downloads PowerShell and the plugin and runs `subscribe --own`; the session owns each item it is given until its pull request
-  is merged and master is green. Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
+  The prompt downloads PowerShell and the plugin and runs `subscribe --own` under the Monitor tool (loaded first where it is deferred; a
+  background command only where there is no Monitor tool); the session owns each item it is given until its pull request is merged (the
+  gateway settles it from there, issue #107). Label `worker:<name>` pins an item to one worker; `Auto Merge` lets it merge without a person;
   `factory test` selects the cheapest model profile.
-- **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask and reads the gateway's patrol
-  digest. It advises; it changes nothing.
+- **Plant manager / supervisor**: one session (name `supervisor`) that answers the questions workers ask, reads the gateway's patrol
+  digest and keeps the flow moving with the flow verbs of `manager-action` (unpark, release-owner, pin and unpin, requeue, prioritize,
+  rerun-failed, drain and resume, restart-session) within guard rails the gateway enforces (`docs/design/plant-manager.md` 10e). It never
+  merges, approves, records a verdict or clears a hold; `manager.mode` `advise` turns its verbs off.
 - **Operator**: the person (or script) with the operator token: dashboard, credentials for workers, revoke, messaging on and off,
   notes to any session.
 - **Operator session**: one AI session (name `operator-session`) with a credential of its own kind, not the operator token. It watches
@@ -83,10 +86,15 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   2. deploy only when the plant is quiet; announce the restart to the connected sessions, verify that they reconnect, roll back otherwise;
   3. protected areas need the owner: credentials and tokens, authorization, revoke, the deploy pipeline, the operator's own skill and
      guard rails, uat and prod;
-  4. a daily limit of self-merged releases, with a report;
+  4. a daily limit of self-merged releases, with a report (12 a day since 2026-10-14, with small changes batched; 3 before);
   5. every change is recorded as an issue in this repository.
+- **The operator session acts without a person inside its guard rails** (2026-10-14, pull request "operator authority", owner review): it takes
+  the recommended option and builds it, the owner hearing of it in the changelog issue; it merges its own green, unprotected pull requests
+  as soon as guard rails a to e allow, without waiting; it may drain, resume and set the capacity of a worker name as the operator does, and read the
+  cycle-time metrics. It still cannot mint, revoke, switch messaging or call a verb, and container logs stay with the operator (no read-only
+  wrapper exists).
 - **uat and prod stay manual.**
-- **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so; the connect prompt text is unchanged because its hash is pinned by the operator suite, a protected path), and a launcher loop starts a new session from the
+- **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so, and the worker connect prompt says an item is owned until its pull request is merged; changing that text changes a hash pinned by the operator suite, a protected path, so it needs the owner's review), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
 - **Messaging and the supervisor are on for every registered worker** (`allowedWorkers` and `allowedAskers` are `*`), set in
   `config/deploy.overrides.json`; the source default stays off.
@@ -190,10 +198,36 @@ u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, 
    window and is pushed again when its worker reconnects, or at once to a worker already reconnected). The start removes the ref after reading it,
    so a snapshot is restored once. A snapshot older than `timing.plantSnapshotMaxAgeMinutes` (30) is ignored, and an
    outright kill (out of memory) writes none. `/status` shows `plantSnapshot.restore`. `FACTORY_PLANT_SNAPSHOT=0` switches it off. Messages,
-   questions and presence are still in memory only. It assumes one replica that stops before the next starts: a new revision that starts
-   before the old replica gets SIGTERM reads no snapshot (the old one's save comes too late) and the sweep rebuilds as before. Open: check the
-   revision mode of the Container App; not yet seen live on tdd (watch the `plant-snapshot` and `plant-restore` log lines
-   at the next release).
+   questions and presence are still in memory only. That was the behaviour without the leader lease (`FACTORY_LEADER_LEASE=0`); with it,
+   entry x.
+x. **Done (2026-10-14, issue 94): one acting gateway across releases** (`gateway/Leader.cs`, `plugin/scripts/lib/Leader.ps1`). In single-revision
+   mode the new revision starts before the old one stops: before, both swept, the new one restored nothing (the old one's snapshot came at its
+   SIGTERM, later) and sessions kept their stream on the old process while their calls reached the new one (#68).
+   - The leader lease is the ref `refs/factory/<instance>/gateway-leader`: a commit whose message is the record (epoch, holder, version,
+     revision, replica, until, released). Every change is a compare-and-swap (the new commit's parent is the one read, the ref moved without
+     force; GitHub refuses a non-fast-forward, 422). A starting process takes epoch+1 at once; only the holder acts (sweep, ticks, back-merge
+     trigger, snapshots). It renews every `timing.leaderRenewSeconds` (120) a lease of `leaderLeaseSeconds` (360) and checks every
+     `leaderCheckSeconds` (15) with one conditional read (304 when unchanged, not counted by GitHub).
+   - A holder that finds a later epoch stands down: it writes its final snapshot (never over a later epoch's), ends its streams with
+     `stream.replaced` (`reconnect`, code `gateway-replaced`; only for clients that registered with `handover=1`, the others' streams are just
+     ended) and answers every call and webhook 503 `gateway-replaced` (`/ready` 503) except the operator's `/status` and dashboard. The stream
+     client prints `stream.handover` and connects again. It stays a standby and takes the lease again when it is released or runs out.
+   - The plant snapshot is written on every change (a change of offers, acceptances, owners, drains or bot holders at most every
+     `plantSnapshotDebounceSeconds`, 30; anything else at most every `plantSnapshotRefreshMinutes`, 10), tagged with the writer's epoch. A
+     start accepts only its predecessor's epoch (the released lease names it as `plant_epoch`): at once when the predecessor released the
+     lease or its lease ran out, else after waiting up to `leaderHandoverSeconds` (90) for the predecessor's final snapshot (then its latest).
+     An outright kill loses at most the debounce. A graceful stop of the holder writes its final snapshot and releases the lease.
+   - The gap: the first full sweep after a start renews the owners' claims whose lease ran out between the predecessor's release (or its last
+     renewal, when it died or handed nothing over) and that sweep, not taken back, and at most `gapRenewMaxMinutes` (120) ago (journal
+     `gap-renewed`, sweep action `claim-renewed-after-gap`).
+   - `/api/v1/status` shows `leader` (role starting, acting, superseded or stopping; epoch; predecessor; superseded by) and
+     `plantSnapshot.restore.how` (`handover`, `handover-timeout`, `released`, `lapsed`, `no-predecessor`). `FACTORY_LEADER_LEASE=0` turns it
+     off (the suites run with it off; `tests/scenarios/leader.ps1` turns it on).
+   Limits: the first release with this change still overlaps (the old process has no lease); a process superseded before its own restore
+   finished hands nothing over; the operator session's stream client (`Client.Operator.ps1`, code-owner path) gets no `stream.replaced`,
+   only the end of its stream, and reconnects as after any drop; the supervisor's and operator session's skills (code-owner paths) do not
+   mention `stream.handover`. Not yet seen live on tdd: at the next release check `leader` and `plantSnapshot.restore.how` on the new
+   process and that no sweep line of the old one follows its `handed-over` line.
 v. **Done (2026-10-14): lasting cycle-time metrics** (enhancement 13). `GET /api/v1/metrics?since=7d|24h|30m|<ISO>[&max=100][&fresh=1]`
    (operator token) runs the admin rule script `metrics` (plugin/scripts/lib/Metrics.ps1). It reads the board's `factory worker` items, newest
    first, and from each item's journal comments (`matched`, `offered`, the owner `assigned`) and state comment (`dispatched_at` per column,
@@ -202,6 +236,47 @@ v. **Done (2026-10-14): lasting cycle-time metrics** (enhancement 13). `GET /api
    changes nothing. One computation reads every item's comments: answers are cached 120 s per query and computed one at a time. The dashboard
    section "Cycle times" loads it when opened. Limits: `dispatched_at` keeps the last dispatch of a column (a column visited twice counts from
    its last visit); items worked before the journal existed have no match or accept time; at most 300 items and 90 days.
+w. **Built (2026-10-14), awaiting the owner's review: the plant manager acts on the flow** (`docs/design/plant-manager.md` 10e). The supervisor's
+   `manager-action` (`factory.ps1 act`): unpark, release-owner, pin, unpin, requeue, prioritize (labels `priority:top`, `priority:high`; the plan
+   offers them first after the pins), rerun-failed (failed jobs only, once per head), drain, resume, restart-session (`session.restart`, the
+   client writes the launcher's end marker). Guard rails in code: never merge, approve, record a verdict or clear a hold; the label `hold:owner`
+   refuses every action (and a restart of a session that owns such an item); 3 actions per item in 24 hours (in the item state), 3 drains or
+   restarts per session name in 24 hours and 30 actions an hour (both in memory); a policy code from `manager.actions.policies` on every
+   action, journaled; `manager.mode` `advise` (any unknown value too) turns them off; the operator token can switch it at run time, and a
+   graceful restart brings back an `advise`, never an `act`. Once a day `supervisor.summary-due` (`manager.dailySummaryHourUtc`; the day is
+   kept in the plant snapshot): the skill sends one summary from `GET /api/v1/metrics` and `act-log` instead of a note per event. Open: not yet
+   seen live on tdd; the hourly and per-name counts and the log of actions are in memory (the per-item count is not); `mode: act` and the
+   summary hour ship in `config/instance.json`, so the one image carries them to uat and prod; the supervisor's skill and its connect prompt
+   changed (owner review).
+z. **Done (2026-10-14, issue 93): the journal folds its repeats** (`plugin/scripts/lib/Journal.ps1`, `docs/design/plant-manager.md` 8). 23
+   items had filled their 30 journal comments with `matched`, `waiting` and `reassigned` lines while they waited for a worker, and then
+   journaled nothing more. A repeat of one of these kinds now edits the comment its kind last posted (the latest line, how often, from when to
+   when, the latest 5 lines), as long as only these kinds or `offered` came after it; any other line ends the folds. Only new comments count
+   against the cap. The state keeps `journal.kinds.<event>` (count, first, last) and `journal.fold.<event>`. `waiting` lines are written at
+   most once per `timing.journalWaitingMinutes` (30). The metrics read the first line of a kind as before (the folded comment keeps the first
+   line's marker and time). Open: the items that are already full stay full.
+y. **Done (2026-10-14, issue 92): the sweep is throttled and the gateway keeps a GitHub budget.**
+   - Before, every webhook with an event and every `complete`, `validation-verdict`, `claim-item`, `accept`, `settle`, `merge` and
+     `approve-pr` started a full sweep 2 s later (about 50 REST calls), so a busy plant swept about once a minute. Now a full sweep runs every
+     `FACTORY_SWEEP_SECONDS` (180) and, when a trigger asks for one, at most every `timing.sweepMinSeconds` (60, `FACTORY_SWEEP_MIN_SECONDS`;
+     never more than the interval). A trigger of one item queues the item: between full sweeps the queued items get an incremental pass
+     (`sync-board` with `items`: the same rules for those items, each read by itself, no claim-ref reaping and no QC sync; at most 50, the
+     rest stay queued, and the items of a failed pass are queued again). A trigger of no item (master moved, a build of master, a new
+     session) and a pull request event (the QC offers and teardowns are made only in a full sweep) ask for a full sweep. The second look at
+     new items (sweepSeenCount) is such a pass after 20 s. `/api/v1/status` `sweep`: full and incremental passes, requests, coalesced,
+     queued, last of each.
+   - Every rule-script answer carries what GitHub said of the rate limit (`_github`, from the `x-ratelimit-*` headers, per resource);
+     `Runner` takes it out of the answer and the budget (`gateway/GitHubBudget.cs`) keeps the latest numbers per resource (`core`,
+     `graphql`) and window, of the gateway's own identity only (calls made as the reviewer App are not counted). Below
+     `github.budgetReserve` (300, `FACTORY_GITHUB_RESERVE`) of a resource whose window has not ended: the full sweep skips its claim-ref
+     reaping and QC sync and the back-merge check; the gateway's journal lines, back-merge calls and metrics are not made (a journal line
+     is dropped, as any failed one); verbs other than `accept`, `claim-item`, `release` and `my-items` answer 503, exit 20 `github-budget`
+     with `retryAfterSeconds` and `resetAt` (an owner told to wait still counts as active). `/api/v1/status` `github`: per resource limit,
+     remaining, reset; low; refusals.
+   - A 403 or 429 is a rate limit (`github-rate-limited`, exit 20, `retryAfterSeconds` from `Retry-After` or the reset) only when GitHub
+     says so: `x-ratelimit-remaining: 0`, a `Retry-After`, or the message of a primary or secondary rate limit; GraphQL's `RATE_LIMITED`
+     error too. Any other 403 is `github-forbidden`, exit 30, with GitHub's message (before, every 403 was a rate limit and retried).
+   - The fake GitHub sends the rate-limit headers (a limit no suite reaches) and `/_fake/rate` sets what is left.
 f. **Cause of the gateway restart at 03:56 UTC on 2026-10-13 on tdd: not confirmed** (the container logs are the operator's). What the
    code allows, and what was fixed, is in "Gateway restarts: what can end the process" below; the operator confirms the cause there.
 i. **Worker-to-worker messaging is not yet proven with the owner's own sessions** (it is proven with test sessions).
@@ -215,14 +290,20 @@ t. **Done (2026-10-14): the Release Queue age** (enhancement 9). The sweep lists
    the gateway promotes: uat and prod stay with the owner and the cmdemo1 session. Open: the supervisor's skill (owner review) does not
    yet say what to do with `release-queue-aged`; not yet seen live on tdd.
 k. **The dashboard has never been tested in a real browser**; Tier 1 checks its HTML and its JavaScript render block only.
-m. **The sweep still saves a state it read without the item lock in two places** of `Verb_sync_board` (Verbs.Sweep.ps1): the
-   awaiting-checks path (`Complete-AwaitingChecks`) and the settle path (`Invoke-Settle`, which reads fresh but holds no lock). They were
-   left because they call GitHub and Octopus for a long time between the read and the save: under the item lock a verb for the same item
-   would wait and be refused `item-busy`. They need the read-decide part outside and a short locked write of their own keys. The
-   merge-detected and owner-released-idle writes are fixed (locked, on a fresh read), as is the QC step.
-n. **Rule scripts run as one `pwsh` per call with no limit on how many at once** (`runner.pool` is 0 in the deployed configuration). A
-   burst of verbs is a burst of processes: the likeliest way for the container to run out of memory. Either a concurrency limit in `Runner`
-   (Program.cs) or `runner.pool` in `config/deploy.overrides.json` (a protected file: the owner decides).
+m. **Done (2026-10-15, #117): the sweep saves no state it read without the item lock.** Settle (`Invoke-SettleLocked`) and the end of a
+   wait for checks (`Invoke-AwaitingChecksLocked`) run under the item lock on a fresh read; a lock still busy after 3 s skips the item for
+   one sweep. A verb of the same item waits for them at most its own 45 s.
+n. **Done (2026-10-14, issue 89): at most `runner.maxProcesses` (6) rule scripts run at once** (`gateway/RunnerGate.cs`). Every call of
+   `Runner`, pooled or a process of its own, holds a slot; waiting calls start by class: the sweep, `accept`, `claim-item`, `expire-claim`
+   (take-backs) and the gateway's own start and stop calls first (one slot is kept for them), other verbs next, long polls
+   (`wait-for-checks`, `metrics`, `publish-demo`) at most half the slots, the journal last. A call that waits too long is answered exit 20
+   `runner-busy`: an ordinary or long-poll verb after 2 minutes, a critical call after its own timeout (at most 150 s), a journal line after
+   5 minutes; the wait is taken from the time the call may run. `/api/v1/status` shows `runner`: limit, running and waiting by class, peaks,
+   refusals, the last starts, and `memory` (the gateway, its live rule-script processes, the container's cgroup current, peak and limit).
+   Under saturation two things follow from the order: a webhook whose intake is refused busy is lost (its delivery id is already seen; the
+   sweep catches up), and an `accept` that waited its bounded time for the item's earlier journal lines may be journaled before them.
+   Open: `runner.pool` is still 0 in the deployed configuration; turning it on is `config/deploy.overrides.json`, a code-owner path (pull
+   request for the owner).
 d. **The state comment can be edited by anyone with write access; the gateway trusts it by author login only.** A signed state was
    built and taken out again on 2026-10-13 (pull request 22, three review rounds). What a next attempt must have from the start:
    1. one shared guard that refuses every verb that reads the state BEFORE the verb acts on GitHub (claim ref, board move, pull request,
@@ -247,6 +328,151 @@ p. **Flaky check, quarantined, cause not found**: qc suite, scenario "qc: a QC a
    was saved and whose plan was applied more than 20 s after it. The check now prints the item's journal: a `reassigned` line in the next
    failure confirms this. Remove the quarantine with the cause.
 q. **Item state signing is still open**: entry d. Until then the state comment is trusted by its author login only.
+
+Done on 2026-10-15 (worker sessions carry out their instructions; from 45 worker transcripts of 14 and 15 October):
+
+- **Outside blockers.** No session is held for the base branch: on red checks the worker calls `complete` once and the one CI rule of master
+  (`Get-RedHeadRuling`, Prs.ps1, issue 102) re-runs once and, for a master defect, waits for master without counting a round (exit 21 to the
+  worker).
+- **`factory.ps1 private-build --item N --worktree <path> [--dotnet <path>] [--log <file>]`** (client side, lib/Client.Build.ps1): the host's
+  build slot (waited for up to `--slot-wait-minutes`, 30; then exit 21 `build-slot-busy`, nothing built), `DATABASE_ENGINE=SQLite`, the
+  dotnet of `ensure-tools.ps1` first on PATH, no credential of the session in the build's environment, `. ./build.ps1 ; Build` with its output in
+  `<work>/build-N.log`, the slot given back in finally, answer `{ok, failed[], log, tail}` (exit 10 `build-failed`). Without `--worktree` the name stays free for the push gate's server verb (`private-build --attest SHA`, pull request 61);
+  a passing build of a clean worktree on the item's branch attests through it where the gateway has it.
+- **`--max-chars N`** on any client verb but subscribe: a longer answer is saved whole to the work directory and printed as one JSON line
+  (`ok`, `exit`, `code`, `truncated`, `saved`, the start of the answer in `text`), so a session never pipes a verb (`| head`).
+- **Skills**: one bare absolute-path command per factory verb (through the `<BASE>/fw` wrapper when the prompt names one) and a classifier
+  refusal is final (comment, release, end the session); no `merge` call after a PASS (`next: "merge"` ends the session); the already-merged
+  guard of Functional Testing; evidence from the running app only, and reviews recorded as the reviewer subagent wrote them; the Qodana and
+  code-style check before the first push; the reviewer of a design checks every sentence of Notes, Constraints and Out-of-scope and flags a new
+  value of a shared enumeration; `Depends on: #M` with a release when a design needs an unmerged item.
+
+Closed on 2026-10-15 (issue #106):
+
+- **#106 Stream sidecar.** The launchers run the session's event stream (`subscribe --own`, from step 7 of the prompt file with the credentials of
+  step 4 or the environment) as a sidecar for the session's whole lifetime and append its lines to `<BASE>/work/events.log`; the session's first
+  message carries a launcher note: do not start `subscribe`, Monitor `tail -n0 -F` of that file (the first arm from line 1), so a re-arm neither
+  registers nor replays. A dead sidecar is started again (not after exit 30 or 40). The client leaves out replayed triggers of items the name no
+  longer owns (`worker.registered` now says `owned`) and prints `peers.snapshot` and `supervisor.joined` only when they changed.
+  `--sidecar auto|on|off`, `docs/launcher.md`. Open: not yet run live on tdd; batch 3's connect-prompt change (PR 121, owner review) and this note
+  must agree on step 7.
+
+Closed on 2026-10-15 (issue #103):
+
+- **#103 Base updates restarted CI on every open pull request.** New setting `baseUpdate.mode`, default `conflict-or-merge`: an owner gets
+  `base.updated` only when its pull request has a merge conflict with master (`reason: "conflict"`, also covers the silent wait of #56), and the
+  gateway brings a behind branch up to date only right before it merges a PASS (once per verdict). `every-move` keeps the old behaviour (the owner
+  suite runs with it; `FACTORY_BASE_UPDATE_MODE` overrides). `docs/design/plant-manager.md` 6a. Open: not yet seen live on tdd.
+Closed on 2026-10-15 (issue #102):
+
+- **#102 One CI rule for flakes and pre-existing failures** (about 18 rejected rounds a day, 13 on acceptance shards). Only the gates (`ciGates`)
+  decide a head; a red head whose runs completed is re-run once when its failures are non-gate checks, known flaky (`masterFlakyChecks`, now both
+  shard families) or failing on master too (`pr.rerun[sha]`, judged on the new attempt); a failure master has as well costs no fix-forward round
+  and no demotion, is reported once (comment, operator `plant.event` `master-defect`), and once master passes it again the gateway merges master
+  into the branch. A park that ends by expiry or unpark resets `fix_forward_rounds` and `demotions`. `docs/design/plant-manager.md` 10e; scenarios
+  `ci rule: ...` (tests/scenarios/cirule.ps1, suites auto and owner). Open: the code-owner documents that list the operator stream's `plant.event`
+  codes (`docs/design/operator-session.md`, the factory-operator skill) do not name `master-defect` yet (owner pull request).
+Closed on 2026-10-15 (issue #105):
+
+- **#105 Digest noise.** `gateway-restarted` is reported only while an owner has not reconnected (`notReconnected` > 0); what the patrol reported
+  (keys, buckets, acknowledged) is carried over a graceful restart in the plant snapshot, so persisting conditions are not new again
+  (`gateway/DigestCarry.cs`); a question whose text the same session asked about the same item within `timing.questionDedupeMinutes` (60) and that is
+  still open is not relayed again (`202` with the first question's id, `duplicate: true`, `/status` `messaging.questionsDeduped`; it still counts for
+  the watchdog's `repeated-question`). The trust-mapping lines are
+  unchanged. Open: the supervisor's skill (owner review) does not describe `duplicate`; nothing depends on it.
+Closed on 2026-10-15 (issue #101):
+
+- **#101 Busy owners were taken back as quiet** (about 10 items a day, 308, 296 and 310 among them): lease rule 3 counted only verbs and a changed
+  summary, so an owner waiting on a long subagent was taken back about 18 min after its last verb. The stream client now watches its machine
+  (`plugin/scripts/lib/Progress.ps1`: a progress file `<work>/progress/<N>.txt`, files of the work directory, commits and changed files of the
+  item's worktrees, on Linux a build or test process at work there) and sends the latest per owned item with its heartbeat (`progress`, each
+  entry's age in seconds); rule 3 counts it like a verb, it renews the lease, and it answers an open `item.check`. An `item.check` that arrives
+  anyway is answered by the client itself (`claim-item --renew` with `renewed_by: "client"`) when it saw work within 10 minutes. Progress counts
+  only while the session itself was active within `schedule.progressMaxMinutes` (180), so a busy machine cannot hold a stuck session's item for
+  ever. `/status` `lease.progress`. `docs/design/plant-manager.md` 6b rule 4.
+  Open: not yet seen live on tdd; #83 (renewals that did not reach the lease watchdog) is a separate cause.
+
+Closed on 2026-10-15 (the settle and plant fixes after the overnight run):
+
+- **#87 A code change was moved to Done when its master Build had been re-run** (272, 276). The Release and Architecture workflows start when a
+  Build completes and GitHub attaches their check runs to master's head at that moment, so a merge commit whose first attempt failed keeps the
+  skipped `release` check of that attempt; settle read it as docs-only. Docs-only is now decided from the merge commit's own Build
+  (`masterCodeChecks`, the jobs that run only for code: all skipped means docs-only) or else the pull request's files, and recorded as
+  `merge.docs_only` with `docs_only_from`; only then may a skipped or missing release check finish an item. The master-green verdict ignores
+  `masterIgnoredChecks` (`release`, `packages`, `architecture`), which could also park an item master-broken.
+- **#100 A blocked session kept winning items.** Its stream client accepted every offer by itself, which reset the session's missed offers,
+  and the take-back five minutes later counted as nothing. Now the client's own accept (`accepted_by: client`) is no answer, every take-back is
+  a miss, and `timing.offerMissLimit` (2) misses in a row with a take-back among them block the session: it is offered nothing, pinned items
+  included, until it calls a verb of its own or a new session of the name registers (a reconnect of the same session keeps the block). Lapsed
+  offers alone still give the timed cool-down. A block is a `session-blocked` plant event on the operator stream and a `session-blocked` entry
+  of the patrol digest (worker, item, `blockedMinutes`); `/status` shows `blocked`, `blockedSince` and `takenBackInRow` per worker and
+  `sessionsBlocked`. QC environments are not part of the rule (they run outside the model session). Open: the supervisor's and operator
+  session's skills and `docs/design/operator-session.md` (owner review) do not list the new digest kind and the plant event codes
+  `session-blocked` and `session-unblocked`; the block is in memory and a restart forgets it.
+- **#107 The owner session idled from the merge to the Release Queue.** The owner was kept until `item.complete` (master green, release,
+  production), doing nothing while the gateway settled the item, so its session was neither free nor told to end. Now the owner hears
+  `item.merged` and is released at once (`Plant.Merged`, also on the merge verb and the gateway's merge after a PASS); the Sweeper no longer
+  keeps the owners of settling items. The spent session gets `session.end` after `timing.sessionEndGraceSeconds` and settle carries the item.
+  The owner skill says the item ends for the session at `item.merged`.
+- **#109 `hold:owner` was ignored** (296). A setting `holdLabels` (default `["hold:owner"]`) is honoured like `Demo`: the sweep offers nothing
+  for an item that carries one (its open offer is dropped at the next plan), its PASS is not merged (`merge` answers exit 10 `held-by-label`,
+  the gateway's merge waits), and `claim-item` (so `accept` and a live owner's `--renew`, whose lease then lapses as with `Demo`) answers exit 10
+  `held-by-label`. A merge the person makes is still picked up and settled. Remove the label to hand the item back.
+- **#114 (and #70, #77) The settle state was erased on a master-broken, master-green-timeout or late release-candidate park** (262 and 280
+  stranded closed in Functional Testing, 276 and 272 validated again after their merge). The wait now stays (`merge.awaiting` `master-broken`
+  or `master-timeout`, with the park for a person) and settle keeps polling: the item goes on once the merge commit's latest attempt, or a
+  later master commit that contains it (compare: ahead or identical, at most `timing.masterContainsLookback` (10) commits back), is green
+  (`merge.green_via`); the late release-candidate search keeps looking after `lateReleaseCandidateHours` and says so once. An item with
+  `merge.sha` is never offered to a worker: the sweep re-arms a settle state an older gateway erased (journal `settle-rearmed`; closed items
+  too, instead of only removing their park), an unpark re-arms it and hands nothing off (`reoffer` false, `awaiting` in the answer), and the
+  merge verb's already-merged path keeps the original record and `merged_at`. `POST /api/v1/items/{n}/resettle` (operator token, a reason)
+  puts a finished merged item back into the settle step, for an item a person reopened because no release carried it. No auto-revert.
+
+- **#117 Two sweep passes moved an unmerged item to the Release Queue** (290: Development, Functional Testing, Release Queue 5 s apart, its
+  pull request unmerged). Settle and the end of a wait for checks run under the item lock on a fresh read (entry m). A card is moved only
+  from the column the step expects: the wait for checks ends without a move when the card left the column it began in
+  (`awaiting_checks.column`), and settle moves a card to the Release Queue only from Functional Testing. An open Release Queue card without a
+  merge record is flagged once (journal `flagged`, code `release-queue-without-merge`, and a plant event on the operator stream); nothing
+  moves it.
+
+w. **Built, off (2026-10-15): the cloud worker runtime adapter** (`docs/design/cloud-worker-runtimes.md` phase 3; `gateway/Runtimes/`,
+   `gateway/Plant.Runtimes.cs`, credentials in `gateway/Auth.cs`). An item labelled `runtime:cae-job` (or matched by `runtimes.routing`) is
+   given to a new execution of the Container Apps job `runtimes.caeJob.jobResourceId`, started through ARM with the gateway's managed identity
+   (package `Azure.Identity`); the execution redeems a one-time nonce for a `w2` credential, registers as `cae-<item>-<6 hex>` and is offered the
+   item with `runtimes.caeJob.ackSeconds`. Capacity, a daily budget, health, take-back of failed executions, park `runtime-failed` after
+   `maxFailuresPerPhase`, re-list at start, `/api/v1/status` and dashboard block `runtimes`, span and metric `fworker.runtime.executions`. The
+   operator marks an unhealthy runtime healthy again with `POST /api/v1/runtimes/cae-job/reset`. Every `runtimes.*` setting is off in
+   `config/instance.json` (smoke check). Open: the job, its identity and the Foundry deployment (rollout step 2), the runner image, the real job
+   resource id in `config/deploy.overrides.json`, and a live proof on tdd; unredeemed nonces are lost at a gateway restart (that execution
+   fails its redemption and is replaced).
+- **#108 Build slots were freed only by their release or their ttl** (30 min). Now an item's slots go when it is taken back, released or
+  completed and whenever its owner is dropped, and a name's slots go when it is revoked, when its session is told `session.end`, and when it
+  stays disconnected for `schedule.buildSlotDisconnectSeconds` (120). `/status` `hosts.buildFreed` counts them; each free is one log line
+  (`"buildSlot":"freed"`) with its reason.
+
+Closed on 2026-10-15 (issues #79 and #82):
+
+- **#79 A flaky master Build parked merged items as master-broken** (276, 272, 280). The settle step asked GitHub to re-run the failed jobs
+  while the Build run was still in progress (GitHub refuses that; the answer was ignored), then parked the item a minute later. Now it waits
+  until every workflow run of the merge commit has completed, re-runs the failed ones once, records the runs and attempts (`merge.rerun_runs`,
+  `rerun_at`) and judges only a newer, completed attempt; the master-green timeout counts again from the re-run. The comment says whether the
+  failure looks flaky (`masterFlakyChecks` patterns, or the same check failed on one of the last 5 master commits). The fake GitHub now lists
+  workflow runs per commit and refuses a re-run of a run in progress, as GitHub does.
+- **#82 A closed item stayed parked.** The sweep removes the park of a closed item whose flow has ended (journal `unparked`, by the sweep), and
+  `POST /api/v1/items/{n}/unpark` accepts a closed item, removing only the park (no hand-off, no offer). Released parks leave the digest's
+  parks list at once.
+
+Closed on 2026-10-15 (issues #80, #81 and #74):
+
+- **#80 An operator drain was lost when the name's next session registered.** The operator's drain (`POST /api/v1/workers/{name}/drain` with
+  the operator token) belongs to the name: it holds across reconnects, new sessions and a graceful restart (the plant snapshot carries
+  `drained`) until the operator resumes the name. A session's own drain (end-session) stays the session's, so the launcher's next session is
+  offered work; a session cannot lift the operator's drain.
+- **#81 An owner whose assignment event was lost was never told about its item again** (274). Every registration of a name, a new session
+  included, and the snapshot restore resend `item.assigned` (mode `resume`, `resent: true`, `accepted: true`) for each accepted own-item
+  assignment of an item the name still owns. The client saves the token and does not accept or spawn for it; the owner skill says what to do.
+- **#74 An accepted assignment outlived its dropped owner.** Where the sweep drops an owner it no longer lists, the owner's accepted
+  own-item assignment goes too, so "accepted" means "owned" and a dropped owner is never resent a finished item.
 
 Closed on 2026-10-14 (issue #42):
 
@@ -278,7 +504,7 @@ Closed on 2026-10-13 (pull request "hardening"):
   pull_request_review); a card moved on the board is a `projects_v2_item` event, which only an organization webhook or an App delivers, so
   the gateway never hears of the move. And an item new in a column is offered by the SECOND sweep that sees it (`timing.sweepSeenCount` 2,
   so a card dragged across starts nothing): up to two intervals, 6 minutes at 180 s. That is the wait seen, and the sweep "that did not
-  match" was the first look. Fixed: after a sweep that saw such an item the next one runs 20 s later (`FACTORY_SWEEP_CONFIRM_SECONDS`), so
+  match" was the first look. Fixed: after a sweep that saw such an item a pass over it runs 20 s later (`FACTORY_SWEEP_CONFIRM_SECONDS`; an incremental pass since issue 92), so
   the first offer comes at most one interval plus 20 s after the move. To make it seconds: deliver `projects_v2_item` (organization
   webhook); the gateway already turns it into a sweep.
 - **(h) `factory.ps1 update-pr --item N --body-file <file>`** replaces the body of the item's own open pull request (item token, owner role),
@@ -299,6 +525,21 @@ Closed on 2026-10-13 (pull request "hardening"):
   merge gate is unchanged and deterministic: recorded inspector approval, approval on GitHub, QC run, person's approval. Same pattern
   elsewhere: entry m.
 
+Closed on 2026-10-14 (operator-session notes in the inbox, stream lines whole):
+
+- **Operator-session notes and the inbox.** The gateway already stored them like operator notes (`Plant.SendMessage` delivers every
+  message with `Operator` set, the operator's and the operator session's alike, into each recipient's inbox); nothing in the client, the
+  skill or the scenarios said or proved it. The peer-messaging skill now says it (handle once, `ack`), `docs/design/worker-messaging.md` 3.4
+  states it, and scenarios of the operator suite prove it: a worker offline at the send, a note to all, `--from-message`, an answer.
+- **Stream lines arrive whole.** The Monitor of Claude Code shows at most 500 characters of one line (measured: 500 arrive, 501 end in
+  `...(truncated)`); a message line was up to about 1,650 characters, and over 500 with a two-letter text for every sender but the
+  operator (the long warnings come before the text), so a session saw the warning and little or none of the text, and the supervisor saw
+  part of the first question of a batch. Every stream line now fits `FACTORY_STREAM_LINE_MAX` (500): a message keeps a short warning and
+  its text is cut with `truncated` and `read` (`factory.ps1 inbox --id <id>`); a batch, a patrol or another event that does not fit says
+  so and names the command that reads it whole (`docs/design/worker-messaging.md` 5.2). `inbox` and `wait-event --messages` stop at about
+  24,000 characters (`more`). Open: the operator skill (code-owner path, another pull request in flight) does not yet mention that a long
+  `operator.inbox` line is cut; the line itself names the command (`read`).
+
 ### Flaky qc-gate-lease scenario (fixed 2026-10-14)
 
 Cause: the QC lease was renewed only when a verb of the worker had finished (accept, qc-progress, qc-report), so a worker whose verb was still
@@ -315,7 +556,7 @@ new start in the Container Apps console log, and the system log of the revision 
 | Cause | In the code or platform | How to confirm |
 |---|---|---|
 | Scale-in (tdd and uat scale to zero) or a replica move | The platform's HTTP scale rule decides; whether an open event stream counts as a request for it is not visible in this repository. A new revision or a node drain does the same | Console log ends with `"gateway":"stopping"` (with `upSeconds`); the system log has a scale, revision or replica event at that time. If streams do not count, set a minimum of one replica for tdd (operator, the demo-environment kit) |
-| Out of memory | One `pwsh` per rule-script call, unlimited (entry n) | No `stopping` and no `unhandled-exception` line before the new start; the system log says OOMKilled or exit code 137 |
+| Out of memory | One `pwsh` per rule-script call, at most `runner.maxProcesses` at once since issue 89 (entry n); `/api/v1/status` `runner.memory` shows the container's current and peak | No `stopping` and no `unhandled-exception` line before the new start; the system log says OOMKilled or exit code 137 |
 | A probe failing | `/health` and `/alive` answer 200 from the first moment and wait on nothing; `/ready` is 503 until the revoked credentials are read (each read has 45 s, a failed one is tried again after 5 s doubling to 60 s; after 3 minutes one `"level":"error"` line with `"waitingFor":"revocations"`). `/ready` must not be the liveness probe | The system log shows failed probes, then a restart; the console log has `stopping` |
 | An unhandled exception | Fixed here: the sweeper let a cancellation that was not the shutdown escape (the default of .NET then stops the host); the runner pool's exit handler ran unguarded. A background service that throws no longer stops the host | A `"gateway":"unhandled-exception"` or `"unobserved-task-exception"` line, or a `crit:` line of the host |
 
@@ -385,7 +626,7 @@ The role is on in the deployed image (`operator.enabled` in `config/deploy.overr
    It does not get the operator token, the Octopus key or any GitHub App key.
 3. The prompt clones this repository, has the session read `CLAUDE.md` and this file, and hands over to
    `plugin/skills/factory-operator/SKILL.md`. The dashboard shows it in the group "Factory operator" with its model check and the
-   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 3).
+   self-merged releases of today against the limit (`operator.maxSelfMergesPerDay`, 12).
 4. To stop it: revoke the name `operator-session` on the dashboard, or switch messaging off (both act at once). To stop the role: set
    `operator.enabled` false in the overrides. Its GitHub connection is removed on GitHub.
 

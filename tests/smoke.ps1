@@ -59,4 +59,50 @@ Check 'testing profile is haiku 5.5 at low effort' ($tp.model -eq 'claude-haiku-
 Check 'testing profile never climbs, whatever the tier' ((Resolve-ModelFor 'orchestrator' 2 $mc 'testing').model -eq 'claude-haiku-5-5' -and -not $tp.escalates)
 Check 'an unknown profile falls back to the ladder' ((Resolve-ModelFor 'subagent' 1 $mc 'nope').model -eq 'claude-sonnet-5-5')
 Check 'the testing profile wins over fixed mode too' ((Resolve-ModelFor 'subagent' 0 $fx 'testing').effort -eq 'low')
+# local progress of owned items (lib/Progress.ps1): which places belong to an item, and which files of the work directory never count
+. (Join-Path $root 'plugin/scripts/lib/Progress.ps1')
+Check 'progress: a branch or file names the item as a whole token' ((Test-NamesItem 'factory-worker/308-development' 308) -and (Test-NamesItem 'brief-308.md' 308) -and (Test-NamesItem '308' 308))
+Check 'progress: a longer number or a hash does not name the item' (-not (Test-NamesItem 'factory-worker/1308-development' 308) -and -not (Test-NamesItem 'worktree-agent-a3081f' 308) -and -not (Test-NamesItem '3080.txt' 308))
+Check 'progress: the files the client, the launcher and the stream write are never work' ($script:PgWorkSkip.IsMatch('events.log') -and $script:PgWorkSkip.IsMatch('launcher.log') -and $script:PgWorkSkip.IsMatch('session-ended') -and -not $script:PgWorkSkip.IsMatch('brief-308.md'))
+$pgDir = Join-Path ([IO.Path]::GetTempPath()) "fw-smoke-progress-$PID"; New-Item -ItemType Directory -Force -Path (Join-Path $pgDir 'progress') | Out-Null
+try {
+    Set-Content -LiteralPath (Join-Path $pgDir 'progress/308.txt') -Value 'x'
+    $pgState = New-ProgressState $pgDir @(); $pgState.owned[308] = [DateTime]::UtcNow.AddMinutes(-1); $pgState.repos = @()
+    $pgRep = @(Get-ProgressReport $pgState)
+    Check 'progress: a progress file is reported once as the item''s (source marker), then not again until it changes' ($pgRep.Count -eq 1 -and $pgRep[0].item -eq 308 -and $pgRep[0].source -eq 'marker' -and $(foreach ($e in $pgRep) { $pgState.sent[[int]$e.item] = [DateTime]::Parse($e.seen).ToUniversalTime() }; @(Get-ProgressReport $pgState).Count -eq 0))
+    Check 'progress: recent work answers a check' ($null -ne (Get-RecentProgress $pgState 308) -and $null -eq (Get-RecentProgress $pgState 309))
+    # a file dated in the future (a skewed mount, a restored archive) is no sign of work
+    $pgFut = New-ProgressState $pgDir @(); $pgFut.owned[310] = [DateTime]::UtcNow.AddMinutes(-1); $pgFut.repos = @()
+    $fut = Join-Path $pgDir 'progress/310.txt'; Set-Content -LiteralPath $fut -Value 'x'; (Get-Item -LiteralPath $fut).LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(3)
+    Check 'progress: a file dated in the future is not work' ($null -eq (Get-ItemProgress $pgFut 310 $false ([Diagnostics.Stopwatch]::StartNew())))
+} finally { Remove-Item -Recurse -Force -LiteralPath $pgDir -ErrorAction SilentlyContinue }
+"config"
+# docs/design/cloud-worker-runtimes.md section 5: every runtime is off in the source defaults; one is switched on and sized only in
+# config/deploy.overrides.json (a code-owner path). A default that starts executions would spend money from any build of this repository.
+$rtCfg = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).runtimes
+Check 'runtimes: the source defaults exist' ($rtCfg -is [System.Collections.IDictionary] -and $rtCfg.caeJob -is [System.Collections.IDictionary])
+Check 'runtimes: no routing rule in the source defaults' (@($rtCfg.routing).Count -eq 0)
+Check 'runtimes: no environment block in the source defaults' ($rtCfg.environments -is [System.Collections.IDictionary] -and $rtCfg.environments.Count -eq 0)
+foreach ($rk in @($rtCfg.Keys | Where-Object { $_ -ne 'environments' -and $rtCfg[$_] -is [System.Collections.IDictionary] })) {
+    $rv = $rtCfg[$rk]
+    Check "runtimes.${rk}: off in the source defaults (enabled false, maxConcurrent 0, maxExecutionsPerDay 0, no job named)" ($rv.enabled -eq $false -and $rv.maxConcurrent -eq 0 -and $rv.maxExecutionsPerDay -eq 0 -and "$($rv.jobResourceId)" -eq '')
+}
+# The deployed settings: the overrides merge over the defaults as the Dockerfile merges them, and only tdd has a runtime switched on
+# (runtimes.environments.<FACTORY_ENVIRONMENT> is the block of that environment; one without an entry has every runtime off).
+$cfgDir = Join-Path $PSScriptRoot '..' 'config'; $merged = Join-Path ([IO.Path]::GetTempPath()) "fw-merged-$PID.json"
+try {
+    $null = & pwsh -NoProfile -File (Join-Path $cfgDir 'apply-overrides.ps1') -Base (Join-Path $cfgDir 'instance.json') -Overrides (Join-Path $cfgDir 'deploy.overrides.json') -Out $merged 2>&1
+    Check 'config: the deploy overrides merge over the defaults' ($LASTEXITCODE -eq 0)
+    $envs = if (Test-Path $merged) { (Get-Content -Raw $merged | ConvertFrom-Json -AsHashtable).runtimes.environments } else { @{} }
+    $t = $envs.tdd
+    # apply-overrides adds an environment's block as written, so its names are checked here: each key exists in the base runtimes block
+    # (a misspelt setting would otherwise ship as its default), and environment names are lower case (FACTORY_ENVIRONMENT is matched lower-cased).
+    $baseRt = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).runtimes
+    $badKeys = @(foreach ($en in @($envs.Keys)) { foreach ($k in @($envs[$en].Keys)) { if ($k -eq 'environments' -or -not $baseRt.Contains($k)) { "$en.$k" } elseif ($envs[$en][$k] -is [System.Collections.IDictionary]) { foreach ($k2 in @($envs[$en][$k].Keys)) { if (-not $baseRt[$k].Contains($k2)) { "$en.$k.$k2" } } } } })
+    Check 'config: every environment names only settings of the base runtimes block' ($badKeys.Count -eq 0); if ($badKeys) { "       unknown: $($badKeys -join ', ')" }
+    Check 'config: environment names are lower case' (@($envs.Keys | Where-Object { $_ -cne $_.ToLowerInvariant() }).Count -eq 0)
+    Check 'config: tdd routes every phase to cae-job, connected workers first' ($t.preferConnected -eq $true -and @($t.routing | Where-Object { $_.phase -eq '*' -and $_.runtime -eq 'cae-job' }).Count -eq 1)
+    Check 'config: tdd runs at most 2 executions at a time and 30 a day' ($t.caeJob.enabled -eq $true -and $t.caeJob.maxConcurrent -eq 2 -and $t.caeJob.maxExecutionsPerDay -eq 30)
+    Check 'config: no runtime is switched on outside tdd' (@($envs.Keys | Where-Object { $_ -ne 'tdd' -and $envs[$_].caeJob.enabled -eq $true }).Count -eq 0)
+} finally { Remove-Item -LiteralPath $merged -ErrorAction SilentlyContinue }
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }

@@ -55,7 +55,11 @@ function Invoke-Subscribe($a) {
                 if ($line.StartsWith('id:')) { $lastId = $line.Substring(3).Trim() }
                 elseif ($line.StartsWith('data:')) {
                     $json = $line.Substring(5).Trim()
-                    [Console]::Out.WriteLine($json); [Console]::Out.Flush()
+                    # one line within the bound of the stream (Client.Own.ps1, Format-StreamLine): a gateway event that does not fit keeps its short fields
+                    $ev0 = if ($json.Length -le (Get-StreamLineMax)) { $null } else { try { $json | ConvertFrom-Json -AsHashtable } catch { $null } }
+                    if ($json.Length -le (Get-StreamLineMax)) { Write-StreamLine $json }
+                    elseif ($ev0 -is [Collections.IDictionary]) { Write-StreamLine (Format-StreamLine $ev0 (Get-StreamReadHint $ev0)) }
+                    else { Write-StreamLine (([ordered]@{ provider = 'client'; event = 'event.unreadable'; chars = $json.Length; cut = $true }) | ConvertTo-Json -Compress) }
                     if ($spawn) { try { $ev = $json | ConvertFrom-Json; if ($ev.event -eq 'work.offered') { Start-Worker $ev $cfg $max } } catch { [Console]::Error.WriteLine("spawn failed: $($_.Exception.Message)") } }
                 }
             }
@@ -64,7 +68,7 @@ function Invoke-Subscribe($a) {
             # a drop is reported only after 2 reconnects failed as well (enhancement 11): one lost connection that the next attempt restores is
             # routine (a proxy, a gateway restart) and says nothing to the session. Comment lines (`: ping`) are never events.
             $dropN++
-            if ($dropN -ge 3 -and ($dropN -le 5 -or $dropN % 10 -eq 0)) { [Console]::Out.WriteLine((@{ provider = 'client'; event = 'stream.error'; reason = "$($_.Exception.Message)"; attempt = $dropN; retry_in_seconds = $backoff } | ConvertTo-Json -Compress)); [Console]::Out.Flush() }
+            if ($dropN -ge 3 -and ($dropN -le 5 -or $dropN % 10 -eq 0)) { Write-StreamLine (Format-StreamLine ([ordered]@{ provider = 'client'; event = 'stream.error'; reason = "$($_.Exception.Message)"; attempt = $dropN; retry_in_seconds = $backoff })) }
             if ($dropN -ge 3) { [Console]::Error.WriteLine("subscription dropped: $($_.Exception.Message); retrying in ${backoff}s") }
         }
         finally { $http.Dispose() }

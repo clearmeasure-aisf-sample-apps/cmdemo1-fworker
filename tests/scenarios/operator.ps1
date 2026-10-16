@@ -19,6 +19,8 @@ function Op-WaitQuiet { [void](Wait-Until -Seconds 75 { (Op-Get '/api/v1/operato
 function Op-Plant($St, [string]$Code, [int]$Item) { Msg-Read $St 12 { param($e) @($e | Where-Object { $_.data.event -eq 'plant.event' -and $_.data.code -eq $Code -and $_.data.item -eq $Item }).Count -gt 0 }; Msg-First @(Op-Events $St 'plant.event' | Where-Object { $_.code -eq $Code -and $_.item -eq $Item }) }
 function Op-Worker([string]$Name) { $s = Msg-Open "name=$Name&type=persistent-local&capacity=1&roles=owner&messaging=1" (Msg-Token $Name); Msg-Registered $s; return $s }
 function Op-F([string[]]$FactoryArgs) { Msg-WithEnv @{ FACTORY_OPERATOR_SESSION_TOKEN = (Op-Token) } { $script:MsgOut = F 'operator-session' (@('operator') + $FactoryArgs) }; return $script:MsgOut }
+# the metrics read every item's comments once per query (rule script `metrics`): a longer wait than the other calls
+function Op-Metrics([string]$Query, [string]$Bearer = '') { $r = Invoke-WebRequest (Msg-Url "/api/v1/metrics?$Query") -Headers @{ Authorization = "Bearer $(if ($Bearer) { $Bearer } else { Op-Token })" } -SkipHttpErrorCheck -TimeoutSec 200; $j = Msg-Json $r; $j.status = [int]$r.StatusCode; return $j }
 function Op-AnswerAll { foreach ($q in @((Mgr-Questions 'open').questions)) { if ($q) { [void](Msg-Post "/api/v1/questions/$($q.id)/answer" @{ text = 'closed by the scenario' }) } } }
 
 $OperatorScenarios = [ordered]@{
@@ -191,7 +193,7 @@ $OperatorScenarios = [ordered]@{
     } finally { Msg-Close $op; Msg-Close $al; Msg-Close $sup; Op-AnswerAll }
 }
 
-'op: every endpoint outside its list refuses the operator credential: mint, revoke, the messaging switch, capacity, drain, verbs and the test seams' = {
+'op: every endpoint outside its list refuses the operator credential: mint, revoke, the messaging switch, verbs and the test seams' = {
     $op = Op-Hold
     try {
         $calls = @(
@@ -199,7 +201,7 @@ $OperatorScenarios = [ordered]@{
             @('POST', '/api/v1/workers/alice/revoke'), @('POST', '/api/v1/workers/operator-session/revoke'),
             @('POST', '/api/v1/messaging/disable'), @('POST', '/api/v1/messaging/enable'),
             @('POST', '/api/v1/supervisor/patrol?minutes=10'), @('POST', '/api/v1/supervisor/patrol-ack'),
-            @('POST', '/api/v1/workers/alice/capacity?value=2'), @('POST', '/api/v1/workers/alice/drain'), @('POST', '/api/v1/workers/alice/resume'),
+            @('POST', '/api/v1/base-update?autoUpdateBranch=false'), @('POST', '/api/v1/items/1/unpark'), @('POST', '/api/v1/release-queue/promotion-request'),
             @('GET', '/api/v1/dashboard'), @('GET', '/api/v1/qc'), @('POST', '/api/v1/qc/1/start'),
             @('POST', '/api/v1/_test/fact'), @('GET', '/api/v1/messages/m-00000000-0001'), @('POST', '/api/v1/qc/1/reset'), @('POST', '/api/v1/qc/1/teardown'), @('POST', '/api/v1/qc/1/reassign'),
             @('POST', '/api/v1/verbs/revoke-worker'), @('GET', '/api/v1/events?name=supervisor&supervisor=1'),
@@ -216,9 +218,62 @@ $OperatorScenarios = [ordered]@{
         $sm = Op-Post '/api/v1/workers/supervisor/messaging?value=mute'; $om = Op-Post '/api/v1/workers/operator-session/messaging?value=off'
         Check 'it sets no mode for the supervisor or for an operator session name' ($sm.status -eq 400 -and $om.status -eq 400) "$($sm.status) $($om.status)"
         $st = (Get-Plant)
-        Check 'and none of them changed anything: messaging is on, alice has no capacity override, no worker named zed' ($st.messaging.enabled -eq $true -and @($st.plant.workers | Where-Object { $_.name -eq 'zed' }).Count -eq 0)
+        Check 'and none of them changed anything: messaging is on, no worker named zed, the gateway still updates branches' ($st.messaging.enabled -eq $true -and @($st.plant.workers | Where-Object { $_.name -eq 'zed' }).Count -eq 0 -and $st.baseUpdate.autoUpdateBranch -ne $false)
         Check 'the same calls are not refused to the admin token (the list tests the credential, not the routes)' ((Msg-Api 'GET' '/api/v1/dashboard').StatusCode -eq 200 -and (Msg-Api 'GET' '/api/v1/_test/stores').StatusCode -eq 200)
     } finally { Msg-Close $op }
+}
+
+'op: it drains and resumes a worker name as the operator does, the drain holds across a new session of the name, it sets a capacity and reads the metrics; nobody else gets these' = {
+    $op = Op-Hold; $bob = Op-Worker 'bob'
+    $me = { Msg-First @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'bob' }) }
+    try {
+        Check 'bob is connected and not draining' ((& $me).connected -eq $true -and (& $me).draining -eq $false) ((& $me) | ConvertTo-Json -Compress -Depth 3)
+        $d = Op-Post '/api/v1/workers/bob/drain'
+        Check 'the operator session drains bob' ($d.status -eq 200 -and $d.draining -eq $true -and (& $me).draining -eq $true) ($d | ConvertTo-Json -Compress)
+        $self = Msg-Post '/api/v1/workers/bob/resume' @{} (Msg-Token 'bob')
+        Check 'bob cannot lift that drain by itself: it is the operator''s, of the name' ($self.status -eq 200 -and (& $me).draining -eq $true) ($self | ConvertTo-Json -Compress)
+        Msg-Close $bob; [void](Wait-Until -Seconds 20 { -not (& $me).connected })
+        $bob = Op-Worker 'bob'
+        Check 'a new session of the name is still draining' ((& $me).connected -eq $true -and (& $me).draining -eq $true) ((& $me) | ConvertTo-Json -Compress -Depth 3)
+        Check 'the gateway log names the session as the one that drained' ((Msg-GatewayLogs) -match '"worker":"drain","name":"bob","by":"operator-session"')
+        $r = Op-Post '/api/v1/workers/bob/resume'
+        Check 'the operator session resumes it' ($r.status -eq 200 -and $r.draining -eq $false -and (& $me).draining -eq $false) ($r | ConvertTo-Json -Compress)
+        $c = Op-Post '/api/v1/workers/bob/capacity?value=3'
+        Check 'it sets bob''s capacity' ($c.status -eq 200 -and $c.capacity -eq 3 -and (& $me).capacity -eq 3) ($c | ConvertTo-Json -Compress)
+        $bad = Op-Post '/api/v1/workers/bob/capacity?value=21'; $sv = Op-Post '/api/v1/workers/supervisor/capacity?value=2'; $nobody = Op-Post '/api/v1/workers/nobody-here/drain'
+        Check 'a capacity out of 1 to 20 or for the supervisor is a usage error, and an unknown name is not found' ($bad.status -eq 400 -and $sv.status -eq 400 -and $nobody.status -eq 404) "$($bad.status) $($sv.status) $($nobody.status)"
+        $m1 = Op-Metrics 'since=24h'
+        Check 'it reads the cycle-time metrics' ($m1.status -eq 200 -and $m1.ok -eq $true -and "$($m1.computedAt)" -ne '') ($m1 | ConvertTo-Json -Compress -Depth 3)
+        Start-Sleep -Milliseconds 1100
+        $m2 = Op-Metrics 'since=24h'
+        $m3 = Op-Metrics 'since=24h&fresh=1' 'test-token'
+        Check 'a second read within the cache period is the cached answer; the operator token can ask for a fresh one' ($m2.status -eq 200 -and "$($m2.computedAt)" -eq "$($m1.computedAt)" -and "$($m3.computedAt)" -ne "$($m1.computedAt)") "$($m1.computedAt) $($m2.computedAt) $($m3.computedAt)"
+        $w7 = Op-Metrics 'since=7d&fresh=1' 'test-token'; $n7 = Op-Metrics ''
+        Check 'its read without since is the 7d entry of the cache (the script''s default)' ($w7.status -eq 200 -and $n7.status -eq 200 -and "$($n7.computedAt)" -eq "$($w7.computedAt)") "$($w7.computedAt) $($n7.computedAt)"
+        $u1 = Op-Metrics 'since=24h&fresh=1'; $u2 = Op-Metrics 'since=2h'; $u3 = Op-Metrics 'max=5'; $u4 = Op-Metrics 'since=7d&max=300'
+        Check 'the session may not ask for a fresh answer, another since, or a max: 400 usage' (@($u1, $u2, $u3, $u4 | Where-Object { $_.status -ne 400 -or $_.code -ne 'usage' }).Count -eq 0) "$($u1.status) $($u2.status) $($u3.status) $($u4.status)"
+        $cf = Op-F @('capacity', '--name', 'bob', '--value', '1'); $df = Op-F @('drain', '--name', 'bob'); $rf = Op-F @('resume', '--name', 'bob'); $mf = Op-F @('metrics', '--since', '24h')
+        Check 'the client verbs capacity, drain, resume and metrics answer exit 0' ($cf.exit -eq 0 -and $cf.capacity -eq 1 -and $df.exit -eq 0 -and $df.draining -eq $true -and $rf.exit -eq 0 -and $rf.draining -eq $false -and $mf.exit -eq 0 -and $mf.ok -eq $true) "$($cf | ConvertTo-Json -Compress) $($df | ConvertTo-Json -Compress) $($rf | ConvertTo-Json -Compress) $($mf.exit)"
+        $u = Op-F @('capacity', '--name', 'bob', '--value', '30'); CheckExit 'the client refuses a capacity above 20 before it calls' $u 2 'usage'
+        $u = Op-F @('metrics', '--since', '2h'); CheckExit 'and a metrics since other than 24h or 7d' $u 2 'usage'
+        $up = Op-F @('DRAIN', '--name', 'bob')
+        Check 'a verb typed in capitals calls the lower-case route' ($up.exit -eq 0 -and $up.draining -eq $true) ($up | ConvertTo-Json -Compress)
+        [void](Op-F @('resume', '--name', 'bob'))
+        $ghost = Op-Post '/api/v1/workers/not-registered/capacity?value=2'
+        Check 'it sets no capacity for a name that has not registered since the gateway started: 404' ($ghost.status -eq 404 -and $ghost.code -eq 'not-found') ($ghost | ConvertTo-Json -Compress)
+        foreach ($c2 in @(@('a worker', (Msg-Token 'alice')), @('the supervisor', (Msg-Supervisor)), @('an operator name that does not hold the slot', (Op-Token 'operator-two')))) {
+            # the active supervisor reads the metrics (docs/design/plant-manager.md 10e, manager-actions.ps1): it is refused only the three name actions
+            $x = @((Op-Post '/api/v1/workers/bob/drain' @{} $c2[1]), (Op-Post '/api/v1/workers/bob/resume' @{} $c2[1]), (Op-Post '/api/v1/workers/bob/capacity?value=2' @{} $c2[1]))
+            if ($c2[0] -ne 'the supervisor') { $x += @(Op-Metrics 'since=24h' $c2[1]) }
+            Check "$($c2[0]) is refused drain, resume and capacity of another name$(if ($c2[0] -ne 'the supervisor') { ' and the metrics' })" (@($x | Where-Object { $_.status -ne 403 }).Count -eq 0) (($x | ForEach-Object { $_.status }) -join ' ')
+        }
+        Check 'and none of the refused calls changed bob' ((& $me).draining -eq $false -and (& $me).capacity -eq 1) ((& $me) | ConvertTo-Json -Compress -Depth 3)
+        # with messaging switched off the operator session is admitted nowhere: the four calls answer 403 to it and still work for the admin token
+        $off = Msg-Post '/api/v1/messaging/disable' @{}
+        $x = @((Op-Post '/api/v1/workers/bob/drain'), (Op-Post '/api/v1/workers/bob/resume'), (Op-Post '/api/v1/workers/bob/capacity?value=2'), (Op-Metrics 'since=24h'))
+        $y = @((Msg-Post '/api/v1/workers/bob/drain' @{}), (Msg-Post '/api/v1/workers/bob/resume' @{}), (Msg-Post '/api/v1/workers/bob/capacity?value=1' @{}), (Op-Metrics 'since=24h' 'test-token'))
+        Check 'with messaging off the session is refused drain, resume, capacity and the metrics (403); the admin token is not' ($off.status -eq 200 -and @($x | Where-Object { $_.status -ne 403 }).Count -eq 0 -and @($y | Where-Object { $_.status -ne 200 }).Count -eq 0) "$(($x | ForEach-Object { $_.status }) -join ' ') / $(($y | ForEach-Object { $_.status }) -join ' ')"
+    } finally { [void](Msg-Post '/api/v1/messaging/enable' @{}); [void](Msg-Post '/api/v1/workers/bob/resume' @{}); [void](Msg-Post '/api/v1/workers/bob/capacity?value=1' @{}); Msg-Close $bob; Msg-Close $op }
 }
 
 'op: a worker or supervisor credential, and an operator credential that does not hold the slot, cannot use the operator endpoints' = {
@@ -317,12 +372,12 @@ $OperatorScenarios = [ordered]@{
     $miss = @($need | Where-Object { $txt.IndexOf($_, [StringComparison]::Ordinal) -lt 0 }); if ($txt -cmatch '[^\x00-\x7F]') { $miss += 'a character outside ASCII' }
     Check 'the operator skill is ASCII and names its two enforced checks, what is instruction only and the protected areas' ($miss.Count -eq 0) ($miss -join '; ')
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Write-Host '    skip  prompt behaviour: node is not installed'; return }
-    # the hash of main's worker prompt (the manager suite pins the same one), with the stream note taken out exactly once
+    # the pinned hash of the worker prompt (the manager suite pins the same one), with the stream note taken out exactly once
     $sha = "const H=t=>require('crypto').createHash('sha256').update(t,'utf8').digest('hex');const U=t=>{const k='   '+streamNote+'\n',i=t.indexOf(k);return i<0||t.indexOf(k,i+1)>=0?'the stream note is not there exactly once':t.slice(0,i)+t.slice(i+k.length)};"
     $w = "{env:'tdd',url:'https://gw.example',token:'w1.tok.sig',name:'cloud-1',type:'claude-cloud',cap:'2',repo:'https://github.com/o/r',qcProfile:''}"
     $got = Msg-Node "$sha console.log(H(U(buildPrompt($w)))+' '+H(U(buildPrompt(Object.assign($w,{operator:false})))))"
-    $pin = 'beab25408f52c5bdf39cd72db1137a79d9e72a23a4f5568da9303c0b16ea4d90'
-    Check 'the worker prompt has the hash it had before the operator prompt existed, with the new field absent or false' ($got -eq "$pin $pin") $got
+    $pin = '8bde80a378bb873478fac49338926a10d4a80024f7e7c4fae47c2eafb0b080b7'
+    Check 'the worker prompt has its pinned hash, with the operator field absent or false' ($got -eq "$pin $pin") $got
     $s = "{env:'tdd',url:'https://gw.example',token:'m1.tok.sig',name:'supervisor',supervisor:true}"
     $same = Msg-Node "console.log((buildPrompt($s)===supervisorPrompt($s)&&buildPrompt(Object.assign($s,{operator:true}))===supervisorPrompt($s))+'')"
     Check 'the supervisor prompt is the supervisor prompt whatever the operator field says' ($same -eq 'true') $same
@@ -380,5 +435,47 @@ $OperatorScenarios = [ordered]@{
     }
     $r = Msg-StartRefused @{ FACTORY_MESSAGING = '0'; FACTORY_MANAGER = '0' }
     Check 'operator.enabled without messaging.enabled is refused at start' ($null -ne $r.exit -and $r.exit -ne 0 -and "$($r.stderr)" -match 'operator.enabled needs messaging.enabled') "$($r.exit) $($r.stderr)"
+}
+'op: its note waits in a worker''s inbox like the operator''s: queued while the worker is away, read, acknowledged, quoted with --from-message, once per worker for a note to all, and as an answer' = {
+    $op = Op-Hold; $al = $null; $bo = $null; $c = $null
+    try {
+        [void](Msg-F 'alice' @('presence'))
+        $text = 'The gateway restarts at 15:00 for a release; streams reconnect by themselves.'
+        $n = Op-Post '/api/v1/messages' @{ to = 'alice'; item = 4711; text = $text }
+        Check 'a note to a worker with no stream open is accepted and queued' ($n.status -eq 200 -and $n.queued -eq 1 -and $n.pushed -eq 0 -and (@($n.recipients) -join ',') -eq 'alice') ($n | ConvertTo-Json -Compress -Depth 4)
+        $in = Msg-F 'alice' @('inbox')
+        $e = Msg-First @($in.messages | Where-Object { $_.id -eq $n.id })
+        Check 'the worker finds it with inbox as the operator session''s note: its name and kind, its own trust, the full warning, the whole text' ($in.exit -eq 0 -and $e -and $e.event -eq 'operator-session.note' -and $e.from -eq 'operator-session' -and $e.fromKind -eq 'operator-session' -and $e.trust -eq 'operator-session-text' -and $e.warning -match 'not the person' -and $e.item -eq 4711 -and $e.text -eq $text) ($in | ConvertTo-Json -Compress -Depth 5)
+        Check 'the record shows it delivered to alice' ((Msg-Admin "/api/v1/messages/$($n.id)").perRecipient.alice -eq 'delivered') ((Msg-Admin "/api/v1/messages/$($n.id)") | ConvertTo-Json -Compress -Depth 4)
+        $ack = Msg-F 'alice' @('ack', '--ids', $n.id)
+        Check 'alice acknowledges it: handled, as an operator note is' ($ack.exit -eq 0 -and (Msg-Admin "/api/v1/messages/$($n.id)").perRecipient.alice -eq 'handled') ($ack | ConvertTo-Json -Compress)
+        $again = Msg-F 'alice' @('inbox', '--id', $n.id)
+        Check 'it stays in the inbox after it was handled: inbox --id still reads it, once' (@($again.messages | Where-Object { $_.id -eq $n.id }).Count -eq 1) ($again | ConvertTo-Json -Compress -Depth 5)
+        $item = New-Item-Fake 'operator session note quoted' 'body' @()
+        $cm = Msg-Json (Msg-Verb 'comment' (Msg-ItemToken $item 'owner' 'alice') @{ item = $item; body = 'Assumed from the operator session: the restart is at 15:00.'; from_message = $n.id })
+        Check 'its id works with --from-message: one marked block that names the operator session as the sender' ($cm.ok -eq $true -and @((Get-FakeIssue $item).comments | Where-Object { $_.body -match ('aisf:assumption source=' + [regex]::Escape($n.id) + ' from=operator-session ') }).Count -eq 1) ($cm | ConvertTo-Json -Compress)
+        $al = Op-Worker 'alice'; $bo = Op-Worker 'bob'
+        $all = Op-Post '/api/v1/messages' @{ to = '*'; text = 'to all from the operator session' }
+        Check 'a note to all reaches alice and bob' ($all.status -eq 200 -and @($all.recipients | Where-Object { $_ -in 'alice', 'bob' }).Count -eq 2) ($all | ConvertTo-Json -Compress -Depth 4)
+        foreach ($w in 'alice', 'bob') {
+            $x = Msg-F $w @('inbox', '--include', 'delivered')
+            Check "it is in the inbox of $w once, as the operator session's note" (@($x.messages | Where-Object { $_.id -eq $all.id -and $_.event -eq 'operator-session.note' -and $_.trust -eq 'operator-session-text' }).Count -eq 1) ($x | ConvertTo-Json -Compress -Depth 5)
+        }
+        $q = Mgr-Ask 'alice' 4712 'Does item 4712 need the migration?'
+        $ans = Op-Post "/api/v1/questions/$($q.id)/answer" @{ text = 'No: the migration is item 4713.' }
+        $ai = Msg-F 'alice' @('inbox', '--id', $ans.id)
+        Check 'its answer to a question waits in the asker''s inbox the same way, in reply to the question' ($ans.status -eq 200 -and $ai.exit -eq 0 -and $ai.messages[0].event -eq 'operator-session.note' -and $ai.messages[0].in_reply_to -eq $q.id -and $ai.messages[0].text -eq 'No: the migration is item 4713.') ($ai | ConvertTo-Json -Compress -Depth 5)
+        # a long note on the real client's stream: one line of at most 500 characters, cut, and inbox --id prints it whole
+        Msg-Close $bo; $bo = $null
+        $c = Msg-Client 'bob' 'op-long'
+        Check 'bob''s client registers' (Msg-WaitEvent $c 'worker.registered' 30)
+        $long = (1..180 | ForEach-Object { "part $_" }) -join ', '
+        $ln = Op-Post '/api/v1/messages' @{ to = 'bob'; text = $long }
+        Check 'bob prints the long note' ($ln.status -eq 200 -and (Msg-WaitPrinted $c $ln.id)) ($ln | ConvertTo-Json -Compress -Depth 4)
+        $line = Msg-First @(Get-Content $c.out | Where-Object { $_ -match [regex]::Escape($ln.id) }); $lo = $line | ConvertFrom-Json -AsHashtable
+        Check 'as one line of at most 500 characters: operator-session.note with its trust, a short warning, cut, and the command that prints it whole' ($line.Length -le 500 -and $lo.event -eq 'operator-session.note' -and $lo.trust -eq 'operator-session-text' -and $lo.warning -match 'not the person' -and $lo.truncated -eq $true -and $lo.read -eq "factory.ps1 inbox --id $($ln.id)" -and $long.StartsWith("$($lo.text)") -and @($lo.Keys)[-1] -eq 'text') $line
+        $whole = Msg-F 'bob' @('inbox', '--id', $ln.id)
+        Check 'and inbox --id prints it whole' ($whole.exit -eq 0 -and $whole.messages[0].text -eq $long) ($whole | ConvertTo-Json -Compress -Depth 5)
+    } finally { Msg-Close $op; if ($al) { Msg-Close $al }; if ($bo) { Msg-Close $bo }; if ($c) { try { Stop-Process -Id $c.proc.Id -Force -ErrorAction SilentlyContinue } catch { } }; Op-AnswerAll }
 }
 }

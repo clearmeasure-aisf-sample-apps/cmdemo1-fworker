@@ -18,7 +18,8 @@ function Pool-Canon([string]$Json) {
         if ($v -is [System.Collections.IList]) { return , @($v | ForEach-Object { Sort-Node $_ }) }
         return $v
     }
-    try { return ((Sort-Node ($Json | ConvertFrom-Json -AsHashtable -DateKind String)) | ConvertTo-Json -Depth 20 -Compress) } catch { return "not json: $Json" }
+    # _github is what GitHub said of the rate limit during the call (issue 92): it differs from call to call and the gateway takes it out of every answer
+    try { $h0 = $Json | ConvertFrom-Json -AsHashtable -DateKind String; if ($h0 -is [System.Collections.IDictionary]) { $h0.Remove('_github') }; return ((Sort-Node $h0) | ConvertTo-Json -Depth 20 -Compress) } catch { return "not json: $Json" }
 }
 function Pool-Size { $c = Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable; if ($c.ContainsKey('runner') -and $c.runner.ContainsKey('pool')) { return [int]$c.runner.pool }; return 0 }
 # The pool workers of this suite's gateway: its child processes that run the runner host.

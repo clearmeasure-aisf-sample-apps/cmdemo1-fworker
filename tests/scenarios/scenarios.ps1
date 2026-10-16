@@ -4,6 +4,39 @@ $L = @('factory worker', 'Auto Merge')
 
 $Scenarios = [ordered]@{
 
+# Session trouble does not spend an item's relaunch budget: a claim the gateway took back (taken_back) is relaunched without counting against
+# maxRelaunches, up to maxSessionRelaunches (10) in a row, whose park is session-relaunch-budget; a plain lapse counts as before; a Functional
+# Testing round that runs out without a verdict is parked as validation-no-verdict, not as a relaunch budget.
+'relaunch budget: session take-backs do not spend it, their own limit parks with session-relaunch-budget, and the park codes say why' = {
+    $n = New-Item-Fake 'Relaunch budget' 'x' @('factory worker', 'Auto Merge')
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'first claim' $r 0
+    foreach ($i in 1..10) { Expire-Claim $n 'client-accepted-not-started'; $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); if ($r.exit -ne 0) { break } }
+    CheckExit 'ten session take-backs in a row: still relaunched' $r 0
+    $st = Get-ItemState $n
+    Check 'the item budget is untouched, the session count is 10' ([int]$st.claim.launches -eq 1 -and [int]$st.claim.session_launches -eq 10) ($st.claim | ConvertTo-Json -Compress)
+    Expire-Claim $n 'no-answer-to-item-check'; $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design')
+    CheckExit 'the eleventh is parked as session trouble' $r 10 'parked'
+    $st = Get-ItemState $n
+    Check 'park code session-relaunch-budget with the last take-back' ($st.park.reason -eq 'session-relaunch-budget' -and $st.park.last_take_back -eq 'no-answer-to-item-check') ($st.park | ConvertTo-Json -Compress)
+
+    $m = New-Item-Fake 'Relaunch budget, item trouble' 'x' @('factory worker', 'Auto Merge')
+    $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design'); CheckExit 'first claim of the second item' $r 0
+    Expire-Claim $m 'client-accepted-not-started'; $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design'); CheckExit 'a take-back' $r 0
+    foreach ($i in 1..3) { Expire-Claim $m; $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design') }
+    CheckExit 'three plain lapses are within the budget of 3' $r 0
+    Check 'a plain lapse resets the run of session take-backs' (-not (Get-ItemState $m).claim.ContainsKey('session_launches'))
+    Expire-Claim $m; $r = F 'w1' @('claim-item', '--item', $m, '--column', 'Technical Design')
+    CheckExit 'the fourth lapse parks' $r 10 'parked'
+    Check 'park code watchdog-relaunch-budget' ((Get-ItemState $m).park.reason -eq 'watchdog-relaunch-budget') ((Get-ItemState $m) | ConvertTo-Json -Compress -Depth 4)
+
+    $v = New-Item-Fake 'Relaunch budget, no verdict' 'x' @('factory worker', 'Auto Merge') 'Functional Testing'
+    $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Functional Testing'); CheckExit 'claim in Functional Testing' $r 0
+    foreach ($i in 1..4) { Expire-Claim $v; $r = F 'w1' @('claim-item', '--item', $v, '--column', 'Functional Testing') }
+    CheckExit 'the budget runs out in Functional Testing' $r 10 'parked'
+    Check 'park code validation-no-verdict' ((Get-ItemState $v).park.reason -eq 'validation-no-verdict') ((Get-ItemState $v).park | ConvertTo-Json -Compress)
+}
+
+
 'happy-docs-only (auto policy)' = {
     $n = New-Item-Fake 'Add a docs file' 'Add docs/a.md' $L
     Do-TechnicalDesign $n
@@ -197,7 +230,82 @@ $Scenarios = [ordered]@{
     $v = Do-Verdict $n $pr; $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
     $done = Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Done' }
     Check 'rerun made master green and the item finished' $done "column $((Get-FakeIssue $n).column)"
-    Check 'a re-run was noted in the item' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*re-running failed jobs*' }).Count -ge 1)
+    Check 'a re-run was noted in the item' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*re-running the failed jobs*' }).Count -ge 1)
+}
+
+'master flaky: a shard fails while the Build runs; the failed jobs are re-run once the run completes and the item proceeds [full]' = {
+    # issue 79: before, the re-run was asked for while the run was still in progress (GitHub refuses it) and the item was parked master-broken
+    Fake 'config' @{ masterFlaky = $true; flakyRunSeconds = 6 } | Out-Null
+    $n = New-Item-Fake 'Flaky master' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n; Do-DevComplete $n | Out-Null
+    $v = Do-Verdict $n $pr; $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    $done = Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Done' }
+    $fs = Get-FakeState
+    Check 'the item finished after the re-run' $done "column $((Get-FakeIssue $n).column)"
+    Check 'one re-run, never asked for while the run was in progress' ($fs.reruns -eq 1 -and $fs.rerunRefusals -eq 0) "reruns $($fs.reruns) refused $($fs.rerunRefusals)"
+    Check 'the comment calls the shard known flaky and names the run' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*known flaky: Acceptance Tests `[shard 1/6`]*re-running the failed jobs once (workflow run*' }).Count -eq 1)
+    Check 'it was not parked' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' }).Count -eq 0)
+}
+
+'master red after the re-run: the item is parked master-broken once the new attempt failed [full]' = {
+    Fake 'config' @{ masterFlaky = $true; flakyRunSeconds = 3; rerunSeconds = 6; rerunConclusion = 'failure' } | Out-Null
+    $n = New-Item-Fake 'Broken master' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n; Do-DevComplete $n | Out-Null
+    $v = Do-Verdict $n $pr; $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    $parked = Wait-Until -Seconds 90 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' }).Count -gt 0 }
+    Check 'parked master-broken after the re-run failed' $parked
+    $c = @((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' })
+    Check 'the park says it failed after one re-run' ($c.Count -eq 1 -and $c[0].body -like '*also after one re-run of the failed jobs*') ($c | ForEach-Object { $_.body } | Out-String)
+    $ri = [array]::IndexOf([string[]]@((Get-FakeIssue $n).comments | ForEach-Object { "$($_.body)" }), [string]@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*re-running the failed jobs once*' } | ForEach-Object { "$($_.body)" })[0])
+    Check 'the re-run was asked for once and judged on its own attempt (the park came after it)' ((Get-FakeState).reruns -eq 1 -and $ri -ge 0) "reruns $((Get-FakeState).reruns)"
+}
+
+'code change, master red once: the skipped release check of the first attempt is no docs-only path; the item waits for its release [full]' = {
+    # items 272 and 276: a code change whose master Build failed and was re-run keeps the skipped release check of the first attempt (the Release
+    # workflow attaches its checks to master's head when it starts); settle read that as docs-only and moved the item to Done with nothing released
+    Fake 'config' @{ masterRed = $true; prodDelaySeconds = 3600 } | Out-Null
+    $n = New-Item-Fake 'Red code' 'x' $L; Do-TechnicalDesign $n 'w1' $false
+    $pr = Do-Development $n @('src/App/Red.cs'); Do-DevComplete $n | Out-Null
+    $v = Do-Verdict $n $pr; $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    # (the state is saved last, after the card move and the comment)
+    $q = Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Release Queue' -and "$(Pv (Pv (Pm-State $n) 'merge') 'awaiting')" -eq 'release-queue' }
+    $iss = Get-FakeIssue $n
+    Check 'after the re-run it waits in the Release Queue for the production deployment' $q "column $($iss.column)"
+    Check 'it is not closed and was never called docs-only' ($iss.open -and @($iss.comments | Where-Object { $_.body -like '*docs-only change has nothing to deploy*' }).Count -eq 0) "open $($iss.open)"
+    Check 'the release made after the re-run is the one that carries it' (@($iss.comments | Where-Object { $_.body -match 'release candidate \*\*2\.4\.\d+\*\* carries' }).Count -eq 1) ($iss.comments | ForEach-Object { $_.body } | Out-String)
+    $mg = Pv (Pm-State $n) 'merge'
+    Check 'the state says why it is not docs-only: the Build ran its code jobs' ((Pv $mg 'docs_only') -eq $false -and (Pv $mg 'docs_only_from') -eq 'build') ($mg | ConvertTo-Json -Compress)
+}
+
+'master-green ignores the checks of the workflows a Build starts: a failed architecture check parks nothing [full]' = {
+    $n = New-Item-Fake 'Docs with arch' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n; Do-DevComplete $n | Out-Null
+    $v = Do-Verdict $n $pr
+    Fake 'config' @{ masterArchitecture = 'failure' } | Out-Null   # the merge commit gets a failed architecture check at once
+    $m = F 'w1' @('merge', '--item', $n, '--pr', $pr); CheckExit 'merge' $m 0
+    Check 'the merge commit has the failed architecture check' (@(Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/commits/$((Get-FakePr $pr).mergeSha)/check-runs").check_runs | Where-Object { $_.name -eq 'architecture' -and $_.conclusion -eq 'failure' }).Count -eq 1
+    $done = Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Done' }
+    Check 'the docs-only item finished' $done "column $((Get-FakeIssue $n).column)"
+    Check 'it was never called broken' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*master is BROKEN*' -or $_.body -like '*master checks failed*' }).Count -eq 0)
+}
+
+'settle and checks under the item lock: a wait for checks moves no card that left Development, and a Release Queue card without a merge record is flagged once' = {
+    # issue 117: two passes 5 s apart moved 290 Development -> Functional Testing -> Release Queue with its pull request unmerged
+    $gh = @{ Authorization = 'Bearer fake-operator' }
+    $mut = 'mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }'
+    $move = { param($i, $col) Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/graphql" -Method POST -Headers $gh -Body (@{ query = $mut; variables = @{ p = 'p'; i = "card_$i"; f = 'f'; o = 'opt_' + ($col -replace ' ', '_') } } | ConvertTo-Json -Depth 5) -ContentType 'application/json' | Out-Null }
+    $n = New-Item-Fake 'Moved while its checks run' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n @('docs/trial.md') 'w1' 'green' 3600
+    $r = Do-DevComplete $n; CheckExit 'complete waits for the checks' $r 21 'accepted-checks-pending'
+    Check 'the wait records the column it began in' ("$((Pm-State $n).awaiting_checks.column)" -eq 'Development') ((Pm-State $n) | ConvertTo-Json -Compress -Depth 4)
+    & $move $n 'Functional Testing'
+    Check 'the wait ends without moving the card' (Wait-Until -Seconds 40 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -like '*ended without moving the card*' }).Count -eq 1 })
+    $st = Pm-State $n
+    Check 'the card stays where it was put, and the wait and its park are gone' ((Get-FakeIssue $n).column -eq 'Functional Testing' -and -not $st.ContainsKey('awaiting_checks') -and -not ($st.ContainsKey('park') -and "$($st.park.reason)" -eq 'development:awaiting-checks')) ($st | ConvertTo-Json -Compress -Depth 4)
+    $m = New-Item-Fake 'In the Release Queue, unmerged' 'x' $L 'Release Queue'
+    Check 'an open Release Queue card without a merge record is flagged' (Wait-Until -Seconds 30 { @((Get-FakeIssue $m).comments | Where-Object { $_.body -match 'plant event=flagged' -and $_.body -like '*release-queue-without-merge*' }).Count -eq 1 })
+    Start-Sleep -Seconds 6
+    Check 'once, and nothing moves it' (@((Get-FakeIssue $m).comments | Where-Object { $_.body -match 'plant event=flagged' }).Count -eq 1 -and (Get-FakeIssue $m).column -eq 'Release Queue')
 }
 
 'code change: release candidate, Release Queue, production, Done [full]' = {

@@ -36,7 +36,19 @@ sealed partial class Plant
                 next.Add((item, QueueRelease(o["release"]?.ToString()), since));
                 if (next.Count >= ReleaseQueueCap) break;
             }
+            // issue 96: an item that two sweeps in a row found in the Release Queue has no owner work left (item.complete was due when it got there):
+            // a missed item.complete must not leave its owner and accepted assignment behind, holding the session back from session.end
+            foreach (var q in next.Where(q => releaseQueue.Any(p => p.Item == q.Item)))
+            {
+                var had = ownerOf.TryGetValue(q.Item, out var ow) ? ow : null;
+                var gone = assignments.Where(kv => kv.Value.Item == q.Item && !IsQc(kv.Value)).Select(kv => kv.Key).ToList();
+                rqOwnerDropped.Add(q.Item);
+                if (had == null && gone.Count == 0 && !botOf.ContainsKey(q.Item)) continue;
+                DropOwner(q.Item); botOf.Remove(q.Item); foreach (var k in gone) assignments.Remove(k); staleDropped += gone.Count;
+                Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["plant"] = "release-queue-owner-dropped", ["item"] = q.Item, ["owner"] = had ?? "", ["assignments"] = gone.Count }.ToJsonString());
+            }
             releaseQueue.Clear(); releaseQueue.AddRange(next.OrderBy(q => q.Item));
+            rqOwnerDropped.IntersectWith(releaseQueue.Select(q => q.Item));
             foreach (var k in promotionRequests.Keys.Where(r => releaseQueue.All(q => q.Release != r)).ToList()) promotionRequests.Remove(k);
             // one operator line per release whose waiting items changed; a release that left the queue is forgotten, so its return is announced again
             var byRelease = releaseQueue.Where(q => q.Release != "").GroupBy(q => q.Release).ToDictionary(g => g.Key, g => g.Select(q => q.Item).OrderBy(i => i).ToList(), StringComparer.Ordinal);
@@ -110,5 +122,84 @@ sealed partial class Plant
     {
         d.ReleaseQueue.AddRange(releaseQueue);
         d.PromotionRequested = promotionRequests.Count > 0;
+    }
+
+    // Issue 65: the items the sweep holds back because an item they depend on is neither merged nor closed (sync-board `held`), with since when the
+    // gateway has seen each held (kept across sweeps while the item stays held). Replaced by every sweep; shown in the status as plant.held.
+    readonly Dictionary<int, (string Code, string Column, int[] On, DateTime Since)> held = new();
+    // scope (issue 92): the items of an incremental pass; the held items outside it are kept as they were
+    public void SetHeld(JsonArray? list, IReadOnlyCollection<int>? scope = null)
+    {
+        if (list == null) return;
+        lock (gate)
+        {
+            var now = DateTime.UtcNow; var next = new Dictionary<int, (string, string, int[], DateTime)>();
+            if (scope != null) foreach (var kv in held) if (!scope.Contains(kv.Key)) next[kv.Key] = kv.Value;
+            foreach (var x in list)
+            {
+                if (x is not JsonObject o || !(o["item"] is JsonValue iv && iv.TryGetValue<int>(out var item) && item >= 1)) continue;
+                var on = (o["on"] as JsonArray ?? new JsonArray()).Select(v => int.TryParse(v?.ToString(), out var d) ? d : 0).Where(d => d > 0).ToArray();
+                var code = o["code"]?.ToString() ?? "depends-on";
+                next[item] = (code, o["column"]?.ToString() ?? "", on, held.TryGetValue(item, out var was) && was.Code == code ? was.Since : now);
+            }
+            held.Clear(); foreach (var kv in next) held[kv.Key] = kv.Value;
+        }
+    }
+    public JsonArray HeldJson()
+    {
+        lock (gate)
+            return new JsonArray(held.OrderBy(kv => kv.Key).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key, ["code"] = GatedCode(kv.Value.Code), ["column"] = Gated(kv.Value.Column),
+                ["on"] = new JsonArray(kv.Value.On.Select(d => (JsonNode)d).ToArray()), ["since"] = kv.Value.Since.ToString("o") }).ToArray());
+    }
+
+    // Issue 99: what the sweep read of parks and of items it saw once (unconfirmed), for the status's list of unowned items and why each waits
+    readonly Dictionary<int, (string Column, string Code, string Since, string Until)> sweepParks = new();
+    readonly HashSet<int> sweepUnconfirmed = new();
+    public void SetSweepFacts(JsonArray? parks, JsonArray? unconfirmed)
+    {
+        lock (gate)
+        {
+            if (parks != null)
+            {
+                sweepParks.Clear();
+                foreach (var x in parks)
+                    if (x is JsonObject o && o["item"] is JsonValue iv && iv.TryGetValue<int>(out var item) && item >= 1 && sweepParks.Count < ReleaseQueueCap)
+                        sweepParks[item] = (Gated(o["column"]?.ToString()), GatedCode(o["code"]?.ToString()), Time(o["since"])?.ToString("o") ?? "", Time(o["until"])?.ToString("o") ?? "");
+            }
+            if (unconfirmed != null)
+            {
+                sweepUnconfirmed.Clear();
+                foreach (var x in unconfirmed) if (int.TryParse(x?.ToString(), out var u) && u >= 1) sweepUnconfirmed.Add(u);
+            }
+        }
+    }
+
+    // Issue 99: every unowned item the factory knows of, with why it waits, so nobody has to read the item's comments. One row per item, the first
+    // that applies: parked (code, since, until), held (depends-on), offered (to whom, until when), waiting (the waiting code), unconfirmed (seen once
+    // on the board, offered at the next sweep), release-queue (merged, waiting for production). Orphans (issue 97): an unowned item past the intake
+    // column, with how long it has been without an owner.
+    public JsonArray UnownedJson()
+    {
+        lock (gate)
+        {
+            var now = DateTime.UtcNow; var rows = new SortedDictionary<int, JsonObject>();
+            void Add(int item, JsonObject o) { if (!ownerOf.ContainsKey(item) && !rows.ContainsKey(item)) { o["item"] = item; rows[item] = o; } }
+            foreach (var (item, h) in held) Add(item, new JsonObject { ["state"] = "held", ["code"] = GatedCode(h.Code), ["column"] = Gated(h.Column), ["on"] = new JsonArray(h.On.Select(d => (JsonNode)d).ToArray()), ["since"] = h.Since.ToString("o") });
+            foreach (var a in assignments.Values.Where(a => a.Kind == "own-item" && !a.Accepted && !IsQc(a)).OrderBy(a => a.Item))
+            {
+                var o = a.Worker != ""
+                    ? new JsonObject { ["state"] = "offered", ["worker"] = a.Worker, ["until"] = a.AckBy.ToString("o"), ["column"] = Gated(a.Column) }
+                    : new JsonObject { ["state"] = "waiting", ["code"] = GatedCode(a.WaitingCode) is { Length: > 0 } wc ? wc : "not-yet-offered", ["since"] = a.WaitingSince?.ToString("o"), ["column"] = Gated(a.Column) };
+                if (orphanSince.TryGetValue(a.Item, out var os)) { o["orphanSince"] = os.ToString("o"); o["orphanMinutes"] = (int)(now - os).TotalMinutes; }
+                Add(a.Item, o);
+            }
+            // (an assignment means the sweep offered the item, so its park is gone: a park row of the same sweep may be stale)
+            foreach (var (item, p) in sweepParks) Add(item, new JsonObject { ["state"] = "parked", ["code"] = p.Code, ["column"] = p.Column, ["since"] = p.Since, ["until"] = p.Until });
+            // (the sweep's unconfirmed also holds items whose PASS waits for the gateway's merge: those say so)
+            foreach (var (item, p) in passUnmerged) Add(item, new JsonObject { ["state"] = "pass-unmerged", ["code"] = p.Code, ["since"] = p.Since.ToString("o"), ["pr"] = p.Pr });
+            foreach (var item in sweepUnconfirmed) Add(item, new JsonObject { ["state"] = "unconfirmed", ["code"] = "seen-once" });
+            foreach (var q in releaseQueue) Add(q.Item, new JsonObject { ["state"] = "release-queue", ["release"] = q.Release, ["since"] = q.Since.ToString("o") });
+            return new JsonArray(rows.Values.Select(r => (JsonNode)r).ToArray());
+        }
     }
 }

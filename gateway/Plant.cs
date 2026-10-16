@@ -16,8 +16,16 @@ sealed class WorkerInfo
     public Channel<(long, string)>? Out;
     public int Missed;                                        // offers in a row this session let lapse (issue 31); any successful verb resets it
     public DateTime CoolUntil = DateTime.MinValue;            // until then it is offered no new work (unpinned)
+    // issue 100: an item taken back from the session (its client accepted it and the session never started, or it did not answer item.check) is a
+    // miss too; TakeBackMisses counts those among the misses in a row. A streak of OfferMissLimit misses with a take-back in it blocks the session:
+    // it is offered nothing, pinned items included, until it calls a verb of its own (the client's own accept is not one) or a new session of the
+    // name registers. BlockedItem is the item of the take-back that blocked it (for the plant event and the digest).
+    public int TakeBackMisses;
+    public DateTime? BlockedSince;
+    public int BlockedItem;
     public List<(long Id, string Json)> Buffer = new();      // item triggers for replay; the event counter itself is the name's Recipient.Next
     public string Model = "", Effort = "";                   // declared at registration (worker-messaging.md 2.2), never verified
+    public string Runtime = "local";                          // from the credential: a w2 names its runtime, a w1 is always local (cloud-worker-runtimes.md 4.1)
     // QC (design pr-qc-environment.md 4.2): environments this session may run at once, the address it declared for URL checks, free memory from its heartbeat
     public int QcCapacity = 1;
     public string QcAddress = "";
@@ -34,6 +42,12 @@ sealed class WorkerInfo
     // number a session.end event was sent for; the client writes the launcher's end marker on that event, so the loop does not rely on the model
     public DateTime? SpentIdleSince;
     public int SessionEndSent;
+    public DateTime? DisconnectedAt;                          // when its stream ended (cleared by the next registration): its build slots go after a while
+    // the launcher watchdog (docs/launcher.md): since when this session is spent and owns nothing, counted across reconnects (a reconnect is no
+    // progress), the session number a session.restart was sent for, and a reason noted elsewhere (a repeated question) for the next tick to send
+    public DateTime? StuckSince;
+    public int RestartSent;
+    public string RestartReason = "", RestartDetail = "";
 }
 
 sealed class Assignment
@@ -75,9 +89,34 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // issue 72: how long a spent session may own nothing (and have no offer of its item open) before it is told session.end; the pause covers a
     // column move in which the same session is offered its item again (timing.sessionEndGraceSeconds, FACTORY_TIMING_sessionEndGraceSeconds)
     public double SessionEndGraceSeconds { get; set; } = 90;
+    // issue 97: the first column of the factory (new work); offers of later columns (work already started, orphaned by a take-back, a park or a lost
+    // session) go first, and an unowned item past it is an orphan whose age the status shows
+    public string IntakeColumn { get; set; } = "Technical Design";
+    readonly Dictionary<int, DateTime> orphanSince = new();
+    // issue 98: a pinned item that has waited this long for its pinned worker (away, at capacity, spent) is offered to any eligible worker, once
+    // per pin, with a journal line (timing.pinFallbackMinutes; 0 is off). pinFallback: the items whose pin is set aside, with the pin it was.
+    public double PinFallbackMinutes { get; set; } = 30;
+    readonly Dictionary<int, string> pinFallback = new();
+    // since when each pinned item has waited with its current pin (the wait counts from the pin, not from an unpinned wait before it)
+    readonly Dictionary<int, (string Pin, DateTime Since)> pinWaitSince = new();
+
+    // the launcher watchdog: a session still connected this long after it became spent and owns nothing (session.end was not acted on, or a stale
+    // accepted offer kept it from being sent) is told session.restart; 0 switches it off (timing.sessionRestartMinutes)
+    public double SessionRestartMinutes { get; set; } = 10;
+    // a session that asks the same question more than this many times is told session.restart (timing.sessionRepeatQuestionLimit); 0 is off
+    public int RepeatQuestionLimit { get; set; } = 2;
+    readonly List<(DateTime At, string Name, int Session, string Reason)> restarts = new();
+    long restartsSent;
     public string Epoch => store.Epoch;
     readonly Dictionary<string, WorkerInfo> workers = new();
     readonly Dictionary<string, Assignment> assignments = new();
+    // issue 96: the accepted assignments (ids) the last sweep saw stale, and how many were dropped
+    readonly HashSet<string> staleSeen = new();
+    long staleDropped;
+    // issue 96: items whose owner was dropped because they sit in the Release Queue (SetReleaseQueue); forgotten when they leave it
+    readonly HashSet<int> rqOwnerDropped = new();
+    // when an item's owner released it (kept an hour): a sweep that read the claim before the release does not put the owner back (as mergedAt, issue 107)
+    readonly Dictionary<int, DateTime> releasedAt = new();
     readonly Dictionary<int, string> ownerOf = new(), botOf = new(), lastTrigger = new();
     // Plant data the digest is computed from (worker-messaging.md 3.9, step 5a), kept only while messaging or the supervisor is on: when an owner was
     // recorded (the grace of the sweep's replacement), what the sweep said of each owned item, the last request per (name, item), and the rings of
@@ -106,7 +145,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     readonly DateTime startedAt = DateTime.UtcNow;
     // An item loses its owner: everything the plant kept about that ownership goes with it, so the next owner starts clean (it must not inherit a
     // sweep that missed the previous one, nor its lease).
-    void DropOwner(int item) { ownerOf.Remove(item); ownedMisses.Remove(item); ownedSince.Remove(item); ownedInfo.Remove(item); lastRouted.Remove(item); reviews.Remove(item); }
+    // Its build slots go too (issue 108): a take-back, a release, the item's completion and every drop of an owner come through here.
+    void DropOwner(int item) { var was = ownerOf.TryGetValue(item, out var o) ? o : null; ownerOf.Remove(item); ownedMisses.Remove(item); ownedSince.Remove(item); ownedInfo.Remove(item); lastRouted.Remove(item); reviews.Remove(item); if (was != null) FreeItemSlots(item, was, "owner-dropped"); }
     static readonly Regex CodeRx = new(@"^[A-Za-z0-9: ._-]{1,60}\z", RegexOptions.CultureInvariant);
     // A column or code that may enter the digest: the pattern of 3.9, or nothing.
     static string Gated(string? s) => s != null && CodeRx.IsMatch(s) ? s : "";
@@ -138,39 +178,92 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // ---- registry ---------------------------------------------------------------------------------------------------------------------
     // after: the cursor of this stream. With messaging off it is today's bare number (-1: nothing is replayed). With messaging on the caller has
     // parsed "<epoch>.<seq>" and passes 0 for another epoch, a bare number or no header, so the whole Buffer and every undelivered message replay.
-    public (WorkerInfo W, Channel<(long, string)> Ch, List<(long, string)> Replay) Register(string name, string type, IEnumerable<string> caps, int capacity, IEnumerable<string> roles, long after, int qcCapacity = 1, string qcAddress = "", bool qcProfile = false, bool messagingClient = false, string model = "", string effort = "", bool newSession = true)
+    public (WorkerInfo W, Channel<(long, string)> Ch, List<(long, string)> Replay) Register(string name, string type, IEnumerable<string> caps, int capacity, IEnumerable<string> roles, long after, int qcCapacity = 1, string qcAddress = "", bool qcProfile = false, bool messagingClient = false, string model = "", string effort = "", bool newSession = true, bool handover = false, string runtime = "local")
     {
         lock (gate)
         {
+            if (handover) handoverClients.Add(name); else handoverClients.Remove(name);
             if (!workers.TryGetValue(name, out var w)) workers[name] = w = new WorkerInfo { Name = name };
-            w.Missed = 0; w.CoolUntil = DateTime.MinValue;   // a (re)registration answers: offers lapsed while the gateway or the session was away do not count
+            // a (re)registration answers: offers lapsed while the gateway or the session was away do not count. A streak with a take-back in it is the
+            // session's, not the stream's: a reconnect of the same session keeps it (and a block), a new session of the name starts clean (issue 100).
+            if (newSession || w.Session == 0 || w.TakeBackMisses == 0) w.Missed = 0;
+            w.CoolUntil = DateTime.MinValue;
             if (newSession || w.Session == 0)
             {   // a new session starts with what the name still owns: it resumes that item and is given no other
+                w.TakeBackMisses = 0;
+                if (w.BlockedSince != null) Unblock(w, "new-session");
                 w.Session++; w.SessionStarted = DateTime.UtcNow;
                 w.SessionItems = new(ownerOf.Where(kv => kv.Value == name).Select(kv => kv.Key));
+                w.StuckSince = null; w.RestartReason = ""; w.RestartDetail = "";
                 w.Sessions.Add((w.Session, w.SessionStarted, w.SessionItems.ToList()));
                 if (w.Sessions.Count > 10) w.Sessions.RemoveAt(0);
             }
             w.Type = type; w.Caps = new(caps); w.Capacity = capOverride.TryGetValue(name, out var capSet) ? capSet : Math.Max(1, capacity); w.Roles = new(roles.Any() ? roles : new[] { "owner" });
             w.QcCapacity = Math.Clamp(qcCapacity, 1, 2); w.QcAddress = qcAddress; w.QcProfile = qcProfile;
-            w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = false;
+            w.Connected = true; w.LastSeen = DateTime.UtcNow; w.Draining = drainedNames.Contains(name) || mgrDrained.Contains(name);   // issue 80: only the operator clears its drain (and the plant manager its own, Manager.cs)
+            w.DisconnectedAt = null;
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
-            w.Model = model; w.Effort = effort;
+            w.RestartSent = 0;                                // and session.restart again, if it is still due
+            w.Model = model; w.Effort = effort; w.Runtime = runtime;
+            if (runtime != "local") Runtimes?.Registered(name);
             // the older stream of this name is told it was replaced before it ends, so its client exits instead of reconnecting (4.6, failure mode 30)
             if (Msg.On && w.Out != null) w.Out.Writer.TryWrite((0, ReplacedJson(name)));
             w.Out?.Writer.TryComplete();
             w.Out = Channel.CreateUnbounded<(long, string)>();
             var replay = Msg.On ? MergedReplay(name, w.Buffer, after, messagingClient) : w.Buffer.Where(b => after >= 0 && b.Id > after).ToList();
+            // issue 106: a new session (a stream without a cursor) is not replayed the triggers of items the name no longer owns: they are the
+            // history of an earlier session's items (a reconnect with a cursor still gets every trigger it missed). Messages are always replayed.
+            if (newSession) replay = replay.Where(rp => !StaleTrigger(rp.Item2, name)).ToList();
             if (Msg.On) { var rec = store.Get(name); rec.MessagingClient = messagingClient; rec.GoneAt = null; rec.Via = "stream"; if (Msg.PresenceAllowed(name)) rec.LastHeard = DateTime.UtcNow; }
             // what this name owns, and any assignment still waiting for its answer, is told again after a (re)connect
             var mine = ownerOf.Where(kv => kv.Value == name).Select(kv => kv.Key).ToList();
             if (mine.Count > 0) Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "ownership.restored", ["items"] = new JsonArray(mine.Select(i => (JsonNode)i).ToArray()) }.ToJsonString(), false);
             foreach (var a in assignments.Values.Where(a => a.Worker == name && !a.Accepted)) Push(w, AssignedJson(a), false);
+            ResendAccepted(w);
             return (w, w.Out, replay);
         }
     }
 
-    public void Disconnect(WorkerInfo w, Channel<(long, string)> ch) { lock (gate) { if (w.Out == ch) { w.Connected = false; w.Out = null; if (Msg.On) store.Get(w.Name).GoneAt = DateTime.UtcNow; } } }
+    // Issue 81: an owner whose item.assigned (or the client's item.accepted) was lost, in a gateway restart or a dropped stream, would only renew its
+    // claim and never work the item. Every (re)registration of the name, a new session included, and the snapshot restore resend item.assigned
+    // for each accepted own-item assignment of an item the name still owns, with mode resume and resent: true (the client saves the token and does
+    // not accept again; the session's own accept is idempotent). Only while the name owns the item: an owner that was dropped (merged and done,
+    // released, taken back, reassigned) has no accepted assignment left (issue 74) and is told nothing, so a finished item is never revived.
+    void ResendAccepted(WorkerInfo w)
+    {
+        foreach (var a in assignments.Values.Where(a => a.Accepted && a.Worker == w.Name && a.Kind == "own-item" && !IsQc(a) && ownerOf.TryGetValue(a.Item, out var o) && o == w.Name).ToList())
+        {
+            if (JsonNode.Parse(AssignedJson(a)) is not JsonObject j) continue;
+            j["mode"] = "resume"; j["resent"] = true; j["accepted"] = true;
+            Push(w, j.ToJsonString(), false);
+        }
+    }
+
+    public void Disconnect(WorkerInfo w, Channel<(long, string)> ch) { lock (gate) { if (w.Out == ch) { w.Connected = false; w.Out = null; w.DisconnectedAt = DateTime.UtcNow; if (Msg.On) store.Get(w.Name).GoneAt = DateTime.UtcNow; } } }
+
+    // ---- the hand-over to a newer gateway process (Leader.cs, issue 94) -----------------------------------------------------------------------
+    // The names whose stream client reconnects on stream.replaced with reconnect (it registered with handover=1); an older client exits on any
+    // stream.replaced, so its stream is only ended (it reconnects as after any drop).
+    readonly HashSet<string> handoverClients = new(StringComparer.Ordinal);
+    public void NoteHandover(string name, bool on) { lock (gate) { if (on) handoverClients.Add(name); else handoverClients.Remove(name); } }
+    // Ends every stream of this process: workers and the supervisor get stream.replaced (reconnect) first when their client knows it; the operator
+    // session's stream is ended (its client reconnects). Returns how many streams were ended.
+    public int HandOver(string reason)
+    {
+        lock (gate)
+        {
+            string Json(string name) => new JsonObject { ["provider"] = "gateway", ["event"] = "stream.replaced", ["name"] = name, ["code"] = "gateway-replaced", ["reconnect"] = true, ["reason"] = reason }.ToJsonString();
+            var n = 0;
+            foreach (var w in workers.Values.Where(w => w.Out != null))
+            {
+                if (handoverClients.Contains(w.Name)) w.Out!.Writer.TryWrite((0, Json(w.Name)));
+                w.Out!.Writer.TryComplete(); n++;
+            }
+            if (store.Slot is { Out: not null } sl) { if (handoverClients.Contains(sl.Name)) sl.Out.Writer.TryWrite((0, Json(sl.Name))); sl.Out.Writer.TryComplete(); n++; }
+            if (opSlot is { Out: not null } op) { op.Out.Writer.TryComplete(); n++; }
+            return n;
+        }
+    }
 
     // ---- messaging: replay, delivery, presence, the supervisor slot (worker-messaging.md 3.4 to 3.6, 4.6). Every method holds the gate. -----
     static string ReplacedJson(string name) => new JsonObject { ["provider"] = "gateway", ["event"] = "stream.replaced", ["name"] = name, ["reason"] = "a newer stream registered with this name; this one ends", ["exit"] = 40 }.ToJsonString();
@@ -179,6 +272,17 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     {
         if (JsonNode.Parse(json) is not JsonObject o) return json;
         o["replayed"] = true; return o.ToJsonString();
+    }
+
+    // issue 106: a trigger of an item this name does not own (a message is never one): an earlier session's history, not replayed to a new session
+    bool StaleTrigger(string json, string name)
+    {
+        try
+        {
+            if (JsonNode.Parse(json) is not JsonObject o || o["event"]?.ToString() == "message.received") return false;
+            return o["item"] is JsonValue iv && iv.TryGetValue<int>(out var item) && item > 0 && !(ownerOf.TryGetValue(item, out var on) && on == name);
+        }
+        catch { return false; }
     }
 
     // The replay snapshot of one (re)connect: the Buffer's triggers and the undelivered inbox entries above the cursor, merged by seq. Taken in the
@@ -300,6 +404,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 q.QFlags = s.Event["flags"] is JsonArray qf ? qf.Select(f => f!.ToString()).ToArray() : Array.Empty<string>();
                 // a question of the item's owner becomes moot when it loses the item before the question is delivered (3.8)
                 q.OwnedAtAsk = s.Item is int qi && ownerOf.TryGetValue(qi, out var qo) && qo == s.From;
+                NoteRepeatedQuestion(s.From, q);
                 return o;
             }
             // the recipients: the one named, or derived for a thread (the item's owner and its QC worker, never its inspector) and for a
@@ -780,6 +885,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         foreach (var k in mergeRefused.Where(kv => (now - kv.Value.At).TotalMinutes > Msg.NoteMinutes).Select(kv => kv.Key).ToList()) mergeRefused.Remove(k);
         foreach (var (item, mr) in mergeRefused.OrderBy(kv => kv.Key)) d.MergeRefused.Add((item, mr.RoundTrip, mr.At));
         AddPassUnmerged(d, now);
+        // (a blocked session that went away for good is no more news: only the connected ones are reported)
+        foreach (var w in workers.Values.Where(w => Blocked(w) && w.Connected && Auth.ValidName(w.Name)).OrderBy(w => w.Name, StringComparer.Ordinal)) d.BlockedSessions.Add((w.Name, w.BlockedItem, w.BlockedSince!.Value));
         if (returned.Count > 0 && (now - startedAt).TotalMinutes < Msg.RestartMinutes)
             d.Restart = (returned.Count, d.Owned.Select(o => o.Holder).Distinct().Count(n => !d.Sessions.Any(x => x.Name == n && x.Connected)), (int)(now - startedAt).TotalMinutes);
         foreach (var a in assignments.Values.Where(a => a.WaitingSince != null && a.Worker == "" && !a.Accepted && !IsQc(a)).OrderBy(a => a.Item)) d.Waiting.Add((a.Item, GatedCode(a.WaitingCode), a.WaitingSince!.Value));
@@ -1185,9 +1292,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     // The sweep's `owned` replaces what the plant believes of own-item owners (3.9): a listed claim refreshes column, lease, heartbeat and park; an
     // owner the sweep no longer lists (an idle release, a card moved away by a person) is dropped once the grace from its accept has passed. Not
-    // dropped: an item whose merge is settling (its claim ended at the merge, its owner still waits for item.complete), an item the sweep could
-    // not read this time, and an owner set through the test seam.
-    void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now)
+    // dropped: an item the sweep could not read this time (`keep`), and an owner set through the test seam. An item whose merge is settling has no
+    // owner any more: it was released at item.merged (Merged).
+    // scope (issue 92): an incremental pass read only these items; the owners of every other item are not touched (nor their counts of misses)
+    void ReplaceOwned(JsonObject owned, IEnumerable<int> keep, DateTime now, IReadOnlyCollection<int>? scope = null)
     {
         var kept = new HashSet<int>(keep);
         var listed = new Dictionary<int, OwnedInfo>();
@@ -1199,6 +1307,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
         foreach (var (item, name) in ownerOf.ToList())
         {
+            if (scope != null && !scope.Contains(item)) continue;
             if (listed.TryGetValue(item, out var li) && li.Holder == name) { ownedInfo[item] = li; ownedMisses.Remove(item); continue; }
             if (kept.Contains(item) || seamOwned.Contains(item)) { ownedMisses.Remove(item); continue; }
             if (!ownedSince.TryGetValue(item, out var since)) ownedSince[item] = since = now;
@@ -1207,6 +1316,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             var misses = ownedMisses[item] = ownedMisses.GetValueOrDefault(item) + 1;
             if (misses < 2) continue;
             DropOwner(item);
+            // issue 74: an accepted own-item assignment of the dropped owner goes with it, so "accepted" always means "owned": a new session of the name
+            // is not resent an item it no longer owns (ResendAccepted), and the next sweep offers the item afresh instead of finding the session gone
+            if (assignments.TryGetValue($"{item}|own-item|owner", out var acc) && acc.Accepted && acc.Worker == name) assignments.Remove($"{item}|own-item|owner");
         }
         foreach (var k in ownedInfo.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) ownedInfo.Remove(k);
         foreach (var k in ownedSince.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) ownedSince.Remove(k);
@@ -1434,16 +1546,35 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             var closed = false;
             if (workers.TryGetValue(name, out var w))
             {
-                if (w.Out != null) { closed = true; w.Out.Writer.TryComplete(); w.Out = null; w.Connected = false; if (Msg.On) store.Get(name).GoneAt = DateTime.UtcNow; }
+                if (w.Out != null) { closed = true; w.Out.Writer.TryComplete(); w.Out = null; w.Connected = false; w.DisconnectedAt = DateTime.UtcNow; if (Msg.On) store.Get(name).GoneAt = DateTime.UtcNow; }
                 foreach (var a in assignments.Values.Where(a => a.Worker == name && !a.Accepted)) { a.Worker = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = a.Pin != "" ? "pinned-unavailable" : "no-session"; }
             }
             if (store.Slot is { } s && s.Name == name && s.Out != null) { closed = true; s.Out.Writer.TryComplete(); s.Out = null; store.Get(name).GoneAt = DateTime.UtcNow; }
             if (RevokeOperator(name)) closed = true;
+            FreeNameSlots(name, "revoked");   // its credentials are refused from now on: it cannot release them (issue 108)
+            if (RevokeKeeper(name)) closed = true;
             return closed;
         }
     }
 
-    public bool SetDraining(string name, bool on) { lock (gate) { if (!workers.TryGetValue(name, out var w)) return false; w.Draining = on; return true; } }
+    // Issue 82: parks released (unpark) or removed from a closed item by the sweep leave the digest's parks list at once, not 24 hours later.
+    public void ClearParks(IEnumerable<int> items) { var set = items.Where(i => i > 0).ToHashSet(); if (set.Count == 0) return; lock (gate) parks.RemoveAll(x => set.Contains(x.Item)); }
+    // Issue 80: the operator's drain belongs to the name. It holds across reconnects, new sessions of the name (the launcher) and a graceful restart
+    // (plant snapshot) until the operator resumes the name. A session's own drain (end-session, docs/launcher.md) is the session's: the next
+    // registration of the name clears it, so the launcher's next session is offered work. A session cannot resume an operator's drain.
+    readonly HashSet<string> drainedNames = new();
+    public bool SetDraining(string name, bool on, bool byOperator = false)
+    {
+        lock (gate)
+        {
+            if (!workers.TryGetValue(name, out var w)) return false;
+            // the operator's resume lifts the plant manager's drain of the name too (Manager.cs); a session's own resume lifts neither
+            if (byOperator) { if (on) drainedNames.Add(name); else { drainedNames.Remove(name); mgrDrained.Remove(name); } }
+            w.Draining = on || drainedNames.Contains(name) || mgrDrained.Contains(name);
+            return true;
+        }
+    }
+    public bool IsDraining(string name) { lock (gate) return workers.TryGetValue(name, out var w) && w.Draining; }
 
     long Push(WorkerInfo w, string json, bool toBuffer = true)
     {
@@ -1462,6 +1593,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         {
             var json = evt.ToJsonString();
             OperatorRouted(item, evt);
+            if (evt["event"]?.ToString() == "item.parked") KeeperPark(item, evt["reason"]?.ToString() ?? "");
             if (Msg.On && ownerOf.ContainsKey(item)) lastRouted[item] = evt["event"]?.ToString() ?? "";
             if (Msg.On && evt["event"]?.ToString() == "item.parked") { parks.Add((DateTime.UtcNow, item, GatedCode(evt["reason"]?.ToString()))); if (parks.Count > 200) parks.RemoveAt(0); }
             if (!mailboxes.TryGetValue(item, out var box)) mailboxes[item] = box = new();
@@ -1508,7 +1640,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     int Owned(string name) => ownerOf.Count(kv => kv.Value == name) + botOf.Count(kv => kv.Value == name) + assignments.Values.Count(a => a.Worker == name && !a.Accepted && !IsQc(a));
     // the session already held a work item, owns one (after a gateway restart the sweep fills ownerOf after the registration), or has an open offer of one, and this is another one (an offer of the same item again, to resume it,
     // is not refused); open offers count so that a session with capacity above 1 is never offered two items at once
-    bool SessionSpent(WorkerInfo w, Assignment a) => OneItemPerSession && a.Kind == "own-item"
+    bool SessionSpent(WorkerInfo w, Assignment a) => (OneItemPerSession || RuntimeWorker(w)) && a.Kind == "own-item"
         && (w.SessionItems.Any(i => i != a.Item) || ownerOf.Any(kv => kv.Value == w.Name && kv.Key != a.Item) || assignments.Values.Any(o => o != a && o.Kind == "own-item" && o.Worker == w.Name && !o.Accepted && o.Item != a.Item));
     void NoteSessionItem(string name, int item)
     {
@@ -1523,13 +1655,21 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             if (o.Pin == "") o.Declined.Add(name);
         }
     }
+    // auto-unpark (sync-board input free_workers): sessions that could take a work item now, as Choose would see them for an unpinned item
+    public int FreeOwnerSessions()
+    {
+        lock (gate)
+            return workers.Values.Count(w => w.Connected && w.Roles.Contains("owner") && !w.Draining && !Cooling(w) && Owned(w.Name) + PinnedWaiting(w.Name) < w.Capacity
+                && !(OneItemPerSession && w.SessionItems.Count > 0) && HostHasRoom(w.Name));
+    }
     int QcActive(string name) => assignments.Values.Count(a => IsQc(a) && a.Worker == name);
     // pinned items that wait for this worker with no offer out (an offer out is counted by Owned already)
     int PinnedWaiting(string name) => assignments.Values.Count(a => !IsQc(a) && !a.Accepted && a.Worker == "" && a.Pin == name);
 
     (WorkerInfo? Worker, string Why) Choose(Assignment a, string? pin)
     {
-        var ws = workers.Values.Where(w => w.Connected).ToList();
+        // a runtime worker takes only the item it was started for (its name is the pin), never an unpinned one
+        var ws = workers.Values.Where(w => w.Connected && (!RuntimeWorker(w) || w.Name == pin)).ToList();
         // chooseCode: the reason as one of six codes (session-spent: one item per session), for WaitingCode (the pinned worker's name comes from a GitHub label and is not carried)
         chooseCode = "no-session";
         if (ws.Count == 0) return (null, "no worker session is subscribed");
@@ -1541,13 +1681,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         if (!string.IsNullOrEmpty(pin))
         {
             chooseCode = "pinned-unavailable";
-            var p = withRole.FirstOrDefault(w => w.Name == pin && !w.Draining);
+            var p = withRole.FirstOrDefault(w => w.Name == pin && !w.Draining && !Blocked(w));
             if (p != null && SessionSpent(p, a)) { chooseCode = "session-spent"; return (null, $"the pinned worker '{pin}' already held a work item in this session; the item waits for its next session"); }
             return p != null && Owned(p.Name) < p.Capacity && HostHasRoom(p.Name) ? (p, "") : (null, $"the pinned worker '{pin}' is not available");
         }
-        var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name) && !Cooling(w)).ToList();
+        var live = withRole.Where(w => !w.Draining && !a.Declined.Contains(w.Name) && !Cooling(w) && !Blocked(w)).ToList();
         chooseCode = "all-draining-or-declined";
-        if (live.Count == 0) return (null, "every eligible session is draining, has declined, or is cooling down after offers it let lapse");
+        if (live.Count == 0) return (null, "every eligible session is draining, has declined, is cooling down after offers it let lapse, or is blocked after items were taken back from it");
         // a slot that a pinned item waits for is that item's (issue 46): an unpinned item takes only the slots no waiting pin claims
         var free = live.Where(w => Owned(w.Name) + PinnedWaiting(w.Name) < w.Capacity).ToList();
         chooseCode = "at-capacity";
@@ -1567,8 +1707,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         var o = new JsonObject
         {
             ["provider"] = "gateway", ["event"] = "item.assigned", ["item"] = a.Item, ["column"] = a.Column, ["job"] = a.Kind, ["role"] = a.Role, ["mode"] = a.Mode, ["reason"] = a.Reason,
-            ["pr"] = a.Pr, ["assignment"] = a.Id, ["ackBySeconds"] = ackSeconds,
-            ["token"] = Auth.MintItemToken(secret, a.Item, a.Role, a.Id, a.Worker, IsQc(a) ? TimeSpan.FromHours(QcCfg.TokenHours) : TimeSpan.FromHours(12), Rev.Of(a.Worker))
+            ["pr"] = a.Pr, ["assignment"] = a.Id, ["ackBySeconds"] = AckFor(a.Worker),
+            ["token"] = Auth.MintItemToken(secret, a.Item, a.Role, a.Id, a.Worker, IsQc(a) ? TimeSpan.FromHours(QcCfg.TokenHours) : TimeSpan.FromHours(12), Rev.Of(a.Worker),
+                workers.TryGetValue(a.Worker, out var aw) && aw.Runtime != "local" ? aw.Runtime : "")
         };
         if (IsQc(a)) { o["sha"] = a.Sha; o["env_id"] = a.EnvId; }
         return o.ToJsonString();
@@ -1663,6 +1804,11 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
     }
     public bool IsConnected(string name) { lock (gate) return workers.TryGetValue(name, out var w) && w.Connected; }
+    // a name that registered at least once since the start (connected or not)
+    // git-credential (cloud-worker-runtimes.md 2.6): only while the name owns the item through an accepted own-item assignment; an item token
+    // outlives its offer, its release and its merge, the push credential must not
+    public bool OwnsAccepted(string name, int item) { lock (gate) return ownerOf.TryGetValue(item, out var o) && o == name && assignments.Values.Any(a => a.Accepted && a.Item == item && a.Worker == name && a.Kind == "own-item"); }
+    public bool IsWorker(string name) { lock (gate) return workers.ContainsKey(name); }
     public string DeclaredAddress(string name) { lock (gate) return workers.TryGetValue(name, out var w) ? w.QcAddress : ""; }
     public void SetMemFree(string name, double mb) { lock (gate) { if (workers.TryGetValue(name, out var w)) w.MemFreeMb = mb; } }
     // A directed event for one worker (qc.reset, qc.teardown).
@@ -1682,7 +1828,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             // the repeated "waiting" of a sweep or a tick (no key; the rule script posts one per 30 minutes) is not queued behind one that is still to be written
             var repeat = ev == "waiting" && key == "";
             if (repeat && !waitingQueued.Add(item)) return;
-            if (ev is "matched" or "offered" or "reassigned") OperatorPlantEvent(ev, item, fields["worker"]?.ToString() ?? "", fields["column"]?.ToString() ?? "");
+            // issue 144: a reassigned line says why (a code, never the journal's text); the code is for the operator stream only, not the journal
+            var why = fields["opCode"]?.ToString() ?? ""; fields.Remove("opCode");
+            if (ev is "matched" or "offered" or "reassigned") OperatorPlantEvent(ev, item, fields["worker"]?.ToString() ?? "", fields["column"]?.ToString() ?? "", ev == "reassigned" ? why : "");
             var prev = journalTail.TryGetValue(item, out var t) ? t : Task.CompletedTask;
             var next = prev.ContinueWith(_ => Write(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
             journalTail[item] = next;
@@ -1712,7 +1860,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     void Offer(Assignment a, WorkerInfo w, string? why)
     {
-        a.Worker = w.Name; a.AckBy = DateTime.UtcNow.AddSeconds(ackSeconds); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";
+        a.Worker = w.Name; a.AckBy = DateTime.UtcNow.AddSeconds(AckFor(w.Name)); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";
         Push(w, AssignedJson(a), false);
         var trig = lastTrigger.TryGetValue(a.Item, out var t) ? t : "the sweep";
         Journal(a.Item, "offered", new JsonObject { ["worker"] = w.Name, ["type"] = w.Type, ["ackSeconds"] = ackSeconds }, "off|" + a.Id + "|" + w.Name);
@@ -1720,32 +1868,74 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
 
     // owned and keep (step 5a): what the sweep says of every owned claim, and the items it must not drop an owner of; used only while messaging or the
     // supervisor is on, so a deployment with both off plans exactly as before.
-    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null)
+    // priorities (docs/design/plant-manager.md 10e): the items with a priority label (top, high); after the pins they are offered first, top before high
+    // scope (issue 92): the items of an incremental pass. Only they were read, so owners and unanswered assignments of every other item are kept.
+    // sweepStarted: when the sweep that made this plan started reading the board. An owner it names for an item that was merged after that is not
+    // put back: the sweep read the claim before the merge removed it (issue 107).
+    public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, JsonObject? priorities = null, DateTime? sweepStarted = null, IReadOnlyCollection<int>? scope = null, JsonObject? runtimes = null, JsonObject? profiles = null)
+    {
+        try { PlanLocked(offers, owners, pins, owned, keep, priorities, sweepStarted, scope, runtimes, profiles); }
+        finally { LaunchProvisions(); }
+    }
+    void PlanLocked(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned, IEnumerable<int>? keep, JsonObject? priorities, DateTime? sweepStarted, IReadOnlyCollection<int>? scope, JsonObject? runtimes, JsonObject? profiles)
     {
         lock (gate)
         {
+            // runtime labels and model profiles: a full sweep replaces them; an incremental pass (scope) replaces only the items it read
+            if (scope == null) { runtimeLabels = runtimes ?? new JsonObject(); itemProfiles = profiles ?? new JsonObject(); }
+            else
+            {
+                static JsonObject Merge(JsonObject old, JsonObject? fresh, IReadOnlyCollection<int> sc)
+                {
+                    var o = (JsonObject)old.DeepClone();
+                    foreach (var i in sc) o.Remove(i.ToString());
+                    if (fresh != null) foreach (var kv in fresh) o[kv.Key] = kv.Value?.DeepClone();
+                    return o;
+                }
+                runtimeLabels = Merge(runtimeLabels, runtimes, scope); itemProfiles = Merge(itemProfiles, profiles, scope);
+            }
             var planNow = DateTime.UtcNow;
+            foreach (var k in mergedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) mergedAt.Remove(k);
+            foreach (var k in releasedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) releasedAt.Remove(k);
             if (owners != null) foreach (var kv in owners)
             {
                 var oi = int.Parse(kv.Key); var on = kv.Value!.ToString();
+                if (rqOwnerDropped.Contains(oi)) continue;   // issue 96: an item in the Release Queue whose owner was dropped keeps no owner while its claim lives on
+                if (sweepStarted is { } ss && mergedAt.TryGetValue(oi, out var ma) && ma >= ss) continue;
+                if (sweepStarted is { } rs && releasedAt.TryGetValue(oi, out var ra) && ra >= rs) continue;
                 if (Msg.On && !(ownerOf.TryGetValue(oi, out var cur) && cur == on)) { ownedSince[oi] = planNow; seamOwned.Remove(oi); ownedMisses.Remove(oi); ownedInfo.Remove(oi); }
                 ownerOf[oi] = on;
             }
-            if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow);
+            if (Msg.On && owned != null) ReplaceOwned(owned, keep ?? Array.Empty<int>(), planNow, scope);
             var wanted = new HashSet<string>();
-            // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can
-            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0))
+            // pinned items first (issue 46): in one sweep the pin takes its worker's free slot before an unpinned item can; then by priority (the
+            // order is stable, so items of one rank keep the sweep's order)
+            // then (issue 97) work already started before new work: an orphan in a column past the intake (Development, Functional Testing) takes a
+            // free worker before an item in the intake column
+            static int Rank(string? p) => p == "top" ? 0 : p == "high" ? 1 : 2;
+            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0).ThenBy(x => Rank(priorities?[x!["item"]!.ToString()]?.ToString())).ThenBy(x => string.Equals(x!["column"]?.ToString() ?? "", IntakeColumn, StringComparison.OrdinalIgnoreCase) ? 1 : 0))
             {
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
-                var key = $"{item}|{kind}|{role}"; wanted.Add(key);
+                var key = $"{item}|{kind}|{role}";
+                // issue 97 with incremental passes (issue 92): a pass over a few items does not see the whole plan, so new work in the intake column is
+                // not offered by it while started work waits for an owner; the next full sweep orders both
+                if (scope != null && kind == "own-item" && string.Equals(o["column"]?.ToString() ?? "", IntakeColumn, StringComparison.OrdinalIgnoreCase)
+                    && !(assignments.TryGetValue(key, out var exi) && exi.Accepted)
+                    && assignments.Values.Any(x => x.Kind == "own-item" && !x.Accepted && !IsQc(x) && x.Worker == "" && !ownerOf.ContainsKey(x.Item) && !string.Equals(x.Column, IntakeColumn, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+                wanted.Add(key);
                 var pin = pins?[item.ToString()]?.ToString();
+                // issue 98: a pin set aside after its long wait stays aside while the label names the same worker (a new label is a new pin)
+                if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
                 if (assignments.TryGetValue(key, out var ex))
                 {
-                    if (ex.Accepted && (DateTime.UtcNow - ex.AcceptedAt).TotalSeconds < 20) continue;     // the offer predates the acceptance
+                    // the offer predates the acceptance: the sweep read the board before the accept (issue 75: a sweep takes tens of seconds and reads
+                    // without the item lock, so its offer of a just-accepted item is stale), or, without a sweep start (the test seam), within 20 s of it
+                    if (ex.Accepted && (sweepStarted is { } st ? st <= ex.AcceptedAt : (DateTime.UtcNow - ex.AcceptedAt).TotalSeconds < 20)) continue;
                     if (ex.Accepted)
                     {   // accepted, yet the item needs a worker again: the session is gone
                         assignments.Remove(key); if (kind == "own-item") DropOwner(item); else botOf.Remove(item);
-                        Journal(item, "reassigned", new JsonObject { ["reason"] = $"the session that owned this item ({ex.Worker}) is gone" }, "gone|" + ex.Id);
+                        Journal(item, "reassigned", new JsonObject { ["reason"] = $"the session that owned this item ({ex.Worker}) is gone", ["opCode"] = "session-gone" }, "gone|" + ex.Id);
                     }
                     else if (ex.Worker != "") continue;                                                     // waiting for an answer
                 }
@@ -1754,8 +1944,15 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     Id = "a-" + Interlocked.Increment(ref counter).ToString("x") + DateTime.UtcNow.Ticks.ToString("x")[^4..], Key = key, Item = item, Column = o["column"]?.ToString() ?? "",
                     Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
                 };
+                if (ReferenceEquals(a, ex) && o["column"]?.ToString() is { Length: > 0 } nc) a.Column = nc;   // a waiting assignment follows its card (issue 97)
                 assignments[key] = a;
                 if (!ReferenceEquals(a, ex)) DeclineTakenBack(a);      // a new assignment: not first to the worker it was just taken back from
+                if (string.IsNullOrEmpty(pin))
+                {   // cloud-worker-runtimes.md 4.4: the runtime of an unpinned item (Plant.Runtimes.cs)
+                    var (handled, rtPin) = RouteRuntime(a);
+                    if (handled) continue;
+                    if (rtPin != null) pin = rtPin;
+                }
                 a.Pin = pin ?? "";
                 if (a.Pin != "" && a.PinRetryAt > planNow) continue;                                      // its worker just let an offer lapse: the tick offers it again
                 if (!a.MatchedNoted)
@@ -1766,11 +1963,51 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     Journal(item, "matched", new JsonObject { ["trigger"] = trigText, ["reason"] = a.Reason, ["column"] = a.Column, ["role"] = a.Kind == "bot-job" ? a.Role : "" }, "m|" + a.Id);
                 }
                 var (w, why) = Choose(a, pin);
+                if (w == null && !string.IsNullOrEmpty(pin))
+                {
+                    if (!(pinWaitSince.TryGetValue(item, out var pw) && pw.Pin == pin)) pinWaitSince[item] = pw = (pin, planNow);
+                    if (PinFallbackMinutes > 0 && (planNow - pw.Since).TotalMinutes >= PinFallbackMinutes)
+                    {
+                        var pinnedCode = chooseCode;
+                        var (fw, _) = Choose(a, null);
+                        if (fw != null)
+                        {
+                            pinFallback[item] = pin; a.Pin = ""; pinWaitSince.Remove(item);
+                            Journal(item, "pin-fallback", new JsonObject { ["pin"] = pin, ["worker"] = fw.Name, ["minutes"] = (int)(planNow - pw.Since).TotalMinutes, ["code"] = pinnedCode }, "pinfb|" + a.Id + "|" + Regex.Replace(pin, "[^A-Za-z0-9_.-]", ""));   // (the label text is not trusted inside the journal's marker)
+                            Console.WriteLine(new JsonObject { ["at"] = planNow.ToString("o"), ["plant"] = "pin-fallback", ["item"] = item, ["pin"] = pin, ["worker"] = fw.Name }.ToJsonString());
+                            w = fw;
+                        }
+                        else chooseCode = pinnedCode;   // the item still waits for its pin: keep the pinned code, not the unpinned one
+                    }
+                }
+                else pinWaitSince.Remove(item);
                 if (w == null) { a.WaitingSince ??= planNow; a.WaitingCode = chooseCode; Journal(item, "waiting", new JsonObject { ["reason"] = why }, ""); continue; }
                 Offer(a, w, null);
             }
+            // a pin set aside is forgotten once the item is no longer wanted (taken, finished or parked)
+            foreach (var i in pinFallback.Keys.Where(i => !wanted.Any(k => k.StartsWith(i + "|", StringComparison.Ordinal))).ToList()) pinFallback.Remove(i);
+            foreach (var i in pinWaitSince.Keys.Where(i => !wanted.Any(k => k.StartsWith(i + "|", StringComparison.Ordinal))).ToList()) pinWaitSince.Remove(i);
             // an unanswered or unwanted assignment that the sweep no longer asks for is dropped
-            foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
+            foreach (var k in assignments.Keys.Where(k => !wanted.Contains(k) && !assignments[k].Accepted && !IsQc(assignments[k]) && (scope == null || scope.Contains(assignments[k].Item))).ToList()) assignments.Remove(k);
+            // issue 96: an accepted own-item assignment whose worker no longer owns the item (another session holds the claim, its owner was dropped
+            // without it) is stale. Left in place it keeps a spent session from being told session.end. Dropped when two sweeps in a row see it so,
+            // a minute or more after the accept. (An item in the Release Queue loses its owner and assignments in SetReleaseQueue.)
+            var staleNow = new HashSet<string>();
+            // (a full sweep only: an incremental pass did not read the other items, issue 92)
+            if (scope == null) foreach (var (k, a) in assignments.Where(kv => kv.Value.Accepted && kv.Value.Kind == "own-item" && !IsQc(kv.Value) && !wanted.Contains(kv.Key)).ToList())
+            {
+                var owns = ownerOf.TryGetValue(a.Item, out var ow) && ow == a.Worker;
+                if (owns || (keep != null && keep.Contains(a.Item)) || (planNow - a.AcceptedAt).TotalSeconds < 60) continue;
+                if (!staleSeen.Contains(a.Id)) { staleNow.Add(a.Id); continue; }
+                assignments.Remove(k); staleDropped++;
+                Console.WriteLine(new JsonObject { ["at"] = planNow.ToString("o"), ["plant"] = "stale-assignment-dropped", ["item"] = a.Item, ["worker"] = a.Worker, ["owner"] = ow ?? "", ["assignment"] = a.Id }.ToJsonString());
+            }
+            if (scope == null) { staleSeen.Clear(); staleSeen.UnionWith(staleNow); }
+            // issue 97: since when each unowned own-item past the intake column has waited for an owner
+            var orphans = assignments.Values.Where(a => a.Kind == "own-item" && !a.Accepted && !IsQc(a) && !ownerOf.ContainsKey(a.Item)
+                && !string.Equals(a.Column, IntakeColumn, StringComparison.OrdinalIgnoreCase)).Select(a => a.Item).ToHashSet();
+            foreach (var i in orphanSince.Keys.Where(i => !orphans.Contains(i)).ToList()) orphanSince.Remove(i);
+            foreach (var i in orphans) orphanSince.TryAdd(i, planNow);
         }
     }
 
@@ -1783,6 +2020,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             foreach (var a in assignments.Values.Where(a => !a.Accepted && a.Worker != "" && a.AckBy < DateTime.UtcNow && !(a.Accepting is { } ing && (DateTime.UtcNow - ing).TotalSeconds < 90)).ToList())
             {
                 var was = a.Worker;
+                if (!IsQc(a) && Runtimes != null && Runtimes.IsRuntimeWorker(was))
+                {   // a runtime worker that did not accept within its window: its execution is stopped and counts as failed; the next plan routes again
+                    a.Worker = ""; a.Pin = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "runtime-offer-lapsed";
+                    Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {Runtimes.AckSeconds:0} s: its execution is stopped", ["opCode"] = "runtime-offer-lapsed" }, "ack|" + a.Id + "|" + was);
+                    Runtimes.OfferLapsed(was);
+                    continue;
+                }
                 if (!IsQc(a) && a.Pin != "")
                 {   // pinned (the item's worker:<name> label): never offered to another worker. It waits, visibly, and is offered to the same worker
                     // again after one more window, or as soon as that worker is back.
@@ -1791,8 +2035,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     continue;
                 }
                 a.Declined.Add(was); a.Worker = "";
-                var cool = IsQc(a) ? "" : NoteMissed(was);
-                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s{cool}" }, "ack|" + a.Id + "|" + was);
+                var cool = IsQc(a) ? "" : NoteMissed(was, a.Item);
+                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {ackSeconds:0} s{cool}", ["opCode"] = "offer-lapsed" }, "ack|" + a.Id + "|" + was);
                 var (w, why) = IsQc(a) ? ChooseQc(a) : Choose(a, null);
                 if (w == null) { if (!IsQc(a)) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = chooseCode; Journal(a.Item, "waiting", new JsonObject { ["reason"] = why }, ""); } continue; }
                 Offer(a, w, null);
@@ -1806,7 +2050,8 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
             // issue 72: a session that is spent (it held a work item) and no longer owns it, nor has an offer of it open, is told to end, so the
             // client writes the launcher's end marker and a fresh session of the name starts; without it the name sat idle as session-spent
-            if (OneItemPerSession) foreach (var w in workers.Values.Where(w => w.Connected && w.Type != "supervisor"))
+            // a runtime worker always runs one item per session (cloud-worker-runtimes.md 5), whatever plant.oneItemPerSession says
+            foreach (var w in workers.Values.Where(w => w.Connected && w.Type != "supervisor" && (OneItemPerSession || RuntimeWorker(w))))
             {
                 // a QC or bot job the session holds or is offered keeps it alive: those are outside the one-item rule and run in this client
                 var idle = w.SessionItems.Count > 0 && !ownerOf.Values.Contains(w.Name) && !botOf.Values.Contains(w.Name) && !qcOf.Values.Contains(w.Name)
@@ -1815,10 +2060,13 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 w.SpentIdleSince ??= DateTime.UtcNow;
                 if (w.SessionEndSent == w.Session || (DateTime.UtcNow - w.SpentIdleSince.Value).TotalSeconds < SessionEndGraceSeconds) continue;
                 w.SessionEndSent = w.Session;
+                FreeNameSlots(w.Name, "session-end");   // the session is told to end: its builds end with it (issue 108)
                 Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "session.end", ["name"] = w.Name, ["session"] = w.Session,
                     ["items"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),
                     ["reason"] = "this session held its one work item and no longer owns it (completed, taken back, released, demoted or reassigned): end it; a new session takes the next item" }.ToJsonString(), false);
             }
+            FreeSlotsOfGoneSessions(DateTime.UtcNow);
+            RestartStuckSessions();
             // a Start that found no worker keeps its place: it is offered as soon as a qualified worker connects (it is the person's earlier Start, not a new automatic one)
             foreach (var a in assignments.Values.Where(a => IsQc(a) && !a.Accepted && a.Worker == "").ToList())
             {
@@ -1837,6 +2085,47 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             }
         }
         foreach (var a in placed) { try { _ = OnQcPlaced?.Invoke(a); } catch { } }
+    }
+
+    // The launcher watchdog (docs/launcher.md): a session that is stuck is told session.restart; its stream client writes the launcher's end marker
+    // and the reason, and the launcher starts a new session of the name (which resumes what the name still owns). Once per session, again after a
+    // reconnect while it is still due. Two causes are seen here: a spent session that owns nothing for sessionRestartMinutes (unlike session.end an
+    // accepted offer does not hold it back: on 2026-10-15 a stale accepted offer kept a spent session idle for hours), and a question the session
+    // asked more than RepeatQuestionLimit times (noted by SendMessage). Called under the gate.
+    void RestartStuckSessions()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var w in workers.Values.Where(w => w.Type != "supervisor"))
+        {
+            // an open QC or bot offer holds it back as it holds session.end back; an own-item offer or a stale accepted one does not
+            var spentIdle = OneItemPerSession && SessionRestartMinutes > 0 && w.SessionItems.Count > 0
+                && !ownerOf.Values.Contains(w.Name) && !botOf.Values.Contains(w.Name) && !qcOf.Values.Contains(w.Name)
+                && !assignments.Values.Any(o => o.Worker == w.Name && o.Kind != "own-item" && !o.Accepted);
+            if (!spentIdle) w.StuckSince = null; else w.StuckSince ??= now;
+            if (!w.Connected || w.RestartSent == w.Session) continue;
+            string reason = w.RestartReason, detail = w.RestartDetail;
+            if (reason == "" && w.StuckSince is { } st && (now - st).TotalMinutes >= SessionRestartMinutes)
+            { reason = "spent-idle"; detail = $"this session held its one work item and has owned nothing for {(now - st).TotalMinutes:0.#} min"; }
+            if (reason == "") continue;
+            w.RestartSent = w.Session; restartsSent++;
+            restarts.Add((now, w.Name, w.Session, reason)); if (restarts.Count > 20) restarts.RemoveAt(0);
+            Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "session.restart", ["name"] = w.Name, ["session"] = w.Session, ["code"] = reason,
+                ["reason"] = detail + ": the launcher ends this session and starts a new one, which resumes what the name still owns" }.ToJsonString(), false);
+            Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["plant"] = "session-restart", ["worker"] = w.Name, ["session"] = w.Session, ["code"] = reason }.ToJsonString());
+        }
+    }
+
+    // A question of a worker session: the same text (case and spacing ignored) about the same item asked more than RepeatQuestionLimit times in this session marks the
+    // session for session.restart at the next tick (the overnight run of 2026-10-14 had sessions asking one thing again and again). Under the gate.
+    void NoteRepeatedQuestion(string name, MessageRecord q)
+    {
+        if (RepeatQuestionLimit <= 0 || !workers.TryGetValue(name, out var w) || w.RestartReason != "") return;
+        static string Norm(string t) => Regex.Replace(t.Trim().ToLowerInvariant(), @"\s+", " ");
+        var text = Norm(q.QText); if (text == "") return;
+        // about the same item (or about none): a long-lived inspector or QC session may ask one stock question for several items
+        // (a repeat the Messenger did not relay again, issue 105, counts on the question it repeated)
+        var n = store.Records.Values.Where(r => r.Type == "question" && r.From == name && r.At >= w.SessionStarted && r.Item == q.Item && Norm(r.QText) == text).Sum(r => 1 + r.Repeats);
+        if (n > RepeatQuestionLimit) { w.RestartReason = "repeated-question"; w.RestartDetail = $"this session asked the same question {n} times"; }
     }
 
     // After a verb succeeded: ownership changes, and the triggers that follow from it.
@@ -1880,14 +2169,14 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     }
                     break;
                 case "release":
+                    releasedAt[item] = DateTime.UtcNow;
                     DropOwner(item); foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
                     break;
                 case "merge" when response["outcome"]?.ToString() is "merged" or "already-merged":
                 case "validation-verdict" when vmOutcome is "merged" or "already-merged":
-                    // the owner keeps the item until master is green (item.complete); the open assignments are done
-                    foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|") && !IsQc(assignments[k])).ToList()) assignments.Remove(k);
-                    passUnmerged.Remove(item);
+                    // the owner hears item.merged, then is released: the gateway settles the item from here (Merged); the open assignments are done
                     Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.merged", ["item"] = item });
+                    Merged(item);
                     break;
                 case "approve-pr":
                     botOf.Remove(item);
@@ -1911,11 +2200,24 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             return new JsonObject
             {
                 ["oneItemPerSession"] = OneItemPerSession,
+                ["staleAssignmentsDropped"] = staleDropped,
+                ["runtimes"] = RuntimesStatus(),
+                ["pinFallbackMinutes"] = PinFallbackMinutes,
+                ["pinsSetAside"] = new JsonObject(pinFallback.Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
+                ["held"] = HeldJson(),
+                ["unowned"] = UnownedJson(),
+                ["orphans"] = new JsonArray(orphanSince.Where(kv => !ownerOf.ContainsKey(kv.Key)).OrderBy(kv => kv.Value).Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key,
+                    ["column"] = Gated(assignments.Values.FirstOrDefault(a => a.Item == kv.Key && a.Kind == "own-item")?.Column), ["since"] = kv.Value.ToString("o"),
+                    ["minutes"] = (int)(DateTime.UtcNow - kv.Value).TotalMinutes }).ToArray()),
+                ["sessionRestarts"] = new JsonObject { ["sent"] = restartsSent, ["recent"] = new JsonArray(restarts.Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["worker"] = r.Name, ["session"] = r.Session, ["code"] = r.Reason }).ToArray()) },
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
-                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
-                    ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null,
+                ["sessionsBlocked"] = sessionsBlocked,
+                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["execution"] = Runtimes?.ExecutionOf(w.Name) ?? "", ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
+                    ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null, ["takenBackInRow"] = w.TakeBackMisses,
+                    ["blocked"] = Blocked(w), ["blockedSince"] = w.BlockedSince?.ToString("o"),
                     ["session"] = w.Session, ["sessionStarted"] = w.SessionStarted.ToString("o"), ["sessionItems"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),
                     ["sessionSpent"] = OneItemPerSession && w.SessionItems.Count > 0,
+                    ["stuckSince"] = w.StuckSince?.ToString("o"), ["restartSent"] = w.RestartSent == w.Session && w.Session > 0,
                     ["itemsPerSession"] = new JsonArray(w.Sessions.Select(x => (JsonNode)new JsonObject { ["session"] = x.No, ["started"] = x.Started.ToString("o"), ["items"] = new JsonArray(x.Items.Select(i => (JsonNode)i).ToArray()) }).ToArray()),
                     ["roles"] = new JsonArray(w.Roles.Select(r => (JsonNode)r).ToArray()) }).ToArray()),
                 ["owners"] = new JsonObject(ownerOf.Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
