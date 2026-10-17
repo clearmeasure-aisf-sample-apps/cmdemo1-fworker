@@ -17,7 +17,7 @@
       "enabled": true,
       "maxConcurrent": 1,
       "maxMinutes": 60,
-      "maxExecutionsPerDay": 6,
+      "maxExecutionsPerDay": 30,
       "model": "auto",
       "optimizeFor": "cost",
       "environments": {
