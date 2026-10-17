@@ -2021,7 +2021,14 @@ static async Task<(string Text, bool TooLarge)> ReadBody(HttpContext ctx, int ma
 }
 
 app.MapMcp("/mcp");
-GatewayMcp.Tools = new McpTools(new InProcess(app, Admit));
+// the worker sessions of r1 holders at /mcp (gateway/Mcp/WorkerSessions.cs): registered with the plant at their first call, idle ones end
+var mcpSessions = new WorkerSessions(plant) { IdleMinutes = TimingValue(scriptsDir, "mcpIdleMinutes", 30) };
+GatewayMcp.Tools = new McpTools(new InProcess(app, Admit), mcpSessions, t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
+{
+    if (messaging.Enabled && ownerMode) plant.Touch(name);
+    if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }
+});
+_ = Task.Run(async () => { while (true) { await Task.Delay(TimeSpan.FromSeconds(30)); try { mcpSessions.Sweep(); } catch (Exception e) { Console.Error.WriteLine($"mcp sessions: {e.Message}"); } } });
 app.Run();
 
 sealed class Runner(string entry)

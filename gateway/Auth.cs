@@ -245,21 +245,26 @@ static class Auth
             var parts = t.Split('.'); if (parts.Length != 4 || !Keeper.Enabled || !Keeper.Names.Contains(parts[1])) return null;
             return Same(t, KeeperToken(secret, parts[1], Keeper.TokenGeneration, rev.Of(parts[1]))) ? new Principal("keeper", parts[1]) : null;
         }
-        if (t.StartsWith("i1."))
-        {
-            var parts = t.Split('.'); if (parts.Length != 3) return null;
-            if (!Same(parts[2], Mac(secret, parts[1]))) return null;
-            try
-            {
-                var j = JsonNode.Parse(Encoding.UTF8.GetString(UnB64(parts[1])))!;
-                var x = j["x"]!.GetValue<long>(); if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
-                // minted before the last revocation of its worker name: refused with everything else of that name
-                if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(j["w"]!.ToString())) return null;
-                return new Principal("item", j["w"]!.ToString(), j["i"]!.GetValue<int>(), j["r"]!.ToString(), j["a"]!.ToString(), x, Runtime: j["rt"]?.ToString() ?? "");
-            }
-            catch { return null; }
-        }
+        if (t.StartsWith("i1.")) return VerifyItemToken(secret, t, rev);
         return null;
+    }
+
+    // An i1 (an item token): MAC, expiry and the holder's revocation generation. Also used by /mcp for the item token it keeps for a worker
+    // session (gateway/Mcp/WorkerSessions.cs): that token is the gateway's own, so auth.legacyKinds does not apply to it there.
+    public static Principal? VerifyItemToken(string secret, string t, Revocations rev)
+    {
+        if (secret.Length == 0 || !t.StartsWith("i1.")) return null;
+        var parts = t.Split('.'); if (parts.Length != 3) return null;
+        if (!Same(parts[2], Mac(secret, parts[1]))) return null;
+        try
+        {
+            var j = JsonNode.Parse(Encoding.UTF8.GetString(UnB64(parts[1])))!;
+            var x = j["x"]!.GetValue<long>(); if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
+            // minted before the last revocation of its worker name: refused with everything else of that name
+            if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(j["w"]!.ToString())) return null;
+            return new Principal("item", j["w"]!.ToString(), j["i"]!.GetValue<int>(), j["r"]!.ToString(), j["a"]!.ToString(), x, Runtime: j["rt"]?.ToString() ?? "");
+        }
+        catch { return null; }
     }
 
     // An r1: MAC, expiry, environment, a known role and mode, a valid unreserved name and the name's revocation generation. Null otherwise.
