@@ -69,9 +69,9 @@ sealed class CursorCloudSettings
     };
 }
 
-sealed class CursorCloudRuntime : IWorkerRuntime
+sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
 {
-    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged; }
+    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged; public JsonNode? Model, ReportedModel, Usage; }
 
     readonly CursorCloudSettings cfg;
     readonly HttpClient http;
@@ -86,6 +86,12 @@ sealed class CursorCloudRuntime : IWorkerRuntime
     { this.cfg = cfg; this.prompt = prompt; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
 
     public string Kind => "cursor-cloud";
+
+    public JsonObject? Detail(string workerName)
+    {
+        lock (agents)
+            return agents.TryGetValue(workerName, out var a) ? new JsonObject { ["agent"] = a.Id, ["model"] = a.Model?.DeepClone(), ["reportedModel"] = a.ReportedModel?.DeepClone(), ["usage"] = a.Usage?.DeepClone(), ["deleted"] = a.Deleted } : null;
+    }
     double IdleGraceSeconds => cfg.IdleGraceSeconds;
     public int MaxConcurrent => cfg.MaxConcurrent;
 
@@ -129,7 +135,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime
         var id = j?["agent"]?["id"]?.ToString() ?? j?["id"]?.ToString() ?? "";
         // a launch that failed may still have created the agent (a timeout, an odd answer): it is looked up by its name and deleted
         if (s is not (200 or 201) || id == "") { await DeleteNamed(Prefix + r.WorkerName, ct); return new(false, "", s is 200 or 201 ? "launch-no-id" : $"launch-{s}"); }
-        lock (agents) agents[r.WorkerName] = new Agent { Id = id, RunId = j?["run"]?["id"]?.ToString() ?? j?["agent"]?["latestRunId"]?.ToString() ?? "", Worker = r.WorkerName, Item = r.Item, Phase = r.Phase };
+        lock (agents) agents[r.WorkerName] = new Agent { Model = sel.DeepClone(), Id = id, RunId = j?["run"]?["id"]?.ToString() ?? j?["agent"]?["latestRunId"]?.ToString() ?? "", Worker = r.WorkerName, Item = r.Item, Phase = r.Phase };
         return new(true, id, "");
     }
 
@@ -142,8 +148,8 @@ sealed class CursorCloudRuntime : IWorkerRuntime
         if (run != "") { try { await Send(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(id)}/runs/{Uri.EscapeDataString(run)}/cancel", null, ct); } catch { } }
         var (s, _) = await Send(HttpMethod.Delete, $"/v1/agents/{Uri.EscapeDataString(id)}", null, ct);
         if (s is not (200 or 202 or 204 or 404)) throw new HttpRequestException($"delete of agent answered {s}");
+        await LogUsage(a, ct);   // before the end is visible to the manager, so its record of the end carries the usage
         lock (agents) { a.Deleted = true; a.Ended ??= DateTime.UtcNow; if (a.Status == "Running") a.Status = "Stopped"; }
-        await LogUsage(a, ct);
     }
 
     // The model of a launch (owner decision 2026-10-17: Auto with the cost preference). Model "auto" is resolved against GET /v1/models once per
@@ -188,6 +194,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime
         try
         {
             var (s, j) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(a.Id)}/usage", null, ct);
+            if (s == 200) lock (agents) a.Usage = j?["totalUsage"]?.DeepClone();
             if (s == 200) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-usage", ["worker"] = a.Worker, ["item"] = a.Item, ["phase"] = a.Phase, ["agent"] = a.Id,
                 ["minutes"] = Math.Round((DateTime.UtcNow - a.Started).TotalMinutes, 1), ["usage"] = j?["totalUsage"]?.DeepClone() }.ToJsonString());
         }
@@ -234,7 +241,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime
                     if (s is not (200 or 404)) throw new HttpRequestException($"read of agent answered {s}");
                     var st = s == 404 ? "ARCHIVED" : j?["agent"]?["status"]?.ToString() ?? j?["status"]?.ToString() ?? "";
                     // the model Cursor reports for the agent, once: the check that the launch ran on the model asked for
-                    if (!a.ModelLogged && (j?["agent"]?["model"] ?? j?["model"]) is { } rm) { a.ModelLogged = true; Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-agent-model", ["agent"] = a.Id, ["model"] = rm.DeepClone() }.ToJsonString()); }
+                    if (!a.ModelLogged && (j?["agent"]?["model"] ?? j?["model"]) is { } rm) { a.ModelLogged = true; lock (agents) a.ReportedModel = rm.DeepClone(); Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-agent-model", ["agent"] = a.Id, ["model"] = rm.DeepClone() }.ToJsonString()); }
                     var runId = j?["agent"]?["latestRunId"]?.ToString() ?? j?["latestRunId"]?.ToString() ?? "";
                     var runStatus = "";
                     if (runId != "") { try { var (rs, rj) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(a.Id)}/runs/{Uri.EscapeDataString(runId)}", null, ct); if (rs == 200) runStatus = rj?["run"]?["status"]?.ToString() ?? rj?["status"]?.ToString() ?? ""; } catch { } }

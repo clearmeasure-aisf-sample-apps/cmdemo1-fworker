@@ -45,6 +45,7 @@ $CursorScenarios = [ordered]@{
         Check 'its worker shows mode api' ($row.Count -eq 1 -and $row[0].mode -eq 'api' -and $row[0].execution -eq $a.id) ($row | ConvertTo-Json -Compress)
         [void](Mcp-Call 'session_end' @{ reason = 'scenario done' } $r1)
         Check 'session_end cancels the run and deletes the agent' (Wait-Until -Seconds 15 { $x = @((Cur-State).agents | Where-Object { $_.id -eq $a.id }); $x.Count -eq 1 -and $x[0].cancelled -and $x[0].deleted })
+        Check 'status shows the model asked for and the model Cursor reports' (Wait-Until -Seconds 10 { $d = @((Cur-Status).last | Where-Object { $_.execution -eq $a.id }); $d.Count -eq 1 -and $d[0].detail.model.id -eq 'auto-smart' -and $d[0].detail.reportedModel.id -eq 'auto-smart' -and $d[0].detail.usage.totalTokens -eq 2340 }) ((Cur-Status).last | ConvertTo-Json -Compress -Depth 6)
         Check 'its token usage is logged' (Wait-Until -Seconds 10 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"cursor-usage`"").Count -gt 0 })
         Check 'and the runtime no longer counts it' (Wait-Until -Seconds 15 { (Cur-Status).running -eq 0 })
     } finally { Cur-Cleanup @($n) }
