@@ -9,23 +9,30 @@ using System.Text.Json.Nodes;
 sealed partial class Plant
 {
     public RuntimeManager? Runtimes { get; set; }
+    // the api mode's adapter (Cursor Cloud Agents, gateway/Runtimes/CursorCloudRuntime.cs): items reach it by the runtime:cursor-cloud label
+    public RuntimeManager? Cursor { get; set; }
     JsonObject runtimeLabels = new(), itemProfiles = new();
-    readonly List<RuntimeManager.Ticket> pendingProvisions = new();
+    readonly List<(RuntimeManager Rm, RuntimeManager.Ticket T)> pendingProvisions = new();
+
+    // the adapter that runs a worker name, or null for a session that connected by itself
+    RuntimeManager? RuntimeOf(string name) => name == "" ? null : Runtimes?.IsRuntimeWorker(name) == true ? Runtimes : Cursor?.IsRuntimeWorker(name) == true ? Cursor : null;
+    RuntimeManager? RuntimeFor(string kind) => kind == "cae-job" ? Runtimes : kind == "cursor-cloud" ? Cursor : null;
     readonly HashSet<(int, string)> parkQueued = new();
 
-    double AckFor(string name) => Runtimes != null && name != "" && Runtimes.IsRuntimeWorker(name) ? Runtimes.AckSeconds : ackSeconds;
+    double AckFor(string name) => RuntimeOf(name)?.AckSeconds ?? ackSeconds;
     bool RuntimeWorker(WorkerInfo w) => w.Runtime != "local";
 
     // Under gate, for an unpinned own-item assignment. Returns (Handled: the assignment was offered to a new runtime worker or parked, Pin: the
     // runtime worker that already runs for the item, or null for the usual choice).
     (bool Handled, string? Pin) RouteRuntime(Assignment a)
     {
-        var rm = Runtimes;
-        if (rm == null || !rm.On || a.Kind != "own-item") return (false, null);
+        var any = Runtimes ?? Cursor;
+        if (any == null || a.Kind != "own-item" || !((Runtimes?.On ?? false) || (Cursor?.On ?? false))) return (false, null);
         var label = runtimeLabels[a.Item.ToString()]?.ToString() ?? "";
-        var runtime = rm.Settings.RouteFor(a.Column, label);
+        var runtime = any.Settings.RouteFor(a.Column, label);
         if (runtime == "local") return (false, null);
-        if (runtime != "cae-job") { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "runtime-unknown"; return (true, null); }   // a kind this gateway has no adapter for
+        var rm = RuntimeFor(runtime);
+        if (rm == null) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "runtime-unknown"; return (true, null); }   // a kind this gateway has no adapter for
         var existing = rm.ExistingFor(a.Item);
         if (existing != "") return (false, existing);
         if (rm.Exhausted(a.Item, a.Column))
@@ -34,13 +41,14 @@ sealed partial class Plant
             a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "runtime-failed";
             return (true, null);
         }
-        if (rm.Settings.PreferConnected && Choose(a, null).Worker != null) return (false, null);
+        // a connected session first (runtimes.preferConnected), except for an item labelled for the api mode: that label is the operator's choice
+        if (rm.Settings.PreferConnected && !(rm.Kind == "cursor-cloud" && label == rm.Kind) && Choose(a, null).Worker != null) return (false, null);
         var (ok, code) = rm.CanStart();
         if (!ok) { if (label != "") { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = code; Journal(a.Item, "waiting", new JsonObject { ["reason"] = $"the item is labelled runtime:{label} and that runtime cannot start a worker now ({code})" }, ""); return (true, null); } return (false, null); }
         var t = rm.Begin(a.Item, a.Column, itemProfiles[a.Item.ToString()]?.ToString() ?? "");
-        pendingProvisions.Add(t);
+        pendingProvisions.Add((rm, t));
         a.Pin = t.Name; a.Worker = t.Name; a.AckBy = DateTime.UtcNow.AddSeconds(rm.AckSeconds); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";
-        Journal(a.Item, "offered", new JsonObject { ["worker"] = t.Name, ["type"] = "runtime", ["runtime"] = "cae-job", ["ackSeconds"] = rm.AckSeconds }, "off|" + a.Id + "|" + t.Name);
+        Journal(a.Item, "offered", new JsonObject { ["worker"] = t.Name, ["type"] = "runtime", ["runtime"] = rm.Kind, ["ackSeconds"] = rm.AckSeconds }, "off|" + a.Id + "|" + t.Name);
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["plant"] = "runtime-route", ["item"] = a.Item, ["phase"] = a.Column, ["worker"] = t.Name, ["label"] = label }.ToJsonString());
         return (true, null);
     }
@@ -48,8 +56,8 @@ sealed partial class Plant
     // After the plant's lock: the executions decided in it are started.
     void LaunchProvisions()
     {
-        List<RuntimeManager.Ticket> go; lock (gate) { go = pendingProvisions.ToList(); pendingProvisions.Clear(); }
-        foreach (var t in go) _ = Task.Run(() => Runtimes!.Provision(t));
+        List<(RuntimeManager Rm, RuntimeManager.Ticket T)> go; lock (gate) { go = pendingProvisions.ToList(); pendingProvisions.Clear(); }
+        foreach (var (rm, t) in go) _ = Task.Run(() => rm.Provision(t));
     }
 
     // RuntimeManager.Poll: what the plant knows of a runtime worker.

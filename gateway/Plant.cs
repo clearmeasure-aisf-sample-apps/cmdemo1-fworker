@@ -205,7 +205,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             w.SpentIdleSince = null; w.SessionEndSent = 0;   // a reconnect of a spent session is told session.end again after the grace
             w.RestartSent = 0;                                // and session.restart again, if it is still due
             w.Model = model; w.Effort = effort; w.Runtime = runtime;
-            if (runtime != "local") Runtimes?.Registered(name);
+            if (runtime != "local") RuntimeOf(name)?.Registered(name);
             // the older stream of this name is told it was replaced before it ends, so its client exits instead of reconnecting (4.6, failure mode 30)
             if (Msg.On && w.Out != null) w.Out.Writer.TryWrite((0, ReplacedJson(name)));
             w.Out?.Writer.TryComplete();
@@ -2020,11 +2020,11 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             foreach (var a in assignments.Values.Where(a => !a.Accepted && a.Worker != "" && a.AckBy < DateTime.UtcNow && !(a.Accepting is { } ing && (DateTime.UtcNow - ing).TotalSeconds < 90)).ToList())
             {
                 var was = a.Worker;
-                if (!IsQc(a) && Runtimes != null && Runtimes.IsRuntimeWorker(was))
+                if (!IsQc(a) && RuntimeOf(was) is { } lapsedRt)
                 {   // a runtime worker that did not accept within its window: its execution is stopped and counts as failed; the next plan routes again
                     a.Worker = ""; a.Pin = ""; a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "runtime-offer-lapsed";
-                    Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {Runtimes.AckSeconds:0} s: its execution is stopped", ["opCode"] = "runtime-offer-lapsed" }, "ack|" + a.Id + "|" + was);
-                    Runtimes.OfferLapsed(was);
+                    Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"{was} did not confirm within {lapsedRt.AckSeconds:0} s: its execution is stopped", ["opCode"] = "runtime-offer-lapsed" }, "ack|" + a.Id + "|" + was);
+                    lapsedRt.OfferLapsed(was);
                     continue;
                 }
                 if (!IsQc(a) && a.Pin != "")
@@ -2212,7 +2212,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 ["sessionRestarts"] = new JsonObject { ["sent"] = restartsSent, ["recent"] = new JsonArray(restarts.Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["worker"] = r.Name, ["session"] = r.Session, ["code"] = r.Reason }).ToArray()) },
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["sessionsBlocked"] = sessionsBlocked,
-                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["mode"] = w.Runtime == "local" ? "manual" : w.Runtime == "cursor-cloud" ? "api" : "hosted", ["role"] = "seat", ["execution"] = Runtimes?.ExecutionOf(w.Name) ?? "", ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
+                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["mode"] = w.Runtime == "local" ? "manual" : w.Runtime == "cursor-cloud" ? "api" : "hosted", ["role"] = "seat", ["execution"] = RuntimeOf(w.Name)?.ExecutionOf(w.Name) ?? "", ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null, ["takenBackInRow"] = w.TakeBackMisses,
                     ["blocked"] = Blocked(w), ["blockedSince"] = w.BlockedSince?.ToString("o"),
                     ["session"] = w.Session, ["sessionStarted"] = w.SessionStarted.ToString("o"), ["sessionItems"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),

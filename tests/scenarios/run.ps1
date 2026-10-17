@@ -50,6 +50,7 @@ foreach ($k in $LeaseScenarios.Keys) { $ManagerScenarios[$k] = $LeaseScenarios[$
 . (Join-Path $PSScriptRoot 'manager-actions.ps1')   # the plant manager's flow verbs (gateway/Manager.cs): scenarios named "act: ..." join the manager suite
 foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerActionScenarios[$k] }
 . (Join-Path $PSScriptRoot 'mcp.ps1')               # the MCP server at /mcp (gateway/Mcp/): suite 'mcp' (uses the helpers of owner.ps1)
+. (Join-Path $PSScriptRoot 'cursor.ps1')            # the api mode, Cursor Cloud Agents against the fake Cursor API: suite 'cursor'
 . (Join-Path $PSScriptRoot 'keeper.ps1')            # the backlog keeper session (gateway/Keeper.cs): scenarios named "keeper: ..." join the manager suite
 foreach ($k in $KeeperScenarios.Keys) { $ManagerScenarios[$k] = $KeeperScenarios[$k] }
 
@@ -107,6 +108,10 @@ $SuiteDefs = @(
     # the MCP server (mcp.ps1, docs/design/agents-roles-launch.md 6): owner mode, messaging on for every name
     @{ Name = 'mcp'; Policy = 'auto'; Set = $McpScenarios; Env = 'owner'; Timing = @{ staleItemMinutes = 600 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true } } }
+    # the api mode (cursor.ps1, agents-roles-launch.md 10): the fake Cursor API, a 0.25-minute deadline, a 20 s window for the agent
+    @{ Name = 'cursor'; Policy = 'auto'; Set = $CursorScenarios; Env = 'cursor'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
+        Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+            api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; idleGraceSeconds = 2; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
@@ -182,6 +187,8 @@ function Get-SuiteEnv([string]$Kind) {
         # the leader lease (Leader.cs) is off as well: a restarted suite gateway would wait for its predecessor's hand-over; its own scenarios switch it on
         'owner' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8' } }
         # the runtime suite: owner mode and the bearer token of the fake ARM (taken by the gateway only for a loopback ARM endpoint)
+        # the cursor suite: owner mode and the key of the fake Cursor API (CURSOR_API_KEY, as the deployed gateway reads it)
+        'cursor' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; CURSOR_API_KEY = 'fake-cursor' } }
         'runtime' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_TEST_ARM_TOKEN = 'fake-arm' } }
         'qc' {
             $adminTokens = Join-Path $script:SuiteRoot 'qc-admin-tokens'; New-Item -ItemType Directory -Force -Path $adminTokens | Out-Null

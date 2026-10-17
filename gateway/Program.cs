@@ -158,6 +158,16 @@ var runtimeNonces = new RuntimeNonces();   // the one-time nonces of runtime wor
 // the runtime adapter (gateway/Runtimes/, cloud-worker-runtimes.md 4): only in owner mode with a token secret and a runtime switched on in the configuration
 var runtimeSettings = RuntimeSettings.Load(scriptsDir);
 var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new RuntimeManager(runtimeSettings, new CaeJobRuntime(runtimeSettings.CaeJob), runtimeNonces) : null;
+// the api mode, v1 Cursor Cloud Agents (gateway/Runtimes/CursorCloudRuntime.cs, agents-roles-launch.md 10): api.cursor.enabled and a key (CURSOR_API_KEY)
+// and the gateway's public URL; the bootstrap prompt is read from prompts/ (set below, once the prompts are loaded)
+var cursorSettings = CursorCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
+Func<int, string, string> cursorPrompt = (_, _) => "";
+static string PhaseSlug(string column) => column.Trim().ToLowerInvariant().Replace(' ', '-');
+var cursorManager = ownerMode && tokenSecret.Length > 0 && cursorSettings.On
+    ? new RuntimeManager(runtimeSettings, new CursorCloudRuntime(cursorSettings, (item, phase) => cursorPrompt(item, phase)), runtimeNonces,
+        cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
+    : null;
+Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
 builder.Services.AddSingleton(sp =>
 {
     var runner = sp.GetRequiredService<Runner>();
@@ -166,7 +176,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -177,19 +187,19 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
 // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
 var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : TimingValue(scriptsDir, "sweepMinSeconds", 60));
 builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
-if (runtimeManager != null) builder.Services.AddHostedService(sp =>
+foreach (var rmx in new[] { runtimeManager, cursorManager }.OfType<RuntimeManager>()) builder.Services.AddHostedService(sp =>
 {
     var rp = sp.GetRequiredService<Plant>(); var rr = sp.GetRequiredService<Runner>();
-    runtimeManager.Plant = rp;
+    rmx.Plant = rp;
     // the gateway's own hands for the adapter: park an item runtime-failed, end the claim a lost execution left, revoke a failed execution's name
-    runtimeManager.Park = async (item, phase) =>
+    rmx.Park = async (item, phase) =>
     {
         var (code, _) = await rr.RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "runtime-failed", ["phase"] = phase, ["by"] = "the runtime adapter" }.ToJsonString(), TimeSpan.FromSeconds(120));
         if (code != 0) throw new InvalidOperationException($"park-item answered exit {code}");
         rp.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "runtime-failed" });
     };
-    runtimeManager.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
-    return new RuntimeLoop(runtimeManager) { MayAct = () => leader.MayAct };
+    rmx.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
+    return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct };
 });
 builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct });
 // A background loop that throws must not end the process (the default of .NET stops the host): the loops catch and go on, and this is the net under them.
@@ -590,6 +600,7 @@ app.MapGet("/ready", () => leader.Replaced ? Results.Json(new { ready = false, w
     : prompts.Errors.Count > 0 ? Results.Json(new { ready = false, waitingFor = "prompts", errors = prompts.Errors }, statusCode: 503)
     : revocationsLoaded.Task.IsCompleted ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = Volatile.Read(ref revAttempts), since = revSince.ToString("o") }, statusCode: 503));
 app.MapGet("/", () => Results.Redirect("/dashboard"));
+WorkerSessions? mcpSessionsRef = null;
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
 app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, pluginHash = PluginHash(), promptsHash = prompts.Hash, started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
 app.MapGet("/api/v1/status", (HttpContext c) =>
@@ -604,7 +615,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
-    if (ownerMode) o["runtimes"] = runtimeManager?.Status() ?? new JsonObject { ["enabled"] = false };
+    if (ownerMode) o["runtimes"] = RuntimesBlock();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
     if (ownerMode && messaging.ManagerEnabled) o["managerActions"] = plant.ManagerActionsStatus(false);
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
@@ -736,7 +747,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
-    if (ownerMode && runtimeManager != null) o["runtimes"] = runtimeManager.Status();
+    if (ownerMode && (runtimeManager != null || cursorManager != null)) o["runtimes"] = RuntimesBlock();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
     if (ownerMode) o["leader"] = leader.Status();
     return Results.Text(o.ToJsonString(), "application/json");
@@ -798,14 +809,24 @@ app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) 
     if (!rok) return Results.Json(new { ok = false, code = "not-recorded", reason = "the revocation could not be written to GitHub, so nothing was revoked; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
     // the execution of a runtime worker is stopped with its name (cloud-worker-runtimes.md 5)
     if (runtimeManager != null && runtimeManager.IsRuntimeWorker(name)) _ = Task.Run(() => runtimeManager.Deprovision(name, "revoked"));
+    if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) _ = Task.Run(() => cursorManager.Deprovision(name, "revoked"));
+    _ = Task.Run(() => mcpSessionsRef?.End(name, "revoked") ?? Task.CompletedTask);
     return Results.Json(new { ok = true, name, generation = gen, streamClosed = closed, exit = 0 });
 });
+// both adapters in one block: the cae-job block as before (or {enabled:false}), and cursor-cloud beside it when it is on
+JsonObject RuntimesBlock()
+{
+    var o = runtimeManager?.Status() ?? new JsonObject { ["enabled"] = false };
+    if (cursorManager?.Status()["cursor-cloud"] is { } cb) o["cursor-cloud"] = cb.DeepClone();
+    return o;
+}
 // The operator marks a runtime healthy again after it was marked unhealthy (cloud-worker-runtimes.md 2.11): operator token only.
 app.MapPost("/api/v1/runtimes/{kind}/reset", (string kind, HttpContext c) =>
 {
     if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator resets a runtime", 30);
-    if (runtimeManager == null || kind != "cae-job") return Fail(404, "no-runtime", "no such runtime is switched on", 12);
-    runtimeManager.ResetHealth();
+    var rk = kind == "cae-job" ? runtimeManager : kind == "cursor-cloud" ? cursorManager : null;
+    if (rk == null) return Fail(404, "no-runtime", "no such runtime is switched on", 12);
+    rk.ResetHealth();
     return Results.Json(new { ok = true, runtime = kind, exit = 0 });
 });
 // The revocation itself: the new generation is written to GitHub, then raised here; the name's open stream and pending nonces end with it.
@@ -827,6 +848,7 @@ async Task<(bool Ok, int Generation, bool Closed)> RevokeName(string name, strin
     finally { revokeGate.Release(); }
 }
 if (runtimeManager != null) runtimeManager.Revoke = async n => { await RevokeName(n, "runtime"); };
+if (cursorManager != null) cursorManager.Revoke = async n => { await RevokeName(n, "runtime"); };
 
 app.MapPost("/webhooks/github", async (HttpContext ctx) =>
 {
@@ -2027,6 +2049,15 @@ static async Task<(string Text, bool TooLarge)> ReadBody(HttpContext ctx, int ma
 app.MapMcp("/mcp");
 // the worker sessions of r1 holders at /mcp (gateway/Mcp/WorkerSessions.cs): registered with the plant at their first call, idle ones end
 var mcpSessions = new WorkerSessions(plant) { IdleMinutes = TimingValue(scriptsDir, "mcpIdleMinutes", 30) };
+mcpSessionsRef = mcpSessions;
+// a worker session that ends (session_end, idle, revoke, the plant closing its stream) stops what runs it: the Cursor agent is cancelled and deleted
+mcpSessions.OnEnded = async (name, reason) => { if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) await cursorManager.Deprovision(name, reason); };
+cursorPrompt = (item, phase) =>
+{
+    var bp = prompts.ByPath("bootstrap/api.md");
+    var text = bp == null ? "" : prompts.Render(bp, "cursor-cloud-agent")["text"]!.ToString();
+    return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\n";
+};
 GatewayMcp.Tools = new McpTools(new InProcess(app, Admit), mcpSessions, t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
 {
     if (messaging.Enabled && ownerMode) plant.Touch(name);
