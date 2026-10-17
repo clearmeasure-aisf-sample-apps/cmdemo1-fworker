@@ -126,6 +126,56 @@ but have not had a live proof on tdd since 1.0.37.
 
 Raw evidence (logs, prompts, traffic) stays on the owner's machine and is not committed: prompts and logs can contain credentials.
 
+### Agents, roles and launch modes: what is built (2026-10-17)
+
+Design: `docs/design/agents-roles-launch.md` (approved by the owner 2026-10-16). Built so far, steps 1 to 3, 4 (worker prompts only) and 9
+(the api mode with Cursor Cloud Agents, off by default):
+
+- **`/mcp`** (`gateway/Mcp/`): Streamable HTTP, stateless, `ModelContextProtocol.AspNetCore` 1.0.0. Bearer credential as at `/api`.
+  `tools/list` and `tools/call` are filtered by role (`gateway/Mcp/RoleTools.cs`, code-owner path). Each tool calls its `/api/v1` endpoint
+  in-process (`InProcess.cs`), so refusals, exit codes and journaling are the endpoint's. 240 tool calls a minute per credential.
+  - **owner** (the admin token, or an owner r1): `factory_status`, `workers_and_runs`, `item_detail`, `metrics` (read only).
+  - **worker** (a worker r1, or a legacy owner i1): `item_get`, `item_accept`, `item_claim`, `item_append_body`, `item_comment`,
+    `item_release`, `item_record_review`, `item_complete`, `pr_open`, `pr_update`, `pr_checks`, `pr_wait_checks`,
+    `item_validation_verdict` (functional-testing phase only), `send_note`, `ask`, `next_event`, `session_end`, `get_prompt`.
+  - A worker r1 session is registered with the plant at its first call (`WorkerSessions.cs`); the item token of its offer stays in the
+    gateway; `next_event` long-polls (at most 50 s) the same events the stream client gets. Idle sessions end after `timing.mcpIdleMinutes`
+    (30).
+- **`r1` role tokens** (`gateway/Auth.cs`): `r1.<payload>.<hmac over "role:"+payload>`, bound to name, role, mode, agent, environment,
+  expiry, item, phase and the name's revocation generation. `Auth.RoleOf` maps the legacy kinds; `auth.legacyKinds` (default true)
+  refuses w1, w2, m1, o1, k1 and i1 when false. Minted today only by the Cursor adapter (and a test seam).
+- **Prompts** (`prompts/`): `bootstrap/api.md`, `common/rules.md`, `worker/technical-design.md`, `worker/development.md`,
+  `worker/functional-testing.md` (migrated from the plugin skills, docs-only path included). Served by `get_prompt`; `/_build` reports
+  `promptsHash`; `/ready` answers 503 `waitingFor: prompts` while one does not parse. Lint: `tests/smoke.ps1`, section "prompts".
+- **api mode, Cursor Cloud Agents** (`gateway/Runtimes/CursorCloudRuntime.cs`): an item labelled `runtime:cursor-cloud` gets one Cursor
+  agent per phase: `POST https://api.cursor.com/v1/agents` with the bootstrap prompt, `repos[0]` cmdemo1-workorders at `master` (Technical
+  Design and Development; Functional Testing at `factory-worker/N-development`), `autoCreatePR` false and `mcpServers` =
+  `[{name: "fworker", type: "http", url: "<gateway>/mcp", headers: {Authorization: "Bearer <r1>"}}]`. Followed by `GET /v1/agents/{id}`
+  and its run; cancelled and deleted at `session_end`, at `api.cursor.maxMinutes` (60) and on revoke; the worker name is revoked when its
+  agent ends, so the r1 Cursor stored is dead with it. v1 routes docs-only items only: the sweep ignores the label (action
+  `runtime-label-ignored`, reason `not-docs-only`) for an item past Technical Design whose design does not carry the docs-only marker.
+  Model: Auto with the cost preference (owner decision 2026-10-17): `auto-smart` with `optimize_for: cost` when `GET /v1/models`
+  lists it, else `auto`; never the account default. Settings `api.cursor.*` in `config/instance.json` (`enabled` false,
+  `maxConcurrent` 1, `maxMinutes` 60, `maxExecutionsPerDay` 10, `ackSeconds` 900, `model` auto, `optimizeFor` cost, `environments`);
+  the deployed image turns it on in tdd only, with 6 launches a day (`config/deploy.overrides.json`). Tier 1: suite `cursor` against the fake Cursor API of `tests/FakeGitHub`.
+
+To run a first live test of a Cursor agent on tdd:
+
+1. The tdd gateway app (`ca-cmdemo1-tdd-fworker`) reads `CURSOR_API_KEY` (Key Vault secret `aisf-cursor-api-key` of kvcmdemo1tddvq464,
+   wired by the cmdemo1 session; uat and prod have it unset). `config/deploy.overrides.json` turns `api.cursor` on for tdd only
+   (`environments.tdd.gatewayUrl` is its public URL). The start log line `{"runtime":"cursor-cloud","enabled":true,...}` confirms it,
+   and `/api/v1/status` shows `runtimes."cursor-cloud"`.
+2. Install the Cursor GitHub App on `clearmeasure-aisf-sample-apps/cmdemo1-workorders` for the Cursor account of that key, with push to
+   branches other than `master` (owner decision 16.4: the second push identity).
+3. Create a docs-only work item (only files under `docs/`) labelled `factory worker` and `runtime:cursor-cloud` (and `Auto Merge` if it
+   should merge by itself), and move it to Technical Design. Do not pin it with `worker:<name>` (a pin skips the runtime routing).
+4. Watch `/api/v1/status` (`runtimes."cursor-cloud".executions`), the item's journal and the Cursor dashboard. The agent's worker is named
+   `cur-<item>-<6 hex>`.
+
+Not built yet: hosted runner on MCP (step 5), Copilot and Cursor CLI adapters (6), manual seats and `request_role` (7), role runs (8),
+removing `type` (10), the inspector, qc, manager, operator and keeper prompts and tools, `prompt_pin`, the gateway-side lease renewal
+beyond `next_event` and item tool calls.
+
 ## 5. Open defects and backlog, in priority order
 
 Done 2026-10-13 (issues 33, 30 and 31 of this repository): **the gateway finishes an approved item by itself.** A PASS on an `Auto Merge`

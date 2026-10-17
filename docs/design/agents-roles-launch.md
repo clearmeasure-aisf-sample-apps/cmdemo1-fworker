@@ -1,6 +1,7 @@
 # Agents, roles and launch modes: one role token, prompts served live, MCP as the only tool surface
 
-Status: design only, 2026-10-16. Nothing here is built. A refactoring of how the factory starts AI sessions, tells them what to do and lets
+Status: approved 2026-10-16; steps 1 to 3, 4 (bootstrap and worker prompts) and 9 (api mode with Cursor Cloud Agents, off by default) built
+2026-10-17 (section 17). The rest is design. A refactoring of how the factory starts AI sessions, tells them what to do and lets
 them act, from the owner's decisions of 2026-10-16 (section 1). Builds on `cloud-worker-runtimes.md` (the `cae-job` runtime, w2, nonces,
 `git-credential`), `environment-test-factories.md` (pull request 159, not merged on 2026-10-16: every role on demand, the owner tools at `/mcp`), `plant-manager.md`
 (tokens, slots, guard rails 10e), `operator-session.md`, `backlog-keeper.md` and `worker-messaging.md` (the stream).
@@ -457,3 +458,21 @@ the operator session can improve how phases are done within its daily release li
 8. **Owner auth at `/mcp`**: the admin token now; Entra identities once an app registration exists (6.1).
 
 No question is open.
+
+## 17. What is built (2026-10-17)
+
+| Step | Built | Where | Differs from the design |
+|---|---|---|---|
+| 1 | `/mcp`, Streamable HTTP, stateless; owner read tools `factory_status`, `workers_and_runs`, `item_detail`, `metrics` | `gateway/Mcp/McpServer.cs`, `InProcess.cs`, `RoleTools.cs` | Admin token or an owner r1 (no Entra yet); the owner action tools of PR 159 18.3 are not built. Tools call their `/api/v1` handler in-process (the endpoint's own request delegate), not a refactored function. 240 calls a minute per credential |
+| 2 | `r1` (mint, verify, environment, generation), `Auth.RoleOf` for the legacy kinds, `auth.legacyKinds` | `gateway/Auth.cs` | An r1 calls no `/api/v1` verb directly; `seat` has no tools yet. `/status` rows carry `mode` and `role` |
+| 3 | The worker role: `item_get`, `item_accept`, `item_claim`, `item_append_body`, `item_comment`, `item_release`, `item_record_review`, `item_complete`, `pr_open`, `pr_update`, `pr_checks`, `pr_wait_checks`, `item_validation_verdict`, `send_note`, `ask`, `next_event`, `session_end` (and `get_prompt`, step 4) | `gateway/Mcp/WorkerSessions.cs` | The gateway keeps the i1 of the offer (the agent never sees it) and registers the session with the plant at its first call. Inspector, qc, manager, operator and keeper tools, `git_credential`, `build_slot`, `item_merge` are not built. Heartbeat: every call stamps presence and counts as work on the owned item |
+| 4 | `prompts/bootstrap/api.md`, `prompts/common/rules.md`, `prompts/worker/{technical-design,development,functional-testing}.md`, `get_prompt`, `promptsHash`, `/ready` 503 `waitingFor: prompts`, lint in `tests/smoke.ps1` | `gateway/Mcp/Prompts.cs` | No MCP `prompts/list` or `prompt://` resources yet (the tool only); no version pins; the lint does not compare `version` with master |
+| 9 | `CursorCloudRuntime`: launch, follow, cancel and delete; r1 per agent; routing by label `runtime:cursor-cloud`, docs-only items only | `gateway/Runtimes/CursorCloudRuntime.cs`, `RuntimeManager.cs` (per-kind `RuntimeLimits`) | The `mcpServers` entry schema was confirmed in Cursor's docs (an array of `{name, type, url, headers}`), so no `envVars` fallback. Model: owner decision 2026-10-17, Auto with the cost preference: `auto-smart` with `params [{id: optimize_for, value: cost}]` when `GET /v1/models` lists it (cursor.com/docs/sdk/python), else `auto`, else the launch is refused; never the account default. Agents are named `fworker-<environment>-<worker>`; a start deletes this environment's agents older than any deadline that the process does not track. The name is revoked when its agent ends. Token usage (`GET /v1/agents/{id}/usage`) is logged at the end |
+
+Settings: `api.cursor.enabled` (false), `maxConcurrent` 1, `maxMinutes` 60, `maxExecutionsPerDay` 10, `ackSeconds` 900, `model` "auto",
+`optimizeFor` "cost", `environments` (when it names any, the mode is on only there, each with its `gatewayUrl`). The key is read from
+`CURSOR_API_KEY` (`api.cursor.apiKey` only for a local gateway). `FACTORY_CURSOR_ENABLED`, `FACTORY_CURSOR_GATEWAY_URL`,
+`FACTORY_CURSOR_MAX_CONCURRENT` and `FACTORY_CURSOR_MAX_MINUTES` override them on a gateway app.
+
+Tier 1: suites `mcp` (owner tools, r1, worker tools, prompts) and `cursor` (the adapter against the fake Cursor API of
+`tests/FakeGitHub`), both in the `operator` job of `tests.yml`.
