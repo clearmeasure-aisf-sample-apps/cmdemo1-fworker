@@ -1,7 +1,7 @@
 # Cursor cloud agents: token optimizations and usage
 
 The record of what was done to keep the `api` mode's Cursor cloud agents cheap, and what each run has used since.
-Runs are on tdd only (`runtime:cursor-cloud` items; 1 at a time, 60 min, 6 launches a day).
+Runs are on tdd only (`runtime:cursor-cloud` items; 1 at a time, 60 min, 30 launches a day).
 
 ## Optimizations (2026-10-17)
 

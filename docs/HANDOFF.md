@@ -157,7 +157,7 @@ Design: `docs/design/agents-roles-launch.md` (approved by the owner 2026-10-16).
   Model: Auto with the cost preference (owner decision 2026-10-17): `auto-smart` with `optimize_for: cost` when `GET /v1/models`
   lists it, else `auto`; never the account default. Settings `api.cursor.*` in `config/instance.json` (`enabled` false,
   `maxConcurrent` 1, `maxMinutes` 60, `maxExecutionsPerDay` 10, `ackSeconds` 900, `model` auto, `optimizeFor` cost, `environments`);
-  the deployed image turns it on in tdd only, with 6 launches a day (`config/deploy.overrides.json`). Tier 1: suite `cursor` against the fake Cursor API of `tests/FakeGitHub`.
+  the deployed image turns it on in tdd only, with 30 launches a day (`config/deploy.overrides.json`). Tier 1: suite `cursor` against the fake Cursor API of `tests/FakeGitHub`.
 
 To run a first live test of a Cursor agent on tdd:
 
