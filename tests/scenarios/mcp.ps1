@@ -135,7 +135,8 @@ $McpScenarios['mcp: a worker r1 registers at its first call, gets its offer by n
         $cv = Api-As POST '/api/v1/verbs/complete' @{ item = $n; holder = $name }
         Check 'a gate refusal is the verb''s own code' ($c.isError -and $c.body.code -eq $cv.body.code -and $c.body.exit -eq $cv.body.exit) "$($c.body | ConvertTo-Json -Compress) / $($cv.body | ConvertTo-Json -Compress)"
         $vd = Mcp-Call 'item_validation_verdict' @{ item = $n; passed = $true; summary = 'x'; pr = 1; head_sha = ('0' * 40) } $t
-        Check 'the verdict tool is refused outside functional-testing' ($vd.isError -and $vd.body.code -eq 'wrong-phase')
+        $vv = Api-As POST '/api/v1/verbs/validation-verdict' @{ item = $n; holder = $name; passed = $true; summary = 'x'; pr = 1; head_sha = ('0' * 40) }
+        Check 'the verdict tool outside Functional Testing is refused by the verb, with the verb''s code' ($vd.isError -and $vd.body.code -eq $vv.body.code) "$($vd.body | ConvertTo-Json -Compress) / $($vv.body | ConvertTo-Json -Compress)"
         $sec = Mcp-Call 'send_note' @{ to = 'operator'; text = ('my key is ghp_' + ('A' * 30)) } $t
         Check 'a note that looks like a credential is refused' ($sec.isError -and $sec.body.code -eq 'secret-in-message') ($sec | ConvertTo-Json -Compress)
         $r1note = Mcp-Call 'send_note' @{ to = 'operator'; text = ('token ' + $t) } $t
