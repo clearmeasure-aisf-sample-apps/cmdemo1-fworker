@@ -717,8 +717,9 @@ $OwnerScenarios['pass-merge: a PASS nobody merged (the session stopped after the
     Start-Sleep -Seconds 3
     Check 'the sweep leaves it alone during the grace' (-not (Get-FakePr $x.pr).merged)
     Check 'the sweep merges it after the grace' (Wait-Until -Seconds 60 { (Get-FakePr $x.pr).merged })
-    [void](Wait-Until -Seconds 20 { (Pm-State $x.n).verdict.processed })
-    Check 'the verdict is processed and the merge comment says the gateway merged it' ((Pm-State $x.n).verdict.processed -and @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match "the gateway squash-merged PR #$($x.pr) " }).Count -eq 1)
+    # the comment is written after the verdict is marked processed: wait for both
+    $ok = Wait-Until -Seconds 20 { (Pm-State $x.n).verdict.processed -and @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match "the gateway squash-merged PR #$($x.pr) " }).Count -ge 1 }
+    Check 'the verdict is processed and the merge comment says the gateway merged it' ($ok -and @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match "the gateway squash-merged PR #$($x.pr) " }).Count -eq 1)
 }
 
 $OwnerScenarios['pass-merge: a PASS recorded just before the gateway restarts is merged after the restart [full]'] = {
