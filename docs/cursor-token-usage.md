@@ -45,3 +45,40 @@ Append one row per Cursor run from here on, from `/api/v1/status` (`last[].detai
 |---|---|---|---:|---:|---:|---:|---:|
 | 2026-10-17 | 364 | Development | 2.1 | 52,213 | 627,328 | 2,571 | 682,112 |
 | 2026-10-17 | 364 | Functional Testing | 2.0 | 89,395 | 490,624 | 1,978 | 581,997 |
+| 2026-10-17 | 371 | Technical Design | 2.3 | 0 | 0 | 0 | n/a |
+| 2026-10-17 | 372 | Technical Design | 1.9 | 0 | 0 | 0 | n/a |
+| 2026-10-17 | 371 | Development | 52.5 | 0 | 0 | 0 | n/a |
+
+n/a: the usage read answered all zeros (371 and 372 Technical Design, 371 Development, which failed); see Round A.
+
+## Round A (2026-10-17): stopped, no token numbers
+
+Plan: 3 docs-only items of different shape (371 new one-line page, 372 append to an existing glossary, 373 new page
+with a table), 3 phases each, then hypotheses, changes and a Round B for comparison. Stopped after 3 runs on two
+defects; no hypothesis was implemented, because nothing could have been measured against a baseline.
+
+1. **Usage is all zeros.** `GET /v1/agents/{id}/usage` answered 200 with every count 0 for all three runs (two
+   Technical Design runs of ~2 min, one Development run of 52 min). Item 364's runs had real numbers, so the
+   read at session end is most likely too early for Cursor's accounting; the agent is then deleted and the number is lost.
+   Needs a change in `gateway/Runtimes/CursorCloudRuntime.cs` (code-owner path): retry the read until it is non-zero
+   or a short limit passes, before the delete. Unmeasured until then.
+2. **The Development agent could not push.** Item 371: the agent released the item after 52 min with "Cannot push
+   factory-worker/371-development: outbound TCP 443 blocked; github.com:22 has no authorized key", after a question to
+   the supervisor waited unanswered. Items 364/365 pushed on the same day, so the Cursor environment's network or
+   its GitHub access changed. Needs the owner's look at the Cursor account/environment.
+
+Items 371, 372 and 373 were moved back to Todo so they do not use more of the 30-a-day cap; they are the Round A
+items to rerun once both defects are fixed.
+
+### Hypotheses for after the fix (not implemented, not measured)
+
+Most tokens are cache reads (88% for item 364), which grow with the number of agent turns, so fewer turns per
+phase is the main lever.
+
+| # | Hypothesis | Expected effect |
+|---|---|---|
+| H1 | Item template gives the exact `Files:` line and docs-only marker in Scope; Technical Design copies them | fewer TD turns, ~20-30% less in TD |
+| H2 | Skip Technical Design for docs-only items whose body already has `Files:` (fold into Development) | one session less per item, ~30% per item |
+| H3 | Shorter worker prompts and terse review lines | small input saving per turn, <5% |
+| H4 | A gateway tool that returns the PR diff for Functional Testing instead of git fetch/checkout/diff | 2-4 fewer FT turns, ~20% in FT |
+| H5 | Development stops after `pr_open` plus one `pr_wait_checks` call | fewer polling turns, ~10-20% in Dev |
