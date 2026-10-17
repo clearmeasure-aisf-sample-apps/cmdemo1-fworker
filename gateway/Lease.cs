@@ -15,11 +15,14 @@ using System.Text.RegularExpressions;
 //    like a summary that names the item, and answers an open item.check. It counts only while the session itself (a verb of its own or a changed
 //    summary) was active within schedule.progressMaxMinutes (180): a machine that stays busy while the session is stuck does not hold the item for
 //    ever. The client's own claim-item --renew (renewed_by client) is progress, not the session's verb.
+// 4. An owner whose complete answered continue: true (it owns the next column) and that calls nothing for the item and reports no local progress
+//    for it within schedule.continueMinutes after it is taken back at once (issue 76): its session ended at the column instead of going on, and
+//    rule 3 would hold the item for staleItemMinutes plus staleConfirmMinutes. 0 switches the rule off.
 // Taking back = the rule script expire-claim ends the claim's lease (the claim stays, marked taken_back), the plant forgets the owner and the next
 // sweep offers the item again with mode resume, first to another worker. Everything here is in memory, like the rest of the plant.
 sealed class LeaseSettings
 {
-    public double LeaseRenewMinutes = 5, StaleItemMinutes = 15, StaleConfirmMinutes = 3, ClientStartMinutes = 5, ProgressMaxMinutes = 180;
+    public double LeaseRenewMinutes = 5, StaleItemMinutes = 15, StaleConfirmMinutes = 3, ClientStartMinutes = 5, ProgressMaxMinutes = 180, ContinueMinutes = 0;
 
     public static LeaseSettings Load(string scriptsDir)
     {
@@ -31,7 +34,7 @@ sealed class LeaseSettings
         return new LeaseSettings
         {
             LeaseRenewMinutes = D("leaseRenewMinutes", 5), StaleItemMinutes = D("staleItemMinutes", 15), StaleConfirmMinutes = D("staleConfirmMinutes", 3),
-            ClientStartMinutes = D("clientStartMinutes", 5), ProgressMaxMinutes = D("progressMaxMinutes", 180)
+            ClientStartMinutes = D("clientStartMinutes", 5), ProgressMaxMinutes = D("progressMaxMinutes", 180), ContinueMinutes = D("continueMinutes", 0)
         };
     }
 }
@@ -51,6 +54,8 @@ sealed partial class Plant
     readonly Dictionary<int, (string Name, DateTime At, DateTime SummaryAt, DateTime QuietSince)> checks = new();
     readonly Dictionary<int, (string Name, string Assignment, DateTime StartBy)> clientAccepted = new();
     readonly Dictionary<int, string> takenBackFrom = new();
+    // rule 4: the owner, the time of its complete with continue: true, and the deadline of its next call
+    readonly Dictionary<int, (string Name, DateTime At, DateTime By)> continueBy = new();
     // per item: the latest local progress its owner's client reported (who, when it was seen on the machine, what showed it)
     readonly Dictionary<int, (string Name, DateTime At, string Source)> lastProgress = new();
     long renewals, renewFailures, checksSent, takenBack, progressReports, checksAnsweredByProgress;
@@ -87,6 +92,8 @@ sealed partial class Plant
                 return;
             }
             lastCall[item] = now; checks.Remove(item); clientAccepted.Remove(item);
+            if (verb == "complete" && ok && Lease.ContinueMinutes > 0 && response?["continue"] is JsonValue cv && cv.TryGetValue<bool>(out var cont) && cont)
+                continueBy[item] = (name, now, now.AddMinutes(Lease.ContinueMinutes));
             if (verb is "" or "accept" or "claim-item" or "release") return;
             if (RenewDue(item, now)) renewFor = name;
         }
@@ -184,6 +191,14 @@ sealed partial class Plant
                 if (now >= ca.StartBy) { clientAccepted.Remove(item); back.Add((item, ca.Name, "client-accepted-not-started")); }
             }
             foreach (var k in lastProgress.Keys.Where(k => !ownerOf.ContainsKey(k)).ToList()) lastProgress.Remove(k);
+            foreach (var (item, cb) in continueBy.ToList())
+            {
+                if (takingBack.Contains(item) || back.Any(b => b.Item == item)) continue;
+                // another owner now, or any call (verb or poll) of the owner after its complete: the session went on
+                if (!(ownerOf.TryGetValue(item, out var o) && o == cb.Name) || (lastCall.TryGetValue(item, out var lc) && lc > cb.At)
+                    || (lastProgress.TryGetValue(item, out var cp) && cp.Name == cb.Name && cp.At > cb.At)) { continueBy.Remove(item); continue; }
+                if (now >= cb.By) { continueBy.Remove(item); checks.Remove(item); back.Add((item, cb.Name, "no-call-after-complete")); }
+            }
             foreach (var (item, owner) in ownerOf.ToList())
             {
                 if (back.Any(b => b.Item == item) || takingBack.Contains(item) || seamOwned.Contains(item)) continue;
@@ -251,7 +266,7 @@ sealed partial class Plant
             {
                 takenBack++;
                 if (workers.TryGetValue(name, out var w)) Push(w, new JsonObject { ["provider"] = "gateway", ["event"] = "item.taken_back", ["item"] = item, ["reason"] = reason }.ToJsonString());
-                DropOwner(item); acceptedOwner.Remove(item); lastCall.Remove(item); lastRenew.Remove(item); checks.Remove(item);
+                DropOwner(item); acceptedOwner.Remove(item); continueBy.Remove(item); lastCall.Remove(item); lastRenew.Remove(item); checks.Remove(item);
                 foreach (var k in assignments.Keys.Where(k => k.StartsWith(item + "|own-item|", StringComparison.Ordinal)).ToList()) assignments.Remove(k);
                 takenBackFrom[item] = name;
                 // issue 100: a take-back is a miss of the session; two in a row (or with lapsed offers) block it until it calls a verb of its own
@@ -259,6 +274,7 @@ sealed partial class Plant
                 Journal(item, "reassigned", new JsonObject { ["reason"] = (reason switch
                 {
                     "client-accepted-not-started" => $"{name} accepted by its client but did not start within the lease; offered again",
+                    "no-call-after-complete" => $"{name} completed a column with continue but called nothing for the item within {Lease.ContinueMinutes:0.#} min; offered again",
                     "released-by-plant-manager" => $"the plant manager released {name} from this item (Manager.cs); offered again",
                     _ => $"{name} did not answer the check after {Lease.StaleItemMinutes:0.#} min without a verb; offered again"
                 }) + blocked, ["opCode"] = reason }, "back|" + item + "|" + now.Ticks);

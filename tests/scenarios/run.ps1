@@ -68,7 +68,7 @@ $SuiteDefs = @(
     @{ Name = 'auto'; Policy = 'auto'; Set = $Scenarios; Extra = @{ gatewayMerge = $false } }
     @{ Name = 'peer-approved'; Policy = 'peer-approved'; Set = $ApprovalScenarios }
     @{ Name = 'merge-queue'; Policy = 'auto'; Set = $QueueScenarios; Extra = @{ mergeQueueDepth = 1; gatewayMerge = $false } }
-    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ mode = 'every-move'; autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600 } }
+    @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ mode = 'every-move'; autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600; continueMinutes = 0 } }
     @{ Name = 'qc'; Policy = 'auto'; Set = $QcScenarios; Extra = $qcOpen; Env = 'qc'; ClientHost = $true }   # ClientHost: F runs the client in one long-lived pwsh (lib.ps1)
     @{ Name = 'qc-worker'; Policy = 'auto'; Set = $QcWorkerScenarios; Extra = (New-Gate); Env = 'qc' }
     @{ Name = 'qc-gate'; Policy = 'peer-approved'; Set = $QcGateScenarios; Extra = (New-Gate); Env = 'qc' }
@@ -86,19 +86,19 @@ $SuiteDefs = @(
     # the limits of the main gateway are lifted, so one scenario's sends never count against another's; the scenarios that test the limits start a
     # second gateway of their own (Msg-OnGateway). "dave" is on no list: it is the name that is refused.
     @{ Name = 'messaging'; Policy = 'auto'; Set = $MessagingScenarios; Extra = @{ messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'hank', 'ivan', 'judy', 'kate', 'liam', 'racer', 'poller'); testHooks = $true }; runner = $msgPool }; Env = 'owner'; ClientHost = $true
-        Timing = @{ ratePerMinute = 100000; pairPer10Min = 100000; perSenderQueueCap = 1000; recipientQueueCap = 1000; broadcastPer10Min = 100000; staleItemMinutes = 600 } }
+        Timing = @{ ratePerMinute = 100000; pairPer10Min = 100000; perSenderQueueCap = 1000; recipientQueueCap = 1000; broadcastPer10Min = 100000; staleItemMinutes = 600; continueMinutes = 0 } }
     @{ Name = 'manager'; Policy = 'auto'; Set = $ManagerScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor', 'supervisor2'); allowedAskers = @('alice', 'bob', 'carol', 'erin', 'frank', 'gina', 'ivan', 'judy', 'kate'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }; runner = $msgPool }; Env = 'owner'; ClientHost = $true
         # the delivery and step budgets are lifted like the other limits (the budget scenarios set their own); an owner the sweep stops listing is dropped after 5 s
         # (an owner that a scenario leaves behind on the suite's gateway is not reported as quiet, and a client that an earlier scenario left running, which
         # reconnects to the next gateway with the cursor of the last one, is not reported as a restart: the scenarios of those conditions set their own times)
-        Timing = @{ mgrTakeoverSeconds = 6; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; mgrOwnedGraceSeconds = 5; mgrQuietMinutes = 600; mgrRestartMinutes = 0.0001; staleItemMinutes = 600 } }
+        Timing = @{ mgrTakeoverSeconds = 6; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; mgrOwnedGraceSeconds = 5; mgrQuietMinutes = 600; mgrRestartMinutes = 0.0001; staleItemMinutes = 600; continueMinutes = 0 } }
     # the factory operator session (operator.ps1): one process per rule-script call, so a verb call is in flight long enough to be seen by release-check
     @{ Name = 'operator'; Policy = 'auto'; Set = $OperatorScenarios; Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('alice', 'bob'); testHooks = $true }; manager = @{ enabled = $true; allowedNames = @('supervisor'); allowedAskers = @('alice', 'bob'); tokenGeneration = 1; turnBudgetPerHour = 100000; turnBudgetPerDay = 100000; stepBudgetPerHour = 100000 }
             operator = @{ enabled = $true; allowedNames = @('operator-session', 'operator-two'); tokenGeneration = 1; requiredModelTier = 'premium'; requiredEffort = 'low'; maxSelfMergesPerDay = 2 } }; Env = 'owner'
-        Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; opSelfAnswerMinutes = 0.1; staleItemMinutes = 600 } }
+        Timing = @{ mgrTakeoverSeconds = 4; ratePerMinute = 100000; pairPer10Min = 100000; broadcastPer10Min = 100000; opSelfAnswerMinutes = 0.1; staleItemMinutes = 600; continueMinutes = 0 } }
     # cloud worker runtimes (runtime.ps1): the w2 credential, the one-time nonce (minted through the messaging test seam) and git-credential
     # and the adapter against the fake ARM: items opt in by the runtime:cae-job label (no routing rule), a 15 s window for runtime workers (8 s for local ones)
-    @{ Name = 'runtime'; Policy = 'auto'; Set = $RuntimeScenarios; Env = 'runtime'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
+    @{ Name = 'runtime'; Policy = 'auto'; Set = $RuntimeScenarios; Env = 'runtime'; Timing = @{ staleItemMinutes = 600; continueMinutes = 0; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             runtimes = @{ preferConnected = $true; routing = @(); caeJob = @{ enabled = $true; maxConcurrent = 3; maxExecutionsPerDay = 1000; ackSeconds = 15; replicaTimeoutSeconds = 3600; maxFailuresPerPhase = 2; unhealthyAfterFailures = 2; listSeconds = 1
                 jobResourceId = '/subscriptions/s1/resourceGroups/rg-test/providers/Microsoft.App/jobs/caj-test-claude'; armEndpoint = '__FAKE_URL__'; apiVersion = '2024-03-01'; managedIdentityClientId = ''; image = ''; containerName = 'fwrunner'; cpu = 4; memory = '8Gi'; gatewayUrl = 'http://ca-test-fworker'

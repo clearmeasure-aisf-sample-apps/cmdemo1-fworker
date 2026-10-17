@@ -85,7 +85,8 @@
     "staleItemMinutes": 15,
     "staleConfirmMinutes": 3,
     "clientStartMinutes": 5,
-    "progressMaxMinutes": 180
+    "progressMaxMinutes": 180,
+    "continueMinutes": 3
   },
   "timing": {
     "assignAckSeconds": 120,

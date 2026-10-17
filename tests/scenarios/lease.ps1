@@ -254,3 +254,34 @@ $LeaseScenarios['lease: items taken back from a session count as misses and the 
         } finally { Mgr-Stop $c }
     }
 }
+
+$LeaseScenarios['lease: an owner whose complete answered continue and that calls nothing more for the item within continueMinutes is taken back at once (issue 76); one that goes on keeps it'] = {
+    $n1 = New-Item-Fake 'Continue, then silent' 'x' @('factory worker', 'worker:ghost-lease')
+    $n2 = New-Item-Fake 'Continue, then goes on' 'x' @('factory worker', 'worker:ghost-lease')
+    Msg-OnGateway (Ls-Env 'instance.lease-c.json' @{ FACTORY_TIMING_continueMinutes = '0.25'; FACTORY_TIMING_staleItemMinutes = '600' }) {
+        param($g)
+        Ls-Swept
+        $carol = Msg-Open 'name=carol&capacity=5&messaging=1' (Msg-Token 'carol'); Msg-Registered $carol
+        try {
+            [void](Msg-Post '/api/v1/_test/plan' @{ offers = @(@{ item = $n1; kind = 'own-item'; column = 'Technical Design' }, @{ item = $n2; kind = 'own-item'; column = 'Technical Design' }); pins = @{}; owned = @{}; keep = @() })
+            Msg-Read $carol 20 { param($e) @($e | Where-Object { $_.data.event -eq 'item.assigned' }).Count -ge 2 }
+            $tok = @{}
+            foreach ($ev in (Msg-Of $carol 'item.assigned')) { $d = $ev.data; $tok["$($d['item'])"] = "$($d['token'])" }
+            # both accepted first: an offer not accepted within the ack window is withdrawn
+            foreach ($i in $n1, $n2) { $r = Msg-Json (Msg-Verb 'accept' $tok["$i"] @{ item = $i }); Check "carol accepts #$i" ($r.exit -eq 0) ($r | ConvertTo-Json -Compress) }
+            foreach ($i in $n1, $n2) {
+                $r = Msg-Json (Msg-Verb 'append-body' $tok["$i"] @{ item = $i; column = 'Technical Design'; content = "## Technical Design`n`n<!-- aisf:docs-only -->`n- change as described.`n" }); Check "the design of #$i is appended" ($r.exit -eq 0) ($r | ConvertTo-Json -Compress)
+                $rv = Msg-Json (Msg-Verb 'record-review' $tok["$i"] @{ item = $i; column = 'Technical Design'; role = 'reviewer'; text = "ok`nREVIEW: COMPLETE" }); Check "the review of #$i is recorded" ($rv.exit -eq 0) ($rv | ConvertTo-Json -Compress)
+                $c = Msg-Json (Msg-Verb 'complete' $tok["$i"] @{ item = $i; column = 'Technical Design'; review_ref = $rv.review_ref; comment = 'REVIEW: COMPLETE - design done' })
+                Check "#$i completes Technical Design with continue" ($c.exit -eq 0 -and $c.continue -eq $true -and $c.next_column -eq 'Development') ($c | ConvertTo-Json -Compress -Depth 4)
+            }
+            # n2's session goes on into the next column (any call counts); n1's session ended at the column
+            [void](Msg-Verb 'get-item' $tok["$n2"] @{ item = $n2 })
+            Msg-Read $carol 40 { param($e) @($e | Where-Object { $_.data.event -eq 'item.taken_back' }).Count -ge 1 }
+            $tb = Msg-Of $carol 'item.taken_back'
+            Check 'the silent item is taken back after continueMinutes; the one that went on is not' ($tb.Count -eq 1 -and $tb[0].data['item'] -eq $n1 -and "$($tb[0].data.reason)" -eq 'no-call-after-complete') ($tb | ConvertTo-Json -Compress -Depth 5)
+            Check 'its lease is ended in the state and the journal says why' (Wait-Until -Seconds 30 { "$(Ls-Taken (Ls-State $n1))" -eq 'no-call-after-complete' -and @((Ls-Journal $n1 'reassigned') | Where-Object { $_.body -match 'called nothing for the item' }).Count -eq 1 }) ((Ls-State $n1) | ConvertTo-Json -Compress -Depth 6)
+            Check 'the plant still names carol for the item that went on only' ((Ls-Owner $n2) -eq 'carol' -and (Ls-Owner $n1) -eq '') ((Ls-Status).plant.owners | ConvertTo-Json -Compress)
+        } finally { Msg-Close $carol }
+    }
+}
