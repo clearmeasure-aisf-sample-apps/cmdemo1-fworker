@@ -15,6 +15,9 @@ sealed class CursorCloudSettings
     public int MaxConcurrent = 1, MaxExecutionsPerDay = 10, MaxFailuresPerPhase = 2, UnhealthyAfterFailures = 2;
     public double MaxMinutes = 60;
     public double AckSeconds = 900, ListSeconds = 30, IdleGraceSeconds = 60;
+    // Cursor's usage of an agent reads all zeros for a while after its run ends (live runs 371, 372 of 2026-10-17): the delete waits for a
+    // non-zero read, re-reading after UsageRetrySeconds and doubling, at most UsageWaitSeconds after the end
+    public double UsageRetrySeconds = 10, UsageWaitSeconds = 300;
     // Model "auto": Cursor's Auto model (owner decision 2026-10-17, cost first); the adapter resolves it against GET /v1/models once and never
     // falls back to the account's default (which may be a premium model): a launch with a model Cursor refuses fails visibly instead
     public string Environment = "tdd", OptimizeFor = "cost";
@@ -39,6 +42,7 @@ sealed class CursorCloudSettings
             s.MaxConcurrent = (int)D("maxConcurrent", 1); s.MaxExecutionsPerDay = (int)D("maxExecutionsPerDay", 10); s.MaxMinutes = Math.Max(0.1, D("maxMinutes", 60));
             s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
             s.AckSeconds = D("ackSeconds", 900); s.ListSeconds = Math.Max(1, D("listSeconds", 30)); s.IdleGraceSeconds = D("idleGraceSeconds", 60);
+            s.UsageRetrySeconds = Math.Max(0.5, D("usageRetrySeconds", 10)); s.UsageWaitSeconds = D("usageWaitSeconds", 300);
             s.ApiUrl = S("apiUrl", s.ApiUrl).TrimEnd('/'); s.ApiKey = S("apiKey", ""); s.GatewayUrl = S("gatewayUrl", "").TrimEnd('/'); s.Model = S("model", "auto").Trim(); if (s.Model == "") s.Model = "auto";
             var of = S("optimizeFor", "cost"); s.OptimizeFor = of is "cost" or "balanced" or "intelligence" ? of : "cost";
             s.Repository = S("repository", s.Repository); s.DefaultBranch = S("defaultBranch", s.DefaultBranch);
@@ -71,7 +75,7 @@ sealed class CursorCloudSettings
 
 sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
 {
-    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged; public JsonNode? Model, ReportedModel, Usage; public JsonArray? Fields, RunFields; public int UsageStatus; }
+    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged, Cancelled; public DateTime? NextUsageRead; public double UsageBackoff; public int UsageReads; public JsonNode? Model, ReportedModel, Usage; public JsonArray? Fields, RunFields; public int UsageStatus; }
 
     readonly CursorCloudSettings cfg;
     readonly HttpClient http;
@@ -145,12 +149,25 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
         Agent? a; lock (agents) agents.TryGetValue(workerName, out a);
         if (a == null || a.Deleted) return;
         string id, run; lock (agents) { id = a.Id; run = a.RunId; }
-        // the usage is read while the agent still exists (a deleted agent answers 404), and before the end is visible to the manager
-        await LogUsage(a, ct);
-        if (run != "") { try { await Send(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(id)}/runs/{Uri.EscapeDataString(run)}/cancel", null, ct); } catch { } }
+        // the run is cancelled first, so the agent does no more work while its usage is awaited
+        if (run != "" && !a.Cancelled) { try { await Send(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(id)}/runs/{Uri.EscapeDataString(run)}/cancel", null, ct); } catch { } lock (agents) a.Cancelled = true; }
+        DateTime ended; lock (agents) { ended = a.Ended ??= DateTime.UtcNow; if (a.Status == "Running") a.Status = "Stopped"; }
+        // the usage is read while the agent still exists (a deleted agent answers 404); while it reads zero the delete is put off (List calls
+        // this again at every reading) with a doubling wait, until UsageWaitSeconds after the end
+        if (!HasUsage(a) && (DateTime.UtcNow - ended).TotalSeconds < cfg.UsageWaitSeconds)
+        {
+            lock (agents) { if (a.NextUsageRead is { } nr && DateTime.UtcNow < nr) return; a.NextUsageRead = DateTime.MaxValue; }   // one read at a time
+            await LogUsage(a, ct);
+            if (!HasUsage(a) && (DateTime.UtcNow - ended).TotalSeconds < cfg.UsageWaitSeconds)
+            {
+                lock (agents) { a.UsageBackoff = a.UsageBackoff <= 0 ? cfg.UsageRetrySeconds : a.UsageBackoff * 2; a.NextUsageRead = DateTime.UtcNow.AddSeconds(a.UsageBackoff); }
+                return;
+            }
+        }
+        if (!HasUsage(a)) await LogUsage(a, ct);   // the wait is over: one last read, logged as it is
         var (s, _) = await Send(HttpMethod.Delete, $"/v1/agents/{Uri.EscapeDataString(id)}", null, ct);
         if (s is not (200 or 202 or 204 or 404)) throw new HttpRequestException($"delete of agent answered {s}");
-        lock (agents) { a.Deleted = true; a.Ended ??= DateTime.UtcNow; if (a.Status == "Running") a.Status = "Stopped"; }
+        lock (agents) a.Deleted = true;
     }
 
     // The model of a launch (owner decision 2026-10-17: Auto with the cost preference). Model "auto" is resolved against GET /v1/models once per
@@ -189,15 +206,17 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
         return all;
     }
 
-    // the tokens an agent used (GET /v1/agents/{id}/usage), logged when it ends, for the cycle metrics
+    static bool HasUsage(Agent a) => a.Usage?["totalTokens"] is JsonValue v && v.TryGetValue<double>(out var t) && t > 0;
+
+    // the tokens an agent used (GET /v1/agents/{id}/usage), logged once it reads non-zero (or for the last read), for the cycle metrics
     async Task LogUsage(Agent a, CancellationToken ct)
     {
         try
         {
             var (s, j) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(a.Id)}/usage", null, ct);
-            lock (agents) { a.UsageStatus = s; if (s == 200) a.Usage = (j?["totalUsage"] ?? j?["usage"])?.DeepClone(); }
-            if (s == 200) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-usage", ["worker"] = a.Worker, ["item"] = a.Item, ["phase"] = a.Phase, ["agent"] = a.Id,
-                ["minutes"] = Math.Round((DateTime.UtcNow - a.Started).TotalMinutes, 1), ["usage"] = j?["totalUsage"]?.DeepClone() }.ToJsonString());
+            lock (agents) { a.UsageReads++; a.UsageStatus = s; if (s == 200) a.Usage = (j?["totalUsage"] ?? j?["usage"])?.DeepClone(); }
+            if (s == 200 && (HasUsage(a) || (DateTime.UtcNow - (a.Ended ?? DateTime.UtcNow)).TotalSeconds >= cfg.UsageWaitSeconds)) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-usage", ["worker"] = a.Worker, ["item"] = a.Item, ["phase"] = a.Phase, ["agent"] = a.Id,
+                ["minutes"] = Math.Round(((a.Ended ?? DateTime.UtcNow) - a.Started).TotalMinutes, 1), ["reads"] = a.UsageReads, ["usage"] = j?["totalUsage"]?.DeepClone() }.ToJsonString());
         }
         catch { }
     }

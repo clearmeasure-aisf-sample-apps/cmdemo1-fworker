@@ -251,7 +251,8 @@ sealed class RuntimeManager
                     ["healthy"] = healthy, ["unhealthyReason"] = unhealthyWhy, ["startFailuresInRow"] = startFailuresInRow, ["ackSeconds"] = lim.AckSeconds, ["relisted"] = relisted,
                     ["executions"] = new JsonArray(execs.Values.Where(e => !e.Ended).Select(e => (JsonNode)new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["status"] = e.Status, ["started"] = e.StartedAt.ToString("o"), ["registered"] = e.RegisteredAt?.ToString("o"), ["detail"] = Detail(e.Name) }).ToArray()),
                     ["failures"] = new JsonArray(failures.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value }).ToArray()),
-                    ["last"] = new JsonArray(last.Select(x => (JsonNode)x.DeepClone()).ToArray())
+                    // the detail is read again while the runtime still knows the worker: its usage arrives after the end (a Cursor agent's reads zero at first)
+                    ["last"] = new JsonArray(last.Select(x => { var c = (JsonObject)x.DeepClone(); if (Detail(c["worker"]?.ToString() ?? "") is { } d) c["detail"] = d; return (JsonNode)c; }).ToArray())
                 }
             };
         }
