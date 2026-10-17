@@ -45,5 +45,8 @@
 /docs/owner-rules.md                          @jeffreypalermo
 /tests/scenarios/keeper.ps1                   @jeffreypalermo
 
+# the MCP tool surface (docs/design/agents-roles-launch.md 14): the role tool sets and the tools
+/gateway/Mcp/                                 @jeffreypalermo
+
 # uat and prod
 /docs/deploy/activate-prod.sh                 @jeffreypalermo

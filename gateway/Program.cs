@@ -190,6 +190,10 @@ builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavio
 // revision, a failed probe). Neither line present means the process was killed outright (out of memory).
 AppDomain.CurrentDomain.UnhandledException += (_, ue) => { try { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"unhandled-exception\",\"terminating\":{(ue.IsTerminating ? "true" : "false")},\"type\":{JsonSerializer.Serialize(ue.ExceptionObject?.GetType().FullName ?? "")},\"message\":{JsonSerializer.Serialize((ue.ExceptionObject as Exception)?.Message ?? "")}}}"); } catch { } };
 TaskScheduler.UnobservedTaskException += (_, te) => { try { te.SetObserved(); Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"unobserved-task-exception\",\"type\":{JsonSerializer.Serialize(te.Exception.InnerException?.GetType().FullName ?? "")},\"message\":{JsonSerializer.Serialize(te.Exception.InnerException?.Message ?? "")}}}"); } catch { } };
+// The MCP server at /mcp (gateway/Mcp/, docs/design/agents-roles-launch.md 6): stateless Streamable HTTP; the middleware authenticates it like /api
+builder.Services.AddMcpServer(o => o.ServerInfo = new() { Name = "fworker", Version = "1" })
+    .WithHttpTransport(o => o.Stateless = true)
+    .WithListToolsHandler(GatewayMcp.ListTools).WithCallToolHandler(GatewayMcp.CallTool);
 var app = builder.Build();
 app.Lifetime.ApplicationStopping.Register(() => { try { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"stopping\",\"reason\":\"shutdown requested (signal or host)\",\"upSeconds\":{(long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds}}}"); } catch { } });
 var hub = app.Services.GetRequiredService<EventHub>();
@@ -507,7 +511,7 @@ app.Use(async (ctx, next) =>
     if (port == hookPort && hookPort != apiPort && !(path == "/webhooks/github" && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
     // a process that a newer one superseded (Leader.cs) serves nothing any more but its status to the operator: calls and new streams are answered
     // 503 gateway-replaced, so the client tries again and reaches the new process; a webhook too (the new process's sweep catches up)
-    if (leader.Replaced && (path == "/webhooks/github" || path.StartsWith("/qc/") || (path.StartsWith("/api/") && !(path is "/api/v1/status" or "/api/v1/dashboard" && Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
+    if (leader.Replaced && (path == "/webhooks/github" || path.StartsWith("/qc/") || ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) || (path.StartsWith("/api/") && !(path is "/api/v1/status" or "/api/v1/dashboard" && Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
     {
         ctx.Response.StatusCode = 503;
         await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "gateway-replaced", reason = "this gateway process was replaced by a newer one; try again", retryAfterSeconds = 5, exit = 20 });
@@ -515,7 +519,8 @@ app.Use(async (ctx, next) =>
     }
     // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
     if (port == apiPort && path == "/api/v1/runtime/redeem") { await next(); return; }
-    if (port == apiPort && path.StartsWith("/api/"))
+    var isMcp = port == apiPort && ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
+    if (port == apiPort && (path.StartsWith("/api/") || isMcp))
     {
         var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
         if (p?.Kind != "admin" && !revocationsLoaded.Task.IsCompleted)
@@ -526,26 +531,43 @@ app.Use(async (ctx, next) =>
         }
         if (p == null) { await Refuse(ctx, 401, "unauthorized", "missing, malformed, forged or expired credential"); return; }
         ctx.Items["principal"] = p;
-        // presence (worker-messaging.md 2.2, 4.6): every request of a session's own credential is proof of life; a stream write is not. The
-        // credentials that are the session itself are listed: a worker, the supervisor, and the item tokens of an owner or an inspector. A QC item
-        // token is pull request code's credential and never stamps presence, nor does any role this list does not name.
-        // A supervisor credential stamps only while its name holds the slot (4.6: exactly one is active; registration stamps by itself), so a
-        // replaced or never-registered supervisor name is never heard.
-        if (messaging.Enabled && ownerMode && (p.Kind == "worker" || (p.Kind == "manager" && plant.ActiveSupervisor().Name == p.Name) || (p.Kind == "item" && p.Role is "owner" or "inspector"))) plant.Touch(p.Name);
-        // the operator session (Operator.cs): heard while it holds the slot; and, for its quiet-plant check, every verb call of an item token is
-        // counted from its arrival to its answer
-        if (p.Kind == "operator") plant.OperatorHeard(p.Name);
-        if (p.Kind == "keeper") plant.KeeperHeard(p.Name);
-        if (messaging.OperatorEnabled && p.Kind == "item" && path.StartsWith("/api/v1/verbs/"))
+        // /mcp (gateway/Mcp/): a credential whose kind plays no role there is refused before the MCP server reads the request; the tools admit
+        // themselves (Admit, through InProcess) when they call their endpoint
+        if (isMcp)
         {
-            var flightVerb = path["/api/v1/verbs/".Length..];
-            var flight = plant.VerbStarted(p.Name, p.Item, flightVerb.All(ch => char.IsAsciiLetterLower(ch) || ch == '-') ? flightVerb : "");
-            try { await next(); } finally { plant.VerbEnded(flight); }
-            return;
+            if (RoleTools.RoleOf(p) == "") { await Refuse(ctx, 403, "forbidden", "this credential plays no role at /mcp"); return; }
+            ctx.User = new System.Security.Claims.ClaimsPrincipal(new GatewayIdentity(p));
+            await next(); return;
         }
+        await Admit(p, path, next);
+        return;
     }
     await next();
 });
+
+// The per-principal work of an admitted /api request: the middleware above runs it, and so does an MCP tool's in-process call of an endpoint
+// (gateway/Mcp/InProcess.cs), so a tool counts exactly as the HTTP call it stands for.
+async Task Admit(Principal p, string path, Func<Task> next)
+{
+    // presence (worker-messaging.md 2.2, 4.6): every request of a session's own credential is proof of life; a stream write is not. The
+    // credentials that are the session itself are listed: a worker, the supervisor, and the item tokens of an owner or an inspector. A QC item
+    // token is pull request code's credential and never stamps presence, nor does any role this list does not name.
+    // A supervisor credential stamps only while its name holds the slot (4.6: exactly one is active; registration stamps by itself), so a
+    // replaced or never-registered supervisor name is never heard.
+    if (messaging.Enabled && ownerMode && (p.Kind == "worker" || (p.Kind == "manager" && plant.ActiveSupervisor().Name == p.Name) || (p.Kind == "item" && p.Role is "owner" or "inspector"))) plant.Touch(p.Name);
+    // the operator session (Operator.cs): heard while it holds the slot; and, for its quiet-plant check, every verb call of an item token is
+    // counted from its arrival to its answer
+    if (p.Kind == "operator") plant.OperatorHeard(p.Name);
+    if (p.Kind == "keeper") plant.KeeperHeard(p.Name);
+    if (messaging.OperatorEnabled && p.Kind == "item" && path.StartsWith("/api/v1/verbs/"))
+    {
+        var flightVerb = path["/api/v1/verbs/".Length..];
+        var flight = plant.VerbStarted(p.Name, p.Item, flightVerb.All(ch => char.IsAsciiLetterLower(ch) || ch == '-') ? flightVerb : "");
+        try { await next(); } finally { plant.VerbEnded(flight); }
+        return;
+    }
+    await next();
+}
 
 if (ownerMode) qc.Map(app);
 app.MapGet("/health", () => Results.Text("ok"));
@@ -1976,6 +1998,8 @@ static async Task<(string Text, bool TooLarge)> ReadBody(HttpContext ctx, int ma
     return n > max ? ("", true) : (Encoding.UTF8.GetString(buf, 0, n), false);
 }
 
+app.MapMcp("/mcp");
+GatewayMcp.Tools = new McpTools(new InProcess(app, Admit));
 app.Run();
 
 sealed class Runner(string entry)
