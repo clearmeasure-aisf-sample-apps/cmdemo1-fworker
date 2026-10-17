@@ -1265,11 +1265,11 @@ app.MapGet("/api/v1/wait", async (HttpContext ctx) =>
     var who = Who(ctx);
     if (!int.TryParse(ctx.Request.Query["item"], out var item)) return Results.Text("{\"ok\":false,\"code\":\"usage\",\"reason\":\"item is required\",\"exit\":2}", "application/json", Encoding.UTF8, 400);
     if (who.Kind == "item" && who.Item != item) return Results.Text(JsonSerializer.Serialize(new { ok = false, code = "forbidden", reason = $"this token is for item #{who.Item} only", exit = 30 }), "application/json", Encoding.UTF8, 403);
-    // an allow-list: the operator token and the item's own token (a role token waits through next_event at /mcp)
-    if (who.Kind is not ("admin" or "item")) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"waiting for an item's triggers needs the item token\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     if (who.Kind == "worker") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"waiting for an item's triggers needs the item token\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     if (who.Kind == "manager") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"a supervisor session cannot wait for an item's triggers\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     if (who.Kind == "operator") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"an operator session cannot wait for an item's triggers\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+    // then an allow-list (after the kinds above, which keep their own reasons): the operator token and the item's own token (a role token waits through next_event at /mcp)
+    if (who.Kind is not ("admin" or "item")) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"waiting for an item's triggers needs the item token\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     // an owner that waits in wait-event makes no verb call for hours: its poll is its activity on the item (worker-messaging.md 3.9)
     if (ownerMode && messaging.On && who.Kind == "item") plant.NoteActivity(who.Name, item);
     if (ownerMode && who.Kind == "item" && who.Role == "owner") plant.NoteItemCall(who.Name, item, "");
