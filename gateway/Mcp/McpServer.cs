@@ -43,7 +43,7 @@ static class GatewayMcp
     public static ValueTask<ListToolsResult> ListTools(RequestContext<ListToolsRequestParams> c, CancellationToken ct)
     {
         var who = Who(c); var role = who == null ? "" : RoleTools.RoleOf(who);
-        var tools = Tools?.All.Where(t => RoleTools.Allows(role, t.Name)).Select(t => new Tool
+        var tools = Tools?.All.Where(t => who != null && RoleTools.Allows(who, role, t.Name)).Select(t => new Tool
         {
             Name = t.Name, Description = t.Description, InputSchema = JsonSerializer.SerializeToElement(t.Schema)
         }).ToList() ?? new List<Tool>();
@@ -62,6 +62,7 @@ static class GatewayMcp
         else if (who == null) r = McpTools.No("unauthorized", "missing, malformed, forged or expired credential", 30);
         else if (tool == null) r = McpTools.No("unknown-tool", $"no tool '{name}'", 2);
         else if (!RoleTools.Allows(role, name)) r = McpTools.No("forbidden", $"the {(role == "" ? "caller's" : role)} role cannot call '{name}'", 30);
+        else if (!RoleTools.Allows(who, role, name)) r = McpTools.No("wrong-phase", $"this session is for {who.Phase} only: '{name}' belongs to another phase; finish with the phase's done tool and session_end", 10);
         else
         {
             // the owner role is the operator's: its tools read with the operator token's rights, whatever credential carried the role

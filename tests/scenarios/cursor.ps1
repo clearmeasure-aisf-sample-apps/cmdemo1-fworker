@@ -22,7 +22,7 @@ $CursorScenarios = [ordered]@{
         $n = New-Item-Fake 'Cursor docs item' 'Add a line to docs/cursor.md.' $CurLabels
         Check 'an agent is launched for the item' (Wait-Until -Seconds 30 { (Cur-Agents $n).Count -gt 0 })
         $a = (Cur-Agents $n)[0]; $b = $a.body
-        Check 'the prompt is prompts/bootstrap/api.md with the item and phase' ("$($b.prompt.text)" -match 'started by the factory gateway through the Cursor Cloud Agents API' -and "$($b.prompt.text)" -match "#$n, phase technical-design") "$($b.prompt.text)"
+        Check 'the prompt is prompts/bootstrap/api.md with the item and phase' ("$($b.prompt.text)" -match 'You are a factory worker for ONE phase' -and "$($b.prompt.text)" -match "#$n, phase technical-design") "$($b.prompt.text)"
         Check 'the repository at master, autoCreatePR false' ($b.repos[0].url -eq 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' -and $b.repos[0].startingRef -eq 'master' -and $b.autoCreatePR -eq $false) ($b | ConvertTo-Json -Compress -Depth 6)
         Check 'one MCP server fworker at the gateway''s public /mcp, with an r1 bearer' (@($b.mcpServers).Count -eq 1 -and $b.mcpServers[0].name -eq 'fworker' -and $b.mcpServers[0].url -eq 'http://gw.test/mcp' -and (Cur-R1 $a) -like 'r1.*')
         Check 'the model is Auto with the cost preference: the Cursor Router auto-smart, optimize_for cost (from /v1/models)' ($b.model.id -eq 'auto-smart' -and @($b.model.params).Count -eq 1 -and $b.model.params[0].id -eq 'optimize_for' -and $b.model.params[0].value -eq 'cost') ($b.model | ConvertTo-Json -Compress -Depth 4)
@@ -35,7 +35,7 @@ $CursorScenarios = [ordered]@{
         $r1 = Cur-R1 $a
         Check 'the r1 is a worker of the api mode: the worker tools' ((Mcp-ToolNames $r1) -contains 'get_prompt')
         $p = Mcp-Call 'get_prompt' @{} $r1
-        Check 'get_prompt gives the technical-design prompt with the Cursor section' (-not $p.isError -and $p.body.prompt -eq 'worker/technical-design' -and "$($p.body.text)" -match 'cursor-cloud-agent')
+        Check 'get_prompt gives the technical-design prompt' (-not $p.isError -and $p.body.prompt -eq 'worker/technical-design')
         $cur = ''; $got = $false
         Check 'the offer arrives by next_event' (Wait-Until -Seconds 30 { $e = Mcp-Events $r1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
         $ac = Mcp-Call 'item_accept' @{ item = $n } $r1

@@ -114,7 +114,9 @@ $McpScenarios['mcp: a worker r1 registers at its first call, gets its offer by n
     $n = New-Item-Fake 'MCP worker item' 'Write docs/mcp.md.' ($OwnerLabels + "worker:$name")
     $t = Role-Token @{ name = $name; role = 'worker'; mode = 'api'; agent = 'cursor-cloud-agent'; item = $n; phase = 'technical-design' }
     try {
-        Check 'tools/list for a worker r1 is the worker set' (((Mcp-ToolNames $t) -join ',') -eq $McpWorkerTools) ((Mcp-ToolNames $t) -join ',')
+        Check 'tools/list for a technical-design r1 is that phase''s set' (((Mcp-ToolNames $t) -join ',') -eq 'ask,get_prompt,item_accept,item_append_body,item_claim,item_complete,item_get,item_record_review,item_release,next_event,send_note,session_end') ((Mcp-ToolNames $t) -join ',')
+        $po = Mcp-Call 'pr_open' @{ item = $n; head = 'x'; title = 'x'; body = 'x' } $t
+        Check 'a tool of another phase is refused wrong-phase' ($po.isError -and $po.body.code -eq 'wrong-phase') ($po | ConvertTo-Json -Compress)
         $e = Mcp-Events $t
         Check 'the first call registers the session' (@($e.events | Where-Object { $_.event -eq 'worker.registered' }).Count -eq 1) ($e | ConvertTo-Json -Compress -Depth 5)
         [void](Wait-Until -Seconds 10 { $script:row = @((Get-Plant).plant.workers | Where-Object { $_.name -eq $name }); $script:row.Count -eq 1 })
@@ -135,8 +137,7 @@ $McpScenarios['mcp: a worker r1 registers at its first call, gets its offer by n
         $cv = Api-As POST '/api/v1/verbs/complete' @{ item = $n; holder = $name }
         Check 'a gate refusal is the verb''s own code' ($c.isError -and $c.body.code -eq $cv.body.code -and $c.body.exit -eq $cv.body.exit) "$($c.body | ConvertTo-Json -Compress) / $($cv.body | ConvertTo-Json -Compress)"
         $vd = Mcp-Call 'item_validation_verdict' @{ item = $n; passed = $true; summary = 'x'; pr = 1; head_sha = ('0' * 40) } $t
-        $vv = Api-As POST '/api/v1/verbs/validation-verdict' @{ item = $n; holder = $name; passed = $true; summary = 'x'; pr = 1; head_sha = ('0' * 40) }
-        Check 'the verdict tool outside Functional Testing is refused by the verb, with the verb''s code' ($vd.isError -and $vd.body.code -eq $vv.body.code) "$($vd.body | ConvertTo-Json -Compress) / $($vv.body | ConvertTo-Json -Compress)"
+        Check 'the verdict is not a tool of a technical-design session' ($vd.isError -and $vd.body.code -eq 'wrong-phase')
         $sec = Mcp-Call 'send_note' @{ to = 'operator'; text = ('my key is ghp_' + ('A' * 30)) } $t
         Check 'a note that looks like a credential is refused' ($sec.isError -and $sec.body.code -eq 'secret-in-message') ($sec | ConvertTo-Json -Compress)
         $r1note = Mcp-Call 'send_note' @{ to = 'operator'; text = ('token ' + $t) } $t
@@ -181,8 +182,8 @@ $McpScenarios['mcp: get_prompt serves the prompt of the session''s role and phas
     try {
         $p = Mcp-Call 'get_prompt' @{} $t
         Check 'get_prompt answers the development prompt with its version' (-not $p.isError -and $p.body.prompt -eq 'worker/development' -and $p.body.version -ge 1) ($p | ConvertTo-Json -Compress -Depth 3)
-        Check 'the common rules come first' ("$($p.body.text)" -match '(?s)## Rules for every session.*# Development')
-        Check 'the agent''s section is appended' ("$($p.body.text)" -match 'For this agent \(cursor-cloud-agent\)')
+        Check 'the common rules come first' ("$($p.body.text)" -match '(?s)^Rules: .*# Development')
+        Check 'it is short' ("$($p.body.text)".Length -lt 3000) "$("$($p.body.text)".Length) characters"
         Check 'no front matter in the text' ("$($p.body.text)" -notmatch '(?m)^tools: \[')
         $td = Mcp-Call 'get_prompt' @{ phase = 'technical-design' } $t
         Check 'another phase by argument' (-not $td.isError -and $td.body.prompt -eq 'worker/technical-design')

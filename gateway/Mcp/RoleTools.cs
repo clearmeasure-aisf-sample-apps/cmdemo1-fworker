@@ -19,4 +19,17 @@ static class RoleTools
     public static string RoleOf(Principal p) => Auth.RoleOf(p).Role is var r && Sets.ContainsKey(r) ? r : "";
 
     public static bool Allows(string role, string tool) => Sets.TryGetValue(role, out var s) && s.Contains(tool);
+
+    // One phase per session (owner decision 2026-10-17): a worker r1 that names its phase sees and may call only that phase's tools, so a
+    // session cannot drift into the next column's work; an unknown phase gets no tool. A legacy item token (no phase) keeps the whole worker set.
+    static readonly string[] Common = ["item_get", "item_accept", "item_claim", "item_release", "ask", "send_note", "next_event", "session_end", "get_prompt"];
+    public static readonly IReadOnlyDictionary<string, string[]> PhaseSets = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["technical-design"] = [.. Common, "item_append_body", "item_record_review", "item_complete"],
+        ["development"] = [.. Common, "item_comment", "item_record_review", "item_complete", "pr_open", "pr_update", "pr_checks", "pr_wait_checks"],
+        ["functional-testing"] = [.. Common, "item_record_review", "item_validation_verdict", "pr_checks"],
+    };
+
+    public static bool Allows(Principal who, string role, string tool) =>
+        Allows(role, tool) && !(role == "worker" && who.Kind == "role" && who.Phase != "" && !(PhaseSets.TryGetValue(who.Phase, out var ps) && ps.Contains(tool)));
 }
