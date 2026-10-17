@@ -99,8 +99,41 @@ sealed class Rel { public string Id = ""; public string Version = ""; public str
 // A Container Apps job execution of the fake ARM (cloud worker runtimes): its name, status, env and times.
 sealed class ArmExec { public string Name = "", Job = ""; public string Status = "Running"; public JsonArray Containers = new(); public DateTime Start = DateTime.UtcNow; public DateTime? End; }
 
+// A Cloud Agent of the fake Cursor API (agents-roles-launch.md 10): its id, the launch body as sent, its status and its run.
+sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public DateTime Created = DateTime.UtcNow; }
+
 sealed class World
 {
+    // The fake Cursor Cloud Agents API v1: POST /v1/agents, GET /v1/agents/{id}, GET .../runs/{runId}, POST .../runs/{runId}/cancel, DELETE /v1/agents/{id}.
+    // It wants the bearer key "fake-cursor". Not cleared by /_fake/reset; /_fake/cursor-reset does.
+    readonly List<CursorAgent> cursorAgents = new(); long cursorSeq; int cursorLaunchFailures;
+    (int, object?) Cursor(string method, string path, JsonNode? b, string auth)
+    {
+        if (auth != "Bearer fake-cursor") return (401, "{\"error\":\"unauthorized\"}");
+        if (path == "/v1/agents" && method == "POST")
+        {
+            if (cursorLaunchFailures > 0) { cursorLaunchFailures--; return (500, "{\"error\":\"internal\"}"); }
+            var a = new CursorAgent { Id = "bc-" + (++cursorSeq).ToString("x8"), RunId = "run-" + cursorSeq.ToString("x8"), Body = b as JsonObject ?? new JsonObject() };
+            cursorAgents.Add(a);
+            return (201, J(("agent", J(("id", a.Id), ("status", a.Status), ("latestRunId", a.RunId))), ("run", J(("id", a.RunId), ("status", "CREATING")))));
+        }
+        if (path == "/v1/models" && method == "GET") return (200, J(("items", new JsonArray(J(("id", "claude-4-sonnet-thinking")), J(("id", "auto")), J(("id", "auto-smart"), ("params", new JsonArray(J(("id", "optimize_for"), ("values", new JsonArray("cost", "balanced", "intelligence"))))))))));
+        if (Regex.IsMatch(path, "^/v1/agents/[^/]+/usage$") && method == "GET")
+            return (200, J(("totalUsage", J(("inputTokens", 1200), ("outputTokens", 340), ("cacheWriteTokens", 0), ("cacheReadTokens", 800), ("totalTokens", 2340))), ("runs", new JsonArray())));
+        if (path == "/v1/agents" && method == "GET")
+            return (200, J(("items", new JsonArray(cursorAgents.Where(x => !x.Deleted).Select(x => (JsonNode)J(("id", x.Id), ("name", x.Body["name"]?.ToString() ?? ""), ("status", x.Status), ("createdAt", x.Created.ToString("o")))).ToArray()))));
+        var m = Regex.Match(path, "^/v1/agents/([^/]+)(/runs/([^/]+)(/cancel)?)?$");
+        if (!m.Success) return (404, null);
+        var ag = cursorAgents.FirstOrDefault(x => x.Id == m.Groups[1].Value && !x.Deleted);
+        if (ag == null) return (404, "{\"error\":\"not found\"}");
+        if (!m.Groups[2].Success && method == "GET") return (200, J(("agent", J(("id", ag.Id), ("status", ag.Status), ("latestRunId", ag.RunId), ("model", ag.Body["model"]?.DeepClone())))));
+        if (!m.Groups[2].Success && method == "DELETE") { ag.Deleted = true; return (200, J(("id", ag.Id))); }
+        if (m.Groups[4].Success && method == "POST") { ag.Cancelled = true; ag.RunStatus = "CANCELLED"; ag.Status = "IDLE"; return (200, J(("id", ag.RunId))); }
+        if (m.Groups[2].Success && method == "GET") return (200, J(("run", J(("id", ag.RunId), ("status", ag.RunStatus)))));
+        return (405, null);
+    }
+    JsonObject CursorState() => J(("agents", new JsonArray(cursorAgents.Select(a => (JsonNode)J(("id", a.Id), ("status", a.Status), ("run", a.RunStatus), ("deleted", a.Deleted), ("cancelled", a.Cancelled), ("body", a.Body.DeepClone()))).ToArray())));
+
     // The fake ARM (Microsoft.App/jobs of cloud-worker-runtimes.md 2.1): GET the job, POST start with a container override, GET executions, POST
     // stop. It wants the bearer token "fake-arm". It is not cleared by /_fake/reset (a gateway keeps its executions across scenarios); /_fake/arm-reset does.
     readonly List<ArmExec> armExecs = new(); int armStarts, armStops; long armSeq; int armStartFailures;
@@ -207,6 +240,7 @@ sealed class World
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
         if (path.StartsWith("/octopus/")) return Octopus(path[9..], q);
         if (path.StartsWith("/subscriptions/")) return Arm(method, path, b, auth);
+        if (path.StartsWith("/v1/")) return Cursor(method, path, b, auth);
         var root = $"/repos/{Owner}/{Repo}";
         Match m;
         if ((m = Regex.Match(path, "^/_blob/(logs|artifacts)/(\\d+)$")).Success)
@@ -706,6 +740,20 @@ sealed class World
             case "ref-page":   // { size }: matching-refs pages, with at most size refs a page (1 to 100); size 0 or none: it does not page, as GitHub
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "arm": return (200, ArmState());
+            case "cursor": return (200, CursorState());
+            case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; return (200, J(("ok", true)));
+            case "cursor-add":   // an agent this gateway did not launch in this process: {"name"}
+            {
+                var a = new CursorAgent { Id = "bc-" + (++cursorSeq).ToString("x8"), RunId = "run-" + cursorSeq.ToString("x8"), Body = J(("name", b?["name"]?.ToString() ?? "")), Created = DateTime.UtcNow.AddMinutes(-(b?["ageMinutes"]?.GetValue<double>() ?? 0)) };
+                cursorAgents.Add(a); return (200, J(("ok", true), ("id", a.Id)));
+            }
+            case "cursor-launch-failures": cursorLaunchFailures = b?["count"]?.GetValue<int>() ?? 1; return (200, J(("ok", true)));
+            case "cursor-agent":
+            {   // sets an agent's state as Cursor would: {"id", "status": ACTIVE | IDLE | ARCHIVED, "run": RUNNING | FINISHED | ERROR}
+                var a = cursorAgents.LastOrDefault(x => x.Id == b?["id"]?.ToString()); if (a == null) return (404, J(("ok", false)));
+                if (b?["status"] is { } st) a.Status = st.ToString(); if (b?["run"] is { } rs) a.RunStatus = rs.ToString();
+                return (200, J(("ok", true)));
+            }
             case "arm-reset": armExecs.Clear(); armStarts = 0; armStops = 0; armStartFailures = 0; return (200, J(("ok", true)));
             case "arm-start-failures": armStartFailures = b?["count"]?.GetValue<int>() ?? 1; return (200, J(("ok", true)));
             case "arm-exec":

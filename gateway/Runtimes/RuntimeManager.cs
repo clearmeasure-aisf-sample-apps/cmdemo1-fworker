@@ -6,6 +6,26 @@ using System.Text.Json.Nodes;
 // capacity, the daily budget and the health of each runtime, and the failures per item and phase. The plant decides that an item goes to a runtime
 // (Plant.Runtimes.cs) and asks here for a worker name and a nonce; the provisioning itself, the stop and the reading of the executions run outside
 // the plant's lock. Lock order: the plant's gate, then this one; nothing here calls the plant while holding its own lock.
+// The limits of one runtime kind: the caeJob block for cae-job, api.cursor for cursor-cloud (CursorCloudRuntime.cs).
+sealed class RuntimeLimits
+{
+    public string Kind = "cae-job", Prefix = "cae";
+    public Func<bool> IsOn = () => false;
+    public int MaxConcurrent, MaxExecutionsPerDay, MaxFailuresPerPhase = 2, UnhealthyAfterFailures = 2;
+    public double AckSeconds = 300, ListSeconds = 30;
+    public long TokenSeconds = 14400 + 900;
+    // the credential the execution is started with: null mints a one-time nonce (cae-job); cursor-cloud mints the worker's r1 (name, item, phase, expiry)
+    public Func<string, int, string, long, string>? MintCredential;
+    // the credential leaves Azure (an r1 stored at Cursor): the name is revoked at every end, not only after a failure
+    public bool RevokeOnEnd;
+
+    public static RuntimeLimits Of(CaeJobSettings c) => new()
+    {
+        Kind = "cae-job", Prefix = "cae", IsOn = () => c.On, MaxConcurrent = c.MaxConcurrent, MaxExecutionsPerDay = c.MaxExecutionsPerDay, MaxFailuresPerPhase = c.MaxFailuresPerPhase,
+        UnhealthyAfterFailures = c.UnhealthyAfterFailures, AckSeconds = c.AckSeconds, ListSeconds = c.ListSeconds, TokenSeconds = c.ReplicaTimeoutSeconds + 900
+    };
+}
+
 sealed class RuntimeManager
 {
     public static readonly ActivitySource Source = new("FactoryWorker.Gateway.Runtimes");
@@ -39,37 +59,42 @@ sealed class RuntimeManager
     public Func<int, string, Task>? ReleaseClaim { get; set; }
     public Func<string, Task>? Revoke { get; set; }
 
-    public RuntimeManager(RuntimeSettings cfg, IWorkerRuntime cae, RuntimeNonces nonces) { this.cfg = cfg; this.cae = cae; this.nonces = nonces; }
+    readonly RuntimeLimits lim;
+    public RuntimeManager(RuntimeSettings cfg, IWorkerRuntime cae, RuntimeNonces nonces, RuntimeLimits? limits = null)
+    { this.cfg = cfg; this.cae = cae; this.nonces = nonces; lim = limits ?? RuntimeLimits.Of(cfg.CaeJob); }
 
     public RuntimeSettings Settings => cfg;
-    public bool On => cfg.AnyOn;
-    public double AckSeconds => cfg.CaeJob.AckSeconds;
+    public RuntimeLimits Limits => lim;
+    public string Kind => cae.Kind;
+    public bool On => lim.IsOn();
+    public double AckSeconds => lim.AckSeconds;
 
     // ---- called by the plant, under its gate: no I/O ----------------------------------------------------------------------------------------
     public bool IsRuntimeWorker(string name) { lock (gate) return execs.ContainsKey(name); }
     public string ExistingFor(int item) { lock (gate) return execs.Values.FirstOrDefault(e => e.Item == item && !e.Ended)?.Name ?? ""; }
     public string ExecutionOf(string name) { lock (gate) return execs.TryGetValue(name, out var e) ? e.Execution : ""; }
-    public bool Exhausted(int item, string phase) { lock (gate) return failures.GetValueOrDefault((item, phase)) >= cfg.CaeJob.MaxFailuresPerPhase; }
+    public bool Exhausted(int item, string phase) { lock (gate) return failures.GetValueOrDefault((item, phase)) >= lim.MaxFailuresPerPhase; }
 
     public (bool Ok, string Code) CanStart()
     {
         lock (gate)
         {
             Roll();
-            if (!cfg.CaeJob.On) return (false, "runtime-off");
+            if (!lim.IsOn()) return (false, "runtime-off");
             if (!relisted) return (false, "runtime-relisting");       // until the executions were read at start, a second one could be started
             if (!healthy) return (false, "runtime-unhealthy");
-            if (execs.Values.Count(e => !e.Ended) >= cfg.CaeJob.MaxConcurrent) return (false, "runtime-at-capacity");
-            if (today >= cfg.CaeJob.MaxExecutionsPerDay) return (false, "runtime-budget");
+            if (execs.Values.Count(e => !e.Ended) >= lim.MaxConcurrent) return (false, "runtime-at-capacity");
+            if (today >= lim.MaxExecutionsPerDay) return (false, "runtime-budget");
             return (true, "");
         }
     }
 
     public Ticket Begin(int item, string phase, string profile)
     {
-        var name = $"cae-{item}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant()}";
-        var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + cfg.CaeJob.ReplicaTimeoutSeconds + 900;
-        var nonce = nonces.Mint(name, cae.Kind, expires, TimeSpan.FromSeconds(Math.Max(cfg.CaeJob.AckSeconds, 60) + 600));
+        var name = $"{lim.Prefix}-{item}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant()}";
+        var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + lim.TokenSeconds;
+        var nonce = lim.MintCredential != null ? lim.MintCredential(name, item, phase, expires)
+            : nonces.Mint(name, cae.Kind, expires, TimeSpan.FromSeconds(Math.Max(lim.AckSeconds, 60) + 600));
         lock (gate) { Roll(); today++; execs[name] = new Exec { Name = name, Item = item, Phase = phase }; }
         return new Ticket(name, item, phase, profile, nonce);
     }
@@ -121,11 +146,11 @@ sealed class RuntimeManager
             e.Ended = true; e.EndedAt = DateTime.UtcNow; e.Outcome = outcome;
             // a failure is counted before the plant takes the item back (RuntimeEnded): a plan in between would otherwise see the phase not yet
             // exhausted and start one execution more than maxFailuresPerPhase
-            if (failed) { var n0 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n0 == cfg.CaeJob.MaxFailuresPerPhase; }
+            if (failed) { var n0 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n0 == lim.MaxFailuresPerPhase; }
             if (e.RegisteredAt == null && (failed || startFailure))
             {
                 startFailuresInRow++;
-                if (healthy && startFailuresInRow >= cfg.CaeJob.UnhealthyAfterFailures) { healthy = false; unhealthyNow = true; unhealthyWhy = $"{startFailuresInRow} executions in a row ended without their worker registering"; }
+                if (healthy && startFailuresInRow >= lim.UnhealthyAfterFailures) { healthy = false; unhealthyNow = true; unhealthyWhy = $"{startFailuresInRow} executions in a row ended without their worker registering"; }
             }
             last.Add(new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["outcome"] = outcome, ["started"] = e.StartedAt.ToString("o"), ["ended"] = e.EndedAt?.ToString("o") });
             if (last.Count > 10) last.RemoveAt(0);
@@ -137,12 +162,12 @@ sealed class RuntimeManager
         if (tookBack && !failed && e.StopReason == "" && outcome == "succeeded")
         {
             failed = true; outcome = "ended-with-item";
-            lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == cfg.CaeJob.MaxFailuresPerPhase; }
+            lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == lim.MaxFailuresPerPhase; }
         }
         Executions.Add(1, new KeyValuePair<string, object?>("runtime", cae.Kind), new KeyValuePair<string, object?>("outcome", outcome));
         if (tookBack && ReleaseClaim != null) { try { await ReleaseClaim(e.Item, name); } catch (Exception x) { Log("release-claim-failed", name, e.Item, x.Message); } }
         // a failure costs the item one of its executions in this phase: the one that failed, or the one whose offer was lost with it
-        if (failed && Revoke != null && e.RegisteredAt != null) { try { await Revoke(name); } catch (Exception x) { Log("revoke-failed", name, e.Item, x.Message); } }
+        if (Revoke != null && ((failed && e.RegisteredAt != null) || lim.RevokeOnEnd)) { try { await Revoke(name); } catch (Exception x) { Log("revoke-failed", name, e.Item, x.Message); } }
         // at the limit the next plan of the item parks it (Plant.RouteRuntime), so the park happens once, on the plant's side
         if (park) Log("failures-exhausted", name, e.Item, e.Phase);
     }
@@ -199,8 +224,8 @@ sealed class RuntimeManager
             var (registered, owns, offered) = Plant?.RuntimeWorkerState(e.Name) ?? (false, false, false);
             if (registered) Registered(e.Name);
             DateTime? regAt; lock (gate) regAt = e.RegisteredAt;
-            if (regAt == null && (now - e.StartedAt).TotalSeconds > cfg.CaeJob.AckSeconds) stops.Add((e.Name, "never-registered"));
-            else if (regAt != null && !owns && !offered && (now - regAt.Value).TotalSeconds > cfg.CaeJob.AckSeconds) stops.Add((e.Name, "no-item"));
+            if (regAt == null && (now - e.StartedAt).TotalSeconds > lim.AckSeconds) stops.Add((e.Name, "never-registered"));
+            else if (regAt != null && !owns && !offered && (now - regAt.Value).TotalSeconds > lim.AckSeconds) stops.Add((e.Name, "no-item"));
         }
         foreach (var (n, why) in stops)
         {
@@ -214,15 +239,14 @@ sealed class RuntimeManager
         lock (gate)
         {
             Roll();
-            var c = cfg.CaeJob;
             return new JsonObject
             {
                 ["preferConnected"] = cfg.PreferConnected,
                 ["routing"] = new JsonArray(cfg.Routing.Select(r => (JsonNode)new JsonObject { ["phase"] = r.Phase, ["runtime"] = r.Runtime }).ToArray()),
                 [cae.Kind] = new JsonObject
                 {
-                    ["enabled"] = c.On, ["maxConcurrent"] = c.MaxConcurrent, ["running"] = execs.Values.Count(e => !e.Ended), ["today"] = today, ["maxExecutionsPerDay"] = c.MaxExecutionsPerDay,
-                    ["healthy"] = healthy, ["unhealthyReason"] = unhealthyWhy, ["startFailuresInRow"] = startFailuresInRow, ["ackSeconds"] = c.AckSeconds, ["relisted"] = relisted,
+                    ["enabled"] = lim.IsOn(), ["maxConcurrent"] = lim.MaxConcurrent, ["running"] = execs.Values.Count(e => !e.Ended), ["today"] = today, ["maxExecutionsPerDay"] = lim.MaxExecutionsPerDay,
+                    ["healthy"] = healthy, ["unhealthyReason"] = unhealthyWhy, ["startFailuresInRow"] = startFailuresInRow, ["ackSeconds"] = lim.AckSeconds, ["relisted"] = relisted,
                     ["executions"] = new JsonArray(execs.Values.Where(e => !e.Ended).Select(e => (JsonNode)new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["status"] = e.Status, ["started"] = e.StartedAt.ToString("o"), ["registered"] = e.RegisteredAt?.ToString("o") }).ToArray()),
                     ["failures"] = new JsonArray(failures.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value }).ToArray()),
                     ["last"] = new JsonArray(last.Select(x => (JsonNode)x.DeepClone()).ToArray())
@@ -246,7 +270,7 @@ sealed class RuntimeLoop(RuntimeManager m) : BackgroundService
         while (!ct.IsCancellationRequested)
         {
             try { if (MayAct()) await m.Poll(ct); } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; } catch (Exception e) { Console.Error.WriteLine($"runtime poll: {e.Message}"); }
-            try { await Task.Delay(TimeSpan.FromSeconds(m.Settings.CaeJob.ListSeconds), ct); } catch (OperationCanceledException) { return; }
+            try { await Task.Delay(TimeSpan.FromSeconds(m.Limits.ListSeconds), ct); } catch (OperationCanceledException) { return; }
         }
     }
 }

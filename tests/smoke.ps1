@@ -104,6 +104,7 @@ try {
     Check 'config: tdd routes every phase to cae-job, connected workers first' ($t.preferConnected -eq $true -and @($t.routing | Where-Object { $_.phase -eq '*' -and $_.runtime -eq 'cae-job' }).Count -eq 1)
     Check 'config: tdd runs at most 2 executions at a time and 30 a day' ($t.caeJob.enabled -eq $true -and $t.caeJob.maxConcurrent -eq 2 -and $t.caeJob.maxExecutionsPerDay -eq 30)
     Check 'config: no runtime is switched on outside tdd' (@($envs.Keys | Where-Object { $_ -ne 'tdd' -and $envs[$_].caeJob.enabled -eq $true }).Count -eq 0)
+    Check 'config: the api mode (Cursor Cloud Agents) is off in the source defaults, one agent at a time, 60 minutes' (((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).api.cursor | ForEach-Object { $_.enabled -eq $false -and $_.maxConcurrent -eq 1 -and $_.maxMinutes -eq 60 -and -not $_.ContainsKey('apiKey') }))
     Check 'config: the legacy credential kinds stay accepted in the source defaults (auth.legacyKinds)' ((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).auth.legacyKinds -eq $true)
 } finally { Remove-Item -LiteralPath $merged -ErrorAction SilentlyContinue }
 

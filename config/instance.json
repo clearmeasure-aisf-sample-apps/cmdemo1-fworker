@@ -191,6 +191,21 @@
     "requireApproval": null,
     "allowLoopbackForTests": false
   },
+  "api": {
+    "cursor": {
+      "enabled": false,
+      "maxConcurrent": 1,
+      "maxMinutes": 60,
+      "maxExecutionsPerDay": 10,
+      "ackSeconds": 900,
+      "apiUrl": "https://api.cursor.com",
+      "gatewayUrl": "",
+      "model": "auto",
+      "optimizeFor": "cost",
+      "repository": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders",
+      "environments": {}
+    }
+  },
   "auth": {
     "legacyKinds": true
   },
