@@ -85,6 +85,7 @@ sealed class McpTools
     readonly WorkerSessions? sessions;
     readonly Func<string, Principal?> verifyItem;
     readonly Action<string, int>? heard;
+    public PromptStore? Prompts { get; init; }
     public List<ToolDef> All { get; } = new();
 
     // sessions: the worker sessions of r1 holders; verifyItem: Auth.VerifyItemToken for the item tokens they hold; heard: presence and the owner's
@@ -183,6 +184,15 @@ sealed class McpTools
                 var after = long.TryParse(c.Args["after"]?.ToString(), out var a) ? a : 0;
                 var wait = double.TryParse(c.Args["wait_seconds"]?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var w) && double.IsFinite(w) ? w : 30;
                 return new(true, await sessions.Next(s, after, wait, c.Ct));
+            });
+        Add("get_prompt", "The instructions of this session's role and phase (prompts/ of the gateway), with their version. Call it at the start of every task.",
+            Schema(P("phase", "string", "the phase, when it is not the session's own (technical-design, development, functional-testing)")), c =>
+            {
+                if (Prompts == null) return Task.FromResult(No("no-prompts", "this gateway serves no prompts", 20));
+                var phase = c.Args["phase"]?.ToString() is { Length: > 0 } ph ? ph : c.Who.Phase;
+                if (phase == "") return Task.FromResult(No("usage", "phase is technical-design, development or functional-testing", 2));
+                var f = Prompts.Find(c.Role, phase);
+                return Task.FromResult(f == null ? No("no-prompt", $"no prompt for {c.Role}/{phase}", 12) : new ToolResult(true, Prompts.Render(f, c.Who.Agent)));
             });
         Add("session_end", "End this session when its task is done (or when a session.end event says so). The gateway closes it, and a runtime adapter stops what runs it.",
             Schema(P("reason", "string", "one line: why the session ends")), async c =>

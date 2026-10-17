@@ -11,7 +11,7 @@ static class RoleTools
         // the worker of an item (owner of the item in the plant's words), in every phase; validation-verdict only in Functional Testing (the tool checks
         // the r1's phase, the verb the column). git_credential, build_slot and merge are not here: the first api agents push with their own identity.
         ["worker"] = ["item_get", "item_accept", "item_claim", "item_append_body", "item_comment", "item_release", "item_record_review", "item_complete", "pr_open", "pr_update", "pr_checks", "pr_wait_checks",
-            "item_validation_verdict", "send_note", "ask", "next_event", "session_end"],
+            "item_validation_verdict", "send_note", "ask", "next_event", "session_end", "get_prompt"],
     };
 
     // The role a principal plays at /mcp, or "" when it has none there. The admin token is the owner (agents-roles-launch.md 4).

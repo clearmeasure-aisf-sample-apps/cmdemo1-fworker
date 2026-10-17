@@ -47,6 +47,8 @@
 
 # the MCP tool surface (docs/design/agents-roles-launch.md 14): the role tool sets and the tools
 /gateway/Mcp/                                 @jeffreypalermo
+/prompts/common/                              @jeffreypalermo
+/prompts/bootstrap/                           @jeffreypalermo
 
 # uat and prod
 /docs/deploy/activate-prod.sh                 @jeffreypalermo

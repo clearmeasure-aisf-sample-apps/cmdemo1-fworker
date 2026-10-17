@@ -106,4 +106,39 @@ try {
     Check 'config: no runtime is switched on outside tdd' (@($envs.Keys | Where-Object { $_ -ne 'tdd' -and $envs[$_].caeJob.enabled -eq $true }).Count -eq 0)
     Check 'config: the legacy credential kinds stay accepted in the source defaults (auth.legacyKinds)' ((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).auth.legacyKinds -eq $true)
 } finally { Remove-Item -LiteralPath $merged -ErrorAction SilentlyContinue }
+
+# ---- prompts (docs/design/agents-roles-launch.md 5.6): the rules gateway/Mcp/Prompts.cs applies, plus the body's tool names ------------------
+'prompts'
+$promptDir = Join-Path $PSScriptRoot '..' 'prompts'
+$rtText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'gateway' 'Mcp' 'RoleTools.cs')
+$roleSets = @{}
+foreach ($m in [regex]::Matches($rtText, '\["([a-z]+)"\]\s*=\s*\[([^\]]*)\]')) { $roleSets[$m.Groups[1].Value] = @([regex]::Matches($m.Groups[2].Value, '"([a-z_]+)"') | ForEach-Object { $_.Groups[1].Value }) }
+$allTools = @($roleSets.Values | ForEach-Object { $_ }) | Sort-Object -Unique
+Check 'prompts: the role tool sets are read from RoleTools.cs' ($roleSets.ContainsKey('worker') -and $roleSets['worker'] -contains 'get_prompt')
+$pfiles = @(Get-ChildItem -Path $promptDir -Recurse -Filter '*.md' | Where-Object { $_.Name -ne 'README.md' })
+$seen = @{}
+foreach ($pf in $pfiles) {
+    $rel = [IO.Path]::GetRelativePath($promptDir, $pf.FullName).Replace('\', '/')
+    $txt = (Get-Content -Raw $pf.FullName).Replace("`r`n", "`n")
+    $ok = $txt -match '(?s)^---\n(.*?)\n---\n(.*)$'
+    Check "prompts: $rel has front matter" $ok
+    if (-not $ok) { continue }
+    $head = $Matches[1]; $body = $Matches[2]
+    $fm = @{}; foreach ($l in $head -split "`n") { if ($l -match '^([a-z]+):\s*(.*)$') { $fm[$Matches[1]] = $Matches[2].Trim() } }
+    Check "prompts: $rel has role, phase, version, tools and includes" (@('role', 'phase', 'version', 'tools', 'includes' | Where-Object { -not $fm.ContainsKey($_) }).Count -eq 0)
+    Check "prompts: $rel version is a positive number" ("$($fm.version)" -match '^[1-9][0-9]*$')
+    $tools = @(if ($fm.tools -match '^\[(.*)\]$') { $Matches[1] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
+    $incs = @(if ($fm.includes -match '^\[(.*)\]$') { $Matches[1] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } })
+    $set = $(if ($fm.role -eq 'bootstrap') { 'worker' } else { $fm.role })
+    Check "prompts: $rel names a known role" ($fm.role -in 'common', 'bootstrap' -or $roleSets.ContainsKey($fm.role))
+    $outside = @($tools | Where-Object { -not ($roleSets.ContainsKey($set) -and $roleSets[$set] -contains $_) })
+    Check "prompts: $rel tools are all in the $set role's set" ($outside.Count -eq 0); if ($outside) { "       outside: $($outside -join ', ')" }
+    $named = @([regex]::Matches($body, '`([a-z_]+)`') | ForEach-Object { $_.Groups[1].Value } | Where-Object { $allTools -contains $_ } | Sort-Object -Unique)
+    $undeclared = @($named | Where-Object { $tools -notcontains $_ })
+    Check "prompts: $rel declares every tool its body names" ($undeclared.Count -eq 0); if ($undeclared) { "       undeclared: $($undeclared -join ', ')" }
+    Check "prompts: $rel includes exist" (@($incs | Where-Object { -not (Test-Path (Join-Path $promptDir $_)) }).Count -eq 0)
+    Check "prompts: $rel names no factory.ps1 and holds no shell variable" (-not $body.Contains('factory.ps1') -and $body -notmatch '\$[A-Za-z_][A-Za-z0-9_]*')
+    $key = "$($fm.role)/$($fm.phase)"; Check "prompts: $rel is the only prompt of $key" (-not $seen.ContainsKey($key)); $seen[$key] = $rel
+}
+foreach ($need in 'worker/technical-design', 'worker/development', 'worker/functional-testing', 'bootstrap/api') { Check "prompts: there is a prompt for $need" ($seen.ContainsKey($need)) }
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }
