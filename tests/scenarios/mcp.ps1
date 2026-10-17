@@ -39,7 +39,7 @@ $McpScenarios = [ordered]@{
     $forged = Mcp 'tools/list' @{} 'w1.alice.0000'
     Check 'a forged credential: 401' ($forged.status -eq 401)
     $w1 = Mcp 'tools/list' @{} (New-WorkerToken 'mcpw1')
-    Check 'a worker credential plays no role at /mcp yet: 403' ($w1.status -eq 403 -and $w1.text -match '"forbidden"') "$($w1.status) $($w1.text)"
+    Check 'a worker credential (a seat) has no tools at /mcp yet: 403' ($w1.status -eq 403 -and $w1.text -match '"forbidden"') "$($w1.status) $($w1.text)"
 }
 
 'mcp: owner read tools answer what the /api/v1 endpoints answer; refusals keep the endpoint''s code' = {
@@ -64,4 +64,43 @@ $McpScenarios = [ordered]@{
     Check 'metrics checks its window' ($m.isError -and $m.body.code -eq 'usage')
     Check 'every call is logged with its tool, role and caller, never a credential' (Wait-Until -Seconds 5 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch '"mcp":"item_detail","role":"owner","caller":"admin:"').Count -gt 0 })
 }
+}
+
+# ---- the role token r1 (Auth.cs, agents-roles-launch.md 4) ----------------------------------------------------------------------------------
+function Role-Token([hashtable]$Claims) { (Api-As POST '/api/v1/_test/role-token' $Claims).body.token }
+
+$McpScenarios['mcp: an r1 round trip: minted, verified for its role, expired, revoked by generation, another environment and another kind''s MAC refused'] = {
+    $t = Role-Token @{ name = 'r1own'; role = 'owner'; mode = 'manual' }
+    Check 'an r1 is minted' ("$t" -like 'r1.*.*')
+    Check 'an owner r1 lists the owner tools at /mcp' (((Mcp-ToolNames $t) -join ',') -eq 'factory_status,item_detail,metrics,workers_and_runs')
+    $st = Mcp-Call 'factory_status' @{} $t
+    Check 'and its tools answer' (-not $st.isError -and $st.body.ownerMode -eq $true) ($st | ConvertTo-Json -Compress -Depth 3)
+    Check 'an r1 cannot wait on an item''s triggers at /api' ((Api-As GET '/api/v1/wait?item=1&timeout=1' $null $t).status -eq 403)
+    $v = Api-As POST '/api/v1/verbs/get-item' @{ item = 1 } $t
+    Check 'an r1 calls no verb directly' ($v.status -eq 403) ($v | ConvertTo-Json -Compress)
+    $p = $t.Split('.'); $forged = "r1.$($p[1]).$('0' * 64)"
+    Check 'a forged MAC is refused' ((Mcp 'tools/list' @{} $forged).status -eq 401)
+    $asItem = "i1.$($p[1]).$($p[2])"
+    Check 'the same payload and MAC as an i1 is refused (domain separation)' ((Api-As POST '/api/v1/verbs/get-item' @{ item = 1 } $asItem).status -eq 401)
+    $short = Role-Token @{ name = 'r1short'; role = 'owner'; mode = 'manual'; tokenSeconds = 2 }
+    Check 'a short r1 answers before its expiry' ((Mcp 'tools/list' @{} $short).status -eq 200)
+    Start-Sleep -Seconds 4
+    Check 'and is refused after it' ((Mcp 'tools/list' @{} $short).status -eq 401)
+    $prod = Role-Token @{ name = 'r1prod'; role = 'owner'; mode = 'manual'; env = 'prod' }
+    Check 'an r1 of another environment is refused' ((Mcp 'tools/list' @{} $prod).status -eq 401)
+    $rv = Role-Token @{ name = 'r1rev'; role = 'owner'; mode = 'manual' }
+    Check 'before the revocation it answers' ((Mcp 'tools/list' @{} $rv).status -eq 200)
+    [void](Api-As POST '/api/v1/workers/r1rev/revoke' @{})
+    Check 'a revocation of its name refuses it' (Wait-Until -Seconds 20 { (Mcp 'tools/list' @{} $rv).status -eq 401 })
+    $seat = Role-Token @{ name = 'r1seat'; role = 'seat'; mode = 'manual' }
+    Check 'a seat r1 has no tools at /mcp in this step' ((Mcp 'tools/list' @{} $seat).status -eq 403)
+}
+
+$McpScenarios['mcp: the legacy kinds map to role principals: the admin token is the owner, a worker credential a seat; /status shows mode and role'] = {
+    Start-OwnerClient 'r1legacy'
+    try {
+        $row = @((Get-Plant).plant.workers | Where-Object { $_.name -eq 'r1legacy' })
+        Check 'a local worker shows mode manual and role seat' ($row.Count -eq 1 -and $row[0].mode -eq 'manual' -and $row[0].role -eq 'seat') ($row | ConvertTo-Json -Compress)
+        Check 'its w1 still works at /api (auth.legacyKinds true)' ((Api-As POST '/api/v1/verbs/my-items' @{} (New-WorkerToken 'r1legacy')).status -eq 200)
+    } finally { Stop-OwnerClient 'r1legacy' }
 }

@@ -191,6 +191,9 @@
     "requireApproval": null,
     "allowLoopbackForTests": false
   },
+  "auth": {
+    "legacyKinds": true
+  },
   "messaging": {
     "enabled": false,
     "allowedWorkers": [],

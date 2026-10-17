@@ -11,11 +11,8 @@ static class RoleTools
     };
 
     // The role a principal plays at /mcp, or "" when it has none there. The admin token is the owner (agents-roles-launch.md 4).
-    public static string RoleOf(Principal p) => p.Kind switch
-    {
-        "admin" => "owner",
-        _ => ""
-    };
+    // The legacy kinds are mapped in Auth.RoleOf; only a role with a tool set plays at /mcp.
+    public static string RoleOf(Principal p) => Auth.RoleOf(p).Role is var r && Sets.ContainsKey(r) ? r : "";
 
     public static bool Allows(string role, string tool) => Sets.TryGetValue(role, out var s) && s.Contains(tool);
 }

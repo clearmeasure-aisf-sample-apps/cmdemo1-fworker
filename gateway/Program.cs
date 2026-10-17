@@ -24,6 +24,14 @@ var ownerMode = Environment.GetEnvironmentVariable("FACTORY_OWNER_MODE") == "1";
 var environmentName = Environment.GetEnvironmentVariable("FACTORY_ENVIRONMENT") ?? "tdd";
 var publicUrl = Environment.GetEnvironmentVariable("FACTORY_PUBLIC_URL") ?? "";
 var tokenSecret = Environment.GetEnvironmentVariable("FACTORY_TOKEN_SECRET") ?? "";
+// the role token r1 (Auth.cs, agents-roles-launch.md 4): bound to this environment; auth.legacyKinds false refuses the per-role kinds
+Auth.Environment = environmentName.Trim().ToLowerInvariant();
+Auth.LegacyKinds = LegacyKindsOn(scriptsDir);
+static bool LegacyKindsOn(string scriptsDir)
+{
+    try { return JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")))?["auth"]?["legacyKinds"] is not JsonValue v || !v.TryGetValue<bool>(out var b) || b; }
+    catch { return true; }
+}
 // The accept window of an offer: FACTORY_ASSIGN_ACK_SECONDS, else FACTORY_TIMING_assignAckSeconds, else timing.assignAckSeconds of the config, else 120.
 var ackSeconds = AckSeconds(scriptsDir);
 // timing.<name> of the config (FACTORY_TIMING_<name> first), a positive number, else the fallback
@@ -1260,6 +1268,8 @@ app.MapGet("/api/v1/wait", async (HttpContext ctx) =>
     if (who.Kind == "worker") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"waiting for an item's triggers needs the item token\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     if (who.Kind == "manager") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"a supervisor session cannot wait for an item's triggers\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     if (who.Kind == "operator") return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"an operator session cannot wait for an item's triggers\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
+    // then an allow-list (after the kinds above, which keep their own reasons): the operator token and the item's own token (a role token waits through next_event at /mcp)
+    if (who.Kind is not ("admin" or "item")) return Results.Text("{\"ok\":false,\"code\":\"forbidden\",\"reason\":\"waiting for an item's triggers needs the item token\",\"exit\":30}", "application/json", Encoding.UTF8, 403);
     // an owner that waits in wait-event makes no verb call for hours: its poll is its activity on the item (worker-messaging.md 3.9)
     if (ownerMode && messaging.On && who.Kind == "item") plant.NoteActivity(who.Name, item);
     if (ownerMode && who.Kind == "item" && who.Role == "owner") plant.NoteItemCall(who.Name, item, "");
@@ -1748,6 +1758,18 @@ if (messaging.Enabled && messaging.TestHooks)
         if (!Auth.ValidName(nm) || !Auth.ValidRuntime(rk)) return Fail(400, "usage", "a valid worker name and a runtime other than local", 2);
         var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (long)(double.TryParse(b["tokenSeconds"]?.ToString(), out var ts) ? ts : 3600);
         return Results.Json(new { ok = true, nonce = runtimeNonces.Mint(nm, rk, exp, TimeSpan.FromSeconds(double.TryParse(b["ttlSeconds"]?.ToString(), out var tt) ? tt : 600)) });
+    });
+    // an r1 for a test (agents-roles-launch.md 4): only the adapters mint one in a deployed gateway
+    app.MapPost("/api/v1/_test/role-token", async (HttpContext ctx) =>
+    {
+        var (b, err) = await SeamBody(ctx, "the body is a JSON object with name, role and mode");
+        if (b == null) return err!;
+        var nm = b["name"]?.ToString() ?? ""; var rl = b["role"]?.ToString() ?? ""; var md = b["mode"]?.ToString() ?? "manual";
+        if (!Auth.ValidName(nm) || !Auth.Roles.Contains(rl) || !Auth.Modes.Contains(md) || tokenSecret.Length == 0) return Fail(400, "usage", "a valid name, a known role and mode, and a token secret", 2);
+        var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (long)(double.TryParse(b["tokenSeconds"]?.ToString(), out var ts) && double.IsFinite(ts) ? Math.Clamp(ts, -86400, 86400) : 3600);
+        var claims = new RoleClaims(nm, rl, md, b["agent"]?.ToString() ?? "", b["env"]?.ToString() ?? Auth.Environment, exp,
+            int.TryParse(b["item"]?.ToString(), out var ri) ? ri : 0, b["assignment"]?.ToString() ?? "", b["phase"]?.ToString() ?? "");
+        return Results.Json(new { ok = true, token = Auth.RoleToken(tokenSecret, claims, revocations.Of(nm)) });
     });
     app.MapPost("/api/v1/_test/deliver", async (HttpContext ctx) =>
     {
