@@ -12,6 +12,21 @@
   "operator": {
     "enabled": true
   },
+  "api": {
+    "cursor": {
+      "enabled": true,
+      "maxConcurrent": 1,
+      "maxMinutes": 60,
+      "maxExecutionsPerDay": 6,
+      "model": "auto",
+      "optimizeFor": "cost",
+      "environments": {
+        "tdd": {
+          "gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io"
+        }
+      }
+    }
+  },
   "runtimes": {
     "environments": {
       "tdd": {
