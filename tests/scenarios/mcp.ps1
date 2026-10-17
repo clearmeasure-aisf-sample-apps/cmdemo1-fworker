@@ -106,7 +106,7 @@ $McpScenarios['mcp: the legacy kinds map to role principals: the admin token is 
 }
 
 # ---- the worker role's tools (agents-roles-launch.md 6.2, 6.3, 7) ------------------------------------------------------------------------
-$McpWorkerTools = 'ask,item_accept,item_append_body,item_claim,item_comment,item_complete,item_get,item_record_review,item_release,item_validation_verdict,next_event,pr_checks,pr_open,pr_update,pr_wait_checks,send_note,session_end'
+$McpWorkerTools = 'ask,get_prompt,item_accept,item_append_body,item_claim,item_comment,item_complete,item_get,item_record_review,item_release,item_validation_verdict,next_event,pr_checks,pr_open,pr_update,pr_wait_checks,send_note,session_end'
 function Mcp-Events([string]$Token, [string]$After = '', [double]$Wait = 0) { (Mcp-Call 'next_event' @{ after = $After; wait_seconds = $Wait } $Token).body }
 
 $McpScenarios['mcp: a worker r1 registers at its first call, gets its offer by next_event without the item token, accepts and works its item through the verbs'] = {
@@ -172,4 +172,23 @@ $McpScenarios['mcp: a legacy item token is accepted at /mcp as the worker role; 
         Check 'an i1 has no session: next_event is refused' ($ne.isError -and $ne.body.code -eq 'no-session')
         Check 'a w1 has no tools at /mcp' ((Mcp 'tools/list' @{} (New-WorkerToken $name)).status -eq 403)
     } finally { Stop-OwnerClient $name }
+}
+
+# ---- prompts served live (prompts/, gateway/Mcp/Prompts.cs, agents-roles-launch.md 5) ------------------------------------------------------
+$McpScenarios['mcp: get_prompt serves the prompt of the session''s role and phase, with the common rules and its agent''s section; /_build reports promptsHash'] = {
+    $t = Role-Token @{ name = 'mcpprompt1'; role = 'worker'; mode = 'api'; agent = 'cursor-cloud-agent'; item = 1; phase = 'development' }
+    try {
+        $p = Mcp-Call 'get_prompt' @{} $t
+        Check 'get_prompt answers the development prompt with its version' (-not $p.isError -and $p.body.prompt -eq 'worker/development' -and $p.body.version -ge 1) ($p | ConvertTo-Json -Compress -Depth 3)
+        Check 'the common rules come first' ("$($p.body.text)" -match '(?s)## Rules for every session.*# Development')
+        Check 'the agent''s section is appended' ("$($p.body.text)" -match 'For this agent \(cursor-cloud-agent\)')
+        Check 'no front matter in the text' ("$($p.body.text)" -notmatch '(?m)^tools: \[')
+        $td = Mcp-Call 'get_prompt' @{ phase = 'technical-design' } $t
+        Check 'another phase by argument' (-not $td.isError -and $td.body.prompt -eq 'worker/technical-design')
+        $no = Mcp-Call 'get_prompt' @{ phase = 'nothing' } $t
+        Check 'an unknown phase is refused' ($no.isError -and $no.body.code -eq 'no-prompt')
+        $b = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/_build"
+        Check '/_build reports the prompts hash, the one get_prompt reports' ("$($b.promptsHash)" -match '^[0-9a-f]{16}$' -and $b.promptsHash -eq $p.body.promptsHash)
+        Check 'the gateway is ready: every shipped prompt parses' ((Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/ready" -SkipHttpErrorCheck).StatusCode -eq 200)
+    } finally { [void](Mcp-Call 'session_end' @{} $t) }
 }

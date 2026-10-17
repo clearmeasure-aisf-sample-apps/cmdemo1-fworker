@@ -1,6 +1,6 @@
 # The factory worker gateway (ASP.NET Core minimal API that runs the PowerShell rule scripts and the sweep), one container.
 # Build context = the root of the repository:  docker build -t fworker .
-# The image holds gateway/, plugin/ and config/ only; tests/, tools/ and docs/ are not copied (.dockerignore keeps them out of the context).
+# The image holds gateway/, plugin/, config/ and prompts/ only; tests/, tools/ and docs/ are not copied (.dockerignore keeps them out of the context).
 #
 # What the demo-environment kit expects of a container deployable: this Dockerfile at the root; the port and health path
 # system.json names for it (8080, /health); a non-root process; ARG VERSION for the build version (/_build answers it).
@@ -29,6 +29,9 @@ COPY plugin/ /app/plugin/
 # the gateway serves this directory to workers (GET /api/v1/plugin): the build fails when the skills or agents are missing from the image
 RUN test -f /app/plugin/scripts/factory.ps1 && test -f /app/plugin/skills/factory-owner-session/SKILL.md && test -f /app/plugin/agents/factory-implementer.md && test -f /app/plugin/scripts/models.default.json && test -f /app/plugin/scripts/ensure-tools.ps1 && test -f /app/plugin/scripts/app-run.ps1 && test -f /app/plugin/scripts/app-shot.ps1 && test -f /app/plugin/tools/shot/Shot.csproj
 COPY config/ /app/config/
+# the prompts the gateway serves at /mcp (get_prompt, docs/design/agents-roles-launch.md 5)
+COPY prompts/ /app/prompts/
+RUN test -f /app/prompts/bootstrap/api.md && test -f /app/prompts/worker/development.md
 # State (the sweep's seen/refusal caches) lives in the container's file system; the truth is on the board and in the
 # item state comments, so a restart loses only caches and the plant's in-memory registry (workers re-register).
 ENV ASPNETCORE_HTTP_PORTS=8080 \

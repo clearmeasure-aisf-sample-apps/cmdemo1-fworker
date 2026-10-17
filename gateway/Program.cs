@@ -583,11 +583,15 @@ app.MapGet("/health", () => Results.Text("ok"));
 app.MapGet("/alive", () => Results.Text("ok"));
 // readiness: the revoked credentials are read (at once where there is nothing to read), so a session credential is answered without waiting
 // (503 says what the start waits for, how many reads have failed and since when: {"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."})
+// the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5): loaded once; a broken one keeps /ready at 503
+var prompts = new PromptStore(Environment.GetEnvironmentVariable("FACTORY_PROMPTS") ?? Path.Combine(scriptsDir, "..", "..", "prompts"));
+foreach (var pe in prompts.Errors) Console.Error.WriteLine($"prompts: {pe}");
 app.MapGet("/ready", () => leader.Replaced ? Results.Json(new { ready = false, waitingFor = "nothing", replaced = true, reason = "a newer gateway process holds the lease" }, statusCode: 503)
+    : prompts.Errors.Count > 0 ? Results.Json(new { ready = false, waitingFor = "prompts", errors = prompts.Errors }, statusCode: 503)
     : revocationsLoaded.Task.IsCompleted ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = Volatile.Read(ref revAttempts), since = revSince.ToString("o") }, statusCode: 503));
 app.MapGet("/", () => Results.Redirect("/dashboard"));
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
-app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, pluginHash = PluginHash(), started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
+app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, pluginHash = PluginHash(), promptsHash = prompts.Hash, started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
 app.MapGet("/api/v1/status", (HttpContext c) =>
 {
     if (Admitted(c).Kind != "admin") return Results.StatusCode(403);
@@ -2027,7 +2031,7 @@ GatewayMcp.Tools = new McpTools(new InProcess(app, Admit), mcpSessions, t => Aut
 {
     if (messaging.Enabled && ownerMode) plant.Touch(name);
     if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }
-});
+}) { Prompts = prompts };
 _ = Task.Run(async () => { while (true) { await Task.Delay(TimeSpan.FromSeconds(30)); try { mcpSessions.Sweep(); } catch (Exception e) { Console.Error.WriteLine($"mcp sessions: {e.Message}"); } } });
 app.Run();
 
