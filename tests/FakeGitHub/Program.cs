@@ -118,6 +118,7 @@ sealed class World
             return (201, J(("agent", J(("id", a.Id), ("status", a.Status), ("latestRunId", a.RunId))), ("run", J(("id", a.RunId), ("status", "CREATING")))));
         }
         if (path == "/v1/models" && method == "GET") return (200, J(("items", new JsonArray(J(("id", "claude-4-sonnet-thinking")), J(("id", "auto")), J(("id", "auto-smart"), ("params", new JsonArray(J(("id", "optimize_for"), ("values", new JsonArray("cost", "balanced", "intelligence"))))))))));
+        if (Regex.IsMatch(path, "^/v1/agents/[^/]+/usage$") && method == "GET" && !cursorAgents.Any(x => path == $"/v1/agents/{x.Id}/usage" && !x.Deleted)) return (404, "{\"error\":\"not found\"}");
         if (Regex.IsMatch(path, "^/v1/agents/[^/]+/usage$") && method == "GET")
             return (200, J(("totalUsage", J(("inputTokens", 1200), ("outputTokens", 340), ("cacheWriteTokens", 0), ("cacheReadTokens", 800), ("totalTokens", 2340))), ("runs", new JsonArray())));
         if (path == "/v1/agents" && method == "GET")

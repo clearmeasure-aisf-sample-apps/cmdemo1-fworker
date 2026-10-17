@@ -71,7 +71,7 @@ sealed class CursorCloudSettings
 
 sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
 {
-    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged; public JsonNode? Model, ReportedModel, Usage; }
+    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged; public JsonNode? Model, ReportedModel, Usage; public JsonArray? Fields, RunFields; public int UsageStatus; }
 
     readonly CursorCloudSettings cfg;
     readonly HttpClient http;
@@ -90,7 +90,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
     public JsonObject? Detail(string workerName)
     {
         lock (agents)
-            return agents.TryGetValue(workerName, out var a) ? new JsonObject { ["agent"] = a.Id, ["model"] = a.Model?.DeepClone(), ["reportedModel"] = a.ReportedModel?.DeepClone(), ["usage"] = a.Usage?.DeepClone(), ["deleted"] = a.Deleted } : null;
+            return agents.TryGetValue(workerName, out var a) ? new JsonObject { ["agent"] = a.Id, ["model"] = a.Model?.DeepClone(), ["reportedModel"] = a.ReportedModel?.DeepClone(), ["usage"] = a.Usage?.DeepClone(), ["usageStatus"] = a.UsageStatus, ["agentFields"] = a.Fields?.DeepClone(), ["runFields"] = a.RunFields?.DeepClone(), ["deleted"] = a.Deleted } : null;
     }
     double IdleGraceSeconds => cfg.IdleGraceSeconds;
     public int MaxConcurrent => cfg.MaxConcurrent;
@@ -145,10 +145,11 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
         Agent? a; lock (agents) agents.TryGetValue(workerName, out a);
         if (a == null || a.Deleted) return;
         string id, run; lock (agents) { id = a.Id; run = a.RunId; }
+        // the usage is read while the agent still exists (a deleted agent answers 404), and before the end is visible to the manager
+        await LogUsage(a, ct);
         if (run != "") { try { await Send(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(id)}/runs/{Uri.EscapeDataString(run)}/cancel", null, ct); } catch { } }
         var (s, _) = await Send(HttpMethod.Delete, $"/v1/agents/{Uri.EscapeDataString(id)}", null, ct);
         if (s is not (200 or 202 or 204 or 404)) throw new HttpRequestException($"delete of agent answered {s}");
-        await LogUsage(a, ct);   // before the end is visible to the manager, so its record of the end carries the usage
         lock (agents) { a.Deleted = true; a.Ended ??= DateTime.UtcNow; if (a.Status == "Running") a.Status = "Stopped"; }
     }
 
@@ -194,7 +195,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
         try
         {
             var (s, j) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(a.Id)}/usage", null, ct);
-            if (s == 200) lock (agents) a.Usage = j?["totalUsage"]?.DeepClone();
+            lock (agents) { a.UsageStatus = s; if (s == 200) a.Usage = (j?["totalUsage"] ?? j?["usage"])?.DeepClone(); }
             if (s == 200) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-usage", ["worker"] = a.Worker, ["item"] = a.Item, ["phase"] = a.Phase, ["agent"] = a.Id,
                 ["minutes"] = Math.Round((DateTime.UtcNow - a.Started).TotalMinutes, 1), ["usage"] = j?["totalUsage"]?.DeepClone() }.ToJsonString());
         }
@@ -241,10 +242,12 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
                     if (s is not (200 or 404)) throw new HttpRequestException($"read of agent answered {s}");
                     var st = s == 404 ? "ARCHIVED" : j?["agent"]?["status"]?.ToString() ?? j?["status"]?.ToString() ?? "";
                     // the model Cursor reports for the agent, once: the check that the launch ran on the model asked for
-                    if (!a.ModelLogged && (j?["agent"]?["model"] ?? j?["model"]) is { } rm) { a.ModelLogged = true; lock (agents) a.ReportedModel = rm.DeepClone(); Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-agent-model", ["agent"] = a.Id, ["model"] = rm.DeepClone() }.ToJsonString()); }
+                    // the field names of the answers (never their values), once: what Cursor's agent and run objects carry
+                    lock (agents) a.Fields ??= new JsonArray(((j?["agent"] ?? j) as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>());
+                    if (!a.ModelLogged && (j?["agent"]?["model"] ?? j?["model"] ?? j?["agent"]?["modelId"]) is { } rm) { a.ModelLogged = true; lock (agents) a.ReportedModel = rm.DeepClone(); Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-agent-model", ["agent"] = a.Id, ["model"] = rm.DeepClone() }.ToJsonString()); }
                     var runId = j?["agent"]?["latestRunId"]?.ToString() ?? j?["latestRunId"]?.ToString() ?? "";
                     var runStatus = "";
-                    if (runId != "") { try { var (rs, rj) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(a.Id)}/runs/{Uri.EscapeDataString(runId)}", null, ct); if (rs == 200) runStatus = rj?["run"]?["status"]?.ToString() ?? rj?["status"]?.ToString() ?? ""; } catch { } }
+                    if (runId != "") { try { var (rs, rj) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(a.Id)}/runs/{Uri.EscapeDataString(runId)}", null, ct); if (rs == 200) { runStatus = rj?["run"]?["status"]?.ToString() ?? rj?["status"]?.ToString() ?? ""; var ro = (rj?["run"] ?? rj) as JsonObject; lock (agents) { a.RunFields ??= new JsonArray(ro?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>()); if (a.ReportedModel == null && (ro?["model"] ?? ro?["modelId"]) is { } rmm) a.ReportedModel = rmm.DeepClone(); } } } catch { } }
                     lock (agents)
                     {
                         if (runId != "") a.RunId = runId;
