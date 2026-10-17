@@ -6,7 +6,7 @@
 #
 # The suites are split over jobs so that each stays far below the timeout on a hosted runner (4 cores). The suites qc, messaging and manager
 # split themselves into 4 groups inside their own job (run.ps1). The owner suite is split over 2 jobs (owner-a, owner-b), each running one of
-# its 2 groups (run.ps1 -Groups 2 -Group g): run inside one job, or under run-all.ps1 (which passes -Groups 1), it took 36-40 minutes against the
+# its 2 groups (run.ps1 -Groups 2 -Group g, contiguous runs of the suite, as its scenarios build on each other): run inside one job, or under run-all.ps1 (which passes -Groups 1), it took 36-40 minutes against the
 # limit. The others run side by side under run-all.ps1.
 # A new suite (a new entry in $SuiteDefs of tests/scenarios/run.ps1) must be added to one of the jobs below: the step "Every suite is in
 # a job" fails the run when one is missing.

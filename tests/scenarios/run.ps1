@@ -5,7 +5,7 @@
 #   -Suite name  exactly one suite, with its own port slot (see Set-TestPorts in lib.ps1), its own HOME and TMPDIR; run-all.ps1 starts many of these at once
 #   -Tier fast   skips the scenarios tagged [full] (lib.ps1 Get-ScenarioTier) and reports how many; the default here is full (everything), run-all.ps1 defaults to fast
 #   -ListScenarios  prints suite, scenario and tier, tab separated
-#   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json; the suites 'qc', 'messaging' and 'manager' default to 4 groups and 'owner' to 2, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
+#   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json (owner: contiguous runs in suite order, as its scenarios build on each other); the suites 'qc', 'messaging' and 'manager' default to 4 groups and 'owner' to 2, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
 #   -ListSuites  prints the suite names, one per line, in slot order (slot = line number, from 0)
 #   Start guards (guard.ps1): refuses with exit 4 when another run.ps1 or run-all.ps1 is active on this machine, or when the temp filesystem has less than
 #   -MinFreeDiskMb (default 2048) free; with less than -MinAvailableMb (default 1500) of memory a suite runs in half its groups. -Force starts anyway.
@@ -198,12 +198,20 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
     $names = @($Set.Keys | Where-Object { -not $Only -or $_ -match $Only })
     $runNames = @($names | Where-Object { $Tier -eq 'full' -or (Get-ScenarioTier $_) -eq 'fast' })
     foreach ($n in $names) { if ($runNames -notcontains $n) { [void]$script:Skipped.Add(@{ suite = $script:SuiteName; name = $n }) } }
-    if ($Groups -gt 1 -and $Group -ge 0) {   # this child's share: longest scenario first onto the least loaded group (seconds from scenario-stats.json), kept in suite order
+    if ($Groups -gt 1 -and $Group -ge 0) {   # this child's share (seconds from scenario-stats.json), kept in suite order: owner in contiguous runs, the others longest scenario first onto the least loaded group
         $st = @{}; try { $st = (Get-Content -Raw (Join-Path $PSScriptRoot 'scenario-stats.json') | ConvertFrom-Json -AsHashtable)[$script:SuiteName] } catch { }
         $load = New-Object double[] $Groups; $mine = @{}
+        if ($script:SuiteName -eq 'owner') {
+            # owner: contiguous runs in suite order, cut at even shares of the seconds. Its scenarios lean on workers and state that earlier ones
+            # left behind (alice, bob, carol...), so a balanced pick from anywhere in the suite breaks them; a contiguous run keeps the order intact.
+            $secs = @($runNames | ForEach-Object { $k = $_ -replace '\s\[full\]\s*$', ''; $(if ($st -and $st.ContainsKey($k)) { [double]$st[$k].seconds } else { 30.0 }) })
+            $total = ($secs | Measure-Object -Sum).Sum; if (-not ($total -gt 0)) { $secs = @($secs | ForEach-Object { 1.0 }); $total = [double]$secs.Count }; $acc = 0.0
+            for ($i = 0; $i -lt $runNames.Count; $i++) { $gi = [math]::Min($Groups - 1, [int][math]::Floor(($acc + $secs[$i] / 2) / $total * $Groups)); $acc += $secs[$i]; if ($gi -eq $Group) { $mine[$runNames[$i]] = $true } }
+        } else {
         foreach ($n in ($runNames | Sort-Object { $k = $_ -replace '\s\[full\]\s*$', ''; if ($st -and $st.ContainsKey($k)) { -[double]$st[$k].seconds } else { -30.0 } })) {
             $k = $n -replace '\s\[full\]\s*$', ''; $sec = $(if ($st -and $st.ContainsKey($k)) { [double]$st[$k].seconds } else { 30.0 }); $gi = 0; for ($i = 1; $i -lt $Groups; $i++) { if ($load[$i] -lt $load[$gi]) { $gi = $i } }
             $load[$gi] += $sec; if ($gi -eq $Group) { $mine[$n] = $true }
+        }
         }
         $runNames = @($runNames | Where-Object { $mine.ContainsKey($_) })
     }
