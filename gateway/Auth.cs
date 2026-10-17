@@ -20,7 +20,12 @@ using System.Text.Json.Nodes;
 // so every credential minted before it (worker, supervisor, item) fails here, and one minted afterwards works. The generations are kept in
 // GitHub by the rule scripts (refs/factory/<instance>/revoked/<name>/<generation>) and read back at start, like owners after a restart.
 
-sealed record Principal(string Kind, string Name = "", int Item = 0, string Role = "", string Assignment = "", long Expires = 0, int Pr = 0, string Sha = "", string Ip = "", string Runtime = "");
+sealed record Principal(string Kind, string Name = "", int Item = 0, string Role = "", string Assignment = "", long Expires = 0, int Pr = 0, string Sha = "", string Ip = "", string Runtime = "",
+    string Phase = "", string Mode = "", string Agent = "", string Env = "");
+
+// The claims of a role token "r1.<payload>.<hmac>" (docs/design/agents-roles-launch.md 4): one session, one role, and for item roles one item,
+// assignment and phase. Minted only by the gateway (a runtime adapter, a test seam); the MAC is over "role:" + payload, so no other kind validates as it.
+sealed record RoleClaims(string Name, string Role, string Mode, string Agent, string Env, long Expires, int Item = 0, string Assignment = "", string Phase = "", int PromptVersion = 0);
 
 // One-time nonces of runtime workers (cloud-worker-runtimes.md 2.6). The adapter puts only a nonce into the execution's environment (anyone with
 // read on the job's executions sees it); the execution redeems it once for its w2. Kept as SHA-256 hashes in memory: a gateway restart loses the
@@ -127,6 +132,39 @@ static class Auth
     // Principal "qc-click": a person who holds a link. Not a credential: the /qc handlers build it after checking the link, and /api/v1/verbs never yields one.
     public static readonly HashSet<string> QcClickVerbs = new() { "qc-view", "qc-request", "qc-reset", "qc-teardown", "qc-touch" };
 
+    // auth.legacyKinds (agents-roles-launch.md 4, 15 step 10): while true (the source default) the per-role kinds w1, w2, m1, o1, k1 and i1 are
+    // accepted beside r1; false refuses them at every endpoint. The admin token, q1 links and n1 nonces are not role credentials and stay.
+    public static bool LegacyKinds = true;
+    // the gateway's environment (FACTORY_ENVIRONMENT): an r1 names the environment it was minted for and is refused by any other
+    public static string Environment = "tdd";
+    public static readonly HashSet<string> Roles = new(StringComparer.Ordinal) { "seat", "worker", "inspector", "qc", "manager", "operator", "keeper", "owner" };
+    public static readonly HashSet<string> Modes = new(StringComparer.Ordinal) { "manual", "hosted", "api" };
+
+    public static string RoleToken(string secret, RoleClaims c, int rev = 0)
+    {
+        var o = new JsonObject { ["v"] = 1, ["n"] = c.Name, ["r"] = c.Role, ["m"] = c.Mode, ["ag"] = c.Agent, ["e"] = c.Env, ["x"] = c.Expires };
+        if (c.Phase != "") o["p"] = c.Phase;
+        if (c.Item != 0) o["i"] = c.Item;
+        if (c.Assignment != "") o["a"] = c.Assignment;
+        if (rev != 0) o["g"] = rev;
+        if (c.PromptVersion != 0) o["pv"] = c.PromptVersion;
+        var p = B64(Encoding.UTF8.GetBytes(o.ToJsonString()));
+        return $"r1.{p}.{Mac(secret, "role:" + p)}";
+    }
+
+    // The role principal of any credential (agents-roles-launch.md 4): the one place the legacy kinds are mapped. "" when the kind plays no role.
+    public static (string Role, string Mode) RoleOf(Principal p) => p.Kind switch
+    {
+        "admin" => ("owner", "manual"),
+        "role" => (p.Role, p.Mode),
+        "worker" => ("seat", p.Runtime == "" ? "manual" : "hosted"),
+        "item" => (p.Role switch { "owner" => "worker", "inspector" => "inspector", "qc" => "qc", _ => "" }, p.Runtime == "" ? "manual" : "hosted"),
+        "manager" => ("manager", "manual"),
+        "operator" => ("operator", "manual"),
+        "keeper" => ("keeper", "manual"),
+        _ => ("", "")
+    };
+
     static byte[] Key(string secret) => Encoding.UTF8.GetBytes(secret);
     static string Hex(byte[] b) => Convert.ToHexString(b).ToLowerInvariant();
     static string Mac(string secret, string text) => Hex(HMACSHA256.HashData(Key(secret), Encoding.UTF8.GetBytes(text)));
@@ -176,6 +214,8 @@ static class Auth
         var t = header[7..];
         if (Same(t, adminToken)) return new Principal("admin");
         if (secret.Length == 0) return null;
+        if (t.StartsWith("r1.")) return VerifyRoleToken(secret, t, msg, rev);
+        if (!LegacyKinds) return null;
         if (t.StartsWith("w1."))
         {
             var last = t.LastIndexOf('.'); if (last <= 3) return null;
@@ -222,6 +262,27 @@ static class Auth
         return null;
     }
 
+    // An r1: MAC, expiry, environment, a known role and mode, a valid unreserved name and the name's revocation generation. Null otherwise.
+    public static Principal? VerifyRoleToken(string secret, string t, MessagingSettings msg, Revocations rev)
+    {
+        if (t.Length > 4000) return null;
+        var parts = t.Split('.'); if (parts.Length != 3 || parts[0] != "r1") return null;
+        if (!Same(parts[2], Mac(secret, "role:" + parts[1]))) return null;
+        try
+        {
+            var j = JsonNode.Parse(Encoding.UTF8.GetString(UnB64(parts[1])))!;
+            if (j["v"]?.GetValue<int>() != 1) return null;
+            var name = j["n"]!.ToString(); var role = j["r"]!.ToString(); var mode = j["m"]!.ToString(); var env = j["e"]!.ToString();
+            var x = j["x"]!.GetValue<long>();
+            if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds() || !ValidName(name) || msg.Reserved.Contains(name) || !Roles.Contains(role) || !Modes.Contains(mode)) return null;
+            if (!string.Equals(env, Environment, StringComparison.Ordinal)) return null;
+            if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(name)) return null;
+            return new Principal("role", name, j["i"]?.GetValue<int>() ?? 0, role, j["a"]?.ToString() ?? "", x, Runtime: mode == "manual" ? "" : (mode == "api" ? "cursor-cloud" : "cae-job"),
+                Phase: j["p"]?.ToString() ?? "", Mode: mode, Agent: j["ag"]?.ToString() ?? "", Env: env);
+        }
+        catch { return null; }
+    }
+
     // "q1.<payload>.<hmac>", MAC over "qc:" + payload, so it validates as no other token. Error: "bad-link" (forged, malformed, wrong purpose) or "link-expired".
     public static (QcClaims? Claims, string? Error) VerifyQcToken(string secret, string? token)
     {
@@ -244,6 +305,8 @@ static class Auth
     public static (JsonObject? Body, string? Refusal) AuthorizeVerb(Principal p, string verb, JsonObject body)
     {
         if (p.Kind == "admin") return (body, null);
+        // an r1 calls no verb itself: its tools at /mcp act through the credential the gateway holds for its assignment (gateway/Mcp/)
+        if (p.Kind == "role") return (null, $"a role token cannot call '{verb}' directly: use the tools at /mcp");
         if (p.Kind == "manager")
         {
             if (!ManagerVerbs.Contains(verb)) return (null, $"the manager role cannot call '{verb}'");

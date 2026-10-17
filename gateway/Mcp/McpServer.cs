@@ -46,7 +46,9 @@ static class GatewayMcp
         else if (!RoleTools.Allows(role, name)) r = McpTools.No("forbidden", $"the {(role == "" ? "caller's" : role)} role cannot call '{name}'", 30);
         else
         {
-            try { r = await tool.Run(new ToolCall(who, role, args, ct)); }
+            // the owner role is the operator's: its tools read with the operator token's rights, whatever credential carried the role
+            var acting = role == "owner" ? new Principal("admin") : who;
+            try { r = await tool.Run(new ToolCall(acting, role, args, ct)); }
             catch (ToolUsage u) { r = McpTools.No("usage", u.Message, 2); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception e) { Console.Error.WriteLine($"mcp tool {name}: {e.GetType().Name}"); r = McpTools.No("internal", "the tool failed inside the gateway", 20); }
