@@ -104,3 +104,72 @@ $McpScenarios['mcp: the legacy kinds map to role principals: the admin token is 
         Check 'its w1 still works at /api (auth.legacyKinds true)' ((Api-As POST '/api/v1/verbs/my-items' @{} (New-WorkerToken 'r1legacy')).status -eq 200)
     } finally { Stop-OwnerClient 'r1legacy' }
 }
+
+# ---- the worker role's tools (agents-roles-launch.md 6.2, 6.3, 7) ------------------------------------------------------------------------
+$McpWorkerTools = 'ask,item_accept,item_append_body,item_claim,item_comment,item_complete,item_get,item_record_review,item_release,item_validation_verdict,next_event,pr_checks,pr_open,pr_update,pr_wait_checks,send_note,session_end'
+function Mcp-Events([string]$Token, [string]$After = '', [double]$Wait = 0) { (Mcp-Call 'next_event' @{ after = $After; wait_seconds = $Wait } $Token).body }
+
+$McpScenarios['mcp: a worker r1 registers at its first call, gets its offer by next_event without the item token, accepts and works its item through the verbs'] = {
+    $name = 'mcpwork1'
+    $n = New-Item-Fake 'MCP worker item' 'Write docs/mcp.md.' ($OwnerLabels + "worker:$name")
+    $t = Role-Token @{ name = $name; role = 'worker'; mode = 'api'; agent = 'cursor-cloud-agent'; item = $n; phase = 'technical-design' }
+    try {
+        Check 'tools/list for a worker r1 is the worker set' (((Mcp-ToolNames $t) -join ',') -eq $McpWorkerTools) ((Mcp-ToolNames $t) -join ',')
+        $e = Mcp-Events $t
+        Check 'the first call registers the session' (@($e.events | Where-Object { $_.event -eq 'worker.registered' }).Count -eq 1) ($e | ConvertTo-Json -Compress -Depth 5)
+        [void](Wait-Until -Seconds 10 { $script:row = @((Get-Plant).plant.workers | Where-Object { $_.name -eq $name }); $script:row.Count -eq 1 })
+        Check 'the plant lists it as connected, mode api' ($script:row.Count -eq 1 -and $script:row[0].connected -and $script:row[0].mode -eq 'api') ($script:row | ConvertTo-Json -Compress)
+        $cur = "$($e.cursor)"; $got = $null
+        Check 'the offer arrives as item.assigned' (Wait-Until -Seconds 40 { $x = Mcp-Events $t $cur 5; $script:got = @($x.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }); $script:got.Count -gt 0 })
+        Check 'without the item token' (-not $script:got[0].ContainsKey('token') -and -not (($script:got | ConvertTo-Json -Compress -Depth 5) -match 'i1\.')) ($script:got | ConvertTo-Json -Compress -Depth 5)
+        $a = Mcp-Call 'item_accept' @{ item = $n } $t
+        Check 'item_accept accepts the assignment' (-not $a.isError -and $a.body.ok -eq $true) ($a | ConvertTo-Json -Compress -Depth 5)
+        Check 'the plant names it owner' (Wait-Until -Seconds 10 { $o = (Get-Plant).plant.owners; $o.PSObject.Properties["$n"] -and $o."$n" -eq $name })
+        $g = Mcp-Call 'item_get' @{ item = $n } $t
+        $v = Api-As POST '/api/v1/verbs/get-item' @{ item = $n }
+        Check 'item_get answers what get-item answers' (-not $g.isError -and $g.body.title -eq $v.body.title -and $g.body.status -eq $v.body.status) ($g | ConvertTo-Json -Compress -Depth 3)
+        $m = New-Item-Fake 'Someone else''s item' 'x' $OwnerLabels
+        $o = Mcp-Call 'item_get' @{ item = $m } $t
+        Check 'another item is refused' ($o.isError -and $o.body.code -eq 'forbidden')
+        $c = Mcp-Call 'item_complete' @{ item = $n } $t
+        $cv = Api-As POST '/api/v1/verbs/complete' @{ item = $n; holder = $name }
+        Check 'a gate refusal is the verb''s own code' ($c.isError -and $c.body.code -eq $cv.body.code -and $c.body.exit -eq $cv.body.exit) "$($c.body | ConvertTo-Json -Compress) / $($cv.body | ConvertTo-Json -Compress)"
+        $vd = Mcp-Call 'item_validation_verdict' @{ item = $n; passed = $true; summary = 'x'; pr = 1; head_sha = ('0' * 40) } $t
+        Check 'the verdict tool is refused outside functional-testing' ($vd.isError -and $vd.body.code -eq 'wrong-phase')
+        $sec = Mcp-Call 'send_note' @{ to = 'operator'; text = ('my key is ghp_' + ('A' * 30)) } $t
+        Check 'a note that looks like a credential is refused' ($sec.isError -and $sec.body.code -eq 'secret-in-message') ($sec | ConvertTo-Json -Compress)
+        $r1note = Mcp-Call 'send_note' @{ to = 'operator'; text = ('token ' + $t) } $t
+        Check 'an r1 in a note is refused as well' ($r1note.isError -and $r1note.body.code -eq 'secret-in-message')
+        $ok = Mcp-Call 'send_note' @{ to = 'operator'; text = 'starting on the design' } $t
+        Check 'a plain note is sent' (-not $ok.isError -and $ok.body.ok -eq $true) ($ok | ConvertTo-Json -Compress)
+        $own = Mcp-Call 'factory_status' @{} $t
+        Check 'an owner tool is refused to the worker role' ($own.isError -and $own.body.code -eq 'forbidden')
+        $end = Mcp-Call 'session_end' @{ reason = 'scenario done' } $t
+        Check 'session_end ends the session' (-not $end.isError)
+        Check 'the plant no longer sees it connected' (Wait-Until -Seconds 10 { -not (@((Get-Plant).plant.workers | Where-Object { $_.name -eq $name -and $_.connected }).Count) })
+        Check 'next_event says the session ended' ((Mcp-Events $t).ended -eq $true)
+        $after = Mcp-Call 'item_get' @{ item = $n } $t
+        Check 'after session_end its item tools are refused' ($after.isError -and $after.body.code -eq 'no-offer') ($after | ConvertTo-Json -Compress)
+        Check 'no item token reached the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -Pattern '\bi1\.[A-Za-z0-9_-]{20,}').Count -eq 0)
+        Check 'no token reaches the log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch $t).Count -eq 0)
+    } finally { [void](Mcp-Call 'session_end' @{} $t) }
+}
+
+$McpScenarios['mcp: a legacy item token is accepted at /mcp as the worker role; a seat r1 and a w1 have no tools'] = {
+    $name = 'mcpleg1'
+    Start-OwnerClient $name
+    try {
+        $n = New-Item-Fake 'MCP legacy item' 'x' ($OwnerLabels + "worker:$name")
+        Check 'offered to the stream client' (Wait-Until -Seconds 40 { (Get-Assigned $name $n).Count -gt 0 })
+        [void](Wait-Until -Seconds 10 { Test-Path (Join-Path $script:Workers[$name].dir "$n.owner") })
+        $tok = Get-Content -Raw (Join-Path $script:Workers[$name].dir "$n.owner") -ErrorAction SilentlyContinue
+        $tok = "$tok".Trim()
+        Check 'the client holds its item token' ($tok -like 'i1.*')
+        Check 'the i1 lists the worker tools' (((Mcp-ToolNames $tok) -join ',') -eq $McpWorkerTools)
+        $g = Mcp-Call 'item_get' @{ item = $n } $tok
+        Check 'and reads its item through them' (-not $g.isError -and $g.body.title -eq 'MCP legacy item')
+        $ne = Mcp-Call 'next_event' @{} $tok
+        Check 'an i1 has no session: next_event is refused' ($ne.isError -and $ne.body.code -eq 'no-session')
+        Check 'a w1 has no tools at /mcp' ((Mcp 'tools/list' @{} (New-WorkerToken $name)).status -eq 403)
+    } finally { Stop-OwnerClient $name }
+}

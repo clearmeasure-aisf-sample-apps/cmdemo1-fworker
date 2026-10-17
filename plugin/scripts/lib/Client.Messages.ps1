@@ -31,7 +31,7 @@ function Get-MessageCredential($Cfg) {
 # secrets.patterns of config/instance.json when this machine has it (a working copy does; a downloaded plugin does not), else the shipped list.
 $script:FallbackRefusePatterns = @(
     '-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)', 'gh[pousr]_[A-Za-z0-9]{20,}', 'xox[baprs]-[A-Za-z0-9-]{10,}', 'AKIA[0-9A-Z]{16}',
-    '\b(w1|m1|i1|q1|o1)\.[A-Za-z0-9_.-]{20,}', '(?i)authorization:\s*bearer\s+[A-Za-z0-9._~+/=-]{20,}',
+    '\b(w1|w2|m1|i1|q1|o1|k1|r1|n1)\.[A-Za-z0-9_.-]{20,}', '(?i)authorization:\s*bearer\s+[A-Za-z0-9._~+/=-]{20,}',
     '(?i)\b(bearer|token|secret|password|api[_-]?key)\b\s*[:=]\s*(["''][^"'']{8,}["'']|[A-Za-z0-9+/_-]{20,}={0,2})')
 $script:SecretRegexes = $null
 function Get-SecretRegexes {

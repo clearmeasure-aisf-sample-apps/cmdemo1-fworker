@@ -18,7 +18,7 @@ $script:JournalFoldShow = 5
 $script:JournalFoldLineMax = 300
 # Used only when config/instance.json has no secrets catalogue (worker-messaging.md 5.4); the catalogue is the source of truth.
 $script:FallbackSecretPatterns = @('-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)', 'gh[pousr]_[A-Za-z0-9]{20,}', 'xox[baprs]-[A-Za-z0-9-]{10,}', 'AKIA[0-9A-Z]{16}',
-    '(?i)(bearer|token|secret|password|api[_-]?key)(\s*[:=]\s*|\s+)[A-Za-z0-9._~+/=-]{12,}', '\b(w1|m1|i1|q1|o1)\.[A-Za-z0-9_.-]{20,}')
+    '(?i)(bearer|token|secret|password|api[_-]?key)(\s*[:=]\s*|\s+)[A-Za-z0-9._~+/=-]{12,}', '\b(w1|w2|m1|i1|q1|o1|k1|r1|n1)\.[A-Za-z0-9_.-]{20,}')
 
 function Protect-JournalText([string]$Text) {
     if (-not $Text) { return '' }
