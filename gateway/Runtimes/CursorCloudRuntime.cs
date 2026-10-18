@@ -75,7 +75,7 @@ sealed class CursorCloudSettings
 
 sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
 {
-    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged, Cancelled; public DateTime? NextUsageRead; public double UsageBackoff; public int UsageReads; public JsonNode? Model, ReportedModel, Usage; public JsonArray? Fields, RunFields; public int UsageStatus; }
+    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged, Cancelled; public DateTime? NextUsageRead; public double UsageBackoff; public int UsageReads; public JsonNode? Model, ReportedModel, Usage, UsageShape; public JsonArray? Fields, RunFields; public int UsageStatus; }
 
     readonly CursorCloudSettings cfg;
     readonly HttpClient http;
@@ -94,7 +94,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
     public JsonObject? Detail(string workerName)
     {
         lock (agents)
-            return agents.TryGetValue(workerName, out var a) ? new JsonObject { ["agent"] = a.Id, ["model"] = a.Model?.DeepClone(), ["reportedModel"] = a.ReportedModel?.DeepClone(), ["usage"] = a.Usage?.DeepClone(), ["usageStatus"] = a.UsageStatus, ["agentFields"] = a.Fields?.DeepClone(), ["runFields"] = a.RunFields?.DeepClone(), ["deleted"] = a.Deleted } : null;
+            return agents.TryGetValue(workerName, out var a) ? new JsonObject { ["agent"] = a.Id, ["model"] = a.Model?.DeepClone(), ["reportedModel"] = a.ReportedModel?.DeepClone(), ["usage"] = a.Usage?.DeepClone(), ["usageStatus"] = a.UsageStatus, ["usageShape"] = a.UsageShape?.DeepClone(), ["agentFields"] = a.Fields?.DeepClone(), ["runFields"] = a.RunFields?.DeepClone(), ["deleted"] = a.Deleted } : null;
     }
     double IdleGraceSeconds => cfg.IdleGraceSeconds;
     public int MaxConcurrent => cfg.MaxConcurrent;
@@ -214,7 +214,15 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
         try
         {
             var (s, j) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(a.Id)}/usage", null, ct);
-            lock (agents) { a.UsageReads++; a.UsageStatus = s; if (s == 200) a.Usage = (j?["totalUsage"] ?? j?["usage"])?.DeepClone(); }
+            lock (agents)
+            {
+                a.UsageReads++; a.UsageStatus = s;
+                var o = j as JsonObject; if (s == 200) a.Usage = (o?["totalUsage"] ?? o?["usage"])?.DeepClone();
+                // the shape of the answer (keys, and the token counts of each run), never anything else: totalUsage read zero on live runs
+                a.UsageShape = new JsonObject { ["keys"] = new JsonArray((o?.Select(kv => (JsonNode)kv.Key).ToArray()) ?? Array.Empty<JsonNode>()),
+                    ["runs"] = new JsonArray(((o?["runs"] as JsonArray) ?? new JsonArray()).Take(10).Select(x => (JsonNode)new JsonObject { ["keys"] = new JsonArray(((x as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray()) ?? Array.Empty<JsonNode>()),
+                        ["usage"] = ((x as JsonObject)?["usage"] ?? (x as JsonObject)?["totalUsage"])?.DeepClone() }).ToArray()) };
+            }
             if (s == 200 && (HasUsage(a) || (DateTime.UtcNow - (a.Ended ?? DateTime.UtcNow)).TotalSeconds >= cfg.UsageWaitSeconds)) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-usage", ["worker"] = a.Worker, ["item"] = a.Item, ["phase"] = a.Phase, ["agent"] = a.Id,
                 ["minutes"] = Math.Round(((a.Ended ?? DateTime.UtcNow) - a.Started).TotalMinutes, 1), ["reads"] = a.UsageReads, ["usage"] = j?["totalUsage"]?.DeepClone() }.ToJsonString());
         }
