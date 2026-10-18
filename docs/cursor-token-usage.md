@@ -48,8 +48,16 @@ Append one row per Cursor run from here on, from `/api/v1/status` (`last[].detai
 | 2026-10-17 | 371 | Technical Design | 2.3 | 0 | 0 | 0 | n/a |
 | 2026-10-17 | 372 | Technical Design | 1.9 | 0 | 0 | 0 | n/a |
 | 2026-10-17 | 371 | Development | 52.5 | 0 | 0 | 0 | n/a |
+| 2026-10-18 | 374 | Technical Design | 2.4 | 0 | 0 | 0 | n/a |
+| 2026-10-18 | 374 | Development | 1.6 | 0 | 0 | 0 | n/a |
+| 2026-10-18 | 374 | Functional Testing | 1.9 | 0 | 0 | 0 | n/a |
+| 2026-10-18 | 376 | Technical Design | 2.6 | 0 | 0 | 0 | n/a |
+| 2026-10-18 | 376 | Development | 36.9 | 0 | 0 | 0 | n/a |
+| 2026-10-18 | 377 | Technical Design | 2.7 | 0 | 0 | 0 | n/a |
+| 2026-10-18 | 377 | Development | 2.0 | 0 | 0 | 0 | n/a |
+| 2026-10-18 | 377 | Functional Testing | 1.8 | 0 | 0 | 0 | n/a |
 
-n/a: the usage read answered all zeros (371 and 372 Technical Design, 371 Development, which failed); see Round A.
+n/a: Cursor's usage answer read all zeros (see "Usage fixes" below). 371 and 376 Development failed on a blocked push.
 
 ## Round A (2026-10-17): stopped, no token numbers
 
@@ -82,3 +90,26 @@ phase is the main lever.
 | H3 | Shorter worker prompts and terse review lines | small input saving per turn, <5% |
 | H4 | A gateway tool that returns the PR diff for Functional Testing instead of git fetch/checkout/diff | 2-4 fewer FT turns, ~20% in FT |
 | H5 | Development stops after `pr_open` plus one `pr_wait_checks` call | fewer polling turns, ~10-20% in Dev |
+
+## Usage fixes (2026-10-18) and what they showed
+
+| Change | PR | Result on tdd |
+|---|---|---|
+| Wait for a non-zero usage read before the delete (10 s, doubling, 300 s cap, one last read); `/status` `last[]` re-reads the detail | #174 | item 374: 3 runs, still 0 after the full 300 s |
+| `/status` shows the shape of the usage answer (keys, each run's counts) | #175 | item 376: keys `totalUsage, cost, runs`; each run `id, usageUuid, usage, cost`; the run counts are 0 too |
+| No cancel at session_end: the run finishes by itself; cancel only past the deadline and before the delete | #176 | item 377: 3 runs, still 0 |
+
+Conclusion: the zeros come from Cursor. The timing of the read and the cancel are ruled out. Items 364/365
+(2026-10-17, ~06:00 UTC) got real numbers from the same endpoint; every run since ~19:00 UTC reads 0. The owner needs
+to check on Cursor's side whether `GET /v1/agents/{id}/usage` still reports tokens: the dashboard usage of these
+agents, the account's plan or billing mode, or an API change. The `cost` fields are not shown yet.
+
+**The push block is intermittent.** Development pushed for 374 (PR 375, merged) and 377. For 371 and 376 it failed
+with "outbound HTTPS to github.com:443 times out" inside the agent's VM. The launch body is the same for all runs
+(`LaunchBody` has not changed since #170). The Cursor GitHub App installation (168749053) is fine: all repositories,
+contents and pull requests write, not suspended, unchanged since 2026-10-14. So the cause is the network egress of
+Cursor's agent environment, not anything the gateway sends. The owner should raise it with Cursor or check the
+account's cloud-agent network setting.
+
+Rounds A and B were not run, and H1-H5 were not implemented, because usage cannot be measured. Phase times of the
+successful runs (374, 377): Technical Design 2.4-2.7 min, Development 1.6-2.0 min, Functional Testing 1.8-1.9 min.
