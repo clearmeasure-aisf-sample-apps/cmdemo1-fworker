@@ -149,8 +149,11 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
         Agent? a; lock (agents) agents.TryGetValue(workerName, out a);
         if (a == null || a.Deleted) return;
         string id, run; lock (agents) { id = a.Id; run = a.RunId; }
-        // the run is cancelled first, so the agent does no more work while its usage is awaited
-        if (run != "" && !a.Cancelled) { try { await Send(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(id)}/runs/{Uri.EscapeDataString(run)}/cancel", null, ct); } catch { } lock (agents) a.Cancelled = true; }
+        // a run past its deadline is cancelled at once; any other (session_end: the agent stops by itself) is let finish while its usage is
+        // awaited, since Cursor answered zero usage for every cancelled run (items 371-376, 2026-10-17); its r1 is revoked already, so the
+        // seconds it may still run (counted as ended here) can call no tool
+        bool failed; lock (agents) failed = a.Status == "Failed";
+        if (failed) await Cancel(a, ct);
         DateTime ended; lock (agents) { ended = a.Ended ??= DateTime.UtcNow; if (a.Status == "Running") a.Status = "Stopped"; }
         // the usage is read while the agent still exists (a deleted agent answers 404); while it reads zero the delete is put off (List calls
         // this again at every reading) with a doubling wait, until UsageWaitSeconds after the end
@@ -165,6 +168,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
             }
         }
         if (!HasUsage(a)) await LogUsage(a, ct);   // the wait is over: one last read, logged as it is
+        await Cancel(a, ct);
         var (s, _) = await Send(HttpMethod.Delete, $"/v1/agents/{Uri.EscapeDataString(id)}", null, ct);
         if (s is not (200 or 202 or 204 or 404)) throw new HttpRequestException($"delete of agent answered {s}");
         lock (agents) a.Deleted = true;
@@ -204,6 +208,12 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
             next = j?["nextCursor"]?.ToString(); if (string.IsNullOrEmpty(next)) break;
         }
         return all;
+    }
+
+    async Task Cancel(Agent a, CancellationToken ct)
+    {
+        string id, run; bool done; lock (agents) { id = a.Id; run = a.RunId; done = a.Cancelled; if (run != "") a.Cancelled = true; }
+        if (run != "" && !done) { try { await Send(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(id)}/runs/{Uri.EscapeDataString(run)}/cancel", null, ct); } catch { } }
     }
 
     static bool HasUsage(Agent a) => a.Usage?["totalTokens"] is JsonValue v && v.TryGetValue<double>(out var t) && t > 0;
