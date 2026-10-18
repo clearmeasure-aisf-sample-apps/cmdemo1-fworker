@@ -100,7 +100,7 @@ sealed class Rel { public string Id = ""; public string Version = ""; public str
 sealed class ArmExec { public string Name = "", Job = ""; public string Status = "Running"; public JsonArray Containers = new(); public DateTime Start = DateTime.UtcNow; public DateTime? End; }
 
 // A Cloud Agent of the fake Cursor API (agents-roles-launch.md 10): its id, the launch body as sent, its status and its run.
-sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public DateTime Created = DateTime.UtcNow; }
+sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public int UsageReads; public DateTime Created = DateTime.UtcNow; }
 
 sealed class World
 {
@@ -119,6 +119,9 @@ sealed class World
         }
         if (path == "/v1/models" && method == "GET") return (200, J(("items", new JsonArray(J(("id", "claude-4-sonnet-thinking")), J(("id", "auto")), J(("id", "auto-smart"), ("params", new JsonArray(J(("id", "optimize_for"), ("values", new JsonArray("cost", "balanced", "intelligence"))))))))));
         if (Regex.IsMatch(path, "^/v1/agents/[^/]+/usage$") && method == "GET" && !cursorAgents.Any(x => path == $"/v1/agents/{x.Id}/usage" && !x.Deleted)) return (404, "{\"error\":\"not found\"}");
+        // like Cursor's: the usage of an agent reads all zeros on its first two reads (the accounting lags the end of the run)
+        if (Regex.IsMatch(path, "^/v1/agents/[^/]+/usage$") && method == "GET" && cursorAgents.First(x => path == $"/v1/agents/{x.Id}/usage" && !x.Deleted) is var ua && ++ua.UsageReads <= 2)
+            return (200, J(("totalUsage", J(("inputTokens", 0), ("outputTokens", 0), ("cacheWriteTokens", 0), ("cacheReadTokens", 0), ("totalTokens", 0))), ("runs", new JsonArray())));
         if (Regex.IsMatch(path, "^/v1/agents/[^/]+/usage$") && method == "GET")
             return (200, J(("totalUsage", J(("inputTokens", 1200), ("outputTokens", 340), ("cacheWriteTokens", 0), ("cacheReadTokens", 800), ("totalTokens", 2340))), ("runs", new JsonArray())));
         if (path == "/v1/agents" && method == "GET")
@@ -133,7 +136,7 @@ sealed class World
         if (m.Groups[2].Success && method == "GET") return (200, J(("run", J(("id", ag.RunId), ("status", ag.RunStatus)))));
         return (405, null);
     }
-    JsonObject CursorState() => J(("agents", new JsonArray(cursorAgents.Select(a => (JsonNode)J(("id", a.Id), ("status", a.Status), ("run", a.RunStatus), ("deleted", a.Deleted), ("cancelled", a.Cancelled), ("body", a.Body.DeepClone()))).ToArray())));
+    JsonObject CursorState() => J(("agents", new JsonArray(cursorAgents.Select(a => (JsonNode)J(("id", a.Id), ("status", a.Status), ("run", a.RunStatus), ("deleted", a.Deleted), ("cancelled", a.Cancelled), ("usageReads", a.UsageReads), ("body", a.Body.DeepClone()))).ToArray())));
 
     // The fake ARM (Microsoft.App/jobs of cloud-worker-runtimes.md 2.1): GET the job, POST start with a container override, GET executions, POST
     // stop. It wants the bearer token "fake-arm". It is not cleared by /_fake/reset (a gateway keeps its executions across scenarios); /_fake/arm-reset does.

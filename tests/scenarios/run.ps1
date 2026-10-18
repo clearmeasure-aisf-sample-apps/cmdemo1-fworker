@@ -111,7 +111,7 @@ $SuiteDefs = @(
     # the api mode (cursor.ps1, agents-roles-launch.md 10): the fake Cursor API, a 0.25-minute deadline, a 20 s window for the agent
     @{ Name = 'cursor'; Policy = 'auto'; Set = $CursorScenarios; Env = 'cursor'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
-            api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; idleGraceSeconds = 2; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
+            api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; idleGraceSeconds = 2; usageRetrySeconds = 0.5; usageWaitSeconds = 20; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
