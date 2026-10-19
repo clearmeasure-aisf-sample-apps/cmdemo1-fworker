@@ -113,3 +113,20 @@ account's cloud-agent network setting.
 
 Rounds A and B were not run, and H1-H5 were not implemented, because usage cannot be measured. Phase times of the
 successful runs (374, 377): Technical Design 2.4-2.7 min, Development 1.6-2.0 min, Functional Testing 1.8-1.9 min.
+
+## End-to-end test, 2026-10-19 (item 379)
+
+Docs-only item 379 (one glossary line, labels `runtime:cursor-cloud` and `Auto Merge`, no worker pin), placed in
+Technical Design at 18:50 UTC after `POST /api/v1/runtimes/cursor-cloud/reset` cleared the unhealthy state left by
+item 376 (376 was moved to Todo and its `factory worker` label removed).
+
+| Phase | Start (UTC) | End (UTC) | Outcome | Agent id | Registered | Push | Usage |
+|---|---|---|---|---|---|---|---|
+| Technical Design, try 1 | 18:56:51 | 18:59:25 | start-failed, `launch-400` | none | no | n/a | n/a |
+| Technical Design, try 2 | 18:59:54 | 19:01:23 | start-failed, `launch-400` | none | no | n/a | n/a |
+
+Result: does not work. `POST /v1/agents` answers 400 on every launch, so no agent is created and the runtime turns
+unhealthy again after two tries (`failures-exhausted` parks the item). Items 376's failures at 01:48 and 01:51 UTC
+were the same kind (start-failed with no execution id). The gateway logs only the status code; the body of Cursor's
+400 is not recorded, so the rejected field (model selection, repository, or MCP server entry) is not known yet.
+Next step: log the 400 body in `CursorCloudRuntime.Provision`, or read it with one manual launch by the owner.
