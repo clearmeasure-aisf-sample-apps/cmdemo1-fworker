@@ -228,7 +228,8 @@ $RuntimeScenarios['runtime: a failed execution: its item is taken back, its clai
         $e = (Rt-Execs $n)[0]; $name = "$($e.worker)"; [void](Rt-Launch $e)
         $r = Rt-Own $name $n; CheckExit 'its worker owns the item' $r 0
         Check 'the plant names it owner' (Wait-Until -Seconds 10 { (Rt-Owner $n) -eq $name })
-        [void](Fake 'arm-exec' @{ worker = $name; status = 'Failed' })
+        $armed = Fake 'arm-exec' @{ worker = $name; status = 'Failed' }
+        Check 'the platform fails the execution' ($armed.ok -eq $true) ($armed | ConvertTo-Json -Compress)
         Check 'the item is taken back from the failed execution' (Wait-Until -Seconds 45 { (Rt-Owner $n) -ne $name })
         # read before the next execution can age past its 15 s ack window: unlaunched, it would end never-registered and count a second failure
         Check 'status: one failure counted for the item and phase' (Wait-Until -Seconds 10 { @((Rt-Status).failures | Where-Object { $_.item -eq $n -and $_.count -eq 1 }).Count -eq 1 }) ((Rt-Status).failures | ConvertTo-Json -Compress)
