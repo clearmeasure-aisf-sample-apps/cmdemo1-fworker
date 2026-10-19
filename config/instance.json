@@ -204,6 +204,20 @@
       "optimizeFor": "cost",
       "repository": "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders",
       "environments": {}
+    },
+    "copilot": {
+      "enabled": false,
+      "maxConcurrent": 1,
+      "maxMinutes": 60,
+      "maxExecutionsPerDay": 30,
+      "ackSeconds": 900,
+      "apiUrl": "https://api.github.com",
+      "apiVersion": "2026-03-10",
+      "gatewayUrl": "",
+      "model": "",
+      "bootstrapGeneration": 1,
+      "repository": "clearmeasure-aisf-sample-apps/cmdemo1-workorders",
+      "environments": {}
     }
   },
   "auth": {

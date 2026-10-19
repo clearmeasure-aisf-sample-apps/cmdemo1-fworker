@@ -10,4 +10,8 @@
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.0.0" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- the Copilot cloud agent's stdio MCP proxy, served at /fworker-mcp.mjs -->
+    <EmbeddedResource Include="Mcp/fworker-mcp.mjs" LogicalName="fworker-mcp.mjs" />
+  </ItemGroup>
 </Project>

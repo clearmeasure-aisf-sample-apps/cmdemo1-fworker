@@ -71,7 +71,7 @@ jobs:
             suites: manager
           - name: operator
             runner: run-all
-            suites: operator,runtime,mcp,cursor
+            suites: operator,runtime,mcp,cursor,copilot
     steps:
       - uses: actions/checkout@v6.0.1
 

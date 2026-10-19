@@ -167,6 +167,16 @@ var cursorManager = ownerMode && tokenSecret.Length > 0 && cursorSettings.On
     ? new RuntimeManager(runtimeSettings, new CursorCloudRuntime(cursorSettings, (item, phase) => cursorPrompt(item, phase)), runtimeNonces,
         cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
     : null;
+// the Copilot cloud agent (gateway/Runtimes/CopilotCloudRuntime.cs, docs/design/copilot-cloud-agent.md): api.copilot.enabled, a token
+// (COPILOT_TASKS_TOKEN) and the gateway's public URL; the task's prompt carries a one-time code for the worker's r1 (copilotCodes)
+var copilotSettings = CopilotCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
+var copilotCodes = new CopilotCodes();
+Func<int, string, string, string> copilotPrompt = (_, _, _) => "";
+var copilotManager = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
+    ? new RuntimeManager(runtimeSettings, new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code) => copilotPrompt(item, phase, code)), runtimeNonces,
+        copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
+    : null;
+Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
 builder.Services.AddSingleton(sp =>
 {
@@ -176,7 +186,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -187,7 +197,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
 // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
 var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : TimingValue(scriptsDir, "sweepMinSeconds", 60));
 builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
-foreach (var rmx in new[] { runtimeManager, cursorManager }.OfType<RuntimeManager>()) builder.Services.AddHostedService(sp =>
+foreach (var rmx in new[] { runtimeManager, cursorManager, copilotManager }.OfType<RuntimeManager>()) builder.Services.AddHostedService(sp =>
 {
     var rp = sp.GetRequiredService<Plant>(); var rr = sp.GetRequiredService<Runner>();
     rmx.Plant = rp;
@@ -536,7 +546,7 @@ app.Use(async (ctx, next) =>
         return;
     }
     // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
-    if (port == apiPort && path == "/api/v1/runtime/redeem") { await next(); return; }
+    if (port == apiPort && path is "/api/v1/runtime/redeem" or "/api/v1/copilot/exchange") { await next(); return; }
     var isMcp = port == apiPort && ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
     if (port == apiPort && (path.StartsWith("/api/") || isMcp))
     {
@@ -747,7 +757,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
-    if (ownerMode && (runtimeManager != null || cursorManager != null)) o["runtimes"] = RuntimesBlock();
+    if (ownerMode && (runtimeManager != null || cursorManager != null || copilotManager != null)) o["runtimes"] = RuntimesBlock();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
     if (ownerMode) o["leader"] = leader.Status();
     return Results.Text(o.ToJsonString(), "application/json");
@@ -810,6 +820,7 @@ app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) 
     // the execution of a runtime worker is stopped with its name (cloud-worker-runtimes.md 5)
     if (runtimeManager != null && runtimeManager.IsRuntimeWorker(name)) _ = Task.Run(() => runtimeManager.Deprovision(name, "revoked"));
     if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) _ = Task.Run(() => cursorManager.Deprovision(name, "revoked"));
+    if (copilotManager != null && copilotManager.IsRuntimeWorker(name)) _ = Task.Run(() => copilotManager.Deprovision(name, "revoked"));
     _ = Task.Run(() => mcpSessionsRef?.End(name, "revoked") ?? Task.CompletedTask);
     return Results.Json(new { ok = true, name, generation = gen, streamClosed = closed, exit = 0 });
 });
@@ -818,13 +829,14 @@ JsonObject RuntimesBlock()
 {
     var o = runtimeManager?.Status() ?? new JsonObject { ["enabled"] = false };
     if (cursorManager?.Status()["cursor-cloud"] is { } cb) o["cursor-cloud"] = cb.DeepClone();
+    if (copilotManager?.Status()["copilot-cloud"] is { } pb) o["copilot-cloud"] = pb.DeepClone();
     return o;
 }
 // The operator marks a runtime healthy again after it was marked unhealthy (cloud-worker-runtimes.md 2.11): operator token only.
 app.MapPost("/api/v1/runtimes/{kind}/reset", (string kind, HttpContext c) =>
 {
     if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator resets a runtime", 30);
-    var rk = kind == "cae-job" ? runtimeManager : kind == "cursor-cloud" ? cursorManager : null;
+    var rk = kind == "cae-job" ? runtimeManager : kind == "cursor-cloud" ? cursorManager : kind == "copilot-cloud" ? copilotManager : null;
     if (rk == null) return Fail(404, "no-runtime", "no such runtime is switched on", 12);
     rk.ResetHealth();
     return Results.Json(new { ok = true, runtime = kind, exit = 0 });
@@ -849,6 +861,7 @@ async Task<(bool Ok, int Generation, bool Closed)> RevokeName(string name, strin
 }
 if (runtimeManager != null) runtimeManager.Revoke = async n => { await RevokeName(n, "runtime"); };
 if (cursorManager != null) cursorManager.Revoke = async n => { await RevokeName(n, "runtime"); };
+if (copilotManager != null) copilotManager.Revoke = async n => { copilotCodes.Forget(n); await RevokeName(n, "runtime"); };
 
 app.MapPost("/webhooks/github", async (HttpContext ctx) =>
 {
@@ -1103,6 +1116,38 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
 
 // A runtime worker's one-time nonce (cloud-worker-runtimes.md 2.6) is redeemed here for its w2, once. No Authorization header: the nonce is the
 // credential. Body {"nonce": "n1.<hex>"}. Every refusal is the same 401 for the caller (unknown, spent, expired); the log says which.
+// The Copilot cloud agent's exchange (docs/design/copilot-cloud-agent.md part 3): the bootstrap token of the work-orders repository's Copilot MCP
+// configuration (b1, api.copilot.bootstrapGeneration) and a task's one-time code give that task's r1, once. Neither alone grants anything: the
+// b1 authenticates no other endpoint, and a code is worth nothing without it. Answers the same 401 for a bad token and a bad code.
+app.MapPost("/api/v1/copilot/exchange", async (HttpContext ctx) =>
+{
+    if (!Auth.VerifyCopilotBootstrap(tokenSecret, ctx.Request.Headers.Authorization.ToString(), copilotSettings.BootstrapGeneration))
+        return Results.Json(new { ok = false, code = "unauthorized", reason = "missing or void bootstrap token", exit = 30 }, statusCode: 401);
+    var (text, tooLarge) = await ReadBody(ctx, 1000);
+    string? code = null; if (!tooLarge) try { code = (JsonNode.Parse(text) as JsonObject)?["code"]?.ToString(); } catch { }
+    if (copilotCodes.Redeem(code) is not { } got)
+    {
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "exchange-refused" }.ToJsonString());
+        return Results.Json(new { ok = false, code = "unauthorized", reason = "unknown, spent or expired code", exit = 30 }, statusCode: 401);
+    }
+    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "exchanged", ["worker"] = got.Name }.ToJsonString());
+    return Results.Json(new { ok = true, name = got.Name, token = got.Token, exit = 0 });
+});
+// The bootstrap token itself (operator only), for the repository's Agents secret COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN; never stored here.
+app.MapPost("/api/v1/copilot/bootstrap-token", (HttpContext c) =>
+{
+    if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator mints the Copilot bootstrap token", 30);
+    if (!ownerMode || tokenSecret.Length == 0) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
+    return Results.Json(new { ok = true, generation = copilotSettings.BootstrapGeneration, token = Auth.CopilotBootstrapToken(tokenSecret, copilotSettings.BootstrapGeneration), exit = 0 });
+});
+// fworker-mcp (gateway/Mcp/fworker-mcp.mjs): the stdio MCP proxy the Copilot agent runs, served anonymously (it holds no secret; the repository is public)
+app.MapGet("/fworker-mcp.mjs", () =>
+{
+    using var st = typeof(CopilotCodes).Assembly.GetManifestResourceStream("fworker-mcp.mjs");
+    if (st == null) return Results.NotFound();
+    using var rd = new StreamReader(st);
+    return Results.Text(rd.ReadToEnd(), "text/javascript", Encoding.UTF8);
+});
 app.MapPost("/api/v1/runtime/redeem", async (HttpContext ctx) =>
 {
     if (!revocationsLoaded.Task.IsCompleted)
@@ -2051,7 +2096,17 @@ app.MapMcp("/mcp");
 var mcpSessions = new WorkerSessions(plant) { IdleMinutes = TimingValue(scriptsDir, "mcpIdleMinutes", 30) };
 mcpSessionsRef = mcpSessions;
 // a worker session that ends (session_end, idle, revoke, the plant closing its stream) stops what runs it: the Cursor agent is cancelled and deleted
-mcpSessions.OnEnded = async (name, reason) => { if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) await cursorManager.Deprovision(name, reason); };
+mcpSessions.OnEnded = async (name, reason) =>
+{
+    if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) await cursorManager.Deprovision(name, reason);
+    if (copilotManager != null && copilotManager.IsRuntimeWorker(name)) await copilotManager.Deprovision(name, reason);
+};
+copilotPrompt = (item, phase, code) =>
+{
+    var bp = prompts.ByPath("bootstrap/copilot.md");
+    var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
+    return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour one-time code for fworker_connect: {code}\n";
+};
 cursorPrompt = (item, phase) =>
 {
     var bp = prompts.ByPath("bootstrap/api.md");
