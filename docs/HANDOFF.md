@@ -172,7 +172,74 @@ To run a first live test of a Cursor agent on tdd:
 4. Watch `/api/v1/status` (`runtimes."cursor-cloud".executions`), the item's journal and the Cursor dashboard. The agent's worker is named
    `cur-<item>-<6 hex>`.
 
-Not built yet: hosted runner on MCP (step 5), Copilot and Cursor CLI adapters (6), manual seats and `request_role` (7), role runs (8),
+### Copilot cloud agent runtime: built, off everywhere (2026-10-19)
+
+Design: `docs/design/copilot-cloud-agent.md` (owner decisions 2026-10-19). Built and merged with Tier 1 tests (suite `copilot`):
+
+- **`CopilotCloudRuntime`** (`gateway/Runtimes/CopilotCloudRuntime.cs`): an item labelled `runtime:copilot-cloud` gets one Copilot agent
+  task per phase: `POST https://api.github.com/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks`
+  (`X-GitHub-Api-Version: 2026-03-10`, public preview) with `{prompt, base_ref, create_pull_request: false}`; `base_ref` is `master`, or
+  `factory-worker/N-development` for Functional Testing. Followed by `GET .../tasks/{id}` (`queued`, `in_progress`, `waiting_for_user`
+  run; `completed`, `idle` succeed; `failed`, `timed_out` fail; `cancelled` stops). The API has no cancel: past `api.copilot.maxMinutes`
+  (60) the task is reported failed and its worker name revoked, so its r1 calls no tool. Registration watchdog (`ackSeconds` 900), 1 at a
+  time, 30 a day, docs-only items only past Technical Design (same sweep rule as Cursor). Premium requests of the task's sessions are
+  shown in `/api/v1/status` → `runtimes."copilot-cloud".last[].detail.usage` and logged as `copilot-usage`. Token: `COPILOT_TASKS_TOKEN`
+  (`unset` or empty keeps the runtime off). Worker names `cop-<item>-<6 hex>`.
+- **One-time code and bootstrap token** (design part 3): the task prompt carries no credential, only a one-time code (`c1.`, valid for the
+  acknowledgement window plus 5 minutes). `POST /api/v1/copilot/exchange` with `Authorization: Bearer <b1 bootstrap token>` and
+  `{"code": "c1...."}` answers that task's r1 once. The b1 (`Auth.CopilotBootstrapToken`, bound to `api.copilot.bootstrapGeneration`)
+  authenticates nothing else; raising the generation voids every copy. The operator mints it with
+  `POST /api/v1/copilot/bootstrap-token` (operator token).
+- **`fworker-mcp`** (`gateway/Mcp/fworker-mcp.mjs`, embedded in the gateway and served anonymously at `GET /fworker-mcp.mjs`): a
+  zero-dependency Node 18+ stdio MCP server. Env `FWORKER_GATEWAY_URL`, `FWORKER_BOOTSTRAP_TOKEN`. Tools `fworker_connect` (code to r1)
+  and `fworker_call` (any gateway tool by name); after the connect the phase's gateway tools are listed and `tools/list_changed` is sent.
+- **Prompt** `prompts/bootstrap/copilot.md` (role bootstrap, phase `api-copilot`).
+- **Config** `api.copilot` in `config/instance.json`: `enabled` false, no `environments` entry anywhere (the deployed image keeps it off).
+
+#### Owner and infrastructure steps before a first tdd test (not done by code)
+
+1. **Copilot seat** for `cm-ai-ops-bot` (a plan that includes the coding agent and the agent tasks API), and the Copilot coding agent
+   enabled for `clearmeasure-aisf-sample-apps/cmdemo1-workorders`.
+2. **Task token**: a token of `cm-ai-ops-bot` that the agent tasks API accepts (user-to-server: a fine-grained PAT with access to
+   cmdemo1-workorders; App installation tokens are refused by the API) in the tdd Key Vault (kvcmdemo1tddvq464) as
+   `fworker-copilot-token`, wired to the tdd gateway app as `COPILOT_TASKS_TOKEN`; `unset` in uat and prod. This is cmdemo1-system IaC,
+   owned by the "cmdemo1" session.
+3. **Bootstrap token**: with the tdd operator token, `POST $U/api/v1/copilot/bootstrap-token`; put the `token` of the answer in
+   cmdemo1-workorders as the Copilot agent secret `COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN` (Settings → Secrets and variables → Agents; on
+   repositories that still show it there, the `copilot` environment's secrets). Never paste it anywhere else.
+4. **MCP configuration** of cmdemo1-workorders (Settings → Copilot → Cloud agent / Coding agent → MCP configuration), exactly:
+
+   ```json
+   {
+     "mcpServers": {
+       "fworker": {
+         "type": "local",
+         "command": "bash",
+         "args": ["-c", "curl -fsSL \"$FWORKER_GATEWAY_URL/fworker-mcp.mjs\" -o /tmp/fworker-mcp.mjs && exec node /tmp/fworker-mcp.mjs"],
+         "tools": ["*"],
+         "env": {
+           "FWORKER_GATEWAY_URL": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+           "FWORKER_BOOTSTRAP_TOKEN": "$COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN"
+         }
+       }
+     }
+   }
+   ```
+
+5. **Agent firewall**: add `ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io` to the Copilot agent firewall
+   allow list of cmdemo1-workorders (Settings → Copilot → Cloud agent → firewall custom allowlist).
+6. **Switch on in tdd** (a code-owner change, by pull request): in `config/deploy.overrides.json` add
+   `"api": {"copilot": {"enabled": true, "environments": {"tdd": {"gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io"}}}}`
+   beside `api.cursor`, and change the smoke check "the Copilot cloud agent is off everywhere" to "on in tdd only". The start log line
+   `{"runtime":"copilot-cloud","enabled":true,...}` confirms it.
+7. **Test**: three docs-only items labelled `factory worker` and `runtime:copilot-cloud`, moved to Technical Design, unpinned. Record each
+   phase in `docs/copilot-token-usage.md`.
+
+Open points for the live test: the coding agent pushes only to `copilot/*` branches, so Development may push to its own branch rather than
+`factory-worker/N-development` (the agent passes its branch to `pr_open` as `head`; check that the merge and QC flow accept it); the task API
+reports premium requests per session, not tokens.
+
+Not built yet: hosted runner on MCP (step 5), the Copilot CLI and Cursor CLI adapters (6), manual seats and `request_role` (7), role runs (8),
 removing `type` (10), the inspector, qc, manager, operator and keeper prompts and tools, `prompt_pin`, the gateway-side lease renewal
 beyond `next_event` and item tool calls.
 
