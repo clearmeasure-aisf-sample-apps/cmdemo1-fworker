@@ -107,6 +107,9 @@ try {
     $curDep = (Get-Content -Raw $merged | ConvertFrom-Json -AsHashtable).api.cursor
     Check 'config: the deployed api mode is on in tdd only, one agent at a time, 60 minutes, 30 launches a day, model auto with optimizeFor cost' ($curDep.enabled -eq $true -and @($curDep.environments.Keys).Count -eq 1 -and $curDep.environments.ContainsKey('tdd') -and $curDep.maxConcurrent -eq 1 -and $curDep.maxMinutes -eq 60 -and $curDep.maxExecutionsPerDay -eq 30 -and $curDep.model -eq 'auto' -and $curDep.optimizeFor -eq 'cost')
     Check 'config: the api mode (Cursor Cloud Agents) is off in the source defaults, one agent at a time, 60 minutes' (((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).api.cursor | ForEach-Object { $_.enabled -eq $false -and $_.maxConcurrent -eq 1 -and $_.maxMinutes -eq 60 -and -not $_.ContainsKey('apiKey') }))
+    $copDep = (Get-Content -Raw $merged | ConvertFrom-Json -AsHashtable).api.copilot
+    Check 'config: the Copilot cloud agent is off everywhere: off in the source defaults and no environment entry deployed (docs/design/copilot-cloud-agent.md)' ($copDep.enabled -eq $false -and @($copDep.environments.Keys).Count -eq 0)
+    Check 'config: the Copilot cloud agent runs one task at a time, 60 minutes, 30 a day, and no token in the file' (((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).api.copilot | ForEach-Object { $_.maxConcurrent -eq 1 -and $_.maxMinutes -eq 60 -and $_.maxExecutionsPerDay -eq 30 -and -not $_.ContainsKey('token') }))
     Check 'config: the legacy credential kinds stay accepted in the source defaults (auth.legacyKinds)' ((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).auth.legacyKinds -eq $true)
 } finally { Remove-Item -LiteralPath $merged -ErrorAction SilentlyContinue }
 
@@ -143,5 +146,5 @@ foreach ($pf in $pfiles) {
     Check "prompts: $rel names no factory.ps1 and holds no shell variable" (-not $body.Contains('factory.ps1') -and $body -notmatch '\$[A-Za-z_][A-Za-z0-9_]*')
     $key = "$($fm.role)/$($fm.phase)"; Check "prompts: $rel is the only prompt of $key" (-not $seen.ContainsKey($key)); $seen[$key] = $rel
 }
-foreach ($need in 'worker/technical-design', 'worker/development', 'worker/functional-testing', 'bootstrap/api') { Check "prompts: there is a prompt for $need" ($seen.ContainsKey($need)) }
+foreach ($need in 'worker/technical-design', 'worker/development', 'worker/functional-testing', 'bootstrap/api', 'bootstrap/api-copilot') { Check "prompts: there is a prompt for $need" ($seen.ContainsKey($need)) }
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }

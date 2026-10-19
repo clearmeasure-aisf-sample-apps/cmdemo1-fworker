@@ -173,7 +173,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     readonly SemaphoreSlim mailboxSignal = new(0, int.MaxValue);
     long counter;
 
-    static readonly Dictionary<string, int> TypeOrder = new() { ["persistent-local"] = 1, ["claude-cloud"] = 2, ["cursor-cloud"] = 2, ["ephemeral-local"] = 3 };
+    static readonly Dictionary<string, int> TypeOrder = new() { ["persistent-local"] = 1, ["claude-cloud"] = 2, ["cursor-cloud"] = 2, ["copilot-cloud"] = 2, ["ephemeral-local"] = 3 };
 
     // ---- registry ---------------------------------------------------------------------------------------------------------------------
     // after: the cursor of this stream. With messaging off it is today's bare number (-1: nothing is replayed). With messaging on the caller has
@@ -846,7 +846,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     }
 
     // ---- the patrol (3.9): the digest input, what is new or worse, the push, the acknowledgement. Every method holds the gate; none calls Runner. ----
-    static readonly string[] SessionTypes = { "persistent-local", "ephemeral-local", "claude-cloud", "cursor-cloud" };
+    static readonly string[] SessionTypes = { "persistent-local", "ephemeral-local", "claude-cloud", "cursor-cloud", "copilot-cloud" };
     DigestInput DigestInputLocked(DateTime now)
     {
         var d = new DigestInput { Now = now };
@@ -2212,7 +2212,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 ["sessionRestarts"] = new JsonObject { ["sent"] = restartsSent, ["recent"] = new JsonArray(restarts.Select(r => (JsonNode)new JsonObject { ["at"] = r.At.ToString("o"), ["worker"] = r.Name, ["session"] = r.Session, ["code"] = r.Reason }).ToArray()) },
                 ["passUnmerged"] = PassUnmergedJson(DateTime.UtcNow),
                 ["sessionsBlocked"] = sessionsBlocked,
-                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["mode"] = w.Runtime == "local" ? "manual" : w.Runtime == "cursor-cloud" ? "api" : "hosted", ["role"] = "seat", ["execution"] = RuntimeOf(w.Name)?.ExecutionOf(w.Name) ?? "", ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
+                ["workers"] = new JsonArray(workers.Values.Select(w => (JsonNode)new JsonObject { ["name"] = w.Name, ["type"] = w.Type, ["runtime"] = w.Runtime, ["mode"] = w.Runtime == "local" ? "manual" : w.Runtime is "cursor-cloud" or "copilot-cloud" ? "api" : "hosted", ["role"] = "seat", ["execution"] = RuntimeOf(w.Name)?.ExecutionOf(w.Name) ?? "", ["connected"] = w.Connected, ["draining"] = w.Draining, ["capacity"] = w.Capacity, ["owned"] = Owned(w.Name), ["qcCapacity"] = w.QcCapacity, ["qcActive"] = QcActive(w.Name), ["qcProfile"] = w.QcProfile, ["qcAddress"] = w.QcAddress,
                     ["missedOffers"] = w.Missed, ["coolDownUntil"] = Cooling(w) ? w.CoolUntil.ToString("o") : null, ["takenBackInRow"] = w.TakeBackMisses,
                     ["blocked"] = Blocked(w), ["blockedSince"] = w.BlockedSince?.ToString("o"),
                     ["session"] = w.Session, ["sessionStarted"] = w.SessionStarted.ToString("o"), ["sessionItems"] = new JsonArray(w.SessionItems.OrderBy(i => i).Select(i => (JsonNode)i).ToArray()),

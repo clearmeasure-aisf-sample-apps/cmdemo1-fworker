@@ -11,12 +11,14 @@ sealed partial class Plant
     public RuntimeManager? Runtimes { get; set; }
     // the api mode's adapter (Cursor Cloud Agents, gateway/Runtimes/CursorCloudRuntime.cs): items reach it by the runtime:cursor-cloud label
     public RuntimeManager? Cursor { get; set; }
+    // the Copilot cloud agent (gateway/Runtimes/CopilotCloudRuntime.cs): items reach it by the runtime:copilot-cloud label
+    public RuntimeManager? Copilot { get; set; }
     JsonObject runtimeLabels = new(), itemProfiles = new();
     readonly List<(RuntimeManager Rm, RuntimeManager.Ticket T)> pendingProvisions = new();
 
     // the adapter that runs a worker name, or null for a session that connected by itself
-    RuntimeManager? RuntimeOf(string name) => name == "" ? null : Runtimes?.IsRuntimeWorker(name) == true ? Runtimes : Cursor?.IsRuntimeWorker(name) == true ? Cursor : null;
-    RuntimeManager? RuntimeFor(string kind) => kind == "cae-job" ? Runtimes : kind == "cursor-cloud" ? Cursor : null;
+    RuntimeManager? RuntimeOf(string name) => name == "" ? null : Runtimes?.IsRuntimeWorker(name) == true ? Runtimes : Cursor?.IsRuntimeWorker(name) == true ? Cursor : Copilot?.IsRuntimeWorker(name) == true ? Copilot : null;
+    RuntimeManager? RuntimeFor(string kind) => kind == "cae-job" ? Runtimes : kind == "cursor-cloud" ? Cursor : kind == "copilot-cloud" ? Copilot : null;
     readonly HashSet<(int, string)> parkQueued = new();
 
     double AckFor(string name) => RuntimeOf(name)?.AckSeconds ?? ackSeconds;
@@ -26,8 +28,8 @@ sealed partial class Plant
     // runtime worker that already runs for the item, or null for the usual choice).
     (bool Handled, string? Pin) RouteRuntime(Assignment a)
     {
-        var any = Runtimes ?? Cursor;
-        if (any == null || a.Kind != "own-item" || !((Runtimes?.On ?? false) || (Cursor?.On ?? false))) return (false, null);
+        var any = Runtimes ?? Cursor ?? Copilot;
+        if (any == null || a.Kind != "own-item" || !((Runtimes?.On ?? false) || (Cursor?.On ?? false) || (Copilot?.On ?? false))) return (false, null);
         var label = runtimeLabels[a.Item.ToString()]?.ToString() ?? "";
         var runtime = any.Settings.RouteFor(a.Column, label);
         if (runtime == "local") return (false, null);
@@ -42,7 +44,7 @@ sealed partial class Plant
             return (true, null);
         }
         // a connected session first (runtimes.preferConnected), except for an item labelled for the api mode: that label is the operator's choice
-        if (rm.Settings.PreferConnected && !(rm.Kind == "cursor-cloud" && label == rm.Kind) && Choose(a, null).Worker != null) return (false, null);
+        if (rm.Settings.PreferConnected && !(rm.Kind is "cursor-cloud" or "copilot-cloud" && label == rm.Kind) && Choose(a, null).Worker != null) return (false, null);
         var (ok, code) = rm.CanStart();
         if (!ok) { if (label != "") { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = code; Journal(a.Item, "waiting", new JsonObject { ["reason"] = $"the item is labelled runtime:{label} and that runtime cannot start a worker now ({code})" }, ""); return (true, null); } return (false, null); }
         var t = rm.Begin(a.Item, a.Column, itemProfiles[a.Item.ToString()]?.ToString() ?? "");
