@@ -140,7 +140,7 @@ sealed class World
         if (auth != "Bearer fake-cursor") return (401, "{\"error\":\"unauthorized\"}");
         if (path == "/v1/agents" && method == "POST")
         {
-            if (cursorLaunchFailures > 0) { cursorLaunchFailures--; return (500, "{\"error\":\"internal\"}"); }
+            if (cursorLaunchFailures > 0) { cursorLaunchFailures--; return (400, "{\"error\":\"bad_request\",\"message\":\"fake: model not available for this account\"}"); }
             var a = new CursorAgent { Id = "bc-" + (++cursorSeq).ToString("x8"), RunId = "run-" + cursorSeq.ToString("x8"), Body = b as JsonObject ?? new JsonObject() };
             cursorAgents.Add(a);
             return (201, J(("agent", J(("id", a.Id), ("status", a.Status), ("latestRunId", a.RunId))), ("run", J(("id", a.RunId), ("status", "CREATING")))));

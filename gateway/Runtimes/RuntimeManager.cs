@@ -48,6 +48,8 @@ sealed class RuntimeManager
     readonly RuntimeNonces nonces;
     readonly Dictionary<string, Exec> execs = new(StringComparer.Ordinal);
     readonly Dictionary<(int Item, string Phase), int> failures = new();
+    // the error of the last failure of an item and phase (its outcome; for a failed start the error, where a non-2xx launch carries the runtime's answer, at most 1 KB), shown in /status
+    readonly Dictionary<(int Item, string Phase), string> failureErrors = new();
     readonly List<JsonObject> last = new();
     DateTime day = DateTime.UtcNow.Date; int today;
     int startFailuresInRow; bool healthy = true; string unhealthyWhy = "";
@@ -122,6 +124,7 @@ sealed class RuntimeManager
         }
         span?.SetStatus(ActivityStatusCode.Error, r.Error);
         nonces.Forget(t.Name);
+        lock (gate) failureErrors[(t.Item, t.Phase)] = r.Error;
         await End(t.Name, "start-failed", failed: true, startFailure: true);
     }
 
@@ -146,7 +149,7 @@ sealed class RuntimeManager
             e.Ended = true; e.EndedAt = DateTime.UtcNow; e.Outcome = outcome;
             // a failure is counted before the plant takes the item back (RuntimeEnded): a plan in between would otherwise see the phase not yet
             // exhausted and start one execution more than maxFailuresPerPhase
-            if (failed) { var n0 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n0 == lim.MaxFailuresPerPhase; }
+            if (failed) { var n0 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n0 == lim.MaxFailuresPerPhase; if (outcome != "start-failed") failureErrors[(e.Item, e.Phase)] = outcome; }
             if (e.RegisteredAt == null && (failed || startFailure))
             {
                 startFailuresInRow++;
@@ -162,7 +165,7 @@ sealed class RuntimeManager
         if (tookBack && !failed && e.StopReason == "" && outcome == "succeeded")
         {
             failed = true; outcome = "ended-with-item";
-            lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == lim.MaxFailuresPerPhase; }
+            lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == lim.MaxFailuresPerPhase; failureErrors[(e.Item, e.Phase)] = outcome; }
         }
         Executions.Add(1, new KeyValuePair<string, object?>("runtime", cae.Kind), new KeyValuePair<string, object?>("outcome", outcome));
         if (tookBack && ReleaseClaim != null) { try { await ReleaseClaim(e.Item, name); } catch (Exception x) { Log("release-claim-failed", name, e.Item, x.Message); } }
@@ -180,7 +183,7 @@ sealed class RuntimeManager
     {
         Log("park", "", item, "runtime-failed " + phase);
         // after the park the item starts afresh: an unpark by the operator gives its phase maxFailuresPerPhase executions again
-        try { if (Park != null) { await Park(item, phase); lock (gate) failures.Remove((item, phase)); } } catch (Exception x) { Log("park-failed", "", item, x.Message); }
+        try { if (Park != null) { await Park(item, phase); lock (gate) { failures.Remove((item, phase)); failureErrors.Remove((item, phase)); } } } catch (Exception x) { Log("park-failed", "", item, x.Message); }
         finally { Plant?.RuntimeParked(item, phase); }
     });
 
@@ -250,7 +253,7 @@ sealed class RuntimeManager
                     ["enabled"] = lim.IsOn(), ["maxConcurrent"] = lim.MaxConcurrent, ["running"] = execs.Values.Count(e => !e.Ended), ["today"] = today, ["maxExecutionsPerDay"] = lim.MaxExecutionsPerDay,
                     ["healthy"] = healthy, ["unhealthyReason"] = unhealthyWhy, ["startFailuresInRow"] = startFailuresInRow, ["ackSeconds"] = lim.AckSeconds, ["relisted"] = relisted,
                     ["executions"] = new JsonArray(execs.Values.Where(e => !e.Ended).Select(e => (JsonNode)new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["status"] = e.Status, ["started"] = e.StartedAt.ToString("o"), ["registered"] = e.RegisteredAt?.ToString("o"), ["detail"] = Detail(e.Name) }).ToArray()),
-                    ["failures"] = new JsonArray(failures.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value }).ToArray()),
+                    ["failures"] = new JsonArray(failures.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value, ["error"] = failureErrors.GetValueOrDefault(kv.Key) }).ToArray()),
                     // the detail is read again while the runtime still knows the worker: its usage arrives after the end (a Cursor agent's reads zero at first)
                     ["last"] = new JsonArray(last.Select(x => { var c = (JsonObject)x.DeepClone(); if (Detail(c["worker"]?.ToString() ?? "") is { } d) c["detail"] = d; return (JsonNode)c; }).ToArray())
                 }
