@@ -101,13 +101,27 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
 
     async Task<(int Status, JsonNode? Body)> Send(HttpMethod m, string path, JsonNode? body, CancellationToken ct)
     {
+        var (s, j, _) = await SendText(m, path, body, ct);
+        return (s, j);
+    }
+
+    async Task<(int Status, JsonNode? Body, string Text)> SendText(HttpMethod m, string path, JsonNode? body, CancellationToken ct)
+    {
         using var req = new HttpRequestMessage(m, cfg.ApiUrl + path);
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", cfg.ApiKey);
         if (body != null) req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
         using var resp = await http.SendAsync(req, ct);
         var text = await resp.Content.ReadAsStringAsync(ct);
         JsonNode? j = null; try { if (text.Length > 0) j = JsonNode.Parse(text); } catch { }
-        return ((int)resp.StatusCode, j);
+        return ((int)resp.StatusCode, j, text);
+    }
+
+    // the answer of a failed call, for the log and /status: at most 1 KB on one line, the key masked should Cursor ever echo it
+    string Excerpt(string text)
+    {
+        var t = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (cfg.ApiKey.Length > 0) t = t.Replace(cfg.ApiKey, "***");
+        return t.Length > 1024 ? t[..1024] + "..." : t;
     }
 
     // The branch an agent starts on: the default branch for Technical Design and a first Development pass (the agent creates
@@ -133,12 +147,12 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
         JsonObject? sel; try { sel = await Model(ct); } catch (Exception e) { return new(false, "", "models-" + e.GetType().Name); }
         if (sel == null) return new(false, "", "model-unavailable");
         body["model"] = sel;
-        int s; JsonNode? j;
-        try { (s, j) = await Send(HttpMethod.Post, "/v1/agents", body, ct); }
+        int s; JsonNode? j; string text;
+        try { (s, j, text) = await SendText(HttpMethod.Post, "/v1/agents", body, ct); }
         catch (Exception e) { await DeleteNamed(Prefix + r.WorkerName, ct); return new(false, "", "launch-" + e.GetType().Name); }
         var id = j?["agent"]?["id"]?.ToString() ?? j?["id"]?.ToString() ?? "";
         // a launch that failed may still have created the agent (a timeout, an odd answer): it is looked up by its name and deleted
-        if (s is not (200 or 201) || id == "") { await DeleteNamed(Prefix + r.WorkerName, ct); return new(false, "", s is 200 or 201 ? "launch-no-id" : $"launch-{s}"); }
+        if (s is not (200 or 201) || id == "") { await DeleteNamed(Prefix + r.WorkerName, ct); return new(false, "", s is 200 or 201 ? "launch-no-id" : $"launch-{s}: {Excerpt(text)}"); }
         lock (agents) agents[r.WorkerName] = new Agent { Model = sel.DeepClone(), Id = id, RunId = j?["run"]?["id"]?.ToString() ?? j?["agent"]?["latestRunId"]?.ToString() ?? "", Worker = r.WorkerName, Item = r.Item, Phase = r.Phase };
         return new(true, id, "");
     }

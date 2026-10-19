@@ -35,7 +35,7 @@ sealed class WorkerSessions
 
     public int Count { get { lock (gate) return live.Count(kv => !kv.Value.Ended); } }
 
-    // The session of an r1 of role worker, registered with the plant at its first call. runtime: "cursor-cloud" (api) or "cae-job" (hosted).
+    // The session of an r1 of role worker, registered with the plant at its first call. runtime: "cursor-cloud" or "copilot-cloud" (api) or "cae-job" (hosted).
     public Session Get(Principal r1)
     {
         Session s;
@@ -51,7 +51,7 @@ sealed class WorkerSessions
             if (s.W != null || s.Ended) return s;
             try
             {
-                var (w, ch, replay) = plant.Register(s.Name, s.Runtime == "local" ? "persistent-local" : s.Runtime == "cursor-cloud" ? "cursor-cloud" : "claude-cloud", Array.Empty<string>(), 1, new[] { "owner" }, -1,
+                var (w, ch, replay) = plant.Register(s.Name, s.Runtime == "local" ? "persistent-local" : s.Runtime is "cursor-cloud" or "copilot-cloud" ? s.Runtime : "claude-cloud", Array.Empty<string>(), 1, new[] { "owner" }, -1,
                     newSession: true, runtime: s.Runtime);
                 lock (gate) { s.W = w; s.Ch = ch; }
                 foreach (var (_, json) in replay) Take(s, json);
