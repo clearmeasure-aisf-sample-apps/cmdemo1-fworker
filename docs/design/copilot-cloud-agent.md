@@ -1,0 +1,68 @@
+# Copilot cloud agent runtime
+
+Status: design, owner decisions of 2026-10-19. Builds on [agents-roles-launch.md](agents-roles-launch.md) (api launch
+mode, served prompts, `/mcp`, one phase per session) and the Cursor runtime ([cursor-token-usage.md](../cursor-token-usage.md)).
+
+## Decisions (Jeffrey, 2026-10-19)
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | Copilot SDK in our own job, or Copilot cloud agent | **Copilot cloud agent**: GitHub hosts the run and opens the PR |
+| 2 | How the agent reaches the gateway's tools | **Our stdio MCP package**, proxying to the gateway's `/mcp` |
+| 3 | Identity that starts tasks and holds the seat | **cm-ai-ops-bot with a Copilot seat**; GitHub App tokens once the API accepts them |
+| 4 | Tasks per item | **One task per phase** (Technical Design, Development, Functional Testing) |
+| 5 | Rollout | **tdd only, docs-only items, 30 launches a day**, label `runtime:copilot-cloud` |
+
+## Shape
+
+```
+gateway sweep ── item labelled runtime:copilot-cloud, phase P
+   │
+   ├─ mint r1 role token (item, phase P, short-lived)
+   ├─ POST /agents/repos/{owner}/{repo}/tasks      (as cm-ai-ops-bot)
+   │     body: phase prompt from prompts/ (get_prompt), item number, branch,
+   │           the r1 token reference, "do phase P only, then end"
+   ▼
+Copilot cloud agent (GitHub Actions environment of cmdemo1-workorders)
+   ├─ local MCP server: fworker-mcp (stdio) ──HTTPS──▶ gateway /mcp (r1 token)
+   │     tools: the phase's tool set only (per-phase tool sets from #169)
+   ├─ GitHub MCP server (built in)
+   └─ pushes branch / opens PR (Development), records phase done via /mcp
+   ▼
+gateway: task status (GET tasks), worker registration, phase verdicts, merge
+```
+
+## Parts to build
+
+1. **`CopilotCloudRuntime`** (gateway/Runtimes), beside `CursorCloudRuntime`, off by default:
+   launch (create task), poll status, cancel past the deadline, registration watchdog, daily cap, concurrency 1,
+   60 min. Config under `api.copilot` in `config/deploy.overrides.json`, `environments.tdd` only.
+2. **`fworker-mcp` stdio package**: a small proxy (stdin/stdout MCP ↔ HTTPS `/mcp`) published so the agent
+   environment can install it; reads the gateway URL and the r1 token from the task's environment.
+3. **Repository MCP configuration** in cmdemo1-workorders (Settings → Copilot → coding agent): one server,
+   `fworker-mcp`, with its secret in the repository's `copilot` environment. The token there is a bootstrap token
+   that can only exchange an item's one-time code for that item's r1 token, so a repo-wide secret never grants
+   item rights by itself.
+4. **Agent firewall allow-list**: the tdd gateway host added to the Copilot agent firewall.
+5. **Seat and token**: Copilot seat for cm-ai-ops-bot; its token for task creation in the tdd Key Vault
+   (`fworker-copilot-token`), `unset` in uat and prod.
+6. **Prompts**: reuse `prompts/worker/*.md`; a short `bootstrap/copilot.md` (how to start the MCP server, end after
+   the phase).
+7. **Measurement**: per phase: duration, premium requests (billing usage API for the seat), and token usage if the
+   task API reports it. Recorded in `docs/copilot-token-usage.md`, the same tables as Cursor.
+
+## Risks and open points
+
+| Risk | Mitigation |
+|---|---|
+| Task API is public preview; App tokens "coming soon" | Bot user token now; adapter isolates the API calls |
+| MCP config is per repository, not per launch | Bootstrap token + per-item one-time code (part 3) |
+| Token usage may not be exposed per task | Measure premium requests and time; record "not reported" honestly |
+| Agent may drift past its phase | Per-phase tool sets refuse other phases' tools; prompt says end after the phase |
+| Agent environment network | Explicit firewall allow-list for the gateway host; registration watchdog marks failures |
+
+## Rollout
+
+1. Adapter + MCP package + tests, off everywhere (merge when green).
+2. Seat, token, repo MCP config, firewall: owner/infra steps listed in HANDOFF.
+3. Enable in tdd; 3 docs-only items; record the phase times and usage; compare with Cursor.
