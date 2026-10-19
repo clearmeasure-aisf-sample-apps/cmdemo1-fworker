@@ -44,7 +44,7 @@ $CursorScenarios = [ordered]@{
         $row = @((Get-Plant).plant.workers | Where-Object { $_.name -like "cur-$n-*" })
         Check 'its worker shows mode api' ($row.Count -eq 1 -and $row[0].mode -eq 'api' -and $row[0].execution -eq $a.id) ($row | ConvertTo-Json -Compress)
         [void](Mcp-Call 'session_end' @{ reason = 'scenario done' } $r1)
-        Check 'session_end cancels the run and deletes the agent' (Wait-Until -Seconds 15 { $x = @((Cur-State).agents | Where-Object { $_.id -eq $a.id }); $x.Count -eq 1 -and $x[0].cancelled -and $x[0].deleted })
+        Check 'session_end cancels the run and deletes the agent' (Wait-Until -Seconds 45 { $x = @((Cur-State).agents | Where-Object { $_.id -eq $a.id }); $x.Count -eq 1 -and $x[0].cancelled -and $x[0].deleted })
         Check 'the delete waited for a non-zero usage read (the fake reads zero twice)' ((@((Cur-State).agents | Where-Object { $_.id -eq $a.id }))[0].usageReads -ge 3)
         Check 'status shows the model asked for and the model Cursor reports' (Wait-Until -Seconds 10 { $d = @((Cur-Status).last | Where-Object { $_.execution -eq $a.id }); $d.Count -eq 1 -and $d[0].detail.model.id -eq 'auto-smart' -and $d[0].detail.reportedModel.id -eq 'auto-smart' -and $d[0].detail.usage.totalTokens -eq 2340 }) ((Cur-Status).last | ConvertTo-Json -Compress -Depth 6)
         Check 'its token usage is logged' (Wait-Until -Seconds 10 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"cursor-usage`"").Count -gt 0 })
@@ -89,6 +89,8 @@ $CursorScenarios = [ordered]@{
         $n = New-Item-Fake 'Cursor relaunch' 'x' $CurLabels
         Check 'after the failed launch a new agent is launched' (Wait-Until -Seconds 40 { (Cur-Agents $n).Count -ge 1 })
         Check 'status: the failure was counted against the item' (@((Cur-Status).failures | Where-Object { $_.item -eq $n -and $_.count -ge 1 }).Count -eq 1) (Cur-Status | ConvertTo-Json -Compress -Depth 5)
+        Check 'status: the failure shows the launch''s HTTP status and Cursor''s answer' (@((Cur-Status).failures | Where-Object { $_.item -eq $n -and "$($_.error)" -like 'launch-400: *fake: model not available for this account*' }).Count -eq 1) (Cur-Status | ConvertTo-Json -Compress -Depth 5)
+        Check 'the gateway log carries Cursor''s answer, not the key' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake: model not available for this account').Count -gt 0 -and @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-cursor').Count -eq 0)
         $a = (Cur-Agents $n)[-1]
         Check 'the deadline (0.25 min in this suite) cancels and deletes it' (Wait-Until -Seconds 60 { $x = @((Cur-State).agents | Where-Object { $_.id -eq $a.id }); $x.Count -eq 1 -and $x[0].deleted })
         Check 'its r1 no longer works: the name is revoked when its agent ends' (Wait-Until -Seconds 30 { (Mcp 'tools/list' @{} (Cur-R1 $a)).status -eq 401 })

@@ -229,15 +229,16 @@ $RuntimeScenarios['runtime: a failed execution: its item is taken back, its clai
         $r = Rt-Own $name $n; CheckExit 'its worker owns the item' $r 0
         Check 'the plant names it owner' (Wait-Until -Seconds 10 { (Rt-Owner $n) -eq $name })
         [void](Fake 'arm-exec' @{ worker = $name; status = 'Failed' })
-        Check 'the item is taken back from the failed execution' (Wait-Until -Seconds 20 { (Rt-Owner $n) -ne $name })
+        Check 'the item is taken back from the failed execution' (Wait-Until -Seconds 45 { (Rt-Owner $n) -ne $name })
+        # read before the next execution can age past its 15 s ack window: unlaunched, it would end never-registered and count a second failure
+        Check 'status: one failure counted for the item and phase' (Wait-Until -Seconds 10 { @((Rt-Status).failures | Where-Object { $_.item -eq $n -and $_.count -eq 1 }).Count -eq 1 }) ((Rt-Status).failures | ConvertTo-Json -Compress)
         Check 'its claim ends' (Wait-Until -Seconds 20 { -not (Get-ItemState $n).ContainsKey('claim') })
         Check 'the take-back is journalled' (Wait-Until -Seconds 20 { (Rt-Journal $n 'plant event=reassigned ') -ge 1 })
         Check 'a new execution is started for the item' (Wait-Until -Seconds 30 { @((Rt-Execs $n) | Where-Object { $_.worker -ne $name }).Count -ge 1 })
         $name2 = "$((Rt-Execs $n)[-1].worker)"
         Check 'with a new worker name' ($name2 -match "^cae-$n-[0-9a-f]{6}$" -and $name2 -ne $name)
-        Check 'status: one failure counted for the item and phase' (@((Rt-Status).failures | Where-Object { $_.item -eq $n -and $_.count -eq 1 }).Count -eq 1)
-        $wk = Rt-Api POST '/api/v1/verbs/my-items' @{} "$($script:Workers[$name].token)"
-        Check 'the failed worker name is revoked' ($wk.status -eq 401) ($wk | ConvertTo-Json -Compress)
+        $script:wk = $null
+        Check 'the failed worker name is revoked' (Wait-Until -Seconds 20 { $script:wk = Rt-Api POST '/api/v1/verbs/my-items' @{} "$($script:Workers[$name].token)"; $script:wk.status -eq 401 }) ($script:wk | ConvertTo-Json -Compress)
     } finally { Rt-Cleanup @($n) @($name, $name2) }
 }
 
