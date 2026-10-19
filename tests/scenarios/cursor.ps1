@@ -90,6 +90,7 @@ $CursorScenarios = [ordered]@{
         Check 'after the failed launch a new agent is launched' (Wait-Until -Seconds 40 { (Cur-Agents $n).Count -ge 1 })
         Check 'status: the failure was counted against the item' (@((Cur-Status).failures | Where-Object { $_.item -eq $n -and $_.count -ge 1 }).Count -eq 1) (Cur-Status | ConvertTo-Json -Compress -Depth 5)
         Check 'status: the failure shows the launch''s HTTP status and Cursor''s answer' (@((Cur-Status).failures | Where-Object { $_.item -eq $n -and "$($_.error)" -like 'launch-400: *fake: model not available for this account*' }).Count -eq 1) (Cur-Status | ConvertTo-Json -Compress -Depth 5)
+        Check 'status: the ended execution in last[] keeps the answer (a park clears failures[])' (@((Cur-Status).last | Where-Object { $_.item -eq $n -and $_.outcome -eq 'start-failed' -and "$($_.error)" -like 'launch-400: *fake: model not available*' }).Count -ge 1) ((Cur-Status).last | ConvertTo-Json -Compress -Depth 3)
         Check 'the gateway log carries Cursor''s answer, not the key' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake: model not available for this account').Count -gt 0 -and @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-cursor').Count -eq 0)
         $a = (Cur-Agents $n)[-1]
         Check 'the deadline (0.25 min in this suite) cancels and deletes it' (Wait-Until -Seconds 60 { $x = @((Cur-State).agents | Where-Object { $_.id -eq $a.id }); $x.Count -eq 1 -and $x[0].deleted })

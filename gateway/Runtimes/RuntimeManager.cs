@@ -155,7 +155,7 @@ sealed class RuntimeManager
                 startFailuresInRow++;
                 if (healthy && startFailuresInRow >= lim.UnhealthyAfterFailures) { healthy = false; unhealthyNow = true; unhealthyWhy = $"{startFailuresInRow} executions in a row ended without their worker registering"; }
             }
-            last.Add(new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["outcome"] = outcome, ["started"] = e.StartedAt.ToString("o"), ["ended"] = e.EndedAt?.ToString("o"), ["detail"] = Detail(e.Name) });
+            last.Add(new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["outcome"] = outcome, ["error"] = failed ? failureErrors.GetValueOrDefault((e.Item, e.Phase)) : null, ["started"] = e.StartedAt.ToString("o"), ["ended"] = e.EndedAt?.ToString("o"), ["detail"] = Detail(e.Name) });
             if (last.Count > 10) last.RemoveAt(0);
             foreach (var k in execs.Where(kv => kv.Value.Ended && kv.Value.EndedAt < DateTime.UtcNow.AddHours(-1)).Select(kv => kv.Key).ToList()) execs.Remove(k);
         }
