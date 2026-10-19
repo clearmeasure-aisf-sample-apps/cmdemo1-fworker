@@ -230,7 +230,9 @@ $RuntimeScenarios['runtime: a failed execution: its item is taken back, its clai
         Check 'the plant names it owner' (Wait-Until -Seconds 10 { (Rt-Owner $n) -eq $name })
         $armed = Fake 'arm-exec' @{ worker = $name; status = 'Failed' }
         Check 'the platform fails the execution' ($armed.ok -eq $true) ($armed | ConvertTo-Json -Compress)
-        Check 'the item is taken back from the failed execution' (Wait-Until -Seconds 45 { (Rt-Owner $n) -ne $name })
+        $tb = Wait-Until -Seconds 45 { (Rt-Owner $n) -ne $name }
+        $diag = if ($tb) { '' } else { "arm=$((Rt-Arm).executions | Where-Object { $_.worker -eq $name } | ConvertTo-Json -Compress -Depth 2) log=$(@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch $name | Select-Object -Last 15 | ForEach-Object { $_.Line }) -join ' | ')" }
+        Check 'the item is taken back from the failed execution' $tb $diag
         # read before the next execution can age past its 15 s ack window: unlaunched, it would end never-registered and count a second failure
         Check 'status: one failure counted for the item and phase' (Wait-Until -Seconds 10 { @((Rt-Status).failures | Where-Object { $_.item -eq $n -and $_.count -eq 1 }).Count -eq 1 }) ((Rt-Status).failures | ConvertTo-Json -Compress)
         Check 'its claim ends' (Wait-Until -Seconds 20 { -not (Get-ItemState $n).ContainsKey('claim') })
