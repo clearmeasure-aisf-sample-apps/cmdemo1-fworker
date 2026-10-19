@@ -184,9 +184,16 @@ static class Auth
     // Worker registration values (worker-messaging.md 2.2): a fixed type, roles from the plant's set, at most 10 capabilities, and model and effort
     // in the tag form when they are sent.
     public static bool ValidRegistration(string type, IEnumerable<string> roles, IReadOnlyCollection<string> caps, string model, string effort) =>
-        type is "persistent-local" or "ephemeral-local" or "claude-cloud" or "cursor-cloud"
+        type is "persistent-local" or "ephemeral-local" or "claude-cloud" or "cursor-cloud" or "copilot-cloud"
         && roles.All(r => r is "owner" or "inspector" or "qc") && caps.Count <= 10 && caps.All(ValidTag)
         && (model == "" || ValidTag(model)) && (effort == "" || ValidTag(effort));
+
+    // The Copilot bootstrap token (docs/design/copilot-cloud-agent.md part 3): the one secret of the work-orders repository's Copilot MCP
+    // configuration. It authenticates nothing but POST /api/v1/copilot/exchange (a one-time code of one task for that task's r1): Authenticate
+    // never accepts it. Bound to api.copilot.bootstrapGeneration, so raising the generation voids every copy.
+    public static string CopilotBootstrapToken(string secret, int generation) => $"b1.{generation}.{Mac(secret, $"copilot-bootstrap:{generation}")}";
+    public static bool VerifyCopilotBootstrap(string secret, string? header, int generation) =>
+        secret.Length > 0 && header is { Length: < 300 } h && h.StartsWith("Bearer b1.") && Same(h[7..], CopilotBootstrapToken(secret, generation));
 
     // rev: the name's revocation generation; 0 (never revoked) keeps the original format and MAC input
     public static string WorkerToken(string secret, string name, int rev = 0) => $"w1.{name}.{Mac(secret, rev == 0 ? "worker:" + name : $"worker:{name}:{rev}")}";
@@ -282,7 +289,7 @@ static class Auth
             if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds() || !ValidName(name) || msg.Reserved.Contains(name) || !Roles.Contains(role) || !Modes.Contains(mode)) return null;
             if (!string.Equals(env, Environment, StringComparison.Ordinal)) return null;
             if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(name)) return null;
-            return new Principal("role", name, j["i"]?.GetValue<int>() ?? 0, role, j["a"]?.ToString() ?? "", x, Runtime: mode == "manual" ? "" : (mode == "api" ? "cursor-cloud" : "cae-job"),
+            return new Principal("role", name, j["i"]?.GetValue<int>() ?? 0, role, j["a"]?.ToString() ?? "", x, Runtime: mode == "manual" ? "" : mode == "api" ? (j["ag"]?.ToString() == "copilot-cloud-agent" ? "copilot-cloud" : "cursor-cloud") : "cae-job",
                 Phase: j["p"]?.ToString() ?? "", Mode: mode, Agent: j["ag"]?.ToString() ?? "", Env: env);
         }
         catch { return null; }

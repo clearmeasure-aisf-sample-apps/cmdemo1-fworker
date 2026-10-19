@@ -63,7 +63,7 @@ app.Run(async ctx =>
         // (GraphQL answers 200 with an error of type RATE_LIMITED, REST 403)
         if (rate is { Remaining: <= 0, Resource: "graphql" }) res = (200, "{\"errors\":[{\"type\":\"RATE_LIMITED\",\"message\":\"API rate limit exceeded for installation ID 7.\"}]}");
         else if (rate is { Remaining: <= 0 }) res = (403, "{\"message\":\"API rate limit exceeded for installation ID 7. If you reach out to GitHub Support for help, please include the request ID.\",\"documentation_url\":\"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting\"}");
-        else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString()); etag = world.Etag; }
+        else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.ApiVersionHeader = ctx.Request.Headers["X-GitHub-Api-Version"].ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString()); etag = world.Etag; }
     }
     if (rate is { } rl)
     {
@@ -102,8 +102,36 @@ sealed class ArmExec { public string Name = "", Job = ""; public string Status =
 // A Cloud Agent of the fake Cursor API (agents-roles-launch.md 10): its id, the launch body as sent, its status and its run.
 sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public int UsageReads; public DateTime Created = DateTime.UtcNow; }
 
+// A task of the fake agent tasks API (docs/design/copilot-cloud-agent.md): its id, the body as sent, the API version header, its state.
+sealed class CopilotTask { public string Id = "", State = "queued", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public double? Premium; }
+
 sealed class World
 {
+    // The fake agent tasks API (GitHub REST, public preview): POST /agents/repos/{owner}/{repo}/tasks, GET .../tasks/{id}. It wants the bearer
+    // token "fake-copilot". Not cleared by /_fake/reset; /_fake/copilot-reset does.
+    public string ApiVersionHeader = "";
+    readonly List<CopilotTask> copilotTasks = new(); long copilotSeq; int copilotLaunchFailures;
+    (int, object?) Copilot(string method, string path, JsonNode? b, string auth)
+    {
+        if (auth != "Bearer fake-copilot") return (401, "{\"message\":\"Bad credentials\"}");
+        var m = Regex.Match(path, "^/agents/repos/([^/]+)/([^/]+)/tasks(/([^/]+))?$");
+        if (!m.Success) return (404, null);
+        if (!m.Groups[3].Success && method == "POST")
+        {
+            if (copilotLaunchFailures > 0) { copilotLaunchFailures--; return (500, "{\"message\":\"internal\"}"); }
+            var t = new CopilotTask { Id = "task-" + (++copilotSeq).ToString("x8"), Body = b as JsonObject ?? new JsonObject(), ApiVersion = ApiVersionHeader, Path = path };
+            copilotTasks.Add(t);
+            return (201, CopilotJson(t));
+        }
+        var task = copilotTasks.FirstOrDefault(x => x.Id == m.Groups[4].Value);
+        if (task == null) return (404, "{\"message\":\"Not Found\"}");
+        if (method == "GET") { task.Reads++; return (200, CopilotJson(task)); }
+        return (405, null);
+    }
+    static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("artifacts", new JsonArray()), ("created_at", DateTime.UtcNow.ToString("o")),
+        ("sessions", new JsonArray(t.Premium is { } p ? J(("id", "s-" + t.Id), ("state", t.State), ("usage", J(("type", "premium_requests"), ("amount", p)))) : J(("id", "s-" + t.Id), ("state", t.State)))));
+    JsonObject CopilotState() => J(("tasks", new JsonArray(copilotTasks.Select(t => (JsonNode)J(("id", t.Id), ("state", t.State), ("reads", t.Reads), ("apiVersion", t.ApiVersion), ("path", t.Path), ("body", t.Body.DeepClone()))).ToArray())));
+
     // The fake Cursor Cloud Agents API v1: POST /v1/agents, GET /v1/agents/{id}, GET .../runs/{runId}, POST .../runs/{runId}/cancel, DELETE /v1/agents/{id}.
     // It wants the bearer key "fake-cursor". Not cleared by /_fake/reset; /_fake/cursor-reset does.
     readonly List<CursorAgent> cursorAgents = new(); long cursorSeq; int cursorLaunchFailures;
@@ -245,6 +273,7 @@ sealed class World
         if (path.StartsWith("/octopus/")) return Octopus(path[9..], q);
         if (path.StartsWith("/subscriptions/")) return Arm(method, path, b, auth);
         if (path.StartsWith("/v1/")) return Cursor(method, path, b, auth);
+        if (path.StartsWith("/agents/")) return Copilot(method, path, b, auth);
         var root = $"/repos/{Owner}/{Repo}";
         Match m;
         if ((m = Regex.Match(path, "^/_blob/(logs|artifacts)/(\\d+)$")).Success)
@@ -745,6 +774,15 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "arm": return (200, ArmState());
             case "cursor": return (200, CursorState());
+            case "copilot": return (200, CopilotState());
+            case "copilot-reset": copilotTasks.Clear(); copilotLaunchFailures = 0; return (200, J(("ok", true)));
+            case "copilot-launch-failures": copilotLaunchFailures = b?["count"]?.GetValue<int>() ?? 1; return (200, J(("ok", true)));
+            case "copilot-task":
+            {   // sets a task's state as GitHub would: {"id", "state": queued | in_progress | completed | failed | timed_out | cancelled, "premium"}
+                var t = copilotTasks.LastOrDefault(x => x.Id == b?["id"]?.ToString()); if (t == null) return (404, J(("ok", false)));
+                if (b?["state"] is { } st) t.State = st.ToString(); if (b?["premium"] is { } pr) t.Premium = pr.GetValue<double>();
+                return (200, J(("ok", true)));
+            }
             case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; return (200, J(("ok", true)));
             case "cursor-add":   // an agent this gateway did not launch in this process: {"name"}
             {
