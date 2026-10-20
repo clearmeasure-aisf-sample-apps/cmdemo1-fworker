@@ -87,16 +87,35 @@ function Verb_update_pr($a) {
     return @{ ok = $true; id = $n; updated = $true; pullRequest = @{ number = $own.number; url = $own.html_url; head_sha = $own.head.sha; branch = $own.head.ref } }
 }
 
+# The draft pull request the Copilot cloud agent opened on its branch: taken over for the item (title names #N, marked ready for review, recorded
+# in the state as the item's pull request). $null when there is none.
+function Use-CopilotDraft([int]$n, [string]$Head, [string]$Title) {
+    $c = Get-Cfg
+    $pr = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&head=$([uri]::EscapeDataString("$($c.owner):$Head"))&per_page=5") | Select-Object -First 1
+    if (-not $pr) { return $null }
+    # a draft that names another item, or that another item's state already holds, is not this item's to take
+    $others = @([regex]::Matches("$($pr.title) $($pr.body)", '(?<![0-9A-Za-z])#(\d+)\b') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -ne $n })
+    if ($others.Count) { Reject 10 'branch-of-other-item' "the pull request on '$Head' names #$($others[0]), not #$n" }
+    if ("$($pr.title)" -notmatch "(^|[^0-9])#$n([^0-9]|$)") { Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ title = $Title } | Out-Null }
+    if ($pr.draft) { [void](Invoke-GhGraphQL 'mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }' @{ id = "$($pr.node_id)" }) }
+    $st = Get-State $n; $st.state.pr = @{ number = $pr.number; branch = $Head; url = $pr.html_url }; Save-State $n $st
+    return (Get-Pr ([int]$pr.number))
+}
+
 function Verb_open_pr($a) {
     $n = Get-ItemNumber $a; $c = Get-Cfg
     $head = "$(Need $a 'head')"; $title = "$(Need $a 'title')"
     $info = Get-ItemInfo $n; Assert-Open $info
     if ($info.column -ine $c.columns.development) { Reject 10 'wrong-column' "pull requests are opened from '$($c.columns.development)'; the item is in '$($info.column)'" }
-    if ($head -notmatch "^$([regex]::Escape($c.name))/$n-") { Reject 10 'bad-branch-name' "the branch must be named '$($c.name)/$n-<something>' so the pull request belongs to the item" }
+    # the Copilot cloud agent pushes only copilot/* branches (docs/design/copilot-cloud-agent.md): such a branch is the item's when the item is the
+    # Copilot runtime's (no runtime: label routes it there by default, or runtime:copilot-cloud); the state records it as the item's branch
+    $copilotHead = $head -match '^copilot/[A-Za-z0-9._/-]{1,150}$' -and -not @($info.labels | Where-Object { $_ -match '^runtime:' -and $_ -ne 'runtime:copilot-cloud' }).Count
+    if (-not $copilotHead -and $head -notmatch "^$([regex]::Escape($c.name))/$n-") { Reject 10 'bad-branch-name' "the branch must be named '$($c.name)/$n-<something>' so the pull request belongs to the item" }
     if ($title -notmatch "(^|[^0-9])#$n([^0-9]|$)") { $title = "$title (#$n)" }
     $base = if (Test-Has $a 'base') { "$($a.base)" } else { $c.defaultBranch }
     $body = if (Test-Has $a 'body') { "$($a.body)" } else { '' }
     $existing = Find-ItemPr $n
+    if ($copilotHead -and -not ($existing -and $existing.head.ref -eq $head)) { $existing = Use-CopilotDraft $n $head $title }
     $gs = (Get-State $n).state
     if ($existing -and $existing.head.ref -eq $head) {
         Assert-PushGate $n $info $gs "$($existing.head.sha)" $existing.number

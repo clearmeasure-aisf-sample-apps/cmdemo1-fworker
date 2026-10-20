@@ -22,6 +22,19 @@ round trip (2026-10-20, PR cmdemo1-workorders#380) ran on Auto's pick, `gpt-5.3-
 `ai_credits`, not tokens. Copilot has no separate cost setting beyond Auto. Never set a premium model here without
 the owner's word.
 
+## Default runtime and all environments (Jeffrey, 2026-10-20)
+
+- cmdemo1's default: `runtimes.environments.<env>.routing` sends every phase of an item without a `runtime:` label to `copilot-cloud`;
+  `runtime:cursor-cloud` (and any other label) still wins. Code and database changes are allowed (the docs-only rule stays for Cursor only).
+- Tasks are started as cm-ai-ops-bot in all three environments (one token, `COPILOT_TASKS_TOKEN` in each environment's vault); each
+  environment has its own bootstrap token. `api.copilot.environments`: tdd on; uat and prod written with `"enabled": false` until the owner
+  switches them on.
+- One MCP configuration for all environments: the prompt carries the gateway URL and the one-time code; `fworker-mcp` accepts only the
+  three gateway hosts (https, no port or path) and picks `FWORKER_BOOTSTRAP_TOKEN_<ENV>`.
+- Branches: the coding agent pushes only `copilot/*`. The Development task is created with `create_pull_request: true`; `pr_open` with
+  that branch takes the task's draft over (title gets `#N`, marked ready, recorded as the item's pull request). Functional Testing starts
+  from the branch the Development task reported (`artifacts[].data.head_ref`). One task per phase.
+
 ## Shape
 
 ```

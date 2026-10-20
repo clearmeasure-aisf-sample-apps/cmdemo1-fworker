@@ -103,7 +103,7 @@ sealed class ArmExec { public string Name = "", Job = ""; public string Status =
 sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public int UsageReads; public DateTime Created = DateTime.UtcNow; }
 
 // A task of the fake agent tasks API (docs/design/copilot-cloud-agent.md): its id, the body as sent, the API version header, its state.
-sealed class CopilotTask { public string Id = "", State = "queued", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public double? Premium; }
+sealed class CopilotTask { public string Id = "", State = "queued", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public double? Premium; public string? HeadRef; }
 
 sealed class World
 {
@@ -128,7 +128,7 @@ sealed class World
         if (method == "GET") { task.Reads++; return (200, CopilotJson(task)); }
         return (405, null);
     }
-    static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("artifacts", new JsonArray()), ("created_at", DateTime.UtcNow.ToString("o")),
+    static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("artifacts", t.HeadRef == null ? new JsonArray() : new JsonArray(J(("provider", "github"), ("type", "branch"), ("data", J(("base_ref", "master"), ("head_ref", t.HeadRef)))))), ("created_at", DateTime.UtcNow.ToString("o")),
         ("sessions", new JsonArray(t.Premium is { } p ? J(("id", "s-" + t.Id), ("state", t.State), ("usage", J(("type", "premium_requests"), ("amount", p)))) : J(("id", "s-" + t.Id), ("state", t.State)))));
     JsonObject CopilotState() => J(("tasks", new JsonArray(copilotTasks.Select(t => (JsonNode)J(("id", t.Id), ("state", t.State), ("reads", t.Reads), ("apiVersion", t.ApiVersion), ("path", t.Path), ("body", t.Body.DeepClone()))).ToArray())));
 
@@ -408,13 +408,14 @@ sealed class World
         if (path == root + "/branches/" + Master && method == "GET") return (200, J(("name", Master), ("commit", J(("sha", masterSha)))));
         if ((m = Regex.Match(path, $"^{root}/compare/([^.]+)\\.\\.\\.(.+)$")).Success && method == "GET") return Compare(m.Groups[1].Value, m.Groups[2].Value);
         if (path == root + "/pulls" && method == "GET")
-            return (200, new JsonArray(prs.Values.Where(x => x.Open).Select(x => (JsonNode)PrJson(x)).ToArray()));
+            // head=owner:branch filters as GitHub does
+            return (200, new JsonArray(prs.Values.Where(x => x.Open && (q["head"].ToString() is not { Length: > 0 } hq || hq == $"{Owner}:{x.Ref}")).Select(x => (JsonNode)PrJson(x)).ToArray()));
         if (path == root + "/pulls" && method == "POST")
         {
             var head = b!["head"]!.ToString();
             if (!branches.TryGetValue(head, out var br) || br.Files.Count == 0) return (422, "{\"message\":\"Validation Failed\",\"errors\":[{\"message\":\"No commits between master and " + head + "\"}]}");
             var bp = branchProfile.TryGetValue(head, out var bpv) ? bpv : ("green", 0.0);
-            var pr = new Pr { Profile = bp.Item1, DelaySeconds = bp.Item2, Number = nextNumber++, Ref = head, Sha = br.Sha, Title = b["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Files = br.Files.ToList(), FileObjs = br.Objs.ToList() };
+            var pr = new Pr { Profile = bp.Item1, DelaySeconds = bp.Item2, Number = nextNumber++, Ref = head, Sha = br.Sha, Title = b["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Files = br.Files.ToList(), FileObjs = br.Objs.ToList(), Draft = b["draft"]?.GetValue<bool>() ?? false };
             var mm = Regex.Match(head, @"/(\d+)-"); if (mm.Success) pr.Issue = int.Parse(mm.Groups[1].Value);
             prs[pr.Number] = pr; ApplyProfile(pr, pr.Sha);
             return (201, PrJson(pr));
@@ -609,7 +610,7 @@ sealed class World
 
     JsonObject PrJson(Pr p, bool detail = false)
     {
-        var o = J(("number", p.Number), ("title", p.Title), ("state", p.Open ? "open" : "closed"), ("html_url", $"https://fake/pull/{p.Number}"), ("merged", p.Merged), ("user", J(("login", p.Author))), ("body", p.Body), ("base", J(("ref", Master))),
+        var o = J(("number", p.Number), ("title", p.Title), ("state", p.Open ? "open" : "closed"), ("html_url", $"https://fake/pull/{p.Number}"), ("node_id", "PR_" + p.Number), ("merged", p.Merged), ("user", J(("login", p.Author))), ("body", p.Body), ("base", J(("ref", Master))),
             ("head", J(("ref", p.Ref), ("sha", p.Sha), ("repo", J(("full_name", p.Fork ? "someone-else/cmdemo1-workorders" : $"{Owner}/{Repo}"))))), ("draft", p.Draft), ("changed_files", p.Files.Count), ("merge_commit_sha", p.MergeSha));
         if (detail)
         {
@@ -682,6 +683,11 @@ sealed class World
             var col = columns.First(c => "opt_" + c.Replace(' ', '_') == opt);
             var iss = issues.Values.FirstOrDefault(x => x.Card == card); if (iss == null) return (200, "{\"errors\":[{\"message\":\"card not found\"}]}");
             iss.Column = col; return (200, Data(J(("updateProjectV2ItemFieldValue", J(("projectV2Item", J(("id", card))))))));
+        }
+        if (q.Contains("markPullRequestReadyForReview"))
+        {
+            var id = v["id"]!.ToString(); var pr = prs.Values.FirstOrDefault(x => "PR_" + x.Number == id); if (pr == null) return (200, "{\"errors\":[{\"message\":\"pull request not found\"}]}");
+            pr.Draft = false; return (200, Data(J(("markPullRequestReadyForReview", J(("pullRequest", J(("number", pr.Number))))))));
         }
         if (q.Contains("addProjectV2ItemById"))
         {
@@ -780,7 +786,7 @@ sealed class World
             case "copilot-task":
             {   // sets a task's state as GitHub would: {"id", "state": queued | in_progress | completed | failed | timed_out | cancelled, "premium"}
                 var t = copilotTasks.LastOrDefault(x => x.Id == b?["id"]?.ToString()); if (t == null) return (404, J(("ok", false)));
-                if (b?["state"] is { } st) t.State = st.ToString(); if (b?["premium"] is { } pr) t.Premium = pr.GetValue<double>();
+                if (b?["state"] is { } st) t.State = st.ToString(); if (b?["premium"] is { } pr) t.Premium = pr.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString();
                 return (200, J(("ok", true)));
             }
             case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; return (200, J(("ok", true)));
