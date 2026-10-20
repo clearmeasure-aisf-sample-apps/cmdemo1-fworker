@@ -153,9 +153,9 @@ $CopilotScenarios = [ordered]@{
         Check 'a draft that names another item is not taken over' ($oth.code -eq 'branch-of-other-item') ($oth | ConvertTo-Json -Compress)
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
         Check 'the task''s end is seen' (Wait-Until -Seconds 20 { @((Cop-Status).last | Where-Object { $_.execution -eq $t.id }).Count -eq 1 })
-        [void](Fake 'move' @{ number = $n; column = 'Functional Testing' })
-        # a Development task launched again meanwhile (the item stayed in Development) is stopped, so its deadline does not park the item
-        foreach ($tt in @((Cop-Tasks $n) | Where-Object { $_.state -in 'queued', 'in_progress' -and "$($_.body.prompt)" -match 'phase development' })) { [void](Fake 'copilot-task' @{ id = $tt.id; state = 'cancelled' }) }
+        # the gateway completes Development from the pull request (copilot-settle) and moves the item on when its checks are green
+        Check 'the gateway moves the item to Functional Testing' (Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column)"
+        Check 'no second Development task was started' ((Cop-DevTasks $n).Count -eq 1) (((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref)" }) -join '; ')
         $ftFrom = Get-Date
         Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 90 { @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref) $($_.body.create_pull_request)" }) -join '; ')
     } finally { Cop-Cleanup @($n) }
