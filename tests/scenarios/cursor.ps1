@@ -41,7 +41,8 @@ $CursorScenarios = [ordered]@{
         $ac = Mcp-Call 'item_accept' @{ item = $n } $r1
         Check 'the agent accepts its item' (-not $ac.isError) ($ac | ConvertTo-Json -Compress -Depth 4)
         Check 'the plant names the agent''s worker owner' (Wait-Until -Seconds 10 { $o = (Get-Plant).plant.owners; $o.PSObject.Properties["$n"] -and "$($o."$n")" -like "cur-$n-*" })
-        $row = @((Get-Plant).plant.workers | Where-Object { $_.name -like "cur-$n-*" })
+        # read until the row carries the execution: under a loaded runner the plant's row can lag the accept by a moment
+        $row = @(); [void](Wait-Until -Seconds 15 { $script:row = @((Get-Plant).plant.workers | Where-Object { $_.name -like "cur-$n-*" }); $script:row.Count -eq 1 -and $script:row[0].mode -eq 'api' -and $script:row[0].execution -eq $a.id }); $row = $script:row
         Check 'its worker shows mode api' ($row.Count -eq 1 -and $row[0].mode -eq 'api' -and $row[0].execution -eq $a.id) ($row | ConvertTo-Json -Compress)
         [void](Mcp-Call 'session_end' @{ reason = 'scenario done' } $r1)
         Check 'session_end cancels the run and deletes the agent' (Wait-Until -Seconds 45 { $x = @((Cur-State).agents | Where-Object { $_.id -eq $a.id }); $x.Count -eq 1 -and $x[0].cancelled -and $x[0].deleted })
