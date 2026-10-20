@@ -103,7 +103,7 @@ sealed class ArmExec { public string Name = "", Job = ""; public string Status =
 sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public int UsageReads; public DateTime Created = DateTime.UtcNow; }
 
 // A task of the fake agent tasks API (docs/design/copilot-cloud-agent.md): its id, the body as sent, the API version header, its state.
-sealed class CopilotTask { public string Id = "", State = "queued", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public double? Premium; public string? HeadRef; }
+sealed class CopilotTask { public string Id = "", State = "queued", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public double? Premium, Credits; public string? HeadRef; }
 
 sealed class World
 {
@@ -129,7 +129,8 @@ sealed class World
         return (405, null);
     }
     static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("artifacts", t.HeadRef == null ? new JsonArray() : new JsonArray(J(("provider", "github"), ("type", "branch"), ("data", J(("base_ref", "master"), ("head_ref", t.HeadRef)))))), ("created_at", DateTime.UtcNow.ToString("o")),
-        ("sessions", new JsonArray(t.Premium is { } p ? J(("id", "s-" + t.Id), ("state", t.State), ("usage", J(("type", "premium_requests"), ("amount", p)))) : J(("id", "s-" + t.Id), ("state", t.State)))));
+        ("sessions", new JsonArray(t.Premium is { } p ? J(("id", "s-" + t.Id), ("state", t.State), ("usage", J(("type", "premium_requests"), ("amount", p))))
+            : t.Credits is { } cr ? J(("id", "s-" + t.Id), ("state", t.State), ("usage", J(("type", "ai_credits"), ("amount", cr)))) : J(("id", "s-" + t.Id), ("state", t.State)))));
     JsonObject CopilotState() => J(("tasks", new JsonArray(copilotTasks.Select(t => (JsonNode)J(("id", t.Id), ("state", t.State), ("reads", t.Reads), ("apiVersion", t.ApiVersion), ("path", t.Path), ("body", t.Body.DeepClone()))).ToArray())));
 
     // The fake Cursor Cloud Agents API v1: POST /v1/agents, GET /v1/agents/{id}, GET .../runs/{runId}, POST .../runs/{runId}/cancel, DELETE /v1/agents/{id}.
@@ -792,7 +793,7 @@ sealed class World
             case "copilot-task":
             {   // sets a task's state as GitHub would: {"id", "state": queued | in_progress | completed | failed | timed_out | cancelled, "premium"}
                 var t = copilotTasks.LastOrDefault(x => x.Id == b?["id"]?.ToString()); if (t == null) return (404, J(("ok", false)));
-                if (b?["state"] is { } st) t.State = st.ToString(); if (b?["premium"] is { } pr) t.Premium = pr.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString();
+                if (b?["state"] is { } st) t.State = st.ToString(); if (b?["premium"] is { } pr) t.Premium = pr.GetValue<double>(); if (b?["credits"] is { } crd) t.Credits = crd.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString();
                 return (200, J(("ok", true)));
             }
             case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; return (200, J(("ok", true)));

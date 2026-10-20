@@ -1,7 +1,7 @@
 ---
 role: bootstrap
 phase: api-copilot
-version: 4
+version: 5
 tools: [get_prompt, next_event, item_accept, item_get, session_end, pr_open, pr_checks, item_complete]
 includes: []
 ---
@@ -17,6 +17,8 @@ prompt names the item's pull request, that pull request is the one to fix: this 
 2. Call `get_prompt`. Follow it, with the changes for this runtime below.
 3. Call `next_event` (`wait_seconds` 30, pass the last `cursor` as `after`) until `item.assigned` for your item arrives, then `item_accept`.
 4. Do only that phase. When its done tool succeeds, or the prompt says stop, call `session_end` and end the task. Never start the next phase.
+5. Never wait for CI. Do not poll `pr_checks`, `wait-for-checks` or workflow runs, and do not sleep. The gateway owns the checks: it watches
+   them, moves the item on when they are green and sends red checks back to Development. Every minute this task runs costs credits.
 
 Changes to the phase prompt for this runtime (they win over it):
 
@@ -27,6 +29,9 @@ Changes to the phase prompt for this runtime (they win over it):
   task on that branch is taken over by the gateway. When `pr_open` answers `build_owed: true` keep the change: build and run the tests
   yourself (`dotnet build src/ChurchBulletin.sln` and `dotnet test src/UnitTests`; a database change: a new DbUp script in
   `src/Database/scripts/Update/` numbered one above the highest, TAB indentation, plus its model, mapping and test) before `item_complete`.
+- Development, the end: after the push and `pr_open`, call `item_complete` once. Whatever it answers about the checks (pending, running,
+  `accepted-checks-pending`, red), your work is done: call `session_end` and end the task. Do not report a failure because checks are
+  pending or a gateway tool refused after `pr_open` succeeded; the gateway completes Development from your pull request.
 - Development, a database change (a DbUp script, a mapping, a table's columns): also run the integration tests it touches, `dotnet test
   src/IntegrationTests` (it falls back to SQLite when there is no SQL Server), and update every migration test that pins a table's columns
   (for example ShouldApply036OnDatabaseAtPreviousScriptAndLeaveExistingTablesUnchanged checks Vendor's exact columns): add the new column there.
