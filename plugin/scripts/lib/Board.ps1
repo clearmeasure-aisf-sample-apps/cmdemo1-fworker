@@ -37,6 +37,8 @@ query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number
     $d = Invoke-GhGraphQL $q @{ o = $c.owner; r = $c.repo; n = $Item }
     $i = $d.repository.issue
     if (-not $i) { Reject 12 'item-not-found' "issue #$Item not found" }
+    $labels0 = @($i.labels.nodes | ForEach-Object { $_.name })
+    if (-not (Test-ItemInScope $labels0)) { Reject 10 'out-of-scope' "issue #$Item is outside this gateway's scope: it does not carry exactly one env: label, '$(Get-EnvLabel)'" }
     $card = $i.projectItems.nodes | Where-Object { $_.project.number -eq [int]$c.project } | Select-Object -First 1
     $status = $null; $cardId = $null
     if ($card) { $cardId = $card.id; if ($card.fieldValueByName) { $status = $card.fieldValueByName.name } }
@@ -47,6 +49,24 @@ query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number
 }
 
 function Test-Label($Info, [string]$Name) { Test-NameIn $Name $Info.labels }
+
+# Environment scope (docs/design/environment-test-factories.md 3): with scoping on, a gateway acts only on items that carry exactly one env: label
+# and that label is env:<FACTORY_ENVIRONMENT>; an unlabelled item, or one with two env: labels, is nobody's. Scoping is on in the environments the
+# configuration's envScope lists (config/deploy.overrides.json; the source default is none, so the Tier 1 suites run unscoped); FACTORY_ENV_SCOPE
+# 1 or 0 on the gateway app overrides the list. Get-EnvLabel is '' with scoping off.
+function Get-EnvLabel {
+    $c = Get-Cfg
+    $e = "$env:FACTORY_ENVIRONMENT".Trim().ToLowerInvariant(); if (-not $e) { $e = 'tdd' }
+    $on = if ("$env:FACTORY_ENV_SCOPE" -in '0', '1') { $env:FACTORY_ENV_SCOPE -eq '1' } else { (Test-Has $c 'envScope') -and (@($c.envScope) | Where-Object { "$_".ToLowerInvariant() -eq $e }) }
+    if (-not $on) { return '' }
+    return "env:$e"
+}
+function Test-ItemInScope($Labels) {
+    $mine = Get-EnvLabel
+    if (-not $mine) { return $true }
+    $envs = @(@($Labels) | Where-Object { "$_" -ilike 'env:*' })
+    return ($envs.Count -eq 1 -and "$($envs[0])" -ieq $mine)
+}
 
 # Labels of an issue. GitHub creates a label that does not exist yet when it is added to an issue; removing one the issue does not carry is a 404,
 # which is no failure here.
@@ -103,10 +123,12 @@ query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(numbe
         $items = $d.organization.projectV2.items
         foreach ($n in $items.nodes) {
             if (-not $n.content -or -not $n.content.PSObject.Properties['number']) { continue }
+            $labels1 = @($n.content.labels.nodes | ForEach-Object { $_.name })
+            if (-not (Test-ItemInScope $labels1)) { continue }   # another environment's card (or an unlabelled one with scoping on): not seen here
             $out += @{ cardId = $n.id; number = [int]$n.content.number; open = ($n.content.state -eq 'OPEN'); title = $n.content.title
                 body = $(if ($n.content.PSObject.Properties['body']) { "$($n.content.body)" } else { '' })
                 column = $(if ($n.fieldValueByName) { $n.fieldValueByName.name } else { $null })
-                labels = @($n.content.labels.nodes | ForEach-Object { $_.name }) }
+                labels = $labels1 }
         }
         $after = $items.pageInfo.endCursor
     } while ($items.pageInfo.hasNextPage)

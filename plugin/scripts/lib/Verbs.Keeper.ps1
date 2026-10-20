@@ -61,7 +61,8 @@ function Set-IssueBody([int]$n, [string]$Body) {
 # A new work item: the issue with the factory label and the given labels, its card on the board in the keeper's column, one journal line.
 function New-KeeperItem([string]$Title, [string]$Body, [string[]]$Labels, $Call, [string]$Detail) {
     $c = Get-Cfg
-    $all = @(@($c.label) + @($Labels) | Where-Object { $_ } | Select-Object -Unique)
+    if ((Get-EnvLabel) -and @(@($Labels) | Where-Object { "$_" -ilike 'env:*' -and "$_" -ine (Get-EnvLabel) }).Count) { Reject 10 'env-mismatch' "an item created here carries '$(Get-EnvLabel)' only" }
+    $all = @(@($c.label) + @(Get-EnvLabel) + @($Labels) | Where-Object { $_ } | Select-Object -Unique)
     $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues" -Body @{ title = $Title; body = $Body; labels = $all }
     $n = [int]$r.number
     $info = Get-ItemInfo $n

@@ -110,6 +110,8 @@ try {
     $copDep = (Get-Content -Raw $merged | ConvertFrom-Json -AsHashtable).api.copilot
     Check 'config: the Copilot cloud agent is off everywhere: off in the source defaults and no environment entry deployed (docs/design/copilot-cloud-agent.md)' ($copDep.enabled -eq $false -and @($copDep.environments.Keys).Count -eq 0)
     Check 'config: the Copilot cloud agent runs one task at a time, 60 minutes, 30 a day, and no token in the file' (((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).api.copilot | ForEach-Object { $_.maxConcurrent -eq 1 -and $_.maxMinutes -eq 60 -and $_.maxExecutionsPerDay -eq 30 -and -not $_.ContainsKey('token') }))
+    $mergedAll = Get-Content -Raw $merged | ConvertFrom-Json -AsHashtable
+    Check 'config: the env: label scopes no gateway in the source defaults and only tdd when deployed (uat and prod are switched on by the owner, environment-test-factories.md 3)' (@((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).envScope).Count -eq 0 -and (@($mergedAll.envScope) -join ',') -eq 'tdd')
     Check 'config: the legacy credential kinds stay accepted in the source defaults (auth.legacyKinds)' ((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).auth.legacyKinds -eq $true)
 } finally { Remove-Item -LiteralPath $merged -ErrorAction SilentlyContinue }
 
