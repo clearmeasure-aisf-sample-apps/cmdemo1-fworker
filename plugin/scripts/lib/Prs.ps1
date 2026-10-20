@@ -5,6 +5,11 @@ function Find-ItemPr([int]$Item) {
     $open = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&per_page=100")
     $mine = @($open | Where-Object { $_.head.ref -match "^$([regex]::Escape($name))/$Item-" })
     if ($mine.Count -eq 0) { $mine = @($open | Where-Object { $_.head.ref -match "/$Item-" }) }
+    # a Copilot cloud agent's branch (copilot/<slug>) is the item's when the state records it (open-pr, Use-CopilotDraft)
+    if ($mine.Count -eq 0 -and @($open | Where-Object { "$($_.head.ref)" -like 'copilot/*' }).Count) {
+        $sp = try { (Get-State $Item).state } catch { $null }
+        if ($sp -and (Test-Has $sp 'pr') -and (Test-Has $sp.pr 'branch')) { $mine = @($open | Where-Object { $_.head.ref -eq "$($sp.pr.branch)" -and [int]$_.number -eq [int]$sp.pr.number }) }
+    }
     if ($mine.Count -eq 0) { return $null }
     return $mine[0]
 }
@@ -14,6 +19,7 @@ function Get-Pr([int]$Number) { Invoke-Gh -Path "$(Get-RepoPath)/pulls/$Number" 
 # Word-boundary match: '#12' does not match '#123'.
 function Test-PrBelongs($Pr, [int]$Item) {
     if ($Pr.head.ref -match "/$Item-") { return $true }
+    if ("$($Pr.head.ref)" -like 'copilot/*') { $sp = try { (Get-State $Item).state } catch { $null }; if ($sp -and (Test-Has $sp 'pr') -and [int]$sp.pr.number -eq [int]$Pr.number) { return $true } }
     return ($Pr.title -match "(^|[^0-9])#$Item([^0-9]|$)")
 }
 

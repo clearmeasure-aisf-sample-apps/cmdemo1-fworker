@@ -25,6 +25,25 @@
           "gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io"
         }
       }
+    },
+    "copilot": {
+      "enabled": true,
+      "maxConcurrent": 1,
+      "maxMinutes": 60,
+      "maxExecutionsPerDay": 30,
+      "environments": {
+        "tdd": {
+          "gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io"
+        },
+        "uat": {
+          "enabled": false,
+          "gatewayUrl": "https://ca-cmdemo1-uat-fworker-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io"
+        },
+        "prod": {
+          "enabled": false,
+          "gatewayUrl": "https://ca-cmdemo1-prod-fworker-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io"
+        }
+      }
     }
   },
   "runtimes": {
@@ -34,7 +53,7 @@
         "routing": [
           {
             "phase": "*",
-            "runtime": "cae-job"
+            "runtime": "copilot-cloud"
           }
         ],
         "caeJob": {
@@ -50,6 +69,24 @@
           "managedIdentityClientId": "4b168728-3e6c-4c1a-9bc2-861988d1cf7f",
           "gatewayUrl": "http://ca-cmdemo1-tdd-fworker"
         }
+      },
+      "uat": {
+        "preferConnected": true,
+        "routing": [
+          {
+            "phase": "*",
+            "runtime": "copilot-cloud"
+          }
+        ]
+      },
+      "prod": {
+        "preferConnected": true,
+        "routing": [
+          {
+            "phase": "*",
+            "runtime": "copilot-cloud"
+          }
+        ]
       }
     }
   }

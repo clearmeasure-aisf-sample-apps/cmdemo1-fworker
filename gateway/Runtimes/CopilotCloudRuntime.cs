@@ -48,7 +48,12 @@ sealed class CopilotCloudSettings
         // api.copilot.environments: when it names any, the mode is on only in those, each with its gateway's public URL (one image runs everywhere)
         if (c?["environments"] is JsonObject { Count: > 0 } envs)
         {
-            if (envs[s.Environment] is JsonObject me) { if (me["gatewayUrl"] is JsonValue gv && gv.TryGetValue<string>(out var g) && g != "") s.GatewayUrl = g.TrimEnd('/'); }
+            if (envs[s.Environment] is JsonObject me)
+            {
+                if (me["gatewayUrl"] is JsonValue gv && gv.TryGetValue<string>(out var g) && g != "") s.GatewayUrl = g.TrimEnd('/');
+                // an entry may be written ready but off ("enabled": false): the owner switches it on in the file
+                if (me["enabled"] is JsonValue mev && mev.TryGetValue<bool>(out var meb) && !meb) s.Enabled = false;
+            }
             else s.Enabled = false;
         }
         if (V("COPILOT_TASKS_TOKEN") is { } key && key != "unset") s.Token = key;
@@ -138,12 +143,18 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         return ((int)resp.StatusCode, j);
     }
 
-    // Technical Design and Development start from the default branch; Functional Testing from the item's branch
-    string BaseRef(int item, string phase) => phase.Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? $"factory-worker/{item}-development" : cfg.DefaultBranch;
+    // The branch each item's Development task reported (its artifacts' head_ref; the coding agent pushes only copilot/* branches)
+    readonly Dictionary<int, string> heads = new();
+    public string? HeadOf(int item) { lock (tasks) return heads.TryGetValue(item, out var h) ? h : null; }
+
+    // Technical Design and Development start from the default branch; Functional Testing from the branch Development reported (else the default
+    // branch: the phase reads the pull request's diff through the gateway's tools either way)
+    string BaseRef(int item, string phase) => phase.Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? HeadOf(item) ?? cfg.DefaultBranch : cfg.DefaultBranch;
+    static bool IsDevelopment(string phase) => phase.Equals("Development", StringComparison.OrdinalIgnoreCase);
 
     public JsonObject TaskBody(ProvisionRequest r, string code)
     {
-        var o = new JsonObject { ["prompt"] = prompt(r.Item, r.Phase, code), ["base_ref"] = BaseRef(r.Item, r.Phase), ["create_pull_request"] = false };
+        var o = new JsonObject { ["prompt"] = prompt(r.Item, r.Phase, code), ["base_ref"] = BaseRef(r.Item, r.Phase), ["create_pull_request"] = IsDevelopment(r.Phase) };   // Development: Copilot opens a draft on its branch, pr_open takes it over
         if (cfg.Model != "") o["model"] = cfg.Model;
         return o;
     }
@@ -196,6 +207,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
                     lock (tasks)
                     {
                         t.State = st; t.Artifacts = j?["artifacts"]?.DeepClone(); if (usage != null) t.Usage = usage;
+                        if (IsDevelopment(t.Phase) && HeadRef(j) is { } hr) heads[t.Item] = hr;
                         t.Fields ??= new JsonArray((j as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>());
                         if (t.Ended == null)
                         {
@@ -212,6 +224,14 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
             list.Add(new RuntimeInstance(t.Id, t.Worker, t.Item, t.Phase, t.Status, t.Started, t.Ended));
         }
         return list;
+    }
+
+    // the branch of the task's artifacts ({type: branch, data: {head_ref}}), only a copilot/ branch
+    public static string? HeadRef(JsonNode? task)
+    {
+        foreach (var a in (task?["artifacts"] as JsonArray) ?? new JsonArray())
+            if (a?["type"]?.ToString() == "branch" && a["data"]?["head_ref"]?.ToString() is { } h && h.StartsWith("copilot/", StringComparison.Ordinal) && h.Length <= 200) return h;
+        return null;
     }
 
     // the usage the task's sessions report ({type: premium_requests | ai_credits, amount}), summed by type; null when none reports one

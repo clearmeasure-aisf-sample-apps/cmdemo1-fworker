@@ -207,7 +207,10 @@ Design: `docs/design/copilot-cloud-agent.md` (owner decisions 2026-10-19). Built
 3. **Bootstrap token**: with the tdd operator token, `POST $U/api/v1/copilot/bootstrap-token`; put the `token` of the answer in
    cmdemo1-workorders as the Copilot agent secret `COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN` (Settings → Secrets and variables → Agents; on
    repositories that still show it there, the `copilot` environment's secrets). Never paste it anywhere else.
-4. **MCP configuration** of cmdemo1-workorders (Settings → Copilot → Cloud agent / Coding agent → MCP configuration), exactly:
+4. **MCP configuration** of cmdemo1-workorders (Settings → Copilot → Cloud agent / Coding agent → MCP configuration): ONE configuration
+   for all three environments (2026-10-20). The task prompt names its gateway; `fworker-mcp` accepts only the three gateway hosts and uses
+   that environment's bootstrap token. The agent secrets are `COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN_TDD`, `_UAT`, `_PROD` (each minted by its
+   own gateway, `POST /api/v1/copilot/bootstrap-token`):
 
    ```json
    {
@@ -215,18 +218,19 @@ Design: `docs/design/copilot-cloud-agent.md` (owner decisions 2026-10-19). Built
        "fworker": {
          "type": "local",
          "command": "bash",
-         "args": ["-c", "curl -fsSL \"$FWORKER_GATEWAY_URL/fworker-mcp.mjs\" -o /tmp/fworker-mcp.mjs && exec node /tmp/fworker-mcp.mjs"],
+         "args": ["-c", "for h in ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io ca-cmdemo1-uat-fworker-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io ca-cmdemo1-prod-fworker-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io; do curl -fsSL \"https://$h/fworker-mcp.mjs\" -o /tmp/fworker-mcp.mjs && break; done; exec node /tmp/fworker-mcp.mjs"],
          "tools": ["*"],
          "env": {
-           "FWORKER_GATEWAY_URL": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
-           "FWORKER_BOOTSTRAP_TOKEN": "$COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN"
+           "FWORKER_BOOTSTRAP_TOKEN_TDD": "$COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN_TDD",
+           "FWORKER_BOOTSTRAP_TOKEN_UAT": "$COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN_UAT",
+           "FWORKER_BOOTSTRAP_TOKEN_PROD": "$COPILOT_MCP_FWORKER_BOOTSTRAP_TOKEN_PROD"
          }
        }
      }
    }
    ```
 
-5. **Agent firewall**: add `ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io` to the Copilot agent firewall
+5. **Agent firewall**: add the three gateway hosts (above) to the Copilot agent firewall
    allow list of cmdemo1-workorders (Settings → Copilot → Cloud agent → firewall custom allowlist).
 6. **Switch on in tdd** (a code-owner change, by pull request): in `config/deploy.overrides.json` add
    `"api": {"copilot": {"enabled": true, "environments": {"tdd": {"gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io"}}}}`

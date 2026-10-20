@@ -119,4 +119,45 @@ $CopilotScenarios = [ordered]@{
         Check 'and its unspent code no longer exchanges' ((Cop-Exchange (Cop-Code $t2) (Cop-Bootstrap)).status -eq 401)
     } finally { Cop-Cleanup @($n, $m) }
 }
+
+'copilot: the default runtime takes an unlabelled code item to Development with a pull request by Copilot; pr_open takes over its draft on the copilot/ branch; Functional Testing starts from that branch' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot code item' 'Change src/App/Thing.cs and its unit test.' @('factory worker', 'Auto Merge') 'Development'
+        Check 'an unlabelled item is routed to copilot-cloud (runtimes.routing *), code and all' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
+        $t = (Cop-Tasks $n)[0]
+        Check 'the Development task asks Copilot for its pull request' ($t.body.create_pull_request -eq $true -and "$($t.body.prompt)" -match "#$n, phase development") ($t.body | ConvertTo-Json -Compress)
+        Check 'the prompt names the gateway for fworker_connect' ("$($t.body.prompt)" -match 'Your gateway URL for fworker_connect: http://gw\.test')
+        $br = "copilot/thing-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Thing.cs', 'src/UnitTests/ThingTests.cs') })
+        $h = @{ Authorization = 'Bearer fake-operator' }
+        $draft = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pulls" -Method POST -Headers $h -ContentType 'application/json' -Body (@{ title = '[WIP] Thing'; head = $br; base = 'master'; body = 'x'; draft = $true } | ConvertTo-Json)
+        $r = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n; head = $br; title = 'Thing' } | ConvertTo-Json) -SkipHttpErrorCheck
+        Check 'pr_open with the copilot/ branch takes over the draft' ($r.ok -and $r.pullRequest.number -eq $draft.number -and $r.created -eq $false) ($r | ConvertTo-Json -Compress -Depth 4)
+        $p = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pulls/$($draft.number)" -Headers $h
+        Check 'and marks it ready, its title naming the item' (-not $p.draft -and "$($p.title)" -match "#$n") ($p | ConvertTo-Json -Compress -Depth 3)
+        $bad = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n; head = 'feature/other'; title = 'x' } | ConvertTo-Json) -SkipHttpErrorCheck
+        Check 'another branch name is still refused' ($bad.code -eq 'bad-branch-name') ($bad | ConvertTo-Json -Compress)
+        [void](Fake 'push-branch' @{ branch = "copilot/other-$n"; files = @('src/App/Other.cs') })
+        [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pulls" -Method POST -Headers $h -ContentType 'application/json' -Body (@{ title = 'Fix #99999'; head = "copilot/other-$n"; base = 'master'; body = 'x'; draft = $true } | ConvertTo-Json))
+        $oth = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n; head = "copilot/other-$n"; title = 'x' } | ConvertTo-Json) -SkipHttpErrorCheck
+        Check 'a draft that names another item is not taken over' ($oth.code -eq 'branch-of-other-item') ($oth | ConvertTo-Json -Compress)
+        [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
+        Check 'the task''s end is seen' (Wait-Until -Seconds 20 { @((Cop-Status).last | Where-Object { $_.execution -eq $t.id }).Count -eq 1 })
+        [void](Fake 'move' @{ number = $n; column = 'Functional Testing' })
+        Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 40 { @(Cop-Tasks $n | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: fworker-mcp accepts only the three factory gateways (https, no path) or its configured URL, each with its own bootstrap token' = {
+    $js = Join-Path $script:Work 'fworker-mcp-check.mjs'
+    [IO.File]::WriteAllText($js, "$((Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/fworker-mcp.mjs").Content)")
+    function Pick([string]$u) { "$(& node $js --check-gateway $u)".Trim() }
+    foreach ($ok in 'https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io', 'https://ca-cmdemo1-uat-fworker-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io/', 'https://ca-cmdemo1-prod-fworker-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io') {
+        Check "allowed: $ok" ((Pick $ok) -eq ('"' + $ok.TrimEnd('/') + '"'))
+    }
+    foreach ($no in 'https://evil.example.com', 'http://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io', 'https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io.evil.com', 'https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io:8443', 'https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io/x', 'https://u@ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io') {
+        Check "refused: $no" ((Pick $no) -eq 'null')
+    }
+}
 }

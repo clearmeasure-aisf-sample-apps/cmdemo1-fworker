@@ -116,7 +116,9 @@ $SuiteDefs = @(
     # the Copilot cloud agent (copilot.ps1, docs/design/copilot-cloud-agent.md): the fake agent tasks API, a 0.25-minute deadline, a 20 s window
     @{ Name = 'copilot'; Policy = 'auto'; Set = $CopilotScenarios; Env = 'copilot'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
-            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
+            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
+            # cmdemo1's default runtime: an item without a runtime: label goes to the Copilot cloud agent
+            runtimes = @{ preferConnected = $true; routing = @(@{ phase = '*'; runtime = 'copilot-cloud' }) } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }

@@ -2105,7 +2105,8 @@ copilotPrompt = (item, phase, code) =>
 {
     var bp = prompts.ByPath("bootstrap/copilot.md");
     var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
-    return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour one-time code for fworker_connect: {code}\n";
+    // one Copilot MCP configuration serves every environment: the prompt names this gateway (fworker-mcp accepts only the three gateway hosts)
+    return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
 };
 cursorPrompt = (item, phase) =>
 {
