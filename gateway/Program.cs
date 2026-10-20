@@ -171,6 +171,7 @@ var cursorManager = ownerMode && tokenSecret.Length > 0 && cursorSettings.On
 // the Copilot cloud agent (gateway/Runtimes/CopilotCloudRuntime.cs, docs/design/copilot-cloud-agent.md): api.copilot.enabled, a token
 // (COPILOT_TASKS_TOKEN) and the gateway's public URL; the task's prompt carries a one-time code for the worker's r1 (copilotCodes)
 var copilotSettings = CopilotCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
+var copilotCiRelease = new CopilotCiRelease { RefusedRetry = TimeSpan.FromSeconds(Math.Max(10, 5 * copilotSettings.CiReleaseSeconds)) };   // the CI release of the Copilot agent's held workflow runs (gateway/Runtimes/CopilotCiRelease.cs)
 var copilotCodes = new CopilotCodes();
 Func<int, string, string, ItemPr?, string> copilotPrompt = (_, _, _, _) => "";
 Func<int, CancellationToken, Task<ItemPr?>> copilotItemPr = (_, _) => Task.FromResult<ItemPr?>(null);
@@ -833,7 +834,12 @@ JsonObject RuntimesBlock()
 {
     var o = runtimeManager?.Status() ?? new JsonObject { ["enabled"] = false };
     if (cursorManager?.Status()["cursor-cloud"] is { } cb) o["cursor-cloud"] = cb.DeepClone();
-    if (copilotManager?.Status()["copilot-cloud"] is { } pb) o["copilot-cloud"] = pb.DeepClone();
+    if (copilotManager?.Status()["copilot-cloud"] is JsonObject pb)
+    {
+        var pc = (JsonObject)pb.DeepClone();
+        pc["ciRelease"] = copilotCiRelease.Status(copilotSettings.CiRelease, copilotSettings.CiReleaseSeconds);
+        o["copilot-cloud"] = pc;
+    }
     return o;
 }
 // The operator marks a runtime healthy again after it was marked unhealthy (cloud-worker-runtimes.md 2.11): operator token only.
@@ -935,6 +941,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (verb is "operator-release" or "operator-releases")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/operator/record-release", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // a person releases a park early only through POST /api/v1/items/{n}/unpark (operator token, with a reason)
+    if (verb is "ci-release")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway releases the Copilot agent's held workflow runs by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "park-item")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway parks an item runtime-failed by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "unpark-item")
@@ -2112,6 +2120,24 @@ copilotItemPr = async (item, ct) =>
     var j = JsonNode.Parse(output);
     return j?["found"]?.GetValue<bool>() == true && j["branch"]?.ToString() is { Length: > 0 } b && int.TryParse(j["number"]?.ToString(), out var num) ? new ItemPr(num, b) : null;
 };
+// the CI release: every api.copilot.ciReleaseSeconds, by the acting gateway, while the Copilot mode is on (docs/design/copilot-cloud-agent.md)
+if (copilotManager != null && copilotSettings.CiRelease) _ = Task.Run(async () =>
+{
+    var ct = app.Lifetime.ApplicationStopping; var rr = app.Services.GetRequiredService<Runner>();
+    while (!ct.IsCancellationRequested)
+    {
+        try { await Task.Delay(TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds), ct); } catch (OperationCanceledException) { return; }
+        try
+        {
+            if (!leader.MayAct || !copilotManager.On) continue;
+            var items = plant.CopilotItems();
+            if (items.Length == 0) continue;
+            await copilotCiRelease.Pass(items, (verb, stdin) => rr.RunAsync(verb, stdin, TimeSpan.FromSeconds(120)),
+                async (item, fields, key) => await rr.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = "ci-released", ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)));
+        }
+        catch (Exception e) { Console.Error.WriteLine($"ci-release: {e.GetType().Name}"); }
+    }
+});
 copilotPrompt = (item, phase, code, pr) =>
 {
     var bp = prompts.ByPath("bootstrap/copilot.md");
@@ -2562,7 +2588,7 @@ pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monos
 <h2>Assignments</h2><div id="basecnt" class="mut"></div><table><tbody id="asg"><tr><td class="mut">none</td></tr></tbody></table>
 <div id="rqsec" hidden><h2>Release Queue</h2><div id="rqtext" class="mut"></div><table><tbody id="rqrows"><tr><td class="mut">none</td></tr></tbody></table>
 <div class="row"><button id="rqreq">Request promotion to UAT</button><span class="mut">Records and announces the request on the operator stream only. The owner and the cmdemo1 session promote to uat and prod.</span></div></div>
-<div id="rtsec" hidden><h2>Runtimes</h2><div id="rttext" class="mut"></div><table><tbody id="rtrows"><tr><td class="mut">none</td></tr></tbody></table></div>
+<div id="cirel" class="mut" hidden></div><div id="rtsec" hidden><h2>Runtimes</h2><div id="rttext" class="mut"></div><table><tbody id="rtrows"><tr><td class="mut">none</td></tr></tbody></table></div>
 <div id="qcsec" hidden><h2>Waiting for PR QC</h2>
 <div class="wrap"><table><thead><tr><th>PR</th><th>Title</th><th>Item</th><th>Head</th><th>Author</th><th>Age</th><th>QC state</th><th>Environment</th><th>Worker</th><th>Actions</th></tr></thead><tbody id="qcrows"><tr><td colspan="10" class="mut">none</td></tr></tbody></table></div></div>
 <details id="metbox"><summary><b>Cycle times</b> <span class="mut">(from the item journals on GitHub; survives a restart)</span></summary>
@@ -2789,7 +2815,7 @@ if(!await sendNote(rb.dataset.n,text,id))return;delete drafts[k]}
 if(id)await act('/api/v1/messages/read',{ids:[id]});if(document.activeElement)document.activeElement.blur();refresh();return}
 const b=e.target.closest('button[data-a="mute"]');if(!b||!confirm('Mute '+b.dataset.n+'? It can still ask the supervisor.'))return;say(await act('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/messaging?value=mute'));refresh()};
 // The Release Queue: the waiting items, oldest first, and the button that only records a promotion request (the gateway never promotes).
-function refreshRt(r){const c=r&&r['cae-job'];$('rtsec').hidden=!c;if(!c)return;$('rttext').textContent=`cae-job: ${c.enabled?'on':'off'}, ${esc(c.running)} of ${esc(c.maxConcurrent)} running, ${esc(c.today)} of ${esc(c.maxExecutionsPerDay)} today, ${c.healthy?'healthy':'UNHEALTHY: '+esc(c.unhealthyReason)}`;const ex=c.executions||[],la=c.last||[];$('rtrows').innerHTML=ex.length||la.length?ex.map(x=>`<tr><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${esc(x.status)}</td><td>${x.registered?'registered':'starting'}</td></tr>`).join('')+la.slice().reverse().map(x=>`<tr class="mut"><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${esc(x.outcome)}</td><td>${esc(x.ended||'')}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>'}
+function refreshRt(r){const ci=r&&r['copilot-cloud']&&r['copilot-cloud'].ciRelease;$('cirel').hidden=!ci;if(ci)$('cirel').innerHTML=`Copilot CI release: ${esc(ci.released)} released, ${esc(ci.refused)} refused`+(ci.ownerAction?` <b>Owner action: ${esc(ci.ownerAction)}</b> (${esc(ci.lastError)})`:'');const c=r&&r['cae-job'];$('rtsec').hidden=!c;if(!c)return;$('rttext').textContent=`cae-job: ${c.enabled?'on':'off'}, ${esc(c.running)} of ${esc(c.maxConcurrent)} running, ${esc(c.today)} of ${esc(c.maxExecutionsPerDay)} today, ${c.healthy?'healthy':'UNHEALTHY: '+esc(c.unhealthyReason)}`;const ex=c.executions||[],la=c.last||[];$('rtrows').innerHTML=ex.length||la.length?ex.map(x=>`<tr><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${esc(x.status)}</td><td>${x.registered?'registered':'starting'}</td></tr>`).join('')+la.slice().reverse().map(x=>`<tr class="mut"><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${esc(x.outcome)}</td><td>${esc(x.ended||'')}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>'}
 function refreshRq(q){const items=q&&q.items||[],reqs=q&&q.requests||[];$('rqsec').hidden=!q;if(!q)return;const req={};reqs.forEach(r=>req[r.release]=r);
 $('rqtext').textContent=items.length?`${items.length} item(s) waiting; the oldest for ${items[0].minutes} min (aged after ${q.agedMinutes} min or at ${q.agedCount} items)`:'No item waits for production.';
 $('rqrows').innerHTML=items.length?items.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.release||'no release')}</td><td>${esc(x.minutes)} min</td><td>${req[x.release]?'promotion requested by '+esc(req[x.release].by):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';

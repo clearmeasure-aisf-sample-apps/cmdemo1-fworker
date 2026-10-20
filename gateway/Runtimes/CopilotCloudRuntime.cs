@@ -17,6 +17,9 @@ sealed class CopilotCloudSettings
     public bool Enabled;
     public int MaxConcurrent = 1, MaxExecutionsPerDay = 30, MaxFailuresPerPhase = 2, MaxLaunchesPerPhase = 3, UnhealthyAfterFailures = 2, BootstrapGeneration = 1;
     public double MaxMinutes = 60, AckSeconds = 900, ListSeconds = 30;
+    // the CI release (CopilotCiRelease.cs): api.copilot.ciRelease, on by default wherever the mode is on; a pass at most every ciReleaseSeconds
+    public bool CiRelease = true;
+    public double CiReleaseSeconds = 120;
     public string Environment = "tdd";
     public string ApiUrl = "https://api.github.com", ApiVersion = "2026-03-10", Token = "", GatewayUrl = "", Model = "",
         Repository = "clearmeasure-aisf-sample-apps/cmdemo1-workorders", DefaultBranch = "master";
@@ -42,6 +45,8 @@ sealed class CopilotCloudSettings
             s.ApiUrl = S("apiUrl", s.ApiUrl).TrimEnd('/'); s.ApiVersion = S("apiVersion", s.ApiVersion); s.Token = S("token", "");
             s.GatewayUrl = S("gatewayUrl", "").TrimEnd('/'); s.Model = S("model", "").Trim();
             s.Repository = S("repository", s.Repository).Trim('/'); s.DefaultBranch = S("defaultBranch", s.DefaultBranch);
+            if (c["ciRelease"] is JsonValue crv && crv.TryGetValue<bool>(out var crb)) s.CiRelease = crb;
+            s.CiReleaseSeconds = Math.Max(1, D("ciReleaseSeconds", 120));
         }
         string? V(string n) => get(n) is { } v && v.Trim() != "" ? v.Trim() : null;
         s.Environment = (V("FACTORY_ENVIRONMENT") ?? "tdd").ToLowerInvariant();

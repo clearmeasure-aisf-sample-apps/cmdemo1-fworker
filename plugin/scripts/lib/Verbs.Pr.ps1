@@ -112,6 +112,55 @@ function Verb_item_pr($a) {
     return @{ ok = $true; id = $n; found = $true; number = [int]$pr.number; branch = "$($pr.head.ref)" }
 }
 
+# CI release (docs/design/copilot-cloud-agent.md, "CI release"): GitHub holds the workflow runs of a Copilot cloud agent's push in
+# action_required, and POST .../approve refuses them; a re-run by an identity with write access starts them. Called by the gateway itself (never
+# a session) with the items whose runtime is copilot-cloud ($a.items) and the run ids it already handled ($a.skip). A run is released only when
+# its head branch is copilot/*, its item is open, in this gateway's env scope, carries no other runtime: label, and the item's pull request has
+# that branch and the run's head_sha as its head. No file guard: the owner's decision of 2026-10-20. Released with the gateway's own identity
+# (the author App); a 403 is reported, never retried with another credential.
+function Verb_ci_release($a) {
+    $items = @(@($a.items) | Where-Object { "$_" -match '^\d{1,7}$' } | ForEach-Object { [int]"$_" } | Select-Object -Unique)
+    $skip = @(@($a.skip) | ForEach-Object { "$_" })
+    $all = @((Invoke-Gh -Path "$(Get-RepoPath)/actions/runs?status=action_required&per_page=100").workflow_runs)
+    $runs = @($all | Where-Object { "$($_.head_branch)" -like 'copilot/*' -and "$($_.id)" -notin $skip })
+    $out = @()
+    if ($runs.Count -eq 0 -or $items.Count -eq 0) { return @{ ok = $true; pending = $runs.Count; runs = $out } }
+    $heads = @{}   # head branch -> @{ item; pr; sha }
+    foreach ($n in $items) {
+        $info = try { Get-ItemInfo $n } catch [FactoryReject] { $out += @{ item = $n; result = 'skipped'; reason = $_.Exception.Code }; continue }
+        if (-not $info.open) { continue }
+        $rtl = @($info.labels | Where-Object { "$_" -like 'runtime:*' })
+        if (-not ($rtl.Count -eq 0 -or ($rtl.Count -eq 1 -and "$($rtl[0])" -ieq 'runtime:copilot-cloud'))) { $out += @{ item = $n; result = 'skipped'; reason = 'other-runtime' }; continue }
+        # only the pull request pr_open recorded for the item (number and copilot/ branch), never a branch-name match
+        $sp = try { (Get-State $n).state } catch { $null }
+        if (-not ($sp -and (Test-Has $sp 'pr') -and (Test-Has $sp.pr 'branch') -and (Test-Has $sp.pr 'number') -and "$($sp.pr.branch)" -like 'copilot/*')) { continue }
+        $pr = try { Get-Pr ([int]$sp.pr.number) } catch { $null }
+        if (-not $pr -or "$($pr.state)" -ne 'open' -or "$($pr.head.ref)" -ne "$($sp.pr.branch)") { continue }
+        $hb = "$($pr.head.ref)"
+        if ($heads.ContainsKey($hb)) { $heads[$hb] = @{ item = 0 }; continue }   # two items name one branch: nobody's
+        $heads[$hb] = @{ item = $n; pr = [int]$pr.number; sha = "$($pr.head.sha)" }
+    }
+    foreach ($r in $runs) {
+        $h = $heads["$($r.head_branch)"]
+        $o = @{ run = [long]$r.id; branch = "$($r.head_branch)"; sha = "$($r.head_sha)" }
+        if (-not $h -or -not $h.item) { $o.result = 'skipped'; $o.reason = 'no-item'; $out += $o; continue }
+        if ([int]"$($r.run_attempt)" -gt 1) { $o.result = 'skipped'; $o.reason = 'already-rerun'; $out += $o; continue }   # re-run before (by this gateway before a restart, or by someone else)
+        $o.item = $h.item; $o.pr = $h.pr
+        if ($h.sha -ne "$($r.head_sha)") { $o.result = 'skipped'; $o.reason = 'head-mismatch'; $out += $o; continue }
+        $x = Invoke-GhRaw -Method POST -Path "$(Get-RepoPath)/actions/runs/$([long]$r.id)/rerun" -Tries 1
+        $o.status = [int]$x.status
+        if ($x.status -ge 200 -and $x.status -lt 300) { $o.result = 'released' }
+        else {
+            $msg = if ($x.body -and $x.body.PSObject.Properties['message']) { "$($x.body.message)" } else { '' }
+            if ($msg.Length -gt 300) { $msg = $msg.Substring(0, 300) }
+            $o.result = if ($x.status -eq 403 -and (Get-GhRateLimitWait 403 $x.headers $msg) -lt 0) { 'refused' } else { 'failed' }
+            $o.message = $msg
+        }
+        $out += $o
+    }
+    return @{ ok = $true; pending = $runs.Count; runs = $out }
+}
+
 # Close a pull request with a comment and delete its branch (a copilot/* branch or the factory's own branch of the item only)
 function Close-PrWithBranch($Pr, [int]$n, [string]$Why) {
     $c = Get-Cfg
