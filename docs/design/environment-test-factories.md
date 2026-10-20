@@ -74,6 +74,13 @@ guard ("conflicting environment labels"), once.
 
 ### 3.2 Where it is enforced
 
+Built (2026-10-20): `Get-EnvLabel` and `Test-ItemInScope` in `Board.ps1`. `Get-BoardList` drops out-of-scope cards (so the sweep, the plant
+manager's reads, QC and merge pick-up never see them), `Get-ItemInfo` refuses an out-of-scope item with exit 10 `out-of-scope` (so every item
+verb, claim, accept, open-pr, merge and the manager and keeper verbs, refuses before writing), the board guard skips other environments'
+issues, `ingest-event` makes no event of them, and the keeper's `create-item` adds the gateway's own label. Scoping is on in the environments
+listed by `envScope` (deployed: `["tdd"]`; uat and prod are added when their items carry `env:uat` and `env:prod`); `FACTORY_ENV_SCOPE=1|0`
+on an app overrides it. Tier 1 suite `envscope` runs a tdd and a uat gateway on one fake board.
+
 One function, `Test-ItemInScope($labels)` in `plugin/scripts/lib/Board.ps1`, used at every entry point that today tests `$c.label` alone:
 
 - `Verb_sync_board` (Verbs.Sweep.ps1, the item loop at the `$c.label` test), so the sweep never plans, offers, settles or unparks another

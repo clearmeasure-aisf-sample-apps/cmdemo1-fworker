@@ -1,4 +1,5 @@
 {
+  "envScope": ["tdd"],
   "ownerSessions": true,
   "mergeQueueDepth": 2,
   "messaging": {

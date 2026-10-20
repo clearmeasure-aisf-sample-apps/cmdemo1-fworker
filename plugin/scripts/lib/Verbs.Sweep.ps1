@@ -162,7 +162,8 @@ function Invoke-ClaimRefReap($List) {
     $acts = @(); $keep = @{}; $now = Get-UtcNow
     foreach ($n in (Get-ClaimRefItems)) {
         try {
-            $open = if ($board.ContainsKey("$n")) { [bool]$board["$n"].open } else { try { [bool](Get-ItemInfo $n).open } catch [FactoryReject] { if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $false } else { throw } } }
+            $open = if ($board.ContainsKey("$n")) { [bool]$board["$n"].open } else { try { [bool](Get-ItemInfo $n).open } catch [FactoryReject] { if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $false } elseif ($_.Exception.Code -eq 'out-of-scope') { $null } else { throw } } }
+            if ($null -eq $open) { continue }   # another environment's claim (the refs are shared when the instance name is): not ours to reap
             $since = if ($first.ContainsKey("$n")) { ConvertFrom-Iso $first["$n"] } else { $null }
             if (-not $since) { $since = $now }
             $aged = ($now - $since).TotalMinutes -ge [double]$t.leaseMinutes
@@ -326,6 +327,7 @@ function Invoke-BoardGuard($List, [int]$Max = 20) {
             $n = [int]$i.number
             if ($null -ne $i.PSObject.Properties['pull_request'] -or $n -le 0 -or $placed.ContainsKey($n)) { continue }
             if (@($i.labels | ForEach-Object { "$($_.name)" }) -contains "$($c.rivalLabel)") { continue }
+            if (-not (Test-ItemInScope @($i.labels | ForEach-Object { "$($_.name)" }))) { continue }   # another environment's issue: its card is not ours to place
             if ($done -ge $Max -or $fails -ge 3) { return , $acts.ToArray() }   # attempts count, failed ones too; three failures in a row end the pass
             $done++
             try {
@@ -407,7 +409,7 @@ function Verb_sync_board($a) {
     $designWaiting = 0; $designCol = if ((Test-Has $c 'keeper') -and (Test-Has $c.keeper 'newItemColumn')) { "$($c.keeper.newItemColumn)" } else { 'Technical Design' }
     $list = if ($null -ne $only) {
         # one read per item (the board list is one read per 100 cards): an item without a card on the board is not factory work here
-        @(foreach ($n0 in $only) { try { $i0 = Get-ItemInfo $n0; if ($i0.cardId) { $i0 } } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { $errors += @{ item = $n0; code = $_.Exception.Code; reason = $_.Exception.Message } } } })
+        @(foreach ($n0 in $only) { try { $i0 = Get-ItemInfo $n0; if ($i0.cardId) { $i0 } } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found', 'out-of-scope') { $errors += @{ item = $n0; code = $_.Exception.Code; reason = $_.Exception.Message } } } })
     } else { Get-BoardList }
     $last = Get-LastColumn
     $unparkCtx = @{ free_workers = $(if (Test-Has $a 'free_workers') { [int]$a.free_workers } else { 0 }) }
@@ -785,8 +787,8 @@ function Verb_ingest_event($a) {
         'issues' {
             $act = "$($p.action)"; $num = [int]$p.issue.number
             $labels = @($p.issue.labels | ForEach-Object { $_.name })
-            $mine = (Test-NameIn $c.label $labels)
-            if ($act -eq 'labeled' -and $p.label.name -ieq $c.label) {
+            $mine = (Test-NameIn $c.label $labels) -and (Test-ItemInScope $labels)
+            if ($act -eq 'labeled' -and $mine -and ($p.label.name -ieq $c.label -or $p.label.name -ieq (Get-EnvLabel))) {
                 $col = try { (Get-ItemInfo $num).column } catch { $null }
                 $out += New-Event 'item.labeled' $num $col $delivery
             } elseif ($act -in 'closed', 'reopened' -and $mine) { $out += New-Event "item.$act" $num $null $delivery }
@@ -806,7 +808,7 @@ function Verb_ingest_event($a) {
             if ("$($p.action)" -eq 'edited' -and (Test-Has $p 'changes') -and $p.changes.field_value.field_name -eq 'Status') {
                 $q = 'query($id:ID!){ node(id:$id){ ... on Issue{ number labels(first:30){ nodes{ name } } } } }'
                 $d = Invoke-GhGraphQL $q @{ id = $p.projects_v2_item.content_node_id }
-                if ($d.node -and (Test-NameIn $c.label @($d.node.labels.nodes | ForEach-Object { $_.name }))) {
+                if ($d.node -and (Test-NameIn $c.label @($d.node.labels.nodes | ForEach-Object { $_.name })) -and (Test-ItemInScope @($d.node.labels.nodes | ForEach-Object { $_.name }))) {
                     $out += New-Event 'item.column_changed' ([int]$d.node.number) "$($p.changes.field_value.to.name)" $delivery
                 }
             }

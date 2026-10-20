@@ -2,6 +2,7 @@
   "name": "factory-worker",
   "label": "factory worker",
   "rivalLabel": "AI Factory",
+  "envScope": [],
   "owner": "clearmeasure-aisf-sample-apps",
   "ownerType": "organization",
   "repo": "cmdemo1-workorders",
