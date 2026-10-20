@@ -15,7 +15,7 @@ using System.Text.Json.Nodes;
 sealed class CopilotCloudSettings
 {
     public bool Enabled;
-    public int MaxConcurrent = 1, MaxExecutionsPerDay = 30, MaxFailuresPerPhase = 2, UnhealthyAfterFailures = 2, BootstrapGeneration = 1;
+    public int MaxConcurrent = 1, MaxExecutionsPerDay = 30, MaxFailuresPerPhase = 2, MaxLaunchesPerPhase = 3, UnhealthyAfterFailures = 2, BootstrapGeneration = 1;
     public double MaxMinutes = 60, AckSeconds = 900, ListSeconds = 30;
     public string Environment = "tdd";
     public string ApiUrl = "https://api.github.com", ApiVersion = "2026-03-10", Token = "", GatewayUrl = "", Model = "",
@@ -37,7 +37,7 @@ sealed class CopilotCloudSettings
             string S(string k, string d) => c[k] is JsonValue sv && sv.TryGetValue<string>(out var str) ? str : d;
             s.Enabled = c["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var eb) && eb;
             s.MaxConcurrent = (int)D("maxConcurrent", 1); s.MaxExecutionsPerDay = (int)D("maxExecutionsPerDay", 30); s.MaxMinutes = Math.Max(0.1, D("maxMinutes", 60));
-            s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
+            s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.MaxLaunchesPerPhase = (int)D("maxLaunchesPerPhase", 3); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
             s.AckSeconds = D("ackSeconds", 900); s.ListSeconds = Math.Max(1, D("listSeconds", 30)); s.BootstrapGeneration = Math.Max(1, (int)D("bootstrapGeneration", 1));
             s.ApiUrl = S("apiUrl", s.ApiUrl).TrimEnd('/'); s.ApiVersion = S("apiVersion", s.ApiVersion); s.Token = S("token", "");
             s.GatewayUrl = S("gatewayUrl", "").TrimEnd('/'); s.Model = S("model", "").Trim();
@@ -68,7 +68,7 @@ sealed class CopilotCloudSettings
     public RuntimeLimits Limits(Func<string, int, string, long, string> mint) => new()
     {
         Kind = "copilot-cloud", Prefix = "cop", IsOn = () => On, MaxConcurrent = MaxConcurrent, MaxExecutionsPerDay = MaxExecutionsPerDay, AckSeconds = AckSeconds,
-        MaxFailuresPerPhase = MaxFailuresPerPhase, UnhealthyAfterFailures = UnhealthyAfterFailures, ListSeconds = ListSeconds,
+        MaxFailuresPerPhase = MaxFailuresPerPhase, MaxLaunchesPerPhase = MaxLaunchesPerPhase, UnhealthyAfterFailures = UnhealthyAfterFailures, ListSeconds = ListSeconds,
         TokenSeconds = (long)(MaxMinutes * 60) + 900, MintCredential = mint, RevokeOnEnd = true
     };
 }
@@ -105,6 +105,9 @@ sealed class CopilotCodes
     void Prune() { var now = DateTime.UtcNow; foreach (var k in live.Where(kv => kv.Value.Expires < now).Select(kv => kv.Key).ToList()) live.Remove(k); }
 }
 
+// an item's open pull request: its number and head branch
+sealed record ItemPr(int Number, string Branch);
+
 sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
 {
     sealed class Task_ { public string Id = "", Worker = "", Phase = "", State = "queued", Status = "Running"; public int Item; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
@@ -112,11 +115,12 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     readonly CopilotCloudSettings cfg;
     readonly HttpClient http;
     readonly CopilotCodes codes;
-    readonly Func<int, string, string, string> prompt;   // item, phase, one-time code -> the bootstrap text
+    readonly Func<int, string, string, ItemPr?, string> prompt;   // item, phase, one-time code, the item's open pull request -> the bootstrap text
+    readonly Func<int, CancellationToken, Task<ItemPr?>>? itemPr;   // the item's open pull request (number, head branch), null when it has none
     readonly Dictionary<string, Task_> tasks = new(StringComparer.Ordinal);   // by worker name
 
-    public CopilotCloudRuntime(CopilotCloudSettings cfg, CopilotCodes codes, Func<int, string, string, string> prompt, HttpClient? http = null)
-    { this.cfg = cfg; this.codes = codes; this.prompt = prompt; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
+    public CopilotCloudRuntime(CopilotCloudSettings cfg, CopilotCodes codes, Func<int, string, string, ItemPr?, string> prompt, HttpClient? http = null, Func<int, CancellationToken, Task<ItemPr?>>? itemPr = null)
+    { this.cfg = cfg; this.codes = codes; this.prompt = prompt; this.itemPr = itemPr; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
 
     public string Kind => "copilot-cloud";
     public int MaxConcurrent => cfg.MaxConcurrent;
@@ -147,14 +151,19 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     readonly Dictionary<int, string> heads = new();
     public string? HeadOf(int item) { lock (tasks) return heads.TryGetValue(item, out var h) ? h : null; }
 
-    // Technical Design and Development start from the default branch; Functional Testing from the branch Development reported (else the default
-    // branch: the phase reads the pull request's diff through the gateway's tools either way)
-    string BaseRef(int item, string phase) => phase.Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? HeadOf(item) ?? cfg.DefaultBranch : cfg.DefaultBranch;
+    // A task of an item that already has its open pull request (fix-forward, rework after a red check or an FT FAIL, Functional Testing) starts
+    // from that pull request's head branch, so the agent sees and fixes it. The agent tasks API never pushes to base_ref: Copilot makes a new
+    // copilot/* branch from it and opens its draft against it; pr_open then makes that draft the item's pull request (retargeted to the default
+    // branch, it carries the old commits) and closes the superseded one (Verbs.Pr.ps1, Close-SupersededPr). Without one: Technical Design and
+    // Development start from the default branch; Functional Testing from the branch Development reported.
+    string BaseRef(int item, string phase, ItemPr? pr) => pr is { Branch.Length: > 0 } ? pr.Branch
+        : phase.Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? HeadOf(item) ?? cfg.DefaultBranch : cfg.DefaultBranch;
     static bool IsDevelopment(string phase) => phase.Equals("Development", StringComparison.OrdinalIgnoreCase);
+    static bool IsTechnicalDesign(string phase) => phase.Equals("Technical Design", StringComparison.OrdinalIgnoreCase);
 
-    public JsonObject TaskBody(ProvisionRequest r, string code)
+    public JsonObject TaskBody(ProvisionRequest r, string code, ItemPr? pr = null)
     {
-        var o = new JsonObject { ["prompt"] = prompt(r.Item, r.Phase, code), ["base_ref"] = BaseRef(r.Item, r.Phase), ["create_pull_request"] = IsDevelopment(r.Phase) };   // Development: Copilot opens a draft on its branch, pr_open takes it over
+        var o = new JsonObject { ["prompt"] = prompt(r.Item, r.Phase, code, pr), ["base_ref"] = BaseRef(r.Item, r.Phase, pr), ["create_pull_request"] = IsDevelopment(r.Phase) };   // Development: Copilot opens a draft on its branch, pr_open takes it over
         if (cfg.Model != "") o["model"] = cfg.Model;
         return o;
     }
@@ -163,8 +172,10 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     {
         // the r1 (r.Nonce) stays in the gateway: the task gets a one-time code for it, valid for the acknowledgement window
         var code = codes.Mint(r.WorkerName, r.Nonce, TimeSpan.FromSeconds(Math.Max(cfg.AckSeconds, 60) + 300));
+        ItemPr? pr = null;
+        if (itemPr != null && !IsTechnicalDesign(r.Phase)) { try { pr = await itemPr(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); } }
         int s; JsonNode? j;
-        try { (s, j) = await Send(HttpMethod.Post, TasksPath, TaskBody(r, code), ct); }
+        try { (s, j) = await Send(HttpMethod.Post, TasksPath, TaskBody(r, code, pr), ct); }
         catch (Exception e) { codes.Forget(r.WorkerName); return new(false, "", "launch-" + e.GetType().Name); }
         var id = j?["id"]?.ToString() ?? "";
         if (s is not (200 or 201 or 202) || id == "") { codes.Forget(r.WorkerName); return new(false, "", s is 200 or 201 or 202 ? "launch-no-id" : $"launch-{s}"); }

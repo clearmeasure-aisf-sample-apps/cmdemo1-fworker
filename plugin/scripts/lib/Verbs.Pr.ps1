@@ -89,17 +89,48 @@ function Verb_update_pr($a) {
 
 # The draft pull request the Copilot cloud agent opened on its branch: taken over for the item (title names #N, marked ready for review, recorded
 # in the state as the item's pull request). $null when there is none.
-function Use-CopilotDraft([int]$n, [string]$Head, [string]$Title) {
+function Use-CopilotDraft([int]$n, [string]$Head, [string]$Title, [int]$Superseding = 0) {
     $c = Get-Cfg
     $pr = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&head=$([uri]::EscapeDataString("$($c.owner):$Head"))&per_page=5") | Select-Object -First 1
     if (-not $pr) { return $null }
     # a draft that names another item, or that another item's state already holds, is not this item's to take
-    $others = @([regex]::Matches("$($pr.title) $($pr.body)", '(?<![0-9A-Za-z])#(\d+)\b') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -ne $n })
+    $others = @([regex]::Matches("$($pr.title) $($pr.body)", '(?<![0-9A-Za-z])#(\d+)\b') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -ne $n -and $_ -ne $Superseding })
     if ($others.Count) { Reject 10 'branch-of-other-item' "the pull request on '$Head' names #$($others[0]), not #$n" }
     if ("$($pr.title)" -notmatch "(^|[^0-9])#$n([^0-9]|$)") { Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ title = $Title } | Out-Null }
+    # a draft Copilot opened against the item's previous branch (a task started from it) goes to the default branch: it carries that branch's commits
+    if ("$($pr.base.ref)" -ne "$((Get-Cfg).defaultBranch)") { Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ base = "$((Get-Cfg).defaultBranch)" } | Out-Null }
     if ($pr.draft) { [void](Invoke-GhGraphQL 'mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }' @{ id = "$($pr.node_id)" }) }
     $st = Get-State $n; $st.state.pr = @{ number = $pr.number; branch = $Head; url = $pr.html_url }; Save-State $n $st
     return (Get-Pr ([int]$pr.number))
+}
+
+# The item's open pull request for the Copilot runtime (CopilotCloudRuntime: a task of an item that has one starts from its branch)
+function Verb_item_pr($a) {
+    $n = Get-ItemNumber $a
+    $pr = Find-ItemPr $n
+    if (-not $pr) { return @{ ok = $true; id = $n; found = $false } }
+    return @{ ok = $true; id = $n; found = $true; number = [int]$pr.number; branch = "$($pr.head.ref)" }
+}
+
+# Close a pull request with a comment and delete its branch (a copilot/* branch or the factory's own branch of the item only)
+function Close-PrWithBranch($Pr, [int]$n, [string]$Why) {
+    $c = Get-Cfg
+    [void](Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$($Pr.number)/comments" -Body @{ body = $Why } -Allow 404, 422)
+    [void](Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($Pr.number)" -Body @{ state = 'closed' })
+    $ref = "$($Pr.head.ref)"
+    if ($ref -like 'copilot/*' -or $ref -match "^$([regex]::Escape($c.name))/$n-") { [void](Invoke-Gh -Method DELETE -Path "$(Get-RepoPath)/git/refs/heads/$ref" -Allow 404, 422) }
+}
+
+# Extra drafts a Copilot task opened against the item's branches (a task that started from the item's pull request and opened its own draft,
+# then fixed the item's pull request another way): closed, branch deleted. Only open copilot/* drafts whose base is one of $Bases, never the
+# default branch, never $Keep.
+function Close-StrayCopilotDrafts([int]$n, [string[]]$Bases, [int]$Keep) {
+    $def = "$((Get-Cfg).defaultBranch)"
+    foreach ($p in @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&per_page=100")) {
+        if (-not $p -or [int]$p.number -eq $Keep -or -not $p.draft -or "$($p.head.ref)" -notlike 'copilot/*') { continue }
+        $b = "$($p.base.ref)"; if ($b -eq $def -or $b -notin $Bases) { continue }
+        Close-PrWithBranch $p $n "Closed by the factory worker gateway: an extra draft of a task of #$n; the item's pull request is #$Keep."
+    }
 }
 
 function Verb_open_pr($a) {
@@ -115,9 +146,31 @@ function Verb_open_pr($a) {
     $base = if (Test-Has $a 'base') { "$($a.base)" } else { $c.defaultBranch }
     $body = if (Test-Has $a 'body') { "$($a.body)" } else { '' }
     $existing = Find-ItemPr $n
-    if ($copilotHead -and -not ($existing -and $existing.head.ref -eq $head)) { $existing = Use-CopilotDraft $n $head $title }
+    # the item already has its pull request on another branch (fix-forward, rework): a Copilot task started from that branch and pushed its own
+    # (CopilotCloudRuntime.BaseRef); the new branch must hold the old one's commits, then it becomes the item's pull request and the old one is
+    # closed as superseded, its branch deleted
+    $prev = if ($existing -and $existing.head.ref -ne $head) { $existing } else { $null }
+    if ($prev -and $copilotHead) {
+        $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($prev.head.sha)...$head" -Allow 404
+        if (-not $cmp -or "$($cmp.status)" -notin 'ahead', 'identical') { Reject 10 'not-on-item-branch' "#$n already has its pull request #$($prev.number) on '$($prev.head.ref)'; '$head' does not hold its commits. Work on a branch made from '$($prev.head.ref)' (the task's own branch is) and pass that." }
+    }
+    if ($copilotHead -and -not ($existing -and $existing.head.ref -eq $head)) { $existing = Use-CopilotDraft $n $head $title $(if ($prev) { [int]$prev.number } else { 0 }) }
+    if ($prev -and $copilotHead -and -not $existing) {
+        # no draft on the branch: the item's pull request is opened on it below, then the old one is superseded
+        Assert-PushGate $n $info (Get-State $n).state '' $null
+        $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls" -Allow 422 -Body @{ title = $title; head = $head; base = $c.defaultBranch; body = (Get-PrBodyText $body $n); draft = $false }
+        if ($r -is [hashtable] -and $r.ContainsKey('status')) { Reject 10 'pr-not-created' "GitHub refused to create the pull request on '$head': $($r.body.message)" }
+        $st = Get-State $n; $st.state.pr = @{ number = $r.number; branch = $head; url = $r.html_url }; Save-State $n $st
+        $existing = Get-Pr ([int]$r.number)
+    }
+    if ($prev -and $copilotHead -and $existing -and [int]$existing.number -ne [int]$prev.number) {
+        Assert-PushGate $n $info (Get-State $n).state "$($existing.head.sha)" $existing.number
+        Close-StrayCopilotDrafts $n @("$($prev.head.ref)", $head) ([int]$existing.number)
+        Close-PrWithBranch $prev $n "Superseded by #$($existing.number), the pull request of #$n now: it holds this branch's commits and the fix. Closed by the factory worker gateway."
+    }
     $gs = (Get-State $n).state
     if ($existing -and $existing.head.ref -eq $head) {
+        if ($copilotHead) { Close-StrayCopilotDrafts $n @($head) ([int]$existing.number) }
         Assert-PushGate $n $info $gs "$($existing.head.sha)" $existing.number
         $bo = Get-BuildOwed $info $existing.number $gs
         return @{ ok = $true; id = $n; created = $false; pullRequest = @{ number = $existing.number; url = $existing.html_url; head_sha = $existing.head.sha; branch = $head }; build_owed = $bo.build_owed; build_reason = $bo.build_reason }
