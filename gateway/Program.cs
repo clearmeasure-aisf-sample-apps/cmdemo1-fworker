@@ -162,6 +162,7 @@ var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyO
 // and the gateway's public URL; the bootstrap prompt is read from prompts/ (set below, once the prompts are loaded)
 var cursorSettings = CursorCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
 Func<int, string, string> cursorPrompt = (_, _) => "";
+static bool IsDev(string column) => column.Trim().Equals("Development", StringComparison.OrdinalIgnoreCase);
 static string PhaseSlug(string column) => column.Trim().ToLowerInvariant().Replace(' ', '-');
 var cursorManager = ownerMode && tokenSecret.Length > 0 && cursorSettings.On
     ? new RuntimeManager(runtimeSettings, new CursorCloudRuntime(cursorSettings, (item, phase) => cursorPrompt(item, phase)), runtimeNonces,
@@ -171,9 +172,10 @@ var cursorManager = ownerMode && tokenSecret.Length > 0 && cursorSettings.On
 // (COPILOT_TASKS_TOKEN) and the gateway's public URL; the task's prompt carries a one-time code for the worker's r1 (copilotCodes)
 var copilotSettings = CopilotCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
 var copilotCodes = new CopilotCodes();
-Func<int, string, string, string> copilotPrompt = (_, _, _) => "";
+Func<int, string, string, ItemPr?, string> copilotPrompt = (_, _, _, _) => "";
+Func<int, CancellationToken, Task<ItemPr?>> copilotItemPr = (_, _) => Task.FromResult<ItemPr?>(null);
 var copilotManager = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
-    ? new RuntimeManager(runtimeSettings, new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code) => copilotPrompt(item, phase, code)), runtimeNonces,
+    ? new RuntimeManager(runtimeSettings, new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr) => copilotPrompt(item, phase, code, pr), itemPr: (item, ct) => copilotItemPr(item, ct)), runtimeNonces,
         copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
     : null;
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
@@ -2103,10 +2105,21 @@ mcpSessions.OnEnded = async (name, reason) =>
     if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) await cursorManager.Deprovision(name, reason);
     if (copilotManager != null && copilotManager.IsRuntimeWorker(name)) await copilotManager.Deprovision(name, reason);
 };
-copilotPrompt = (item, phase, code) =>
+copilotItemPr = async (item, ct) =>
+{
+    var (rc, output) = await app.Services.GetRequiredService<Runner>().RunAsync("item-pr", new JsonObject { ["item"] = item }.ToJsonString(), TimeSpan.FromSeconds(60));
+    if (rc != 0) return null;
+    var j = JsonNode.Parse(output);
+    return j?["found"]?.GetValue<bool>() == true && j["branch"]?.ToString() is { Length: > 0 } b && int.TryParse(j["number"]?.ToString(), out var num) ? new ItemPr(num, b) : null;
+};
+copilotPrompt = (item, phase, code, pr) =>
 {
     var bp = prompts.ByPath("bootstrap/copilot.md");
     var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
+    // an item with its open pull request: the task starts from that branch (CopilotCloudRuntime.BaseRef), and the fix goes to that pull request
+    if (pr != null) text += $"\nThis item's pull request: #{pr.Number}, branch {pr.Branch}. This task starts from that branch; Copilot gives the task its own branch made from it. " +
+        (IsDev(phase) ? $"Fix #{pr.Number}: read its failing checks or the review (pr_checks, item_get), change the code on the branch this task runs on, which already holds #{pr.Number}'s commits, push, and pass THAT branch as `head` to pr_open. The gateway makes your task's pull request the item's and closes #{pr.Number} as superseded. Do not start over from master and open nothing else.\n"
+            : $"Verify #{pr.Number}; change nothing.\n");
     // one Copilot MCP configuration serves every environment: the prompt names this gateway (fworker-mcp accepts only the three gateway hosts)
     return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
 };

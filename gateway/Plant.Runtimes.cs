@@ -66,8 +66,13 @@ sealed partial class Plant
     public (bool Registered, bool Owns, bool Offered) RuntimeWorkerState(string name)
     {
         lock (gate)
-            return (workers.TryGetValue(name, out var w) && w.Session > 0, ownerOf.Values.Contains(name),
-                assignments.Values.Any(a => a.Worker == name && !a.Accepted));
+        {
+            var known = workers.TryGetValue(name, out var w);
+            // a spent session (it held an item and gave it back) is being told to end (session.end after SessionEndGraceSeconds): it counts as
+            // busy for a minute past that, so the runtime's no-item stop does not race the session's own end under load
+            var ending = known && w!.SessionItems.Count > 0 && (w.SpentIdleSince == null || (DateTime.UtcNow - w.SpentIdleSince.Value).TotalSeconds < SessionEndGraceSeconds + 60);
+            return (known && w!.Session > 0, ownerOf.Values.Contains(name), ending || assignments.Values.Any(a => a.Worker == name && !a.Accepted));
+        }
     }
 
     // The execution of a runtime worker ended: everything the name still holds goes back to the plan (its owner is dropped, its assignments are

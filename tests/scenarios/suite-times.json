@@ -27,8 +27,14 @@
     "qc-proxy": 54.0,
     "author": 15.0,
     "messaging": 290.0,
-    "manager": 658.0
+    "manager": 658.0,
+    "operator": 244.0,
+    "runtime": 319.0,
+    "mcp": 95.0,
+    "cursor": 121.0,
+    "copilot": 262.0,
+    "envscope": 52.0
   },
-  "wall-full": 1739.0,
+  "wall-full": 336.0,
   "wall-fast": 108.0
 }

@@ -34,6 +34,12 @@ the owner's word.
 - Branches: the coding agent pushes only `copilot/*`. The Development task is created with `create_pull_request: true`; `pr_open` with
   that branch takes the task's draft over (title gets `#N`, marked ready, recorded as the item's pull request). Functional Testing starts
   from the branch the Development task reported (`artifacts[].data.head_ref`). One task per phase.
+- An item that already has its open pull request (fix-forward after a red check, rework after an FT FAIL, Functional Testing): the task's
+  `base_ref` is that pull request's head branch (verb `item-pr`), and the prompt names the pull request. The agent tasks API never pushes to
+  `base_ref`: Copilot makes a new `copilot/*` branch from it and opens its draft against it. `pr_open` with that branch checks it holds the
+  old head (else `not-on-item-branch`), retargets the draft to the default branch, takes it over, closes the superseded pull request with a
+  comment and deletes its branch. Extra `copilot/*` drafts against the item's branches are closed with their branches.
+- At most `api.copilot.maxLaunchesPerPhase` (3) executions of one item in one phase in a row, however each ended; then the item is parked.
 
 ## Shape
 

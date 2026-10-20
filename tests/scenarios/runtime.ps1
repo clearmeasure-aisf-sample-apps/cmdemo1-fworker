@@ -213,9 +213,9 @@ $RuntimeScenarios['runtime: session.end maps to the execution exit: the worker e
         $r = Rt-Own $name $n; CheckExit 'its worker owns the item' $r 0
         [void](Gh-As 'fake-operator' "issues/$n/labels" @{ labels = @('hold:owner') })
         $r = Fo $name @('release', '--item', $n, '--reason', 'scenario: the item is done for this execution'); CheckExit 'the item leaves the worker' $r 0
-        Check 'the runtime worker is told session.end (one item per session for runtime workers)' (Wait-Until -Seconds 20 { @(Get-WorkerEvents $name | Where-Object { $_.event -eq 'session.end' }).Count -gt 0 })
+        Check 'the runtime worker is told session.end (one item per session for runtime workers)' (Wait-Until -Seconds 60 { @(Get-WorkerEvents $name | Where-Object { $_.event -eq 'session.end' }).Count -gt 0 })
         [void](Fake 'arm-exec' @{ worker = $name; status = 'Succeeded' })
-        Check 'the execution exits and the runtime counts it succeeded' (Wait-Until -Seconds 15 { @((Rt-Status).last | Where-Object { $_.worker -eq $name -and $_.outcome -eq 'succeeded' }).Count -eq 1 }) ((Rt-Status).last | ConvertTo-Json -Compress)
+        Check 'the execution exits and the runtime counts it succeeded' (Wait-Until -Seconds 60 { @((Rt-Status).last | Where-Object { $_.worker -eq $name -and $_.outcome -eq 'succeeded' }).Count -eq 1 }) ((Rt-Status).last | ConvertTo-Json -Compress)
         Check 'it no longer runs and its worker is gone from the plant' ((Rt-Status).running -eq 0 -and @((Get-Plant).plant.workers | Where-Object { $_.name -eq $name }).Count -eq 0)
     } finally { Rt-Cleanup @($n) @($name) }
 }

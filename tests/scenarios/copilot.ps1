@@ -110,6 +110,8 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; premium = 3 })
         Check 'its end is seen, with the premium requests of its sessions' (Wait-Until -Seconds 20 { $d = @((Cop-Status).last | Where-Object { $_.execution -eq $t.id }); $d.Count -eq 1 -and $d[0].detail.usage.premium_requests -eq 3 }) ((Cop-Status).last | ConvertTo-Json -Compress -Depth 6)
         Check 'its usage is logged' (Wait-Until -Seconds 10 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch '"runtime":"copilot-usage"').Count -gt 0 })
+        # the item is closed first: a relaunch of it would take the injected failure meant for the next item
+        Cop-Cleanup @($n); $n = 0
         [void](Fake 'copilot-launch-failures' @{ count = 1 })
         $m = New-Item-Fake 'Copilot relaunch' 'x' $CopLabels
         Check 'after the failed create a new task is created' (Wait-Until -Seconds 40 { (Cop-Tasks $m).Count -ge 1 })
@@ -145,7 +147,83 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
         Check 'the task''s end is seen' (Wait-Until -Seconds 20 { @((Cop-Status).last | Where-Object { $_.execution -eq $t.id }).Count -eq 1 })
         [void](Fake 'move' @{ number = $n; column = 'Functional Testing' })
-        Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 40 { @(Cop-Tasks $n | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        # a Development task launched again meanwhile (the item stayed in Development) is stopped, so its deadline does not park the item
+        foreach ($tt in @((Cop-Tasks $n) | Where-Object { $_.state -in 'queued', 'in_progress' -and "$($_.body.prompt)" -match 'phase development' })) { [void](Fake 'copilot-task' @{ id = $tt.id; state = 'cancelled' }) }
+        $ftFrom = Get-Date
+        Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 90 { @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref) $($_.body.create_pull_request)" }) -join '; ')
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: fix-forward of an item with an open pull request: the task starts from its branch, pr_open makes the task''s draft the item''s pull request, closes the superseded one and its branch, and closes extra drafts; no duplicates (Functional Testing from that branch: the scenario above)' = {
+    $n = 0
+    try {
+        $h = @{ Authorization = 'Bearer fake-operator' }
+        $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+        function OpenPr([string]$Head) { Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n; head = $Head; title = 'Thing' } | ConvertTo-Json) -SkipHttpErrorCheck }
+        function Draft([string]$Head, [string]$Base, [string]$Body) { Invoke-RestMethod "$gh/pulls" -Method POST -Headers $h -ContentType 'application/json' -Body (@{ title = '[WIP] Thing'; head = $Head; base = $Base; body = $Body; draft = $true } | ConvertTo-Json) }
+        function FakePr([int]$Num) { @((Fake 'state').prs | Where-Object { $_.number -eq $Num })[0] }
+        $n = New-Item-Fake 'Copilot fix-forward item' 'Change src/App/Thing.cs and its unit test.' @('factory worker', 'Auto Merge') 'Development'
+        Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
+        $t1 = (Cop-Tasks $n)[0]
+        Check 'the first Development task starts from master: the item has no pull request yet' ($t1.body.base_ref -eq 'master' -and -not ("$($t1.body.prompt)" -match "This item's pull request")) ($t1.body | ConvertTo-Json -Compress)
+        $a = "copilot/thing-$n"
+        [void](Fake 'push-branch' @{ branch = $a; files = @('src/App/Thing.cs') })
+        $d1 = Draft $a 'master' 'x'
+        $r1 = OpenPr $a
+        Check 'pr_open takes over the first draft' ($r1.ok -and $r1.pullRequest.number -eq $d1.number) ($r1 | ConvertTo-Json -Compress -Depth 4)
+        [void](Fake 'copilot-task' @{ id = $t1.id; state = 'completed'; headRef = $a })
+        Check 'the fix-forward Development task starts from the pull request''s branch and names it' (Wait-Until -Seconds 60 { @((Cop-Tasks $n) | Where-Object { $_.id -ne $t1.id -and "$($_.body.prompt)" -match 'phase development' }).Count -gt 0 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        $t2 = @((Cop-Tasks $n) | Where-Object { $_.id -ne $t1.id })[0]
+        Check 'its base_ref is the pull request''s head branch, not master' ($t2.body.base_ref -eq $a -and $t2.body.create_pull_request -eq $true) ($t2.body | ConvertTo-Json -Compress)
+        Check 'its prompt names the item''s pull request and says the fix goes there' ("$($t2.body.prompt)" -match "This item's pull request: #$($d1.number), branch $([regex]::Escape($a))" -and "$($t2.body.prompt)" -match "Fix #$($d1.number)") "$($t2.body.prompt)"
+        Check 'the prompt asks for the integration tests and the migration tests of a database change' ("$($t2.body.prompt)" -match 'dotnet test\s+src/IntegrationTests' -and "$($t2.body.prompt)" -match 'migration test')
+        # Copilot made its own branch from the item's branch and opened its draft against it (as the agent tasks API does), naming the old one
+        $b = "copilot/thing-fix-$n"
+        [void](Fake 'push-branch' @{ branch = $b; files = @('src/App/Thing.cs', 'src/UnitTests/ThingTests.cs') })
+        $d2 = Draft $b $a "Fixes the failing check of #$($d1.number)."
+        $r2 = OpenPr $b
+        Check 'pr_open with the task''s branch makes its draft the item''s pull request' ($r2.ok -and $r2.pullRequest.number -eq $d2.number -and $r2.pullRequest.branch -eq $b) ($r2 | ConvertTo-Json -Compress -Depth 4)
+        $p2 = FakePr $d2.number; $p1 = FakePr $d1.number
+        Check 'the new pull request is retargeted to master and ready, its title naming the item' ($p2.open -and $p2.base -eq 'master' -and -not $p2.draft -and "$($p2.title)" -match "#$n") ($p2 | ConvertTo-Json -Compress -Depth 3)
+        Check 'the superseded pull request is closed with a comment naming the new one' (-not $p1.open -and -not $p1.merged -and @($p1.comments | Where-Object { "$($_.body)" -match "Superseded by #$($d2.number)" }).Count -eq 1) ($p1 | ConvertTo-Json -Compress -Depth 3)
+        Check 'and its branch is deleted' (@((Fake 'state').deletedRefs) -contains "heads/$a") ((Fake 'state').deletedRefs | ConvertTo-Json -Compress)
+        Check 'the item has exactly one open pull request' (@((Fake 'state').prs | Where-Object { $_.open -and "$($_.ref)" -like "copilot/thing*-$n" }).Count -eq 1)
+        # a later task that pushed to the item's branch and also left a draft of its own against it: pr_open closes the extra draft
+        $c = "copilot/thing-extra-$n"
+        [void](Fake 'push-branch' @{ branch = $c; files = @('src/App/Extra.cs') })
+        $d3 = Draft $c $b 'x'
+        $r3 = OpenPr $b
+        Check 'pr_open with the item''s branch keeps the item''s pull request' ($r3.ok -and $r3.pullRequest.number -eq $d2.number) ($r3 | ConvertTo-Json -Compress -Depth 4)
+        Check 'and closes the extra draft the task created, deleting its branch' (-not (FakePr $d3.number).open -and @((Fake 'state').deletedRefs) -contains "heads/$c" -and (FakePr $d2.number).open)
+        # a branch that does not hold the item's pull request's commits is refused (a task that started over from master)
+        $x = "copilot/thing-over-$n"
+        [void](Fake 'push-branch' @{ branch = $x; files = @('src/App/Over.cs') })
+        $before = @((Fake 'state').prs).Count
+        [void](Fake 'fault' @{ match = "compare/.*\.\.\.$([regex]::Escape($x))$"; status = 200; body = '{"status":"diverged","ahead_by":1,"behind_by":1}' })
+        $r4 = OpenPr $x
+        Check 'a branch without the item''s pull request''s commits is refused, nothing is opened or closed' ($r4.code -eq 'not-on-item-branch' -and @((Fake 'state').prs).Count -eq $before -and (FakePr $d2.number).open) ($r4 | ConvertTo-Json -Compress)
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: Development tasks that end their session without finishing the phase are launched at most api.copilot.maxLaunchesPerPhase (3) times in a row, then the item is parked, not relaunched' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot relaunch loop' 'Change src/App/Loop.cs.' @('factory worker', 'Auto Merge') 'Development'
+        foreach ($k in 1..3) {
+            Check "launch $k is created" (Wait-Until -Seconds 60 { (Cop-Tasks $n).Count -ge $k }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+            $tk = (Cop-Tasks $n)[$k - 1]
+            # the agent connects, accepts the item and ends its session without finishing the phase (no failure is counted for that)
+            $r1 = "$((Cop-Exchange (Cop-Code $tk) (Cop-Bootstrap)).body.token)"
+            $cur = ''
+            Check "launch $k gets its offer" (Wait-Until -Seconds 30 { $e = Mcp-Events $r1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
+            [void](Mcp-Call 'item_accept' @{ item = $n } $r1)
+            [void](Mcp-Call 'session_end' @{ reason = 'stopped without finishing' } $r1)
+            [void](Fake 'copilot-task' @{ id = $tk.id; state = 'completed' })
+            Check "launch $k ends" (Wait-Until -Seconds 20 { @((Cop-Status).last | Where-Object { $_.execution -eq $tk.id }).Count -eq 1 })
+        }
+        Check 'the item is parked after the third launch' (Wait-Until -Seconds 40 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"park`"" | Where-Object { "$_" -match "`"item`":$n," -and "$_" -match 'runtime-failed Development' }).Count -gt 0 })
+        Start-Sleep -Seconds 8
+        Check 'and no fourth task is created' ((Cop-Tasks $n).Count -eq 3) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
     } finally { Cop-Cleanup @($n) }
 }
 

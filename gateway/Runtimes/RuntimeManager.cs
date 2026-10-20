@@ -12,6 +12,10 @@ sealed class RuntimeLimits
     public string Kind = "cae-job", Prefix = "cae";
     public Func<bool> IsOn = () => false;
     public int MaxConcurrent, MaxExecutionsPerDay, MaxFailuresPerPhase = 2, UnhealthyAfterFailures = 2;
+    // executions of one item in one phase in a row (no other phase of the item started between them), however each ended: at the limit the
+    // item is parked instead of launched again (a task that ends without finishing its phase and without counting as failed would otherwise be
+    // relaunched without end); 0 = no limit
+    public int MaxLaunchesPerPhase;
     public double AckSeconds = 300, ListSeconds = 30;
     public long TokenSeconds = 14400 + 900;
     // the credential the execution is started with: null mints a one-time nonce (cae-job); cursor-cloud mints the worker's r1 (name, item, phase, expiry)
@@ -48,6 +52,7 @@ sealed class RuntimeManager
     readonly RuntimeNonces nonces;
     readonly Dictionary<string, Exec> execs = new(StringComparer.Ordinal);
     readonly Dictionary<(int Item, string Phase), int> failures = new();
+    readonly Dictionary<(int Item, string Phase), int> launches = new();   // executions in a row of an item in one phase (RuntimeLimits.MaxLaunchesPerPhase)
     // the error of the last failure of an item and phase (its outcome; for a failed start the error, where a non-2xx launch carries the runtime's answer, at most 1 KB), shown in /status
     readonly Dictionary<(int Item, string Phase), string> failureErrors = new();
     readonly List<JsonObject> last = new();
@@ -75,7 +80,19 @@ sealed class RuntimeManager
     public bool IsRuntimeWorker(string name) { lock (gate) return execs.ContainsKey(name); }
     public string ExistingFor(int item) { lock (gate) return execs.Values.FirstOrDefault(e => e.Item == item && !e.Ended)?.Name ?? ""; }
     public string ExecutionOf(string name) { lock (gate) return execs.TryGetValue(name, out var e) ? e.Execution : ""; }
-    public bool Exhausted(int item, string phase) { lock (gate) return failures.GetValueOrDefault((item, phase)) >= lim.MaxFailuresPerPhase; }
+    public bool Exhausted(int item, string phase)
+    {
+        lock (gate)
+        {
+            if (failures.GetValueOrDefault((item, phase)) >= lim.MaxFailuresPerPhase) return true;
+            if (lim.MaxLaunchesPerPhase > 0 && launches.GetValueOrDefault((item, phase)) >= lim.MaxLaunchesPerPhase)
+            {
+                failureErrors[(item, phase)] = $"launches-exhausted: {lim.MaxLaunchesPerPhase} executions in a row without finishing the phase";
+                return true;
+            }
+            return false;
+        }
+    }
 
     public (bool Ok, string Code) CanStart()
     {
@@ -97,7 +114,13 @@ sealed class RuntimeManager
         var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + lim.TokenSeconds;
         var nonce = lim.MintCredential != null ? lim.MintCredential(name, item, phase, expires)
             : nonces.Mint(name, cae.Kind, expires, TimeSpan.FromSeconds(Math.Max(lim.AckSeconds, 60) + 600));
-        lock (gate) { Roll(); today++; execs[name] = new Exec { Name = name, Item = item, Phase = phase }; }
+        lock (gate)
+        {
+            Roll(); today++; execs[name] = new Exec { Name = name, Item = item, Phase = phase };
+            // another phase of the item started: the item made progress, the count in a row starts again
+            foreach (var k in launches.Keys.Where(k => k.Item == item && k.Phase != phase).ToList()) launches.Remove(k);
+            launches[(item, phase)] = launches.GetValueOrDefault((item, phase)) + 1;
+        }
         return new Ticket(name, item, phase, profile, nonce);
     }
 
@@ -183,7 +206,7 @@ sealed class RuntimeManager
     {
         Log("park", "", item, "runtime-failed " + phase);
         // after the park the item starts afresh: an unpark by the operator gives its phase maxFailuresPerPhase executions again
-        try { if (Park != null) { await Park(item, phase); lock (gate) { failures.Remove((item, phase)); failureErrors.Remove((item, phase)); } } } catch (Exception x) { Log("park-failed", "", item, x.Message); }
+        try { if (Park != null) { await Park(item, phase); lock (gate) { failures.Remove((item, phase)); failureErrors.Remove((item, phase)); launches.Remove((item, phase)); } } } catch (Exception x) { Log("park-failed", "", item, x.Message); }
         finally { Plant?.RuntimeParked(item, phase); }
     });
 
@@ -253,6 +276,7 @@ sealed class RuntimeManager
                     ["enabled"] = lim.IsOn(), ["maxConcurrent"] = lim.MaxConcurrent, ["running"] = execs.Values.Count(e => !e.Ended), ["today"] = today, ["maxExecutionsPerDay"] = lim.MaxExecutionsPerDay,
                     ["healthy"] = healthy, ["unhealthyReason"] = unhealthyWhy, ["startFailuresInRow"] = startFailuresInRow, ["ackSeconds"] = lim.AckSeconds, ["relisted"] = relisted,
                     ["executions"] = new JsonArray(execs.Values.Where(e => !e.Ended).Select(e => (JsonNode)new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["status"] = e.Status, ["started"] = e.StartedAt.ToString("o"), ["registered"] = e.RegisteredAt?.ToString("o"), ["detail"] = Detail(e.Name) }).ToArray()),
+                    ["launches"] = new JsonArray(launches.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value }).ToArray()), ["maxLaunchesPerPhase"] = lim.MaxLaunchesPerPhase,
                     ["failures"] = new JsonArray(failures.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value, ["error"] = failureErrors.GetValueOrDefault(kv.Key) }).ToArray()),
                     // the detail is read again while the runtime still knows the worker: its usage arrives after the end (a Cursor agent's reads zero at first)
                     ["last"] = new JsonArray(last.Select(x => { var c = (JsonObject)x.DeepClone(); if (Detail(c["worker"]?.ToString() ?? "") is { } d) c["detail"] = d; return (JsonNode)c; }).ToArray())

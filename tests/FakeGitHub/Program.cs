@@ -82,7 +82,7 @@ app.Run();
 
 sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow; }
 sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
-sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public List<Comment> Comments = new(); }
+sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public string Base = "master"; public List<Comment> Comments = new(); }
 sealed record Redirect(string To);
 sealed record PlainText(string Text);
 // App "github-actions": the check run is a job of a workflow run (its id is the job id), with steps, a log and the artifacts of the run.
@@ -224,6 +224,7 @@ sealed class World
     readonly List<string> log = new();
     readonly List<Artifact> artifacts = new();
     readonly List<string> masterHistory = new();   // the commits of the base branch, oldest first; the last one is masterSha
+    readonly List<string> deletedRefs = new();   // branches deleted through DELETE git/refs/heads/...
     readonly Dictionary<string, List<string>> masterFiles = new();   // the files each commit of the base branch changed (for compare)
     long nextArtifact = 1;
     readonly HashSet<string> labelNames = new() { "factory worker", "AI Factory", "Auto Merge", "video", "Demo", "Ready To Move", "Needs Human Review" };
@@ -404,18 +405,22 @@ sealed class World
             return (200, new JsonArray(match.Skip((rp - 1) * per).Take(per).Select(r => (JsonNode)J(("ref", r))).ToArray()));
         }
         if ((m = Regex.Match(path, $"^{root}/git/refs/(.+)$")).Success && method == "DELETE")
-            { refSha.Remove("refs/" + m.Groups[1].Value); return refs.Remove("refs/" + m.Groups[1].Value) ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}"); }
+            {   // a branch pushed through /_fake/push-branch is a ref too: deleting it is recorded (deletedRefs of /_fake/state)
+                refSha.Remove("refs/" + m.Groups[1].Value);
+                var hb = m.Groups[1].Value.StartsWith("heads/") && branches.Remove(m.Groups[1].Value[6..]);
+                if (hb) deletedRefs.Add(m.Groups[1].Value);
+                return refs.Remove("refs/" + m.Groups[1].Value) || hb ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}"); }
         if (path == root + "/branches/" + Master && method == "GET") return (200, J(("name", Master), ("commit", J(("sha", masterSha)))));
         if ((m = Regex.Match(path, $"^{root}/compare/([^.]+)\\.\\.\\.(.+)$")).Success && method == "GET") return Compare(m.Groups[1].Value, m.Groups[2].Value);
         if (path == root + "/pulls" && method == "GET")
             // head=owner:branch filters as GitHub does
-            return (200, new JsonArray(prs.Values.Where(x => x.Open && (q["head"].ToString() is not { Length: > 0 } hq || hq == $"{Owner}:{x.Ref}")).Select(x => (JsonNode)PrJson(x)).ToArray()));
+            return (200, new JsonArray(prs.Values.Where(x => x.Open && (q["head"].ToString() is not { Length: > 0 } hq || hq == $"{Owner}:{x.Ref}") && (q["base"].ToString() is not { Length: > 0 } bq || bq == x.Base)).Select(x => (JsonNode)PrJson(x)).ToArray()));
         if (path == root + "/pulls" && method == "POST")
         {
             var head = b!["head"]!.ToString();
             if (!branches.TryGetValue(head, out var br) || br.Files.Count == 0) return (422, "{\"message\":\"Validation Failed\",\"errors\":[{\"message\":\"No commits between master and " + head + "\"}]}");
             var bp = branchProfile.TryGetValue(head, out var bpv) ? bpv : ("green", 0.0);
-            var pr = new Pr { Profile = bp.Item1, DelaySeconds = bp.Item2, Number = nextNumber++, Ref = head, Sha = br.Sha, Title = b["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Files = br.Files.ToList(), FileObjs = br.Objs.ToList(), Draft = b["draft"]?.GetValue<bool>() ?? false };
+            var pr = new Pr { Profile = bp.Item1, DelaySeconds = bp.Item2, Number = nextNumber++, Ref = head, Sha = br.Sha, Title = b["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Files = br.Files.ToList(), FileObjs = br.Objs.ToList(), Draft = b["draft"]?.GetValue<bool>() ?? false, Base = b["base"]?.ToString() is { Length: > 0 } pb ? pb : Master };
             var mm = Regex.Match(head, @"/(\d+)-"); if (mm.Success) pr.Issue = int.Parse(mm.Groups[1].Value);
             prs[pr.Number] = pr; ApplyProfile(pr, pr.Sha);
             return (201, PrJson(pr));
@@ -450,6 +455,7 @@ sealed class World
                         if (b?["body"] is { } nb) pr.Body = nb.ToString();
                         if (b?["title"] is { } nt) pr.Title = nt.ToString();
                         if (b?["state"]?.ToString() == "closed" && !pr.Merged) pr.Open = false;
+                        if (b?["base"]?.ToString() is { Length: > 0 } nbase) pr.Base = nbase;
                     }
                     return (200, PrJson(pr, true));
             }
@@ -610,7 +616,7 @@ sealed class World
 
     JsonObject PrJson(Pr p, bool detail = false)
     {
-        var o = J(("number", p.Number), ("title", p.Title), ("state", p.Open ? "open" : "closed"), ("html_url", $"https://fake/pull/{p.Number}"), ("node_id", "PR_" + p.Number), ("merged", p.Merged), ("user", J(("login", p.Author))), ("body", p.Body), ("base", J(("ref", Master))),
+        var o = J(("number", p.Number), ("title", p.Title), ("state", p.Open ? "open" : "closed"), ("html_url", $"https://fake/pull/{p.Number}"), ("node_id", "PR_" + p.Number), ("merged", p.Merged), ("user", J(("login", p.Author))), ("body", p.Body), ("base", J(("ref", p.Base))),
             ("head", J(("ref", p.Ref), ("sha", p.Sha), ("repo", J(("full_name", p.Fork ? "someone-else/cmdemo1-workorders" : $"{Owner}/{Repo}"))))), ("draft", p.Draft), ("changed_files", p.Files.Count), ("merge_commit_sha", p.MergeSha));
         if (detail)
         {
@@ -813,7 +819,7 @@ sealed class World
             }
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();
-                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
                 masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; return (200, J(("ok", true)));
             case "issue":
@@ -950,7 +956,7 @@ sealed class World
                 return (200, J(
                     ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("title", i.Title), ("body", i.Body), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
                         ("comments", new JsonArray(i.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())))).ToArray())),
-                    ("appMints", appMints), ("scopedMints", new JsonArray(scopedMints.Select(x => (JsonNode)x).ToArray())), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
+                    ("deletedRefs", new JsonArray(deletedRefs.Select(x => (JsonNode)x).ToArray())), ("appMints", appMints), ("scopedMints", new JsonArray(scopedMints.Select(x => (JsonNode)x).ToArray())), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("base", p.Base), ("draft", p.Draft), ("title", p.Title), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
                     ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("rerunJobs", rerunJobs), ("releases", releases.Count), ("requests", log.Count)));
             case "health": healthStatus = b?["status"]?.GetValue<int>() ?? 200; return (200, J(("ok", true)));
             case "log": return (200, new JsonArray(log.Select(l => (JsonNode)l).ToArray()));
