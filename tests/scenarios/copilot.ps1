@@ -321,4 +321,31 @@ $CopilotScenarios = [ordered]@{
         Check 'the superseded pull request is closed' (-not (Cop-FakePr $d1.number).open -and @((Fake 'state').deletedRefs) -contains "heads/$a")
     } finally { Cop-Cleanup @($n) }
 }
+
+'copilot: a Copilot pull request goes from a PASS to the gateway''s merge; GitHub''s refusal of a stacked pull request (403, use the asynchronous endpoint) is merged through merge-async' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot merge item' 'Change src/App/Merge.cs.' @('factory worker', 'Auto Merge') 'Development'
+        Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
+        $t = (Cop-DevTasks $n)[0]
+        $br = "copilot/merge-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Merge.cs') })
+        $d = Cop-Draft $br 'master' "Merge (#$n)"
+        [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
+        Check 'the item reaches Functional Testing' (Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column)"
+        Check 'a Functional Testing task is created' (Wait-Until -Seconds 60 { @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' }).Count -eq 1 })
+        $ft = @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' })[0]
+        $r1 = "$((Cop-Exchange (Cop-Code $ft) (Cop-Bootstrap)).body.token)"
+        $cur = ''
+        Check 'the FT agent gets its offer' (Wait-Until -Seconds 30 { $e = Mcp-Events $r1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
+        [void](Mcp-Call 'item_accept' @{ item = $n } $r1)
+        [void](Fake 'fault' @{ match = "^PUT /repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/pulls/$($d.number)/merge$"; status = 403; count = 5; body = '{"message":"Merging stacked PRs via this endpoint is not supported. Use the asynchronous merge endpoint instead."}' })
+        $rv = Mcp-Call 'item_record_review' @{ item = $n; column = 'Functional Testing'; role = 'reviewer'; text = "Criteria exercised.`nREVIEW: COMPLETE" } $r1
+        $v = Mcp-Call 'item_validation_verdict' @{ item = $n; passed = $true; summary = 'The criterion is met.'; pr = $d.number; review_ref = "$($rv.body.review_ref)"; head_sha = "$((Cop-FakePr $d.number).sha)" } $r1
+        Check 'the PASS verdict is recorded' (-not $v.isError) ($v | ConvertTo-Json -Compress -Depth 5)
+        [void](Mcp-Call 'session_end' @{ reason = 'done' } $r1)
+        Check 'the gateway merges the pull request through merge-async' (Wait-Until -Seconds 120 { (Cop-FakePr $d.number).merged }) (Cop-FakePr $d.number | ConvertTo-Json -Compress -Depth 3)
+        Check 'and records the merge on the item' (Wait-Until -Seconds 30 { (Cop-Comments $n '*squash-merged PR #*').Count -ge 1 -or (Cop-Comments $n '*was merged as*').Count -ge 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
+    } finally { Cop-Cleanup @($n) }
+}
 }
