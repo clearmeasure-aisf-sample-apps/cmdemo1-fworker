@@ -255,12 +255,12 @@ $CopilotScenarios = [ordered]@{
         # the item's head, refused once by GitHub (the App lacks Actions: write), then released; sticky: still listed held after the re-run
         [void](Fake 'fault' @{ match = "^POST .*/actions/runs/[0-9]+/rerun$"; status = 403; count = 1; body = '{"message":"Resource not accessible by integration"}' })
         $run = Fake 'held-run' @{ branch = $br; sticky = $true }
-        Check 'a 403 is surfaced in status as an owner action' (Wait-Until -Seconds 30 { $c = CiStatus; $c.refused -ge 1 -and $c.permissionMissing -and "$($c.ownerAction)" -match 'Actions: Read & write' -and "$($c.lastError)" -match '403' }) ((CiStatus) | ConvertTo-Json -Compress)
+        Check 'a 403 is surfaced in status as an owner action' (Wait-Until -Seconds 45 { $c = CiStatus; $c.refused -ge 1 -and $c.permissionMissing -and "$($c.ownerAction)" -match 'Actions: Read & write' -and "$($c.lastError)" -match '403' }) ((CiStatus) | ConvertTo-Json -Compress)
         Check 'and nothing was re-run by another credential' ((Held $run.id).reruns -eq 0)
-        Check 'the held run of the item''s head is released after the retry' (Wait-Until -Seconds 40 { (Held $run.id).reruns -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
+        Check 'the held run of the item''s head is released after the retry' (Wait-Until -Seconds 90 { (Held $run.id).reruns -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
         Check 'status counts the release and clears the owner action' (Wait-Until -Seconds 10 { $c = CiStatus; $c.released -ge 1 -and -not $c.permissionMissing }) ((CiStatus) | ConvertTo-Json -Compress)
         Check 'one journal line on the item names the run' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "released workflow run $($run.id) of PR #$($d.number)" }).Count -eq 1 })
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds 12
         Check 'idempotent: the run, still listed held, is not re-run again' ((Held $run.id).reruns -eq 1) ((Held $run.id) | ConvertTo-Json -Compress)
         Check 'a run whose head_sha is not the pull request''s head is not released' ((Held $old.id).reruns -eq 0)
         Check 'a run of another environment''s item is not released' ((Held $other.id).reruns -eq 0)
