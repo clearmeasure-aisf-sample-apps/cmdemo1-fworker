@@ -13,6 +13,15 @@ mode, served prompts, `/mcp`, one phase per session) and the Cursor runtime ([cu
 | 4 | Tasks per item | **One task per phase** (Technical Design, Development, Functional Testing) |
 | 5 | Rollout | **tdd only, docs-only items, 30 launches a day**, label `runtime:copilot-cloud` |
 
+## Model (Jeffrey, 2026-10-20)
+
+Auto model selection, for efficiency and low cost. The agent-tasks API has no model parameter that we use: the
+adapter sends none (`api.copilot.model` is empty, pinned by a smoke check), and GitHub uses Auto wherever no model is
+picked. Auto carries a 10% discount on the model multiplier and is not subject to the weekly rate limits. The first
+round trip (2026-10-20, PR cmdemo1-workorders#380) ran on Auto's pick, `gpt-5.3-codex`, and reported its usage as
+`ai_credits`, not tokens. Copilot has no separate cost setting beyond Auto. Never set a premium model here without
+the owner's word.
+
 ## Shape
 
 ```
