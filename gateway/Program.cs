@@ -197,7 +197,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
 // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
 var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : TimingValue(scriptsDir, "sweepMinSeconds", 60));
 builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
-foreach (var rmx in new[] { runtimeManager, cursorManager, copilotManager }.OfType<RuntimeManager>()) builder.Services.AddHostedService(sp =>
+// one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
+// with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
+foreach (var rmx in new[] { runtimeManager, cursorManager, copilotManager }.OfType<RuntimeManager>()) builder.Services.AddSingleton<IHostedService>(sp =>
 {
     var rp = sp.GetRequiredService<Plant>(); var rr = sp.GetRequiredService<Runner>();
     rmx.Plant = rp;
