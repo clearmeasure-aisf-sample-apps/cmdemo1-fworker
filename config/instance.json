@@ -219,7 +219,7 @@
       "bootstrapGeneration": 1,
       "ciRelease": true,
       "ciReleaseSeconds": 120,
-      "maxCreditsPerTask": 3000000000,
+      "maxCreditsPerTask": 0,
       "repository": "clearmeasure-aisf-sample-apps/cmdemo1-workorders",
       "environments": {}
     }
