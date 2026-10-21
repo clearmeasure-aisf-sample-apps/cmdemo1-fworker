@@ -51,6 +51,7 @@
     "url": "https://clearmeasure.octopus.app",
     "space": "Spaces-355",
     "project": "cmdemo1-ui",
+    "prodUrl": "https://ca-cmdemo1-prod-ui-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
     "environments": {
       "tdd": "tdd",
       "uat": "uat",

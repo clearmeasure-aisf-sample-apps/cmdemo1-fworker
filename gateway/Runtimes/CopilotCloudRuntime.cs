@@ -22,6 +22,9 @@ sealed class CopilotCloudSettings
     public double CiReleaseSeconds = 120;
     // the credit guard: a task whose sessions report more ai_credits than this is ended (its r1 revoked) and its item parked credit-guard; 0 = off
     public double MaxCreditsPerTask = 0;
+    // a session refused for the seat's quota stops all starts for quotaRetryMinutes; the next start after that is the probe (it fails in seconds,
+    // spending nothing, while the quota is still exhausted)
+    public double QuotaRetryMinutes = 30;
     public string Environment = "tdd";
     public string ApiUrl = "https://api.github.com", ApiVersion = "2026-03-10", Token = "", GatewayUrl = "", Model = "",
         Repository = "clearmeasure-aisf-sample-apps/cmdemo1-workorders", DefaultBranch = "master";
@@ -44,7 +47,7 @@ sealed class CopilotCloudSettings
             s.MaxConcurrent = (int)D("maxConcurrent", 1); s.MaxExecutionsPerDay = (int)D("maxExecutionsPerDay", 30); s.MaxMinutes = Math.Max(0.1, D("maxMinutes", 60));
             s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.MaxLaunchesPerPhase = (int)D("maxLaunchesPerPhase", 3); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
             s.AckSeconds = D("ackSeconds", 900); s.ListSeconds = Math.Max(1, D("listSeconds", 30)); s.BootstrapGeneration = Math.Max(1, (int)D("bootstrapGeneration", 1));
-            s.MaxCreditsPerTask = D("maxCreditsPerTask", s.MaxCreditsPerTask);
+            s.MaxCreditsPerTask = D("maxCreditsPerTask", s.MaxCreditsPerTask); s.QuotaRetryMinutes = D("quotaRetryMinutes", 30);
             s.ApiUrl = S("apiUrl", s.ApiUrl).TrimEnd('/'); s.ApiVersion = S("apiVersion", s.ApiVersion); s.Token = S("token", "");
             s.GatewayUrl = S("gatewayUrl", "").TrimEnd('/'); s.Model = S("model", "").Trim();
             s.Repository = S("repository", s.Repository).Trim('/'); s.DefaultBranch = S("defaultBranch", s.DefaultBranch);
@@ -74,9 +77,10 @@ sealed class CopilotCloudSettings
         return s;
     }
 
+    public Func<string?>? QuotaBlock;
     public RuntimeLimits Limits(Func<string, int, string, long, string> mint) => new()
     {
-        Kind = "copilot-cloud", Prefix = "cop", IsOn = () => On, MaxConcurrent = MaxConcurrent, MaxExecutionsPerDay = MaxExecutionsPerDay, AckSeconds = AckSeconds,
+        Kind = "copilot-cloud", Prefix = "cop", IsOn = () => On, Blocked = () => QuotaBlock?.Invoke(), MaxConcurrent = MaxConcurrent, MaxExecutionsPerDay = MaxExecutionsPerDay, AckSeconds = AckSeconds,
         MaxFailuresPerPhase = MaxFailuresPerPhase, MaxLaunchesPerPhase = MaxLaunchesPerPhase, UnhealthyAfterFailures = UnhealthyAfterFailures, ListSeconds = ListSeconds,
         TokenSeconds = (long)(MaxMinutes * 60) + 900, MintCredential = mint, RevokeOnEnd = true
     };
@@ -161,6 +165,14 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     public Func<CopilotOwner, Task>? SaveOwner { get; set; }
     // what changed since the last session (the rework or the red checks the item state records), for a follow-up's prompt
     public Func<int, CancellationToken, Task<string>>? WhyResume { get; set; }
+
+    // The seat's quota (Copilot answers a session "You have exceeded your monthly quota"): no start or resume until the retry time; owned items
+    // stay owned and wait. Cleared by the first session that runs.
+    DateTime? quotaSince, quotaRetryAt; string quotaMessage = "";
+    public const string QuotaOwnerAction = "raise the Copilot AI-credit budget / quota for cm-ai-ops-bot (the seat that runs the Copilot cloud agent)";
+    public static bool IsQuotaError(string? m) => m != null && (m.Contains("exceeded your monthly quota", StringComparison.OrdinalIgnoreCase) || m.Contains("insufficient premium", StringComparison.OrdinalIgnoreCase) || m.Contains("quota exceeded", StringComparison.OrdinalIgnoreCase));
+    public string? QuotaBlocked() { lock (tasks) return quotaRetryAt is { } r && DateTime.UtcNow < r ? "quota-exhausted" : null; }
+    public JsonObject QuotaJson() { lock (tasks) { var o = new JsonObject { ["exhausted"] = quotaSince != null, ["since"] = quotaSince?.ToString("o"), ["retryAt"] = quotaRetryAt?.ToString("o"), ["message"] = quotaMessage }; if (quotaSince != null) o["ownerAction"] = QuotaOwnerAction; return o; } }
 
     public CopilotCloudRuntime(CopilotCloudSettings cfg, CopilotCodes codes, Func<int, string, string, ItemPr?, string?, string> prompt, HttpClient? http = null, Func<int, CancellationToken, Task<ItemPr?>>? itemPr = null)
     { this.cfg = cfg; this.codes = codes; this.prompt = prompt; this.itemPr = itemPr; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
@@ -262,9 +274,23 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
             string act; try { act = await Settle(r.Item, "launch", null, ct); } catch (Exception e) { act = "launch"; Console.Error.WriteLine($"copilot: settle of #{r.Item} before launch: {e.GetType().Name}"); }
             if (act == "awaiting") { codes.Forget(r.WorkerName); return new(false, "", "settled"); }
         }
-        ItemPr? pr = null;
-        if (itemPr != null) { try { pr = await itemPr(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); } }
-        var own = await Owner(r.Item, ct);
+        // the item's pull request (none in Technical Design) and its owner record are read side by side: each is a rule-script run, and the
+        // registration window counts from the offer
+        async Task<ItemPr?> ReadPr()
+        {
+            if (itemPr == null || IsTechnicalDesign(r.Phase)) return null;
+            try { return await itemPr(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); return null; }
+        }
+        var prTask = ReadPr(); var ownTask = Owner(r.Item, ct);
+        var pr = await prTask; var own = await ownTask;
+        // an item an earlier gateway ran one task per phase for, with its pull request open: the task whose branch that pull request is on
+        // becomes the owner and is resumed there (no new task, no stacked draft against the item's branch)
+        if (own == null && pr is { Branch.Length: > 0 } && await TaskOfBranch(pr.Branch, ct) is { } adopted)
+        {
+            own = new CopilotOwner { Item = r.Item, TaskId = adopted.Id, Url = adopted.Url, Branch = pr.Branch, Pr = pr.Number, Phase = r.Phase, Sessions = adopted.Sessions, WaitingOn = "adopted" };
+            lock (tasks) { if (owners.TryGetValue(r.Item, out var o0) && !o0.Done) own = o0; else owners[r.Item] = own; }
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "owner-adopted", ["item"] = r.Item, ["task"] = own.TaskId, ["pr"] = pr.Number }.ToJsonString());
+        }
         if (own != null)
         {
             // the owner is resumed on its pull request: the item's open one, else the one on the task's branch
@@ -339,6 +365,21 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         return true;
     }
 
+    // the newest task of the repository whose branch artifact is this branch (the tasks the seat's identity can list), with its session count
+    async Task<(string Id, string Url, int Sessions)?> TaskOfBranch(string branch, CancellationToken ct)
+    {
+        try
+        {
+            var (s, j) = await Send(HttpMethod.Get, $"{TasksPath}?per_page=100", null, ct);
+            if (s != 200) return null;
+            foreach (var t in ((j?["tasks"] as JsonArray) ?? new JsonArray()).OrderByDescending(x => x?["created_at"]?.ToString() ?? "", StringComparer.Ordinal))
+                if (t?["id"]?.ToString() is { Length: > 0 } id && HeadRef(t) == branch)
+                    return (id, HtmlUrl(t), int.TryParse(t["session_count"]?.ToString(), out var sc) && sc > 0 ? sc : 1);
+        }
+        catch (Exception e) { Console.Error.WriteLine($"copilot: tasks of {branch}: {e.GetType().Name}"); }
+        return null;
+    }
+
     // the open pull request on a branch (0: none)
     async Task<int> PrOfBranch(string branch, CancellationToken ct)
     {
@@ -411,6 +452,21 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
                     var mine = t.Session < sessions.Count ? sessions[t.Session] : null;
                     // a follow-up session not listed yet is queued; the task's first session reads as the task when the API lists none
                     var st = mine?["state"]?.ToString() ?? (t.Session == 0 ? j?["state"]?.ToString() ?? "" : "queued");
+                    var err = mine?["error"]?["message"]?.ToString();
+                    var quota = st is "failed" && IsQuotaError(err);
+                    lock (tasks)
+                    {
+                        if (quota)
+                        {
+                            if (quotaSince == null) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-quota-exhausted", ["item"] = t.Item, ["task"] = t.TaskId }.ToJsonString());
+                            quotaSince ??= DateTime.UtcNow; quotaRetryAt = DateTime.UtcNow.AddMinutes(cfg.QuotaRetryMinutes); quotaMessage = (err ?? "").Length > 200 ? err![..200] : err ?? "";
+                        }
+                        else if (quotaSince != null && st is "in_progress" or "completed" && t.Started > quotaSince)
+                        {
+                            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-quota-back", ["item"] = t.Item }.ToJsonString());
+                            quotaSince = null; quotaRetryAt = null; quotaMessage = "";
+                        }
+                    }
                     var usage = Usage(mine != null ? new JsonArray(mine.DeepClone()) : t.Session == 0 ? j?["sessions"] : null);
                     var taskUsage = Usage(j?["sessions"]);
                     // the credit guard: a task over api.copilot.maxCreditsPerTask (all its sessions) ends here (the API has no cancel: its r1 is
@@ -435,7 +491,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
                         t.Fields ??= new JsonArray((j as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>());
                         if (t.Ended == null && !t.Guarded)
                         {
-                            t.Status = st switch { "completed" or "idle" => "Succeeded", "failed" or "timed_out" => "Failed", "cancelled" => "Stopped", _ => "Running" };
+                            t.Status = quota ? "Blocked" : st switch { "completed" or "idle" => "Succeeded", "failed" or "timed_out" => "Failed", "cancelled" => "Stopped", _ => "Running" };
                             if (t.Status != "Running") t.Ended = DateTime.UtcNow;
                         }
                         else if (t.Usage == null) t.Usage = new JsonObject { ["reported"] = false };

@@ -2200,9 +2200,12 @@ if (copilotRuntime != null && copilotManager != null)
     plant.CopilotOwnersSnapshot = copilotRuntime.OwnedJson;
     plant.CopilotOwnersRestore = copilotRuntime.Restore;
     copilotManager.Owned = copilotRuntime.OwnedJson;
+    copilotManager.Quota = copilotRuntime.QuotaJson;
+    copilotSettings.QuotaBlock = copilotRuntime.QuotaBlocked;
     // The owner watch: every api.copilot.ciReleaseSeconds, by the acting gateway, for each owned item with no session running: what it waits on
     // (its checks, the next phase, the merge, master). Done (merged, master green for the merge): the ownership is closed with a comment that
     // links the task. A red master after the merge: the owner task is resumed once per merge commit to fix forward on a new pull request.
+    var ownerChecked = new Dictionary<int, DateTime>();
     _ = Task.Run(async () =>
     {
         var ct = app.Lifetime.ApplicationStopping;
@@ -2210,9 +2213,14 @@ if (copilotRuntime != null && copilotManager != null)
         {
             try { await Task.Delay(TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds), ct); } catch (OperationCanceledException) { return; }
             if (!leader.MayAct || !copilotManager.On) continue;
-            foreach (var o in copilotRuntime.Owners())
+            var owners = copilotRuntime.Owners();
+            foreach (var key in ownerChecked.Keys.Where(ck => owners.All(x => x.Item != ck)).ToList()) ownerChecked.Remove(key);   // items no longer owned
+            foreach (var o in owners)
             {
                 if (copilotRuntime.Running(o.Item)) continue;
+                // one status read per owned item at most every max(30 s, 3 x ciReleaseSeconds): each is a rule-script run, and the runner is shared
+                if (ownerChecked.TryGetValue(o.Item, out var lastCk) && (DateTime.UtcNow - lastCk).TotalSeconds < Math.Max(30, 3 * copilotSettings.CiReleaseSeconds)) continue;
+                ownerChecked[o.Item] = DateTime.UtcNow;
                 try
                 {
                     var j = await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "status" });
@@ -2288,7 +2296,7 @@ copilotPrompt = (item, phase, code, pr, why) =>
             "You own #{item} until it is merged and master is green, but THIS session does only this phase step and then ends: never poll or wait for CI; the gateway watches it and resumes you.\n";
         f = f.Replace("{item}", item.ToString());
         if (why.Trim() != "") f += $"What changed: {why.Trim()}\n";
-        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass, else fix and rerun. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
+        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass (a failing test outside your change that also fails at origin/master does not block: name it in item_complete), else fix and rerun. Push as soon as the gate allows. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
             : phase.Trim().Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? $"Verify PR #{pr.Number} against the item's criteria; change nothing; record the review and the verdict, then session_end.\n"
             : "Do this phase's step only, then session_end.\n";
         var bpf = prompts.ByPath("bootstrap/copilot.md");
@@ -3020,7 +3028,7 @@ const RT_NAMES={'cae-job':'Container Apps jobs','copilot-cloud':'Copilot cloud',
 const rtKinds=r=>Object.keys(r||{}).filter(k=>r[k]&&typeof r[k]==='object'&&'maxConcurrent' in r[k]);
 const sessionLink=x=>{const d=x.detail||{},u=x.sessionUrl||x.session_url||x.url||d.sessionUrl||d.session_url||d.url||'';return /^https:\/\/[\w.-]+\//i.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">session</a>`:'<span class="mut">-</span>'};
 const stPill=s=>{const v=String(s||'').toLowerCase();return `<span class="pill ${/fail|error|refused|unhealthy|cancel/.test(v)?'off':/run|progress|registered|start|queued/.test(v)?'info':/succe|done|complete|ok/.test(v)?'on':''}">${esc(s||'-')}</span>`};
-function refreshRt(r){const ow=(r&&r['copilot-cloud']&&r['copilot-cloud'].owned)||[];$('copown').hidden=!ow.length;$('copownrows').innerHTML=ow.map(o=>`<tr><td>#${esc(o.item)}</td><td>${o.url?`<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.task)}</a>`:esc(o.task)}</td><td>${esc(o.phase)}</td><td>${stPill(o.waitingOn)}</td><td>${o.pr?'#'+esc(o.pr):''}</td><td>${esc(o.sessions)}</td></tr>`).join('');const ci=r&&r['copilot-cloud']&&r['copilot-cloud'].ciRelease;$('cirel').hidden=!ci;if(ci)$('cirel').innerHTML=`Copilot CI release: ${esc(ci.released)} released, ${esc(ci.refused)} refused`+(ci.ownerAction?` <b>Owner action: ${esc(ci.ownerAction)}</b> (${esc(ci.lastError)})`:'');
+function refreshRt(r){const qq=r&&r['copilot-cloud']&&r['copilot-cloud'].quota;const ow=(r&&r['copilot-cloud']&&r['copilot-cloud'].owned)||[];$('copown').hidden=!ow.length;$('copownrows').innerHTML=ow.map(o=>`<tr><td>#${esc(o.item)}</td><td>${o.url?`<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.task)}</a>`:esc(o.task)}</td><td>${esc(o.phase)}</td><td>${stPill(o.waitingOn)}</td><td>${o.pr?'#'+esc(o.pr):''}</td><td>${esc(o.sessions)}</td></tr>`).join('');const ci=r&&r['copilot-cloud']&&r['copilot-cloud'].ciRelease;$('cirel').hidden=!ci&&!(qq&&qq.exhausted);$('cirel').innerHTML=(ci?`Copilot CI release: ${esc(ci.released)} released, ${esc(ci.refused)} refused`+(ci.ownerAction?` <b>Owner action: ${esc(ci.ownerAction)}</b> (${esc(ci.lastError)})`:''):'')+(qq&&qq.exhausted?` <b>Owner action: ${esc(qq.ownerAction)}</b> (Copilot quota exhausted since ${esc(qq.since)}; next try ${esc(qq.retryAt)})`:'');
 const ks=rtKinds(r);$('rtsec').hidden=!ks.length;if(!ks.length)return;
 $('rttext').textContent=ks.map(k=>{const c=r[k];return `${k}: ${c.enabled?'on':'off'}, ${c.running} of ${c.maxConcurrent} running, ${c.today} of ${c.maxExecutionsPerDay} today, ${c.healthy?'healthy':'UNHEALTHY: '+c.unhealthyReason}`}).join(' | ');
 let h='';for(const k of ks){const c=r[k],ex=c.executions||[],la=c.last||[];h+=`<tr class="grp"><th colspan="6">${esc(RT_NAMES[k]||k)} <span class="pill ${!c.enabled?'':c.healthy?'on':'off'}">${!c.enabled?'off':c.healthy?'healthy':'unhealthy'}</span> <span class="mut">${esc(c.running)}/${esc(c.maxConcurrent)} running, ${esc(c.today)}/${esc(c.maxExecutionsPerDay)} today</span></th></tr>`;

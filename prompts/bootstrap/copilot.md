@@ -42,6 +42,11 @@ Changes to the phase prompt for this runtime (they win over it):
   `pwsh src/AcceptanceTests/bin/Debug/net10.0/playwright.ps1 install`, then `dotnet test src/AcceptanceTests --configuration Debug`). Push
   only when both pass; otherwise fix and run them again. Report both results tersely in `item_complete`'s comment (for example "private
   build: pass (N tests); acceptance: pass (N tests)").
+  Only failures the change causes block the push: a failing test outside the change's files that also fails at `origin/master` (run it
+  once there) is not yours; push anyway and name it in `item_complete` ("unrelated failure at master: <test>"). Push as soon as the gate
+  allows: an unpushed commit is lost when the session ends, and the next session of this task starts from the pushed branch.
+  Before and after each long step (the private build, the acceptance tests) call `item_get` for your item: a cheap call that tells the
+  gateway the session is alive.
 - Development, the end: after the push and `pr_open`, call `item_complete` once. Whatever it answers about the checks (pending, running,
   `accepted-checks-pending`, red), your work is done: call `session_end` and end the task. Do not report a failure because checks are
   pending or a gateway tool refused after `pr_open` succeeded; the gateway completes Development from your pull request.
