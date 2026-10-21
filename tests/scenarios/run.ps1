@@ -115,9 +115,9 @@ $SuiteDefs = @(
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; idleGraceSeconds = 2; usageRetrySeconds = 0.5; usageWaitSeconds = 20; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
     # the Copilot cloud agent (copilot.ps1, docs/design/copilot-cloud-agent.md): the fake agent tasks API, a 0.25-minute deadline, a 20 s window
-    @{ Name = 'copilot'; Policy = 'auto'; Set = $CopilotScenarios; Env = 'copilot'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
+    @{ Name = 'copilot'; Policy = 'auto'; Set = $CopilotScenarios; Env = 'copilot'; DefaultEnvLabel = 'env:tdd'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
-            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
+            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 10; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
             # cmdemo1's default runtime: an item without a runtime: label goes to the Copilot cloud agent
             runtimes = @{ preferConnected = $true; routing = @(@{ phase = '*'; runtime = 'copilot-cloud' }) } } }
     # the env: label (envscope.ps1, environment-test-factories.md 3): the suite's gateway is tdd with scoping on, its scenario starts a uat one
@@ -200,7 +200,7 @@ function Get-SuiteEnv([string]$Kind) {
         # the cursor suite: owner mode and the key of the fake Cursor API (CURSOR_API_KEY, as the deployed gateway reads it)
         'cursor' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; CURSOR_API_KEY = 'fake-cursor' } }
         # the copilot suite: owner mode and the token of the fake agent tasks API (COPILOT_TASKS_TOKEN, as the deployed gateway reads it)
-        'copilot' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; COPILOT_TASKS_TOKEN = 'fake-copilot' } }
+        'copilot' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; COPILOT_TASKS_TOKEN = 'fake-copilot' } }
         'envscope' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_LEADER_LEASE = '0' } }
         'runtime' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_TEST_ARM_TOKEN = 'fake-arm' } }
         'qc' {
@@ -250,7 +250,7 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
 function Invoke-SuiteDef($Def) {
     $script:SuiteName = $Def.Name
     $script:UseClientHost = $Def.ContainsKey('ClientHost') -and [bool]$Def.ClientHost
-    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
+    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; $script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
     foreach ($k in $envs.Keys) { Set-Item "Env:$k" ([string]$envs[$k]) }
     foreach ($k in $timing.Keys) { Set-Item "Env:FACTORY_TIMING_$k" ([string]$timing[$k]) }
     try { Run-Suite $Def.Policy $Def.Set $(if ($Def.ContainsKey('Extra')) { $Def.Extra } else { @{} }) }

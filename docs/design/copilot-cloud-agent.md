@@ -41,6 +41,32 @@ the owner's word.
   comment and deletes its branch. Extra `copilot/*` drafts against the item's branches are closed with their branches.
 - At most `api.copilot.maxLaunchesPerPhase` (3) executions of one item in one phase in a row, however each ended; then the item is parked.
 
+## CI release (Jeffrey, 2026-10-20: "Build it, no file guard")
+
+GitHub puts the workflow runs that a push of the Copilot cloud agent triggers into `action_required`. `POST /actions/runs/{id}/approve`
+refuses them ("not from a fork pull request or queued by the Actions bot"); a re-run by an identity with write access starts them. The
+gateway does that itself, so development flows without a person (merging green pull requests under `Auto Merge` it already does).
+
+- **When**: every `api.copilot.ciReleaseSeconds` (120), by the acting gateway (leader lease), while the Copilot mode is on and
+  `api.copilot.ciRelease` is true (the default, source and deployed; smoke pins it). REST only: one list call per pass; the item reads only
+  when a held `copilot/*` run exists.
+- **Candidates** (`Plant.CopilotItems`): the items labelled `runtime:copilot-cloud` that the sweep read (only this gateway's `env:` scope) and
+  the items the Copilot adapter ran a task for since the process started.
+- **Rule** (verb `ci-release`, `Verbs.Pr.ps1`; the gateway's own, refused over HTTP): `GET actions/runs?status=action_required`, runs whose
+  `head_branch` is `copilot/*`. A run is released only when its item is open, in this gateway's env scope (`Get-ItemInfo`), carries no other
+  `runtime:` label, and the item's pull request (`Find-ItemPr`, the head recorded by `pr_open`) has that branch and the run's `head_sha` as
+  its head. Anything else is skipped (`head-mismatch`, `no-item`, `out-of-scope`, `other-runtime`).
+- **No file guard**: the owner's decision. A held run is released whatever files the push changed (workflow files included); the guard is
+  the item, scope and head match above, and the review and merge gates that follow.
+- **Release**: `POST actions/runs/{id}/rerun` with the gateway's GitHub App installation token (factory-worker-author). Never another
+  credential. A 403 that is not a rate limit counts as `refused`, is retried for that run after 5 passes (at least 10 s), and shows in
+  `/api/v1/status` → `runtimes."copilot-cloud".ciRelease` (`released`, `refused`, `lastError`, `permissionMissing`, `ownerAction`) and on the
+  dashboard as the owner action "grant factory-worker-author App Actions: Read & write".
+- **Once**: a released run id is never re-run again (kept in the process, passed to the verb as `skip`); a run already re-run by someone
+  else is no longer `action_required` and is not listed. One journal line `ci-released` per release on the item (key: the run id).
+- Tier 1: suite `copilot`, scenario "CI release" (in scope released once, head mismatch and another env's item skipped, 403 surfaced,
+  idempotent), against `held-run` of the fake GitHub.
+
 ## Shape
 
 ```

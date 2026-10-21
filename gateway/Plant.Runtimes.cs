@@ -21,6 +21,16 @@ sealed partial class Plant
     RuntimeManager? RuntimeFor(string kind) => kind == "cae-job" ? Runtimes : kind == "cursor-cloud" ? Cursor : kind == "copilot-cloud" ? Copilot : null;
     readonly HashSet<(int, string)> parkQueued = new();
 
+    // The CI release's candidates (CopilotCiRelease.cs): the items labelled runtime:copilot-cloud (the sweep reads only this gateway's env scope)
+    // and the items the Copilot adapter ran a task for. The rule verb checks scope, state and pull request head again.
+    public int[] CopilotItems()
+    {
+        if (Copilot == null) return Array.Empty<int>();
+        var s = Copilot.ItemsSeen();
+        lock (gate) foreach (var kv in runtimeLabels) if (kv.Value?.ToString() == "copilot-cloud" && int.TryParse(kv.Key, out var i)) s.Add(i);
+        return s.Order().ToArray();
+    }
+
     double AckFor(string name) => RuntimeOf(name)?.AckSeconds ?? ackSeconds;
     bool RuntimeWorker(WorkerInfo w) => w.Runtime != "local";
 
