@@ -83,6 +83,12 @@ $CursorScenarios = [ordered]@{
     } finally { Cur-Cleanup @($n) }
 }
 
+}
+
+# The deadline has its own suite ('cursor-deadline', api.cursor.maxMinutes 0.25): in 'cursor' it would end the agent of any scenario that runs over
+# 15 s on a loaded runner, so that suite keeps a generous maxMinutes.
+$CursorDeadlineScenarios = [ordered]@{
+
 'cursor: a failed launch frees the slot and the item gets a new agent; an agent past api.cursor.maxMinutes is cancelled and deleted' = {
     $n = 0
     try {
