@@ -105,7 +105,7 @@ sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE",
 // A task of the fake agent tasks API (docs/design/copilot-cloud-agent.md): its id, the body as sent, the API version header, its state.
 // Its sessions: the first is the task's own; a @copilot comment on the task's pull request (its head branch is the task's) adds one, as GitHub
 // starts a follow-up session on the same pull request. The task's state is its last session's.
-sealed class CopilotSession { public string State = "queued", Prompt = "", Branch = ""; public int Pr; public double? Premium, Credits; public DateTime Created = DateTime.UtcNow; }
+sealed class CopilotSession { public string? Error; public string State = "queued", Prompt = "", Branch = ""; public int Pr; public double? Premium, Credits; public DateTime Created = DateTime.UtcNow; }
 sealed class CopilotTask
 {
     public string Id = "", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public string? HeadRef;
@@ -132,6 +132,7 @@ sealed class World
             copilotTasks.Add(t);
             return (201, CopilotJson(t));
         }
+        if (!m.Groups[3].Success && method == "GET") return (200, J(("tasks", new JsonArray(copilotTasks.Select(x => (JsonNode)CopilotJson(x)).ToArray()))));
         var task = copilotTasks.FirstOrDefault(x => x.Id == m.Groups[4].Value);
         if (task == null) return (404, "{\"message\":\"Not Found\"}");
         if (method == "GET") { task.Reads++; return (200, CopilotJson(task)); }
@@ -140,7 +141,7 @@ sealed class World
     static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("html_url", "https://github.com" + Regex.Replace(t.Path, "^/agents/repos", "") + "/" + t.Id), ("session_count", t.Sessions.Count),
         ("artifacts", t.HeadRef == null ? new JsonArray() : new JsonArray(J(("provider", "github"), ("type", "branch"), ("data", J(("base_ref", "master"), ("head_ref", t.HeadRef)))))), ("created_at", t.Sessions[0].Created.ToString("o")),
         ("sessions", new JsonArray(t.Sessions.Select((x, k) => (JsonNode)(x.Premium is { } p ? J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("usage", J(("type", "premium_requests"), ("amount", p))))
-            : x.Credits is { } cr ? J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("usage", J(("type", "ai_credits"), ("amount", cr)))) : J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o"))))).ToArray())));
+            : x.Credits is { } cr ? J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("usage", J(("type", "ai_credits"), ("amount", cr)))) : J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("error", x.Error == null ? null : J(("code", "unclassified"), ("message", x.Error)))))).ToArray())));
     // one row per session: the task's first is the task id (its body as sent), a follow-up "<task>#<n>" (body: its prompt, via comment, the pull request)
     JsonObject CopilotState() => J(("tasks", new JsonArray(copilotTasks.SelectMany(t => t.Sessions.Select((x, k) => (JsonNode)J(("id", k == 0 ? t.Id : $"{t.Id}#{k}"), ("task", t.Id), ("session", k), ("via", k == 0 ? "task" : "comment"), ("pr", x.Pr), ("state", x.State), ("reads", t.Reads), ("apiVersion", t.ApiVersion), ("path", t.Path),
         ("body", k == 0 ? t.Body.DeepClone() : J(("prompt", x.Prompt), ("base_ref", x.Branch), ("create_pull_request", false)))))).ToArray())));
@@ -837,7 +838,7 @@ sealed class World
                 var sid = b?["id"]?.ToString() ?? ""; var sk = sid.IndexOf('#'); var tid = sk < 0 ? sid : sid[..sk];
                 var t = copilotTasks.LastOrDefault(x => x.Id == tid); if (t == null) return (404, J(("ok", false)));
                 var se = sk < 0 ? t.Last : int.TryParse(sid[(sk + 1)..], out var sn) && sn < t.Sessions.Count ? t.Sessions[sn] : null; if (se == null) return (404, J(("ok", false)));
-                if (b?["state"] is { } st) se.State = st.ToString(); if (b?["premium"] is { } pr) se.Premium = pr.GetValue<double>(); if (b?["credits"] is { } crd) se.Credits = crd.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString();
+                if (b?["state"] is { } st) se.State = st.ToString(); if (b?["premium"] is { } pr) se.Premium = pr.GetValue<double>(); if (b?["credits"] is { } crd) se.Credits = crd.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString(); if (b?["error"] is { } er) se.Error = er.ToString();
                 return (200, J(("ok", true)));
             }
             case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; return (200, J(("ok", true)));
