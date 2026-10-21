@@ -67,9 +67,12 @@ gateway does that itself, so development flows without a person (merging green p
   `/api/v1/status` → `runtimes."copilot-cloud".ciRelease` (`released`, `refused`, `lastError`, `permissionMissing`, `ownerAction`) and on the
   dashboard as the owner action "grant factory-worker-author App Actions: Read & write".
 - **Once**: a released run id is never re-run again (kept in the process, passed to the verb as `skip`); a run already re-run by someone
-  else is no longer `action_required` and is not listed. One journal line `ci-released` per release on the item (key: the run id).
-- Tier 1: suite `copilot`, scenario "CI release" (in scope released once, head mismatch and another env's item skipped, 403 surfaced,
-  idempotent), against `held-run` of the fake GitHub.
+  else is no longer `action_required` and is not listed. A successful release is routine (the same session that opened the pull request merges it once green) and posts **no issue
+  comment**: it is recorded in the item's state (`journal.ciReleased`, the last 20 lines, in the edited-in-place factory-state comment),
+  in `/api/v1/status` (`released`, `lastRelease`) and as a gateway log line. An issue comment (`ci-release-refused`, once per run id) is
+  posted only when a release needs a person: the 403, worded as the owner action "grant factory-worker-author App Actions: Read & write".
+- Tier 1: suite `copilot`, scenario "CI release" (in scope released once with no comment, head mismatch and another env's item skipped, 403 surfaced
+  with one comment, idempotent), against `held-run` of the fake GitHub.
 
 ## Shape
 

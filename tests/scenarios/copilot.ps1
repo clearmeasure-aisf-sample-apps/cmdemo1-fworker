@@ -270,7 +270,9 @@ $CopilotScenarios = [ordered]@{
         Check 'and nothing was re-run by another credential' ((Held $run.id).reruns -eq 0)
         Check 'the held run of the item''s head is released after the retry' (Wait-Until -Seconds 120 { (Held $run.id).reruns -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
         Check 'status counts the release and clears the owner action' (Wait-Until -Seconds 10 { $c = CiStatus; $c.released -ge 1 -and -not $c.permissionMissing }) ((CiStatus) | ConvertTo-Json -Compress)
-        Check 'one journal line on the item names the run' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "released workflow run $($run.id) of PR #$($d.number)" }).Count -eq 1 })
+        Check 'a 403 posts one neutral owner-action comment on the item' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "owner action: the gateway could not release workflow run $($run.id)" }).Count -eq 1 })
+        Check 'the successful release posts no issue comment' (@((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'GitHub held it|released workflow run' }).Count -eq 0) ((Get-FakeIssue $n).comments | ConvertTo-Json -Compress -Depth 3)
+        Check 'the release is recorded in the item state and the log' ((Wait-Until -Seconds 30 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"result`":`"released`",`"run`":$($run.id)").Count -gt 0 }) -and (CiStatus).lastRelease)
         Start-Sleep -Seconds 25
         Check 'idempotent: the run, still listed held, is not re-run again' ((Held $run.id).reruns -eq 1) ((Held $run.id) | ConvertTo-Json -Compress)
         Check 'a run whose head_sha is not the pull request''s head is not released' ((Held $old.id).reruns -eq 0)

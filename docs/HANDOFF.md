@@ -245,7 +245,7 @@ reports premium requests per session, not tokens.
 
 **CI release (2026-10-20, owner: "Build it, no file guard")**: GitHub holds the workflow runs of a Copilot agent's push in
 `action_required` and refuses `approve` for them. The gateway re-runs such a run (`POST actions/runs/{id}/rerun`, its App token) when it is
-on a `copilot/*` branch whose open, in-scope item's pull request has that head; once per run id, one `ci-released` journal line each, every
+on a `copilot/*` branch whose open, in-scope item's pull request has that head; once per run id, one state record (no issue comment) each, every
 `api.copilot.ciReleaseSeconds` (120). No file guard. Status: `/api/v1/status` → `runtimes."copilot-cloud".ciRelease`. A 403 there
 (`permissionMissing`, owner action on the dashboard) means the owner step: org settings → GitHub Apps → factory-worker-author →
 Permissions → Actions: Read & write → accept the change on the installation. Design: `docs/design/copilot-cloud-agent.md`, "CI release".
