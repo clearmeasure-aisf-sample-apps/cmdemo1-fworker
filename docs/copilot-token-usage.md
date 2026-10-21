@@ -76,3 +76,10 @@ Findings: the cost is in tasks that wait (CI polling, sleeps) or redo work (a re
 after their tool call cost 0.4–2B. The gateway now owns Development's end (no CI waiting in the agent, no relaunch of an item whose pull
 request carries the change) and the credit guard parks a task over 10B. An FT task that passed 10B in about 90 s (#394, a343833d) is not
 explained by the agent's own turns; open point: read its run log.
+
+## Model and credit guard (Jeffrey, 2026-10-21)
+
+Copilot stays on plain Auto. Auto picked the premium `gpt-6.1-sol` for #394's Functional Testing task (a343833d: 22,470,780,000
+raw ai_credits in 3 min 22 s, against 0.4–2 × 10^9 for tasks on `gpt-5.3-codex`). The owner chose "Auto, lower guard": the
+per-task guard `api.copilot.maxCreditsPerTask` is 3 × 10^9 raw ai_credits (was 10 × 10^9). The task API reports a raw `amount` of
+type `ai_credits`, not tokens; GitHub documents no scale, so the figures here are relative until the Copilot billing page calibrates them.
