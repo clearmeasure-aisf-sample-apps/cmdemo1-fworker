@@ -74,7 +74,8 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
             if ($F.ContainsKey('conflict') -and $F.conflict) { return "the pull request has a merge conflict with master (``$($F.sha7)``); told the owner (**$($F.worker)**) to merge master into the branch and resolve it: $($F.behind) commit(s) behind$(if ($F.ContainsKey('overlap') -and $F.overlap) { ", files changed on both sides: $($F.overlap)" })." }
             return "master moved to ``$($F.sha7)``$(if ($F.ContainsKey('prs') -and $F.prs) { " (merged: $($F.prs))" }); told the owner (**$($F.worker)**) to merge master into the branch now: $($F.behind) commit(s) behind$(if ($F.ContainsKey('overlap') -and $F.overlap) { ", files changed on both sides: $($F.overlap)" })."
         }
-        'ci-released' { return "the gateway released workflow run $($F.run) of PR #$($F.pr) (head ``$($F.sha7)``, branch ``$($F.branch)``): GitHub held it in action_required because the Copilot cloud agent pushed it; re-run with the gateway's App." }
+        'ci-released' { return "released workflow run $($F.run) of PR #$($F.pr) (head ``$($F.sha7)``, branch ``$($F.branch)``)." }
+        'ci-release-refused' { return "owner action: the gateway could not release workflow run $($F.run) of PR #$($F.pr) (GitHub answered $($F.status)): grant the factory-worker-author App Actions: Read & write. It retries by itself once that is granted." }
         'branch-updated' { return "the gateway merged master into the branch of PR #$($F.pr) (GitHub's update branch: no conflict, the owner had not updated it within $($F.seconds) s)." }
         'gap-renewed' { return "the lease of **$($F.worker)** ran out at $($F.lapsed) while no gateway was running (down since $($F.since)); renewed for $($F.minutes) min instead of offering the item again." }
         'lease-expired' { return "the gateway ended the lease of **$($F.worker)** ($($F.reason)); the item is offered again in resume mode." }
@@ -198,7 +199,7 @@ function Get-JournalKeys($State) { if (Test-Has $State 'journal') { return @($St
 # Admin verb: the gateway journals the decisions it makes itself (matched, offered, reassigned, waiting, skipped).
 function Verb_journal($a) {
     $n = Get-ItemNumber $a; $ev = "$(Need $a 'event')"
-    if ($ev -notin 'matched', 'offered', 'launched', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated', 'base-updated', 'branch-updated', 'keeper-action', 'manager-action', 'pin-fallback', 'ci-released') { Reject 2 'usage' "unknown journal event '$ev'" }
+    if ($ev -notin 'matched', 'offered', 'launched', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated', 'base-updated', 'branch-updated', 'keeper-action', 'manager-action', 'pin-fallback', 'ci-released', 'ci-release-refused') { Reject 2 'usage' "unknown journal event '$ev'" }
     $f = @{}; if (Test-Has $a 'fields') { foreach ($k in $a.fields.Keys) { $f[$k] = $a.fields[$k] } }
     # a 'waiting' note is rate-limited: at most one per timing.journalWaitingMinutes (30) per item
     if ($ev -eq 'waiting') {
@@ -211,6 +212,22 @@ function Verb_journal($a) {
         return @{ ok = $true; id = $n; posted = $posted }
     }
     $key = if (Test-Has $a 'key') { "$($a.key)" } else { [string](Get-UtcNow).Ticks }
+    # a routine release is machine-read state only (journal.ciReleased, last 20): no issue comment
+    if ($ev -eq 'ci-released') {
+        $f.item = $n; $line = Limit-JournalLine (Protect-JournalText (Get-JournalText $ev $f))
+        $rec = Use-ItemLock $n {
+            $st = Get-State $n; $s = $st.state
+            if (-not (Test-Has $s 'journal')) { $s.journal = @{ keys = @(); count = 0 } }
+            $k = "$ev|$key"
+            if (@($s.journal.keys) -contains $k) { return $false }
+            $s.journal.keys = @(@($s.journal.keys) + $k | Select-Object -Last 200); $s.journal.count = [int]$s.journal.count + 1
+            $prev = if (Test-Has $s.journal 'ciReleased') { @($s.journal.ciReleased) } else { @() }
+            $s.journal.ciReleased = @($prev + @("$(Get-JournalStamp (Get-UtcNow)) $line") | Select-Object -Last 20)
+            [void](Add-JournalKind $s.journal $ev (ConvertTo-Iso (Get-UtcNow)))
+            [void](Save-State $n $st); $true
+        }
+        return @{ ok = $true; id = $n; posted = $false; recorded = ($rec -eq $true) }
+    }
     $posted = Add-Journal $n $null $ev $f $key
     return @{ ok = $true; id = $n; posted = $posted }
 }
