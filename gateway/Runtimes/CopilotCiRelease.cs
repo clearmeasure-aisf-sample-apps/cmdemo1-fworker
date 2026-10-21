@@ -14,7 +14,6 @@ sealed class CopilotCiRelease
     readonly HashSet<string> handledSet = new(StringComparer.Ordinal);
     readonly Dictionary<string, DateTime> refusedAt = new(StringComparer.Ordinal);
     readonly HashSet<string> refusedIds = new(StringComparer.Ordinal);   // distinct runs refused (the refused count)   // run id -> last 403: tried again after RefusedRetry
-    readonly HashSet<string> journaledRefusals = new();
     int released, refused, passes, failedPasses, pending;
     string lastError = "", lastPass = "", lastRelease = "";
     bool permissionMissing;
@@ -71,8 +70,6 @@ sealed class CopilotCiRelease
                 {
                     if (refusedIds.Add(id)) refused++;
                     refusedAt[id] = DateTime.UtcNow; permissionMissing = true;
-                    var ritem = r!["item"]?.GetValue<int>() ?? 0;
-                    if (ritem > 0 && journaledRefusals.Add(id)) toJournal.Add((ritem, new JsonObject { ["run"] = id, ["pr"] = r["pr"]?.GetValue<int>() ?? 0, ["status"] = r["status"]?.ToString() ?? "403", ["refused"] = true }, id));
                     lastError = $"run {id}: 403 {r!["message"]}".Trim();
                     Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-ci-release", ["result"] = "refused", ["run"] = id, ["status"] = r["status"]?.DeepClone(), ["message"] = r["message"]?.DeepClone() }.ToJsonString());
                 }
