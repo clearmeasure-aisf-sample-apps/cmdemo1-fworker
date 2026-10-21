@@ -12,12 +12,14 @@ using System.Text.Json.Nodes;
 sealed class CursorCloudSettings
 {
     public bool Enabled;
-    public int MaxConcurrent = 1, MaxExecutionsPerDay = 10, MaxFailuresPerPhase = 2, UnhealthyAfterFailures = 2;
+    public int MaxConcurrent = 1, MaxExecutionsPerDay = 10, MaxFailuresPerPhase = 2, MaxLaunchesPerPhase = 3, UnhealthyAfterFailures = 2;
     public double MaxMinutes = 60;
     public double AckSeconds = 900, ListSeconds = 30, IdleGraceSeconds = 60;
     // Cursor's usage of an agent reads all zeros for a while after its run ends (live runs 371, 372 of 2026-10-17): the delete waits for a
     // non-zero read, re-reading after UsageRetrySeconds and doubling, at most UsageWaitSeconds after the end
     public double UsageRetrySeconds = 10, UsageWaitSeconds = 300;
+    // the owner watch (Program.cs StartOwnerWatch): what each owned item waits on, read at most every 3 x this
+    public double OwnerWatchSeconds = 120;
     // Model "auto": Cursor's Auto model (owner decision 2026-10-17, cost first); the adapter resolves it against GET /v1/models once and never
     // falls back to the account's default (which may be a premium model): a launch with a model Cursor refuses fails visibly instead
     public string Environment = "tdd", OptimizeFor = "cost";
@@ -40,9 +42,9 @@ sealed class CursorCloudSettings
             string S(string k, string d) => c[k] is JsonValue sv && sv.TryGetValue<string>(out var str) ? str : d;
             s.Enabled = c["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var eb) && eb;
             s.MaxConcurrent = (int)D("maxConcurrent", 1); s.MaxExecutionsPerDay = (int)D("maxExecutionsPerDay", 10); s.MaxMinutes = Math.Max(0.1, D("maxMinutes", 60));
-            s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
+            s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.MaxLaunchesPerPhase = (int)D("maxLaunchesPerPhase", 3); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
             s.AckSeconds = D("ackSeconds", 900); s.ListSeconds = Math.Max(1, D("listSeconds", 30)); s.IdleGraceSeconds = D("idleGraceSeconds", 60);
-            s.UsageRetrySeconds = Math.Max(0.5, D("usageRetrySeconds", 10)); s.UsageWaitSeconds = D("usageWaitSeconds", 300);
+            s.UsageRetrySeconds = Math.Max(0.5, D("usageRetrySeconds", 10)); s.UsageWaitSeconds = D("usageWaitSeconds", 300); s.OwnerWatchSeconds = Math.Max(1, D("ownerWatchSeconds", 120));
             s.ApiUrl = S("apiUrl", s.ApiUrl).TrimEnd('/'); s.ApiKey = S("apiKey", ""); s.GatewayUrl = S("gatewayUrl", "").TrimEnd('/'); s.Model = S("model", "auto").Trim(); if (s.Model == "") s.Model = "auto";
             var of = S("optimizeFor", "cost"); s.OptimizeFor = of is "cost" or "balanced" or "intelligence" ? of : "cost";
             s.Repository = S("repository", s.Repository); s.DefaultBranch = S("defaultBranch", s.DefaultBranch);
@@ -67,34 +69,90 @@ sealed class CursorCloudSettings
     public RuntimeLimits Limits(Func<string, int, string, long, string> mint) => new()
     {
         Kind = "cursor-cloud", Prefix = "cur", IsOn = () => On, MaxConcurrent = MaxConcurrent, MaxExecutionsPerDay = MaxExecutionsPerDay, AckSeconds = AckSeconds,
-        MaxFailuresPerPhase = MaxFailuresPerPhase, UnhealthyAfterFailures = UnhealthyAfterFailures, ListSeconds = ListSeconds,
+        MaxFailuresPerPhase = MaxFailuresPerPhase, MaxLaunchesPerPhase = MaxLaunchesPerPhase, UnhealthyAfterFailures = UnhealthyAfterFailures, ListSeconds = ListSeconds,
         // the r1 expires 15 minutes after the deadline (agents-roles-launch.md 4)
         TokenSeconds = (long)(MaxMinutes * 60) + 900, MintCredential = mint, RevokeOnEnd = true
     };
 }
 
-sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
+// The owner of an item (Jeffrey 2026-10-21, as for Copilot: CopilotOwner): ONE Cursor agent owns the item from its first launch until the change is
+// in production. Every later phase, fix-forward and rework is a follow-up run of that agent (POST /v1/agents/{id}/runs, with a fresh r1 in its
+// mcpServers), so the agent keeps its conversation and workspace. Between runs no run is active and the gateway watches CI, the merge and the
+// release; the agent is deleted only when the ownership closes. The durable record is the item state's copilot_task with runtime cursor-cloud.
+sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
 {
-    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool Deleted, ModelLogged, Cancelled; public DateTime? NextUsageRead; public double UsageBackoff; public int UsageReads; public JsonNode? Model, ReportedModel, Usage, UsageShape; public JsonArray? Fields, RunFields; public int UsageStatus; }
+    sealed class Agent { public string Id = "", RunId = "", Worker = "", Phase = ""; public int Item; public bool FollowUp, Kept; public string Url = ""; public DateTime Started = DateTime.UtcNow; public string Status = "Running"; public DateTime? Ended, IdleSince; public bool ModelLogged, Cancelled; public DateTime? NextUsageRead; public double UsageBackoff; public int UsageReads; public JsonNode? Model, ReportedModel, Usage, UsageShape; public JsonArray? Fields, RunFields; public int UsageStatus; }
 
     readonly CursorCloudSettings cfg;
     readonly HttpClient http;
-    readonly Func<int, string, string> prompt;   // item, phase -> the bootstrap text
+    readonly Func<int, string, string?, string> prompt;   // item, phase, why (null: a new agent; else a follow-up run, with what changed) -> the text
+    readonly Dictionary<int, CopilotOwner> owners = new();
+    // the durable record of the owner (rule verb copilot-owner, runtime cursor-cloud): load (null: none), save
+    public Func<int, CancellationToken, Task<CopilotOwner?>>? LoadOwner { get; set; }
+    public Func<CopilotOwner, Task>? SaveOwner { get; set; }
+    public Func<int, CancellationToken, Task<string>>? WhyResume { get; set; }
+    // the gateway's completion of Development (rule verb copilot-settle) before a launch: "awaiting" means the item's pull request waits for its checks
+    public Func<int, string, string?, CancellationToken, Task<string>>? Settle { get; set; }
     readonly Dictionary<string, Agent> agents = new(StringComparer.Ordinal);   // by worker name
     bool swept;   // the agents a former process left behind were looked for (first List)
     JsonObject? model;   // the resolved model selection (Model "auto" resolved against GET /v1/models)
     // agent names carry the environment, so a key shared by two gateways never lets one delete the other's agents
     string Prefix => $"fworker-{cfg.Environment}-";
 
-    public CursorCloudRuntime(CursorCloudSettings cfg, Func<int, string, string> prompt, HttpClient? http = null)
+    public CursorCloudRuntime(CursorCloudSettings cfg, Func<int, string, string?, string> prompt, HttpClient? http = null)
     { this.cfg = cfg; this.prompt = prompt; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
 
     public string Kind => "cursor-cloud";
 
+    // ---- the owners -----------------------------------------------------------------------------------------------------------------------------
+    public bool Owns(int item) { lock (agents) return owners.TryGetValue(item, out var o) && !o.Done; }
+    public CopilotOwner? OwnerOf(int item) { lock (agents) return owners.TryGetValue(item, out var o) && !o.Done ? o : null; }
+    public List<CopilotOwner> Owners() { lock (agents) return owners.Values.Where(o => !o.Done).OrderBy(o => o.Item).ToList(); }
+    public bool Running(int item) { lock (agents) return agents.Values.Any(a => a.Item == item && a.Ended == null); }
+    public void Adopt(CopilotOwner o) { lock (agents) if (!owners.TryGetValue(o.Item, out var cur) || cur.Done) owners[o.Item] = o; }
+    public void Waiting(int item, string column, string waitingOn) { lock (agents) if (owners.TryGetValue(item, out var o)) { if (column != "") o.Phase = column; o.WaitingOn = waitingOn; o.Updated = DateTime.UtcNow; } }
+    public void SetPr(int item, int pr, string branch = "") { lock (agents) if (owners.TryGetValue(item, out var o)) { if (pr > 0) o.Pr = pr; if (System.Text.RegularExpressions.Regex.IsMatch(branch, @"^[A-Za-z0-9._/-]{1,200}\z")) o.Branch = branch; o.Updated = DateTime.UtcNow; } }
+    public JsonArray OwnedJson() { lock (agents) return new JsonArray(owners.Values.Where(o => !o.Done).OrderBy(o => o.Item).Select(o => { var j = o.Json(); j["agent"] = o.TaskId; if (agents.Values.Any(a => a.Item == o.Item && a.Ended == null)) j["waitingOn"] = "run"; return (JsonNode)j; }).ToArray()); }
+    // the ownership ends (in production, or the item closed). The agent is never deleted (owner 2026-10-21): its transcript stays readable at its url
+    public Task CloseOwner(int item)
+    {
+        CopilotOwner? o; lock (agents) { owners.TryGetValue(item, out o); if (o != null) { o.Done = true; o.WaitingOn = "done"; owners.Remove(item); } }
+        if (o != null) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-owner-closed", ["item"] = item, ["agent"] = o.TaskId, ["url"] = o.Url }.ToJsonString());
+        return Task.CompletedTask;
+    }
+    // the owners of a plant snapshot: only plausible values; the item state stays the truth
+    public void Restore(JsonArray a)
+    {
+        foreach (var n in a)
+        {
+            if (n is not JsonObject j || !int.TryParse(j["item"]?.ToString(), out var item) || item <= 0 || item > 9_999_999) continue;
+            var id = j["task"]?.ToString() ?? ""; if (!System.Text.RegularExpressions.Regex.IsMatch(id, @"^[A-Za-z0-9-]{1,80}\z")) continue;
+            var br = j["branch"]?.ToString() ?? ""; if (!System.Text.RegularExpressions.Regex.IsMatch(br, @"^[A-Za-z0-9._/-]{0,200}\z")) br = "";
+            Adopt(new CopilotOwner { Item = item, TaskId = id, Branch = br, Pr = int.TryParse(j["pr"]?.ToString(), out var p) && p > 0 ? p : 0, Phase = j["phase"]?.ToString() ?? "", WaitingOn = "restored", Sessions = int.TryParse(j["sessions"]?.ToString(), out var ss) && ss > 0 ? ss : 1 });
+        }
+    }
+    async Task<CopilotOwner?> Owner(int item, CancellationToken ct)
+    {
+        lock (agents) if (owners.TryGetValue(item, out var o) && !o.Done) return o;
+        if (LoadOwner == null) return null;
+        CopilotOwner? l = null; try { l = await LoadOwner(item, ct); } catch (Exception e) { Console.Error.WriteLine($"cursor: owner of #{item}: {e.GetType().Name}"); }
+        if (l == null) return null;
+        lock (agents) { if (owners.TryGetValue(item, out var o2) && !o2.Done) return o2; owners[item] = l; return l; }
+    }
+    async Task Save(CopilotOwner o) { if (SaveOwner != null) { try { await SaveOwner(o); } catch (Exception e) { Console.Error.WriteLine($"cursor: owner record of #{o.Item}: {e.GetType().Name}"); } } }
+    bool OwnedAgent(Agent a) { lock (agents) return owners.TryGetValue(a.Item, out var o) && !o.Done && o.TaskId == a.Id; }
+    // the agent's page as Cursor's agents API answers it (create or get: its url field), never built here; "" when Cursor gives none
+    static string UrlOf(JsonNode? j) => (j?["agent"]?["url"] ?? j?["url"])?.ToString() is { } u && u.StartsWith("https://", StringComparison.Ordinal) && u.Length <= 300 && !u.Any(char.IsWhiteSpace) ? u : "";
+    async Task<string> ReadUrl(string id, CancellationToken ct)
+    {
+        try { var (s, j) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(id)}", null, ct); return s == 200 ? UrlOf(j) : ""; }
+        catch { return ""; }
+    }
+
     public JsonObject? Detail(string workerName)
     {
         lock (agents)
-            return agents.TryGetValue(workerName, out var a) ? new JsonObject { ["agent"] = a.Id, ["model"] = a.Model?.DeepClone(), ["reportedModel"] = a.ReportedModel?.DeepClone(), ["usage"] = a.Usage?.DeepClone(), ["usageStatus"] = a.UsageStatus, ["usageShape"] = a.UsageShape?.DeepClone(), ["agentFields"] = a.Fields?.DeepClone(), ["runFields"] = a.RunFields?.DeepClone(), ["deleted"] = a.Deleted } : null;
+            return agents.TryGetValue(workerName, out var a) ? new JsonObject { ["agent"] = a.Id, ["run"] = a.RunId, ["url"] = a.Url, ["followUp"] = a.FollowUp, ["released"] = a.Kept, ["model"] = a.Model?.DeepClone(), ["reportedModel"] = a.ReportedModel?.DeepClone(), ["usage"] = a.Usage?.DeepClone(), ["usageStatus"] = a.UsageStatus, ["usageShape"] = a.UsageShape?.DeepClone(), ["agentFields"] = a.Fields?.DeepClone(), ["runFields"] = a.RunFields?.DeepClone() } : null;
     }
     double IdleGraceSeconds => cfg.IdleGraceSeconds;
     public int MaxConcurrent => cfg.MaxConcurrent;
@@ -121,6 +179,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
     {
         var t = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
         if (cfg.ApiKey.Length > 0) t = t.Replace(cfg.ApiKey, "***");
+        t = System.Text.RegularExpressions.Regex.Replace(t, @"Bearer\s+\S+", "Bearer ***");   // an r1 Cursor may echo from mcpServers
         return t.Length > 1024 ? t[..1024] + "..." : t;
     }
 
@@ -128,10 +187,17 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
     // factory-worker/N-development), the item's branch for Functional Testing.
     string StartingRef(int item, string phase) => phase.Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? $"factory-worker/{item}-development" : cfg.DefaultBranch;
 
+    JsonArray Mcp(string nonce) => new(new JsonObject
+    {
+        ["name"] = "fworker", ["type"] = "http", ["url"] = cfg.GatewayUrl + "/mcp",
+        ["headers"] = new JsonObject { ["Authorization"] = "Bearer " + nonce }
+    });
+
+    // the agent's name carries the environment and the item ("fworker-tdd-i<item>-<worker>"): a restarted gateway finds the owner agents it keeps
     public JsonObject LaunchBody(ProvisionRequest r) => new()
     {
-        ["name"] = Prefix + r.WorkerName,
-        ["prompt"] = new JsonObject { ["text"] = prompt(r.Item, r.Phase) },
+        ["name"] = Prefix + "i" + r.Item + "-" + r.WorkerName,
+        ["prompt"] = new JsonObject { ["text"] = prompt(r.Item, r.Phase, null) },
         ["repos"] = new JsonArray(new JsonObject { ["url"] = cfg.Repository, ["startingRef"] = StartingRef(r.Item, r.Phase) }),
         ["autoCreatePR"] = false,
         ["mcpServers"] = new JsonArray(new JsonObject
@@ -143,49 +209,81 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
 
     public async Task<ProvisionResult> Provision(ProvisionRequest r, CancellationToken ct)
     {
+        // Development of an item whose pull request already carries the change and no rework is asked for: no run, the gateway waits for its checks
+        if (r.Phase.Equals("Development", StringComparison.OrdinalIgnoreCase) && Settle != null)
+        {
+            string act; try { act = await Settle(r.Item, "launch", null, ct); } catch (Exception e) { act = "launch"; Console.Error.WriteLine($"cursor: settle of #{r.Item} before launch: {e.GetType().Name}"); }
+            if (act == "awaiting") return new(false, "", "settled");
+        }
+        var own = await Owner(r.Item, ct);
+        if (own != null)
+        {
+            var fu = await FollowUp(own, r, ct);
+            if (fu != null) return fu;
+            // the owner agent is gone (deleted or archived at Cursor): a new agent becomes the owner, the old id is kept as previous
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-owner-gone", ["item"] = r.Item, ["agent"] = own.TaskId }.ToJsonString());
+        }
         var body = LaunchBody(r);
         JsonObject? sel; try { sel = await Model(ct); } catch (Exception e) { return new(false, "", "models-" + e.GetType().Name); }
         if (sel == null) return new(false, "", "model-unavailable");
         body["model"] = sel;
         int s; JsonNode? j; string text;
         try { (s, j, text) = await SendText(HttpMethod.Post, "/v1/agents", body, ct); }
-        catch (Exception e) { await DeleteNamed(Prefix + r.WorkerName, ct); return new(false, "", "launch-" + e.GetType().Name); }
+        catch (Exception e) { return new(false, "", "launch-" + e.GetType().Name); }
         var id = j?["agent"]?["id"]?.ToString() ?? j?["id"]?.ToString() ?? "";
         // a launch that failed may still have created the agent (a timeout, an odd answer): it is looked up by its name and deleted
-        if (s is not (200 or 201) || id == "") { await DeleteNamed(Prefix + r.WorkerName, ct); return new(false, "", s is 200 or 201 ? "launch-no-id" : $"launch-{s}: {Excerpt(text)}"); }
-        lock (agents) agents[r.WorkerName] = new Agent { Model = sel.DeepClone(), Id = id, RunId = j?["run"]?["id"]?.ToString() ?? j?["agent"]?["latestRunId"]?.ToString() ?? "", Worker = r.WorkerName, Item = r.Item, Phase = r.Phase };
-        return new(true, id, "");
+        if (s is not (200 or 201) || id == "") { return new(false, "", s is 200 or 201 ? "launch-no-id" : $"launch-{s}: {Excerpt(text)}"); }
+        var url = UrlOf(j); if (url == "") url = await ReadUrl(id, ct);
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-agent-url", ["item"] = r.Item, ["agent"] = id, ["url"] = url }.ToJsonString());
+        CopilotOwner no;
+        lock (agents)
+        {
+            agents[r.WorkerName] = new Agent { Url = url, Model = sel.DeepClone(), Id = id, RunId = j?["run"]?["id"]?.ToString() ?? j?["agent"]?["latestRunId"]?.ToString() ?? "", Worker = r.WorkerName, Item = r.Item, Phase = r.Phase };
+            no = new CopilotOwner { Item = r.Item, TaskId = id, Url = url, Branch = own?.Branch ?? "", Pr = own?.Pr ?? 0, Phase = r.Phase, Sessions = 1, LastResume = DateTime.UtcNow, WaitingOn = "run" };
+            if (own != null) { no.Previous.AddRange(own.Previous); no.Previous.Add(own.TaskId); no.Since = own.Since; }
+            owners[r.Item] = no;
+        }
+        _ = Task.Run(() => Save(no));
+        return new(true, id, "", url);
     }
 
-    // cancel the run, then delete the agent (its stored MCP configuration and the r1 in it go with it); idempotent, and retried by List until done
+    // A follow-up run of the owner agent: the next phase's prompt and a fresh r1 in its MCP configuration (the previous run's was revoked at its
+    // end). Null: the agent cannot take a run any more (gone or archived); a new agent is launched instead.
+    async Task<ProvisionResult?> FollowUp(CopilotOwner own, ProvisionRequest r, CancellationToken ct)
+    {
+        var why = ""; if (WhyResume != null) { try { why = await WhyResume(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"cursor: why of #{r.Item}: {e.GetType().Name}"); } }
+        var body = new JsonObject { ["prompt"] = new JsonObject { ["text"] = prompt(r.Item, r.Phase, why) }, ["mcpServers"] = Mcp(r.Nonce) };
+        int s; JsonNode? j; string text;
+        try { (s, j, text) = await SendText(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(own.TaskId)}/runs", body, ct); }
+        catch (Exception e) { return new(false, "", "followup-" + e.GetType().Name); }
+        if (s is 404 or 410) return null;
+        if (s is 400 or 409 && text.Contains("archiv", StringComparison.OrdinalIgnoreCase)) return null;
+        var run = j?["run"]?["id"]?.ToString() ?? j?["id"]?.ToString() ?? "";
+        if (s is not (200 or 201 or 202) || run == "") return new(false, "", s is 200 or 201 or 202 ? "followup-no-id" : $"followup-{s}: {Excerpt(text)}");
+        var id = $"{own.TaskId}#{own.Sessions}";
+        lock (agents)
+        {
+            agents[r.WorkerName] = new Agent { Id = own.TaskId, RunId = run, Worker = r.WorkerName, Item = r.Item, Phase = r.Phase, FollowUp = true, Model = model?.DeepClone() };
+            own.Sessions++; own.Phase = r.Phase; own.LastResume = DateTime.UtcNow; own.WaitingOn = "run"; own.Updated = DateTime.UtcNow;
+        }
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-followup", ["item"] = r.Item, ["phase"] = r.Phase, ["agent"] = own.TaskId, ["run"] = run, ["session"] = own.Sessions - 1 }.ToJsonString());
+        _ = Task.Run(() => Save(own));
+        if (own.Url == "") { var u = await ReadUrl(own.TaskId, ct); if (u != "") lock (agents) own.Url = u; }
+        lock (agents) agents[r.WorkerName].Url = own.Url;
+        return new(true, id, "", own.Url);
+    }
+
+    // The end of a run: its usage is read once and logged, then the run is cancelled when it did not finish by itself. The agent is NEVER deleted
+    // (owner 2026-10-21): its transcript stays readable at its url, and an owner agent takes the item's next run as a follow-up. The run's r1 is
+    // revoked by the manager (RevokeOnEnd), so the MCP configuration Cursor keeps calls no tool any more. Idempotent.
     public async Task Deprovision(string workerName, string reason, CancellationToken ct)
     {
         Agent? a; lock (agents) agents.TryGetValue(workerName, out a);
-        if (a == null || a.Deleted) return;
-        string id, run; lock (agents) { id = a.Id; run = a.RunId; }
-        // a run past its deadline is cancelled at once; any other (session_end: the agent stops by itself) is let finish while its usage is
-        // awaited, since Cursor answered zero usage for every cancelled run (items 371-376, 2026-10-17); its r1 is revoked already, so the
-        // seconds it may still run (counted as ended here) can call no tool
-        bool failed; lock (agents) failed = a.Status == "Failed";
-        if (failed) await Cancel(a, ct);
-        DateTime ended; lock (agents) { ended = a.Ended ??= DateTime.UtcNow; if (a.Status == "Running") a.Status = "Stopped"; }
-        // the usage is read while the agent still exists (a deleted agent answers 404); while it reads zero the delete is put off (List calls
-        // this again at every reading) with a doubling wait, until UsageWaitSeconds after the end
-        if (!HasUsage(a) && (DateTime.UtcNow - ended).TotalSeconds < cfg.UsageWaitSeconds)
-        {
-            lock (agents) { if (a.NextUsageRead is { } nr && DateTime.UtcNow < nr) return; a.NextUsageRead = DateTime.MaxValue; }   // one read at a time
-            await LogUsage(a, ct);
-            if (!HasUsage(a) && (DateTime.UtcNow - ended).TotalSeconds < cfg.UsageWaitSeconds)
-            {
-                lock (agents) { a.UsageBackoff = a.UsageBackoff <= 0 ? cfg.UsageRetrySeconds : a.UsageBackoff * 2; a.NextUsageRead = DateTime.UtcNow.AddSeconds(a.UsageBackoff); }
-                return;
-            }
-        }
-        if (!HasUsage(a)) await LogUsage(a, ct);   // the wait is over: one last read, logged as it is
-        await Cancel(a, ct);
-        var (s, _) = await Send(HttpMethod.Delete, $"/v1/agents/{Uri.EscapeDataString(id)}", null, ct);
-        if (s is not (200 or 202 or 204 or 404)) throw new HttpRequestException($"delete of agent answered {s}");
-        lock (agents) a.Deleted = true;
+        if (a == null) return;
+        bool finished;
+        lock (agents) { if (a.Kept) return; a.Kept = true; a.Ended ??= DateTime.UtcNow; finished = a.Status == "Succeeded"; if (a.Status == "Running") a.Status = "Stopped"; }
+        await LogUsage(a, ct, force: true);
+        if (!finished) await Cancel(a, ct);
     }
 
     // The model of a launch (owner decision 2026-10-17: Auto with the cost preference). Model "auto" is resolved against GET /v1/models once per
@@ -224,6 +322,15 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
         return all;
     }
 
+    // an agent a former process left that is still an item's owner (its name carries the item; the item state records its id): adopted, not deleted
+    async Task<bool> KeepOwnerAgent(string id, string name, CancellationToken ct)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(name[Prefix.Length..], @"^i(\d{1,7})-");
+        if (!m.Success) return false;
+        var o = await Owner(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), ct);
+        return o != null && o.TaskId == id;
+    }
+
     async Task Cancel(Agent a, CancellationToken ct)
     {
         string id, run; bool done; lock (agents) { id = a.Id; run = a.RunId; done = a.Cancelled; if (run != "") a.Cancelled = true; }
@@ -233,7 +340,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
     static bool HasUsage(Agent a) => a.Usage?["totalTokens"] is JsonValue v && v.TryGetValue<double>(out var t) && t > 0;
 
     // the tokens an agent used (GET /v1/agents/{id}/usage), logged once it reads non-zero (or for the last read), for the cycle metrics
-    async Task LogUsage(Agent a, CancellationToken ct)
+    async Task LogUsage(Agent a, CancellationToken ct, bool force = false)
     {
         try
         {
@@ -247,43 +354,38 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
                     ["runs"] = new JsonArray(((o?["runs"] as JsonArray) ?? new JsonArray()).Take(10).Select(x => (JsonNode)new JsonObject { ["keys"] = new JsonArray(((x as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray()) ?? Array.Empty<JsonNode>()),
                         ["usage"] = ((x as JsonObject)?["usage"] ?? (x as JsonObject)?["totalUsage"])?.DeepClone() }).ToArray()) };
             }
-            if (s == 200 && (HasUsage(a) || (DateTime.UtcNow - (a.Ended ?? DateTime.UtcNow)).TotalSeconds >= cfg.UsageWaitSeconds)) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-usage", ["worker"] = a.Worker, ["item"] = a.Item, ["phase"] = a.Phase, ["agent"] = a.Id,
+            if (s == 200 && (force || HasUsage(a) || (DateTime.UtcNow - (a.Ended ?? DateTime.UtcNow)).TotalSeconds >= cfg.UsageWaitSeconds)) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-usage", ["worker"] = a.Worker, ["item"] = a.Item, ["phase"] = a.Phase, ["agent"] = a.Id, ["run"] = a.RunId, ["followUp"] = a.FollowUp,
                 ["minutes"] = Math.Round(((a.Ended ?? DateTime.UtcNow) - a.Started).TotalMinutes, 1), ["reads"] = a.UsageReads, ["usage"] = j?["totalUsage"]?.DeepClone() }.ToJsonString());
         }
         catch { }
     }
 
-    async Task DeleteNamed(string name, CancellationToken ct)
-    {
-        try { foreach (var (id, n, _) in await Remote(ct)) if (n == name) await Send(HttpMethod.Delete, $"/v1/agents/{Uri.EscapeDataString(id)}", null, ct); }
-        catch (Exception e) { Console.Error.WriteLine($"cursor: cleanup of {name}: {e.GetType().Name}"); }
-    }
 
     // The agents this process started, with Container Apps job states: ACTIVE is Running; IDLE (its turn ended), ARCHIVED or a deleted agent
     // ended; a run in ERROR or EXPIRED failed. An agent past its deadline is cancelled and deleted here and reported Failed.
     public async Task<IReadOnlyList<RuntimeInstance>> List(CancellationToken ct)
     {
-        // a former process's agents (fworker-<environment>-* names this process does not track) are deleted: their workers are gone with that process
+        // the owner agents a former process left (fworker-<environment>-i<item>-* names, recorded in the item state) are adopted; no agent is deleted
         if (!swept)
         {
             try
             {
                 HashSet<string> mine; lock (agents) mine = agents.Values.Select(x => x.Id).ToHashSet();
-                // only agents past any deadline: during a revision rollover the former process still runs its live ones, and ends them itself
-                var stale = DateTime.UtcNow.AddMinutes(-(cfg.MaxMinutes + 15));
+                // only agents of the last 14 days: agents are never deleted, and each check is a rule-script run
+                var since = DateTime.UtcNow.AddDays(-14);
                 foreach (var (id, n, created) in await Remote(ct))
-                    if (n.StartsWith(Prefix) && !mine.Contains(id) && (created == null || created < stale)) { await Send(HttpMethod.Delete, $"/v1/agents/{Uri.EscapeDataString(id)}", null, ct); Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-orphan-deleted", ["agent"] = id }.ToJsonString()); }
+                    if (n.StartsWith(Prefix) && !mine.Contains(id) && (created == null || created > since) && await KeepOwnerAgent(id, n, ct)) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-owner-adopted", ["agent"] = id }.ToJsonString());
                 swept = true;
             }
-            catch (Exception e) { Console.Error.WriteLine($"cursor: orphan sweep: {e.GetType().Name}"); }
+            catch (Exception e) { Console.Error.WriteLine($"cursor: owner sweep: {e.GetType().Name}"); }
         }
-        List<Agent> all; lock (agents) { foreach (var k in agents.Where(kv => kv.Value.Deleted && kv.Value.Ended < DateTime.UtcNow.AddHours(-2)).Select(kv => kv.Key).ToList()) agents.Remove(k); all = agents.Values.ToList(); }
+        List<Agent> all; lock (agents) { foreach (var k in agents.Where(kv => kv.Value.Kept && kv.Value.Ended < DateTime.UtcNow.AddHours(-2)).Select(kv => kv.Key).ToList()) agents.Remove(k); all = agents.Values.ToList(); }
         var list = new List<RuntimeInstance>();
         foreach (var a in all)
         {
             try
             {
-                if (!a.Deleted && a.Ended == null && (DateTime.UtcNow - a.Started).TotalMinutes > cfg.MaxMinutes)
+                if (a.Ended == null && (DateTime.UtcNow - a.Started).TotalMinutes > cfg.MaxMinutes)
                 {   // the deadline: a failure of the item's phase; the delete is retried below until it is done
                     lock (agents) { a.Status = "Failed"; a.Ended = DateTime.UtcNow; }
                 }
@@ -296,22 +398,24 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail
                     // the field names of the answers (never their values), once: what Cursor's agent and run objects carry
                     lock (agents) a.Fields ??= new JsonArray(((j?["agent"] ?? j) as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>());
                     if (!a.ModelLogged && (j?["agent"]?["model"] ?? j?["model"] ?? j?["agent"]?["modelId"]) is { } rm) { a.ModelLogged = true; lock (agents) a.ReportedModel = rm.DeepClone(); Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-agent-model", ["agent"] = a.Id, ["model"] = rm.DeepClone() }.ToJsonString()); }
-                    var runId = j?["agent"]?["latestRunId"]?.ToString() ?? j?["latestRunId"]?.ToString() ?? "";
+                    // this execution's run: a follow-up knows its own; a first launch takes the agent's latest
+                    var runId = a.FollowUp && a.RunId != "" ? a.RunId : j?["agent"]?["latestRunId"]?.ToString() ?? j?["latestRunId"]?.ToString() ?? "";
                     var runStatus = "";
                     if (runId != "") { try { var (rs, rj) = await Send(HttpMethod.Get, $"/v1/agents/{Uri.EscapeDataString(a.Id)}/runs/{Uri.EscapeDataString(runId)}", null, ct); if (rs == 200) { runStatus = rj?["run"]?["status"]?.ToString() ?? rj?["status"]?.ToString() ?? ""; var ro = (rj?["run"] ?? rj) as JsonObject; lock (agents) { a.RunFields ??= new JsonArray(ro?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>()); if (a.ReportedModel == null && (ro?["model"] ?? ro?["modelId"]) is { } rmm) a.ReportedModel = rmm.DeepClone(); } } } catch { } }
                     lock (agents)
                     {
-                        if (runId != "") a.RunId = runId;
-                        if (s == 404) a.Deleted = true;
+                        if (runId != "" && !a.FollowUp) a.RunId = runId;
                         // IDLE (the turn ended) counts as the end once it lasted a minute: a short pause between turns is no end
                         if (st == "IDLE") a.IdleSince ??= DateTime.UtcNow; else a.IdleSince = null;
                         var idleOver = a.IdleSince is { } isn && (DateTime.UtcNow - isn).TotalSeconds >= IdleGraceSeconds;
-                        a.Status = runStatus is "ERROR" or "EXPIRED" ? "Failed" : st switch { "ACTIVE" => "Running", "IDLE" => idleOver ? "Succeeded" : "Running", "ARCHIVED" => "Stopped", _ => "Running" };
+                        // a follow-up's own run decides (the agent may read IDLE for a moment before the run starts)
+                        if (a.FollowUp && runStatus != "") a.Status = runStatus switch { "ERROR" or "EXPIRED" => "Failed", "FINISHED" => "Succeeded", "CANCELLED" => "Stopped", _ => st == "ARCHIVED" ? "Stopped" : "Running" };
+                        else a.Status = runStatus is "ERROR" or "EXPIRED" ? "Failed" : st switch { "ACTIVE" => "Running", "IDLE" => idleOver ? "Succeeded" : "Running", "ARCHIVED" => "Stopped", _ => "Running" };
                         if (a.Status != "Running") a.Ended ??= DateTime.UtcNow;
                     }
                 }
                 // an agent that ended (by itself, at the deadline, or a delete that failed before) is deleted, again at every reading until it is gone
-                if (a.Ended != null && !a.Deleted) { try { await Deprovision(a.Worker, "ended", ct); } catch (Exception e) { Console.Error.WriteLine($"cursor: delete of {a.Worker}: {e.GetType().Name}"); } }
+                if (a.Ended != null && !a.Kept) { try { await Deprovision(a.Worker, "ended", ct); } catch (Exception e) { Console.Error.WriteLine($"cursor: end of {a.Worker}: {e.GetType().Name}"); } }
             }
             catch (Exception e) { Console.Error.WriteLine($"cursor: read of {a.Worker}: {e.GetType().Name}"); }
             list.Add(new RuntimeInstance(a.Id, a.Worker, a.Item, a.Phase, a.Status, a.Started, a.Ended));
