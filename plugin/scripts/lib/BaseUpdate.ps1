@@ -60,7 +60,7 @@ function Verb_base_watch($a) {
                 # a PASS verdict waiting for its merge, or a merge being settled: the gateway owns the next step, not a back-merge
                 if ((Test-Has $s 'verdict') -and $s.verdict.passed -and -not $s.verdict.processed) { $row.skip = 'pass-unmerged' }
                 elseif ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { $row.skip = 'merged' }
-                $pr = @($open | Where-Object { $_.head.ref -match "^$([regex]::Escape($c.name))/$n-" }) | Select-Object -First 1
+                $pr = @($open | Where-Object { $_.head.ref -match "^$([regex]::Escape($c.name))/$n-" -or ("$($_.head.ref)" -like 'copilot/*' -and (Test-Has $s 'pr') -and (Test-Has $s.pr 'number') -and [int]$s.pr.number -eq [int]$_.number) }) | Select-Object -First 1
                 if ($pr) { $row.pr = [int]$pr.number; $row.branch = "$($pr.head.ref)"; $row.head = "$($pr.head.sha)"; if ($row.pr -in $merged -and -not $row.skip) { $row.skip = 'merged' } }
                 elseif ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number') -and $s.pr.number) { if (-not $row.skip) { $row.skip = 'pr-closed' } }
                 elseif ((Test-Has $s 'pr') -and (Test-Has $s.pr 'branch') -and $s.pr.branch) { $row.branch = "$($s.pr.branch)" }

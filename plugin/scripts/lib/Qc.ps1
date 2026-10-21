@@ -138,7 +138,9 @@ function Get-QcEligibility($c, [int]$n, $labels, $column, $s, $pr, $files) {
     if ($true -eq (Get-Prop $pr 'draft' $false)) { [void]$why.Add('draft') }
     $full = "$(Get-Prop (Get-Prop (Get-Prop $pr 'head' $null) 'repo' $null) 'full_name' '')"
     if ($full -ine "$($c.owner)/$($c.repo)") { [void]$why.Add('fork') }
-    if ("$($pr.head.ref)" -notmatch "^$([regex]::Escape($c.name))/$n-") { [void]$why.Add('branch-prefix') }
+    # the item's own branch, or the copilot/* branch of the pull request its state records (a Copilot cloud agent pushes only copilot/* branches)
+    $copilotOwn = "$($pr.head.ref)" -like 'copilot/*' -and (Test-Has $s 'pr') -and (Test-Has $s.pr 'number') -and [int]$s.pr.number -eq [int]$pr.number
+    if ("$($pr.head.ref)" -notmatch "^$([regex]::Escape($c.name))/$n-" -and -not $copilotOwn) { [void]$why.Add('branch-prefix') }
     if ("$column" -ine "$($c.columns.validation)") { [void]$why.Add('not-in-validation') }
     # A PASS without the Auto Merge label is recorded as processed and parked ('pass-without-auto-merge') for a person to merge: that is exactly the item QC serves.
     if (-not (Test-Has $s 'verdict') -or -not $s.verdict.passed -or [int]$s.verdict.pr -ne [int]$pr.number -or (Test-Has $s 'merge')) { [void]$why.Add('no-pass-verdict') }
