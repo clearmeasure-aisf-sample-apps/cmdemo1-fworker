@@ -118,7 +118,7 @@ $SuiteDefs = @(
     # the Copilot cloud agent (copilot.ps1, docs/design/copilot-cloud-agent.md): the fake agent tasks API, a 0.25-minute deadline, a 20 s window
     @{ Name = 'copilot'; Policy = 'auto'; Set = $CopilotScenarios; Env = 'copilot'; DefaultEnvLabel = 'env:tdd'; Timing = @{ staleItemMinutes = 0.1; staleConfirmMinutes = 0.05; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
-            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 10; maxCreditsPerTask = 10000000000; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
+            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 10; quotaRetryMinutes = 0.3; maxCreditsPerTask = 10000000000; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
             # cmdemo1's default runtime: an item without a runtime: label goes to the Copilot cloud agent
             runtimes = @{ preferConnected = $true; routing = @(@{ phase = '*'; runtime = 'copilot-cloud' }) } } }
     # the env: label (envscope.ps1, environment-test-factories.md 3): the suite's gateway is tdd with scoping on, its scenario starts a uat one

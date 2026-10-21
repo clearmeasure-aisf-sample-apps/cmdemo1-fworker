@@ -105,6 +105,12 @@ else the SQLite fallback).
 session counts, an owned but waiting task does not), the daily cap (a master fix-forward counts too) and the credit guard (off; when on, per
 task over all its sessions).
 
+**Quota.** A session that GitHub fails with a quota error in its `error.message` ("You have exceeded your monthly quota", tdd 2026-10-21
+06:55Z onwards) stops every start and resume for `api.copilot.quotaRetryMinutes` (30): the execution ends `blocked` (no failure of the
+item, no launch counted, no park), owned items stay owned and wait, status `runtimes."copilot-cloud".quota` and the dashboard show the owner
+action "raise the Copilot AI-credit budget / quota for cm-ai-ops-bot". The next start after the retry time is the probe (a refused session
+fails in seconds and spends nothing; no probe task of its own); the first session that runs clears the state.
+
 **Status.** `/api/v1/status` → `runtimes."copilot-cloud".owned`: item, task, url, branch, pr, phase, waitingOn (`session` while one runs),
 sessions; the dashboard table "Copilot owned items".
 

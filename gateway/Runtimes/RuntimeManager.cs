@@ -11,6 +11,8 @@ sealed class RuntimeLimits
 {
     public string Kind = "cae-job", Prefix = "cae";
     public Func<bool> IsOn = () => false;
+    // a reason the runtime cannot start anything now, or null (the Copilot seat's quota: quota-exhausted until the next probe)
+    public Func<string?> Blocked = () => null;
     public int MaxConcurrent, MaxExecutionsPerDay, MaxFailuresPerPhase = 2, UnhealthyAfterFailures = 2;
     // executions of one item in one phase in a row (no other phase of the item started between them), however each ended: at the limit the
     // item is parked instead of launched again (a task that ends without finishing its phase and without counting as failed would otherwise be
@@ -70,6 +72,7 @@ sealed class RuntimeManager
     public Func<Exec, Task<bool>>? Ending { get; set; }   // true: the item was settled (the end is no failure of the phase)
     // the items an execution's owner holds between its sessions (the Copilot runtime: one task per item, resumed), for /status
     public Func<JsonArray>? Owned { get; set; }
+    public Func<JsonObject>? Quota { get; set; }
 
     readonly RuntimeLimits lim;
     public RuntimeManager(RuntimeSettings cfg, IWorkerRuntime cae, RuntimeNonces nonces, RuntimeLimits? limits = null)
@@ -87,7 +90,7 @@ sealed class RuntimeManager
     // the items this runtime ran or runs an execution for since the process started (the CI release's candidates)
     public HashSet<int> ItemsSeen() { lock (gate) { var s = execs.Values.Select(e => e.Item).Concat(launches.Keys.Select(k => k.Item)).Concat(failures.Keys.Select(k => k.Item)).ToHashSet(); foreach (var x in last) if (x["item"]?.GetValue<int>() is int i) s.Add(i); return s; } }
     // the execution of this worker was started and has not ended
-    public bool Alive(string name) { lock (gate) return execs.TryGetValue(name, out var e) && !e.Ended && e.Execution != ""; }
+    public bool Alive(string name) { lock (gate) return execs.TryGetValue(name, out var e) && !e.Ended; }
     public string ExecutionOf(string name) { lock (gate) return execs.TryGetValue(name, out var e) ? e.Execution : ""; }
     public bool Exhausted(int item, string phase)
     {
@@ -111,6 +114,7 @@ sealed class RuntimeManager
             if (!lim.IsOn()) return (false, "runtime-off");
             if (!relisted) return (false, "runtime-relisting");       // until the executions were read at start, a second one could be started
             if (!healthy) return (false, "runtime-unhealthy");
+            if (lim.Blocked() is { Length: > 0 } why) return (false, why);
             if (execs.Values.Count(e => !e.Ended) >= lim.MaxConcurrent) return (false, "runtime-at-capacity");
             if (today >= lim.MaxExecutionsPerDay) return (false, "runtime-budget");
             return (true, "");
@@ -263,6 +267,8 @@ sealed class RuntimeManager
                 e.Status = i.Status;
                 if (i.Status == "Succeeded") ends.Add((e.Name, e.StopReason != "" ? "stopped:" + e.StopReason : "succeeded", false));
                 else if (i.Status is "Failed" or "Degraded") ends.Add((e.Name, "failed", true));
+                // the runtime refused the session for a reason of its own account (quota): no failure of the item, no launch counted
+                else if (i.Status == "Blocked") { ends.Add((e.Name, "blocked", false)); launches.Remove((e.Item, e.Phase)); }
                 else if (i.Status == "Stopped") ends.Add((e.Name, e.StopReason != "" ? "stopped:" + e.StopReason : "stopped", e.StopReason == ""));
             }
         }
@@ -299,7 +305,7 @@ sealed class RuntimeManager
                     ["enabled"] = lim.IsOn(), ["maxConcurrent"] = lim.MaxConcurrent, ["running"] = execs.Values.Count(e => !e.Ended), ["today"] = today, ["maxExecutionsPerDay"] = lim.MaxExecutionsPerDay,
                     ["healthy"] = healthy, ["unhealthyReason"] = unhealthyWhy, ["startFailuresInRow"] = startFailuresInRow, ["ackSeconds"] = lim.AckSeconds, ["relisted"] = relisted,
                     ["executions"] = new JsonArray(execs.Values.Where(e => !e.Ended).Select(e => (JsonNode)new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["status"] = e.Status, ["started"] = e.StartedAt.ToString("o"), ["registered"] = e.RegisteredAt?.ToString("o"), ["detail"] = Detail(e.Name) }).ToArray()),
-                    ["owned"] = Owned?.Invoke(),
+                    ["owned"] = Owned?.Invoke(), ["quota"] = Quota?.Invoke(),
                     ["launches"] = new JsonArray(launches.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value }).ToArray()), ["maxLaunchesPerPhase"] = lim.MaxLaunchesPerPhase,
                     ["failures"] = new JsonArray(failures.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value, ["error"] = failureErrors.GetValueOrDefault(kv.Key) }).ToArray()),
                     // the detail is read again while the runtime still knows the worker: its usage arrives after the end (a Cursor agent's reads zero at first)

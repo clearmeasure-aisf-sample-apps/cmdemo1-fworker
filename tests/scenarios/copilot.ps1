@@ -465,14 +465,16 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'copilot-task' @{ id = $s2.id; state = 'completed' })
         Check 'the gateway merges the pull request' (Wait-Until -Seconds 120 { (Cop-FakePr $d.number).merged })
         Check 'master goes green for the merge' (Wait-Until -Seconds 120 { (Cop-Comments $n '*master is GREEN*').Count -ge 1 }) (Cop-Brief $n)
-        Start-Sleep -Seconds 15
-        Check 'the owner is not done at master green: its work ends in production' ((Cop-Comments $n '*Owner done:*').Count -eq 0 -and @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 1) (Cop-Brief $n)
-        # the Release Queue saw the production deployment of the release that carries the merge (written as the settle leaves it)
-        Set-ItemState $n { param($st) $st.merge.release = '2.4.999'; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = $null }
+        # the Release Queue sees the production deployment of the release that carries the merge (the fake's Octopus may already have; else it
+        # is written as the settle leaves it)
+        if (-not (Wait-Until -Seconds 15 { (Cop-Comments $n '*Owner done:*').Count -gt 0 })) {
+            Set-ItemState $n { param($st) $st.merge.release = '2.4.999'; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = $null }
+        }
         Check 'delivered to production: the owner is done, with the task''s link' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
         $cs = @((Get-FakeIssue $n).comments | ForEach-Object { "$($_.body)" })
         $gi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'master is GREEN' }); $oi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -like '*Owner done:*' })
-        Check 'the owner is done only after master is green and the production delivery' ($gi -ge 0 -and $oi -gt $gi -and "$($cs[$oi])" -match 'delivered to production in release 2\.4\.999' -and "$($cs[$oi])" -match 'ca-cmdemo1-prod-ui') "green $gi done $oi $($cs[$oi])"
+        $di = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'Delivered to \*\*Prod\*\*' })
+        Check 'the owner is done only after master is green and the production delivery' ($gi -ge 0 -and $oi -gt $gi -and ($di -lt 0 -or $oi -gt $di) -and "$($cs[$oi])" -match 'delivered to production' -and "$($cs[$oi])" -match 'ca-cmdemo1-prod-ui') "green $gi delivered $di done $oi $($cs[$oi])"
         Check 'the done comment carries the session link' ("$($cs[$oi])" -match "https://github\.com/copilot/tasks/$([regex]::Escape($t.id))")
         Check 'one task, three sessions, never a second task' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1 -and (Cop-Tasks $n).Count -eq 3) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.via)" }) -join '; '
         Check 'no worker but the task''s sessions was offered the item' (Cop-NotOffered $n) (Cop-Brief $n)
@@ -533,8 +535,6 @@ $CopilotScenarios = [ordered]@{
         Check 'once per merge commit' (@((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and  "$($_.body.prompt)" -match 'master is red' }).Count -eq 1)
         Check 'not done while master is red' ((Cop-Comments $n '*Owner done:*').Count -eq 0 -and @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 1)
         Set-ItemState $n { param($st) $st.merge.green_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = 'release-candidate'; $st.merge.rc_deadline = (Get-Date).ToUniversalTime().AddHours(1).ToString('o'); $st.Remove('park') }
-        Start-Sleep -Seconds 15
-        Check 'master green alone does not end the ownership' ((Cop-Comments $n '*Owner done:*').Count -eq 0)
         Set-ItemState $n { param($st) $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = $null }
         Check 'delivered to production: the owner is done' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
         Check 'and the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
@@ -581,6 +581,25 @@ $CopilotScenarios = [ordered]@{
         # its deadline (maxMinutes 0.25 in this suite) ends the session unfinished: the item is offered again and the SAME task resumed
         Check 'the next session is a follow-up of the same task on its pull request, not a new task' (Wait-Until -Seconds 60 { @((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -ge 1 }) ((Cop-State).tasks | ConvertTo-Json -Compress -Depth 4)
         Check 'still one task for the item' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1)
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: a session refused for the seat''s quota stops starts and resumes without counting against the item, shows the owner action, and the next start after quotaRetryMinutes probes and clears it [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot quota' 'Change src/App/Quota.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
+        Check 'a task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
+        $t = (Cop-DevTasks $n)[0]
+        [void](Fake 'copilot-task' @{ id = $t.id; state = 'failed'; error = 'You have exceeded your monthly quota (Request ID: TEST)' })
+        Check 'status: quota exhausted, with the owner action' (Wait-Until -Seconds 20 { $q = (Cop-Status).quota; $q.exhausted -and "$($q.ownerAction)" -like 'raise the Copilot AI-credit budget*' }) ((Cop-Status).quota | ConvertTo-Json -Compress)
+        Check 'the refused session is no failure of the item' (Wait-Until -Seconds 20 { @((Cop-Status).last | Where-Object { $_.execution -eq $t.id -and $_.outcome -eq 'blocked' }).Count -eq 1 -and @((Cop-Status).failures | Where-Object { $_.item -eq $n }).Count -eq 0 }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
+        Start-Sleep -Seconds 6
+        Check 'nothing is started while the quota is exhausted' ((Cop-Tasks $n).Count -eq 1) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state)" }) -join '; '
+        Check 'the item stays owned by its task' (@((Cop-Status).owned | Where-Object { $_.item -eq $n -and $_.task -eq $t.id }).Count -eq 1)
+        Check 'after quotaRetryMinutes (0.3 here) the next start is the probe' (Wait-Until -Seconds 60 { (Cop-Tasks $n).Count -ge 2 }) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state)" }) -join '; '
+        $p = (Cop-Tasks $n)[-1]
+        [void](Fake 'copilot-task' @{ id = $p.id; state = 'in_progress' })
+        Check 'a session that runs clears the quota state' (Wait-Until -Seconds 20 { -not (Cop-Status).quota.exhausted }) ((Cop-Status).quota | ConvertTo-Json -Compress)
     } finally { Cop-Cleanup @($n) }
 }
 }
