@@ -238,6 +238,8 @@ sealed class World
     // masterFlaky: the master Build fails one acceptance shard at once while "Build result" is still running (it fails seconds later), as a flaky shard
     // does on GitHub. rerunSeconds / rerunConclusion: how long a re-run of failed jobs takes and how it ends (default: 3 s, success).
     bool masterFlaky; double flakyRunSeconds = 4, rerunSeconds = 3; string rerunConclusion = "success";
+    sealed class HeldRun { public long Id; public string Branch = "", Sha = "", Status = "action_required"; public int Reruns; public bool Sticky; }
+    readonly List<HeldRun> heldRuns = new(); int heldReruns;
     long nextRun = 1000; readonly Dictionary<long, int> runAttempts = new(); readonly Dictionary<long, string> pendingRelease = new(); int rerunRefusals, reruns; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold; string? masterArchitecture;
     long counter = 0; int appMints; readonly List<string> scopedMints = new();
 
@@ -516,6 +518,19 @@ sealed class World
             if (c == null) return (404, "{\"message\":\"Not Found\"}");
             c.Conclusion = "success"; rerunJobs++;
             return (201, null);
+        }
+        if (path == root + "/actions/runs" && method == "GET" && q["status"].ToString() == "action_required")
+        {   // the runs GitHub holds for approval (the Copilot cloud agent's pushes): hook held-run adds one, a re-run starts it
+            var held = heldRuns.Where(r => r.Status == "action_required").Select(r => (JsonNode)J(("id", r.Id), ("head_branch", r.Branch), ("head_sha", r.Sha), ("status", r.Status), ("conclusion", "action_required"), ("event", "pull_request"), ("run_attempt", 1))).ToArray();
+            return (200, J(("total_count", held.Length), ("workflow_runs", new JsonArray(held))));
+        }
+        if ((m = Regex.Match(path, $"^{root}/actions/runs/(\\d+)/rerun$")).Success && method == "POST")
+        {
+            var hr = heldRuns.FirstOrDefault(r => r.Id == long.Parse(m.Groups[1].Value));
+            if (hr == null) return (404, "{\"message\":\"Not Found\"}");
+            if (!hr.Sticky) hr.Status = "queued";   // sticky: GitHub's list still shows it held for a while (the gateway must not re-run it twice)
+            hr.Reruns++; heldReruns++;
+            return (201, "{}");
         }
         if (path == root + "/actions/runs" && method == "GET")
         {   // the workflow runs of a commit (head_sha), as GitHub lists them: one per run id of its check runs, judged on the latest attempt of each job
@@ -810,6 +825,14 @@ sealed class World
                 if (b?["status"] is { } st) a.Status = st.ToString(); if (b?["run"] is { } rs) a.RunStatus = rs.ToString();
                 return (200, J(("ok", true)));
             }
+            case "held-run":
+            {   // {branch, sha?}: a workflow run held in action_required (sha: the branch's PR head when omitted)
+                var br = b!["branch"]!.ToString();
+                var sha = b["sha"]?.ToString() ?? prs.Values.LastOrDefault(p => p.Ref == br)?.Sha ?? NewSha();
+                var hr = new HeldRun { Id = nextRun++, Branch = br, Sha = sha, Sticky = b["sticky"]?.GetValue<bool>() == true }; heldRuns.Add(hr);
+                return (200, J(("ok", true), ("id", hr.Id), ("sha", sha)));
+            }
+            case "held-runs": return (200, J(("reruns", heldReruns), ("runs", new JsonArray(heldRuns.Select(r => (JsonNode)J(("id", r.Id), ("branch", r.Branch), ("sha", r.Sha), ("status", r.Status), ("reruns", r.Reruns))).ToArray()))));
             case "arm-reset": armExecs.Clear(); armStarts = 0; armStops = 0; armStartFailures = 0; return (200, J(("ok", true)));
             case "arm-start-failures": armStartFailures = b?["count"]?.GetValue<int>() ?? 1; return (200, J(("ok", true)));
             case "arm-exec":
@@ -823,7 +846,7 @@ sealed class World
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();
                 artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
-                masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; return (200, J(("ok", true)));
+                masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; heldRuns.Clear(); heldReruns = 0; return (200, J(("ok", true)));
             case "issue":
             {
                 var i = new Issue { Number = nextNumber++, Title = b!["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Column = b["column"]?.ToString() };

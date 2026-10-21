@@ -3,7 +3,8 @@
 # the bootstrap token for the r1 (directly, and through fworker-mcp, the stdio proxy the gateway serves), and calls /mcp. Suite 'copilot'
 # (owner mode). Uses the helpers of owner.ps1 and mcp.ps1.
 
-$CopLabels = @('factory worker', 'Auto Merge', 'runtime:copilot-cloud')
+# the suite's gateway is tdd with env scoping on (as deployed): every item carries env:tdd
+$CopLabels = @('factory worker', 'Auto Merge', 'runtime:copilot-cloud', 'env:tdd')
 function Cop-State { Fake 'copilot' }
 function Cop-Tasks([int]$Item) { , @((Cop-State).tasks | Where-Object { "$($_.body.prompt)" -match "work item: #$Item," }) }
 function Cop-Code($Task) { if ("$($Task.body.prompt)" -match '(c1\.[0-9a-f]{48})') { $Matches[1] } else { '' } }
@@ -132,7 +133,7 @@ $CopilotScenarios = [ordered]@{
 'copilot: the default runtime takes an unlabelled code item to Development with a pull request by Copilot; pr_open takes over its draft on the copilot/ branch; Functional Testing starts from that branch' = {
     $n = 0
     try {
-        $n = New-Item-Fake 'Copilot code item' 'Change src/App/Thing.cs and its unit test.' @('factory worker', 'Auto Merge') 'Development'
+        $n = New-Item-Fake 'Copilot code item' 'Change src/App/Thing.cs and its unit test.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         Check 'an unlabelled item is routed to copilot-cloud (runtimes.routing *), code and all' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
         $t = (Cop-Tasks $n)[0]
         Check 'the Development task asks Copilot for its pull request' ($t.body.create_pull_request -eq $true -and "$($t.body.prompt)" -match "#$n, phase development") ($t.body | ConvertTo-Json -Compress)
@@ -157,7 +158,8 @@ $CopilotScenarios = [ordered]@{
         Check 'the gateway moves the item to Functional Testing' (Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column)"
         Check 'no second Development task was started' ((Cop-DevTasks $n).Count -eq 1) (((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref)" }) -join '; ')
         $ftFrom = Get-Date
-        Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 90 { @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref) $($_.body.create_pull_request)" }) -join '; ')
+        # (a Development task relaunched before the sweep saw the move is stopped too, inside the wait: on a loaded runner it can start late)
+        Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 90 { foreach ($tt in @((Cop-Tasks $n) | Where-Object { $_.state -in 'queued', 'in_progress' -and "$($_.body.prompt)" -match 'phase development' })) { [void](Fake 'copilot-task' @{ id = $tt.id; state = 'cancelled' }) }; @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref) $($_.body.create_pull_request)" }) -join '; ')
     } finally { Cop-Cleanup @($n) }
 }
 
@@ -169,7 +171,7 @@ $CopilotScenarios = [ordered]@{
         function OpenPr([string]$Head) { Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n; head = $Head; title = 'Thing' } | ConvertTo-Json) -SkipHttpErrorCheck }
         function Draft([string]$Head, [string]$Base, [string]$Body) { Invoke-RestMethod "$gh/pulls" -Method POST -Headers $h -ContentType 'application/json' -Body (@{ title = '[WIP] Thing'; head = $Head; base = $Base; body = $Body; draft = $true } | ConvertTo-Json) }
         function FakePr([int]$Num) { @((Fake 'state').prs | Where-Object { $_.number -eq $Num })[0] }
-        $n = New-Item-Fake 'Copilot fix-forward item' 'Change src/App/Thing.cs and its unit test.' @('factory worker', 'Auto Merge') 'Development'
+        $n = New-Item-Fake 'Copilot fix-forward item' 'Change src/App/Thing.cs and its unit test.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
         $t1 = (Cop-Tasks $n)[0]
         Check 'the first Development task starts from master: the item has no pull request yet' ($t1.body.base_ref -eq 'master' -and -not ("$($t1.body.prompt)" -match "This item's pull request")) ($t1.body | ConvertTo-Json -Compress)
@@ -218,7 +220,7 @@ $CopilotScenarios = [ordered]@{
 'copilot: Development tasks that end their session without finishing the phase are launched at most api.copilot.maxLaunchesPerPhase (3) times in a row, then the item is parked, not relaunched' = {
     $n = 0
     try {
-        $n = New-Item-Fake 'Copilot relaunch loop' 'Change src/App/Loop.cs.' @('factory worker', 'Auto Merge') 'Development'
+        $n = New-Item-Fake 'Copilot relaunch loop' 'Change src/App/Loop.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         foreach ($k in 1..3) {
             Check "launch $k is created" (Wait-Until -Seconds 60 { (Cop-Tasks $n).Count -ge $k }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
             $tk = (Cop-Tasks $n)[$k - 1]
@@ -237,6 +239,46 @@ $CopilotScenarios = [ordered]@{
     } finally { Cop-Cleanup @($n) }
 }
 
+'copilot: CI release: the gateway re-runs a held (action_required) workflow run of the item''s copilot/ pull request head with its App, once; a head mismatch and another env''s item are skipped; a 403 is surfaced as an owner action' = {
+    $n = 0; $m = 0
+    try {
+        $h = @{ Authorization = 'Bearer fake-operator' }
+        $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+        function Held([long]$Id) { @((Fake 'held-runs').runs | Where-Object { $_.id -eq $Id })[0] }
+        function CiStatus { (Cop-Status).ciRelease }
+        $n = New-Item-Fake 'Copilot CI release item' 'Change src/App/Ci.cs.' $CopLabels 'Development'
+        $br = "copilot/ci-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Ci.cs') })
+        $d = Invoke-RestMethod "$gh/pulls" -Method POST -Headers $h -ContentType 'application/json' -Body (@{ title = '[WIP] Ci'; head = $br; base = 'master'; body = 'x'; draft = $true } | ConvertTo-Json)
+        $r = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n; head = $br; title = 'Ci' } | ConvertTo-Json) -SkipHttpErrorCheck
+        Check 'pr_open makes the copilot/ draft the item''s pull request' ($r.ok -and $r.pullRequest.number -eq $d.number) ($r | ConvertTo-Json -Compress -Depth 4)
+        Check 'status shows the CI release, on' ((CiStatus).enabled -eq $true) ((Cop-Status) | ConvertTo-Json -Compress -Depth 3)
+        $verb = Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/ci-release" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body '{}' -SkipHttpErrorCheck
+        Check 'the rule verb is the gateway''s own: refused over HTTP' ([int]$verb.StatusCode -eq 400)
+        # a head mismatch: a run of an older commit of the branch
+        $old = Fake 'held-run' @{ branch = $br; sha = ('ab' * 20) }
+        # another environment's item with its own copilot/ pull request
+        $m = New-Item-Fake 'uat CI release item' 'x' @('factory worker', 'Auto Merge', 'runtime:copilot-cloud', 'env:uat') 'Development'
+        $ub = "copilot/uat-$m"
+        [void](Fake 'push-branch' @{ branch = $ub; files = @('src/App/Uat.cs') })
+        [void](Invoke-RestMethod "$gh/pulls" -Method POST -Headers $h -ContentType 'application/json' -Body (@{ title = "Fix #$m"; head = $ub; base = 'master'; body = 'x' } | ConvertTo-Json))
+        $other = Fake 'held-run' @{ branch = $ub }
+        # the item's head, refused once by GitHub (the App lacks Actions: write), then released; sticky: still listed held after the re-run
+        [void](Fake 'fault' @{ match = "^POST .*/actions/runs/[0-9]+/rerun$"; status = 403; count = 1; body = '{"message":"Resource not accessible by integration"}' })
+        $run = Fake 'held-run' @{ branch = $br; sticky = $true }
+        Check 'a 403 is surfaced in status as an owner action' (Wait-Until -Seconds 45 { $c = CiStatus; $c.refused -ge 1 -and $c.permissionMissing -and "$($c.ownerAction)" -match 'Actions: Read & write' -and "$($c.lastError)" -match '403' }) ((CiStatus) | ConvertTo-Json -Compress)
+        Check 'and nothing was re-run by another credential' ((Held $run.id).reruns -eq 0)
+        Check 'the held run of the item''s head is released after the retry' (Wait-Until -Seconds 120 { (Held $run.id).reruns -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
+        Check 'status counts the release and clears the owner action' (Wait-Until -Seconds 10 { $c = CiStatus; $c.released -ge 1 -and -not $c.permissionMissing }) ((CiStatus) | ConvertTo-Json -Compress)
+        Check 'one journal line on the item names the run' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "released workflow run $($run.id) of PR #$($d.number)" }).Count -eq 1 })
+        Start-Sleep -Seconds 25
+        Check 'idempotent: the run, still listed held, is not re-run again' ((Held $run.id).reruns -eq 1) ((Held $run.id) | ConvertTo-Json -Compress)
+        Check 'a run whose head_sha is not the pull request''s head is not released' ((Held $old.id).reruns -eq 0)
+        Check 'a run of another environment''s item is not released' ((Held $other.id).reruns -eq 0)
+        Check 'the gateway log names no token' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-copilot').Count -eq 0)
+    } finally { Cop-Cleanup @($n, $m) }
+}
+
 'copilot: fworker-mcp accepts only the three factory gateways (https, no path) or its configured URL, each with its own bootstrap token' = {
     $js = Join-Path $script:Work 'fworker-mcp-check.mjs'
     [IO.File]::WriteAllText($js, "$((Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/fworker-mcp.mjs").Content)")
@@ -252,7 +294,7 @@ $CopilotScenarios = [ordered]@{
 'copilot: the gateway owns Development''s end: a task that ends after pushing (no pr_open, no item_complete, even a reported failure) has its draft taken over by the branch of its artifacts; the item waits for its checks in the gateway and moves on when they are green; no second Development task' = {
     $n = 0
     try {
-        $n = New-Item-Fake 'Copilot settle item' 'Change src/App/Settle.cs and its unit test.' @('factory worker', 'Auto Merge') 'Development'
+        $n = New-Item-Fake 'Copilot settle item' 'Change src/App/Settle.cs and its unit test.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
         $t = (Cop-DevTasks $n)[0]
         $r1 = "$((Cop-Exchange (Cop-Code $t) (Cop-Bootstrap)).body.token)"
@@ -278,7 +320,7 @@ $CopilotScenarios = [ordered]@{
 'copilot: the credit guard ends a task over api.copilot.maxCreditsPerTask and parks its item credit-guard; after an unpark, an item whose pull request already carries the change starts no new Development task: it waits for its checks' = {
     $n = 0
     try {
-        $n = New-Item-Fake 'Copilot credit item' 'Change src/App/Credit.cs.' @('factory worker', 'Auto Merge') 'Development'
+        $n = New-Item-Fake 'Copilot credit item' 'Change src/App/Credit.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
         $t = (Cop-DevTasks $n)[0]
         $br = "copilot/credit-$n"
@@ -303,7 +345,7 @@ $CopilotScenarios = [ordered]@{
 'copilot: a fix-forward draft that GitHub will not retarget (part of a stack, 422) is closed and the item''s pull request is opened on its branch, superseding the old one' = {
     $n = 0
     try {
-        $n = New-Item-Fake 'Copilot stack item' 'Change src/App/Stack.cs.' @('factory worker', 'Auto Merge') 'Development'
+        $n = New-Item-Fake 'Copilot stack item' 'Change src/App/Stack.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
         $a = "copilot/stack-$n"
         [void](Fake 'push-branch' @{ branch = $a; files = @('src/App/Stack.cs'); profile = 'stuck' })
