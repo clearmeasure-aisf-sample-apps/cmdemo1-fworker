@@ -342,7 +342,7 @@ $CopilotScenarios = [ordered]@{
         Check 'the agent''s failure report parks the item worker-failure' (-not $f.isError -and (Cop-Comments $n '*worker reported **FAILURE***').Count -eq 1) ($f | ConvertTo-Json -Compress -Depth 5)
         [void](Mcp-Call 'session_end' @{ reason = 'done' } $r1)
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
-        Check 'the gateway takes over the task''s draft (title naming the item, ready for review)' (Wait-Until -Seconds 90 { $p = Cop-FakePr $d.number; $p.open -and -not $p.draft -and "$($p.title)" -match "#$n" }) (Cop-FakePr $d.number | ConvertTo-Json -Compress -Depth 3)
+        Check 'the gateway takes over the task''s draft (title naming the item, ready for review)' (Wait-Until -Seconds 30 { $p = Cop-FakePr $d.number; $p.open -and -not $p.draft -and "$($p.title)" -match "#$n" }) (Cop-FakePr $d.number | ConvertTo-Json -Compress -Depth 3)
         Check 'and records Development as done pending checks, over the agent''s failure report' (Wait-Until -Seconds 20 { (Cop-Comments $n '*Development is done pending checks*the Copilot task ended*').Count -eq 1 })
         Check 'green checks move the item to Functional Testing' (Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column)"
         Check 'no second Development task was started' ((Cop-DevTasks $n).Count -eq 1) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state)" }) -join '; '
