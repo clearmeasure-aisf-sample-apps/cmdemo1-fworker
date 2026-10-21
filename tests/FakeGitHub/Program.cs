@@ -428,7 +428,7 @@ sealed class World
             prs[pr.Number] = pr; ApplyProfile(pr, pr.Sha);
             return (201, PrJson(pr));
         }
-        if ((m = Regex.Match(path, $"^{root}/pulls/(\\d+)(/(files|reviews|merge|update-branch))?$")).Success)
+        if ((m = Regex.Match(path, $"^{root}/pulls/(\\d+)(/(files|reviews|merge|merge-async|update-branch))?$")).Success)
         {
             if (!prs.TryGetValue(int.Parse(m.Groups[1].Value), out var pr)) return (404, "{\"message\":\"Not Found\"}");
             switch (m.Groups[3].Value)
@@ -451,6 +451,7 @@ sealed class World
                     { var old = pr.Sha; pr.Behind = 0; pr.Sha = NewSha(); parents[pr.Sha] = new() { old, History()[^1] }; webFlow.Add(pr.Sha); ApplyProfile(pr, pr.Sha); }
                     return (202, "{\"message\":\"Updating pull request branch.\"}");
                 case "merge": return Merge(pr, b);
+                case "merge-async": { var (ms, mb) = Merge(pr, b); return ms == 200 ? (202, J(("id", "m-" + pr.Number))) : (ms == 405 ? 400 : ms, mb); }   // as GitHub: accepted, merged in the background (here at once)
                 default:
                     if (method == "PATCH")
                     {   // title and body only, and only while open (as GitHub: a closed pull request's text can be edited there, the product never does);

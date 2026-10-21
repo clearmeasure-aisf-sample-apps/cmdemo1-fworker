@@ -33,6 +33,7 @@ function Get-MergeWaitText([string]$Code) {
         'branch-updated' { return 'its branch was behind the base branch and has been brought up to date; the checks of the new head run now' }
         'mergeability-unknown' { return 'GitHub has not yet said whether it can be merged' }
         'verdict-head-unknown' { return 'the verdict does not name the head it was given for' }
+        'merge-async' { return 'GitHub merges it in the background (a pull request that was part of a stack); the merge is picked up when it lands' }
         'merge-queue' { return 'the merge queue is full (an earlier merge is still waiting for its release candidate)' }
         'checks-rerun' { return 'its checks failed and the failed jobs are re-run once (or a run of the head is still going); the new attempt decides' }
         'master-defect' { return 'its checks fail only where the base branch fails as well (a defect of the base branch, not of this change); it waits for the base branch to pass them again' }
@@ -249,7 +250,22 @@ function Verb_merge($a, [switch]$Gateway) {
     $byVerdict = $c.mergePolicy -eq 'auto'
     for ($attempt = 1; $attempt -le [int]$t.outOfDateMergeAttempts; $attempt++) {
         $mergeSha = if ($byVerdict) { "$($s.verdict.head_sha)" } else { "$($pr.head.sha)" }
-        $r = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/merge" -Body @{ merge_method = 'squash'; sha = $mergeSha } -Allow 405, 409, 422
+        $r = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/merge" -Body @{ merge_method = 'squash'; sha = $mergeSha } -Allow 403, 405, 409, 422
+        # a pull request that is (or was) part of a stack, as a Copilot task's stacked draft leaves its base (#396): GitHub merges it only through
+        # the asynchronous endpoint; the merge is waited for a short while, else picked up by the sweep when it lands (Invoke-MergePickup)
+        if ($r -is [hashtable] -and $r.ContainsKey('status') -and $r.status -eq 403 -and "$($r.body.message)" -match 'stack|asynchronous') {
+            $ar = Invoke-Gh -Method PUT -Path "$(Get-RepoPath)/pulls/$prNum/merge-async" -Body @{ merge_method = 'squash'; sha = $mergeSha; merge_action = 'direct_merge' } -Allow 400, 403, 409, 422
+            # 409: a merge request of it is already pending (an earlier call): still merging, not a refusal
+            if ($ar -is [hashtable] -and $ar.ContainsKey('status') -and [int]$ar.status -eq 409) { if ($Gateway) { return & $wait 'merge-async' }; Reject 21 'merge-async' "PR #$prNum is being merged by GitHub in the background." @{ retryAfterSeconds = 60 } }
+            if ($ar -is [hashtable] -and $ar.ContainsKey('status')) { $r = @{ status = [int]$ar.status; body = $ar.body } }
+            else {
+                $end = (Get-Date).AddSeconds(30); $mp = Get-Pr $prNum
+                while (-not $mp.merged -and (Get-Date) -lt $end) { Start-Sleep -Seconds 3; $mp = Get-Pr $prNum }
+                if (-not $mp.merged) { if ($Gateway) { return & $wait 'merge-async' }; Reject 21 'merge-async' "PR #$prNum is being merged by GitHub in the background; the gateway picks the merge up when it lands." @{ retryAfterSeconds = 60 } }
+                $r = [pscustomobject]@{ merged = $true; sha = "$($mp.merge_commit_sha)" }
+            }
+        }
+        if ($r -is [hashtable] -and $r.ContainsKey('status') -and $r.status -eq 403) { Reject 30 'github-forbidden' "GitHub refused the merge of PR #$prNum (403): $($r.body.message)" @{ status = 403 } }
         if ($r -is [hashtable] -and $r.ContainsKey('status')) {
             $msg = "$($r.body.message)"
             if ($msg -match 'out of date|out-of-date|Head branch was modified|behind') {
