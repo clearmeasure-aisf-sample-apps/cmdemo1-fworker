@@ -68,7 +68,9 @@ function Verb_update_pr($a) {
     # only while the item is in Development, the owner's column: after that the pull request has been read and approved as it is
     if ("$($info.column)" -ine "$($c.columns.development)") { Reject 10 'wrong-column' "the body of the pull request is changed only while the item is in '$($c.columns.development)'; it is in '$($info.column)'" }
     $own = Find-ItemPr $n
-    if ($own -and $own.head.ref -notmatch "^$([regex]::Escape($c.name))/$n-") { $own = $null }
+    # the item's own branch, or the copilot/* branch its state records (Find-ItemPr matched it by the state): pr_update answered pr-not-open for
+    # a taken-over Copilot pull request (#395)
+    if ($own -and $own.head.ref -notmatch "^$([regex]::Escape($c.name))/$n-" -and "$($own.head.ref)" -notlike 'copilot/*') { $own = $null }
     if (Test-Has $a 'pr') {
         $want = [int]$a.pr
         if (-not $own -or [int]$own.number -ne $want) {
@@ -96,9 +98,18 @@ function Use-CopilotDraft([int]$n, [string]$Head, [string]$Title, [int]$Supersed
     # a draft that names another item, or that another item's state already holds, is not this item's to take
     $others = @([regex]::Matches("$($pr.title) $($pr.body)", '(?<![0-9A-Za-z])#(\d+)\b') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -ne $n -and $_ -ne $Superseding })
     if ($others.Count) { Reject 10 'branch-of-other-item' "the pull request on '$Head' names #$($others[0]), not #$n" }
+    # a draft Copilot opened against the item's previous branch (a task started from it) goes to the default branch: it carries that branch's commits.
+    # GitHub refuses that for a draft that is part of a stack (422 "part of a stack", #395/#398): the draft is closed, its branch kept, and the
+    # caller opens the item's pull request on the branch itself
+    if ("$($pr.base.ref)" -ne "$((Get-Cfg).defaultBranch)") {
+        $rb = Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ base = "$((Get-Cfg).defaultBranch)" } -Allow 422
+        if ($rb -is [hashtable] -and $rb.ContainsKey('status')) {
+            [void](Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$($pr.number)/comments" -Body @{ body = "Closed by the factory worker gateway: GitHub does not retarget this stacked draft to $((Get-Cfg).defaultBranch); the pull request of #$n is opened on the same branch instead." } -Allow 404, 422)
+            [void](Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ state = 'closed' })
+            return $null
+        }
+    }
     if ("$($pr.title)" -notmatch "(^|[^0-9])#$n([^0-9]|$)") { Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ title = $Title } | Out-Null }
-    # a draft Copilot opened against the item's previous branch (a task started from it) goes to the default branch: it carries that branch's commits
-    if ("$($pr.base.ref)" -ne "$((Get-Cfg).defaultBranch)") { Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ base = "$((Get-Cfg).defaultBranch)" } | Out-Null }
     if ($pr.draft) { [void](Invoke-GhGraphQL 'mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }' @{ id = "$($pr.node_id)" }) }
     $st = Get-State $n; $st.state.pr = @{ number = $pr.number; branch = $Head; url = $pr.html_url }; Save-State $n $st
     return (Get-Pr ([int]$pr.number))
@@ -159,6 +170,66 @@ function Verb_ci_release($a) {
         $out += $o
     }
     return @{ ok = $true; pending = $runs.Count; runs = $out }
+}
+
+# copilot-settle: the gateway owns the completion of a Copilot Development task (CopilotCloudRuntime). The coding agent's session ends before CI
+# does, so item_complete may never succeed and the agent may even report a failure while its pull request is fine (#393 to #395). Admin only (the
+# gateway's runner); never a worker's verb. Body: item, stage (launch | end), head (end: the branch of the task's artifacts).
+#   launch: before a Development task is started. The item already has a pull request with changes and no fix-forward or rework is asked for
+#           (no pr.rejection): no task; the gateway waits for its checks instead (action awaiting). A rework: the head it starts from is recorded
+#           (copilot_base), so its end can tell whether it pushed anything. Otherwise: action launch.
+#   end:    after a Development task ended, whatever the agent reported. The task's branch (head) with changes is taken over as the item's pull
+#           request (open-pr: its draft, or a new pull request, superseding the old one); then a pull request with changes and a head the task
+#           did not start from waits for its checks in the gateway: Development is done pending checks (awaiting_checks, the sweep moves the item
+#           to the next column when they are green and hands it back to Development to fix forward when they are red). Otherwise action none
+#           (the relaunch cap decides).
+# A park other than the agent's worker-failure is left alone; so is an item that is not in Development or already waits for its checks.
+function Verb_copilot_settle($a) {
+    $n = Get-ItemNumber $a; $c = Get-Cfg
+    $stage = "$(Need $a 'stage')"; if ($stage -notin 'launch', 'end') { Reject 2 'usage' 'stage is launch or end' }
+    $head = if (Test-Has $a 'head') { "$($a.head)" } else { '' }
+    $info = Get-ItemInfo $n
+    $none = { param($why) @{ ok = $true; id = $n; action = $(if ($stage -eq 'launch') { 'launch' } else { 'none' }); reason = $why } }
+    if (-not $info.open) { return (& $none 'closed') }
+    if ("$($info.column)" -ine "$($c.columns.development)") { return (& $none 'not-in-development') }
+    $s = (Get-State $n).state
+    if (Test-Has $s 'awaiting_checks') { return @{ ok = $true; id = $n; action = 'awaiting'; already = $true; pr = $s.awaiting_checks.pr } }
+    if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha) { return (& $none 'merged') }
+    $park = Get-Park $s
+    if ($park -and "$($park.reason)" -ne 'worker-failure') { return (& $none "parked $($park.reason)") }
+    $rework = (Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')
+    $pr = Find-ItemPr $n
+    if ($stage -eq 'launch') {
+        if (-not $pr) { return (& $none 'no-pr') }
+        if ($rework) { $rs = Get-State $n; $rs.state.copilot_base = "$($pr.head.sha)"; Save-State $n $rs; return @{ ok = $true; id = $n; action = 'launch'; reason = 'rework'; pr = [int]$pr.number } }
+    } elseif ($head -match '^copilot/[A-Za-z0-9._/-]{1,150}$' -and -not ($pr -and "$($pr.head.ref)" -eq $head)) {
+        # the task's own branch: taken over when it carries changes beyond the item's pull request (or the default branch when it has none)
+        $from = if ($pr) { "$($pr.head.sha)" } else { "$($c.defaultBranch)" }
+        $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$([uri]::EscapeDataString($from))...$([uri]::EscapeDataString($head))" -Allow 404
+        $ok = $cmp -and -not ($cmp -is [hashtable] -and $cmp.ContainsKey('body'))
+        $files = if ($ok -and $cmp.PSObject.Properties['files']) { @($cmp.files | Where-Object { $_ }).Count } elseif ($ok) { [int]$cmp.ahead_by } else { 0 }
+        $ahead = $ok -and "$($cmp.status)" -eq 'ahead' -and [int]$cmp.ahead_by -gt 0 -and ($pr -or $files -gt 0)
+        if ($ahead) {
+            try { [void](Verb_open_pr @{ item = $n; head = $head; title = "$($info.title)" }) }
+            catch [FactoryReject] { return @{ ok = $true; id = $n; action = 'none'; reason = "takeover-refused $($_.Exception.Code)" } }
+            $pr = Find-ItemPr $n
+        } elseif ($pr) { Close-StrayCopilotDrafts $n @("$($pr.head.ref)") ([int]$pr.number) }
+    }
+    if (-not $pr) { return (& $none 'no-pr') }
+    $prd = Get-Pr ([int]$pr.number)
+    if ([int]$prd.changed_files -eq 0) { return (& $none 'empty-pr') }
+    $st = Get-State $n; $s = $st.state
+    if ($stage -eq 'end' -and (Test-Has $s 'copilot_base') -and "$($s.copilot_base)" -eq "$($prd.head.sha)") { return (& $none 'no-new-commits') }
+    if ((Test-DocsOnlyFiles (Get-PrFiles $pr.number)) -and -not (Test-ItemDocsOnly $s $info)) { return (& $none 'docs-only-pr') }
+    $rerun = if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rerun') -and [int]$s.pr.number -eq [int]$pr.number) { $s.pr.rerun } else { $null }
+    $s.pr = @{ number = $pr.number; branch = "$($pr.head.ref)"; url = $pr.html_url }; if ($null -ne $rerun) { $s.pr.rerun = $rerun }
+    $why = if ($stage -eq 'launch') { 'it already has its pull request with changes; no new Development task is started' } else { 'the Copilot task ended' }
+    $s.awaiting_checks = @{ pr = $pr.number; sha = "$($prd.head.sha)"; comment = "Completed by the gateway: $why."; since = ConvertTo-Iso (Get-UtcNow); column = "$($info.column)" }
+    if ($park) { $s.Remove('park') }
+    Set-Park $s 'development:awaiting-checks' $c.timing.awaitingChecksParkMinutes
+    $s.Remove('copilot_base'); $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n
+    Add-Comment $n "Development is done pending checks: $why, and PR #$($pr.number) carries the change (head ``$("$($prd.head.sha)".Substring(0, [Math]::Min(7, "$($prd.head.sha)".Length)))``). The gateway waits for its checks and moves the item on when they are green; red checks go back to Development to fix forward."
+    return @{ ok = $true; id = $n; action = 'awaiting'; pr = [int]$pr.number; sha = "$($prd.head.sha)"; overrode = $(if ($park) { "$($park.reason)" } else { '' }) }
 }
 
 # Close a pull request with a comment and delete its branch (a copilot/* branch or the factory's own branch of the item only)

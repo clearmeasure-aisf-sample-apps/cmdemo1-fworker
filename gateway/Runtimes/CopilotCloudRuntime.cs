@@ -20,6 +20,8 @@ sealed class CopilotCloudSettings
     // the CI release (CopilotCiRelease.cs): api.copilot.ciRelease, on by default wherever the mode is on; a pass at most every ciReleaseSeconds
     public bool CiRelease = true;
     public double CiReleaseSeconds = 120;
+    // the credit guard: a task whose sessions report more ai_credits than this is ended (its r1 revoked) and its item parked credit-guard; 0 = off
+    public double MaxCreditsPerTask = 10e9;
     public string Environment = "tdd";
     public string ApiUrl = "https://api.github.com", ApiVersion = "2026-03-10", Token = "", GatewayUrl = "", Model = "",
         Repository = "clearmeasure-aisf-sample-apps/cmdemo1-workorders", DefaultBranch = "master";
@@ -42,6 +44,7 @@ sealed class CopilotCloudSettings
             s.MaxConcurrent = (int)D("maxConcurrent", 1); s.MaxExecutionsPerDay = (int)D("maxExecutionsPerDay", 30); s.MaxMinutes = Math.Max(0.1, D("maxMinutes", 60));
             s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.MaxLaunchesPerPhase = (int)D("maxLaunchesPerPhase", 3); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
             s.AckSeconds = D("ackSeconds", 900); s.ListSeconds = Math.Max(1, D("listSeconds", 30)); s.BootstrapGeneration = Math.Max(1, (int)D("bootstrapGeneration", 1));
+            s.MaxCreditsPerTask = D("maxCreditsPerTask", s.MaxCreditsPerTask);
             s.ApiUrl = S("apiUrl", s.ApiUrl).TrimEnd('/'); s.ApiVersion = S("apiVersion", s.ApiVersion); s.Token = S("token", "");
             s.GatewayUrl = S("gatewayUrl", "").TrimEnd('/'); s.Model = S("model", "").Trim();
             s.Repository = S("repository", s.Repository).Trim('/'); s.DefaultBranch = S("defaultBranch", s.DefaultBranch);
@@ -66,6 +69,7 @@ sealed class CopilotCloudSettings
         if (s.GatewayUrl == "") s.GatewayUrl = (V("FACTORY_COPILOT_GATEWAY_URL") ?? V("FACTORY_PUBLIC_URL") ?? "").TrimEnd('/');
         else if (V("FACTORY_COPILOT_GATEWAY_URL") is { } gu) s.GatewayUrl = gu.TrimEnd('/');
         if (int.TryParse(V("FACTORY_COPILOT_MAX_CONCURRENT"), NumberStyles.None, CultureInfo.InvariantCulture, out var mc)) s.MaxConcurrent = mc;
+        if (double.TryParse(V("FACTORY_COPILOT_MAX_CREDITS_PER_TASK"), NumberStyles.Float, CultureInfo.InvariantCulture, out var mcr) && double.IsFinite(mcr) && mcr >= 0) s.MaxCreditsPerTask = mcr;
         if (double.TryParse(V("FACTORY_COPILOT_MAX_MINUTES"), NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && double.IsFinite(mm) && mm > 0) s.MaxMinutes = mm;
         return s;
     }
@@ -115,7 +119,7 @@ sealed record ItemPr(int Number, string Branch);
 
 sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
 {
-    sealed class Task_ { public string Id = "", Worker = "", Phase = "", State = "queued", Status = "Running"; public int Item; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
+    sealed class Task_ { public string Id = "", Worker = "", Phase = "", State = "queued", Status = "Running"; public int Item; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
 
     readonly CopilotCloudSettings cfg;
     readonly HttpClient http;
@@ -123,6 +127,11 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     readonly Func<int, string, string, ItemPr?, string> prompt;   // item, phase, one-time code, the item's open pull request -> the bootstrap text
     readonly Func<int, CancellationToken, Task<ItemPr?>>? itemPr;   // the item's open pull request (number, head branch), null when it has none
     readonly Dictionary<string, Task_> tasks = new(StringComparer.Ordinal);   // by worker name
+    // The gateway owns the completion of Development (rule verb copilot-settle): (item, stage launch | end, the task's branch) -> its action:
+    // launch (start the task), awaiting (the item's pull request waits for its checks in the gateway: no task), none
+    public Func<int, string, string?, CancellationToken, Task<string>>? Settle { get; set; }
+    // the credit guard (api.copilot.maxCreditsPerTask): parks the item (item, phase, the credits the task reported)
+    public Func<int, string, double, Task>? OverBudget { get; set; }
 
     public CopilotCloudRuntime(CopilotCloudSettings cfg, CopilotCodes codes, Func<int, string, string, ItemPr?, string> prompt, HttpClient? http = null, Func<int, CancellationToken, Task<ItemPr?>>? itemPr = null)
     { this.cfg = cfg; this.codes = codes; this.prompt = prompt; this.itemPr = itemPr; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
@@ -177,6 +186,13 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     {
         // the r1 (r.Nonce) stays in the gateway: the task gets a one-time code for it, valid for the acknowledgement window
         var code = codes.Mint(r.WorkerName, r.Nonce, TimeSpan.FromSeconds(Math.Max(cfg.AckSeconds, 60) + 300));
+        // Development of an item that already has its pull request with changes and no rework asked for: no new task, the gateway waits for its
+        // checks (#395 was relaunched in mode first after its green pull request and opened a duplicate draft for 25B ai_credits)
+        if (IsDevelopment(r.Phase) && Settle != null)
+        {
+            string act; try { act = await Settle(r.Item, "launch", null, ct); } catch (Exception e) { act = "launch"; Console.Error.WriteLine($"copilot: settle of #{r.Item} before launch: {e.GetType().Name}"); }
+            if (act == "awaiting") { codes.Forget(r.WorkerName); return new(false, "", "settled"); }
+        }
         ItemPr? pr = null;
         if (itemPr != null && !IsTechnicalDesign(r.Phase)) { try { pr = await itemPr(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); } }
         int s; JsonNode? j;
@@ -220,12 +236,24 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
                     if (s != 200) throw new HttpRequestException($"read of task answered {s}");
                     var st = j?["state"]?.ToString() ?? "";
                     var usage = Usage(j);
+                    // the credit guard: one task over api.copilot.maxCreditsPerTask ends here (the API has no cancel: its r1 is revoked with the end)
+                    // and its item is parked before the end is settled, so no relaunch and no settle follows
+                    var credits = usage?["ai_credits"] is JsonValue cv && cv.TryGetValue<double>(out var cd) ? cd : 0;
+                    if (cfg.MaxCreditsPerTask > 0 && credits > cfg.MaxCreditsPerTask && !t.Guarded)
+                    {
+                        lock (tasks) { t.Guarded = true; t.Usage = usage; }
+                        codes.Forget(t.Worker);
+                        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-credit-guard", ["worker"] = t.Worker, ["item"] = t.Item, ["phase"] = t.Phase, ["task"] = t.Id, ["ai_credits"] = credits, ["max"] = cfg.MaxCreditsPerTask }.ToJsonString());
+                        if (OverBudget != null) { try { await OverBudget(t.Item, t.Phase, credits); } catch (Exception e) { Console.Error.WriteLine($"copilot: credit-guard park of #{t.Item}: {e.GetType().Name}"); } }
+                        // the end is reported only after the park is saved: the settle at the end must see the guard's park
+                        lock (tasks) if (t.Ended == null) { t.Status = "Failed"; t.Ended = DateTime.UtcNow; }
+                    }
                     lock (tasks)
                     {
                         t.State = st; t.Artifacts = j?["artifacts"]?.DeepClone(); if (usage != null) t.Usage = usage;
                         if (IsDevelopment(t.Phase) && HeadRef(j) is { } hr) heads[t.Item] = hr;
                         t.Fields ??= new JsonArray((j as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>());
-                        if (t.Ended == null)
+                        if (t.Ended == null && !t.Guarded)
                         {
                             t.Status = st switch { "completed" or "idle" => "Succeeded", "failed" or "timed_out" => "Failed", "cancelled" => "Stopped", _ => "Running" };
                             if (t.Status != "Running") t.Ended = DateTime.UtcNow;

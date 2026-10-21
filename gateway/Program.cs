@@ -175,8 +175,10 @@ var copilotCiRelease = new CopilotCiRelease { RefusedRetry = TimeSpan.FromSecond
 var copilotCodes = new CopilotCodes();
 Func<int, string, string, ItemPr?, string> copilotPrompt = (_, _, _, _) => "";
 Func<int, CancellationToken, Task<ItemPr?>> copilotItemPr = (_, _) => Task.FromResult<ItemPr?>(null);
-var copilotManager = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
-    ? new RuntimeManager(runtimeSettings, new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr) => copilotPrompt(item, phase, code, pr), itemPr: (item, ct) => copilotItemPr(item, ct)), runtimeNonces,
+var copilotRuntime = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
+    ? new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr) => copilotPrompt(item, phase, code, pr), itemPr: (item, ct) => copilotItemPr(item, ct)) : null;
+var copilotManager = copilotRuntime != null
+    ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
         copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
     : null;
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
@@ -945,6 +947,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway releases the Copilot agent's held workflow runs by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "park-item")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway parks an item runtime-failed by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
+    if (verb is "copilot-settle")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway settles a Copilot Development task by itself, at its launch and its end", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "unpark-item")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/items/{n}/unpark (client: factory.ps1 unpark --item N --reason \"...\")", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "resettle-item")
@@ -2138,13 +2142,35 @@ if (copilotManager != null && copilotSettings.CiRelease) _ = Task.Run(async () =
         catch (Exception e) { Console.Error.WriteLine($"ci-release: {e.GetType().Name}"); }
     }
 });
+// The gateway owns the completion of a Copilot Development task (rule verb copilot-settle): before a launch (an item whose pull request already
+// carries the change waits for its checks, no new task) and at every end (the task's branch is taken over; Development is done pending checks)
+async Task<string> CopilotSettle(int item, string stage, string? head)
+{
+    var args = new JsonObject { ["item"] = item, ["stage"] = stage }; if (!string.IsNullOrEmpty(head)) args["head"] = head;
+    var (rc, output) = await app.Services.GetRequiredService<Runner>().RunAsync("copilot-settle", args.ToJsonString(), TimeSpan.FromSeconds(120));
+    JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
+    var action = rc == 0 ? j?["action"]?.ToString() ?? "" : "";
+    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "settle", ["item"] = item, ["stage"] = stage, ["exit"] = rc, ["action"] = action, ["reason"] = j?["reason"]?.ToString() ?? j?["code"]?.ToString(), ["pr"] = j?["pr"]?.DeepClone() }.ToJsonString());
+    return rc == 0 ? action : (stage == "launch" ? "launch" : "none");
+}
+if (copilotRuntime != null && copilotManager != null)
+{
+    copilotRuntime.Settle = (item, stage, head, _) => CopilotSettle(item, stage, head);
+    copilotManager.Ending = async e => e.Phase.Equals("Development", StringComparison.OrdinalIgnoreCase) && await CopilotSettle(e.Item, "end", copilotRuntime.HeadOf(e.Item)) == "awaiting";
+    copilotRuntime.OverBudget = async (item, phase, credits) =>
+    {
+        var (code, _) = await app.Services.GetRequiredService<Runner>().RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "credit-guard", ["phase"] = phase, ["by"] = $"the Copilot credit guard: one task reported {credits:0} ai_credits, over api.copilot.maxCreditsPerTask {copilotSettings.MaxCreditsPerTask:0}" }.ToJsonString(), TimeSpan.FromSeconds(120));
+        if (code != 0) throw new InvalidOperationException($"park-item answered exit {code}");
+        plant.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "credit-guard" });
+    };
+}
 copilotPrompt = (item, phase, code, pr) =>
 {
     var bp = prompts.ByPath("bootstrap/copilot.md");
     var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
     // an item with its open pull request: the task starts from that branch (CopilotCloudRuntime.BaseRef), and the fix goes to that pull request
     if (pr != null) text += $"\nThis item's pull request: #{pr.Number}, branch {pr.Branch}. This task starts from that branch; Copilot gives the task its own branch made from it. " +
-        (IsDev(phase) ? $"Fix #{pr.Number}: read its failing checks or the review (pr_checks, item_get), change the code on the branch this task runs on, which already holds #{pr.Number}'s commits, push, and pass THAT branch as `head` to pr_open. The gateway makes your task's pull request the item's and closes #{pr.Number} as superseded. Do not start over from master and open nothing else.\n"
+        (IsDev(phase) ? $"Fix #{pr.Number}: read why once (pr_checks for the failed job's log, item_get for the review), change the code on the branch this task runs on, which already holds #{pr.Number}'s commits, push, and pass THAT branch as `head` to pr_open, then item_complete and session_end. The gateway makes your task's pull request the item's, closes #{pr.Number} as superseded and waits for the checks itself. Do not start over from master and open nothing else.\n"
             : $"Verify #{pr.Number}; change nothing.\n");
     // one Copilot MCP configuration serves every environment: the prompt names this gateway (fworker-mcp accepts only the three gateway hosts)
     return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";

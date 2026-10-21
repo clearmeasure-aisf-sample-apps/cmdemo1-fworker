@@ -65,6 +65,9 @@ sealed class RuntimeManager
     public Func<int, string, Task>? Park { get; set; }
     public Func<int, string, Task>? ReleaseClaim { get; set; }
     public Func<string, Task>? Revoke { get; set; }
+    // before the plant takes back what an ended execution held: the gateway settles what the execution left (the Copilot runtime: a Development
+    // task's pull request waits for its checks in the gateway, rule verb copilot-settle). Not for an execution that never started.
+    public Func<Exec, Task<bool>>? Ending { get; set; }   // true: the item was settled (the end is no failure of the phase)
 
     readonly RuntimeLimits lim;
     public RuntimeManager(RuntimeSettings cfg, IWorkerRuntime cae, RuntimeNonces nonces, RuntimeLimits? limits = null)
@@ -147,8 +150,15 @@ sealed class RuntimeManager
             if (late) { try { await cae.Deprovision(t.Name, "ended-during-start", CancellationToken.None); } catch (Exception x) { Log("deprovision-failed", t.Name, t.Item, x.Message); } }
             return;
         }
-        span?.SetStatus(ActivityStatusCode.Error, r.Error);
         nonces.Forget(t.Name);
+        // the adapter settled the item instead of starting a task (copilot-settle: its pull request waits for its checks): no failure, no launch
+        if (r.Error == "settled")
+        {
+            lock (gate) { if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            await End(t.Name, "settled", failed: false, startFailure: false);
+            return;
+        }
+        span?.SetStatus(ActivityStatusCode.Error, r.Error);
         lock (gate) failureErrors[(t.Item, t.Phase)] = r.Error;
         await End(t.Name, "start-failed", failed: true, startFailure: true);
     }
@@ -185,9 +195,13 @@ sealed class RuntimeManager
             foreach (var k in execs.Where(kv => kv.Value.Ended && kv.Value.EndedAt < DateTime.UtcNow.AddHours(-1)).Select(kv => kv.Key).ToList()) execs.Remove(k);
         }
         if (unhealthyNow) Log("unhealthy", name, e.Item, unhealthyWhy);
+        var settled = false;
+        if (Ending != null && outcome is not ("settled" or "start-failed")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
+        // the phase is done pending checks: the next Development task (a fix-forward round) is counted afresh; fixForwardMaxRounds caps those
+        if (settled) lock (gate) launches.Remove((e.Item, e.Phase));
         var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }
         // an execution that exited by itself while its worker still held the item did not finish it: a failure like any other
-        if (tookBack && !failed && e.StopReason == "" && outcome == "succeeded")
+        if (tookBack && !failed && !settled && e.StopReason == "" && outcome == "succeeded")
         {
             failed = true; outcome = "ended-with-item";
             lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == lim.MaxFailuresPerPhase; failureErrors[(e.Item, e.Phase)] = outcome; }
