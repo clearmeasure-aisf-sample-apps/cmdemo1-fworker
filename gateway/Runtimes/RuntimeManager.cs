@@ -86,6 +86,8 @@ sealed class RuntimeManager
     public string ExistingFor(int item) { lock (gate) return execs.Values.FirstOrDefault(e => e.Item == item && !e.Ended)?.Name ?? ""; }
     // the items this runtime ran or runs an execution for since the process started (the CI release's candidates)
     public HashSet<int> ItemsSeen() { lock (gate) { var s = execs.Values.Select(e => e.Item).Concat(launches.Keys.Select(k => k.Item)).Concat(failures.Keys.Select(k => k.Item)).ToHashSet(); foreach (var x in last) if (x["item"]?.GetValue<int>() is int i) s.Add(i); return s; } }
+    // the execution of this worker was started and has not ended
+    public bool Alive(string name) { lock (gate) return execs.TryGetValue(name, out var e) && !e.Ended && e.Execution != ""; }
     public string ExecutionOf(string name) { lock (gate) return execs.TryGetValue(name, out var e) ? e.Execution : ""; }
     public bool Exhausted(int item, string phase)
     {

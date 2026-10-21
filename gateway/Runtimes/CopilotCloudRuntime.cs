@@ -265,6 +265,14 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         ItemPr? pr = null;
         if (itemPr != null) { try { pr = await itemPr(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); } }
         var own = await Owner(r.Item, ct);
+        // an item an earlier gateway ran one task per phase for, with its pull request open: the task whose branch that pull request is on
+        // becomes the owner and is resumed there (no new task, no stacked draft against the item's branch)
+        if (own == null && pr is { Branch.Length: > 0 } && await TaskOfBranch(pr.Branch, ct) is { } adopted)
+        {
+            own = new CopilotOwner { Item = r.Item, TaskId = adopted.Id, Url = adopted.Url, Branch = pr.Branch, Pr = pr.Number, Phase = r.Phase, Sessions = adopted.Sessions, WaitingOn = "adopted" };
+            lock (tasks) { if (owners.TryGetValue(r.Item, out var o0) && !o0.Done) own = o0; else owners[r.Item] = own; }
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "owner-adopted", ["item"] = r.Item, ["task"] = own.TaskId, ["pr"] = pr.Number }.ToJsonString());
+        }
         if (own != null)
         {
             // the owner is resumed on its pull request: the item's open one, else the one on the task's branch
@@ -337,6 +345,21 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         lock (tasks) { own.Sessions++; own.LastResume = DateTime.UtcNow; own.Updated = DateTime.UtcNow; }
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "resume", ["item"] = item, ["phase"] = "master-fix", ["task"] = own.TaskId, ["pr"] = pr }.ToJsonString());
         return true;
+    }
+
+    // the newest task of the repository whose branch artifact is this branch (the tasks the seat's identity can list), with its session count
+    async Task<(string Id, string Url, int Sessions)?> TaskOfBranch(string branch, CancellationToken ct)
+    {
+        try
+        {
+            var (s, j) = await Send(HttpMethod.Get, $"{TasksPath}?per_page=100", null, ct);
+            if (s != 200) return null;
+            foreach (var t in ((j?["tasks"] as JsonArray) ?? new JsonArray()).OrderByDescending(x => x?["created_at"]?.ToString() ?? "", StringComparer.Ordinal))
+                if (t?["id"]?.ToString() is { Length: > 0 } id && HeadRef(t) == branch)
+                    return (id, HtmlUrl(t), int.TryParse(t["session_count"]?.ToString(), out var sc) && sc > 0 ? sc : 1);
+        }
+        catch (Exception e) { Console.Error.WriteLine($"copilot: tasks of {branch}: {e.GetType().Name}"); }
+        return null;
     }
 
     // the open pull request on a branch (0: none)

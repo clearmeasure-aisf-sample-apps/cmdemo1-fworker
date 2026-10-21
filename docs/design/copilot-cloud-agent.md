@@ -71,16 +71,33 @@ session is the usual per-name one; between sessions the gateway holds the item f
 back to Development with `pr.rejection`). The owner watch (every `api.copilot.ciReleaseSeconds`, acting gateway only) reads `copilot-owner
 status` for each owned item with no session running: `ci`, `next-phase`, `parked:<reason>`, `master-green`, `master-broken`, `done`, `closed`.
 
-**Done.** Only when the pull request is merged AND master is green for the merge commit (the settle's `merge.green_at`): the watch closes
+**Done.** Only when the pull request is merged, master is green for the merge commit, AND the change is in production (below; `merge.done_at`): the watch closes
 the ownership (`done_at`), comments "**Owner done:** ... Session link: <html_url>" and logs `owner-done`. An item closed without a merge ends
 the ownership without that comment. A **red master** after the merge (`master-broken`) resumes the owner task once per merge commit to fix
 forward on ONE new pull request against master; the item stays parked master-broken and goes on by the existing auto-unpark once master is
 green, then the owner is done.
 
+**All the way to production (Jeffrey, 2026-10-21).** "If copilot creates a draft pr, then it has to be marked as ready in order to get ready
+for merge. I want fworker to drive a work item all the way through to production." So:
+- The item's pull request is never left a draft: `pr_open` takes the task's draft over and marks it ready (GraphQL
+  `markPullRequestReadyForReview`), and Development's settle marks a recorded draft ready before it waits for the checks. GitHub merges no draft.
+- The owner's work ends in production, not at master green: the watch closes the ownership when the item state's `merge.done_at` is set,
+  which the Release Queue step sets when the release that carries the merge commit (or a later one that contains it) is deployed to prod
+  (Octopus task `Success`). The settle then moves the item to Done, closes it and comments the release and the production URL
+  (`octopus.prodUrl`); the "**Owner done:**" comment names the release and the URL too. Status `waitingOn`: `release-candidate`,
+  `prod-deploy`, `prod-failed`.
+- A failed production deployment of the item's release (`Failed`, `TimedOut`) is said once per deployment on the item ("**Prod deployment
+  FAILED**") and shows as `prod-failed`; the operator judges it: infrastructure is deployed again, code sends the item back to Development,
+  where its owner task fixes forward. Not automatic yet: telling infrastructure from code needs the Octopus task log.
+
 **Sessions in the prompts.** The agent owns the item until master is green, but each session does its phase step (push, `pr_open`,
 `item_complete` or the verdict), calls `session_end` and ends. It never polls or waits for CI. Before every push that creates or updates the
 pull request (Jeffrey, 2026-10-21: "runs the Private build and the acceptance tests within the session") it runs `pwsh ./PrivateBuild.ps1`
-and `pwsh ./AcceptanceTests.ps1`, pushes only when both pass, and reports both in `item_complete`. cmdemo1-workorders'
+and `pwsh ./AcceptanceTests.ps1`, pushes only when both pass, and reports both in `item_complete`. Only failures the change causes block
+the push: a failing test outside the change's files that also fails at `origin/master` is named in `item_complete` and does not block (#416:
+247/248, the one failure untouched by the change). The session pushes as soon as the gate allows (an unpushed commit dies with the VM) and
+calls `item_get` before and after the long steps. A running cloud session is exempt from the item check (`Plant.RuntimeAlive`): its
+runtime's deadline bounds it (#415 and #406 lost their leases to the 15 min check during the acceptance tests). cmdemo1-workorders'
 `copilot-setup-steps.yml` installs the SDK and the Playwright Chromium; ubuntu-latest brings PowerShell and Docker (SQL Server container,
 else the SQLite fallback).
 

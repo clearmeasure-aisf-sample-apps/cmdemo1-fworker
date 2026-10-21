@@ -2288,7 +2288,7 @@ copilotPrompt = (item, phase, code, pr, why) =>
             "You own #{item} until it is merged and master is green, but THIS session does only this phase step and then ends: never poll or wait for CI; the gateway watches it and resumes you.\n";
         f = f.Replace("{item}", item.ToString());
         if (why.Trim() != "") f += $"What changed: {why.Trim()}\n";
-        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass, else fix and rerun. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
+        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass (a failing test outside your change that also fails at origin/master does not block: name it in item_complete), else fix and rerun. Push as soon as the gate allows. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
             : phase.Trim().Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? $"Verify PR #{pr.Number} against the item's criteria; change nothing; record the review and the verdict, then session_end.\n"
             : "Do this phase's step only, then session_end.\n";
         var bpf = prompts.ByPath("bootstrap/copilot.md");

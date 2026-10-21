@@ -35,6 +35,7 @@ sealed partial class Plant
         return s.Order().ToArray();
     }
 
+    bool RuntimeAlive(string name) => (Cursor?.Alive(name) ?? false) || (Copilot?.Alive(name) ?? false);
     double AckFor(string name) => RuntimeOf(name)?.AckSeconds ?? ackSeconds;
     bool RuntimeWorker(WorkerInfo w) => w.Runtime != "local";
 

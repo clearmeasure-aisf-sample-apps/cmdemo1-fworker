@@ -132,6 +132,7 @@ sealed class World
             copilotTasks.Add(t);
             return (201, CopilotJson(t));
         }
+        if (!m.Groups[3].Success && method == "GET") return (200, J(("tasks", new JsonArray(copilotTasks.Select(x => (JsonNode)CopilotJson(x)).ToArray()))));
         var task = copilotTasks.FirstOrDefault(x => x.Id == m.Groups[4].Value);
         if (task == null) return (404, "{\"message\":\"Not Found\"}");
         if (method == "GET") { task.Reads++; return (200, CopilotJson(task)); }

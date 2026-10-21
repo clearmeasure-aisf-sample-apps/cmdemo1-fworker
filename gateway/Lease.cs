@@ -206,6 +206,9 @@ sealed partial class Plant
                 if (clientAccepted.ContainsKey(item)) continue;   // rule 1 decides about it
                 if (ownedInfo.TryGetValue(item, out var info) && info.Parked) { checks.Remove(item); continue; }
                 if (lastRouted.TryGetValue(item, out var ev) && LeaseWaits.Contains(ev)) { checks.Remove(item); continue; }
+                // a cloud runtime's session (Cursor, Copilot) whose execution still runs is alive whatever it says: its private build and
+                // acceptance tests take longer than the quiet window, and the runtime's own deadline (maxMinutes) bounds it
+                if (RuntimeAlive(owner)) { checks.Remove(item); continue; }
                 var summaryAt = store.Recipients.TryGetValue(owner, out var r) ? r.SummaryAt : default;
                 // an owner the plant starts watching without a call it saw (restored from a snapshot, or listed by a sweep after a restart) gets a
                 // full quiet window from now, not from when it took the item

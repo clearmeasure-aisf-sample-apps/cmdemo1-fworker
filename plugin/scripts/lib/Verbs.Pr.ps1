@@ -232,6 +232,8 @@ function Verb_copilot_settle($a) {
     if (-not $pr) { return (& $none 'no-pr') }
     $prd = Get-Pr ([int]$pr.number)
     if ([int]$prd.changed_files -eq 0) { return (& $none 'empty-pr') }
+    # the item's pull request is never left a draft: GitHub merges no draft, and nobody would mark it ready (#418, #421)
+    if ($prd.draft) { [void](Invoke-GhGraphQL 'mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }' @{ id = "$($prd.node_id)" }) }
     $st = Get-State $n; $s = $st.state
     if ($stage -eq 'end' -and (Test-Has $s 'copilot_base') -and "$($s.copilot_base)" -eq "$($prd.head.sha)") { return (& $none 'no-new-commits') }
     if ((Test-DocsOnlyFiles (Get-PrFiles $pr.number)) -and -not (Test-ItemDocsOnly $s $info)) { return (& $none 'docs-only-pr') }
@@ -289,7 +291,9 @@ function Verb_copilot_owner($a) {
         $merged = if ([int]$own.pr -gt 0) { ": PR #$($own.pr) merged" } else { '' }
         if ($sha) { $merged += ' as `' + $sha.Substring(0, [Math]::Min(7, $sha.Length)) + '`' }
         $sessionLink = if ("$($own.url)") { "$($own.url)" } else { "$($own.id)" }
-        Add-Comment $n "**Owner done:** Copilot task $link finished #$n$merged and master is green. Session link: $sessionLink"
+        $rel = if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'release') -and $s.merge.release) { " in release $($s.merge.release)" } else { '' }
+        $oc = (Get-Cfg).octopus; $prodAt = if ((Test-Has $oc 'prodUrl') -and "$($oc.prodUrl)") { " ($($oc.prodUrl))" } else { '' }
+        Add-Comment $n "**Owner done:** Copilot task $link finished #$n$merged, master is green and the change is delivered to production$rel$prodAt. Session link: $sessionLink"
         return @{ ok = $true; id = $n; closed = $true }
     }
     # status
@@ -299,7 +303,11 @@ function Verb_copilot_owner($a) {
     $o = @{ ok = $true; id = $n; open = [bool]$info.open; column = "$($info.column)"; pr = $(if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }) }
     if ($m -and (Test-Has $m 'sha') -and $m.sha) {
         $o.merge_sha = "$($m.sha)"
-        if ((Test-Has $m 'green_at') -and $m.green_at) { $o.waiting = 'done' }
+        # the owner's work ends in production (Jeffrey 2026-10-21): delivered (done_at, the Release Queue saw the prod deployment)
+        # (a merged item closed by any other route, a person's Done or a docs-only path that sets no done_at, ends the ownership too)
+        if (((Test-Has $m 'done_at') -and $m.done_at) -or (-not $info.open -and -not ((Test-Has $m 'awaiting') -and $m.awaiting))) { $o.waiting = 'done'; if (Test-Has $m 'release') { $o.release = "$($m.release)" } }
+        elseif ("$($m.awaiting)" -eq 'release-queue') { $o.waiting = $(if ((Test-Has $m 'prod_failed') -and $m.prod_failed) { 'prod-failed' } else { 'prod-deploy' }) }
+        elseif ("$($m.awaiting)" -in 'release-candidate', 'late-rc') { $o.waiting = 'release-candidate' }
         elseif ("$($m.awaiting)" -eq 'master-broken') { $o.waiting = 'master-broken'; $o.failed = @(if ($park -and (Test-Has $park 'failed')) { @($park.failed) }) }
         else { $o.waiting = 'master-green' }
     }
