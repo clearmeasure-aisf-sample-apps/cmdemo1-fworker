@@ -132,7 +132,7 @@ $CopilotScenarios = [ordered]@{
     } finally { Cop-Cleanup @($n) }
 }
 
-'copilot: a task that ends by itself ends its worker and reports its premium requests; a failed create frees the slot; a task past api.copilot.maxMinutes fails and its code dies' = {
+'copilot: a task that ends by itself ends its worker and reports its premium requests; a failed create frees the slot' = {
     $n = 0; $m = 0
     try {
         $n = New-Item-Fake 'Copilot self end' 'x' $CopLabels
@@ -148,10 +148,6 @@ $CopilotScenarios = [ordered]@{
         $m = New-Item-Fake 'Copilot relaunch' 'x' $CopLabels
         Check 'after the failed create a new task is created' (Wait-Until -Seconds 40 { (Cop-Tasks $m).Count -ge 1 })
         Check 'status: the failure was counted against the item' (Wait-Until -Seconds 20 { @((Cop-Status).failures | Where-Object { $_.item -eq $m -and $_.count -ge 1 }).Count -eq 1 }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
-        $t2 = (Cop-Tasks $m)[0]
-        # the deadline is counted from the gateway's own launch of the task; the wait is generous for a loaded runner
-        Check 'the deadline (0.25 min in this suite) fails it' (Wait-Until -Seconds 120 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"" | Where-Object { "$_" -match $t2.id }).Count -gt 0 })
-        Check 'and its unspent code no longer exchanges' (Wait-Until -Seconds 20 { (Cop-Exchange (Cop-Code $t2) (Cop-Bootstrap)).status -eq 401 })
     } finally { Cop-Cleanup @($n, $m) }
 }
 
@@ -544,6 +540,23 @@ $CopilotScenarios = [ordered]@{
         Set-ItemState $n { param($st) $st.merge.green_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = 'release-candidate'; $st.merge.rc_deadline = (Get-Date).ToUniversalTime().AddHours(1).ToString('o'); $st.Remove('park') }
         Check 'master green: the owner is done' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
         Check 'and the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
+    } finally { Cop-Cleanup @($n) }
+}
+}
+
+# The deadline has its own suite ('copilot-deadline', api.copilot.maxMinutes 0.25): in 'copilot' it would end any task of a scenario that runs
+# over 15 s on a loaded runner (an item moved on by the gateway, an extra session), so that suite keeps a generous maxMinutes.
+$CopilotDeadlineScenarios = [ordered]@{
+
+'copilot: a task past api.copilot.maxMinutes fails and its code dies' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot deadline' 'x' $CopLabels
+        Check 'a task is created' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
+        $t2 = (Cop-Tasks $n)[0]
+        # the deadline is counted from the gateway's own launch of the task; the wait is generous for a loaded runner
+        Check 'the deadline (0.25 min in this suite) fails it' (Wait-Until -Seconds 120 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"" | Where-Object { "$_" -match $t2.id }).Count -gt 0 })
+        Check 'and its unspent code no longer exchanges' (Wait-Until -Seconds 20 { (Cop-Exchange (Cop-Code $t2) (Cop-Bootstrap)).status -eq 401 })
     } finally { Cop-Cleanup @($n) }
 }
 }
