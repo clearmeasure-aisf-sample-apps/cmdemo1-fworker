@@ -740,7 +740,7 @@ $OwnerScenarios['pass-merge: checks still running at the verdict: the answer is 
     $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
     Check 'the verdict answer: merge waiting for checks-pending' ((Pv $v 'merge') -and $v.merge.outcome -eq 'waiting' -and $v.merge.reason -eq 'checks-pending') ($v | ConvertTo-Json -Compress -Depth 5)
     [void](F 'w1' @('claim-item', '--item', $x.n, '--release', 'true'))     # the session is gone: no live claim
-    Start-Sleep -Seconds 6
+    [void](Wait-Until -Seconds 30 { @((Get-Plant).plant.passUnmerged | Where-Object { $_.item -eq $x.n -and $_.code -eq 'checks-pending' }).Count -eq 1 })
     $pu = @((Get-Plant).plant.passUnmerged | Where-Object { $_.item -eq $x.n })
     Check '/status lists it as pass-unmerged with its reason' ($pu.Count -eq 1 -and $pu[0].code -eq 'checks-pending' -and $pu[0].pr -eq $x.pr) ((Get-Plant).plant.passUnmerged | ConvertTo-Json -Compress)
     # (an offer before the verdict, while the scripted holder moved the item between columns, is not one of this state)
