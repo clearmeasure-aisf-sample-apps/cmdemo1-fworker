@@ -29,13 +29,13 @@
     "messaging": 290.0,
     "manager": 658.0,
     "operator": 145.0,
-    "runtime": 191.0,
-    "mcp": 37.0,
-    "cursor": 80.0,
-    "copilot": 262.0,
-    "envscope": 33.0,
+    "runtime": 194.0,
+    "mcp": 33.0,
+    "cursor": 84.0,
+    "copilot": 514.0,
+    "envscope": 34.0,
     "copilot-manager": 116.0
   },
-  "wall-full": 497.0,
+  "wall-full": 518.0,
   "wall-fast": 108.0
 }

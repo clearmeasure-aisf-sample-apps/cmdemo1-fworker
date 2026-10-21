@@ -274,9 +274,15 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
             string act; try { act = await Settle(r.Item, "launch", null, ct); } catch (Exception e) { act = "launch"; Console.Error.WriteLine($"copilot: settle of #{r.Item} before launch: {e.GetType().Name}"); }
             if (act == "awaiting") { codes.Forget(r.WorkerName); return new(false, "", "settled"); }
         }
-        ItemPr? pr = null;
-        if (itemPr != null) { try { pr = await itemPr(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); } }
-        var own = await Owner(r.Item, ct);
+        // the item's pull request (none in Technical Design) and its owner record are read side by side: each is a rule-script run, and the
+        // registration window counts from the offer
+        async Task<ItemPr?> ReadPr()
+        {
+            if (itemPr == null || IsTechnicalDesign(r.Phase)) return null;
+            try { return await itemPr(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); return null; }
+        }
+        var prTask = ReadPr(); var ownTask = Owner(r.Item, ct);
+        var pr = await prTask; var own = await ownTask;
         // an item an earlier gateway ran one task per phase for, with its pull request open: the task whose branch that pull request is on
         // becomes the owner and is resumed there (no new task, no stacked draft against the item's branch)
         if (own == null && pr is { Branch.Length: > 0 } && await TaskOfBranch(pr.Branch, ct) is { } adopted)
