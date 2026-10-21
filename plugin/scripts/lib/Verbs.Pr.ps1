@@ -97,6 +97,8 @@ function Use-CopilotDraft([int]$n, [string]$Head, [string]$Title, [int]$Supersed
     if (-not $pr) { return $null }
     # a draft that names another item, or that another item's state already holds, is not this item's to take
     $others = @([regex]::Matches("$($pr.title) $($pr.body)", '(?<![0-9A-Za-z])#(\d+)\b') | ForEach-Object { [int]$_.Groups[1].Value } | Where-Object { $_ -ne $n -and $_ -ne $Superseding })
+    # a pull request it names is no other item: a Copilot follow-up opens its own draft "which merges into #<the item's pull request>" (#474 on #470)
+    $others = @($others | Where-Object { $op = Invoke-Gh -Path "$(Get-RepoPath)/pulls/$_" -Allow 404; $op -is [hashtable] -and $op.ContainsKey('status') })
     if ($others.Count) { Reject 10 'branch-of-other-item' "the pull request on '$Head' names #$($others[0]), not #$n" }
     # a draft Copilot opened against the item's previous branch (a task started from it) goes to the default branch: it carries that branch's commits.
     # GitHub refuses that for a draft that is part of a stack (422 "part of a stack", #395/#398): the draft is closed, its branch kept, and the
@@ -306,11 +308,11 @@ function Verb_copilot_owner($a) {
     # before the merge: the item's pull request is the open one of the owner task's branch (a closed or superseded record is replaced)
     if ($info.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha)) {
         $ow = try { Resolve-OwnerPr $n } catch { $null }
-        if ($ow -and $ow.changed) { $st = Get-State $n; $s = $st.state }
+        if ($ow) { $st = Get-State $n; $s = $st.state }
     }
     $m = if (Test-Has $s 'merge') { $s.merge } else { $null }
     $park = Get-Park $s
-    $o = @{ ok = $true; id = $n; open = [bool]$info.open; column = "$($info.column)"; pr = $(if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }) }
+    $o = @{ ok = $true; id = $n; open = [bool]$info.open; column = "$($info.column)"; branch = $(if ($own) { "$($s.copilot_task.branch)" } else { '' }); pr = $(if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }) }
     if ($m -and (Test-Has $m 'sha') -and $m.sha) {
         $o.merge_sha = "$($m.sha)"
         # the owner's work ends in production (Jeffrey 2026-10-21): delivered (done_at, the Release Queue saw the prod deployment)
@@ -363,7 +365,15 @@ function Resolve-OwnerPr([int]$n) {
     if ((Test-Has $s.copilot_task 'done_at') -and $s.copilot_task.done_at) { return $null }
     $br = "$($s.copilot_task.branch)"
     $pr = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&head=$([uri]::EscapeDataString("$($c.owner):$br"))&per_page=5") | Where-Object { $_ -and "$($_.head.ref)" -eq $br } | Select-Object -First 1
+    # a follow-up session may open its own draft on a new branch, stacked on the owner's ("merges into #<pr>", #468 on #466, #474 on #470): the
+    # owner's work goes on there, so its current branch is the newest such successor (followed a few levels)
+    for ($hop = 0; $hop -lt 3; $hop++) {
+        $succ = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&base=$([uri]::EscapeDataString($br))&per_page=20") | Where-Object { $_ -and "$($_.head.ref)" -like 'copilot/*' -and "$($_.base.ref)" -eq $br } | Sort-Object { [int]$_.number } | Select-Object -Last 1
+        if (-not $succ) { break }
+        $br = "$($succ.head.ref)"; $pr = $succ
+    }
     if (-not $pr) { return $null }
+    if ("$($s.copilot_task.branch)" -ne $br) { $s.copilot_task.branch = $br; Save-State $n $st }
     $o = @{ pr = $pr; changed = $false; retargeted = $false; superseded = 0; refused = '' }
     if ("$($pr.base.ref)" -ne $def) {
         $basePr = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&head=$([uri]::EscapeDataString("$($c.owner):$($pr.base.ref)"))&per_page=5") | Where-Object { $_ -and "$($_.head.ref)" -eq "$($pr.base.ref)" } | Select-Object -First 1

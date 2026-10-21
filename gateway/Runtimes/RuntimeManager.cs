@@ -37,6 +37,8 @@ sealed class RuntimeLimits
 interface IRuntimeWork
 {
     bool FollowUp(string worker);
+    // the follow-up ended without registering or pushing: the next one of the item is told to push first
+    void Idle(string worker);
     Task<bool?> Pushed(string worker, CancellationToken ct);
 }
 
@@ -235,6 +237,7 @@ sealed class RuntimeManager
             try { pu = await rw.Pushed(name, CancellationToken.None); } catch (Exception x) { Log("pushed-read-failed", name, e.Item, x.Message); }
             // not known (the head unreadable): neither, the end is judged as before
             pushed = pu == true; idle = pu == false;
+            if (idle) rw.Idle(name);
             Log(pushed ? "followup-pushed" : idle ? "followup-idle" : "followup-unknown", name, e.Item, e.Phase);
         }
         lock (gate) { if (idle) idleFollowUps[e.Item] = idleFollowUps.GetValueOrDefault(e.Item) + 1; else if (pushed) idleFollowUps.Remove(e.Item); }
