@@ -142,10 +142,10 @@ sealed class CopilotOwner
     };
 }
 
-sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
+sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
 {
     // one execution: a session of a task (Session 0 is the task's first; Id is the task id for it and "<task>#<n>" for a follow-up)
-    sealed class Task_ { public string Id = "", TaskId = "", Worker = "", Phase = "", State = "queued", Status = "Running", Via = "task"; public int Item, Session, Pr; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
+    sealed class Task_ { public string Id = "", TaskId = "", Worker = "", Phase = "", State = "queued", Status = "Running", Via = "task", BaseSha = ""; public int Item, Session, Pr; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
 
     readonly CopilotCloudSettings cfg;
     readonly HttpClient http;
@@ -210,6 +210,8 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     }
     public void Adopt(CopilotOwner o) { lock (tasks) if (!owners.TryGetValue(o.Item, out var cur) || cur.Done) owners[o.Item] = o; }
     public void Waiting(int item, string column, string waitingOn) { lock (tasks) if (owners.TryGetValue(item, out var o)) { if (column != "") o.Phase = column; o.WaitingOn = waitingOn; o.Updated = DateTime.UtcNow; } }
+    // the item's pull request as the rule verb resolved it (copilot-owner status: the open one of the owner task's branch)
+    public void SetPr(int item, int pr) { lock (tasks) if (pr > 0 && owners.TryGetValue(item, out var o) && o.Pr != pr) { o.Pr = pr; o.Updated = DateTime.UtcNow; } }
     public void Close(int item) { lock (tasks) if (owners.TryGetValue(item, out var o)) { o.Done = true; o.WaitingOn = "done"; owners.Remove(item); } }
     public JsonArray OwnedJson() { lock (tasks) return new JsonArray(owners.Values.Where(o => !o.Done).OrderBy(o => o.Item).Select(o => { var j = o.Json(); if (tasks.Values.Any(t => t.Item == o.Item && t.Ended == null)) j["waitingOn"] = "session"; return (JsonNode)j; }).ToArray()); }
 
@@ -332,6 +334,8 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     async Task<ProvisionResult> Resume(CopilotOwner own, string worker, int item, string phase, int pr, string text, CancellationToken ct)
     {
         var k = own.Sessions;
+        // the pull request's head when the session is asked for: its end is judged by whether it pushed (IRuntimeWork.Pushed)
+        var baseSha = await HeadShaOf(pr, ct);
         try
         {
             var (ts, tj) = await Send(HttpMethod.Get, $"{TasksPath}/{Uri.EscapeDataString(own.TaskId)}", null, ct);
@@ -345,7 +349,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         var id = $"{own.TaskId}#{k}";
         lock (tasks)
         {
-            tasks[worker] = new Task_ { Id = id, TaskId = own.TaskId, Session = k, Via = "comment", Pr = pr, Worker = worker, Item = item, Phase = phase };
+            tasks[worker] = new Task_ { Id = id, TaskId = own.TaskId, Session = k, Via = "comment", Pr = pr, Worker = worker, Item = item, Phase = phase, BaseSha = baseSha ?? "" };
             own.Sessions = k + 1; own.Pr = pr; own.Phase = phase; own.LastResume = DateTime.UtcNow; own.WaitingOn = "session"; own.Updated = DateTime.UtcNow;
         }
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "resume", ["item"] = item, ["phase"] = phase, ["task"] = own.TaskId, ["session"] = k, ["pr"] = pr }.ToJsonString());
@@ -363,6 +367,24 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         lock (tasks) { own.Sessions++; own.LastResume = DateTime.UtcNow; own.Updated = DateTime.UtcNow; }
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "resume", ["item"] = item, ["phase"] = "master-fix", ["task"] = own.TaskId, ["pr"] = pr }.ToJsonString());
         return true;
+    }
+
+    // the head commit of a pull request (null: unreadable)
+    async Task<string?> HeadShaOf(int pr, CancellationToken ct)
+    {
+        try { var (s, j) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/pulls/{pr}", null, ct); return s == 200 && j?["head"]?["sha"]?.ToString() is { Length: > 0 } h ? h : null; }
+        catch (Exception e) { Console.Error.WriteLine($"copilot: head of #{pr}: {e.GetType().Name}"); return null; }
+    }
+
+    // IRuntimeWork: a follow-up session (a @copilot comment on the item's pull request), and whether that pull request's head moved since it was
+    // asked for (null: not known)
+    public bool FollowUp(string worker) { lock (tasks) return tasks.TryGetValue(worker, out var t) && t.Via == "comment"; }
+    public async Task<bool?> Pushed(string worker, CancellationToken ct)
+    {
+        Task_? t; lock (tasks) tasks.TryGetValue(worker, out t);
+        if (t == null || t.Via != "comment" || t.Pr <= 0 || t.BaseSha == "") return null;
+        var h = await HeadShaOf(t.Pr, ct);
+        return h == null ? null : h != t.BaseSha;
     }
 
     // the newest task of the repository whose branch artifact is this branch (the tasks the seat's identity can list), with its session count
