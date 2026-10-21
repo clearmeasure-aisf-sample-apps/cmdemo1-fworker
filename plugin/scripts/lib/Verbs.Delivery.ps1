@@ -285,14 +285,23 @@ function Invoke-Settle([int]$n) {
     }
     if ($m.awaiting -eq 'release-queue') {
         $d = Get-Delivery $sha
+        $o = (Get-Cfg).octopus
+        $prodAt = if ((Test-Has $o 'prodUrl') -and "$($o.prodUrl)") { " Production: $($o.prodUrl)" } else { '' }
         if ($d.prod_success) {
-            & $finish "Delivered to **Prod** - moved to **$(Get-LastColumn)**. Release $($m.release)."
+            & $finish "Delivered to **Prod** - moved to **$(Get-LastColumn)**. Release $($m.release).$prodAt"
             return @{ outcome = 'done'; path = 'prod' }
         }
         $later = Get-ProdContaining $sha
         if ($later) {
-            & $finish "Delivered to **Prod** in release $later, which contains this change - moved to **$(Get-LastColumn)**."
+            & $finish "Delivered to **Prod** in release $later, which contains this change - moved to **$(Get-LastColumn)**.$prodAt"
             return @{ outcome = 'done'; path = 'prod-later-release'; release = $later }
+        }
+        # a failed production deployment of the item's release: said once per deployment on the item, and the owner's status shows prod-failed;
+        # the operator judges it (infrastructure: deploy again; code: the item goes back to Development and its owner task fixes forward)
+        $pd = $null; foreach ($k in $d.deployments.Keys) { if ($k -ieq "$($o.environments.prod)") { $pd = $d.deployments[$k] } }
+        if ($pd -and $pd.completed -and "$($pd.state)" -in 'Failed', 'TimedOut' -and "$($m.prod_failed)" -ne "$($pd.deployment)") {
+            $m.prod_failed = "$($pd.deployment)"; Save-State $n $st
+            Add-Comment $n "**Prod deployment FAILED** for release $($m.release) ($($pd.deployment), $($pd.state)). The item stays in the Release Queue for the operator: an infrastructure failure is deployed again; a code failure sends the item back to Development, where its owner fixes forward."
         }
         # since when it waits (the Release Queue age of the digest): an item queued before queued_at was recorded counts from master green, or the merge
         $queued = if (Test-Has $m 'queued_at') { $m.queued_at } elseif (Test-Has $m 'green_at') { $m.green_at } else { $m.merged_at }

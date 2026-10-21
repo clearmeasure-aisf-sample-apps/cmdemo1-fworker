@@ -1262,234 +1262,316 @@
   },
   "mcp": {
     "mcp: the legacy kinds map to role principals: the admin token is the owner, a worker credential a seat; /status shows mode and role": {
-      "tier": "fast",
       "checks": 2,
-      "seconds": 10.4
+      "tier": "fast",
+      "seconds": 3.6
     },
     "mcp: the owner (admin token) lists the owner read tools; a missing, forged or roleless credential is refused before the server": {
-      "tier": "fast",
       "checks": 4,
-      "seconds": 3.7
+      "tier": "fast",
+      "seconds": 0.7
     },
     "mcp: owner read tools answer what the /api/v1 endpoints answer; refusals keep the endpoint's code": {
-      "tier": "fast",
       "checks": 9,
-      "seconds": 16.6
+      "tier": "fast",
+      "seconds": 5.4
     },
     "mcp: a legacy item token is accepted at /mcp as the worker role; a seat r1 and a w1 have no tools": {
-      "tier": "fast",
       "checks": 6,
-      "seconds": 19.9
+      "tier": "fast",
+      "seconds": 5.8
     },
     "mcp: a worker r1 registers at its first call, gets its offer by next_event without the item token, accepts and works its item through the verbs": {
-      "tier": "fast",
       "checks": 22,
-      "seconds": 26.8
+      "tier": "fast",
+      "seconds": 8.1
     },
     "mcp: an r1 round trip: minted, verified for its role, expired, revoked by generation, another environment and another kind's MAC refused": {
-      "tier": "fast",
       "checks": 13,
-      "seconds": 8.4
+      "tier": "fast",
+      "seconds": 5.1
     },
     "mcp: get_prompt serves the prompt of the session's role and phase, with the common rules and its agent's section; /_build reports promptsHash": {
-      "tier": "fast",
       "checks": 8,
-      "seconds": 0.3
+      "tier": "fast",
+      "seconds": 0.1
     }
   },
   "cursor": {
     "cursor: an item labelled runtime:cursor-cloud launches one agent with the bootstrap prompt, the repository at master and the gateway's /mcp with an r1; the agent works the item by MCP and session_end deletes it": {
-      "tier": "fast",
       "checks": 21,
-      "seconds": 30.2
+      "tier": "fast",
+      "seconds": 28.8
     },
     "cursor: a failed launch frees the slot and the item gets a new agent; an agent past api.cursor.maxMinutes is cancelled and deleted": {
-      "tier": "fast",
       "checks": 7,
-      "seconds": 40.4
+      "tier": "fast",
+      "seconds": 27.6
     },
     "cursor: an agent that ends by itself is deleted and its item taken back; a restarted gateway deletes the agents a former process left": {
-      "tier": "fast",
       "checks": 5,
-      "seconds": 30.5
+      "tier": "fast",
+      "seconds": 14.4
     },
     "cursor: v1 takes docs-only items only: a code item labelled for it in Development is not launched": {
-      "tier": "fast",
       "checks": 2,
-      "seconds": 9.8
+      "tier": "fast",
+      "seconds": 7.0
     }
   },
   "envscope": {
     "env label: two gateways on one board each act only on items of their own env: label; unlabelled and doubly labelled items are nobody's": {
-      "tier": "fast",
       "checks": 21,
-      "seconds": 47.1
+      "tier": "fast",
+      "seconds": 30.0
     }
   },
   "operator": {
     "op: a failure report of the owner arrives as parked with its reason and the column it was called for, not as a completed column": {
-      "tier": "fast",
       "checks": 4,
-      "seconds": 5.1
+      "tier": "fast",
+      "seconds": 2.8
     },
     "op: revoke kills the operator credential: its stream ends, the old credential is unknown, and a new one works": {
-      "tier": "fast",
       "checks": 7,
-      "seconds": 3.2
+      "tier": "fast",
+      "seconds": 2.8
     },
     "op: release-check answers not quiet with an owner mid-verb, an open question or a pending offer, with the reasons, and quiet otherwise": {
-      "tier": "fast",
       "checks": 8,
-      "seconds": 14.9
+      "tier": "fast",
+      "seconds": 9.8
     },
     "op: with operator.enabled false every operator call is refused, the status has no operator block, and without messaging the gateway does not start": {
-      "tier": "fast",
       "checks": 6,
-      "seconds": 5.7
+      "tier": "fast",
+      "seconds": 2.9
     },
     "op: every endpoint outside its list refuses the operator credential: mint, revoke, the messaging switch, verbs and the test seams": {
-      "tier": "fast",
       "checks": 4,
-      "seconds": 1.3
+      "tier": "fast",
+      "seconds": 0.1
     },
     "op: the worker and supervisor prompts are unchanged, the operator prompt clones the product and names its skill, the page shows the operator, and gen-connect-prompt.sh writes the prompt": {
-      "tier": "fast",
       "checks": 8,
-      "seconds": 2.5
+      "tier": "fast",
+      "seconds": 1.6
     },
     "op: it sends a note to a worker, to the supervisor and to all, reads the log and the questions, answers, sets a mode and grants budget; the real client does the same": {
-      "tier": "fast",
       "checks": 21,
-      "seconds": 20.8
+      "tier": "fast",
+      "seconds": 7.0
     },
     "op: a worker or supervisor credential, and an operator credential that does not hold the slot, cannot use the operator endpoints": {
-      "tier": "fast",
       "checks": 5,
-      "seconds": 0.2
+      "tier": "fast",
+      "seconds": 0.0
     },
     "op: it drains and resumes a worker name as the operator does, the drain holds across a new session of the name, it sets a capacity and reads the metrics; nobody else gets these": {
-      "tier": "fast",
       "checks": 22,
-      "seconds": 44.4
+      "tier": "fast",
+      "seconds": 16.3
     },
     "op: it registers and holds the one slot, a second name is refused and takes over after the window, and the model check is reported": {
-      "tier": "fast",
       "checks": 9,
-      "seconds": 8.3
+      "tier": "fast",
+      "seconds": 6.5
     },
     "op: record-release counts a self-merged release once, the count survives a gateway restart, and at the limit the next check is refused": {
-      "tier": "fast",
       "checks": 9,
-      "seconds": 79.1
+      "tier": "fast",
+      "seconds": 67.7
     },
     "op: a worker's and the supervisor's notes to the operator and a plant event for each item milestone arrive on its stream, with codes and never free text": {
-      "tier": "fast",
       "checks": 10,
-      "seconds": 6.0
-    },
-    "op: the operator credential is minted only by the admin token, for an allowed name, and a forged one is refused": {
       "tier": "fast",
-      "checks": 7,
       "seconds": 4.6
     },
-    "op: its note waits in a worker's inbox like the operator's: queued while the worker is away, read, acknowledged, quoted with --from-message, once per worker for a note to all, and as an answer": {
+    "op: the operator credential is minted only by the admin token, for an allowed name, and a forged one is refused": {
+      "checks": 7,
       "tier": "fast",
+      "seconds": 2.2
+    },
+    "op: its note waits in a worker's inbox like the operator's: queued while the worker is away, read, acknowledged, quoted with --from-message, once per worker for a note to all, and as an answer": {
       "checks": 14,
-      "seconds": 38.4
+      "tier": "fast",
+      "seconds": 14.6
     }
   },
   "copilot": {
     "copilot: fix-forward of an item with an open pull request: the task starts from its branch, pr_open makes the task's draft the item's pull request, closes the superseded one and its branch, and closes extra drafts; no duplicates (Functional Testing from that branch: the scenario above)": {
+      "checks": 17,
       "tier": "fast",
-      "checks": 15,
-      "seconds": 39.5
+      "seconds": 16.5
     },
     "copilot: the default runtime takes an unlabelled code item to Development with a pull request by Copilot; pr_open takes over its draft on the copilot/ branch; Functional Testing starts from that branch": {
+      "checks": 12,
       "tier": "fast",
-      "checks": 9,
-      "seconds": 33.2
+      "seconds": 17.1
     },
     "copilot: Development tasks that end their session without finishing the phase are launched at most api.copilot.maxLaunchesPerPhase (3) times in a row, then the item is parked, not relaunched": {
-      "tier": "fast",
       "checks": 11,
-      "seconds": 80.6
+      "tier": "fast",
+      "seconds": 34.1
     },
     "copilot: fworker-mcp accepts only the three factory gateways (https, no path) or its configured URL, each with its own bootstrap token": {
-      "tier": "fast",
       "checks": 9,
-      "seconds": 2.1
+      "tier": "fast",
+      "seconds": 0.3
     },
     "copilot: an item labelled runtime:copilot-cloud creates one agent task with the phase prompt and a one-time code; the code and the bootstrap token give the r1 once; session_end ends the task and revokes it": {
-      "tier": "fast",
       "checks": 18,
-      "seconds": 31.3
+      "tier": "fast",
+      "seconds": 11.7
     },
     "copilot: fworker-mcp, the stdio proxy the gateway serves, connects with the code and the bootstrap token and proxies the phase's tools": {
-      "tier": "fast",
       "checks": 11,
-      "seconds": 17.5
+      "tier": "fast",
+      "seconds": 15.1
     },
     "copilot: a task that ends by itself ends its worker and reports its premium requests; a failed create frees the slot; a task past api.copilot.maxMinutes fails and its code dies": {
-      "tier": "fast",
       "checks": 7,
-      "seconds": 48.4
+      "tier": "fast",
+      "seconds": 36.1
+    },
+    "copilot: CI release: the gateway re-runs a held (action_required) workflow run of the item's copilot/ pull request head with its App, once; a head mismatch and another env's item are skipped; a 403 is surfaced as an owner action": {
+      "checks": 12,
+      "tier": "fast",
+      "seconds": 86.5
+    },
+    "copilot: CI release: passes run with no candidate item; an unlabelled item routed to copilot-cloud by runtimes.routing has its held run released": {
+      "checks": 3,
+      "tier": "fast",
+      "seconds": 18.2
+    },
+    "copilot: the gateway owns Development's end: a task that ends after pushing (no pr_open, no item_complete, even a reported failure) has its draft taken over by the branch of its artifacts; the item waits for its checks in the gateway and moves on when they are green; no second Development task": {
+      "checks": 8,
+      "tier": "fast",
+      "seconds": 13.8
+    },
+    "copilot: the credit guard ends a task over api.copilot.maxCreditsPerTask and parks its item credit-guard; after an unpark, an item whose pull request already carries the change starts no new Development task: it waits for its checks": {
+      "checks": 9,
+      "tier": "fast",
+      "seconds": 20.6
+    },
+    "copilot: a fix-forward draft that GitHub will not retarget (part of a stack, 422) is closed and the item's pull request is opened on its branch, superseding the old one": {
+      "checks": 6,
+      "tier": "fast",
+      "seconds": 9.4
+    },
+    "copilot: a Copilot pull request goes from a PASS to the gateway's merge; GitHub's refusal of a stacked pull request (403, use the asynchronous endpoint) is merged through merge-async": {
+      "checks": 7,
+      "tier": "fast",
+      "seconds": 12.9
+    },
+    "copilot: one task owns the item end to end: Technical Design opens the draft, Development and Functional Testing are follow-up sessions of the same task on that pull request, no other worker is offered the item, the draft is marked ready, and the owner is done only after the merge, a green master and the production delivery": {
+      "checks": 22,
+      "tier": "full",
+      "seconds": 62.6
+    },
+    "copilot: an FT FAIL sends the item back to Development as a follow-up session of the owner task, naming the findings": {
+      "checks": 7,
+      "tier": "full",
+      "seconds": 20.2
+    },
+    "copilot: a red master after the merge resumes the owner task once to fix forward; the owner is done only once master is green and the change is in production": {
+      "checks": 8,
+      "tier": "full",
+      "seconds": 59.2
+    },
+    "copilot: an item an earlier gateway ran one task per phase for adopts the task whose branch its pull request is on and resumes it there; no new task, no stacked draft": {
+      "checks": 4,
+      "tier": "full",
+      "seconds": 7.4
+    },
+    "copilot: a running owner session silent past the item check keeps its lease (its runtime's deadline bounds it); after its session ends unfinished the same task is resumed on its pull request": {
+      "checks": 5,
+      "tier": "full",
+      "seconds": 31.0
+    },
+    "copilot: a session refused for the seat's quota stops starts and resumes without counting against the item, shows the owner action, and the next start after quotaRetryMinutes probes and clears it": {
+      "checks": 7,
+      "tier": "full",
+      "seconds": 34.7
     }
   },
   "runtime": {
     "runtime: session.end maps to the execution exit: the worker ends, the execution succeeds and the runtime forgets it": {
-      "tier": "fast",
       "checks": 6,
-      "seconds": 29.8
+      "tier": "fast",
+      "seconds": 14.3
     },
     "runtime: a gateway restart re-lists the running executions and starts no second one for their items": {
-      "tier": "fast",
       "checks": 6,
-      "seconds": 20.5
+      "tier": "fast",
+      "seconds": 21.5
     },
     "runtime: a per-worker ack window; an offer a runtime worker lets lapse stops its execution, one that never registers is stopped, and the second failure parks runtime-failed": {
-      "tier": "fast",
       "checks": 12,
-      "seconds": 65.1
+      "tier": "fast",
+      "seconds": 47.5
     },
     "runtime: a w2 expires with the execution": {
-      "tier": "fast",
       "checks": 4,
-      "seconds": 12.7
+      "tier": "fast",
+      "seconds": 8.1
     },
     "runtime: git-credential mints a one-repository contents-write token for the owner of a runtime worker, and for nobody else": {
-      "tier": "fast",
       "checks": 14,
-      "seconds": 77.6
+      "tier": "fast",
+      "seconds": 33.7
     },
     "runtime: the runtime of a registration comes from the credential: a w1 cannot claim one, a w2 registers with its own": {
-      "tier": "fast",
       "checks": 3,
-      "seconds": 22.0
+      "tier": "fast",
+      "seconds": 3.5
     },
     "runtime: a nonce is redeemed once for a w2 bound to its name and runtime; a second redemption and an unknown nonce are refused": {
-      "tier": "fast",
       "checks": 10,
-      "seconds": 4.0
+      "tier": "fast",
+      "seconds": 2.5
     },
     "runtime: a failed execution: its item is taken back, its claim ends and a new execution is started": {
-      "tier": "fast",
       "checks": 11,
-      "seconds": 21.8
+      "tier": "fast",
+      "seconds": 14.9
     },
     "runtime: the daily budget stops new executions; the item waits with runtime-budget": {
-      "tier": "fast",
       "checks": 4,
-      "seconds": 17.9
+      "tier": "fast",
+      "seconds": 17.5
     },
     "runtime: an item labelled runtime:cae-job starts one execution with the job container and its values; the worker redeems, registers and is offered the item with the runtime window": {
-      "tier": "fast",
       "checks": 16,
-      "seconds": 24.0
+      "tier": "fast",
+      "seconds": 9.3
     },
     "runtime: outside tdd the baked caeJob is off; the FACTORY_RUNTIME_ variables switch it on with a job and an identity": {
-      "tier": "fast",
       "checks": 5,
-      "seconds": 14.6
+      "tier": "fast",
+      "seconds": 14.4
+    }
+  },
+  "copilot-manager": {
+    "copilot manager: with nothing pending after the cooldown there is no second launch": {
+      "checks": 2,
+      "tier": "fast",
+      "seconds": 20.0
+    },
+    "copilot manager: a late question launches one task with the manager prompt; its token reaches the manager tools only; session_end clears present": {
+      "checks": 32,
+      "tier": "fast",
+      "seconds": 20.8
+    },
+    "copilot manager: nothing pending launches nothing": {
+      "checks": 2,
+      "tier": "fast",
+      "seconds": 12.1
+    },
+    "copilot manager: the cooldown holds a new question back; the second and third tasks launch after it; a task that ends by itself clears present; the daily cap holds the fourth": {
+      "checks": 12,
+      "tier": "fast",
+      "seconds": 56.4
     }
   }
 }
