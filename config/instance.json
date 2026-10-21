@@ -282,6 +282,7 @@
     "requiredModelTier": "premium",
     "requiredEffort": "medium",
     "maxNewItemsPerDay": 10,
+    "replenish": { "enabled": false, "environments": ["tdd"], "maxPerDay": 30, "targetOpen": 10 },
     "minTechnicalDesign": 3,
     "newItemColumn": "Technical Design",
     "jobCodes": ["same-criterion-repeated", "worker-failure", "fix-forward-exhausted", "demotion-limit", "watchdog-relaunch-budget", "verdict-failed", "stuck", "master-broken"],

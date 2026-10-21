@@ -142,6 +142,27 @@ sealed partial class Plant
         }
     }
 
+    // keeper.replenish (plugin/scripts/lib/Replenish.ps1): the last full sweep's counts, and the items created since this process started
+    JsonObject? rpLast; int rpCreated; DateTime? rpAt; int rpLastItem;
+    public void SetReplenish(JsonObject r)
+    {
+        lock (gate)
+        {
+            rpLast = (JsonObject)r.DeepClone();
+            var made = (r["created"] as JsonArray)?.Count ?? 0;
+            if (made > 0) { rpCreated += made; rpAt = DateTime.UtcNow; rpLastItem = int.TryParse((r["created"] as JsonArray)![made - 1]?.ToString(), out var li) ? li : 0; }
+        }
+    }
+    public JsonObject? ReplenishStatus()
+    {
+        lock (gate)
+        {
+            if (rpLast == null) return null;
+            return new JsonObject { ["enabled"] = true, ["open"] = rpLast["open"]?.DeepClone(), ["targetOpen"] = rpLast["targetOpen"]?.DeepClone(), ["createdToday"] = rpLast["createdToday"]?.DeepClone(), ["maxPerDay"] = rpLast["maxPerDay"]?.DeepClone(),
+                ["skipped"] = rpLast["skipped"]?.DeepClone(), ["createdSinceStart"] = rpCreated, ["lastItem"] = rpLastItem, ["lastAt"] = rpAt?.ToString("o") };
+        }
+    }
+
     public JsonObject KeeperStatus()
     {
         lock (gate)

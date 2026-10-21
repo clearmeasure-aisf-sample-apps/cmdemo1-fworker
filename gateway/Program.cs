@@ -630,6 +630,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     if (messaging.On) foreach (var kv in MessagingBlocks(false).ToList()) o[kv.Key] = kv.Value?.DeepClone();
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
     if (keeper.Enabled) o["keeper"] = plant.KeeperStatus();
+    if (plant.ReplenishStatus() is { } rps) o["replenish"] = rps;
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
@@ -771,6 +772,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (messaging.On) foreach (var kv in MessagingBlocks(true).ToList()) o[kv.Key] = kv.Value?.DeepClone();
     if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
     if (keeper.Enabled) o["keeper"] = plant.KeeperStatus();
+    if (plant.ReplenishStatus() is { } rps) o["replenish"] = rps;
     if (ownerMode) o["baseUpdate"] = baseWatch.Status();
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
@@ -2643,6 +2645,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 var keep = new List<int>();
                 foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
                 plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, items, j["runtimes"] as JsonObject, j["profiles"] as JsonObject);
+                if (items == null && j["replenish"] is JsonObject rpj) plant.SetReplenish(rpj);
                 if (items == null && j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);   // a full sweep only: an incremental one reads a few items
                 // the hold:owner items of the whole board: a full sweep replaces them, an incremental pass updates its own items; the plant hears
                 // them once a full sweep has read the whole board (until then its name actions wait, sweep-pending)
