@@ -29,7 +29,7 @@
     },
     "copilot": {
       "enabled": true,
-      "maxConcurrent": 1,
+      "maxConcurrent": 3,
       "maxMinutes": 60,
       "maxExecutionsPerDay": 30,
       "ciRelease": true,
