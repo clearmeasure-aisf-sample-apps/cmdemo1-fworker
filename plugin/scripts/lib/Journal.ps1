@@ -94,6 +94,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'pulled' { return "pulled from **$($F.from)** into ${col}: a worker slot was free and nothing waited there ($($F.wip) of at most $($F.wipLimit) items in the AI columns)." }
         # the plant manager's flow verbs (Verbs.Manager.ps1, docs/design/plant-manager.md 10e): who acted, what, under which policy code, and why
         # the backlog keeper's verbs (Verbs.Keeper.ps1, docs/design/backlog-keeper.md): who, what, the policy code and why
+        'replenish' { return "the gateway created work item #$($F.new) (**$($F.title)**) to keep activity going after this item finished." }
         'keeper-action' { return "$(if ("$($F.by)" -eq 'operator') { 'the operator' } else { "the backlog keeper (**$($F.by)**)" }) $($F.detail), under policy ``$($F.policy)``$(if ($F.ContainsKey('reason') -and $F.reason) { ": $($F.reason)" })." }
         'manager-action' { return "$(if ("$($F.by)" -eq 'operator') { 'the operator' } else { "the plant manager (**$($F.by)**)" }) $($F.detail), under policy ``$($F.policy)``$(if ($F.ContainsKey('reason') -and $F.reason) { ": $($F.reason)" })$(if ($F.ContainsKey('session') -and $F.session) { " ([Copilot session]($($F.session)))" })." }
         default { return "$Event" }

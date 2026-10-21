@@ -10,6 +10,9 @@
     "enabled": true,
     "allowedAskers": ["*"]
   },
+  "keeper": {
+    "replenish": { "enabled": true, "environments": ["tdd"], "maxPerDay": 30, "targetOpen": 10 }
+  },
   "operator": {
     "enabled": true
   },

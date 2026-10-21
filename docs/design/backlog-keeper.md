@@ -79,3 +79,14 @@ owner's rules (`docs/owner-rules.md`, a code-owner path) are read-only input: th
 writes them. Instruction only (the skill): the default policies, and that an owner rule wins over a policy.
 
 Kill switches: revoke the keeper's name on the dashboard, set `keeper.enabled` false in the overrides, or switch messaging off.
+
+## Replenishment by the gateway (`keeper.replenish`)
+
+Independent of the keeper session: when an item reaches Done (`merge.done_at`, delivered to production), the full sweep creates ONE new docs-only item
+(`plugin/scripts/lib/Replenish.ps1`) so the board keeps moving. Settings: `keeper.replenish = { enabled, environments, maxPerDay, targetOpen }`; the
+source leaves it off, `config/deploy.overrides.json` turns it on for `tdd` only. The item carries `enhancement`, `Auto Merge`, the factory label and
+the environment label, sits in Technical Design and lists "only Markdown under docs/ changes". The title comes from a built-in catalog of docs topics
+(then "Docs: glossary entry for <term>", then "Docs: note N") and is unique among open and closed factory issues. The finished item's state records
+`replenished`, so it never creates twice; open items never exceed `targetOpen` and creations stay within `maxPerDay` per 24 hours. A journal line on the
+finished item names the new one. `/status` shows `replenish` (open, targetOpen, createdToday, maxPerDay, createdSinceStart, lastItem). Scenario:
+`keeper: replenish ...` (manager suite).
