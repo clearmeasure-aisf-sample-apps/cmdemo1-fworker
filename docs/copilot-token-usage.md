@@ -83,3 +83,12 @@ Copilot stays on plain Auto. Auto picked the premium `gpt-6.1-sol` for #394's Fu
 raw ai_credits in 3 min 22 s, against 0.4–2 × 10^9 for tasks on `gpt-5.3-codex`). The owner chose "Auto, lower guard": the
 per-task guard `api.copilot.maxCreditsPerTask` is 3 × 10^9 raw ai_credits (was 10 × 10^9). The task API reports a raw `amount` of
 type `ai_credits`, not tokens; GitHub documents no scale, so the figures here are relative until the Copilot billing page calibrates them.
+
+## Credit guard off (Jeffrey, 2026-10-21)
+
+The 3 × 10^9 guard was too low: `usage.amount` is a raw number, most likely 10^9 = 1 AI credit ($0.01), so it parked a task at about
+3 credits ($0.03), and normal Development runs that waited on CI reached 28–69 × 10^9 raw. Because the task API has no cancel, the guard
+could not stop the billing; it only revoked the agent's gateway token so the task could not finish. The owner does not want jobs ended by
+an artificially low token cap: `api.copilot.maxCreditsPerTask` is 0 (off). The limits that remain are time and repetition: 60 minutes
+per task, at most 3 runs in a row per phase, 1 at a time, 30 a day. Usage stays visible per task in `/status` and in this log. The raw
+scale is to be confirmed against the ClearMeasureLabs Copilot billing page.
