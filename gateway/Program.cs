@@ -173,10 +173,10 @@ var cursorManager = ownerMode && tokenSecret.Length > 0 && cursorSettings.On
 var copilotSettings = CopilotCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
 var copilotCiRelease = new CopilotCiRelease { RefusedRetry = TimeSpan.FromSeconds(Math.Max(10, 5 * copilotSettings.CiReleaseSeconds)) };   // the CI release of the Copilot agent's held workflow runs (gateway/Runtimes/CopilotCiRelease.cs)
 var copilotCodes = new CopilotCodes();
-Func<int, string, string, ItemPr?, string> copilotPrompt = (_, _, _, _) => "";
+Func<int, string, string, ItemPr?, string?, string> copilotPrompt = (_, _, _, _, _) => "";
 Func<int, CancellationToken, Task<ItemPr?>> copilotItemPr = (_, _) => Task.FromResult<ItemPr?>(null);
 var copilotRuntime = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
-    ? new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr) => copilotPrompt(item, phase, code, pr), itemPr: (item, ct) => copilotItemPr(item, ct)) : null;
+    ? new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr, why) => copilotPrompt(item, phase, code, pr, why), itemPr: (item, ct) => copilotItemPr(item, ct)) : null;
 var copilotManager = copilotRuntime != null
     ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
         copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
@@ -958,6 +958,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway releases the Copilot agent's held workflow runs by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "park-item")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway parks an item runtime-failed by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
+    if (verb is "copilot-owner")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway records a Copilot task's ownership of an item by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "copilot-settle")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway settles a Copilot Development task by itself, at its launch and its end", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "unpark-item")
@@ -2176,6 +2178,72 @@ if (copilotRuntime != null && copilotManager != null)
 {
     copilotRuntime.Settle = (item, stage, head, _) => CopilotSettle(item, stage, head);
     copilotManager.Ending = async e => e.Phase.Equals("Development", StringComparison.OrdinalIgnoreCase) && await CopilotSettle(e.Item, "end", copilotRuntime.HeadOf(e.Item)) == "awaiting";
+    // One task, resumed (docs/design/copilot-cloud-agent.md): the owner record lives in the item state (rule verb copilot-owner)
+    async Task<JsonNode?> OwnerVerb(JsonObject args)
+    {
+        var (rc, output) = await app.Services.GetRequiredService<Runner>().RunAsync("copilot-owner", args.ToJsonString(), TimeSpan.FromSeconds(120));
+        if (rc != 0) throw new InvalidOperationException($"copilot-owner {args["action"]} answered exit {rc}");
+        return JsonNode.Parse(output);
+    }
+    copilotRuntime.LoadOwner = async (item, _) =>
+    {
+        var t = (await OwnerVerb(new JsonObject { ["item"] = item, ["action"] = "get" }))?["task"];
+        if (t is not JsonObject || t["id"]?.ToString() is not { Length: > 0 } id) return null;
+        var o = new CopilotOwner { Item = item, TaskId = id, Url = t["url"]?.ToString() ?? "", Branch = t["branch"]?.ToString() ?? "", Phase = t["phase"]?.ToString() ?? "", Pr = int.TryParse(t["pr"]?.ToString(), out var p) ? p : 0, WaitingOn = "restored" };
+        if (DateTime.TryParse(t["since"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var since)) o.Since = since;
+        foreach (var x in (t["previous"] as JsonArray) ?? new JsonArray()) if (x?.ToString() is { Length: > 0 } px) o.Previous.Add(px);
+        return o;
+    };
+    copilotRuntime.SaveOwner = async o => await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "set", ["task"] = new JsonObject { ["id"] = o.TaskId, ["url"] = o.Url, ["branch"] = o.Branch, ["pr"] = o.Pr, ["phase"] = o.Phase } });
+    copilotRuntime.WhyResume = async (item, _) => (await OwnerVerb(new JsonObject { ["item"] = item, ["action"] = "status" }))?["rework"]?.ToString() ?? "";
+    plant.CopilotOwns = copilotRuntime.Owns;
+    plant.CopilotOwnersSnapshot = copilotRuntime.OwnedJson;
+    plant.CopilotOwnersRestore = copilotRuntime.Restore;
+    copilotManager.Owned = copilotRuntime.OwnedJson;
+    // The owner watch: every api.copilot.ciReleaseSeconds, by the acting gateway, for each owned item with no session running: what it waits on
+    // (its checks, the next phase, the merge, master). Done (merged, master green for the merge): the ownership is closed with a comment that
+    // links the task. A red master after the merge: the owner task is resumed once per merge commit to fix forward on a new pull request.
+    _ = Task.Run(async () =>
+    {
+        var ct = app.Lifetime.ApplicationStopping;
+        while (!ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds), ct); } catch (OperationCanceledException) { return; }
+            if (!leader.MayAct || !copilotManager.On) continue;
+            foreach (var o in copilotRuntime.Owners())
+            {
+                if (copilotRuntime.Running(o.Item)) continue;
+                try
+                {
+                    var j = await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "status" });
+                    var waiting = j?["waiting"]?.ToString() ?? "";
+                    copilotRuntime.Waiting(o.Item, j?["column"]?.ToString() ?? "", waiting);
+                    if (waiting == "done")
+                    {
+                        await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "close" });
+                        copilotRuntime.Close(o.Item);
+                        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "owner-done", ["item"] = o.Item, ["task"] = o.TaskId, ["url"] = o.Url, ["sessions"] = o.Sessions }.ToJsonString());
+                    }
+                    else if (waiting == "closed")
+                    {
+                        await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "close", ["unmerged"] = true });
+                        copilotRuntime.Close(o.Item);
+                        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "owner-ended", ["item"] = o.Item, ["task"] = o.TaskId, ["reason"] = "item closed without a merge" }.ToJsonString());
+                    }
+                    else if (waiting == "master-broken" && j?["merge_sha"]?.ToString() is { Length: > 0 } sha && o.MasterFixFor != sha && copilotManager.CanStart().Ok)
+                    {
+                        var prn = o.Pr > 0 ? o.Pr : int.TryParse(j["pr"]?.ToString(), out var spr) ? spr : 0;
+                        var failed = string.Join(", ", ((j["failed"] as JsonArray) ?? new JsonArray()).Select(x => x?.ToString()).Where(x => !string.IsNullOrEmpty(x)));
+                        var text = $"Follow-up session of the task that owns #{o.Item}: master is red after PR #{prn} was merged as {sha[..Math.Min(7, sha.Length)]}" + (failed != "" ? $" (failed: {failed})" : "") +
+                            $". Fix forward: make a new branch from master, fix the failing checks, run the tests, push and open ONE pull request against master titled \"Fix master after #{prn} (#{o.Item})\". Never wait for CI; end the session after opening it.";
+                        o.MasterFixFor = sha;
+                        if (await copilotRuntime.ResumeDirect(o.Item, prn, text, ct)) { copilotManager.CountExternal(); copilotRuntime.Waiting(o.Item, "", "master-fix"); }
+                    }
+                }
+                catch (Exception e) { Console.Error.WriteLine($"copilot owner watch #{o.Item}: {e.GetType().Name}"); }
+            }
+        }
+    });
     copilotRuntime.OverBudget = async (item, phase, credits) =>
     {
         var (code, _) = await app.Services.GetRequiredService<Runner>().RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "credit-guard", ["phase"] = phase, ["by"] = $"the Copilot credit guard: one task reported {credits:0} ai_credits, over api.copilot.maxCreditsPerTask {copilotSettings.MaxCreditsPerTask:0}" }.ToJsonString(), TimeSpan.FromSeconds(120));
@@ -2210,8 +2278,23 @@ if (copilotRuntime != null && ownerMode && messaging.ManagerEnabled && messaging
         }
     });
 }
-copilotPrompt = (item, phase, code, pr) =>
+copilotPrompt = (item, phase, code, pr, why) =>
 {
+    // a follow-up session of the owner task (why != null): terse, self-contained (phase, item, pull request, what changed), so its correctness does
+    // not depend on Copilot's memory of the earlier sessions; then the same connect lines as a first session
+    if (why != null && pr != null)
+    {
+        var f = $"Follow-up session of the task that owns #{item}: phase {phase}. Work on PR #{pr.Number}, branch {pr.Branch} (this session runs on it). " +
+            "You own #{item} until it is merged and master is green, but THIS session does only this phase step and then ends: never poll or wait for CI; the gateway watches it and resumes you.\n";
+        f = f.Replace("{item}", item.ToString());
+        if (why.Trim() != "") f += $"What changed: {why.Trim()}\n";
+        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass, else fix and rerun. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
+            : phase.Trim().Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? $"Verify PR #{pr.Number} against the item's criteria; change nothing; record the review and the verdict, then session_end.\n"
+            : "Do this phase's step only, then session_end.\n";
+        var bpf = prompts.ByPath("bootstrap/copilot.md");
+        var steps = bpf == null ? "" : prompts.Render(bpf, "copilot-cloud-agent")["text"]!.ToString();
+        return f + "\n" + steps + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
+    }
     var bp = prompts.ByPath("bootstrap/copilot.md");
     var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
     // an item with its open pull request: the task starts from that branch (CopilotCloudRuntime.BaseRef), and the fix goes to that pull request
@@ -2687,7 +2770,7 @@ details>summary{cursor:pointer;padding:4px 0;list-style-position:inside}details.
 <div id="banner" class="card dr" hidden>Messaging needs an always-on gateway: this environment scales to zero, and a restart loses every inbox, question and mode.</div>
 <div id="summary" class="cards" aria-label="Summary"></div>
 <section class="panel" aria-labelledby="h-asg"><h2 id="h-asg">Work items</h2><div id="basecnt" class="sub"></div><div class="wrap"><table><tbody id="asg"><tr><td class="mut">none</td></tr></tbody></table></div></section>
-<section class="panel" aria-labelledby="h-rt"><h2 id="h-rt">Runtimes</h2><div id="cirel" class="sub" hidden></div><div id="rtsec" hidden><div id="rttext" class="sub"></div><div class="wrap"><table><tbody id="rtrows"><tr><td class="mut">none</td></tr></tbody></table></div></div></section>
+<section class="panel" aria-labelledby="h-rt"><h2 id="h-rt">Runtimes</h2><div id="cirel" class="sub" hidden></div><div id="copown" hidden><h3>Copilot owned items</h3><div class="wrap"><table><thead><tr><th>Item</th><th>Task</th><th>Phase</th><th>Waiting on</th><th>PR</th><th>Sessions</th></tr></thead><tbody id="copownrows"></tbody></table></div></div><div id="rtsec" hidden><div id="rttext" class="sub"></div><div class="wrap"><table><tbody id="rtrows"><tr><td class="mut">none</td></tr></tbody></table></div></div></section>
 <section class="panel" aria-labelledby="h-ses"><h2 id="h-ses">Sessions</h2>
 <div class="wrap"><table><thead id="shead"><tr><th>Name</th><th>Type</th><th>State</th><th>Owns</th><th>Capacity</th><th>Roles</th><th>QC</th><th></th></tr></thead><tbody id="rows"><tr><td colspan="8" class="mut">Enter the operator token.</td></tr></tbody></table></div>
 <div id="cost" class="row mut" hidden><span id="costtext"></span><button id="grant" hidden>Grant 6 more turns</button>
@@ -2937,7 +3020,7 @@ const RT_NAMES={'cae-job':'Container Apps jobs','copilot-cloud':'Copilot cloud',
 const rtKinds=r=>Object.keys(r||{}).filter(k=>r[k]&&typeof r[k]==='object'&&'maxConcurrent' in r[k]);
 const sessionLink=x=>{const d=x.detail||{},u=x.sessionUrl||x.session_url||x.url||d.sessionUrl||d.session_url||d.url||'';return /^https:\/\/[\w.-]+\//i.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">session</a>`:'<span class="mut">-</span>'};
 const stPill=s=>{const v=String(s||'').toLowerCase();return `<span class="pill ${/fail|error|refused|unhealthy|cancel/.test(v)?'off':/run|progress|registered|start|queued/.test(v)?'info':/succe|done|complete|ok/.test(v)?'on':''}">${esc(s||'-')}</span>`};
-function refreshRt(r){const ci=r&&r['copilot-cloud']&&r['copilot-cloud'].ciRelease;$('cirel').hidden=!ci;if(ci)$('cirel').innerHTML=`Copilot CI release: ${esc(ci.released)} released, ${esc(ci.refused)} refused`+(ci.ownerAction?` <b>Owner action: ${esc(ci.ownerAction)}</b> (${esc(ci.lastError)})`:'');
+function refreshRt(r){const ow=(r&&r['copilot-cloud']&&r['copilot-cloud'].owned)||[];$('copown').hidden=!ow.length;$('copownrows').innerHTML=ow.map(o=>`<tr><td>#${esc(o.item)}</td><td>${o.url?`<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.task)}</a>`:esc(o.task)}</td><td>${esc(o.phase)}</td><td>${stPill(o.waitingOn)}</td><td>${o.pr?'#'+esc(o.pr):''}</td><td>${esc(o.sessions)}</td></tr>`).join('');const ci=r&&r['copilot-cloud']&&r['copilot-cloud'].ciRelease;$('cirel').hidden=!ci;if(ci)$('cirel').innerHTML=`Copilot CI release: ${esc(ci.released)} released, ${esc(ci.refused)} refused`+(ci.ownerAction?` <b>Owner action: ${esc(ci.ownerAction)}</b> (${esc(ci.lastError)})`:'');
 const ks=rtKinds(r);$('rtsec').hidden=!ks.length;if(!ks.length)return;
 $('rttext').textContent=ks.map(k=>{const c=r[k];return `${k}: ${c.enabled?'on':'off'}, ${c.running} of ${c.maxConcurrent} running, ${c.today} of ${c.maxExecutionsPerDay} today, ${c.healthy?'healthy':'UNHEALTHY: '+c.unhealthyReason}`}).join(' | ');
 let h='';for(const k of ks){const c=r[k],ex=c.executions||[],la=c.last||[];h+=`<tr class="grp"><th colspan="6">${esc(RT_NAMES[k]||k)} <span class="pill ${!c.enabled?'':c.healthy?'on':'off'}">${!c.enabled?'off':c.healthy?'healthy':'unhealthy'}</span> <span class="mut">${esc(c.running)}/${esc(c.maxConcurrent)} running, ${esc(c.today)}/${esc(c.maxExecutionsPerDay)} today</span></th></tr>`;

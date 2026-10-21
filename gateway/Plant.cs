@@ -1956,6 +1956,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 var pin = pins?[item.ToString()]?.ToString();
                 // issue 98: a pin set aside after its long wait stays aside while the label names the same worker (a new label is a new pin)
                 if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
+                if (kind == "own-item" && CopilotOwned(item)) pin = null;   // an item a Copilot task owns goes to that task only (Plant.Runtimes.cs)
                 if (assignments.TryGetValue(key, out var ex))
                 {
                     // the offer predates the acceptance: the sweep read the board before the accept (issue 75: a sweep takes tens of seconds and reads

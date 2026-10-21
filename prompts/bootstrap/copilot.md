@@ -1,7 +1,7 @@
 ---
 role: bootstrap
 phase: api-copilot
-version: 5
+version: 6
 tools: [get_prompt, next_event, item_accept, item_get, session_end, pr_open, pr_checks, item_complete]
 includes: []
 ---
@@ -11,6 +11,13 @@ own tools: read and edit files, run shell commands (`git`, `dotnet`), commit, an
 none. Technical Design and Functional Testing change no files. Never use `gh`, the GitHub API, the GitHub MCP server or a browser to change
 issues, labels, the board or pull requests; open no second pull request (`pr_open` takes over the task's draft). When the end of this
 prompt names the item's pull request, that pull request is the one to fix: this task starts from its branch.
+
+Ownership: this task owns the item from its first acceptance until its pull request is merged and master is green. Each phase (Technical
+Design, Development, a fix-forward, Functional Testing) is one SESSION of this same task, on the same branch and pull request: the gateway
+starts the next session with a `@copilot` follow-up on the pull request that names the phase, the pull request and what changed. A session
+does its phase step (push, `pr_open`, `item_complete` or the verdict), calls `session_end` and ends. It never polls or waits for CI, the
+merge or master: the gateway watches them and resumes this task when there is work. Technical Design: leave the draft pull request this task
+opened as it is (it becomes the item's pull request in Development).
 
 1. Call fworker_connect with the one-time code AND the gateway URL at the end of this prompt (arguments `code` and `gateway`). If the
    gateway tools below do not appear after it, call each through fworker_call with its name and arguments.
@@ -29,6 +36,12 @@ Changes to the phase prompt for this runtime (they win over it):
   task on that branch is taken over by the gateway. When `pr_open` answers `build_owed: true` keep the change: build and run the tests
   yourself (`dotnet build src/ChurchBulletin.sln` and `dotnet test src/UnitTests`; a database change: a new DbUp script in
   `src/Database/scripts/Update/` numbered one above the highest, TAB indentation, plus its model, mapping and test) before `item_complete`.
+- Development, every push that creates or updates the pull request (the first change, a fix-forward, a rework): FIRST run the private
+  build, `pwsh ./PrivateBuild.ps1` (or `. ./build.ps1; Build`: compile, unit tests, database migration, integration tests; on Linux it uses
+  the SQL Server container when Docker is there, else the SQLite fallback), AND the acceptance tests, `pwsh ./AcceptanceTests.ps1` (or
+  `pwsh src/AcceptanceTests/bin/Debug/net10.0/playwright.ps1 install`, then `dotnet test src/AcceptanceTests --configuration Debug`). Push
+  only when both pass; otherwise fix and run them again. Report both results tersely in `item_complete`'s comment (for example "private
+  build: pass (N tests); acceptance: pass (N tests)").
 - Development, the end: after the push and `pr_open`, call `item_complete` once. Whatever it answers about the checks (pending, running,
   `accepted-checks-pending`, red), your work is done: call `session_end` and end the task. Do not report a failure because checks are
   pending or a gateway tool refused after `pr_open` succeeded; the gateway completes Development from your pull request.
