@@ -9,6 +9,11 @@ function Cur-R1($Agent) { "$($Agent.body.mcpServers[0].headers.Authorization)".S
 function Cur-Status { (Get-Plant).runtimes.'cursor-cloud' }
 function Cur-Cleanup([int[]]$Items) {
     foreach ($n in $Items) { if ($n) { [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json') } }
+    # two sweeps after the close: an agent the gateway launched for a closed item from a plan made before it read the close (a relaunch after
+    # session_end) is archived here, not left to show up in the next scenario
+    $s0 = "$((Get-Plant).lastSweep)"; $script:curMid = $null
+    [void](Wait-Until -Seconds 40 { $s1 = "$((Get-Plant).lastSweep)"; if ($s1 -ne $s0 -and -not $script:curMid) { $script:curMid = $s1 }; $script:curMid -and $s1 -ne $script:curMid })
+    $script:curMid = $null
     foreach ($a in @((Cur-State).agents | Where-Object { -not $_.deleted -and $_.status -eq 'ACTIVE' })) { [void](Fake 'cursor-agent' @{ id = $a.id; status = 'ARCHIVED' }) }
     [void](Wait-Until -Seconds 20 { (Cur-Status).running -eq 0 })
     [void](Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/runtimes/cursor-cloud/reset" -Method POST -Headers @{ Authorization = 'Bearer test-token' })
@@ -49,7 +54,8 @@ $CursorScenarios = [ordered]@{
         Check 'the delete waited for a non-zero usage read (the fake reads zero twice)' ((@((Cur-State).agents | Where-Object { $_.id -eq $a.id }))[0].usageReads -ge 3)
         Check 'status shows the model asked for and the model Cursor reports' (Wait-Until -Seconds 10 { $d = @((Cur-Status).last | Where-Object { $_.execution -eq $a.id }); $d.Count -eq 1 -and $d[0].detail.model.id -eq 'auto-smart' -and $d[0].detail.reportedModel.id -eq 'auto-smart' -and $d[0].detail.usage.totalTokens -eq 2340 }) ((Cur-Status).last | ConvertTo-Json -Compress -Depth 6)
         Check 'its token usage is logged' (Wait-Until -Seconds 10 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"cursor-usage`"").Count -gt 0 })
-        Check 'and the runtime no longer counts it' (Wait-Until -Seconds 15 { (Cur-Status).running -eq 0 })
+        # 'it' is this agent: the item is still open in its phase, so the gateway may already run the next agent for it (a relaunch after session_end)
+        Check 'and the runtime no longer counts it' (Wait-Until -Seconds 15 { $st2 = Cur-Status; @($st2.executions | Where-Object { $_.execution -eq $a.id }).Count -eq 0 -and $st2.running -eq @($st2.executions | Where-Object { $_ }).Count }) ((Cur-Status) | ConvertTo-Json -Compress -Depth 4)
     } finally { Cur-Cleanup @($n) }
 }
 
