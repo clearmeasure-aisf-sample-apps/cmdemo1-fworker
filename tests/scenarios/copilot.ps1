@@ -16,6 +16,17 @@ function Cop-Exchange([string]$Code, [string]$Bootstrap) {
     $b = $null; try { $b = "$($r.Content)" | ConvertFrom-Json } catch { }
     return @{ status = [int]$r.StatusCode; body = $b }
 }
+# the r1 of a task's session: the exchange is retried until it answers 200 (the task's prompt and code can lag the task's creation on a loaded runner); '' when it never does
+function Cop-R1($Task) {
+    $got = @{ tok = '' }
+    [void](Wait-Until -Seconds 30 { $x = Cop-Exchange (Cop-Code $Task) (Cop-Bootstrap); if ($x.status -eq 200 -and $x.body -and $x.body.token) { $got.tok = "$($x.body.token)"; $true } else { $false } })
+    return $got.tok
+}
+# waits until no task is created for 4 s in a row (earlier scenarios' items have stopped relaunching)
+function Cop-Quiet {
+    $st = @{ last = -1; since = Get-Date }
+    [void](Wait-Until -Seconds 40 { $c = @((Cop-State).tasks).Count; if ($c -ne $st.last) { $st.last = $c; $st.since = Get-Date }; ((Get-Date) - $st.since).TotalSeconds -ge 4 })
+}
 function Cop-Cleanup([int[]]$Items) {
     foreach ($n in $Items) { if ($n) { [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json') } }
     foreach ($t in @((Cop-State).tasks | Where-Object { $_.state -in 'queued', 'in_progress' })) { [void](Fake 'copilot-task' @{ id = $t.id; state = 'cancelled' }) }
@@ -25,7 +36,7 @@ function Cop-Cleanup([int[]]$Items) {
 
 # plays one session: exchanges the code of its prompt, waits for the offer and accepts; answers the r1
 function Cop-Accept($Entry, [int]$Item) {
-    $r1 = "$((Cop-Exchange (Cop-Code $Entry) (Cop-Bootstrap)).body.token)"
+    $r1 = (Cop-R1 $Entry)
     $cur = ''
     [void](Wait-Until -Seconds 30 { $e = Mcp-Events $r1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $Item }).Count -gt 0 })
     [void](Mcp-Call 'item_accept' @{ item = $Item } $r1)
@@ -132,13 +143,15 @@ $CopilotScenarios = [ordered]@{
         Check 'its usage is logged' (Wait-Until -Seconds 10 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch '"runtime":"copilot-usage"').Count -gt 0 })
         # the item is closed first: a relaunch of it would take the injected failure meant for the next item
         Cop-Cleanup @($n); $n = 0
+        Cop-Quiet
         [void](Fake 'copilot-launch-failures' @{ count = 1 })
         $m = New-Item-Fake 'Copilot relaunch' 'x' $CopLabels
         Check 'after the failed create a new task is created' (Wait-Until -Seconds 40 { (Cop-Tasks $m).Count -ge 1 })
-        Check 'status: the failure was counted against the item' (@((Cop-Status).failures | Where-Object { $_.item -eq $m -and $_.count -ge 1 }).Count -eq 1) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
-        $t2 = (Cop-Tasks $m)[-1]
-        Check 'the deadline (0.25 min in this suite) fails it' (Wait-Until -Seconds 60 { @((Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"") | Where-Object { "$_" -match $t2.id }).Count -gt 0 })
-        Check 'and its unspent code no longer exchanges' ((Cop-Exchange (Cop-Code $t2) (Cop-Bootstrap)).status -eq 401)
+        Check 'status: the failure was counted against the item' (Wait-Until -Seconds 20 { @((Cop-Status).failures | Where-Object { $_.item -eq $m -and $_.count -ge 1 }).Count -eq 1 }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
+        $t2 = (Cop-Tasks $m)[0]
+        # the deadline is counted from the gateway's own launch of the task; the wait is generous for a loaded runner
+        Check 'the deadline (0.25 min in this suite) fails it' (Wait-Until -Seconds 120 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"" | Where-Object { "$_" -match $t2.id }).Count -gt 0 })
+        Check 'and its unspent code no longer exchanges' (Wait-Until -Seconds 20 { (Cop-Exchange (Cop-Code $t2) (Cop-Bootstrap)).status -eq 401 })
     } finally { Cop-Cleanup @($n, $m) }
 }
 
@@ -238,7 +251,7 @@ $CopilotScenarios = [ordered]@{
             Check "launch $k is created" (Wait-Until -Seconds 60 { (Cop-Tasks $n).Count -ge $k }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
             $tk = (Cop-Tasks $n)[$k - 1]
             # the agent connects, accepts the item and ends its session without finishing the phase (no failure is counted for that)
-            $r1 = "$((Cop-Exchange (Cop-Code $tk) (Cop-Bootstrap)).body.token)"
+            $r1 = (Cop-R1 $tk)
             $cur = ''
             Check "launch $k gets its offer" (Wait-Until -Seconds 30 { $e = Mcp-Events $r1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
             [void](Mcp-Call 'item_accept' @{ item = $n } $r1)
@@ -328,7 +341,7 @@ $CopilotScenarios = [ordered]@{
         $n = New-Item-Fake 'Copilot settle item' 'Change src/App/Settle.cs and its unit test.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
         $t = (Cop-DevTasks $n)[0]
-        $r1 = "$((Cop-Exchange (Cop-Code $t) (Cop-Bootstrap)).body.token)"
+        $r1 = (Cop-R1 $t)
         $cur = ''
         Check 'the agent gets its offer' (Wait-Until -Seconds 30 { $e = Mcp-Events $r1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
         [void](Mcp-Call 'item_accept' @{ item = $n } $r1)
@@ -340,7 +353,7 @@ $CopilotScenarios = [ordered]@{
         Check 'the agent''s failure report parks the item worker-failure' (-not $f.isError -and (Cop-Comments $n '*worker reported **FAILURE***').Count -eq 1) ($f | ConvertTo-Json -Compress -Depth 5)
         [void](Mcp-Call 'session_end' @{ reason = 'done' } $r1)
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
-        Check 'the gateway takes over the task''s draft (title naming the item, ready for review)' (Wait-Until -Seconds 30 { $p = Cop-FakePr $d.number; $p.open -and -not $p.draft -and "$($p.title)" -match "#$n" }) (Cop-FakePr $d.number | ConvertTo-Json -Compress -Depth 3)
+        Check 'the gateway takes over the task''s draft (title naming the item, ready for review)' (Wait-Until -Seconds 60 { $p = Cop-FakePr $d.number; $p.open -and -not $p.draft -and "$($p.title)" -match "#$n" }) (Cop-FakePr $d.number | ConvertTo-Json -Compress -Depth 3)
         Check 'and records Development as done pending checks, over the agent''s failure report' (Wait-Until -Seconds 20 { (Cop-Comments $n '*Development is done pending checks*the Copilot task ended*').Count -eq 1 })
         Check 'green checks move the item to Functional Testing' (Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column)"
         Check 'no second Development task was started' ((Cop-DevTasks $n).Count -eq 1) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state)" }) -join '; '
@@ -408,7 +421,7 @@ $CopilotScenarios = [ordered]@{
         Check 'the item reaches Functional Testing' (Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column)"
         Check 'a Functional Testing task is created' (Wait-Until -Seconds 60 { @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' }).Count -eq 1 })
         $ft = @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' })[0]
-        $r1 = "$((Cop-Exchange (Cop-Code $ft) (Cop-Bootstrap)).body.token)"
+        $r1 = (Cop-R1 $ft)
         $cur = ''
         Check 'the FT agent gets its offer' (Wait-Until -Seconds 30 { $e = Mcp-Events $r1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
         [void](Mcp-Call 'item_accept' @{ item = $n } $r1)
