@@ -196,6 +196,17 @@ Design: `docs/design/copilot-cloud-agent.md` (owner decisions 2026-10-19). Built
 - **Prompt** `prompts/bootstrap/copilot.md` (role bootstrap, phase `api-copilot`).
 - **Config** `api.copilot` in `config/instance.json`: `enabled` false, no `environments` entry anywhere (the deployed image keeps it off).
 
+#### The manager as a short Copilot task (2026-10-21)
+
+The gateway launches the plant manager on demand: one Copilot task for the `manager` role when the digest holds a stalled, waiting, refused,
+parked or late-question entry that is new, no supervisor is present, the manager budgets have room, the cooldown (15 min) has passed and
+the day's count (6) is not reached. `api.copilot.manager` in `config/instance.json` (off), tdd on and uat/prod written off in
+`config/deploy.overrides.json`. Code `gateway/Runtimes/ManagerCopilot.cs`, tools in `gateway/Mcp/McpServer.cs` (`manager_*`, role set in
+`RoleTools.cs`), prompts `prompts/manager/patrol.md` and `prompts/bootstrap/copilot-manager.md`, trigger `Plant.ManagerWork`. Watch it in
+`/api/v1/status` -> `manager.copilot` (`present`, `url`, `launches`, `today`, `next`, `usage`). Stop it with
+`FACTORY_COPILOT_MANAGER_ENABLED=false` on the gateway app or `enabled: false` in the overrides. Suite `copilot-manager`. Design:
+`docs/design/agents-roles-launch.md` section 18.
+
 #### Owner and infrastructure steps before a first tdd test (not done by code)
 
 1. **Copilot seat** for `cm-ai-ops-bot` (a plan that includes the coding agent and the agent tasks API), and the Copilot coding agent

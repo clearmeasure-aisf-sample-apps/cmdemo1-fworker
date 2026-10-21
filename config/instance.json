@@ -211,7 +211,7 @@
       "maxConcurrent": 1,
       "maxMinutes": 60,
       "maxExecutionsPerDay": 30,
-      "ackSeconds": 900,
+      "ackSeconds": 1800,
       "apiUrl": "https://api.github.com",
       "apiVersion": "2026-03-10",
       "gatewayUrl": "",
@@ -220,6 +220,7 @@
       "ciRelease": true,
       "ciReleaseSeconds": 120,
       "maxCreditsPerTask": 0,
+      "manager": { "enabled": false, "maxPerDay": 6, "cooldownMinutes": 15, "maxMinutes": 10 },
       "repository": "clearmeasure-aisf-sample-apps/cmdemo1-workorders",
       "environments": {}
     }

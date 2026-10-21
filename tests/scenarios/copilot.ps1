@@ -442,7 +442,12 @@ $CopilotScenarios = [ordered]@{
         Check 'Development is a follow-up session of the same task: a @copilot comment on its draft' (Wait-Until -Seconds 60 { @((Cop-Sessions $n $t.id 'development') | Where-Object { $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
         $s1 = (Cop-Sessions $n $t.id 'development')[0]
         Check 'the follow-up prompt names the phase, the pull request, the ownership and the one-step rule' ("$($s1.body.prompt)" -match "owns #$n" -and "$($s1.body.prompt)" -match "PR #$($d.number), branch $([regex]::Escape($br))" -and "$($s1.body.prompt)" -match 'never poll or wait for CI') "$($s1.body.prompt)"
-        $w1 = Cop-Accept $s1 $n
+        Check 'the follow-up carries a fresh one-time code of its own' ((Cop-Code $s1) -ne '' -and (Cop-Code $s1) -ne (Cop-Code $t))
+        $x1 = Cop-Exchange (Cop-Code $s1) (Cop-Bootstrap)
+        Check 'which exchanges for the new session''s r1' ($x1.status -eq 200 -and "$($x1.body.name)" -like "cop-$n-*")
+        $w1 = "$($x1.body.token)"; $cur1 = ''
+        [void](Wait-Until -Seconds 30 { $e = Mcp-Events $w1 $cur1 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
+        [void](Mcp-Call 'item_accept' @{ item = $n } $w1)
         [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Own.cs', 'src/UnitTests/OwnTests.cs') })
         $op = Cop-OpenPr $n $br
         Check 'pr_open takes the draft over as the item''s pull request' ($op.ok -and $op.pullRequest.number -eq $d.number) ($op | ConvertTo-Json -Compress -Depth 4)
@@ -462,7 +467,7 @@ $CopilotScenarios = [ordered]@{
         $cs = @((Get-FakeIssue $n).comments | ForEach-Object { "$($_.body)" })
         $gi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'master is GREEN' }); $oi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -like '*Owner done:*' })
         Check 'the owner is done only after master is green' ($gi -ge 0 -and $oi -gt $gi) "green $gi done $oi"
-        Check 'the done comment carries the session link' ("$($cs[$oi])" -match "https://github\.com/fake/tasks/$([regex]::Escape($t.id))")
+        Check 'the done comment carries the session link' ("$($cs[$oi])" -match "https://github\.com/copilot/tasks/$([regex]::Escape($t.id))")
         Check 'one task, three sessions, never a second task' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1 -and (Cop-Tasks $n).Count -eq 3) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.via)" }) -join '; '
         Check 'no worker but the task''s sessions was offered the item' (Cop-NotOffered $n) (Cop-Brief $n)
         Check 'status: the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })

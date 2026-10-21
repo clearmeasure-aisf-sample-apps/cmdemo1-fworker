@@ -252,7 +252,9 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     public async Task<ProvisionResult> Provision(ProvisionRequest r, CancellationToken ct)
     {
         // the r1 (r.Nonce) stays in the gateway: the task gets a one-time code for it, valid for the acknowledgement window
-        var code = codes.Mint(r.WorkerName, r.Nonce, TimeSpan.FromSeconds(Math.Max(cfg.AckSeconds, 60) + 300));
+        // a fresh code for every session (a follow-up included); it outlives the registration window by 30 min: the agent environment's setup
+        // (SDK, Playwright browsers) runs before the agent connects
+        var code = codes.Mint(r.WorkerName, r.Nonce, TimeSpan.FromSeconds(Math.Max(cfg.AckSeconds, 60) + 1800));
         // Development of an item that already has its pull request with changes and no rework asked for: no new session, the gateway waits for
         // its checks (#395 was relaunched in mode first after its green pull request and opened a duplicate draft for 25B ai_credits)
         if (IsDevelopment(r.Phase) && Settle != null)
@@ -348,6 +350,30 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         }
         catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of {branch}: {e.GetType().Name}"); }
         return 0;
+    }
+
+    // A task for a role that is not a worker (the on-demand manager, ManagerCopilot.cs): its prompt and the default branch as base_ref, no pull
+    // request by Copilot, no model unless api.copilot.model names one. It is not in the worker table: the runtime manager never lists it.
+    public async Task<(bool Ok, string Id, string Url, string Error)> LaunchRole(string promptText, CancellationToken ct)
+    {
+        var body = new JsonObject { ["prompt"] = promptText, ["base_ref"] = cfg.DefaultBranch, ["create_pull_request"] = false };
+        if (cfg.Model != "") body["model"] = cfg.Model;
+        int s; JsonNode? j;
+        try { (s, j) = await Send(HttpMethod.Post, TasksPath, body, ct); }
+        catch (Exception e) { return (false, "", "", "launch-" + e.GetType().Name); }
+        var id = j?["id"]?.ToString() ?? "";
+        if (s is not (200 or 201 or 202) || id == "") return (false, "", "", s is 200 or 201 or 202 ? "launch-no-id" : $"launch-{s}");
+        return (true, id, j?["html_url"]?.ToString() ?? "", "");
+    }
+
+    // The state of such a task: Running, Succeeded, Failed or Stopped as for a worker's, the session link (html_url) and the usage its sessions report.
+    public async Task<(bool Ok, string Status, string Url, JsonObject? Usage)> ReadRole(string id, CancellationToken ct)
+    {
+        var (s, j) = await Send(HttpMethod.Get, $"{TasksPath}/{Uri.EscapeDataString(id)}", null, ct);
+        if (s != 200) return (false, "Running", "", null);
+        var st = j?["state"]?.ToString() ?? "";
+        var status = st switch { "completed" or "idle" => "Succeeded", "failed" or "timed_out" => "Failed", "cancelled" => "Stopped", _ => "Running" };
+        return (true, status, j?["html_url"]?.ToString() ?? "", Usage(j?["sessions"]));
     }
 
     // The agent tasks API has no cancel: the end is recorded here, the code is spent, and the manager revokes the name (RevokeOnEnd), so the
