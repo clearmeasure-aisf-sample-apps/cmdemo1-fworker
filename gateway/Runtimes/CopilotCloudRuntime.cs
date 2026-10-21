@@ -119,7 +119,7 @@ sealed record ItemPr(int Number, string Branch);
 
 sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
 {
-    sealed class Task_ { public string Id = "", Worker = "", Phase = "", State = "queued", Status = "Running"; public int Item; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
+    sealed class Task_ { public string Id = "", Url = "", Worker = "", Phase = "", State = "queued", Status = "Running"; public int Item; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
 
     readonly CopilotCloudSettings cfg;
     readonly HttpClient http;
@@ -143,7 +143,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
     public JsonObject? Detail(string workerName)
     {
         lock (tasks)
-            return tasks.TryGetValue(workerName, out var t) ? new JsonObject { ["task"] = t.Id, ["state"] = t.State, ["usage"] = t.Usage?.DeepClone(), ["artifacts"] = t.Artifacts?.DeepClone(), ["taskFields"] = t.Fields?.DeepClone(),
+            return tasks.TryGetValue(workerName, out var t) ? new JsonObject { ["task"] = t.Id, ["url"] = t.Url, ["state"] = t.State, ["usage"] = t.Usage?.DeepClone(), ["artifacts"] = t.Artifacts?.DeepClone(), ["taskFields"] = t.Fields?.DeepClone(),
                 ["minutes"] = Math.Round(((t.Ended ?? DateTime.UtcNow) - t.Started).TotalMinutes, 1) } : null;
     }
 
@@ -200,8 +200,9 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         catch (Exception e) { codes.Forget(r.WorkerName); return new(false, "", "launch-" + e.GetType().Name); }
         var id = j?["id"]?.ToString() ?? "";
         if (s is not (200 or 201 or 202) || id == "") { codes.Forget(r.WorkerName); return new(false, "", s is 200 or 201 or 202 ? "launch-no-id" : $"launch-{s}"); }
-        lock (tasks) tasks[r.WorkerName] = new Task_ { Id = id, Worker = r.WorkerName, Item = r.Item, Phase = r.Phase, State = j?["state"]?.ToString() ?? "queued" };
-        return new(true, id, "");
+        var url = TaskUrl(j?["html_url"]?.ToString(), id);
+        lock (tasks) tasks[r.WorkerName] = new Task_ { Id = id, Url = url, Worker = r.WorkerName, Item = r.Item, Phase = r.Phase, State = j?["state"]?.ToString() ?? "queued" };
+        return new(true, id, "", url);
     }
 
     // The agent tasks API has no cancel: the end is recorded here, the code is spent, and the manager revokes the name (RevokeOnEnd), so the
@@ -268,6 +269,14 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
             list.Add(new RuntimeInstance(t.Id, t.Worker, t.Item, t.Phase, t.Status, t.Started, t.Ended));
         }
         return list;
+    }
+
+    // The task's page (its live session, after the end its transcript): the API's html_url when it is an https URL without credentials, query or
+    // fragment; else built from the repository and the task id. Never carries a token.
+    public string TaskUrl(string? htmlUrl, string id)
+    {
+        if (Uri.TryCreate(htmlUrl, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps && u.Host == "github.com" && u.UserInfo == "" && u.Query == "" && u.Fragment == "" && htmlUrl!.Length <= 300) return u.AbsoluteUri;
+        return $"https://github.com/{cfg.Repository}/tasks/{Uri.EscapeDataString(id)}";
     }
 
     // the branch of the task's artifacts ({type: branch, data: {head_ref}}), only a copilot/ branch

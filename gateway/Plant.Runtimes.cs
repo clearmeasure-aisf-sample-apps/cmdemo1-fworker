@@ -87,7 +87,16 @@ sealed partial class Plant
 
     // The execution of a runtime worker ended: everything the name still holds goes back to the plan (its owner is dropped, its assignments are
     // removed), its stream is closed and it is forgotten. Answers whether anything was taken back.
-    public bool RuntimeEnded(string name, int item, string outcome)
+    // The execution was started: the item's journal names it and its page (launched; the accepted and ended lines carry the page too).
+    public void RuntimeLaunched(string name, int item, string phase, string kind, string execution, string url)
+    {
+        Journal(item, "launched", new JsonObject { ["worker"] = name, ["runtime"] = kind, ["phase"] = phase, ["task"] = execution, ["url"] = url }, "rtl|" + name + "|" + execution);
+    }
+
+    // the page of a runtime worker's execution ("" for none or a connected session)
+    public string RuntimeUrlOf(string name) => RuntimeOf(name)?.UrlOf(name) ?? "";
+
+    public bool RuntimeEnded(string name, int item, string outcome, string url = "")
     {
         lock (gate)
         {
@@ -96,7 +105,7 @@ sealed partial class Plant
             foreach (var k in assignments.Where(kv => kv.Value.Worker == name && !IsQc(kv.Value)).Select(kv => kv.Key).ToList())
             {
                 var a = assignments[k]; assignments.Remove(k); took = true;
-                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"the execution of {name} ended ({outcome})", ["opCode"] = "runtime-ended" }, "rtend|" + a.Id + "|" + name);
+                Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"the execution of {name} ended ({outcome})", ["url"] = url, ["opCode"] = "runtime-ended" }, "rtend|" + a.Id + "|" + name);
             }
             if (workers.TryGetValue(name, out var w)) { w.Out?.Writer.TryComplete(); w.Connected = false; workers.Remove(name); }
             return took;

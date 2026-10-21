@@ -12,7 +12,7 @@
 $script:JournalCap = 30
 $script:JournalFoldKinds = @('matched', 'waiting', 'reassigned')
 # lines that neither end a fold nor are folded themselves
-$script:JournalFoldNeutral = @('offered')
+$script:JournalFoldNeutral = @('offered', 'launched')
 $script:JournalFoldShow = 5
 # a folded line is kept in the state for the comment's history: at most this long (the state comment has a size limit of its own)
 $script:JournalFoldLineMax = 300
@@ -31,6 +31,14 @@ function Protect-JournalText([string]$Text) {
     return $t
 }
 
+# The page of a runtime worker's execution: a Copilot task's (its live session, after the end its transcript) reads "Copilot session: <url>"
+function Get-JournalSessionLink($F) {
+    if (-not ($F.ContainsKey('url') -and $F.url)) { return '' }
+    $u = "$($F.url)"
+    if ($u -match '^https://github\.com/[^/\s]+/[^/\s]+/tasks/[^/\s?#]+$') { return " Copilot session: $u" }
+    return " [session]($u)"
+}
+
 function Get-JournalText([string]$Event, [hashtable]$F) {
     $col = if ($F.ContainsKey('column')) { "**$($F.column)**" } else { '' }
     $n = $F.item
@@ -40,12 +48,14 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'assigned' {
             if ($F.ContainsKey('role') -and $F.role) { return "**$($F.worker)** accepted the $($F.role) job for PR #$($F.pr)$(if ($F.ContainsKey('url') -and $F.url) { " ([session]($($F.url)))" })." }
             $m = if ($F.ContainsKey('model') -and $F.model) { " Model: $($F.model) ($($F.effort)), tier $($F.tier)." } else { '' }
-            $link = if ($F.ContainsKey('url') -and $F.url) { " [session]($($F.url))" } else { '' }
+            $sl = Get-JournalSessionLink $F; $cop = $sl -like ' Copilot session: *'
+            $link = if ($cop) { '' } else { $sl }
             $by = if ($F.ContainsKey('by') -and $F.by -eq 'client') { ' (accepted by its client; the session starts on it next)' } else { '' }
-            return "**$($F.worker)**$link accepted$($by): it owns this item from $col until it is merged (mode $($F.mode), attempt $($F.attempt)).$m Lease until $($F.lease)."
+            return "**$($F.worker)**$link accepted$($by): it owns this item from $col until it is merged (mode $($F.mode), attempt $($F.attempt)).$m Lease until $($F.lease).$(if ($cop) { $sl })"
         }
         'routed' { return "told the owner (**$($F.worker)**): $($F.what)." }
-        'reassigned' { return "$($F.reason); offering to the next worker." }
+        'reassigned' { $sl = Get-JournalSessionLink $F; return "$($F.reason); offering to the next worker.$sl" }
+        'launched' { $sl = Get-JournalSessionLink $F; return "$($F.runtime) started **$($F.worker)** for $(if ($F.phase) { "**$($F.phase)**" } else { 'this item' })$(if ($F.task) { " (task ``$($F.task)``)" }).$sl" }
         'tier' { return "model tier raised to **$($F.name)** ($($F.reasons))." }
         'waiting' { return "waiting: $($F.reason)." }
         'pin-fallback' { return "the pinned worker **$($F.pin)** could not take the item for $($F.minutes) min ($($F.code)): the pin is set aside and it is offered to **$($F.worker)**. A new worker label pins it again." }
@@ -188,7 +198,7 @@ function Get-JournalKeys($State) { if (Test-Has $State 'journal') { return @($St
 # Admin verb: the gateway journals the decisions it makes itself (matched, offered, reassigned, waiting, skipped).
 function Verb_journal($a) {
     $n = Get-ItemNumber $a; $ev = "$(Need $a 'event')"
-    if ($ev -notin 'matched', 'offered', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated', 'base-updated', 'branch-updated', 'keeper-action', 'manager-action', 'pin-fallback', 'ci-released') { Reject 2 'usage' "unknown journal event '$ev'" }
+    if ($ev -notin 'matched', 'offered', 'launched', 'assigned', 'routed', 'reassigned', 'tier', 'waiting', 'skipped', 'released', 'qc-offered', 'qc-requested', 'qc-assigned', 'qc-ready', 'qc-failed', 'qc-reset', 'qc-torn-down', 'qc-waiting', 'question-escalated', 'base-updated', 'branch-updated', 'keeper-action', 'manager-action', 'pin-fallback', 'ci-released') { Reject 2 'usage' "unknown journal event '$ev'" }
     $f = @{}; if (Test-Has $a 'fields') { foreach ($k in $a.fields.Keys) { $f[$k] = $a.fields[$k] } }
     # a 'waiting' note is rate-limited: at most one per timing.journalWaitingMinutes (30) per item
     if ($ev -eq 'waiting') {
