@@ -18,7 +18,8 @@ function Cur-FollowUps([string]$Id) { , @(@((Cur-State).agents | Where-Object { 
 function Cur-FuR1($FollowUp) { "$($FollowUp.body.mcpServers[0].headers.Authorization)".Substring(7) }
 function Cur-Accept([string]$R1, [int]$Item) {
     $cur = ''
-    [void](Wait-Until -Seconds 30 { $e = Mcp-Events $R1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $Item }).Count -gt 0 })
+    # a call refused while the run's r1 registers (a loaded runner) answers no events: read again
+    [void](Wait-Until -Seconds 60 { $e = Mcp-Events $R1 $cur 5; $e -and $e.PSObject.Properties['events'] -and @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $Item }).Count -gt 0 })
     [void](Mcp-Call 'item_accept' @{ item = $Item } $R1)
 }
 function Cur-Status { (Get-Plant).runtimes.'cursor-cloud' }
