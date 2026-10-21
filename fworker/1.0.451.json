@@ -1,0 +1,26 @@
+{
+  "deployable": "fworker",
+  "version": "1.0.451",
+  "generated": "2026-10-21T05:00:51Z",
+  "kind": "container image",
+  "process": "dotnet FactoryWorker.Gateway.dll",
+  "entry": "FactoryWorker.Gateway",
+  "assemblies": [
+    {
+      "name": "FactoryWorker.Gateway",
+      "entry": true,
+      "references": [],
+      "packages": [
+        {
+          "name": "Azure.Identity",
+          "version": "1.21.0"
+        },
+        {
+          "name": "ModelContextProtocol.AspNetCore",
+          "version": "1.0.0"
+        }
+      ]
+    }
+  ],
+  "truncated": false
+}
