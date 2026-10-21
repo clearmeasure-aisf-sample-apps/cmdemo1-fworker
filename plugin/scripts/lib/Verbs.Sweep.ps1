@@ -14,7 +14,28 @@ function Complete-AwaitingChecks([int]$n, $info, $st) {
         Add-Comment $n "the wait for the checks of PR #$($aw.pr) ended without moving the card: it is in **$($info.column)**, not in **$expect** where the wait began."
         return @{ outcome = 'column-moved'; column = "$($info.column)"; expected = $expect }
     }
-    $pr = Get-Pr ([int]$aw.pr); $sha = "$($pr.head.sha)"
+    $pr = Get-Pr ([int]$aw.pr)
+    # the pull request waited on was closed or superseded (a migration, a takeover): an owner task's item waits on the open pull request of the
+    # task's branch instead, from now
+    if ("$($pr.state)" -ne 'open' -and -not $pr.merged -and (Test-Has $s 'copilot_task')) {
+        $ow = try { Resolve-OwnerPr $n } catch { $null }
+        if ($ow -and [int]$ow.pr.number -ne [int]$pr.number) {
+            $st = Get-State $n; $s = $st.state; $aw = $s.awaiting_checks
+            if (-not $aw) { return @{ outcome = 'settled-meanwhile' } }
+            $pr = Get-Pr ([int]$ow.pr.number)
+        }
+    }
+    # still closed, with no open pull request on the owner task's branch: no checks will ever finish; the owner gets it back to open one
+    if ("$($pr.state)" -ne 'open' -and -not $pr.merged -and (Test-Has $s 'copilot_task')) {
+        $s.Remove('awaiting_checks'); $s.Remove('park')
+        if (-not (Test-Has $s 'pr')) { $s.pr = @{} }
+        $s.pr.rejection = "PR #$($pr.number) was closed and the owner task's branch has no open pull request: push the work to the task's branch and pr_open it against $($c.defaultBranch)"
+        $s.handoff = @{ column = $c.columns.development; at = ConvertTo-Iso (Get-UtcNow) }
+        Save-State $n $st
+        Add-Comment $n "PR #$($pr.number), whose checks the gateway waited for, is closed and the owner task's branch has no open pull request. Re-dispatching Development to open it (not counted as a fix-forward round)."
+        return @{ outcome = 'fix-forward'; round = $(if (Test-Has $s 'fix_forward_rounds') { [int]$s.fix_forward_rounds } else { 0 }); reason = 'pr-closed'; offer = $true }
+    }
+    $sha = "$($pr.head.sha)"
     $chk = Get-ChecksFor $sha
     if ($chk.status -eq 'success') {
         $s.Remove('fix_forward_rounds'); $s.Remove('master_defect'); if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
@@ -89,6 +110,47 @@ function Complete-AwaitingChecks([int]$n, $info, $st) {
         }
     }
     $since = ConvertFrom-Iso $aw.since
+    # No CI run at all for the head (the first gate, the Build, is absent) after timing.noBuildMinutes is no hung CI: a push that started no
+    # workflow (a pull request stacked on another branch, a push by the agent that triggered nothing). Once per head the gateway retargets the pull
+    # request to the default branch when it is stacked and starts the CI workflow on the branch (ciWorkflow, workflow_dispatch); still none after
+    # that: the owner gets it back (merge the default branch into the branch and push: a new head starts CI), no fix-forward round counted.
+    $noBuild = if (Test-Has $c.timing 'noBuildMinutes') { [double]$c.timing.noBuildMinutes } else { 10 }
+    $gate0 = @($c.ciGates | Where-Object { $_ })[0]
+    if ($chk.status -eq 'pending' -and $gate0 -and "$($chk.gates[$gate0])" -eq 'absent' -and $since -and ((Get-UtcNow) - $since).TotalMinutes -gt $noBuild) {
+        $nbf = if (Test-Has $aw 'no_build_for') { "$($aw.no_build_for)" } else { '' }
+        if ($nbf -ne $sha) {
+            $how = @()
+            if ("$($pr.base.ref)" -ne "$($c.defaultBranch)") {
+                $ow = if (Test-Has $s 'copilot_task') { try { Resolve-OwnerPr $n } catch { $null } } else { $null }
+                if ($ow -and $ow.retargeted) { $how += "retargeted to $($c.defaultBranch)" }
+                elseif (-not $ow) {
+                    $rb = Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ base = "$($c.defaultBranch)" } -Allow 422
+                    if (-not ($rb -is [hashtable] -and $rb.ContainsKey('status'))) { $how += "retargeted to $($c.defaultBranch)" }
+                }
+                $st = Get-State $n; $s = $st.state; $aw = $s.awaiting_checks
+                if (-not $aw) { return @{ outcome = 'settled-meanwhile' } }
+                # another pull request is waited on now: the next pass judges it
+                if ([int]$aw.pr -ne [int]$pr.number) { return @{ outcome = 'pr-replaced'; pr = [int]$aw.pr } }
+                $pr = Get-Pr ([int]$aw.pr)
+            }
+            $wf = if (Test-Has $c 'ciWorkflow') { "$($c.ciWorkflow)" } else { '' }
+            if ($wf) {
+                $d = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/actions/workflows/$([uri]::EscapeDataString($wf))/dispatches" -Body @{ ref = "$($pr.head.ref)" } -Allow 403, 404, 422
+                if (-not ($d -is [hashtable] -and $d.ContainsKey('status'))) { $how += "started $wf on ``$($pr.head.ref)``" } else { $how += "could not start $wf ($($d.status))" }
+            }
+            $aw.no_build_for = $sha; $aw.since = ConvertTo-Iso (Get-UtcNow); Save-State $n $st
+            Add-Comment $n "PR #$($pr.number) has no $gate0 run for its head ``$($sha.Substring(0, [Math]::Min(7, $sha.Length)))`` after $noBuild min: no CI started for it (not a hung run). The gateway $(if ($how.Count) { $how -join ' and ' } else { 'found nothing to re-trigger' }) and waits again."
+            return @{ outcome = 'ci-retriggered'; pr = [int]$pr.number; how = $how }
+        }
+        $s.Remove('awaiting_checks'); $s.Remove('park')
+        if (-not (Test-Has $s 'pr')) { $s.pr = @{} }
+        $s.pr.number = $pr.number; $s.pr.branch = $pr.head.ref; $s.pr.url = $pr.html_url
+        $s.pr.rejection = "PR #$($pr.number) has no $gate0 run for its head even after a re-trigger: merge $($c.defaultBranch) into the branch and push (plain push), so the new head starts CI"
+        $s.handoff = @{ column = $c.columns.development; at = ConvertTo-Iso (Get-UtcNow) }
+        Save-State $n $st
+        Add-Comment $n "PR #$($pr.number) still has no $gate0 run for its head after a re-trigger. Re-dispatching Development to merge $($c.defaultBranch) into the branch and push, which starts CI (not counted as a fix-forward round)."
+        return @{ outcome = 'fix-forward'; round = $(if (Test-Has $s 'fix_forward_rounds') { [int]$s.fix_forward_rounds } else { 0 }); reason = 'no-build'; offer = $true }
+    }
     if ($since -and ((Get-UtcNow) - $since).TotalMinutes -gt $c.timing.devChecksTimeoutMinutes) {
         $s.Remove('awaiting_checks'); Set-Park $s 'stuck' ($c.timing.parkHours * 60); Save-State $n $st
         Add-Comment $n "PR #$($pr.number) checks were still not finished after $($c.timing.devChecksTimeoutMinutes) min - parked for a human (a hung CI run, not a code problem)."

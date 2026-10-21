@@ -32,6 +32,7 @@
     "Build result",
     "secret-scan"
   ],
+  "ciWorkflow": "build.yml",
   "autoMergeLabel": "Auto Merge",
   "videoLabel": "video",
   "demoLabel": "Demo",
@@ -121,6 +122,7 @@
     "lateReleaseCandidateHours": 24,
     "masterContainsLookback": 10,
     "devChecksTimeoutMinutes": 30,
+    "noBuildMinutes": 10,
     "verdictTimeoutMinutes": 180,
     "unprocessedVerdictGraceMinutes": 3,
     "passMergeGraceSeconds": 60,

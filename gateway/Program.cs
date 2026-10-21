@@ -2226,6 +2226,7 @@ if (copilotRuntime != null && copilotManager != null)
                     var j = await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "status" });
                     var waiting = j?["waiting"]?.ToString() ?? "";
                     copilotRuntime.Waiting(o.Item, j?["column"]?.ToString() ?? "", waiting);
+                    if (int.TryParse(j?["pr"]?.ToString(), out var curPr) && curPr > 0) copilotRuntime.SetPr(o.Item, curPr);
                     if (waiting == "done")
                     {
                         await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "close" });
@@ -2292,11 +2293,15 @@ copilotPrompt = (item, phase, code, pr, why) =>
     // not depend on Copilot's memory of the earlier sessions; then the same connect lines as a first session
     if (why != null && pr != null)
     {
-        var f = $"Follow-up session of the task that owns #{item}: phase {phase}. Work on PR #{pr.Number}, branch {pr.Branch} (this session runs on it). " +
+        // a comment session reads the comment as a request to address: the registration comes FIRST, before any reading or change (a follow-up
+        // that never connected did its work unseen, or none, and was counted as failed: #415, #416 on 2026-10-21)
+        var first = $"FIRST, before you read or change anything: call fworker_connect with code {code} and gateway {copilotSettings.GatewayUrl}, then next_event (wait_seconds 30) until item.assigned for #{item} arrives, then item_accept for #{item}. " +
+            "Without that the gateway cannot see this session: its work is not recorded and the session counts as failed. Only then do the step below.\n";
+        var f = first + $"Follow-up session of the task that owns #{item}: phase {phase}. Work on PR #{pr.Number}, branch {pr.Branch} (this session runs on it). " +
             "You own #{item} until it is merged and master is green, but THIS session does only this phase step and then ends: never poll or wait for CI; the gateway watches it and resumes you.\n";
         f = f.Replace("{item}", item.ToString());
         if (why.Trim() != "") f += $"What changed: {why.Trim()}\n";
-        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass (a failing test outside your change that also fails at origin/master does not block: name it in item_complete), else fix and rerun. Push as soon as the gate allows. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
+        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass (a failing test outside your change that also fails at origin/master, or a full acceptance run that fails only outside your change's area or does not finish in 20 min while the private build and the acceptance tests of your area pass, does not block: push and name it in item_complete), else fix and rerun. Push as soon as the gate allows. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
             : phase.Trim().Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? $"Verify PR #{pr.Number} against the item's criteria; change nothing; record the review and the verdict, then session_end.\n"
             : "Do this phase's step only, then session_end.\n";
         var bpf = prompts.ByPath("bootstrap/copilot.md");
