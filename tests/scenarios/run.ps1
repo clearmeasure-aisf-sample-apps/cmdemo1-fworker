@@ -115,7 +115,7 @@ $SuiteDefs = @(
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; idleGraceSeconds = 2; usageRetrySeconds = 0.5; usageWaitSeconds = 20; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
     # the Copilot cloud agent (copilot.ps1, docs/design/copilot-cloud-agent.md): the fake agent tasks API, a 0.25-minute deadline, a 20 s window
-    @{ Name = 'copilot'; Policy = 'auto'; Set = $CopilotScenarios; Env = 'copilot'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
+    @{ Name = 'copilot'; Policy = 'auto'; Set = $CopilotScenarios; Env = 'copilot'; DefaultEnvLabel = 'env:tdd'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 10; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
             # cmdemo1's default runtime: an item without a runtime: label goes to the Copilot cloud agent
@@ -250,7 +250,7 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
 function Invoke-SuiteDef($Def) {
     $script:SuiteName = $Def.Name
     $script:UseClientHost = $Def.ContainsKey('ClientHost') -and [bool]$Def.ClientHost
-    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
+    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; $script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
     foreach ($k in $envs.Keys) { Set-Item "Env:$k" ([string]$envs[$k]) }
     foreach ($k in $timing.Keys) { Set-Item "Env:FACTORY_TIMING_$k" ([string]$timing[$k]) }
     try { Run-Suite $Def.Policy $Def.Set $(if ($Def.ContainsKey('Extra')) { $Def.Extra } else { @{} }) }

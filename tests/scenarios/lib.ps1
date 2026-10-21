@@ -189,7 +189,8 @@ function CheckExit($Name, $r, [int]$Exit, [string]$Code = '') {
     Check $Name $ok "(wanted exit $Exit $Code, got exit $($r.exit) $got $why)"
 }
 
-function New-Item-Fake([string]$Title, [string]$Body, [string[]]$Labels, [string]$Column = 'Technical Design') { (Fake 'issue' @{ title = $Title; body = $Body; labels = $Labels; column = $Column }).number }
+# a suite whose definition names DefaultEnvLabel (copilot: its gateway is env-scoped): an item given no env: label gets that one
+function New-Item-Fake([string]$Title, [string]$Body, [string[]]$Labels, [string]$Column = 'Technical Design') { if ($script:DefaultEnvLabel -and -not @($Labels | Where-Object { "$_" -like 'env:*' }).Count) { $Labels = @($Labels) + $script:DefaultEnvLabel }; (Fake 'issue' @{ title = $Title; body = $Body; labels = $Labels; column = $Column }).number }
 
 # The scripted worker: runs one column the way the skill does, with canned judgement.
 function Do-TechnicalDesign([int]$n, [string]$Holder = 'w1', [bool]$DocsOnly = $true) {
