@@ -18,7 +18,7 @@ sealed class CopilotCloudSettings
     public int MaxConcurrent = 1, MaxExecutionsPerDay = 30, MaxFailuresPerPhase = 2, MaxLaunchesPerPhase = 3, UnhealthyAfterFailures = 2, BootstrapGeneration = 1;
     public double MaxMinutes = 60, AckSeconds = 900, ListSeconds = 30;
     // the credit guard: a task whose sessions report more ai_credits than this is ended (its r1 revoked) and its item parked credit-guard; 0 = off
-    public double MaxCreditsPerTask = 10e9;
+    public double MaxCreditsPerTask = 3e9;
     public string Environment = "tdd";
     public string ApiUrl = "https://api.github.com", ApiVersion = "2026-03-10", Token = "", GatewayUrl = "", Model = "",
         Repository = "clearmeasure-aisf-sample-apps/cmdemo1-workorders", DefaultBranch = "master";

@@ -217,7 +217,7 @@
       "gatewayUrl": "",
       "model": "",
       "bootstrapGeneration": 1,
-      "maxCreditsPerTask": 10000000000,
+      "maxCreditsPerTask": 3000000000,
       "repository": "clearmeasure-aisf-sample-apps/cmdemo1-workorders",
       "environments": {}
     }
