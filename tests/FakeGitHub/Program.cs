@@ -138,7 +138,7 @@ sealed class World
         if (method == "GET") { task.Reads++; return (200, CopilotJson(task)); }
         return (405, null);
     }
-    static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("html_url", $"https://github.com/copilot/tasks/{t.Id}"), ("session_count", t.Sessions.Count),
+    static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("html_url", "https://github.com" + Regex.Replace(t.Path, "^/agents/repos", "") + "/" + t.Id), ("session_count", t.Sessions.Count),
         ("artifacts", t.HeadRef == null ? new JsonArray() : new JsonArray(J(("provider", "github"), ("type", "branch"), ("data", J(("base_ref", "master"), ("head_ref", t.HeadRef)))))), ("created_at", t.Sessions[0].Created.ToString("o")),
         ("sessions", new JsonArray(t.Sessions.Select((x, k) => (JsonNode)(x.Premium is { } p ? J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("usage", J(("type", "premium_requests"), ("amount", p))))
             : x.Credits is { } cr ? J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("usage", J(("type", "ai_credits"), ("amount", cr)))) : J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("error", x.Error == null ? null : J(("code", "unclassified"), ("message", x.Error)))))).ToArray())));

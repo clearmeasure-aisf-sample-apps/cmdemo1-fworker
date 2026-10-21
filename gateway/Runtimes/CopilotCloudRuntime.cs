@@ -145,7 +145,7 @@ sealed class CopilotOwner
 sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
 {
     // one execution: a session of a task (Session 0 is the task's first; Id is the task id for it and "<task>#<n>" for a follow-up)
-    sealed class Task_ { public string Id = "", TaskId = "", Worker = "", Phase = "", State = "queued", Status = "Running", Via = "task", BaseSha = ""; public int Item, Session, Pr; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
+    sealed class Task_ { public string Id = "", TaskId = "", Url = "", Worker = "", Phase = "", State = "queued", Status = "Running", Via = "task", BaseSha = ""; public int Item, Session, Pr; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
 
     readonly CopilotCloudSettings cfg;
     readonly HttpClient http;
@@ -185,7 +185,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
     {
         lock (tasks)
             return tasks.TryGetValue(workerName, out var t) ? new JsonObject { ["task"] = t.TaskId, ["session"] = t.Session, ["via"] = t.Via, ["state"] = t.State, ["usage"] = t.Usage?.DeepClone(), ["artifacts"] = t.Artifacts?.DeepClone(), ["taskFields"] = t.Fields?.DeepClone(),
-                ["url"] = owners.TryGetValue(t.Item, out var o) && o.TaskId == t.TaskId ? o.Url : null, ["minutes"] = Math.Round(((t.Ended ?? DateTime.UtcNow) - t.Started).TotalMinutes, 1) } : null;
+                ["url"] = t.Url != "" ? t.Url : owners.TryGetValue(t.Item, out var o) && o.TaskId == t.TaskId ? o.Url : null, ["minutes"] = Math.Round(((t.Ended ?? DateTime.UtcNow) - t.Started).TotalMinutes, 1) } : null;
     }
 
     // ---- the owners -----------------------------------------------------------------------------------------------------------------------------
@@ -317,16 +317,16 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
         catch (Exception e) { codes.Forget(r.WorkerName); return new(false, "", "launch-" + e.GetType().Name); }
         var id = j?["id"]?.ToString() ?? "";
         if (s is not (200 or 201 or 202) || id == "") { codes.Forget(r.WorkerName); return new(false, "", s is 200 or 201 or 202 ? "launch-no-id" : $"launch-{s}"); }
-        CopilotOwner no;
+        CopilotOwner no; var url = TaskUrl(j?["html_url"]?.ToString(), id);
         lock (tasks)
         {
-            tasks[r.WorkerName] = new Task_ { Id = id, TaskId = id, Worker = r.WorkerName, Item = r.Item, Phase = r.Phase, State = j?["state"]?.ToString() ?? "queued" };
-            no = new CopilotOwner { Item = r.Item, TaskId = id, Url = HtmlUrl(j), Branch = HeadRef(j) ?? (pr?.Branch ?? ""), Pr = pr?.Number ?? 0, Phase = r.Phase, Sessions = 1, LastResume = DateTime.UtcNow, WaitingOn = "session" };
+            tasks[r.WorkerName] = new Task_ { Id = id, TaskId = id, Url = url, Worker = r.WorkerName, Item = r.Item, Phase = r.Phase, State = j?["state"]?.ToString() ?? "queued" };
+            no = new CopilotOwner { Item = r.Item, TaskId = id, Url = url, Branch = HeadRef(j) ?? (pr?.Branch ?? ""), Pr = pr?.Number ?? 0, Phase = r.Phase, Sessions = 1, LastResume = DateTime.UtcNow, WaitingOn = "session" };
             if (own != null) { no.Previous.AddRange(own.Previous); no.Previous.Add(own.TaskId); no.Since = own.Since; }
             owners[r.Item] = no;
         }
         _ = Task.Run(() => Save(no));
-        return new(true, id, "");
+        return new(true, id, "", url);
     }
 
     // A follow-up session of the owner task: a @copilot comment on its pull request, by the identity that holds the seat (GitHub answers only a
@@ -346,15 +346,15 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
         try { (s, _) = await Send(HttpMethod.Post, $"/repos/{cfg.Repository}/issues/{pr}/comments", new JsonObject { ["body"] = "@copilot " + text }, ct); }
         catch (Exception e) { return new(false, "", "resume-" + e.GetType().Name); }
         if (s is not (200 or 201)) return new(false, "", $"resume-{s}");
-        var id = $"{own.TaskId}#{k}";
+        var id = $"{own.TaskId}#{k}"; var url = own.Url != "" ? own.Url : TaskUrl(null, own.TaskId);
         lock (tasks)
         {
-            tasks[worker] = new Task_ { Id = id, TaskId = own.TaskId, Session = k, Via = "comment", Pr = pr, Worker = worker, Item = item, Phase = phase, BaseSha = baseSha ?? "" };
+            tasks[worker] = new Task_ { Id = id, TaskId = own.TaskId, Url = url, Session = k, Via = "comment", Pr = pr, Worker = worker, Item = item, Phase = phase, BaseSha = baseSha ?? "" };
             own.Sessions = k + 1; own.Pr = pr; own.Phase = phase; own.LastResume = DateTime.UtcNow; own.WaitingOn = "session"; own.Updated = DateTime.UtcNow;
         }
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "resume", ["item"] = item, ["phase"] = phase, ["task"] = own.TaskId, ["session"] = k, ["pr"] = pr }.ToJsonString());
         _ = Task.Run(() => Save(own));
-        return new(true, id, "");
+        return new(true, id, "", url);
     }
 
     // A follow-up of the owner task that is no phase of the board (a red master after the merge): no worker, no tool of the gateway; the session
@@ -509,7 +509,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
                         var hr = HeadRef(j);
                         if (IsDevelopment(t.Phase) && hr != null) heads[t.Item] = hr;
                         if (hr != null && owners.TryGetValue(t.Item, out var ow) && ow.TaskId == t.TaskId && ow.Branch != hr) { ow.Branch = hr; changed = ow; }
-                        if (owners.TryGetValue(t.Item, out var ow2) && ow2.TaskId == t.TaskId && HtmlUrl(j) is { Length: > 0 } hu && ow2.Url != hu) { ow2.Url = hu; changed = ow2; }
+                        if (owners.TryGetValue(t.Item, out var ow2) && ow2.TaskId == t.TaskId && HtmlUrl(j) is { Length: > 0 } h0 && TaskUrl(h0, t.TaskId) is var hu && ow2.Url != hu) { ow2.Url = hu; changed = ow2; }
                         t.Fields ??= new JsonArray((j as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>());
                         if (t.Ended == null && !t.Guarded)
                         {
@@ -529,6 +529,13 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
         return list;
     }
 
+    // The task's page (its live session, after the end its transcript): the API's html_url when it is an https URL without credentials, query or
+    // fragment; else built from the repository and the task id. Never carries a token.
+    public string TaskUrl(string? htmlUrl, string id)
+    {
+        if (Uri.TryCreate(htmlUrl, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps && u.Host == "github.com" && u.UserInfo == "" && u.Query == "" && u.Fragment == "" && htmlUrl!.Length <= 300) return u.AbsoluteUri;
+        return $"https://github.com/{cfg.Repository}/tasks/{Uri.EscapeDataString(id)}";
+    }
     static string HtmlUrl(JsonNode? task) => task?["html_url"]?.ToString() is { } u && u.StartsWith("https://", StringComparison.Ordinal) && u.Length <= 300 ? u : "";
 
     // the branch of the task's artifacts ({type: branch, data: {head_ref}}), only a copilot/ branch
