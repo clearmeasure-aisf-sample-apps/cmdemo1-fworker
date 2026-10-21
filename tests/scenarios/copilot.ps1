@@ -137,7 +137,9 @@ $CopilotScenarios = [ordered]@{
         Check 'after the failed create a new task is created' (Wait-Until -Seconds 40 { (Cop-Tasks $m).Count -ge 1 })
         Check 'status: the failure was counted against the item' (@((Cop-Status).failures | Where-Object { $_.item -eq $m -and $_.count -ge 1 }).Count -eq 1) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
         $t2 = (Cop-Tasks $m)[-1]
-        Check 'the deadline (0.25 min in this suite) fails it' (Wait-Until -Seconds 60 { @((Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"") | Where-Object { "$_" -match $t2.id }).Count -gt 0 })
+        # the deadline (0.25 min here) or, when the start itself took long (the owner record is read first; CI under load), the 20 s
+        # registration window ends it first: either bound ends a task that never connected
+        Check 'the deadline (0.25 min in this suite) fails it, or the registration window stops it' (Wait-Until -Seconds 60 { @((Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"") | Where-Object { "$_" -match $t2.id }).Count -gt 0 -or @((Cop-Status).last | Where-Object { $_.execution -eq $t2.id -and "$($_.outcome)" -match 'never-registered|stopped' }).Count -gt 0 })
         Check 'and its unspent code no longer exchanges' ((Cop-Exchange (Cop-Code $t2) (Cop-Bootstrap)).status -eq 401)
     } finally { Cop-Cleanup @($n, $m) }
 }
