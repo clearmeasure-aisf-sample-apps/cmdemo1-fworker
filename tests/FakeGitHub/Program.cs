@@ -103,7 +103,16 @@ sealed class ArmExec { public string Name = "", Job = ""; public string Status =
 sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public int UsageReads; public DateTime Created = DateTime.UtcNow; }
 
 // A task of the fake agent tasks API (docs/design/copilot-cloud-agent.md): its id, the body as sent, the API version header, its state.
-sealed class CopilotTask { public string Id = "", State = "queued", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public double? Premium, Credits; public string? HeadRef; }
+// Its sessions: the first is the task's own; a @copilot comment on the task's pull request (its head branch is the task's) adds one, as GitHub
+// starts a follow-up session on the same pull request. The task's state is its last session's.
+sealed class CopilotSession { public string State = "queued", Prompt = "", Branch = ""; public int Pr; public double? Premium, Credits; public DateTime Created = DateTime.UtcNow; }
+sealed class CopilotTask
+{
+    public string Id = "", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public string? HeadRef;
+    public List<CopilotSession> Sessions = new() { new CopilotSession() };
+    public CopilotSession Last => Sessions[^1];
+    public string State { get => Last.State; set => Last.State = value; }
+}
 
 sealed class World
 {
@@ -128,10 +137,21 @@ sealed class World
         if (method == "GET") { task.Reads++; return (200, CopilotJson(task)); }
         return (405, null);
     }
-    static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("artifacts", t.HeadRef == null ? new JsonArray() : new JsonArray(J(("provider", "github"), ("type", "branch"), ("data", J(("base_ref", "master"), ("head_ref", t.HeadRef)))))), ("created_at", DateTime.UtcNow.ToString("o")),
-        ("sessions", new JsonArray(t.Premium is { } p ? J(("id", "s-" + t.Id), ("state", t.State), ("usage", J(("type", "premium_requests"), ("amount", p))))
-            : t.Credits is { } cr ? J(("id", "s-" + t.Id), ("state", t.State), ("usage", J(("type", "ai_credits"), ("amount", cr)))) : J(("id", "s-" + t.Id), ("state", t.State)))));
-    JsonObject CopilotState() => J(("tasks", new JsonArray(copilotTasks.Select(t => (JsonNode)J(("id", t.Id), ("state", t.State), ("reads", t.Reads), ("apiVersion", t.ApiVersion), ("path", t.Path), ("body", t.Body.DeepClone()))).ToArray())));
+    static JsonObject CopilotJson(CopilotTask t) => J(("id", t.Id), ("state", t.State), ("html_url", "https://github.com/fake/tasks/" + t.Id), ("session_count", t.Sessions.Count),
+        ("artifacts", t.HeadRef == null ? new JsonArray() : new JsonArray(J(("provider", "github"), ("type", "branch"), ("data", J(("base_ref", "master"), ("head_ref", t.HeadRef)))))), ("created_at", t.Sessions[0].Created.ToString("o")),
+        ("sessions", new JsonArray(t.Sessions.Select((x, k) => (JsonNode)(x.Premium is { } p ? J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("usage", J(("type", "premium_requests"), ("amount", p))))
+            : x.Credits is { } cr ? J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o")), ("usage", J(("type", "ai_credits"), ("amount", cr)))) : J(("id", $"s-{t.Id}-{k}"), ("state", x.State), ("created_at", x.Created.ToString("o"))))).ToArray())));
+    // one row per session: the task's first is the task id (its body as sent), a follow-up "<task>#<n>" (body: its prompt, via comment, the pull request)
+    JsonObject CopilotState() => J(("tasks", new JsonArray(copilotTasks.SelectMany(t => t.Sessions.Select((x, k) => (JsonNode)J(("id", k == 0 ? t.Id : $"{t.Id}#{k}"), ("task", t.Id), ("session", k), ("via", k == 0 ? "task" : "comment"), ("pr", x.Pr), ("state", x.State), ("reads", t.Reads), ("apiVersion", t.ApiVersion), ("path", t.Path),
+        ("body", k == 0 ? t.Body.DeepClone() : J(("prompt", x.Prompt), ("base_ref", x.Branch), ("create_pull_request", false)))))).ToArray())));
+    // a @copilot comment on a pull request by the seat's identity: a follow-up session of the task whose branch the pull request is on
+    public void CopilotMention(int pr, string branch, string body)
+    {
+        var t = copilotTasks.LastOrDefault(x => x.HeadRef == branch);
+        if (t == null) return;
+        var at = DateTime.UtcNow; if (at <= t.Last.Created) at = t.Last.Created.AddMilliseconds(1);
+        t.Sessions.Add(new CopilotSession { Prompt = body.StartsWith("@copilot ") ? body[9..] : body, Pr = pr, Branch = branch, Created = at });
+    }
 
     // The fake Cursor Cloud Agents API v1: POST /v1/agents, GET /v1/agents/{id}, GET .../runs/{runId}, POST .../runs/{runId}/cancel, DELETE /v1/agents/{id}.
     // It wants the bearer key "fake-cursor". Not cleared by /_fake/reset; /_fake/cursor-reset does.
@@ -344,7 +364,12 @@ sealed class World
             var cn = int.Parse(m.Groups[1].Value);
             var thread = issues.TryGetValue(cn, out var ci) ? ci.Comments : prs.TryGetValue(cn, out var cp) ? cp.Comments : null;
             if (thread == null) return (404, "{\"message\":\"Not Found\"}");
-            if (method == "POST") { var c = new Comment { Id = nextComment++, Body = b!["body"]!.ToString() }; thread.Add(c); return (201, J(("id", c.Id))); }
+            if (method == "POST")
+            {
+                var c = new Comment { Id = nextComment++, Body = b!["body"]!.ToString() }; thread.Add(c);
+                if (auth == "Bearer fake-copilot" && c.Body.StartsWith("@copilot") && prs.TryGetValue(cn, out var mp)) CopilotMention(cn, mp.Ref, c.Body);
+                return (201, J(("id", c.Id)));
+            }
             int page = int.TryParse(q["page"], out var pg) ? pg : 1;
             return (200, new JsonArray(thread.Skip((page - 1) * 100).Take(100).Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body), ("user", J(("login", c.User))), ("created_at", c.At.ToString("o")))).ToArray()));
         }
@@ -808,8 +833,11 @@ sealed class World
             case "copilot-launch-failures": copilotLaunchFailures = b?["count"]?.GetValue<int>() ?? 1; return (200, J(("ok", true)));
             case "copilot-task":
             {   // sets a task's state as GitHub would: {"id", "state": queued | in_progress | completed | failed | timed_out | cancelled, "premium"}
-                var t = copilotTasks.LastOrDefault(x => x.Id == b?["id"]?.ToString()); if (t == null) return (404, J(("ok", false)));
-                if (b?["state"] is { } st) t.State = st.ToString(); if (b?["premium"] is { } pr) t.Premium = pr.GetValue<double>(); if (b?["credits"] is { } crd) t.Credits = crd.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString();
+                // "<task>#<n>": that session; a task id: its last session
+                var sid = b?["id"]?.ToString() ?? ""; var sk = sid.IndexOf('#'); var tid = sk < 0 ? sid : sid[..sk];
+                var t = copilotTasks.LastOrDefault(x => x.Id == tid); if (t == null) return (404, J(("ok", false)));
+                var se = sk < 0 ? t.Last : int.TryParse(sid[(sk + 1)..], out var sn) && sn < t.Sessions.Count ? t.Sessions[sn] : null; if (se == null) return (404, J(("ok", false)));
+                if (b?["state"] is { } st) se.State = st.ToString(); if (b?["premium"] is { } pr) se.Premium = pr.GetValue<double>(); if (b?["credits"] is { } crd) se.Credits = crd.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString();
                 return (200, J(("ok", true)));
             }
             case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; return (200, J(("ok", true)));
