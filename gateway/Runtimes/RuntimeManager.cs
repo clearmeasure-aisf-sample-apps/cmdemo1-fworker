@@ -147,8 +147,8 @@ sealed class RuntimeManager
         {
             bool late; lock (gate) { late = !execs.TryGetValue(t.Name, out var e) || e.Ended || e.StopReason != ""; if (execs.TryGetValue(t.Name, out var e2)) { e2.Execution = r.Execution; e2.Url = r.Url; e2.Status = "Running"; } }
             span?.SetTag("fworker.execution", r.Execution);
-            // the item's journal names the execution and its page (a Copilot task: "Copilot session: <url>")
-            if (!late) { try { Plant?.RuntimeLaunched(t.Name, t.Item, t.Phase, cae.Kind, r.Execution, r.Url); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
+            // the item's journal names the execution and its page (a Copilot task: "Copilot session: <url>"); a runtime without a page adds no line
+            if (!late && r.Url != "") { try { Plant?.RuntimeLaunched(t.Name, t.Item, t.Phase, cae.Kind, r.Execution, r.Url); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
             // ended or stopped while the start call ran (a revoke, a lapse): stop it now, or it would run unattended
             if (late) { try { await cae.Deprovision(t.Name, "ended-during-start", CancellationToken.None); } catch (Exception x) { Log("deprovision-failed", t.Name, t.Item, x.Message); } }
             return;
