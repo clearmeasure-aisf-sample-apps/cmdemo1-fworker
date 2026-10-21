@@ -2205,6 +2205,7 @@ if (copilotRuntime != null && copilotManager != null)
     // The owner watch: every api.copilot.ciReleaseSeconds, by the acting gateway, for each owned item with no session running: what it waits on
     // (its checks, the next phase, the merge, master). Done (merged, master green for the merge): the ownership is closed with a comment that
     // links the task. A red master after the merge: the owner task is resumed once per merge commit to fix forward on a new pull request.
+    var ownerChecked = new Dictionary<int, DateTime>();
     _ = Task.Run(async () =>
     {
         var ct = app.Lifetime.ApplicationStopping;
@@ -2215,6 +2216,9 @@ if (copilotRuntime != null && copilotManager != null)
             foreach (var o in copilotRuntime.Owners())
             {
                 if (copilotRuntime.Running(o.Item)) continue;
+                // one status read per owned item at most every max(30 s, 3 x ciReleaseSeconds): each is a rule-script run, and the runner is shared
+                if (ownerChecked.TryGetValue(o.Item, out var lastCk) && (DateTime.UtcNow - lastCk).TotalSeconds < Math.Max(30, 3 * copilotSettings.CiReleaseSeconds)) continue;
+                ownerChecked[o.Item] = DateTime.UtcNow;
                 try
                 {
                     var j = await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "status" });

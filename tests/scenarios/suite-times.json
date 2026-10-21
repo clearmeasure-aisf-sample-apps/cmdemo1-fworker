@@ -28,13 +28,14 @@
     "author": 15.0,
     "messaging": 290.0,
     "manager": 658.0,
-    "operator": 244.0,
-    "runtime": 319.0,
-    "mcp": 95.0,
-    "cursor": 121.0,
+    "operator": 145.0,
+    "runtime": 191.0,
+    "mcp": 37.0,
+    "cursor": 80.0,
     "copilot": 262.0,
-    "envscope": 52.0
+    "envscope": 33.0,
+    "copilot-manager": 116.0
   },
-  "wall-full": 336.0,
+  "wall-full": 497.0,
   "wall-fast": 108.0
 }
