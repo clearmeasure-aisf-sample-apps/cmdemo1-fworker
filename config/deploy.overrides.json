@@ -1,5 +1,5 @@
 {
-  "envScope": ["tdd"],
+  "envScope": ["tdd", "uat"],
   "ownerSessions": true,
   "mergeQueueDepth": 2,
   "messaging": {
@@ -39,7 +39,7 @@
           "gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io"
         },
         "uat": {
-          "enabled": false,
+          "enabled": true,
           "gatewayUrl": "https://ca-cmdemo1-uat-fworker-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io"
         },
         "prod": {
