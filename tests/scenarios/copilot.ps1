@@ -18,15 +18,14 @@ function Cop-Exchange([string]$Code, [string]$Bootstrap) {
 }
 # the r1 of a task's session: the exchange is retried until it answers 200 (the task's prompt and code can lag the task's creation on a loaded runner); '' when it never does
 function Cop-R1($Task) {
-    $tok = ''
-    [void](Wait-Until -Seconds 30 { $x = Cop-Exchange (Cop-Code $Task) (Cop-Bootstrap); if ($x.status -eq 200 -and $x.body -and $x.body.token) { $script:copR1 = "$($x.body.token)"; $true } else { $false } })
-    if ($script:copR1) { $tok = $script:copR1 }; $script:copR1 = ''
-    return $tok
+    $got = @{ tok = '' }
+    [void](Wait-Until -Seconds 30 { $x = Cop-Exchange (Cop-Code $Task) (Cop-Bootstrap); if ($x.status -eq 200 -and $x.body -and $x.body.token) { $got.tok = "$($x.body.token)"; $true } else { $false } })
+    return $got.tok
 }
 # waits until no task is created for 4 s in a row (earlier scenarios' items have stopped relaunching)
 function Cop-Quiet {
-    $last = -1; $since = Get-Date
-    [void](Wait-Until -Seconds 40 { $c = @((Cop-State).tasks).Count; if ($c -ne $last) { $last = $c; $since = Get-Date }; ((Get-Date) - $since).TotalSeconds -ge 4 })
+    $st = @{ last = -1; since = Get-Date }
+    [void](Wait-Until -Seconds 40 { $c = @((Cop-State).tasks).Count; if ($c -ne $st.last) { $st.last = $c; $st.since = Get-Date }; ((Get-Date) - $st.since).TotalSeconds -ge 4 })
 }
 function Cop-Cleanup([int[]]$Items) {
     foreach ($n in $Items) { if ($n) { [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json') } }
@@ -151,7 +150,7 @@ $CopilotScenarios = [ordered]@{
         Check 'status: the failure was counted against the item' (Wait-Until -Seconds 20 { @((Cop-Status).failures | Where-Object { $_.item -eq $m -and $_.count -ge 1 }).Count -eq 1 }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
         $t2 = (Cop-Tasks $m)[0]
         # the deadline is counted from the gateway's own launch of the task; the wait is generous for a loaded runner
-        Check 'the deadline (0.25 min in this suite) fails it' (Wait-Until -Seconds 120 { $ids = @((Cop-Tasks $m) | ForEach-Object { $_.id }); @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"" | Where-Object { $l = "$_"; @($ids | Where-Object { $l -match $_ }).Count -gt 0 }).Count -gt 0 })
+        Check 'the deadline (0.25 min in this suite) fails it' (Wait-Until -Seconds 120 { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"" | Where-Object { "$_" -match $t2.id }).Count -gt 0 })
         Check 'and its unspent code no longer exchanges' (Wait-Until -Seconds 20 { (Cop-Exchange (Cop-Code $t2) (Cop-Bootstrap)).status -eq 401 })
     } finally { Cop-Cleanup @($n, $m) }
 }
