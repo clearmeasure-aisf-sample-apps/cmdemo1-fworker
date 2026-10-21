@@ -2226,7 +2226,7 @@ if (copilotRuntime != null && copilotManager != null)
                     var j = await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "status" });
                     var waiting = j?["waiting"]?.ToString() ?? "";
                     copilotRuntime.Waiting(o.Item, j?["column"]?.ToString() ?? "", waiting);
-                    if (int.TryParse(j?["pr"]?.ToString(), out var curPr) && curPr > 0) copilotRuntime.SetPr(o.Item, curPr);
+                    if (int.TryParse(j?["pr"]?.ToString(), out var curPr) && curPr > 0) copilotRuntime.SetPr(o.Item, curPr, j?["branch"]?.ToString() ?? "");
                     if (waiting == "done")
                     {
                         await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "close" });

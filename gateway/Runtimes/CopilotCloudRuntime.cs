@@ -211,7 +211,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
     public void Adopt(CopilotOwner o) { lock (tasks) if (!owners.TryGetValue(o.Item, out var cur) || cur.Done) owners[o.Item] = o; }
     public void Waiting(int item, string column, string waitingOn) { lock (tasks) if (owners.TryGetValue(item, out var o)) { if (column != "") o.Phase = column; o.WaitingOn = waitingOn; o.Updated = DateTime.UtcNow; } }
     // the item's pull request as the rule verb resolved it (copilot-owner status: the open one of the owner task's branch)
-    public void SetPr(int item, int pr) { lock (tasks) if (pr > 0 && owners.TryGetValue(item, out var o) && o.Pr != pr) { o.Pr = pr; o.Updated = DateTime.UtcNow; } }
+    public void SetPr(int item, int pr, string branch = "") { lock (tasks) if (owners.TryGetValue(item, out var o)) { if (pr > 0 && o.Pr != pr) { o.Pr = pr; o.Updated = DateTime.UtcNow; } if (branch.StartsWith("copilot/", StringComparison.Ordinal) && o.Branch != branch) { o.Branch = branch; o.Updated = DateTime.UtcNow; } } }
     public void Close(int item) { lock (tasks) nudge.Remove(item); lock (tasks) if (owners.TryGetValue(item, out var o)) { o.Done = true; o.WaitingOn = "done"; owners.Remove(item); } }
     public JsonArray OwnedJson() { lock (tasks) return new JsonArray(owners.Values.Where(o => !o.Done).OrderBy(o => o.Item).Select(o => { var j = o.Json(); if (tasks.Values.Any(t => t.Item == o.Item && t.Ended == null)) j["waitingOn"] = "session"; return (JsonNode)j; }).ToArray()); }
 
@@ -342,11 +342,10 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
         var baseSha = await HeadShaOf(pr, ct);
         // the runs the branch already has are earlier sessions': this session's run is a new one
         var rbr = branch != "" ? branch : own.Branch;
-        if (rbr != "")
         {
             try
             {
-                var (rs, rj) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/actions/runs?event=dynamic&branch={Uri.EscapeDataString(rbr)}&per_page=30", null, ct);
+                var (rs, rj) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/actions/runs?event=dynamic&per_page=50", null, ct);
                 if (rs == 200) foreach (var x in (rj?["workflow_runs"] as JsonArray) ?? new JsonArray()) if (long.TryParse(x?["id"]?.ToString(), out var xid)) lock (tasks) runsTaken.Add(xid);
             }
             catch (Exception e) { Console.Error.WriteLine($"copilot: runs of {rbr}: {e.GetType().Name}"); }
@@ -401,8 +400,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
     // agent tasks API may call the session done while the run still builds and tests. Null: no run found (yet).
     async Task<(string Status, string? Conclusion)?> FollowUpRun(Task_ t, CancellationToken ct)
     {
-        if (t.Branch == "") return null;
-        var (s, j) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/actions/runs?event=dynamic&branch={Uri.EscapeDataString(t.Branch)}&per_page=30", null, ct);
+        var (s, j) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/actions/runs?event=dynamic&per_page=50", null, ct);
         if (s != 200) return null;
         var name = $"Addressing comment on PR #{t.Pr}";
         JsonNode? run = null;
@@ -564,7 +562,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
                         t.State = st; t.Artifacts = j?["artifacts"]?.DeepClone(); if (usage != null) t.Usage = usage;
                         var hr = HeadRef(j);
                         if (IsDevelopment(t.Phase) && hr != null) heads[t.Item] = hr;
-                        if (hr != null && owners.TryGetValue(t.Item, out var ow) && ow.TaskId == t.TaskId && ow.Branch != hr) { ow.Branch = hr; changed = ow; }
+                        if (hr != null && owners.TryGetValue(t.Item, out var ow) && ow.TaskId == t.TaskId && ow.Branch == "") { ow.Branch = hr; changed = ow; }
                         if (owners.TryGetValue(t.Item, out var ow2) && ow2.TaskId == t.TaskId && HtmlUrl(j) is { Length: > 0 } hu && ow2.Url != hu) { ow2.Url = hu; changed = ow2; }
                         t.Fields ??= new JsonArray((j as JsonObject)?.Select(kv => (JsonNode)kv.Key).ToArray() ?? Array.Empty<JsonNode>());
                         if (t.Ended == null && !t.Guarded)
@@ -587,7 +585,8 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
 
     static string HtmlUrl(JsonNode? task) => task?["html_url"]?.ToString() is { } u && u.StartsWith("https://", StringComparison.Ordinal) && u.Length <= 300 ? u : "";
 
-    // the branch of the task's artifacts ({type: branch, data: {head_ref}}), only a copilot/ branch
+    // the branch of the task's artifacts ({type: branch, data: {head_ref}}), only a copilot/ branch: the first one (a later session may add its own
+// branch; the owner's current branch is the rule verb's to follow: Resolve-OwnerPr)
     public static string? HeadRef(JsonNode? task)
     {
         foreach (var a in (task?["artifacts"] as JsonArray) ?? new JsonArray())
