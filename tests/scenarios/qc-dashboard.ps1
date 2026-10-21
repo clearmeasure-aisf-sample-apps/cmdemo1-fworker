@@ -77,6 +77,9 @@ $QcDashScenarios = [ordered]@{
     $b = Qc-Http 'GET' (Dash-Url '/_build')
     Check '/_build gives the environment and the version for the header' ($b.status -eq 200 -and "$($b.json.environment)" -ne '' -and "$($b.json.version)" -ne '')
     Check 'the page header reads /_build' ($pg.body -match "fetch\('/_build'\)" -and $pg.body -match 'id="ver"')
+    $keys = 'header class="top"', 'id="summary"', 'id="asg"', 'id="rtsec"', 'id="rows"', 'id="qsec"', 'id="msgsec"', 'id="qcsec"', 'id="rqsec"', 'id="metbox"', 'id="rawbox"', 'id="newbox"', 'id="mk"', 'id="go"'
+    Check 'the page renders its key sections: header, summary cards, work items, runtimes, sessions, owner panels and the collapsed details' (@($keys | Where-Object { $pg.body -notmatch [regex]::Escape($_) }).Count -eq 0) (@($keys | Where-Object { $pg.body -notmatch [regex]::Escape($_) }) -join ', ')
+    Check 'the page is self-contained: no external script or stylesheet' ($pg.body -notmatch '<script[^>]+src=' -and $pg.body -notmatch '<link[^>]+stylesheet')
 }
 
 'qc: dashboard list shows available, ready, failed and stale rows [full]' = {
