@@ -3022,6 +3022,8 @@ $('metagg').innerHTML=Object.keys(MET_NAMES).map(k=>statRow(MET_NAMES[k],g[k])).
 const it=m.items||[];$('metrows').innerHTML=it.length?it.map(x=>{const d=x.durations||{};return `<tr><td>#${esc(x.item)}</td><td>${esc(x.column)}</td><td>${dur(d.matchToAccept)}</td><td>${dur(d.acceptToMerge)}</td><td>${dur(d.mergeToDone)}</td><td>${dur(d.matchToDone)}</td></tr>`}).join(''):'<tr><td colspan="6" class="mut">No item in this period.</td></tr>'}
 catch(e){$('metinfo').textContent=e.message}}
 $('metbox').ontoggle=()=>refreshMetrics(true);$('metsince').onchange=()=>refreshMetrics(true);setInterval(()=>refreshMetrics(false),15000);
+// A link like /dashboard#token=<value> connects as Connect does; the fragment never reaches the server, and is removed from the address bar and history at once.
+{const m=/(?:^#|&)token=([^&]*)/.exec(location.hash);if(m){let v='';try{v=decodeURIComponent(m[1]).trim()}catch(e){}if(v){$('tok').value=v;$('go').onclick()}history.replaceState(null,'',location.pathname+location.search)}}
 setInterval(refresh,4000);refresh();
 </script></body></html>
 """;

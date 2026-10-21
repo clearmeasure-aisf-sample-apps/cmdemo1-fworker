@@ -304,4 +304,10 @@ $QcDashScenarios = [ordered]@{
     }
 }
 
+'qc: dashboard connects from a #token= fragment and removes it from the address bar' = {
+    $pg = Qc-Http 'GET' (Dash-Url '/dashboard')
+    Check 'the page script reads token= from location.hash and connects' ($pg.body -match 'location\.hash' -and $pg.body -match 'token=\([^$pg.body -match 'location\.hash' -and $pg.body -match 'token=']*\)')
+    Check 'the page script calls history.replaceState to drop the fragment' ($pg.body -match "history\.replaceState\(null,''")
+}
+
 }

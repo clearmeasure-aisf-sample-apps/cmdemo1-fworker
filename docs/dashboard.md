@@ -38,3 +38,5 @@ Phone width: ![phone](images/dashboard/after-phone.png) Dark: ![dark](images/das
 
 `tests/scenarios/qc-dashboard.ps1` checks the key sections are rendered and that the page loads no external script or
 stylesheet; the messaging and owner scenarios run the page's script in node against a live gateway.
+
+A link `/dashboard#token=<value>` connects with that token on load, then removes the fragment from the address bar and history (`history.replaceState`); the token is never sent in a query string.
