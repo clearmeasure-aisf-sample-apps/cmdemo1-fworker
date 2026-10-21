@@ -135,13 +135,27 @@ function Verb_ci_release($a) {
     $all = @((Invoke-Gh -Path "$(Get-RepoPath)/actions/runs?status=action_required&per_page=100").workflow_runs)
     $runs = @($all | Where-Object { "$($_.head_branch)" -like 'copilot/*' -and "$($_.id)" -notin $skip })
     $out = @()
-    if ($runs.Count -eq 0 -or $items.Count -eq 0) { return @{ ok = $true; pending = $runs.Count; runs = $out } }
+    # the App's Actions permission, read once per process by the gateway (probe): the installation as the App sees it (its JWT)
+    $perm = $null
+    if ($a.probe -eq $true -and $env:FACTORY_AUTHOR_APP -eq '1' -and -not $env:FACTORY_FAKE_APPS) { $perm = try { Get-AppActionsPermission 'author' } catch { '' } }
+    elseif ($a.probe -eq $true -and $env:FACTORY_FAKE_APPS) { $perm = "$env:FACTORY_FAKE_APP_ACTIONS" }
+    # routeAll (the gateway routes every phase of an unlabelled item to copilot-cloud): the items of the held runs' pull requests are candidates too;
+    # the recorded pull request below still has to name the branch
+    $routeAll = $a.routeAll -eq $true
+    if ($routeAll -and $runs.Count -gt 0) {
+        $open = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&per_page=100")
+        foreach ($r in $runs) { foreach ($p in @($open | Where-Object { "$($_.head.ref)" -eq "$($r.head_branch)" })) { if ("$($p.title)" -match '#(\d{1,7})\b') { $items += [int]$Matches[1] } } }
+        $items = @($items | Select-Object -Unique)
+    }
+    $given = @(@($a.items) | ForEach-Object { "$_" })
+    if ($runs.Count -eq 0 -or $items.Count -eq 0) { return @{ ok = $true; pending = $runs.Count; runs = $out; actions = $perm } }
     $heads = @{}   # head branch -> @{ item; pr; sha }
     foreach ($n in $items) {
         $info = try { Get-ItemInfo $n } catch [FactoryReject] { $out += @{ item = $n; result = 'skipped'; reason = $_.Exception.Code }; continue }
         if (-not $info.open) { continue }
         $rtl = @($info.labels | Where-Object { "$_" -like 'runtime:*' })
         if (-not ($rtl.Count -eq 0 -or ($rtl.Count -eq 1 -and "$($rtl[0])" -ieq 'runtime:copilot-cloud'))) { $out += @{ item = $n; result = 'skipped'; reason = 'other-runtime' }; continue }
+        if ($rtl.Count -eq 0 -and -not $routeAll -and "$n" -notin $given) { $out += @{ item = $n; result = 'skipped'; reason = 'not-copilot' }; continue }
         # only the pull request pr_open recorded for the item (number and copilot/ branch), never a branch-name match
         $sp = try { (Get-State $n).state } catch { $null }
         if (-not ($sp -and (Test-Has $sp 'pr') -and (Test-Has $sp.pr 'branch') -and (Test-Has $sp.pr 'number') -and "$($sp.pr.branch)" -like 'copilot/*')) { continue }
@@ -169,7 +183,7 @@ function Verb_ci_release($a) {
         }
         $out += $o
     }
-    return @{ ok = $true; pending = $runs.Count; runs = $out }
+    return @{ ok = $true; pending = $runs.Count; runs = $out; actions = $perm }
 }
 
 # copilot-settle: the gateway owns the completion of a Copilot Development task (CopilotCloudRuntime). The coding agent's session ends before CI
