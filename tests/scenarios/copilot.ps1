@@ -564,6 +564,8 @@ $CopilotScenarios = [ordered]@{
 
 'copilot: a running owner session silent past the item check keeps its lease (its runtime''s deadline bounds it); after its session ends unfinished the same task is resumed on its pull request [full]' = {
     $n = 0
+    # this scenario alone runs with a short item check (0.1 + 0.05 min): the gateway is restarted with it, and again without it at the end
+    $env:FACTORY_TIMING_staleItemMinutes = '0.1'; $env:FACTORY_TIMING_staleConfirmMinutes = '0.05'; Restart-Gateway
     try {
         $n = New-Item-Fake 'Copilot quiet owner' 'Change src/App/Quiet.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         Check 'a task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
@@ -581,7 +583,7 @@ $CopilotScenarios = [ordered]@{
         # its deadline (maxMinutes 0.25 in this suite) ends the session unfinished: the item is offered again and the SAME task resumed
         Check 'the next session is a follow-up of the same task on its pull request, not a new task' (Wait-Until -Seconds 60 { @((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -ge 1 }) ((Cop-State).tasks | ConvertTo-Json -Compress -Depth 4)
         Check 'still one task for the item' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1)
-    } finally { Cop-Cleanup @($n) }
+    } finally { Cop-Cleanup @($n); $env:FACTORY_TIMING_staleItemMinutes = '600'; Remove-Item Env:FACTORY_TIMING_staleConfirmMinutes -ErrorAction SilentlyContinue; Restart-Gateway }
 }
 
 'copilot: a session refused for the seat''s quota stops starts and resumes without counting against the item, shows the owner action, and the next start after quotaRetryMinutes probes and clears it [full]' = {
