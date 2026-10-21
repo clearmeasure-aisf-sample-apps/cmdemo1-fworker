@@ -105,7 +105,7 @@ sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE",
 // A task of the fake agent tasks API (docs/design/copilot-cloud-agent.md): its id, the body as sent, the API version header, its state.
 // Its sessions: the first is the task's own; a @copilot comment on the task's pull request (its head branch is the task's) adds one, as GitHub
 // starts a follow-up session on the same pull request. The task's state is its last session's.
-sealed class CopilotSession { public string? Error; public string State = "queued", Prompt = "", Branch = ""; public int Pr; public double? Premium, Credits; public DateTime Created = DateTime.UtcNow; }
+sealed class CopilotSession { public string? Error; public string State = "queued", Prompt = "", Branch = ""; public string? Run; public int Pr; public long RunId = System.Threading.Interlocked.Increment(ref RunSeq) + 900000; public static long RunSeq; public double? Premium, Credits; public DateTime Created = DateTime.UtcNow; }
 sealed class CopilotTask
 {
     public string Id = "", ApiVersion = "", Path = ""; public JsonObject Body = new(); public int Reads; public string? HeadRef;
@@ -565,6 +565,18 @@ sealed class World
             hr.Reruns++; heldReruns++;
             return (201, "{}");
         }
+        if (path == root + "/actions/runs" && method == "GET" && q["event"].ToString() == "dynamic")
+        {   // the Actions run of each follow-up session (a @copilot comment): "Addressing comment on PR #N" on the pull request's branch. Its state is
+            // the session's, or what /_fake/copilot-task { run: in_progress | success | failure } set (the run outlives the session API's state)
+            var rbr = q["branch"].ToString();
+            var dyn = copilotTasks.SelectMany(t => t.Sessions.Skip(1)).Where(x => rbr == "" || x.Branch == rbr).Select(x =>
+            {
+                var rs = x.Run ?? (x.State is "queued" or "in_progress" or "waiting_for_user" ? "in_progress" : x.State == "completed" ? "success" : x.State == "cancelled" ? "cancelled" : "failure");
+                var running = rs is "in_progress" or "queued";
+                return (JsonNode)J(("id", x.RunId), ("name", $"Addressing comment on PR #{x.Pr}"), ("event", "dynamic"), ("head_branch", x.Branch), ("created_at", x.Created.ToString("o")), ("status", running ? "in_progress" : "completed"), ("conclusion", running ? null : rs));
+            }).ToArray();
+            return (200, J(("total_count", dyn.Length), ("workflow_runs", new JsonArray(dyn))));
+        }
         if (path == root + "/actions/runs" && method == "GET")
         {   // the workflow runs of a commit (head_sha), as GitHub lists them: one per run id of its check runs, judged on the latest attempt of each job
             var sha = q["head_sha"].ToString();
@@ -847,7 +859,7 @@ sealed class World
                 var sid = b?["id"]?.ToString() ?? ""; var sk = sid.IndexOf('#'); var tid = sk < 0 ? sid : sid[..sk];
                 var t = copilotTasks.LastOrDefault(x => x.Id == tid); if (t == null) return (404, J(("ok", false)));
                 var se = sk < 0 ? t.Last : int.TryParse(sid[(sk + 1)..], out var sn) && sn < t.Sessions.Count ? t.Sessions[sn] : null; if (se == null) return (404, J(("ok", false)));
-                if (b?["state"] is { } st) se.State = st.ToString(); if (b?["premium"] is { } pr) se.Premium = pr.GetValue<double>(); if (b?["credits"] is { } crd) se.Credits = crd.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString(); if (b?["error"] is { } er) se.Error = er.ToString();
+                if (b?["state"] is { } st) se.State = st.ToString(); if (b?["premium"] is { } pr) se.Premium = pr.GetValue<double>(); if (b?["credits"] is { } crd) se.Credits = crd.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString(); if (b?["error"] is { } er) se.Error = er.ToString(); if (b?["run"] is { } rn) se.Run = rn.ToString();
                 return (200, J(("ok", true)));
             }
             case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; return (200, J(("ok", true)));

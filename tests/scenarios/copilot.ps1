@@ -704,6 +704,32 @@ $CopilotScenarios = [ordered]@{
         Check 'never parked runtime-failed' ((Cop-Comments $n '*runtime-failed*').Count -eq 0) (Cop-Brief $n)
     } finally { Cop-Cleanup @($n) }
 }
+
+'copilot: a follow-up session lives as long as its Actions run: the slot stays held while the run runs, and a run that succeeds without a push brings one follow-up that is told to push [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot follow-up run' 'Change src/App/Run.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
+        Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
+        $t = (Cop-DevTasks $n)[0]
+        $br = "copilot/run-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Run.cs') })
+        $d = Cop-Draft $br 'master' '[WIP] Run'
+        $w = Cop-Accept $t $n
+        [void](Cop-OpenPr $n $br)
+        [void](Mcp-Call 'session_end' @{ reason = 'pushed' } $w)
+        [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
+        Check 'Functional Testing follows as a follow-up session' (Wait-Until -Seconds 120 { (Cop-Sessions $n $t.id 'functional-testing').Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        $s2 = (Cop-Sessions $n $t.id 'functional-testing')[0]
+        # the tasks API calls the session done; its Actions run still builds and tests
+        [void](Fake 'copilot-task' @{ id = $s2.id; state = 'completed'; run = 'in_progress' })
+        Start-Sleep -Seconds 8
+        Check 'the session still runs: the slot is held while its run runs' (@((Cop-Status).executions | Where-Object { $_.item -eq $n }).Count -eq 1 -and @((Cop-Status).last | Where-Object { $_.execution -eq $s2.id }).Count -eq 0) ((Cop-Status) | ConvertTo-Json -Compress -Depth 4)
+        Check 'and the item stays in its phase' ((Get-FakeIssue $n).column -eq 'Functional Testing')
+        [void](Fake 'copilot-task' @{ id = $s2.id; run = 'success' })
+        Check 'the run''s end ends the session' (Wait-Until -Seconds 30 { @((Cop-Status).last | Where-Object { $_.execution -eq $s2.id }).Count -eq 1 }) ((Cop-Status).last | ConvertTo-Json -Compress -Depth 3)
+        Check 'a run that succeeded without a push brings one follow-up told to push first' (Wait-Until -Seconds 60 { @((Cop-Sessions $n $t.id 'functional-testing') | Where-Object { "$($_.body.prompt)" -match 'ended without pushing anything' }).Count -eq 1 }) (((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.via)" }) -join '; ')
+    } finally { Cop-Cleanup @($n) }
+}
 }
 
 # The deadline has its own suite ('copilot-deadline', api.copilot.maxMinutes 0.25): in 'copilot' it would end any task of a scenario that runs

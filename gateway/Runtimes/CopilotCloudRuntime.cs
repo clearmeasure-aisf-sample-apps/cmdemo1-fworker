@@ -145,7 +145,7 @@ sealed class CopilotOwner
 sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
 {
     // one execution: a session of a task (Session 0 is the task's first; Id is the task id for it and "<task>#<n>" for a follow-up)
-    sealed class Task_ { public string Id = "", TaskId = "", Worker = "", Phase = "", State = "queued", Status = "Running", Via = "task", BaseSha = ""; public int Item, Session, Pr; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
+    sealed class Task_ { public string Id = "", TaskId = "", Worker = "", Phase = "", State = "queued", Status = "Running", Via = "task", BaseSha = "", Branch = ""; public long RunId; public int Item, Session, Pr; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
 
     readonly CopilotCloudSettings cfg;
     readonly HttpClient http;
@@ -212,7 +212,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
     public void Waiting(int item, string column, string waitingOn) { lock (tasks) if (owners.TryGetValue(item, out var o)) { if (column != "") o.Phase = column; o.WaitingOn = waitingOn; o.Updated = DateTime.UtcNow; } }
     // the item's pull request as the rule verb resolved it (copilot-owner status: the open one of the owner task's branch)
     public void SetPr(int item, int pr) { lock (tasks) if (pr > 0 && owners.TryGetValue(item, out var o) && o.Pr != pr) { o.Pr = pr; o.Updated = DateTime.UtcNow; } }
-    public void Close(int item) { lock (tasks) if (owners.TryGetValue(item, out var o)) { o.Done = true; o.WaitingOn = "done"; owners.Remove(item); } }
+    public void Close(int item) { lock (tasks) nudge.Remove(item); lock (tasks) if (owners.TryGetValue(item, out var o)) { o.Done = true; o.WaitingOn = "done"; owners.Remove(item); } }
     public JsonArray OwnedJson() { lock (tasks) return new JsonArray(owners.Values.Where(o => !o.Done).OrderBy(o => o.Item).Select(o => { var j = o.Json(); if (tasks.Values.Any(t => t.Item == o.Item && t.Ended == null)) j["waitingOn"] = "session"; return (JsonNode)j; }).ToArray()); }
 
     async Task<CopilotOwner?> Owner(int item, CancellationToken ct)
@@ -302,7 +302,11 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
             if (target > 0)
             {
                 var why = ""; if (WhyResume != null) { try { why = await WhyResume(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: why of #{r.Item}: {e.GetType().Name}"); } }
-                var res = await Resume(own, r.WorkerName, r.Item, r.Phase, target, prompt(r.Item, r.Phase, code, pr ?? new ItemPr(target, own.Branch), why), ct);
+                var tpr = pr ?? new ItemPr(target, own.Branch);
+                // the previous follow-up's run succeeded without a push: this one is told to push first (once: a second idle one parks the item)
+                bool nudged; lock (tasks) nudged = nudge.Remove(r.Item);
+                if (nudged) why = $"Your previous session ended without pushing anything to {tpr.Branch}. Push your committed work now (plain push); if nothing is committed, do the step and push it. " + why;
+                var res = await Resume(own, r.WorkerName, r.Item, r.Phase, target, prompt(r.Item, r.Phase, code, tpr, why), ct, tpr.Branch);
                 if (!res.Ok) codes.Forget(r.WorkerName);
                 return res;
             }
@@ -331,11 +335,22 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
 
     // A follow-up session of the owner task: a @copilot comment on its pull request, by the identity that holds the seat (GitHub answers only a
     // writer's mention). The execution is that task's next session: "<task>#<n>".
-    async Task<ProvisionResult> Resume(CopilotOwner own, string worker, int item, string phase, int pr, string text, CancellationToken ct)
+    async Task<ProvisionResult> Resume(CopilotOwner own, string worker, int item, string phase, int pr, string text, CancellationToken ct, string branch = "")
     {
         var k = own.Sessions;
         // the pull request's head when the session is asked for: its end is judged by whether it pushed (IRuntimeWork.Pushed)
         var baseSha = await HeadShaOf(pr, ct);
+        // the runs the branch already has are earlier sessions': this session's run is a new one
+        var rbr = branch != "" ? branch : own.Branch;
+        if (rbr != "")
+        {
+            try
+            {
+                var (rs, rj) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/actions/runs?event=dynamic&branch={Uri.EscapeDataString(rbr)}&per_page=30", null, ct);
+                if (rs == 200) foreach (var x in (rj?["workflow_runs"] as JsonArray) ?? new JsonArray()) if (long.TryParse(x?["id"]?.ToString(), out var xid)) lock (tasks) runsTaken.Add(xid);
+            }
+            catch (Exception e) { Console.Error.WriteLine($"copilot: runs of {rbr}: {e.GetType().Name}"); }
+        }
         try
         {
             var (ts, tj) = await Send(HttpMethod.Get, $"{TasksPath}/{Uri.EscapeDataString(own.TaskId)}", null, ct);
@@ -349,7 +364,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
         var id = $"{own.TaskId}#{k}";
         lock (tasks)
         {
-            tasks[worker] = new Task_ { Id = id, TaskId = own.TaskId, Session = k, Via = "comment", Pr = pr, Worker = worker, Item = item, Phase = phase, BaseSha = baseSha ?? "" };
+            tasks[worker] = new Task_ { Id = id, TaskId = own.TaskId, Session = k, Via = "comment", Pr = pr, Worker = worker, Item = item, Phase = phase, BaseSha = baseSha ?? "", Branch = branch != "" ? branch : own.Branch };
             own.Sessions = k + 1; own.Pr = pr; own.Phase = phase; own.LastResume = DateTime.UtcNow; own.WaitingOn = "session"; own.Updated = DateTime.UtcNow;
         }
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "resume", ["item"] = item, ["phase"] = phase, ["task"] = own.TaskId, ["session"] = k, ["pr"] = pr }.ToJsonString());
@@ -378,6 +393,37 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
 
     // IRuntimeWork: a follow-up session (a @copilot comment on the item's pull request), and whether that pull request's head moved since it was
     // asked for (null: not known)
+    readonly HashSet<int> nudge = new();
+    readonly HashSet<long> runsTaken = new();
+    public void Idle(string worker) { lock (tasks) if (tasks.TryGetValue(worker, out var t)) nudge.Add(t.Item); }
+
+    // A follow-up session lives as long as its Actions run on the pull request's branch ("Addressing comment on PR #N", event dynamic): the
+    // agent tasks API may call the session done while the run still builds and tests. Null: no run found (yet).
+    async Task<(string Status, string? Conclusion)?> FollowUpRun(Task_ t, CancellationToken ct)
+    {
+        if (t.Branch == "") return null;
+        var (s, j) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/actions/runs?event=dynamic&branch={Uri.EscapeDataString(t.Branch)}&per_page=30", null, ct);
+        if (s != 200) return null;
+        var name = $"Addressing comment on PR #{t.Pr}";
+        JsonNode? run = null;
+        foreach (var x in (j?["workflow_runs"] as JsonArray) ?? new JsonArray())
+        {
+            if (x == null) continue;
+            var id = long.TryParse(x["id"]?.ToString(), out var xi) ? xi : 0;
+            if (t.RunId != 0) { if (id == t.RunId) { run = x; break; } continue; }
+            if (x["name"]?.ToString() != name) continue;
+            // a run another session of this process already took is not this one's (a previous follow-up on the same pull request)
+            bool taken; lock (tasks) taken = runsTaken.Contains(id);
+            if (taken) continue;
+            if (!DateTime.TryParse(x["created_at"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var ca) || ca < t.Started.AddSeconds(-10)) continue;
+            // the earliest run since the comment: this session's
+            if (run == null || string.CompareOrdinal(x["created_at"]?.ToString(), run["created_at"]?.ToString()) < 0) run = x;
+        }
+        if (run == null) return null;
+        if (t.RunId == 0 && long.TryParse(run["id"]?.ToString(), out var rid)) lock (tasks) { t.RunId = rid; runsTaken.Add(rid); }
+        return (run["status"]?.ToString() ?? "", run["conclusion"]?.ToString());
+    }
+
     public bool FollowUp(string worker) { lock (tasks) return tasks.TryGetValue(worker, out var t) && t.Via == "comment"; }
     public async Task<bool?> Pushed(string worker, CancellationToken ct)
     {
@@ -474,6 +520,16 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
                     var mine = t.Session < sessions.Count ? sessions[t.Session] : null;
                     // a follow-up session not listed yet is queued; the task's first session reads as the task when the API lists none
                     var st = mine?["state"]?.ToString() ?? (t.Session == 0 ? j?["state"]?.ToString() ?? "" : "queued");
+                    // a follow-up's end is its Actions run's: running while the run runs (the slot stays held, the item does not move on); a
+                    // finished run decides the state; no run seen yet within 3 minutes of the comment: still starting
+                    if (t.Via == "comment" && t.Ended == null && !(st is "failed" && IsQuotaError(mine?["error"]?["message"]?.ToString())))
+                    {
+                        (string Status, string? Conclusion)? run = null;
+                        try { run = await FollowUpRun(t, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: run of {t.Worker}: {e.GetType().Name}"); }
+                        if (run is { } rr)
+                            st = rr.Status != "completed" ? "in_progress" : rr.Conclusion switch { "success" => "completed", "cancelled" => "cancelled", "timed_out" => "timed_out", _ => st is "failed" ? st : "failed" };
+                        else if (st is "completed" or "idle" && (DateTime.UtcNow - t.Started).TotalMinutes < 3) st = "in_progress";
+                    }
                     var err = mine?["error"]?["message"]?.ToString();
                     var quota = st is "failed" && IsQuotaError(err);
                     lock (tasks)
