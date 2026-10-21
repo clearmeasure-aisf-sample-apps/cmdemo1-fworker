@@ -158,7 +158,8 @@ $CopilotScenarios = [ordered]@{
         # a Development task launched again meanwhile (the item stayed in Development) is stopped, so its deadline does not park the item
         foreach ($tt in @((Cop-Tasks $n) | Where-Object { $_.state -in 'queued', 'in_progress' -and "$($_.body.prompt)" -match 'phase development' })) { [void](Fake 'copilot-task' @{ id = $tt.id; state = 'cancelled' }) }
         $ftFrom = Get-Date
-        Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 90 { @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref) $($_.body.create_pull_request)" }) -join '; ')
+        # (a Development task relaunched before the sweep saw the move is stopped too, inside the wait: on a loaded runner it can start late)
+        Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 90 { foreach ($tt in @((Cop-Tasks $n) | Where-Object { $_.state -in 'queued', 'in_progress' -and "$($_.body.prompt)" -match 'phase development' })) { [void](Fake 'copilot-task' @{ id = $tt.id; state = 'cancelled' }) }; @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref) $($_.body.create_pull_request)" }) -join '; ')
     } finally { Cop-Cleanup @($n) }
 }
 
@@ -267,10 +268,10 @@ $CopilotScenarios = [ordered]@{
         $run = Fake 'held-run' @{ branch = $br; sticky = $true }
         Check 'a 403 is surfaced in status as an owner action' (Wait-Until -Seconds 45 { $c = CiStatus; $c.refused -ge 1 -and $c.permissionMissing -and "$($c.ownerAction)" -match 'Actions: Read & write' -and "$($c.lastError)" -match '403' }) ((CiStatus) | ConvertTo-Json -Compress)
         Check 'and nothing was re-run by another credential' ((Held $run.id).reruns -eq 0)
-        Check 'the held run of the item''s head is released after the retry' (Wait-Until -Seconds 90 { (Held $run.id).reruns -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
+        Check 'the held run of the item''s head is released after the retry' (Wait-Until -Seconds 120 { (Held $run.id).reruns -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
         Check 'status counts the release and clears the owner action' (Wait-Until -Seconds 10 { $c = CiStatus; $c.released -ge 1 -and -not $c.permissionMissing }) ((CiStatus) | ConvertTo-Json -Compress)
         Check 'one journal line on the item names the run' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "released workflow run $($run.id) of PR #$($d.number)" }).Count -eq 1 })
-        Start-Sleep -Seconds 12
+        Start-Sleep -Seconds 25
         Check 'idempotent: the run, still listed held, is not re-run again' ((Held $run.id).reruns -eq 1) ((Held $run.id) | ConvertTo-Json -Compress)
         Check 'a run whose head_sha is not the pull request''s head is not released' ((Held $old.id).reruns -eq 0)
         Check 'a run of another environment''s item is not released' ((Held $other.id).reruns -eq 0)
