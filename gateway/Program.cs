@@ -2213,7 +2213,9 @@ if (copilotRuntime != null && copilotManager != null)
         {
             try { await Task.Delay(TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds), ct); } catch (OperationCanceledException) { return; }
             if (!leader.MayAct || !copilotManager.On) continue;
-            foreach (var o in copilotRuntime.Owners())
+            var owners = copilotRuntime.Owners();
+            foreach (var key in ownerChecked.Keys.Where(ck => owners.All(x => x.Item != ck)).ToList()) ownerChecked.Remove(key);   // items no longer owned
+            foreach (var o in owners)
             {
                 if (copilotRuntime.Running(o.Item)) continue;
                 // one status read per owned item at most every max(30 s, 3 x ciReleaseSeconds): each is a rule-script run, and the runner is shared
