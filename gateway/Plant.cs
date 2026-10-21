@@ -999,6 +999,23 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         store.LogQueue.AddRange(log);
     }
 
+    // The on-demand manager's trigger (gateway/Runtimes/ManagerCopilot.cs): the entries of this moment that need a judgement (a stalled owner, a
+    // waiting item no worker takes, repeated refusals, a parked item, a question nobody answered within its window), whether a supervisor
+    // is present, and whether the manager's delivery budget (3.9) allows a session. Nothing is marked reported and no delivery is spent.
+    public (List<(string Key, string Kind, int Bucket)> Entries, bool Present, bool BudgetLeft) ManagerWork()
+    {
+        lock (gate)
+        {
+            var now = DateTime.UtcNow;
+            var late = DigestBuilder.Attention(DigestInputLocked(now), Msg)
+                .Where(e => e.Kind is "stalled" or "waiting" or "refusals" or "parked" || (e.Kind == "late-question" && e.Bucket == 1))
+                .Select(e => (e.Key, e.Kind, e.Bucket)).ToList();
+            var wantsQuestion = late.Any(e => e.Kind == "late-question");
+            var budget = wantsQuestion ? QuestionBudgetLeft(now, out _) : PatrolBudgetLeft(now);
+            return (late, SupervisorHeard(now), budget);
+        }
+    }
+
     // GET /digest: the digest of this moment, on demand (after a restart or a compaction). Nothing is marked reported and no delivery is spent.
     public JsonObject DigestNow()
     {
@@ -1444,6 +1461,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             return (true, name, s.Since, s.Out, replay);
         }
     }
+
+    // The on-demand manager's task ended: the supervisor it was is not heard any more (it is not present for the window after its last call).
+    public void SupervisorEnded(string name) { lock (gate) { if (store.Slot is { } s && s.Name == name) { var r = store.Get(name); r.LastHeard = null; r.GoneAt = DateTime.UtcNow; } } }
 
     public void DisconnectSupervisor(Channel<(long, string)> ch) { lock (gate) { if (store.Slot is { } s && s.Out == ch) { s.Out = null; store.Get(s.Name).GoneAt = DateTime.UtcNow; } } }
 

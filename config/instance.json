@@ -220,6 +220,7 @@
       "ciRelease": true,
       "ciReleaseSeconds": 120,
       "maxCreditsPerTask": 0,
+      "manager": { "enabled": false, "maxPerDay": 6, "cooldownMinutes": 15, "maxMinutes": 10 },
       "repository": "clearmeasure-aisf-sample-apps/cmdemo1-workorders",
       "environments": {}
     }

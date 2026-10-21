@@ -112,6 +112,12 @@ gateway: task status (GET tasks), worker registration, phase verdicts, merge
 7. **Measurement**: per phase: duration, premium requests (billing usage API for the seat), and token usage if the
    task API reports it. Recorded in `docs/copilot-token-usage.md`, the same tables as Cursor.
 
+## The manager on demand (2026-10-21)
+
+The same task API serves one more role: a short task for the plant manager, launched by the gateway when the digest needs a judgement and
+no supervisor is present (design: `agents-roles-launch.md` section 18). Same exchange (one-time code and bootstrap token for an `r1`), role
+`manager`, at most one task, a cooldown, a daily count, `maxMinutes` 10; tdd only. Its usage is shown in `/status` `manager.copilot`.
+
 ## Risks and open points
 
 | Risk | Mitigation |
