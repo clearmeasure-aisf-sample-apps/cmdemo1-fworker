@@ -621,6 +621,95 @@ $CopilotScenarios = [ordered]@{
         Check 'a session that runs clears the quota state' (Wait-Until -Seconds 20 { -not (Cop-Status).quota.exhausted }) ((Cop-Status).quota | ConvertTo-Json -Compress)
     } finally { Cop-Cleanup @($n) }
 }
+
+'copilot: a recorded pull request that was closed (a migration, a takeover) is replaced by the open pull request of the owner task''s branch; the wait for checks follows it and the item moves on, not parked stuck [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot closed recorded PR' 'Change src/App/Rec.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Release Queue'
+        $old = "copilot/old-$n"; $cur = "copilot/cur-$n"
+        [void](Fake 'push-branch' @{ branch = $old; files = @('src/App/Rec.cs') })
+        $o = Cop-Draft $old 'master' "Old (#$n)"
+        [void](Invoke-RestMethod "$(Cop-Gh)/pulls/$($o.number)" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
+        [void](Fake 'push-branch' @{ branch = $cur; files = @('src/App/Rec.cs', 'src/UnitTests/RecTests.cs') })
+        $c = Cop-Draft $cur 'master' "Cur (#$n)"
+        $task = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks" -Method POST -Headers @{ Authorization = 'Bearer fake-copilot' } -ContentType 'application/json' -Body (@{ prompt = 'the owner task'; base_ref = 'master'; create_pull_request = $true } | ConvertTo-Json)
+        [void](Fake 'copilot-task' @{ id = $task.id; state = 'completed'; headRef = $cur })
+        # the item waits for the checks of the closed pull request, as #408, #410 and #412 did
+        $now = (Get-Date).ToUniversalTime().ToString('o')
+        $state = @{ item = $n; pr = @{ number = $o.number; branch = $old }; copilot_task = @{ id = $task.id; url = ''; branch = $cur; pr = $o.number; phase = 'Development'; since = $now; previous = @() }
+            awaiting_checks = @{ pr = $o.number; sha = (Cop-FakePr $o.number).sha; since = $now; column = 'Development'; comment = 'test' }; park = (New-TestPark 'development:awaiting-checks') }
+        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
+        [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
+        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        Check 'the item''s pull request is re-resolved to the open one of the owner task''s branch' (Wait-Until -Seconds 90 { (Cop-Comments $n "*pull request is now #$($c.number)*").Count -eq 1 }) (Cop-Brief $n)
+        Check 'the state records it' ((Get-ItemState $n).pr.number -eq $c.number -and (Get-ItemState $n).copilot_task.pr -eq $c.number) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
+        Check 'its green checks move the item on; it is not parked stuck' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
+        Check 'no stuck park' ((Cop-Comments $n '*still not finished*').Count -eq 0)
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: an owner pull request stacked on another branch with no Build run is consolidated onto master and its CI started; it moves on, not parked stuck [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot stacked PR' 'Change src/App/Stk.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Release Queue'
+        $bb = "copilot/base-$n"; $sb = "copilot/stk-$n"
+        [void](Fake 'push-branch' @{ branch = $bb; files = @('src/App/Stk.cs') })
+        $b = Cop-Draft $bb 'master' "Base (#$n)"
+        # the owner's branch holds the base's commits; its push started no Build (as #443's)
+        [void](Fake 'push-branch' @{ branch = $sb; files = @('src/App/Stk.cs', 'src/UnitTests/StkTests.cs'); profile = 'nobuild' })
+        $sp = Cop-Draft $sb $bb "Stacked (#$n)"
+        $task = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks" -Method POST -Headers @{ Authorization = 'Bearer fake-copilot' } -ContentType 'application/json' -Body (@{ prompt = 'the owner task'; base_ref = 'master'; create_pull_request = $true } | ConvertTo-Json)
+        [void](Fake 'copilot-task' @{ id = $task.id; state = 'completed'; headRef = $sb })
+        $now = (Get-Date).ToUniversalTime().ToString('o')
+        $state = @{ item = $n; pr = @{ number = $b.number; branch = $bb }; copilot_task = @{ id = $task.id; url = ''; branch = $sb; pr = $b.number; phase = 'Development'; since = $now; previous = @() } }
+        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
+        [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
+        $before = (Cop-Tasks $n).Count
+        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        Check 'the stacked pull request is retargeted to master' (Wait-Until -Seconds 90 { (Cop-FakePr $sp.number).base -eq 'master' }) ((Cop-FakePr $sp.number) | ConvertTo-Json -Compress -Depth 3)
+        Check 'and the base''s open pull request is superseded: one pull request for the item' (Wait-Until -Seconds 30 { -not (Cop-FakePr $b.number).open }) (Cop-Brief $n)
+        Check 'the item''s pull request is the owner''s' (Wait-Until -Seconds 30 { (Get-ItemState $n).pr.number -eq $sp.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
+        Check 'no Build run for its head is no hung CI: the gateway starts the Build on the branch' (Wait-Until -Seconds 120 { @((Fake 'state').dispatches | Where-Object { "$_" -eq "build.yml@$sb" }).Count -ge 1 }) (Cop-Brief $n)
+        Check 'the item moves on once the Build is green' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
+        Check 'never parked stuck' ((Cop-Comments $n '*still not finished*').Count -eq 0)
+        Check 'no new Development task was started for it' (@((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase development' }).Count -eq 0) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 3)
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: a follow-up session that succeeds and pushes without connecting is judged by its run and its push: no failure, the item is settled; its prompt asks to connect first [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot unregistered follow-up' 'Change src/App/Unreg.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
+        Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
+        $t = (Cop-DevTasks $n)[0]
+        $br = "copilot/unreg-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Unreg.cs') })
+        $d = Cop-Draft $br 'master' '[WIP] Unreg'
+        $w = Cop-Accept $t $n
+        [void](Cop-OpenPr $n $br)
+        [void](Mcp-Call 'session_end' @{ reason = 'pushed' } $w)
+        [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
+        Check 'Functional Testing follows as a session of the same task' (Wait-Until -Seconds 120 { (Cop-Sessions $n $t.id 'functional-testing').Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        $s2 = (Cop-Sessions $n $t.id 'functional-testing')[0]
+        Check 'the follow-up prompt asks to connect and accept FIRST, with its code' ("$($s2.body.prompt)" -match 'FIRST, before you read or change anything: call fworker_connect with code c1\.' -and "$($s2.body.prompt)" -match "item_accept for #$n") "$($s2.body.prompt)"
+        $w2 = Cop-Accept $s2 $n
+        $rv = Mcp-Call 'item_record_review' @{ item = $n; column = 'Functional Testing'; role = 'reviewer'; text = "The empty title is accepted.`nREVIEW: COMPLETE" } $w2
+        [void](Mcp-Call 'item_validation_verdict' @{ item = $n; passed = $false; summary = 'FAIL: the empty title is accepted'; pr = $d.number; review_ref = "$($rv.body.review_ref)"; head_sha = "$((Cop-FakePr $d.number).sha)" } $w2)
+        [void](Mcp-Call 'session_end' @{ reason = 'verdict' } $w2)
+        [void](Fake 'copilot-task' @{ id = $s2.id; state = 'completed' })
+        Check 'the rework is a Development follow-up of the same task' (Wait-Until -Seconds 90 { @((Cop-Sessions $n $t.id 'development') | Where-Object { $_.via -eq 'comment' }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        $s3 = @((Cop-Sessions $n $t.id 'development') | Where-Object { $_.via -eq 'comment' })[0]
+        $pending = (Cop-Comments $n '*Development is done pending checks*').Count
+        # the session never connects; it fixes, pushes to the pull request's branch and its run succeeds
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Unreg.cs', 'src/App/Title.cs') })
+        [void](Fake 'copilot-task' @{ id = $s3.id; state = 'completed' })
+        Check 'its end is no failure of the item' (Wait-Until -Seconds 60 { @((Cop-Status).last | Where-Object { $_.execution -eq $s3.id -and $_.outcome -eq 'succeeded' }).Count -eq 1 }) ((Cop-Status).last | ConvertTo-Json -Compress -Depth 4)
+        Check 'no failure is counted' (@((Cop-Status).failures | Where-Object { $_.item -eq $n }).Count -eq 0) ((Cop-Status).failures | ConvertTo-Json -Compress)
+        Check 'the pushed work is settled: the pull request waits for its checks' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Development is done pending checks*').Count -gt $pending }) (Cop-Brief $n)
+        Check 'and the item moves on to Functional Testing, not parked' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
+        Check 'never parked runtime-failed' ((Cop-Comments $n '*runtime-failed*').Count -eq 0) (Cop-Brief $n)
+    } finally { Cop-Cleanup @($n) }
+}
 }
 
 # The deadline has its own suite ('copilot-deadline', api.copilot.maxMinutes 0.25): in 'copilot' it would end any task of a scenario that runs

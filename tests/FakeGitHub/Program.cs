@@ -82,7 +82,7 @@ app.Run();
 
 sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow; }
 sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
-sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public string Base = "master"; public List<Comment> Comments = new(); }
+sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public string Base = "master"; public List<Comment> Comments = new(); public bool Dispatched; }
 sealed record Redirect(string To);
 sealed record PlainText(string Text);
 // App "github-actions": the check run is a job of a workflow run (its id is the job id), with steps, a log and the artifacts of the run.
@@ -232,6 +232,7 @@ sealed class World
     readonly Dictionary<int, Issue> issues = new();
     readonly Dictionary<int, Pr> prs = new();
     readonly Dictionary<string, List<Check>> checks = new();
+    readonly List<string> dispatches = new();
     readonly HashSet<string> refs = new();
     // what a ref points at (a ref created before this was kept points at master's head) and the commits written through git/commits (the plant snapshot)
     readonly Dictionary<string, string> refSha = new();
@@ -545,6 +546,12 @@ sealed class World
             c.Conclusion = "success"; rerunJobs++;
             return (201, null);
         }
+        if ((m = Regex.Match(path, $"^{root}/actions/workflows/([^/]+)/dispatches$")).Success && method == "POST")
+        {   // workflow_dispatch on a branch: its open pull requests' heads get the Build (recorded in dispatches of /_fake/state)
+            var dref = b?["ref"]?.ToString() ?? ""; dispatches.Add(m.Groups[1].Value + "@" + dref);
+            foreach (var dp in prs.Values.Where(x => x.Open && x.Ref == dref)) { dp.Dispatched = true; ApplyProfile(dp, dp.Sha); }
+            return (204, null);
+        }
         if (path == root + "/actions/runs" && method == "GET" && q["status"].ToString() == "action_required")
         {   // the runs GitHub holds for approval (the Copilot cloud agent's pushes): hook held-run adds one, a re-run starts it
             var held = heldRuns.Where(r => r.Status == "action_required").Select(r => (JsonNode)J(("id", r.Id), ("head_branch", r.Branch), ("head_sha", r.Sha), ("status", r.Status), ("conclusion", "action_required"), ("event", "pull_request"), ("run_attempt", 1))).ToArray();
@@ -678,6 +685,8 @@ sealed class World
         l.Add(new Check { Id = nextCheck++, Name = "secret-scan", Status = st, CompleteAt = done, Conclusion = "success" });
         var build = new Check { Id = nextCheck++, Name = "Build result", Status = st, CompleteAt = done, Conclusion = p.Profile == "red" ? "failure" : "success" };
         if (p.Profile == "stuck") { build.Status = "in_progress"; build.CompleteAt = null; build.Conclusion = null; }
+        // nobuild: the push started no Build (an agent's push that triggered nothing) until the workflow is dispatched on the branch
+        if (p.Profile == "nobuild" && !p.Dispatched) return;
         l.Add(build);
     }
 
@@ -873,7 +882,7 @@ sealed class World
             }
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();
-                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); dispatches.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
                 masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; heldRuns.Clear(); heldReruns = 0; return (200, J(("ok", true)));
             case "issue":
@@ -1011,7 +1020,7 @@ sealed class World
                     ("issues", new JsonArray(issues.Values.Select(i => (JsonNode)J(("number", i.Number), ("title", i.Title), ("body", i.Body), ("open", i.Open), ("column", i.Column), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)x).ToArray())),
                         ("comments", new JsonArray(i.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())))).ToArray())),
                     ("deletedRefs", new JsonArray(deletedRefs.Select(x => (JsonNode)x).ToArray())), ("appMints", appMints), ("scopedMints", new JsonArray(scopedMints.Select(x => (JsonNode)x).ToArray())), ("reruns", reruns), ("rerunRefusals", rerunRefusals), ("prs", new JsonArray(prs.Values.Select(p => (JsonNode)J(("number", p.Number), ("ref", p.Ref), ("body", p.Body), ("sha", p.Sha), ("open", p.Open), ("merged", p.Merged), ("base", p.Base), ("draft", p.Draft), ("title", p.Title), ("mergeSha", p.MergeSha), ("comments", new JsonArray(p.Comments.Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body))).ToArray())), ("reviews", new JsonArray(p.Reviews.Select(r => (JsonNode)J(("user", r.User), ("state", r.State), ("commit", r.Commit))).ToArray())), ("files", new JsonArray(p.Files.Select(f => (JsonNode)f).ToArray())))).ToArray())),
-                    ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("masterSha", masterSha), ("rerunJobs", rerunJobs), ("releases", releases.Count), ("requests", log.Count)));
+                    ("refs", new JsonArray(refs.Select(r => (JsonNode)r).ToArray())), ("dispatches", new JsonArray(dispatches.Select(x => (JsonNode)x).ToArray())), ("masterSha", masterSha), ("rerunJobs", rerunJobs), ("releases", releases.Count), ("requests", log.Count)));
             case "health": healthStatus = b?["status"]?.GetValue<int>() ?? 200; return (200, J(("ok", true)));
             case "log": return (200, new JsonArray(log.Select(l => (JsonNode)l).ToArray()));
         }

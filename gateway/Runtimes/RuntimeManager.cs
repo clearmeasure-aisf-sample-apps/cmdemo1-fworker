@@ -32,6 +32,14 @@ sealed class RuntimeLimits
     };
 }
 
+// What an adapter can tell of an ended execution beyond its state (the Copilot runtime: a follow-up session started by a comment on the item's pull
+// request, and whether it pushed to that pull request while it ran)
+interface IRuntimeWork
+{
+    bool FollowUp(string worker);
+    Task<bool?> Pushed(string worker, CancellationToken ct);
+}
+
 sealed class RuntimeManager
 {
     public static readonly ActivitySource Source = new("FactoryWorker.Gateway.Runtimes");
@@ -57,6 +65,9 @@ sealed class RuntimeManager
     readonly Dictionary<(int Item, string Phase), int> launches = new();   // executions in a row of an item in one phase (RuntimeLimits.MaxLaunchesPerPhase)
     // the error of the last failure of an item and phase (its outcome; for a failed start the error, where a non-2xx launch carries the runtime's answer, at most 1 KB), shown in /status
     readonly Dictionary<(int Item, string Phase), string> failureErrors = new();
+    // follow-up sessions of an item in a row, in any phase, that ended without registering and without pushing (IRuntimeWork): at
+    // MaxFailuresPerPhase the item is parked instead of resumed again (#415, #416: seven sessions that never connected, alternating phases)
+    readonly Dictionary<int, int> idleFollowUps = new();
     readonly List<JsonObject> last = new();
     DateTime day = DateTime.UtcNow.Date; int today;
     int startFailuresInRow; bool healthy = true; string unhealthyWhy = "";
@@ -98,6 +109,11 @@ sealed class RuntimeManager
         lock (gate)
         {
             if (failures.GetValueOrDefault((item, phase)) >= lim.MaxFailuresPerPhase) return true;
+            if (idleFollowUps.GetValueOrDefault(item) >= lim.MaxFailuresPerPhase)
+            {
+                failureErrors[(item, phase)] = $"followups-idle: {idleFollowUps[item]} follow-up sessions in a row ended without connecting to the gateway or pushing";
+                return true;
+            }
             if (lim.MaxLaunchesPerPhase > 0 && launches.GetValueOrDefault((item, phase)) >= lim.MaxLaunchesPerPhase)
             {
                 failureErrors[(item, phase)] = $"launches-exhausted: {lim.MaxLaunchesPerPhase} executions in a row without finishing the phase";
@@ -138,7 +154,7 @@ sealed class RuntimeManager
         return new Ticket(name, item, phase, profile, nonce);
     }
 
-    public void Registered(string name) { lock (gate) { if (execs.TryGetValue(name, out var e) && e.RegisteredAt == null) { e.RegisteredAt = DateTime.UtcNow; startFailuresInRow = 0; } } }
+    public void Registered(string name) { lock (gate) { if (execs.TryGetValue(name, out var e) && e.RegisteredAt == null) { e.RegisteredAt = DateTime.UtcNow; startFailuresInRow = 0; idleFollowUps.Remove(e.Item); } } }
 
     // a session started outside the plant (the Copilot owner's fix-forward of a red master) counts against the daily cap
     public void CountExternal() { lock (gate) { Roll(); today++; } }
@@ -209,13 +225,26 @@ sealed class RuntimeManager
             foreach (var k in execs.Where(kv => kv.Value.Ended && kv.Value.EndedAt < DateTime.UtcNow.AddHours(-1)).Select(kv => kv.Key).ToList()) execs.Remove(k);
         }
         if (unhealthyNow) Log("unhealthy", name, e.Item, unhealthyWhy);
+        // a follow-up session is judged by its end and the work it pushed, not only by its registration: one that succeeded and pushed to the
+        // item's pull request without connecting did its step (Development: settled below, its pull request waits for its checks); one that
+        // neither connected nor pushed did nothing, and such sessions in a row park the item (Exhausted) instead of resuming it again
+        bool pushed = false, idle = false;
+        if (outcome == "succeeded" && e.RegisteredAt == null && cae is IRuntimeWork rw && rw.FollowUp(name))
+        {
+            bool? pu = null;
+            try { pu = await rw.Pushed(name, CancellationToken.None); } catch (Exception x) { Log("pushed-read-failed", name, e.Item, x.Message); }
+            // not known (the head unreadable): neither, the end is judged as before
+            pushed = pu == true; idle = pu == false;
+            Log(pushed ? "followup-pushed" : idle ? "followup-idle" : "followup-unknown", name, e.Item, e.Phase);
+        }
+        lock (gate) { if (idle) idleFollowUps[e.Item] = idleFollowUps.GetValueOrDefault(e.Item) + 1; else if (pushed) idleFollowUps.Remove(e.Item); }
         var settled = false;
         if (Ending != null && outcome is not ("settled" or "start-failed")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
         // the phase is done pending checks: the next Development task (a fix-forward round) is counted afresh; fixForwardMaxRounds caps those
         if (settled) lock (gate) launches.Remove((e.Item, e.Phase));
         var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome, e.Url) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }
         // an execution that exited by itself while its worker still held the item did not finish it: a failure like any other
-        if (tookBack && !failed && !settled && e.StopReason == "" && outcome == "succeeded")
+        if (tookBack && !failed && !settled && !pushed && e.StopReason == "" && outcome == "succeeded")
         {
             failed = true; outcome = "ended-with-item";
             lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == lim.MaxFailuresPerPhase; failureErrors[(e.Item, e.Phase)] = outcome; }
@@ -236,7 +265,7 @@ sealed class RuntimeManager
     {
         Log("park", "", item, "runtime-failed " + phase);
         // after the park the item starts afresh: an unpark by the operator gives its phase maxFailuresPerPhase executions again
-        try { if (Park != null) { await Park(item, phase); lock (gate) { failures.Remove((item, phase)); failureErrors.Remove((item, phase)); launches.Remove((item, phase)); } } } catch (Exception x) { Log("park-failed", "", item, x.Message); }
+        try { if (Park != null) { await Park(item, phase); lock (gate) { failures.Remove((item, phase)); failureErrors.Remove((item, phase)); launches.Remove((item, phase)); idleFollowUps.Remove(item); } } } catch (Exception x) { Log("park-failed", "", item, x.Message); }
         finally { Plant?.RuntimeParked(item, phase); }
     });
 

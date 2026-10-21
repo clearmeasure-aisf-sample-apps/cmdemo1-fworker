@@ -118,7 +118,10 @@ function Use-CopilotDraft([int]$n, [string]$Head, [string]$Title, [int]$Supersed
 # The item's open pull request for the Copilot runtime (CopilotCloudRuntime: a task of an item that has one starts from its branch)
 function Verb_item_pr($a) {
     $n = Get-ItemNumber $a
-    $pr = Find-ItemPr $n
+    # an owner task's item: the open pull request of the task's branch (a recorded one that was closed or superseded is replaced)
+    # item-pr runs without the item lock (NoLockVerbs): the resolution writes the state, so it takes the lock; busy: what the state records
+    $ow = try { Use-ItemLock $n { Resolve-OwnerPr $n } 5 } catch [FactoryReject] { if ($_.Exception.Code -eq 'item-busy') { $null } else { throw } }
+    $pr = if ($ow) { $ow.pr } else { Find-ItemPr $n }
     if (-not $pr) { return @{ ok = $true; id = $n; found = $false } }
     return @{ ok = $true; id = $n; found = $true; number = [int]$pr.number; branch = "$($pr.head.ref)" }
 }
@@ -206,6 +209,8 @@ function Verb_copilot_settle($a) {
     $none = { param($why) @{ ok = $true; id = $n; action = $(if ($stage -eq 'launch') { 'launch' } else { 'none' }); reason = $why } }
     if (-not $info.open) { return (& $none 'closed') }
     if ("$($info.column)" -ine "$($c.columns.development)") { return (& $none 'not-in-development') }
+    # an owner task's item: its pull request is the open one of the task's branch (a closed or superseded record is replaced first)
+    try { [void](Resolve-OwnerPr $n) } catch { }
     $s = (Get-State $n).state
     if (Test-Has $s 'awaiting_checks') { return @{ ok = $true; id = $n; action = 'awaiting'; already = $true; pr = $s.awaiting_checks.pr } }
     if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha) { return (& $none 'merged') }
@@ -298,6 +303,11 @@ function Verb_copilot_owner($a) {
     }
     # status
     $info = Get-ItemInfo $n
+    # before the merge: the item's pull request is the open one of the owner task's branch (a closed or superseded record is replaced)
+    if ($info.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and $s.merge.sha)) {
+        $ow = try { Resolve-OwnerPr $n } catch { $null }
+        if ($ow -and $ow.changed) { $st = Get-State $n; $s = $st.state }
+    }
     $m = if (Test-Has $s 'merge') { $s.merge } else { $null }
     $park = Get-Park $s
     $o = @{ ok = $true; id = $n; open = [bool]$info.open; column = "$($info.column)"; pr = $(if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }) }
@@ -338,6 +348,57 @@ function Close-StrayCopilotDrafts([int]$n, [string[]]$Bases, [int]$Keep) {
         $b = "$($p.base.ref)"; if ($b -eq $def -or $b -notin $Bases) { continue }
         Close-PrWithBranch $p $n "Closed by the factory worker gateway: an extra draft of a task of #$n; the item's pull request is #$Keep."
     }
+}
+
+# The item's pull request of a Copilot owner task (docs/design/copilot-cloud-agent.md, "One task, resumed"): always the open pull request of the
+# owner task's current branch (copilot_task.branch). A recorded pull request that was closed or superseded (a migration, a takeover) is replaced
+# by it in the state (pr, copilot_task.pr, awaiting_checks). Every owner pull request targets the default branch: one stacked on another branch is
+# retargeted once that base has no open pull request (merged or closed); while the base's pull request is still open, the stack is consolidated
+# onto the owner's pull request when its branch holds the base's commits (the commit-ancestry guard of #192), the base's pull request is closed as
+# superseded. Returns $null when the item has no owner branch with an open pull request; else @{ pr; changed; retargeted; superseded; refused }.
+function Resolve-OwnerPr([int]$n) {
+    $c = Get-Cfg; $def = "$($c.defaultBranch)"
+    $st = Get-State $n; $s = $st.state
+    if (-not (Test-Has $s 'copilot_task') -or -not "$($s.copilot_task.branch)") { return $null }
+    if ((Test-Has $s.copilot_task 'done_at') -and $s.copilot_task.done_at) { return $null }
+    $br = "$($s.copilot_task.branch)"
+    $pr = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&head=$([uri]::EscapeDataString("$($c.owner):$br"))&per_page=5") | Where-Object { $_ -and "$($_.head.ref)" -eq $br } | Select-Object -First 1
+    if (-not $pr) { return $null }
+    $o = @{ pr = $pr; changed = $false; retargeted = $false; superseded = 0; refused = '' }
+    if ("$($pr.base.ref)" -ne $def) {
+        $basePr = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&head=$([uri]::EscapeDataString("$($c.owner):$($pr.base.ref)"))&per_page=5") | Where-Object { $_ -and "$($_.head.ref)" -eq "$($pr.base.ref)" } | Select-Object -First 1
+        $go = $true
+        if ($basePr) {
+            # the base's pull request is still open: consolidate only when the owner's branch holds its commits
+            $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($basePr.head.sha)...$($pr.head.sha)" -Allow 404
+            if (-not $cmp -or ($cmp -is [hashtable] -and $cmp.ContainsKey('status') -and $cmp.ContainsKey('body')) -or "$($cmp.status)" -notin 'ahead', 'identical') { $go = $false; $o.refused = "stacked on #$($basePr.number), whose commits '$br' does not hold" }
+        }
+        if ($go) {
+            $rb = Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ base = $def } -Allow 422
+            if ($rb -is [hashtable] -and $rb.ContainsKey('status')) { $o.refused = "GitHub refused to retarget #$($pr.number) to ${def}: $($rb.body.message)" }
+            else {
+                $o.retargeted = $true; $pr = Get-Pr ([int]$pr.number); $o.pr = $pr
+                Add-Comment $n "PR #$($pr.number), the pull request of the owner task's branch ``$br``, was stacked on ``$($pr.base.ref)``$(if ($basePr) { " (#$($basePr.number))" }); the gateway retargeted it to **$def**, where CI runs."
+                # the base's pull request only after the retarget: deleting its branch first would close the stacked one with it
+                if ($basePr) { Close-PrWithBranch $basePr $n "Superseded by #$($pr.number), the pull request of #$n now: it holds this branch's commits and the owner task's work. Closed by the factory worker gateway."; $o.superseded = [int]$basePr.number }
+            }
+        }
+    }
+    $st = Get-State $n; $s = $st.state
+    $rec = if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }
+    # only a recorded pull request is replaced: none recorded yet (a Technical Design draft) stays unrecorded until pr_open or the settle takes it
+    if ($rec -gt 0 -and $rec -ne [int]$pr.number) {
+        # what the record says about the work (a rework asked for, the failed checks) stays; the re-run record was of the old pull request
+        $s.pr.number = [int]$pr.number; $s.pr.branch = $br; $s.pr.url = "$($pr.html_url)"; if (Test-Has $s.pr 'rerun') { $s.pr.Remove('rerun') }
+        $o.changed = $true
+    }
+    if ((Test-Has $s 'awaiting_checks') -and [int]$s.awaiting_checks.pr -ne [int]$pr.number) { $s.awaiting_checks.pr = [int]$pr.number; $s.awaiting_checks.sha = "$($pr.head.sha)"; $s.awaiting_checks.since = ConvertTo-Iso (Get-UtcNow); $o.changed = $true }
+    if ([int]$s.copilot_task.pr -ne [int]$pr.number) { $s.copilot_task.pr = [int]$pr.number; $o.changed = $true }
+    if ($o.changed) {
+        Save-State $n $st
+        if ($rec -gt 0 -and $rec -ne [int]$pr.number) { Add-Comment $n "The item's pull request is now #$($pr.number), the open pull request of the owner task's branch ``$br`` (the recorded #$rec is closed or superseded)." }
+    }
+    return $o
 }
 
 function Verb_open_pr($a) {

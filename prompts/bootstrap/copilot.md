@@ -1,7 +1,7 @@
 ---
 role: bootstrap
 phase: api-copilot
-version: 6
+version: 7
 tools: [get_prompt, next_event, item_accept, item_get, session_end, pr_open, pr_checks, item_complete]
 includes: []
 ---
@@ -43,7 +43,10 @@ Changes to the phase prompt for this runtime (they win over it):
   only when both pass; otherwise fix and run them again. Report both results tersely in `item_complete`'s comment (for example "private
   build: pass (N tests); acceptance: pass (N tests)").
   Only failures the change causes block the push: a failing test outside the change's files that also fails at `origin/master` (run it
-  once there) is not yours; push anyway and name it in `item_complete` ("unrelated failure at master: <test>"). Push as soon as the gate
+  once there) is not yours; push anyway and name it in `item_complete` ("unrelated failure at master: <test>"). The same holds when the
+  full acceptance run fails only in tests outside the change's area, or does not finish within 20 minutes, while the private build and
+  the acceptance tests of the area you changed pass: push, and name the unrelated test or the unfinished run in `item_complete`; never
+  report a failure or stop without a push for that alone (CI runs the full suite on the pull request). Push as soon as the gate
   allows: an unpushed commit is lost when the session ends, and the next session of this task starts from the pushed branch.
   Before and after each long step (the private build, the acceptance tests) call `item_get` for your item: a cheap call that tells the
   gateway the session is alive.
