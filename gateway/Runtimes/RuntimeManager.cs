@@ -50,7 +50,7 @@ sealed class RuntimeManager
 
     public sealed class Exec
     {
-        public string Name = "", Execution = "", Phase = "", Status = "provisioning", Outcome = "", StopReason = "";
+        public string Name = "", Execution = "", Url = "", Phase = "", Status = "provisioning", Outcome = "", StopReason = "";
         public int Item;
         public DateTime StartedAt = DateTime.UtcNow;
         public DateTime? RegisteredAt, EndedAt;
@@ -102,6 +102,7 @@ sealed class RuntimeManager
     public string ExistingFor(int item) { lock (gate) return execs.Values.FirstOrDefault(e => e.Item == item && !e.Ended)?.Name ?? ""; }
     // the items this runtime ran or runs an execution for since the process started (the CI release's candidates)
     public HashSet<int> ItemsSeen() { lock (gate) { var s = execs.Values.Select(e => e.Item).Concat(launches.Keys.Select(k => k.Item)).Concat(failures.Keys.Select(k => k.Item)).ToHashSet(); foreach (var x in last) if (x["item"]?.GetValue<int>() is int i) s.Add(i); return s; } }
+    public string UrlOf(string name) { lock (gate) return execs.TryGetValue(name, out var e) ? e.Url : ""; }
     // the execution of this worker was started and has not ended
     public bool Alive(string name) { lock (gate) return execs.TryGetValue(name, out var e) && !e.Ended; }
     public string ExecutionOf(string name) { lock (gate) return execs.TryGetValue(name, out var e) ? e.Execution : ""; }
@@ -173,8 +174,10 @@ sealed class RuntimeManager
         Log("provision", t.Name, t.Item, r.Ok ? r.Execution : r.Error);
         if (r.Ok)
         {
-            bool late; lock (gate) { late = !execs.TryGetValue(t.Name, out var e) || e.Ended || e.StopReason != ""; if (execs.TryGetValue(t.Name, out var e2)) { e2.Execution = r.Execution; e2.Status = "Running"; } }
+            bool late; lock (gate) { late = !execs.TryGetValue(t.Name, out var e) || e.Ended || e.StopReason != ""; if (execs.TryGetValue(t.Name, out var e2)) { e2.Execution = r.Execution; e2.Url = r.Url; e2.Status = "Running"; } }
             span?.SetTag("fworker.execution", r.Execution);
+            // the item's journal names the execution and its page (a Copilot task: "Copilot session: <url>"); a runtime without a page adds no line
+            if (!late && r.Url != "") { try { Plant?.RuntimeLaunched(t.Name, t.Item, t.Phase, cae.Kind, r.Execution, r.Url); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
             // ended or stopped while the start call ran (a revoke, a lapse): stop it now, or it would run unattended
             if (late) { try { await cae.Deprovision(t.Name, "ended-during-start", CancellationToken.None); } catch (Exception x) { Log("deprovision-failed", t.Name, t.Item, x.Message); } }
             return;
@@ -219,7 +222,7 @@ sealed class RuntimeManager
                 startFailuresInRow++;
                 if (healthy && startFailuresInRow >= lim.UnhealthyAfterFailures) { healthy = false; unhealthyNow = true; unhealthyWhy = $"{startFailuresInRow} executions in a row ended without their worker registering"; }
             }
-            last.Add(new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["outcome"] = outcome, ["error"] = failed ? failureErrors.GetValueOrDefault((e.Item, e.Phase)) : null, ["started"] = e.StartedAt.ToString("o"), ["ended"] = e.EndedAt?.ToString("o"), ["detail"] = Detail(e.Name) });
+            last.Add(new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["url"] = e.Url, ["outcome"] = outcome, ["error"] = failed ? failureErrors.GetValueOrDefault((e.Item, e.Phase)) : null, ["started"] = e.StartedAt.ToString("o"), ["ended"] = e.EndedAt?.ToString("o"), ["detail"] = Detail(e.Name) });
             if (last.Count > 10) last.RemoveAt(0);
             foreach (var k in execs.Where(kv => kv.Value.Ended && kv.Value.EndedAt < DateTime.UtcNow.AddHours(-1)).Select(kv => kv.Key).ToList()) execs.Remove(k);
         }
@@ -242,7 +245,7 @@ sealed class RuntimeManager
         if (Ending != null && outcome is not ("settled" or "start-failed")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
         // the phase is done pending checks: the next Development task (a fix-forward round) is counted afresh; fixForwardMaxRounds caps those
         if (settled) lock (gate) launches.Remove((e.Item, e.Phase));
-        var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }
+        var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome, e.Url) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }
         // an execution that exited by itself while its worker still held the item did not finish it: a failure like any other
         if (tookBack && !failed && !settled && !pushed && e.StopReason == "" && outcome == "succeeded")
         {
@@ -336,7 +339,7 @@ sealed class RuntimeManager
                 {
                     ["enabled"] = lim.IsOn(), ["maxConcurrent"] = lim.MaxConcurrent, ["running"] = execs.Values.Count(e => !e.Ended), ["today"] = today, ["maxExecutionsPerDay"] = lim.MaxExecutionsPerDay,
                     ["healthy"] = healthy, ["unhealthyReason"] = unhealthyWhy, ["startFailuresInRow"] = startFailuresInRow, ["ackSeconds"] = lim.AckSeconds, ["relisted"] = relisted,
-                    ["executions"] = new JsonArray(execs.Values.Where(e => !e.Ended).Select(e => (JsonNode)new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["status"] = e.Status, ["started"] = e.StartedAt.ToString("o"), ["registered"] = e.RegisteredAt?.ToString("o"), ["detail"] = Detail(e.Name) }).ToArray()),
+                    ["executions"] = new JsonArray(execs.Values.Where(e => !e.Ended).Select(e => (JsonNode)new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["url"] = e.Url, ["status"] = e.Status, ["started"] = e.StartedAt.ToString("o"), ["registered"] = e.RegisteredAt?.ToString("o"), ["detail"] = Detail(e.Name) }).ToArray()),
                     ["owned"] = Owned?.Invoke(), ["quota"] = Quota?.Invoke(),
                     ["launches"] = new JsonArray(launches.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value }).ToArray()), ["maxLaunchesPerPhase"] = lim.MaxLaunchesPerPhase,
                     ["failures"] = new JsonArray(failures.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value, ["error"] = failureErrors.GetValueOrDefault(kv.Key) }).ToArray()),

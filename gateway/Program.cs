@@ -1096,6 +1096,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
             return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = acode, reason = areason, exit = ax }), "application/json", Encoding.UTF8, 409);
         }
         accepting = true;
+        // a runtime worker's acceptance carries its execution's page (a Copilot task's session), for the item's journal
+        if (!(authorized["url"] is JsonValue) && plant.RuntimeUrlOf(who.Name) is { Length: > 0 } ru) authorized["url"] = ru;
     }
     if (ownerMode && verb == "accept" && who.Kind == "item" && plant.JournalBefore(who.Item, who.Assignment, who.Name) is { AtMost.Ticks: > 0 } earlier)
         await Task.WhenAny(earlier.Written, Task.Delay(earlier.AtMost));

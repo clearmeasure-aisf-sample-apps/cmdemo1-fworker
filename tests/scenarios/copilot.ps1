@@ -69,6 +69,8 @@ $CopilotScenarios = [ordered]@{
         Check 'neither the token nor the code is in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-copilot').Count -eq 0 -and @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch $code).Count -eq 0)
         $st = Cop-Status
         Check 'status: the task runs under the copilot-cloud runtime' ($st.running -eq 1 -and @($st.executions | Where-Object { $_.item -eq $n -and $_.execution -eq $t.id }).Count -eq 1) ($st | ConvertTo-Json -Compress -Depth 5)
+        $link = "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks/$($t.id)"
+        Check 'status: the execution carries the task''s html_url' (@($st.executions | Where-Object { $_.execution -eq $t.id -and $_.url -eq $link -and $_.detail.url -eq $link }).Count -eq 1) ($st.executions | ConvertTo-Json -Compress -Depth 5)
         $boot = Cop-Bootstrap
         Check 'the bootstrap token is a b1 and authenticates no other endpoint' ($boot -like 'b1.1.*' -and (Mcp 'tools/list' @{} $boot).status -eq 401)
         Check 'the exchange without the bootstrap token is refused' ((Cop-Exchange $code '').status -eq 401)
@@ -86,6 +88,10 @@ $CopilotScenarios = [ordered]@{
         Check 'its worker shows type copilot-cloud, mode api' ($row.Count -eq 1 -and $row[0].mode -eq 'api' -and $row[0].type -eq 'copilot-cloud' -and $row[0].execution -eq $t.id) ($row | ConvertTo-Json -Compress -Depth 4)
         [void](Mcp-Call 'session_end' @{ reason = 'scenario done' } $r1)
         Check 'session_end ends the task for the runtime' (Wait-Until -Seconds 15 { (Cop-Status).running -eq 0 })
+        Check 'status: last[] carries the url' (Wait-Until -Seconds 15 { @((Cop-Status).last | Where-Object { $_.execution -eq $t.id -and $_.url -eq $link }).Count -eq 1 })
+        Check 'the launch comment on the issue names the task and links its Copilot session' (Wait-Until -Seconds 20 { (Cop-Comments $n "*started **cop-$n-* (task *$($t.id)*). Copilot session: $link*").Count -eq 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n---`n")
+        Check 'the accepted comment links the Copilot session' (Wait-Until -Seconds 20 { (Cop-Comments $n "*cop-$n-* accepted*Copilot session: $link*").Count -eq 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n---`n")
+        Check 'no comment carries a token' (-not ((((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n") -match 'r1\.|b1\.|c1\.|fake-copilot'))
         Check 'and revokes its r1' (Wait-Until -Seconds 30 { (Mcp 'tools/list' @{} $r1).status -eq 401 })
     } finally { Cop-Cleanup @($n) }
 }
@@ -486,7 +492,7 @@ $CopilotScenarios = [ordered]@{
         $gi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'master is GREEN' }); $oi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -like '*Owner done:*' })
         $di = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'Delivered to \*\*Prod\*\*' })
         Check 'the owner is done only after master is green and the production delivery' ($gi -ge 0 -and $oi -gt $gi -and ($di -lt 0 -or $oi -gt $di) -and "$($cs[$oi])" -match 'delivered to production' -and "$($cs[$oi])" -match 'ca-cmdemo1-prod-ui') "green $gi delivered $di done $oi $($cs[$oi])"
-        Check 'the done comment carries the session link' ("$($cs[$oi])" -match "https://github\.com/copilot/tasks/$([regex]::Escape($t.id))")
+        Check 'the done comment carries the session link' ("$($cs[$oi])" -match "https://github\.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks/$([regex]::Escape($t.id))")
         Check 'one task, three sessions, never a second task' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1 -and (Cop-Tasks $n).Count -eq 3) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.via)" }) -join '; '
         Check 'no worker but the task''s sessions was offered the item' (Cop-NotOffered $n) (Cop-Brief $n)
         Check 'status: the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
