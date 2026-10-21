@@ -109,7 +109,8 @@ $CursorScenarios = [ordered]@{
         Check 'the run ends; the item stays owned, nothing runs' (Wait-Until -Seconds 30 { (Cur-Status).running -eq 0 -and @((Cur-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 1 }) ((Cur-Status) | ConvertTo-Json -Compress -Depth 5)
         $k0 = (Cur-FollowUps $a.id).Count
         [void](Fake 'move' @{ number = $n; column = 'Development' })
-        Check 'Development is a follow-up run of the same agent' (Wait-Until -Seconds 60 { @((Cur-FollowUps $a.id) | Where-Object { "$($_.body.prompt.text)" -match "#$n, phase development" }).Count -ge 1 }) ((Cur-State) | ConvertTo-Json -Compress -Depth 6)
+        # a Technical Design follow-up the gateway may have started before the move (the item was still in that column) is finished as Cursor would
+        Check 'Development is a follow-up run of the same agent' (Wait-Until -Seconds 90 { $fx = Cur-FollowUps $a.id; $ok = @($fx | Where-Object { "$($_.body.prompt.text)" -match "#$n, phase development" }).Count -ge 1; if (-not $ok -and $fx.Count -gt 0 -and "$($fx[-1].body.prompt.text)" -match 'phase technical-design') { [void](Fake 'cursor-agent' @{ id = $a.id; status = 'IDLE'; run = 'FINISHED' }) }; $ok }) ((Cur-State) | ConvertTo-Json -Compress -Depth 6)
         $fd = @((Cur-FollowUps $a.id) | Where-Object { "$($_.body.prompt.text)" -match "#$n, phase development" })[-1]
         Check 'the development follow-up names the branch and the build gate' ("$($fd.body.prompt.text)" -match "factory-worker/$n-development" -and "$($fd.body.prompt.text)" -match 'private build') "$($fd.body.prompt.text)"
         $w1 = Cur-FuR1 $fd; Cur-Accept $w1 $n
