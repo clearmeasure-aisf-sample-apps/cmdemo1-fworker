@@ -12,6 +12,9 @@ static class RoleTools
         // column). git_credential, build_slot and merge are not here: the first api agents push with their own identity.
         ["worker"] = ["item_get", "item_accept", "item_claim", "item_append_body", "item_comment", "item_release", "item_record_review", "item_complete", "pr_open", "pr_update", "pr_checks", "pr_wait_checks",
             "item_validation_verdict", "send_note", "ask", "next_event", "session_end", "get_prompt"],
+        // the plant manager on demand (ManagerCopilot.cs): the digest, the open questions, an answer, a note to the operator, the manager's flow verb,
+        // a read of an item and the patrol acknowledgement. No worker tool, no merge, no verdict, no file or pull request tool.
+        ["manager"] = ["manager_digest", "manager_questions", "manager_answer", "manager_note", "manager_action", "manager_item", "manager_patrol_ack", "session_end", "get_prompt"],
     };
 
     // The role a principal plays at /mcp, or "" when it has none there. The admin token is the owner (agents-roles-launch.md 4).

@@ -181,6 +181,7 @@ var copilotManager = copilotRuntime != null
     ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
         copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
     : null;
+ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), created once the plant exists
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
 builder.Services.AddSingleton(sp =>
@@ -751,7 +752,17 @@ bool OperatorActive(HttpContext c) => Who(c) is { Kind: "operator" } w && ownerM
 // "operator-session" (Messaging.cs), never as the person's "operator"; log lines name it too (By).
 Principal Admitted(HttpContext c) => OperatorActive(c) ? new Principal("admin", Who(c).Name) : Who(c);
 string By(HttpContext c) => Who(c) is { Kind: "operator" } w ? w.Name : "operator";
-JsonObject MessagingBlocks(bool dashboard) { var b = plant.MessagingStatus(dashboard); messenger.AddCounters((JsonObject)b["messaging"]!); return b; }
+JsonObject MessagingBlocks(bool dashboard)
+{
+    var b = plant.MessagingStatus(dashboard); messenger.AddCounters((JsonObject)b["messaging"]!);
+    // the on-demand manager (ManagerCopilot.cs): present while its task runs, with the launch counts and the task's link
+    if (managerCopilot != null && b["manager"] is JsonObject mb)
+    {
+        var mc = managerCopilot.Status(); mb["copilot"] = mc;
+        if (mc["present"]?.GetValue<bool>() == true) mb["present"] = true;
+    }
+    return b;
+}
 app.MapGet("/api/v1/dashboard", (HttpContext c) =>
 {
     if (Who(c).Kind != "admin") return Results.StatusCode(403);
@@ -1003,6 +1014,9 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         if (!ownerMode) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
         var mAction = authorized["action"]?.ToString() ?? ""; var mPolicy = authorized["policy"]?.ToString() ?? ""; var mWorker = authorized["worker"]?.ToString() ?? "";
         var mBy = who.Kind == "manager" ? who.Name : "operator"; authorized["by"] = mBy;
+        // the Copilot session of the on-demand manager (ManagerCopilot.cs) goes into the journal line it causes
+        var mSession = who.Kind == "manager" ? managerCopilot?.SessionUrl(who.Name) ?? "" : "";
+        if (mSession != "") authorized["session"] = mSession; else authorized.Remove("session");
         // one line, no HTML comment markers (the journal's machine-read marker), no mention: as the rule verb cleans it, for the name actions too
         var mReason = authorized["reason"] is JsonValue mrv && mrv.TryGetValue<string>(out var mrs) ? System.Text.RegularExpressions.Regex.Replace(System.Text.RegularExpressions.Regex.Replace(mrs.Replace("://", " "), @"[<>@`\[\]!]", ""), @"\s+", " ").Trim() : "";
         IResult MgrNo(int status, string code, string reason, int exit, int retry = 0)
@@ -1031,7 +1045,7 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
             if (nx != 0) return Results.Text(nx == 20 ? JsonSerializer.Serialize(new { ok = false, verb, action = mAction, code = ncode, reason = nreason, retryAfterSeconds = 60, exit = nx }) : JsonSerializer.Serialize(new { ok = false, verb, action = mAction, code = ncode, reason = nreason, exit = nx }), "application/json", Encoding.UTF8, nx == 12 ? 404 : nx == 20 ? 503 : 409);
             if (mAction == "restart-session")
                 foreach (var oi in items)
-                    plant.JournalManagerAction(oi, new JsonObject { ["action"] = mAction, ["policy"] = mPolicy, ["by"] = mBy, ["reason"] = mReason, ["detail"] = $"restarted the session of **{mWorker}**, which owns this item; its next session resumes it" }, $"restart|{mWorker}|{DateTime.UtcNow.Ticks}");
+                    plant.JournalManagerAction(oi, new JsonObject { ["action"] = mAction, ["policy"] = mPolicy, ["by"] = mBy, ["reason"] = mReason, ["session"] = mSession, ["detail"] = $"restarted the session of **{mWorker}**, which owns this item; its next session resumes it" }, $"restart|{mWorker}|{DateTime.UtcNow.Ticks}");
             hub.RequestSweep();
             var mstate = plant.IsDraining(mWorker);
             return Results.Text(JsonSerializer.Serialize(new { ok = true, verb, action = mAction, worker = mWorker, policy = mPolicy, draining = mstate, items, exit = 0 }), "application/json");
@@ -2166,6 +2180,33 @@ if (copilotRuntime != null && copilotManager != null)
         plant.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "credit-guard" });
     };
 }
+// The plant manager on demand: one short Copilot task for the manager role when the digest holds something that needs a judgement and no supervisor
+// is present (api.copilot.manager, docs/design/agents-roles-launch.md). Enabled only where the configuration says so.
+if (copilotRuntime != null && ownerMode && messaging.ManagerEnabled && messaging.Enabled)
+{
+    var mgrCopSettings = ManagerCopilotSettings.Load(scriptsDir, Environment.GetEnvironmentVariable, copilotSettings.Environment);
+    managerCopilot = new ManagerCopilot(mgrCopSettings, copilotRuntime, copilotCodes, plant,
+        (name, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "manager", "api", "copilot-cloud-agent", Auth.Environment, expires, 0, "", "patrol"), revocations.Of(name)),
+        code =>
+        {
+            var bp = prompts.ByPath("bootstrap/copilot-manager.md");
+            var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
+            return text + $"\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
+        },
+        async name => { await RevokeName(name, "runtime"); });
+    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-config", ["enabled"] = mgrCopSettings.Enabled, ["maxPerDay"] = mgrCopSettings.MaxPerDay, ["cooldownMinutes"] = mgrCopSettings.CooldownMinutes, ["maxMinutes"] = mgrCopSettings.MaxMinutes }.ToJsonString());
+    _ = Task.Run(async () =>
+    {
+        var ct = app.Lifetime.ApplicationStopping;
+        while (!ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(copilotSettings.ListSeconds < 5 ? 5 : 30), ct); } catch (OperationCanceledException) { return; }
+            try { if (leader.MayAct) await managerCopilot.Tick(ct); }
+            catch (OperationCanceledException) { return; }
+            catch (Exception e) { Console.Error.WriteLine($"manager copilot: {e.GetType().Name}"); }
+        }
+    });
+}
 copilotPrompt = (item, phase, code, pr) =>
 {
     var bp = prompts.ByPath("bootstrap/copilot.md");
@@ -2187,7 +2228,7 @@ GatewayMcp.Tools = new McpTools(new InProcess(app, Admit), mcpSessions, t => Aut
 {
     if (messaging.Enabled && ownerMode) plant.Touch(name);
     if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }
-}) { Prompts = prompts };
+}) { Prompts = prompts, ManagerLive = n => managerCopilot?.Live(n) == true, ManagerEnd = (n, why) => managerCopilot?.End(n, why) ?? Task.CompletedTask };
 _ = Task.Run(async () => { while (true) { await Task.Delay(TimeSpan.FromSeconds(30)); try { mcpSessions.Sweep(); } catch (Exception e) { Console.Error.WriteLine($"mcp sessions: {e.Message}"); } } });
 app.Run();
 
