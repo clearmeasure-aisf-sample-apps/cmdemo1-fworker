@@ -37,7 +37,7 @@
       "environments": {
         "tdd": {
           "gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
-          "manager": { "enabled": false }
+          "manager": { "enabled": true }
         },
         "uat": {
           "enabled": false,

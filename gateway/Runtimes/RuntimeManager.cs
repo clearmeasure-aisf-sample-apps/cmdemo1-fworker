@@ -68,6 +68,8 @@ sealed class RuntimeManager
     // before the plant takes back what an ended execution held: the gateway settles what the execution left (the Copilot runtime: a Development
     // task's pull request waits for its checks in the gateway, rule verb copilot-settle). Not for an execution that never started.
     public Func<Exec, Task<bool>>? Ending { get; set; }   // true: the item was settled (the end is no failure of the phase)
+    // the items an execution's owner holds between its sessions (the Copilot runtime: one task per item, resumed), for /status
+    public Func<JsonArray>? Owned { get; set; }
 
     readonly RuntimeLimits lim;
     public RuntimeManager(RuntimeSettings cfg, IWorkerRuntime cae, RuntimeNonces nonces, RuntimeLimits? limits = null)
@@ -130,6 +132,9 @@ sealed class RuntimeManager
     }
 
     public void Registered(string name) { lock (gate) { if (execs.TryGetValue(name, out var e) && e.RegisteredAt == null) { e.RegisteredAt = DateTime.UtcNow; startFailuresInRow = 0; } } }
+
+    // a session started outside the plant (the Copilot owner's fix-forward of a red master) counts against the daily cap
+    public void CountExternal() { lock (gate) { Roll(); today++; } }
 
     void Roll() { var d = DateTime.UtcNow.Date; if (d != day) { day = d; today = 0; } }
 
@@ -292,6 +297,7 @@ sealed class RuntimeManager
                     ["enabled"] = lim.IsOn(), ["maxConcurrent"] = lim.MaxConcurrent, ["running"] = execs.Values.Count(e => !e.Ended), ["today"] = today, ["maxExecutionsPerDay"] = lim.MaxExecutionsPerDay,
                     ["healthy"] = healthy, ["unhealthyReason"] = unhealthyWhy, ["startFailuresInRow"] = startFailuresInRow, ["ackSeconds"] = lim.AckSeconds, ["relisted"] = relisted,
                     ["executions"] = new JsonArray(execs.Values.Where(e => !e.Ended).Select(e => (JsonNode)new JsonObject { ["worker"] = e.Name, ["item"] = e.Item, ["phase"] = e.Phase, ["execution"] = e.Execution, ["status"] = e.Status, ["started"] = e.StartedAt.ToString("o"), ["registered"] = e.RegisteredAt?.ToString("o"), ["detail"] = Detail(e.Name) }).ToArray()),
+                    ["owned"] = Owned?.Invoke(),
                     ["launches"] = new JsonArray(launches.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value }).ToArray()), ["maxLaunchesPerPhase"] = lim.MaxLaunchesPerPhase,
                     ["failures"] = new JsonArray(failures.Select(kv => (JsonNode)new JsonObject { ["item"] = kv.Key.Item, ["phase"] = kv.Key.Phase, ["count"] = kv.Value, ["error"] = failureErrors.GetValueOrDefault(kv.Key) }).ToArray()),
                     // the detail is read again while the runtime still knows the worker: its usage arrives after the end (a Cursor agent's reads zero at first)

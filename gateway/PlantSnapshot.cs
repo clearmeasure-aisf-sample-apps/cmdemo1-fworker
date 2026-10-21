@@ -15,6 +15,9 @@ using System.Text.Json.Nodes;
 // outright (no SIGTERM) leaves the previous one behind.
 sealed partial class Plant
 {
+    public Func<JsonArray>? CopilotOwnersSnapshot { get; set; }
+    public Action<JsonArray>? CopilotOwnersRestore { get; set; }
+
     public JsonObject Snapshot()
     {
         lock (gate)
@@ -38,6 +41,7 @@ sealed partial class Plant
                 {
                     ["holder"] = kv.Value.Holder, ["column"] = kv.Value.Column, ["leaseUntil"] = kv.Value.LeaseUntil?.ToString("o"), ["heartbeat"] = kv.Value.Heartbeat?.ToString("o"), ["parked"] = kv.Value.Parked
                 }))),
+                ["copilotOwners"] = CopilotOwnersSnapshot?.Invoke(),   // the items Copilot tasks own (CopilotCloudRuntime: one task, resumed)
                 ["digest"] = DigestSnapshotLocked()   // issue 105: what the patrol digest already reported (DigestCarry.cs)
             };
         }
@@ -97,6 +101,8 @@ sealed partial class Plant
                         ownedInfo[item] = new OwnedInfo(holder, Gated(oi["column"]?.ToString()), Time(oi["leaseUntil"]), Time(oi["heartbeat"]), oi["parked"] is JsonValue pv && pv.TryGetValue<bool>(out var pb) && pb, now);
             }
             if (Msg.On) RestoreDigestLocked(s["digest"], now);   // issue 105 (DigestCarry.cs)
+            // the Copilot owners come back too (their durable record is the item state; this spares a read per item at the next start)
+            if (s["copilotOwners"] is JsonArray co && CopilotOwnersRestore != null) { try { CopilotOwnersRestore(co); } catch { } }
             foreach (var w in workers.Values.Where(w => w.Out != null))
             {
                 var mine = ownerOf.Where(kv => kv.Value == w.Name).Select(kv => kv.Key).ToList();

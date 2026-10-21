@@ -23,6 +23,18 @@ function Cop-Cleanup([int[]]$Items) {
     [void](Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/runtimes/copilot-cloud/reset" -Method POST -Headers @{ Authorization = 'Bearer test-token' })
 }
 
+# plays one session: exchanges the code of its prompt, waits for the offer and accepts; answers the r1
+function Cop-Accept($Entry, [int]$Item) {
+    $r1 = "$((Cop-Exchange (Cop-Code $Entry) (Cop-Bootstrap)).body.token)"
+    $cur = ''
+    [void](Wait-Until -Seconds 30 { $e = Mcp-Events $r1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $Item }).Count -gt 0 })
+    [void](Mcp-Call 'item_accept' @{ item = $Item } $r1)
+    return $r1
+}
+function Cop-Sessions([int]$Item, [string]$Task, [string]$Phase) { , @((Cop-Tasks $Item) | Where-Object { $_.task -eq $Task -and "$($_.body.prompt)" -match "phase $Phase" }) }
+function Cop-NotOffered([int]$Item) { @((Get-FakeIssue $Item).comments | Where-Object { "$($_.body)" -match 'plant event=offered' -and "$($_.body)" -notmatch "cop-$Item-" }).Count -eq 0 }
+function Cop-Brief([int]$Item) { ((Get-FakeIssue $Item).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(140, $_.body.Length)) }) -join ' | ' }
+
 function Cop-Gh { "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders" }
 function Cop-Draft([string]$Head, [string]$Base, [string]$Title = '[WIP] Thing', [string]$Body = 'x') { Invoke-RestMethod "$(Cop-Gh)/pulls" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ title = $Title; head = $Head; base = $Base; body = $Body; draft = $true } | ConvertTo-Json) }
 function Cop-OpenPr([int]$Item, [string]$Head) { Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $Item; head = $Head; title = 'Thing' } | ConvertTo-Json) -SkipHttpErrorCheck }
@@ -40,7 +52,7 @@ $CopilotScenarios = [ordered]@{
         $t = (Cop-Tasks $n)[0]; $b = $t.body
         Check 'POST /agents/repos/{owner}/{repo}/tasks with X-GitHub-Api-Version 2026-03-10' ($t.path -eq '/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks' -and $t.apiVersion -eq '2026-03-10') ($t | ConvertTo-Json -Compress -Depth 3)
         Check 'the prompt is prompts/bootstrap/copilot.md with the item and phase' ("$($b.prompt)" -match 'You are a factory worker for ONE phase' -and "$($b.prompt)" -match 'fworker_connect' -and "$($b.prompt)" -match "#$n, phase technical-design") "$($b.prompt)"
-        Check 'the body: base_ref master, no pull request by Copilot, no model (the account default), nothing else' ($b.base_ref -eq 'master' -and $b.create_pull_request -eq $false -and -not $b.PSObject.Properties['model'] -and @($b.PSObject.Properties.Name).Count -eq 3) ($b | ConvertTo-Json -Compress)
+        Check 'the body: base_ref master, the owner task opens the item''s draft pull request at once, no model (the account default), nothing else' ($b.base_ref -eq 'master' -and $b.create_pull_request -eq $true -and -not $b.PSObject.Properties['model'] -and @($b.PSObject.Properties.Name).Count -eq 3) ($b | ConvertTo-Json -Compress)
         $code = Cop-Code $t
         Check 'the prompt carries a one-time code and no credential' ($code -ne '' -and -not ("$($b.prompt)" -match 'r1\.|b1\.|i1\.|w1\.|w2\.|fake-copilot'))
         Check 'neither the token nor the code is in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-copilot').Count -eq 0 -and @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch $code).Count -eq 0)
@@ -159,7 +171,8 @@ $CopilotScenarios = [ordered]@{
         Check 'no second Development task was started' ((Cop-DevTasks $n).Count -eq 1) (((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref)" }) -join '; ')
         $ftFrom = Get-Date
         # (a Development task relaunched before the sweep saw the move is stopped too, inside the wait: on a loaded runner it can start late)
-        Check 'Functional Testing gets its own task, from the branch Development reported' (Wait-Until -Seconds 90 { foreach ($tt in @((Cop-Tasks $n) | Where-Object { $_.state -in 'queued', 'in_progress' -and "$($_.body.prompt)" -match 'phase development' })) { [void](Fake 'copilot-task' @{ id = $tt.id; state = 'cancelled' }) }; @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.body.base_ref -eq $br -and $_.body.create_pull_request -eq $false }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.body.base_ref) $($_.body.create_pull_request)" }) -join '; ')
+        Check 'Functional Testing is a follow-up session of the same task, on its pull request' (Wait-Until -Seconds 90 { foreach ($tt in @((Cop-Tasks $n) | Where-Object { $_.state -in 'queued', 'in_progress' -and "$($_.body.prompt)" -match 'phase development' })) { [void](Fake 'copilot-task' @{ id = $tt.id; state = 'cancelled' }) }; @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.task -eq $t.id -and $_.via -eq 'comment' -and $_.pr -eq $draft.number }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.task) $($_.via) $($_.pr)" }) -join '; ')
+        Check 'one task for the item, no second POST' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1)
     } finally { Cop-Cleanup @($n) }
 }
 
@@ -184,10 +197,10 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'copilot-task' @{ id = $t1.id; state = 'completed'; headRef = $a })
         Check 'the task''s end leaves Development done pending checks in the gateway' (Wait-Until -Seconds 30 { (Cop-Comments $n '*Development is done pending checks*').Count -ge 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
         Check 'the red checks hand it back to Development to fix forward' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Re-dispatching Development to fix forward*').Count -ge 1 })
-        Check 'the fix-forward Development task starts from the pull request''s branch and names it' (Wait-Until -Seconds 60 { @((Cop-Tasks $n) | Where-Object { $_.id -ne $t1.id -and "$($_.body.prompt)" -match 'phase development' }).Count -gt 0 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        Check 'the fix-forward is a follow-up session of the same task' (Wait-Until -Seconds 60 { @((Cop-Tasks $n) | Where-Object { $_.id -ne $t1.id -and "$($_.body.prompt)" -match 'phase development' }).Count -gt 0 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
         $t2 = @((Cop-Tasks $n) | Where-Object { $_.id -ne $t1.id })[0]
-        Check 'its base_ref is the pull request''s head branch, not master' ($t2.body.base_ref -eq $a -and $t2.body.create_pull_request -eq $true) ($t2.body | ConvertTo-Json -Compress)
-        Check 'its prompt names the item''s pull request and says the fix goes there' ("$($t2.body.prompt)" -match "This item's pull request: #$($d1.number), branch $([regex]::Escape($a))" -and "$($t2.body.prompt)" -match "Fix #$($d1.number)") "$($t2.body.prompt)"
+        Check 'started by a @copilot comment on the item''s pull request, in the owner task' ($t2.task -eq $t1.id -and $t2.via -eq 'comment' -and $t2.pr -eq $d1.number -and @((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1) ($t2 | ConvertTo-Json -Compress -Depth 4)
+        Check 'its prompt names the phase, the pull request and what changed (the red checks)' ("$($t2.body.prompt)" -match "phase Development\. Work on PR #$($d1.number), branch $([regex]::Escape($a))" -and "$($t2.body.prompt)" -match 'What changed: .*checks failed') "$($t2.body.prompt)"
         Check 'the prompt asks for the integration tests and the migration tests of a database change' ("$($t2.body.prompt)" -match 'dotnet test\s+src/IntegrationTests' -and "$($t2.body.prompt)" -match 'migration test')
         # Copilot made its own branch from the item's branch and opened its draft against it (as the agent tasks API does), naming the old one
         $b = "copilot/thing-fix-$n"
@@ -408,6 +421,116 @@ $CopilotScenarios = [ordered]@{
         [void](Mcp-Call 'session_end' @{ reason = 'done' } $r1)
         Check 'the gateway merges the pull request through merge-async' (Wait-Until -Seconds 120 { (Cop-FakePr $d.number).merged }) (Cop-FakePr $d.number | ConvertTo-Json -Compress -Depth 3)
         Check 'and records the merge on the item' (Wait-Until -Seconds 30 { (Cop-Comments $n '*squash-merged PR #*').Count -ge 1 -or (Cop-Comments $n '*was merged as*').Count -ge 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: one task owns the item end to end: Technical Design opens the draft, Development and Functional Testing are follow-up sessions of the same task on that pull request, no other worker is offered the item, and the owner is done only after the merge and a green master [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot owned item' 'Change src/App/Own.cs and its unit test.' @('factory worker', 'Auto Merge', 'env:tdd')
+        Check 'the Technical Design task is created and asks for the item''s draft pull request at once' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
+        $t = (Cop-Tasks $n)[0]
+        Check 'create_pull_request is set for the first session' ($t.body.create_pull_request -eq $true) ($t.body | ConvertTo-Json -Compress)
+        Check 'the item names its owner task, once' (Wait-Until -Seconds 30 { (Cop-Comments $n '*Owner:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
+        Check 'the item state records the owner' ((Get-ItemState $n).copilot_task.id -eq $t.id)
+        $br = "copilot/own-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Own.cs') })
+        $d = Cop-Draft $br 'master' '[WIP] Own'
+        $r1 = Cop-Accept $t $n
+        [void](Mcp-Call 'session_end' @{ reason = 'design done' } $r1)
+        [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
+        Check 'the session ends; the item stays owned, no session runs' (Wait-Until -Seconds 30 { (Cop-Status).running -eq 0 -and @((Cop-Status).owned | Where-Object { $_.item -eq $n -and $_.task -eq $t.id }).Count -eq 1 }) ((Cop-Status) | ConvertTo-Json -Compress -Depth 5)
+        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        Check 'Development is a follow-up session of the same task: a @copilot comment on its draft' (Wait-Until -Seconds 60 { @((Cop-Sessions $n $t.id 'development') | Where-Object { $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        $s1 = (Cop-Sessions $n $t.id 'development')[0]
+        Check 'the follow-up prompt names the phase, the pull request, the ownership and the one-step rule' ("$($s1.body.prompt)" -match "owns #$n" -and "$($s1.body.prompt)" -match "PR #$($d.number), branch $([regex]::Escape($br))" -and "$($s1.body.prompt)" -match 'never poll or wait for CI') "$($s1.body.prompt)"
+        Check 'the follow-up carries a fresh one-time code of its own' ((Cop-Code $s1) -ne '' -and (Cop-Code $s1) -ne (Cop-Code $t))
+        $x1 = Cop-Exchange (Cop-Code $s1) (Cop-Bootstrap)
+        Check 'which exchanges for the new session''s r1' ($x1.status -eq 200 -and "$($x1.body.name)" -like "cop-$n-*")
+        $w1 = "$($x1.body.token)"; $cur1 = ''
+        [void](Wait-Until -Seconds 30 { $e = Mcp-Events $w1 $cur1 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
+        [void](Mcp-Call 'item_accept' @{ item = $n } $w1)
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Own.cs', 'src/UnitTests/OwnTests.cs') })
+        $op = Cop-OpenPr $n $br
+        Check 'pr_open takes the draft over as the item''s pull request' ($op.ok -and $op.pullRequest.number -eq $d.number) ($op | ConvertTo-Json -Compress -Depth 4)
+        [void](Mcp-Call 'session_end' @{ reason = 'pushed' } $w1)
+        [void](Fake 'copilot-task' @{ id = $s1.id; state = 'completed' })
+        Check 'the gateway waits for the checks and moves the item to Functional Testing' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column)"
+        Check 'Functional Testing is the next session of the same task' (Wait-Until -Seconds 60 { @((Cop-Sessions $n $t.id 'functional-testing') | Where-Object { $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        $s2 = (Cop-Sessions $n $t.id 'functional-testing')[0]
+        $w2 = Cop-Accept $s2 $n
+        $rv = Mcp-Call 'item_record_review' @{ item = $n; column = 'Functional Testing'; role = 'reviewer'; text = "Criteria exercised.`nREVIEW: COMPLETE" } $w2
+        $v = Mcp-Call 'item_validation_verdict' @{ item = $n; passed = $true; summary = 'The criterion is met.'; pr = $d.number; review_ref = "$($rv.body.review_ref)"; head_sha = "$((Cop-FakePr $d.number).sha)" } $w2
+        Check 'the PASS verdict is recorded' (-not $v.isError) ($v | ConvertTo-Json -Compress -Depth 5)
+        [void](Mcp-Call 'session_end' @{ reason = 'verdict' } $w2)
+        [void](Fake 'copilot-task' @{ id = $s2.id; state = 'completed' })
+        Check 'the gateway merges the pull request' (Wait-Until -Seconds 120 { (Cop-FakePr $d.number).merged })
+        Check 'master green: the owner is done, with the task''s link' (Wait-Until -Seconds 120 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
+        $cs = @((Get-FakeIssue $n).comments | ForEach-Object { "$($_.body)" })
+        $gi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'master is GREEN' }); $oi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -like '*Owner done:*' })
+        Check 'the owner is done only after master is green' ($gi -ge 0 -and $oi -gt $gi) "green $gi done $oi"
+        Check 'the done comment carries the session link' ("$($cs[$oi])" -match "https://github\.com/copilot/tasks/$([regex]::Escape($t.id))")
+        Check 'one task, three sessions, never a second task' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1 -and (Cop-Tasks $n).Count -eq 3) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.via)" }) -join '; '
+        Check 'no worker but the task''s sessions was offered the item' (Cop-NotOffered $n) (Cop-Brief $n)
+        Check 'status: the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: an FT FAIL sends the item back to Development as a follow-up session of the owner task, naming the findings [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot FT fail' 'Change src/App/Ft.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
+        Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
+        $t = (Cop-DevTasks $n)[0]
+        $br = "copilot/ft-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Ft.cs') })
+        $d = Cop-Draft $br 'master' '[WIP] Ft'
+        $w = Cop-Accept $t $n
+        [void](Cop-OpenPr $n $br)
+        [void](Mcp-Call 'session_end' @{ reason = 'pushed' } $w)
+        [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
+        Check 'Functional Testing follows as a session of the same task' (Wait-Until -Seconds 120 { (Cop-Sessions $n $t.id 'functional-testing').Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        $s2 = (Cop-Sessions $n $t.id 'functional-testing')[0]
+        $w2 = Cop-Accept $s2 $n
+        $rv = Mcp-Call 'item_record_review' @{ item = $n; column = 'Functional Testing'; role = 'reviewer'; text = "The empty title is accepted.`nREVIEW: COMPLETE" } $w2
+        $v = Mcp-Call 'item_validation_verdict' @{ item = $n; passed = $false; summary = 'FAIL: the empty title is accepted'; pr = $d.number; review_ref = "$($rv.body.review_ref)"; head_sha = "$((Cop-FakePr $d.number).sha)" } $w2
+        Check 'the FAIL verdict is recorded' (-not $v.isError) ($v | ConvertTo-Json -Compress -Depth 5)
+        [void](Mcp-Call 'session_end' @{ reason = 'verdict' } $w2)
+        [void](Fake 'copilot-task' @{ id = $s2.id; state = 'completed' })
+        Check 'the rework is a Development session of the same task on the same pull request' (Wait-Until -Seconds 90 { @((Cop-Sessions $n $t.id 'development') | Where-Object { $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -eq 1 }) ((Cop-Tasks $n) | ConvertTo-Json -Compress -Depth 4)
+        $s3 = @((Cop-Sessions $n $t.id 'development') | Where-Object { $_.via -eq 'comment' })[0]
+        Check 'its prompt names what changed: the findings' ("$($s3.body.prompt)" -match 'What changed: .*empty title') "$($s3.body.prompt)"
+        Check 'still one task' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1)
+        Check 'no other worker was offered the item' (Cop-NotOffered $n) (Cop-Brief $n)
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: a red master after the merge resumes the owner task once to fix forward; the owner is done only once master is green [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot red master' 'Change src/App/Red.cs.' @('factory worker', 'Auto Merge', 'env:tdd')
+        Check 'the owner task is created' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
+        $t = (Cop-Tasks $n)[0]
+        $br = "copilot/red-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Red.cs') })
+        $d = Cop-Draft $br 'master' "Red (#$n)"
+        $w = Cop-Accept $t $n
+        [void](Mcp-Call 'session_end' @{ reason = 'done' } $w)
+        [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
+        Check 'its session ends' (Wait-Until -Seconds 30 { (Cop-Status).running -eq 0 })
+        # the item was merged (here: written as the settle leaves it) and master went red for the merge commit
+        [void](Fake 'move' @{ number = $n; column = 'Release Queue' })
+        $sha = 'abcdef1' + ('0' * 33)
+        Set-ItemState $n { param($st) $st.Remove('claim'); $st.pr = @{ number = $d.number; branch = $br }; $st.merge = @{ sha = $sha; merged_at = (Get-Date).ToUniversalTime().ToString('o'); awaiting = 'master-broken'; rerun_attempted = $true }; $st.park = (New-TestPark 'master-broken' @{ failed = @('Build result'); sha = $sha }) }
+        Check 'the owner task is resumed on its pull request to fix master forward' (Wait-Until -Seconds 60 { @((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and $_.via -eq 'comment' -and $_.pr -eq $d.number -and "$($_.body.prompt)" -match 'master is red' }).Count -eq 1 }) ((Cop-State).tasks | ConvertTo-Json -Compress -Depth 4)
+        $fx = @((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and  "$($_.body.prompt)" -match 'master is red' })[0]
+        Check 'its prompt names the failed check and asks for one pull request against master' ("$($fx.body.prompt)" -match 'Build result' -and "$($fx.body.prompt)" -match 'ONE pull request against master') "$($fx.body.prompt)"
+        Start-Sleep -Seconds 25
+        Check 'once per merge commit' (@((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and  "$($_.body.prompt)" -match 'master is red' }).Count -eq 1)
+        Check 'not done while master is red' ((Cop-Comments $n '*Owner done:*').Count -eq 0 -and @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 1)
+        Set-ItemState $n { param($st) $st.merge.green_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = 'release-candidate'; $st.merge.rc_deadline = (Get-Date).ToUniversalTime().AddHours(1).ToString('o'); $st.Remove('park') }
+        Check 'master green: the owner is done' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
+        Check 'and the item is no longer owned' (Wait-Until -Seconds 20 { @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 0 })
     } finally { Cop-Cleanup @($n) }
 }
 }
