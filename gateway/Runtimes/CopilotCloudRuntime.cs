@@ -21,7 +21,7 @@ sealed class CopilotCloudSettings
     public bool CiRelease = true;
     public double CiReleaseSeconds = 120;
     // the credit guard: a task whose sessions report more ai_credits than this is ended (its r1 revoked) and its item parked credit-guard; 0 = off
-    public double MaxCreditsPerTask = 3e9;
+    public double MaxCreditsPerTask = 0;
     public string Environment = "tdd";
     public string ApiUrl = "https://api.github.com", ApiVersion = "2026-03-10", Token = "", GatewayUrl = "", Model = "",
         Repository = "clearmeasure-aisf-sample-apps/cmdemo1-workorders", DefaultBranch = "master";
@@ -203,6 +203,30 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail
         var url = TaskUrl(j?["html_url"]?.ToString(), id);
         lock (tasks) tasks[r.WorkerName] = new Task_ { Id = id, Url = url, Worker = r.WorkerName, Item = r.Item, Phase = r.Phase, State = j?["state"]?.ToString() ?? "queued" };
         return new(true, id, "", url);
+    }
+
+    // A task for a role that is not a worker (the on-demand manager, ManagerCopilot.cs): its prompt and the default branch as base_ref, no pull
+    // request by Copilot, no model unless api.copilot.model names one. It is not in the worker table: the runtime manager never lists it.
+    public async Task<(bool Ok, string Id, string Url, string Error)> LaunchRole(string promptText, CancellationToken ct)
+    {
+        var body = new JsonObject { ["prompt"] = promptText, ["base_ref"] = cfg.DefaultBranch, ["create_pull_request"] = false };
+        if (cfg.Model != "") body["model"] = cfg.Model;
+        int s; JsonNode? j;
+        try { (s, j) = await Send(HttpMethod.Post, TasksPath, body, ct); }
+        catch (Exception e) { return (false, "", "", "launch-" + e.GetType().Name); }
+        var id = j?["id"]?.ToString() ?? "";
+        if (s is not (200 or 201 or 202) || id == "") return (false, "", "", s is 200 or 201 or 202 ? "launch-no-id" : $"launch-{s}");
+        return (true, id, j?["html_url"]?.ToString() ?? "", "");
+    }
+
+    // The state of such a task: Running, Succeeded, Failed or Stopped as for a worker's, the session link (html_url) and the usage its sessions report.
+    public async Task<(bool Ok, string Status, string Url, JsonObject? Usage)> ReadRole(string id, CancellationToken ct)
+    {
+        var (s, j) = await Send(HttpMethod.Get, $"{TasksPath}/{Uri.EscapeDataString(id)}", null, ct);
+        if (s != 200) return (false, "Running", "", null);
+        var st = j?["state"]?.ToString() ?? "";
+        var status = st switch { "completed" or "idle" => "Succeeded", "failed" or "timed_out" => "Failed", "cancelled" => "Stopped", _ => "Running" };
+        return (true, status, j?["html_url"]?.ToString() ?? "", Usage(j));
     }
 
     // The agent tasks API has no cancel: the end is recorded here, the code is spent, and the manager revokes the name (RevokeOnEnd), so the

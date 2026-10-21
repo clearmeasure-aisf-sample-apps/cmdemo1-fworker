@@ -52,6 +52,7 @@ foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerA
 . (Join-Path $PSScriptRoot 'mcp.ps1')               # the MCP server at /mcp (gateway/Mcp/): suite 'mcp' (uses the helpers of owner.ps1)
 . (Join-Path $PSScriptRoot 'cursor.ps1')            # the api mode, Cursor Cloud Agents against the fake Cursor API: suite 'cursor'
 . (Join-Path $PSScriptRoot 'copilot.ps1')           # the Copilot cloud agent against the fake agent tasks API: suite 'copilot'
+. (Join-Path $PSScriptRoot 'copilot-manager.ps1')   # the plant manager on demand as a short Copilot task: suite 'copilot-manager'
 . (Join-Path $PSScriptRoot 'envscope.ps1')           # the env: label: two gateways (tdd, uat) on one board; suite 'envscope'
 . (Join-Path $PSScriptRoot 'keeper.ps1')            # the backlog keeper session (gateway/Keeper.cs): scenarios named "keeper: ..." join the manager suite
 foreach ($k in $KeeperScenarios.Keys) { $ManagerScenarios[$k] = $KeeperScenarios[$k] }
@@ -117,11 +118,19 @@ $SuiteDefs = @(
     # the Copilot cloud agent (copilot.ps1, docs/design/copilot-cloud-agent.md): the fake agent tasks API, a 0.25-minute deadline, a 20 s window
     @{ Name = 'copilot'; Policy = 'auto'; Set = $CopilotScenarios; Env = 'copilot'; DefaultEnvLabel = 'env:tdd'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
-            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 10; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
+            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 10; maxCreditsPerTask = 10000000000; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
             # cmdemo1's default runtime: an item without a runtime: label goes to the Copilot cloud agent
             runtimes = @{ preferConnected = $true; routing = @(@{ phase = '*'; runtime = 'copilot-cloud' }) } } }
     # the env: label (envscope.ps1, environment-test-factories.md 3): the suite's gateway is tdd with scoping on, its scenario starts a uat one
     @{ Name = 'envscope'; Policy = 'auto'; Set = $EnvScopeScenarios; Env = 'envscope'; Timing = @{ staleItemMinutes = 600 } }
+    # the plant manager on demand (copilot-manager.ps1, docs/design/agents-roles-launch.md): the fake agent tasks API, a manager that is enabled with a 15 s cooldown,
+    # a cap of 3 tasks a day and a 1-minute deadline; a question is late after 3 s
+    @{ Name = 'copilot-manager'; Policy = 'auto'; Set = $CopilotManagerScenarios; Env = 'copilot'; DefaultEnvLabel = 'env:tdd'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3; ratePerMinute = 100000; pairPer10Min = 100000 }
+        Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+            manager = @{ enabled = $true; allowedNames = @('supervisor'); allowedAskers = @('alice', 'bob'); answerSlaSeconds = 3; turnBudgetPerHour = 100; turnBudgetPerDay = 1000; stepBudgetPerHour = 1000 }
+            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 5; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 600; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders'
+                manager = @{ enabled = $true; maxPerDay = 3; cooldownMinutes = 0.25; maxMinutes = 1 } } }
+            runtimes = @{ preferConnected = $true; routing = @(@{ phase = '*'; runtime = 'copilot-cloud' }) } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }

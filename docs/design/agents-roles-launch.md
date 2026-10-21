@@ -476,3 +476,40 @@ Settings: `api.cursor.enabled` (false), `maxConcurrent` 1, `maxMinutes` 60, `max
 
 Tier 1: suites `mcp` (owner tools, r1, worker tools, prompts) and `cursor` (the adapter against the fake Cursor API of
 `tests/FakeGitHub`), both in the `operator` job of `tests.yml`.
+
+## 18. The manager as a short Copilot task (2026-10-21)
+
+Owner request (2026-10-21): the gateway launches the manager role on demand as a short Copilot task when there is something for it to do.
+Built in `gateway/Runtimes/ManagerCopilot.cs`; Tier 1 suite `copilot-manager` (`tests/scenarios/copilot-manager.ps1`).
+
+- **Trigger** (`Plant.ManagerWork`): a pass every 30 s by the acting gateway. It launches when (a) no supervisor is present (nobody holds
+  the slot and was heard within the presence window), (b) the digest of this moment holds an entry that needs a judgement and is new or
+  worse than at the last launch (`stalled`, `waiting`, `refusals`, `parked`, or a `late-question`: an open question nobody answered within
+  `manager.answerSlaSeconds`; an escalated question is the operator's and does not trigger), and (c) the manager's delivery budget
+  (`budgetHour`, `budgetDay`; messaging 3.9) has room (questions use the questions' share, patrol entries the whole). `next` in the status says why
+  not: `nothing-pending`, `supervisor-present`, `budget`, `cooldown`, `daily-cap`.
+- **Limits**: one task at a time; `api.copilot.manager.cooldownMinutes` (15) after the end of the last; `maxPerDay` (6) launches in 24
+  hours; `maxMinutes` (10), past which the task is ended and its name revoked. No token cap (owner decision: the credit guard stays off).
+  Config: `api.copilot.manager {enabled, maxPerDay, cooldownMinutes, maxMinutes}`, with `api.copilot.environments.<env>.manager` over it:
+  `enabled: true` in tdd, written and `enabled: false` in uat and prod (`config/deploy.overrides.json`). `FACTORY_COPILOT_MANAGER_ENABLED`
+  overrides the switch on a gateway app. It needs the Copilot runtime on and `manager.enabled`.
+- **The task**: `POST /agents/.../tasks` as for a worker, `base_ref` the default branch, `create_pull_request` false, no model (the
+  account's Auto). Prompt `prompts/bootstrap/copilot-manager.md` (edits nothing, connect, `get_prompt`, `session_end`) with the one-time code;
+  the served prompt is `prompts/manager/patrol.md` (role `manager`, phase `patrol`): digest and open questions, answer or `manager_note`
+  to the operator, `manager_action` per entry, `manager_patrol_ack`, `session_end`. It is not in the worker table of the runtime manager.
+- **Role token**: an `r1` of role `manager`, mode `api`, phase `patrol`, name `mgr-cop-<6 hex>` (a name of `manager.allowedNames` is reserved
+  and cannot be an r1 name). `RoleTools.Sets["manager"]` is `manager_digest`, `manager_questions`, `manager_answer`, `manager_note`,
+  `manager_action`, `manager_item`, `manager_patrol_ack`, `session_end`, `get_prompt`: no worker verb, no merge, approve, verdict, hold, file,
+  git or pull request tool. Each tool acts as the supervisor credential of that name only while the task runs (`ManagerCopilot.Live`), so the
+  endpoints' own rules apply unchanged: the active supervisor, the step budget, `manager-action`'s guard rails (mode, policy codes, limit per hour
+  and per item, `hold:owner`), and `Auth.ManagerVerbs`.
+- **Presence**: the gateway registers the task's name in the supervisor slot at launch (`Plant.RegisterSupervisor`, which delivers the open
+  questions and the baseline as for a streaming supervisor, dropped on the floor) and lets it go at the end (`Plant.SupervisorEnded`:
+  not present from then on). `/status` `manager.present` is true while the task runs; `manager.copilot` holds `enabled`, `present`, `task`, `url`
+  (the task's `html_url`, the Copilot session link), `launches`, `today`, `last`, `lastEnd`, `minutes`, `status`, `usage` (the sessions' reported
+  `ai_credits`), `next` and `error`. The dashboard's supervisor row shows it online while it runs.
+- **Session link**: the `manager-action` line a task causes in an item's journal ends with `([Copilot session](url))` (`session` field, set by
+  the gateway from the running task, never by the caller).
+- **End**: `session_end`, the task's own end (`completed`, `failed`, ...), or `maxMinutes`; the name is revoked, the code spent. Log lines
+  `{"manager":"copilot-launched"|"copilot-ended"|"copilot-launch-failed", ...}` carry the task, minutes and usage, no token.
+
