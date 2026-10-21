@@ -111,14 +111,14 @@ $SuiteDefs = @(
     # the MCP server (mcp.ps1, docs/design/agents-roles-launch.md 6): owner mode, messaging on for every name
     @{ Name = 'mcp'; Policy = 'auto'; Set = $McpScenarios; Env = 'owner'; Timing = @{ staleItemMinutes = 600 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true } } }
-    # the api mode (cursor.ps1, agents-roles-launch.md 10): the fake Cursor API, a 0.25-minute deadline, a 20 s window for the agent
+    # the api mode (cursor.ps1, agents-roles-launch.md 10): the fake Cursor API, a 5-minute deadline (the deadline itself: suite cursor-deadline), a 20 s window for the agent
     @{ Name = 'cursor'; Policy = 'auto'; Set = $CursorScenarios; Env = 'cursor'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
-            api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; idleGraceSeconds = 2; usageRetrySeconds = 0.5; usageWaitSeconds = 20; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
-    # the Copilot cloud agent (copilot.ps1, docs/design/copilot-cloud-agent.md): the fake agent tasks API, a 0.25-minute deadline, a 20 s window
+            api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 5; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; idleGraceSeconds = 2; usageRetrySeconds = 0.5; usageWaitSeconds = 20; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
+    # the Copilot cloud agent (copilot.ps1, docs/design/copilot-cloud-agent.md): the fake agent tasks API, a 5-minute deadline (the deadline itself: suite copilot-deadline), a 300 s window (an offer that lapses stops the task and the next launch settles the item on: a scenario that plays no session must not race it)
     @{ Name = 'copilot'; Policy = 'auto'; Set = $CopilotScenarios; Env = 'copilot'; DefaultEnvLabel = 'env:tdd'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
-            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 10; maxCreditsPerTask = 10000000000; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
+            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 5; maxExecutionsPerDay = 1000; ackSeconds = 300; listSeconds = 1; ciReleaseSeconds = 10; maxCreditsPerTask = 10000000000; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
             # cmdemo1's default runtime: an item without a runtime: label goes to the Copilot cloud agent
             runtimes = @{ preferConnected = $true; routing = @(@{ phase = '*'; runtime = 'copilot-cloud' }) } } }
     # the env: label (envscope.ps1, environment-test-factories.md 3): the suite's gateway is tdd with scoping on, its scenario starts a uat one
@@ -131,6 +131,16 @@ $SuiteDefs = @(
             api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 5; maxExecutionsPerDay = 1000; ackSeconds = 20; listSeconds = 1; ciReleaseSeconds = 600; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders'
                 manager = @{ enabled = $true; maxPerDay = 3; cooldownMinutes = 0.25; maxMinutes = 1 } } }
             runtimes = @{ preferConnected = $true; routing = @(@{ phase = '*'; runtime = 'copilot-cloud' }) } } }
+    # the deadline of a Copilot task (copilot.ps1): the copilot suite with a 0.25-minute api.copilot.maxMinutes, for that one scenario (a 300 s window, so the deadline, not a lapsed offer, ends the task)
+    @{ Name = 'copilot-deadline'; Policy = 'auto'; Set = $CopilotDeadlineScenarios; Env = 'copilot'; DefaultEnvLabel = 'env:tdd'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
+        Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+            api = @{ copilot = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 300; listSeconds = 1; ciReleaseSeconds = 10; maxCreditsPerTask = 10000000000; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' } }
+            # cmdemo1's default runtime: an item without a runtime: label goes to the Copilot cloud agent
+            runtimes = @{ preferConnected = $true; routing = @(@{ phase = '*'; runtime = 'copilot-cloud' }) } } }
+    # the deadline of a Cursor agent (cursor.ps1): a 0.25-minute api.cursor.maxMinutes and a 300 s window, so the deadline, not a lapsed offer, ends it
+    @{ Name = 'cursor-deadline'; Policy = 'auto'; Set = $CursorDeadlineScenarios; Env = 'cursor'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
+        Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+            api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 300; listSeconds = 1; idleGraceSeconds = 2; usageRetrySeconds = 0.5; usageWaitSeconds = 20; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
