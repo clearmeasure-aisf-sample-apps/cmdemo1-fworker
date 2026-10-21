@@ -173,10 +173,10 @@ var cursorManager = ownerMode && tokenSecret.Length > 0 && cursorSettings.On
 var copilotSettings = CopilotCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
 var copilotCiRelease = new CopilotCiRelease { RefusedRetry = TimeSpan.FromSeconds(Math.Max(10, 5 * copilotSettings.CiReleaseSeconds)) };   // the CI release of the Copilot agent's held workflow runs (gateway/Runtimes/CopilotCiRelease.cs)
 var copilotCodes = new CopilotCodes();
-Func<int, string, string, ItemPr?, string> copilotPrompt = (_, _, _, _) => "";
+Func<int, string, string, ItemPr?, string?, string> copilotPrompt = (_, _, _, _, _) => "";
 Func<int, CancellationToken, Task<ItemPr?>> copilotItemPr = (_, _) => Task.FromResult<ItemPr?>(null);
 var copilotRuntime = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
-    ? new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr) => copilotPrompt(item, phase, code, pr), itemPr: (item, ct) => copilotItemPr(item, ct)) : null;
+    ? new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr, why) => copilotPrompt(item, phase, code, pr, why), itemPr: (item, ct) => copilotItemPr(item, ct)) : null;
 var copilotManager = copilotRuntime != null
     ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
         copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
@@ -958,6 +958,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway releases the Copilot agent's held workflow runs by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "park-item")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway parks an item runtime-failed by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
+    if (verb is "copilot-owner")
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway records a Copilot task's ownership of an item by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "copilot-settle")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway settles a Copilot Development task by itself, at its launch and its end", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "unpark-item")
@@ -1033,6 +1035,7 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         if (Auth.ManagerNameActions.Contains(mAction))
         {
             if (!Auth.ValidName(mWorker) || messaging.Reserved.Contains(mWorker)) return MgrNo(400, "usage", "worker is the name of a worker session", 2);
+            if (mAction is "restart-session" or "drain" && plant.ManagerRuntimeOwned(0, mWorker)) return MgrNo(409, "runtime-owner", "that session is a runtime task that is still running; the runtime manager ends it past its deadline", 10);
             var (nt, nra, ncd) = plant.ManagerActionBegin(mAction, 0, mWorker, mPolicy, mBy);
             if (nt == null && ncd == "name-action-limit") return MgrNo(409, "name-action-limit", $"the plant manager drained or restarted {mWorker} {plant.MgrActions.PerItemPerDay} times in 24 hours: leave it to the operator", 10, nra);
             if (nt == null) return MgrNo(429, "action-limit", $"the plant manager's limit of {plant.MgrActions.PerHour} actions an hour is reached; leave the rest to the operator", 20, nra);
@@ -1054,6 +1057,8 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         // a pin names a session this gateway knows (registered since its start): a typo would hold the item for nobody
         if (mAction == "pin" && !(Auth.ValidName(mWorker) && plant.KnowsWorker(mWorker))) return MgrNo(404, "no-such-worker", "pin names a worker session that has registered with this gateway", 12);
         authorized["reason"] = mReason;
+        // a runtime task (Copilot, Cursor, CAE job) that still runs is neither stalled nor disconnected: the manager leaves its owner alone
+        if (mAction is "release-owner" or "requeue" && plant.ManagerRuntimeOwned(mItem, "")) return MgrNo(409, "runtime-owner", "the owner of this item is a runtime task that is still running; the runtime manager ends it past its deadline", 10);
         var (it0, ira, _) = plant.ManagerActionBegin(mAction, mItem, mWorker, mPolicy, mBy);
         if (it0 == null) return MgrNo(429, "action-limit", $"the plant manager's limit of {plant.MgrActions.PerHour} actions an hour is reached; leave the rest to the operator", 20, ira);
         mgrTicket = it0;
@@ -2175,6 +2180,72 @@ if (copilotRuntime != null && copilotManager != null)
 {
     copilotRuntime.Settle = (item, stage, head, _) => CopilotSettle(item, stage, head);
     copilotManager.Ending = async e => e.Phase.Equals("Development", StringComparison.OrdinalIgnoreCase) && await CopilotSettle(e.Item, "end", copilotRuntime.HeadOf(e.Item)) == "awaiting";
+    // One task, resumed (docs/design/copilot-cloud-agent.md): the owner record lives in the item state (rule verb copilot-owner)
+    async Task<JsonNode?> OwnerVerb(JsonObject args)
+    {
+        var (rc, output) = await app.Services.GetRequiredService<Runner>().RunAsync("copilot-owner", args.ToJsonString(), TimeSpan.FromSeconds(120));
+        if (rc != 0) throw new InvalidOperationException($"copilot-owner {args["action"]} answered exit {rc}");
+        return JsonNode.Parse(output);
+    }
+    copilotRuntime.LoadOwner = async (item, _) =>
+    {
+        var t = (await OwnerVerb(new JsonObject { ["item"] = item, ["action"] = "get" }))?["task"];
+        if (t is not JsonObject || t["id"]?.ToString() is not { Length: > 0 } id) return null;
+        var o = new CopilotOwner { Item = item, TaskId = id, Url = t["url"]?.ToString() ?? "", Branch = t["branch"]?.ToString() ?? "", Phase = t["phase"]?.ToString() ?? "", Pr = int.TryParse(t["pr"]?.ToString(), out var p) ? p : 0, WaitingOn = "restored" };
+        if (DateTime.TryParse(t["since"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var since)) o.Since = since;
+        foreach (var x in (t["previous"] as JsonArray) ?? new JsonArray()) if (x?.ToString() is { Length: > 0 } px) o.Previous.Add(px);
+        return o;
+    };
+    copilotRuntime.SaveOwner = async o => await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "set", ["task"] = new JsonObject { ["id"] = o.TaskId, ["url"] = o.Url, ["branch"] = o.Branch, ["pr"] = o.Pr, ["phase"] = o.Phase } });
+    copilotRuntime.WhyResume = async (item, _) => (await OwnerVerb(new JsonObject { ["item"] = item, ["action"] = "status" }))?["rework"]?.ToString() ?? "";
+    plant.CopilotOwns = copilotRuntime.Owns;
+    plant.CopilotOwnersSnapshot = copilotRuntime.OwnedJson;
+    plant.CopilotOwnersRestore = copilotRuntime.Restore;
+    copilotManager.Owned = copilotRuntime.OwnedJson;
+    // The owner watch: every api.copilot.ciReleaseSeconds, by the acting gateway, for each owned item with no session running: what it waits on
+    // (its checks, the next phase, the merge, master). Done (merged, master green for the merge): the ownership is closed with a comment that
+    // links the task. A red master after the merge: the owner task is resumed once per merge commit to fix forward on a new pull request.
+    _ = Task.Run(async () =>
+    {
+        var ct = app.Lifetime.ApplicationStopping;
+        while (!ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds), ct); } catch (OperationCanceledException) { return; }
+            if (!leader.MayAct || !copilotManager.On) continue;
+            foreach (var o in copilotRuntime.Owners())
+            {
+                if (copilotRuntime.Running(o.Item)) continue;
+                try
+                {
+                    var j = await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "status" });
+                    var waiting = j?["waiting"]?.ToString() ?? "";
+                    copilotRuntime.Waiting(o.Item, j?["column"]?.ToString() ?? "", waiting);
+                    if (waiting == "done")
+                    {
+                        await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "close" });
+                        copilotRuntime.Close(o.Item);
+                        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "owner-done", ["item"] = o.Item, ["task"] = o.TaskId, ["url"] = o.Url, ["sessions"] = o.Sessions }.ToJsonString());
+                    }
+                    else if (waiting == "closed")
+                    {
+                        await OwnerVerb(new JsonObject { ["item"] = o.Item, ["action"] = "close", ["unmerged"] = true });
+                        copilotRuntime.Close(o.Item);
+                        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["copilot"] = "owner-ended", ["item"] = o.Item, ["task"] = o.TaskId, ["reason"] = "item closed without a merge" }.ToJsonString());
+                    }
+                    else if (waiting == "master-broken" && j?["merge_sha"]?.ToString() is { Length: > 0 } sha && o.MasterFixFor != sha && copilotManager.CanStart().Ok)
+                    {
+                        var prn = o.Pr > 0 ? o.Pr : int.TryParse(j["pr"]?.ToString(), out var spr) ? spr : 0;
+                        var failed = string.Join(", ", ((j["failed"] as JsonArray) ?? new JsonArray()).Select(x => x?.ToString()).Where(x => !string.IsNullOrEmpty(x)));
+                        var text = $"Follow-up session of the task that owns #{o.Item}: master is red after PR #{prn} was merged as {sha[..Math.Min(7, sha.Length)]}" + (failed != "" ? $" (failed: {failed})" : "") +
+                            $". Fix forward: make a new branch from master, fix the failing checks, run the tests, push and open ONE pull request against master titled \"Fix master after #{prn} (#{o.Item})\". Never wait for CI; end the session after opening it.";
+                        o.MasterFixFor = sha;
+                        if (await copilotRuntime.ResumeDirect(o.Item, prn, text, ct)) { copilotManager.CountExternal(); copilotRuntime.Waiting(o.Item, "", "master-fix"); }
+                    }
+                }
+                catch (Exception e) { Console.Error.WriteLine($"copilot owner watch #{o.Item}: {e.GetType().Name}"); }
+            }
+        }
+    });
     copilotRuntime.OverBudget = async (item, phase, credits) =>
     {
         var (code, _) = await app.Services.GetRequiredService<Runner>().RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "credit-guard", ["phase"] = phase, ["by"] = $"the Copilot credit guard: one task reported {credits:0} ai_credits, over api.copilot.maxCreditsPerTask {copilotSettings.MaxCreditsPerTask:0}" }.ToJsonString(), TimeSpan.FromSeconds(120));
@@ -2209,8 +2280,23 @@ if (copilotRuntime != null && ownerMode && messaging.ManagerEnabled && messaging
         }
     });
 }
-copilotPrompt = (item, phase, code, pr) =>
+copilotPrompt = (item, phase, code, pr, why) =>
 {
+    // a follow-up session of the owner task (why != null): terse, self-contained (phase, item, pull request, what changed), so its correctness does
+    // not depend on Copilot's memory of the earlier sessions; then the same connect lines as a first session
+    if (why != null && pr != null)
+    {
+        var f = $"Follow-up session of the task that owns #{item}: phase {phase}. Work on PR #{pr.Number}, branch {pr.Branch} (this session runs on it). " +
+            "You own #{item} until it is merged and master is green, but THIS session does only this phase step and then ends: never poll or wait for CI; the gateway watches it and resumes you.\n";
+        f = f.Replace("{item}", item.ToString());
+        if (why.Trim() != "") f += $"What changed: {why.Trim()}\n";
+        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass, else fix and rerun. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
+            : phase.Trim().Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? $"Verify PR #{pr.Number} against the item's criteria; change nothing; record the review and the verdict, then session_end.\n"
+            : "Do this phase's step only, then session_end.\n";
+        var bpf = prompts.ByPath("bootstrap/copilot.md");
+        var steps = bpf == null ? "" : prompts.Render(bpf, "copilot-cloud-agent")["text"]!.ToString();
+        return f + "\n" + steps + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
+    }
     var bp = prompts.ByPath("bootstrap/copilot.md");
     var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
     // an item with its open pull request: the task starts from that branch (CopilotCloudRuntime.BaseRef), and the fix goes to that pull request
@@ -2623,51 +2709,97 @@ static class DashboardPage
     public const string Html = """
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Factory Workers</title>
 <style>
-:root{--bg:#fff;--fg:#1b1f24;--mut:#59636e;--line:#d1d9e0;--card:#f6f8fa;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
-@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#9198a1;--line:#30363d;--card:#161b22;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}main{max-width:1100px;margin:0 auto;padding:16px}
-h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px}.mut{color:var(--mut)}
-table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:top}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px}
-.pill{display:inline-block;padding:0 8px;border-radius:10px;border:1px solid var(--line);font-size:12px}.on{color:var(--ok)}.off{color:var(--bad)}.dr{color:var(--warn)}
-input,select,button,textarea,.btn{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
-button,.btn{cursor:pointer;text-decoration:none;display:inline-block}textarea{width:100%;box-sizing:border-box;height:260px;font:13px/1.4 ui-monospace,monospace}
-#qcprofile{height:120px}textarea.ans{height:3.4em;min-width:14em;font:inherit}
-pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monospace,monospace;max-height:2.9em;overflow:hidden;cursor:pointer;min-width:12em}pre.t.open{max-height:none}
-#digest{white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;cursor:auto;max-height:none}tr.unread td{font-weight:600}tr.grp th{background:var(--card);font-size:13px;padding-top:10px}
-.kinds{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}.kind{flex:1 1 220px;border:1px solid var(--line);border-radius:8px;padding:10px;cursor:pointer;background:var(--bg)}.kind b{display:block}.kind span{display:block;font-size:13px;color:var(--mut)}.kind:has(input:checked){border-color:var(--ok);box-shadow:0 0 0 1px var(--ok)}.err{color:var(--bad);font-size:13px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}.wrap{overflow-x:auto}
-</style></head><body><main>
-<h1>Factory workers <span id="env" class="pill"></span> <span id="ver" class="mut"></span></h1>
-<div class="mut" id="sub">Connected sessions of this software factory.</div>
-<div class="row"><span id="tokrow"><input id="tok" type="password" placeholder="operator token" size="30" autocomplete="off"> <button id="go">Connect</button></span><span id="conn" hidden><span class="pill on">Connected as operator</span> <button id="bye">Disconnect</button></span><span id="msg" class="mut"></span></div>
+:root{--font:'Inter Variable','Inter',system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--pri:#4f46e5;--pri-strong:#4338ca;--pri-tint:#eef2ff;--pri-tint-b:#c7d2fe;--on-pri:#fff;
+--bg:#f5f7fb;--surface:#fff;--surface2:#f8fafc;--fg:#0f172a;--mut:#475569;--line:#e5e9f0;--line2:#cbd5e1;
+--ok:#047857;--ok-bg:#d1fae5;--warn:#b45309;--warn-bg:#fef3c7;--bad:#b91c1c;--bad-bg:#fee2e2;--info:#1d4ed8;--info-bg:#dbeafe;--neu:#475569;--neu-bg:#f1f5f9;
+--head-from:#0b1220;--head-to:#111a2e;--head-fg:#f8fafc;--head-mut:#cbd5e1;
+--r-card:12px;--r-ctl:8px;--shadow:0 1px 3px rgba(15,23,42,.08);--focus:#4f46e5}
+@media (prefers-color-scheme:dark){:root{--pri:#818cf8;--pri-strong:#a5b4fc;--pri-tint:rgba(99,102,241,.18);--pri-tint-b:rgba(129,140,248,.45);
+--bg:#0f172a;--surface:#151f33;--surface2:#1b263b;--fg:#e2e8f0;--mut:#a3b1c6;--line:#263248;--line2:#334155;
+--ok:#6ee7b7;--ok-bg:rgba(16,185,129,.16);--warn:#fcd34d;--warn-bg:rgba(245,158,11,.16);--bad:#fca5a5;--bad-bg:rgba(239,68,68,.16);--info:#93c5fd;--info-bg:rgba(59,130,246,.18);--neu:#cbd5e1;--neu-bg:rgba(148,163,184,.18);
+--head-from:#070c16;--head-to:#0b1220;--shadow:0 1px 3px rgba(0,0,0,.4);--focus:#a5b4fc}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--font)}
+a{color:var(--pri)}a:hover{color:var(--pri-strong)}
+header.top{background:linear-gradient(135deg,var(--head-from),var(--head-to));color:var(--head-fg)}
+.top .in{max-width:1200px;margin:0 auto;padding:14px 16px;display:flex;gap:12px 16px;align-items:center;flex-wrap:wrap}
+.logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#4f46e5,#6366f1);display:grid;place-items:center;font-weight:700;font-size:14px;flex:none}
+.brand{flex:1 1 260px;min-width:0}.brand h1{font-size:18px;margin:0;line-height:1.3;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.brand #sub{color:var(--head-mut);font-size:12px;overflow-wrap:anywhere}
+.top #env{background:rgba(129,140,248,.25);color:#e0e7ff;border-color:rgba(129,140,248,.5);text-transform:uppercase;letter-spacing:.04em}.top #ver{color:var(--head-mut);font-size:13px;font-weight:500}
+.top .acct{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.top input{background:rgba(255,255,255,.08);color:var(--head-fg);border-color:rgba(148,163,184,.35)}.top input::placeholder{color:#94a3b8}
+.top button{background:transparent;color:var(--head-fg);border-color:rgba(148,163,184,.45)}.top button:hover{background:rgba(148,163,184,.15)}
+.top #go{background:var(--pri);border-color:var(--pri);color:#fff}
+main{max-width:1200px;margin:0 auto;padding:16px}
+#msg{display:block;font-size:13px;color:var(--bad)}#msg:empty{display:none}
+h2{font-size:15px;font-weight:600;margin:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}h3{font-size:13px;margin:12px 0 6px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+.mut{color:var(--mut)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:0 0 16px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);padding:14px 16px;border-top:3px solid var(--pri)}
+.stat .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);font-weight:600}.stat .val{font-size:26px;font-weight:700;line-height:1.2;margin:4px 0 2px}.stat .det{font-size:12px;color:var(--mut);overflow-wrap:anywhere}
+.stat.ok{border-top-color:var(--ok)}.stat.dr{border-top-color:var(--warn)}.stat.off{border-top-color:var(--bad)}
+.panel,.card,#msgsec{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);padding:16px;margin:0 0 16px;min-width:0}
+.panel>h2,.panel>summary{margin-bottom:8px}
+.wrap{overflow-x:auto;max-width:100%}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
+thead th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);font-weight:600;background:var(--surface2)}
+tbody tr:hover td{background:var(--surface2)}tbody tr:last-child td{border-bottom:0}
+tr.grp th{background:var(--pri-tint);color:var(--pri-strong);font-size:12px;padding-top:8px}
+.pill{display:inline-block;padding:1px 9px;border-radius:999px;border:1px solid transparent;font-size:12px;font-weight:600;line-height:1.6;background:var(--neu-bg);color:var(--neu);white-space:nowrap}
+.pill.on{background:var(--ok-bg);color:var(--ok)}.pill.off{background:var(--bad-bg);color:var(--bad)}.pill.dr{background:var(--warn-bg);color:var(--warn)}.pill.info{background:var(--info-bg);color:var(--info)}
+.on{color:var(--ok)}.off{color:var(--bad)}.dr{color:var(--warn)}
+input,select,button,textarea,.btn{font:inherit;font-size:13px;color:var(--fg);background:var(--surface);border:1px solid var(--line2);border-radius:var(--r-ctl);padding:6px 10px;min-height:34px;max-width:100%}
+button,.btn{cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;font-weight:500}button:hover,.btn:hover{background:var(--surface2)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.primary,#mk{background:var(--pri);border-color:var(--pri);color:var(--on-pri)}.primary:hover,#mk:hover{background:var(--pri-strong)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+textarea{width:100%;height:260px;font:12px/1.45 var(--mono)}
+#qcprofile{height:120px}textarea.ans{height:3.4em;min-width:14em;font:inherit;font-size:13px}
+pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.45 var(--mono);max-height:2.9em;overflow:hidden;cursor:pointer;min-width:12em}pre.t.open{max-height:none}
+#digest{white-space:pre-wrap;font:12px/1.4 var(--mono);max-height:none;margin:8px 0 0}tr.unread td{font-weight:600}
+details>summary{cursor:pointer;padding:4px 0;list-style-position:inside}details.panel>summary{font-weight:600;font-size:15px}
+.kinds{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}.kind{flex:1 1 220px;border:1px solid var(--line2);border-radius:var(--r-ctl);padding:10px;cursor:pointer;background:var(--surface)}.kind b{display:block}.kind span{display:block;font-size:13px;color:var(--mut)}.kind:has(input:checked){border-color:var(--pri);box-shadow:0 0 0 1px var(--pri);background:var(--pri-tint)}
+.err{color:var(--bad);font-size:13px}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+#banner{background:var(--warn-bg);border-color:transparent;color:var(--warn)}
+.sub{font-size:13px;color:var(--mut);margin:0 0 8px}
+@media (max-width:600px){main{padding:12px}.stat .val{font-size:22px}th,td{padding:6px}}
+</style></head><body><header class="top"><div class="in"><div class="logo" aria-hidden="true">FW</div>
+<div class="brand"><h1>Factory workers <span id="env" class="pill" title="environment"></span> <span id="ver" class="mut"></span></h1><div id="sub">Connected sessions of this software factory.</div></div>
+<div class="acct"><span id="tokrow"><label for="tok" class="mut" style="position:absolute;left:-9999px">Operator token</label><input id="tok" type="password" placeholder="operator token" size="24" autocomplete="off"> <button id="go">Connect</button></span><span id="conn" hidden><span class="pill on">Connected as operator</span> <button id="bye">Disconnect</button></span></div></div></header>
+<main><div role="status" aria-live="polite"><span id="msg" class="mut"></span></div>
 <div id="banner" class="card dr" hidden>Messaging needs an always-on gateway: this environment scales to zero, and a restart loses every inbox, question and mode.</div>
-<h2>Sessions</h2>
+<div id="summary" class="cards" aria-label="Summary"></div>
+<section class="panel" aria-labelledby="h-asg"><h2 id="h-asg">Work items</h2><div id="basecnt" class="sub"></div><div class="wrap"><table><tbody id="asg"><tr><td class="mut">none</td></tr></tbody></table></div></section>
+<section class="panel" aria-labelledby="h-rt"><h2 id="h-rt">Runtimes</h2><div id="cirel" class="sub" hidden></div><div id="copown" hidden><h3>Copilot owned items</h3><div class="wrap"><table><thead><tr><th>Item</th><th>Task</th><th>Phase</th><th>Waiting on</th><th>PR</th><th>Sessions</th></tr></thead><tbody id="copownrows"></tbody></table></div></div><div id="rtsec" hidden><div id="rttext" class="sub"></div><div class="wrap"><table><tbody id="rtrows"><tr><td class="mut">none</td></tr></tbody></table></div></div></section>
+<section class="panel" aria-labelledby="h-ses"><h2 id="h-ses">Sessions</h2>
 <div class="wrap"><table><thead id="shead"><tr><th>Name</th><th>Type</th><th>State</th><th>Owns</th><th>Capacity</th><th>Roles</th><th>QC</th><th></th></tr></thead><tbody id="rows"><tr><td colspan="8" class="mut">Enter the operator token.</td></tr></tbody></table></div>
 <div id="cost" class="row mut" hidden><span id="costtext"></span><button id="grant" hidden>Grant 6 more turns</button>
 <label>Patrol every <input id="patrolmin" type="number" min="5" max="240" style="width:5em"> min</label><button id="setpatrol">Set</button></div>
-<details id="digestbox" hidden><summary class="mut">Last digest sent to the supervisor<span id="digestnow"></span></summary><pre id="digest"></pre></details>
-<div id="qsec" hidden><h2>Questions <span id="qbadge" class="pill off" hidden></span></h2><div id="qcounts" class="mut"></div>
+<details id="digestbox" hidden><summary class="mut">Last digest sent to the supervisor<span id="digestnow"></span></summary><pre id="digest"></pre></details></section>
+<section class="panel" id="qsec" hidden><h2>Questions <span id="qbadge" class="pill off" hidden></span></h2><div id="qcounts" class="sub"></div>
 <div class="wrap"><table><thead><tr><th>Age</th><th>From</th><th>Item</th><th>State</th><th>Question (click for full text)</th><th>Answer</th></tr></thead><tbody id="qrows"><tr><td colspan="6" class="mut">none</td></tr></tbody></table></div>
-<details><summary class="mut">Decision log (last 50)</summary><table><tbody id="dlog"><tr><td class="mut">none</td></tr></tbody></table></details></div>
+<details><summary class="mut">Decision log (last 50)</summary><div class="wrap"><table><tbody id="dlog"><tr><td class="mut">none</td></tr></tbody></table></div></details></section>
 <div id="msgsec" hidden><h2>Messages <span id="opbadge" class="pill dr" hidden></span></h2>
-<div class="mut">Operator only: no model reads this log, and the supervisor is refused it. Text is shown on click, as text.</div>
+<div class="sub">Operator only: no model reads this log, and the supervisor is refused it. Text is shown on click, as text.</div>
 <div class="row"><button id="msgall" title="One note to every connected session, the supervisor included">Message all</button><button id="readall">Mark all read</button><span class="mut">A note is data to a session, never a command. Notes to the operator, newest first:</span></div>
 <div class="wrap"><table><thead><tr><th>Time</th><th>From -&gt; to</th><th>Role</th><th>Type</th><th>Item</th><th>Size</th><th>State</th><th>Text</th><th>Reply</th></tr></thead><tbody id="oprows"><tr><td colspan="9" class="mut">Nothing was sent to the operator.</td></tr></tbody></table></div>
 <details id="logbox"><summary class="mut">Traffic log (newest first, 200 rows)</summary>
 <div class="row"><label>Session <input id="logworker" size="14" placeholder="any"></label><label>Item <input id="logitem" size="6" placeholder="any"></label><label>Show <select id="logring"><option value="">messages</option><option value="refused">refusals and flags</option></select></label></div>
 <div class="wrap"><table><thead><tr><th>Time</th><th>From -&gt; to</th><th>Role</th><th>Type</th><th>Item</th><th>Size</th><th>State</th><th>Text</th></tr></thead><tbody id="logrows"><tr><td colspan="8" class="mut">none</td></tr></tbody></table></div></details></div>
-<h2>Assignments</h2><div id="basecnt" class="mut"></div><table><tbody id="asg"><tr><td class="mut">none</td></tr></tbody></table>
-<div id="rqsec" hidden><h2>Release Queue</h2><div id="rqtext" class="mut"></div><table><tbody id="rqrows"><tr><td class="mut">none</td></tr></tbody></table>
-<div class="row"><button id="rqreq">Request promotion to UAT</button><span class="mut">Records and announces the request on the operator stream only. The owner and the cmdemo1 session promote to uat and prod.</span></div></div>
-<div id="cirel" class="mut" hidden></div><div id="rtsec" hidden><h2>Runtimes</h2><div id="rttext" class="mut"></div><table><tbody id="rtrows"><tr><td class="mut">none</td></tr></tbody></table></div>
-<div id="qcsec" hidden><h2>Waiting for PR QC</h2>
-<div class="wrap"><table><thead><tr><th>PR</th><th>Title</th><th>Item</th><th>Head</th><th>Author</th><th>Age</th><th>QC state</th><th>Environment</th><th>Worker</th><th>Actions</th></tr></thead><tbody id="qcrows"><tr><td colspan="10" class="mut">none</td></tr></tbody></table></div></div>
-<details id="metbox"><summary><b>Cycle times</b> <span class="mut">(from the item journals on GitHub; survives a restart)</span></summary>
+<section class="panel" id="qcsec" hidden><h2>Waiting for PR QC</h2>
+<div class="wrap"><table><thead><tr><th>PR</th><th>Title</th><th>Item</th><th>Head</th><th>Author</th><th>Age</th><th>QC state</th><th>Environment</th><th>Worker</th><th>Actions</th></tr></thead><tbody id="qcrows"><tr><td colspan="10" class="mut">none</td></tr></tbody></table></div></section>
+<h3>Details</h3>
+<details class="panel" id="rqsec" hidden><summary>Release Queue</summary><div id="rqtext" class="sub"></div><div class="wrap"><table><tbody id="rqrows"><tr><td class="mut">none</td></tr></tbody></table></div>
+<div class="row"><button id="rqreq">Request promotion to UAT</button><span class="mut">Records and announces the request on the operator stream only. The owner and the cmdemo1 session promote to uat and prod.</span></div></details>
+<details class="panel" id="metbox"><summary><b>Cycle times</b> <span class="mut">(from the item journals on GitHub; survives a restart)</span></summary>
 <div class="row"><label>Since <select id="metsince"><option value="24h">24 hours</option><option value="7d" selected>7 days</option><option value="30d">30 days</option><option value="90d">90 days</option></select></label> <span id="metinfo" class="mut"></span></div>
 <div class="wrap"><table><thead><tr><th>Measure</th><th>Items</th><th>Median</th><th>p90</th><th>Max</th></tr></thead><tbody id="metagg"><tr><td colspan="5" class="mut">open to load</td></tr></tbody></table></div>
 <div class="wrap"><table><thead><tr><th>Item</th><th>Column</th><th>Match to accept</th><th>Accept to merge</th><th>Merge to done</th><th>Match to done</th></tr></thead><tbody id="metrows"><tr><td colspan="6" class="mut">none</td></tr></tbody></table></div></details>
-<h2>Connect a new session</h2>
-<div class="card"><div><b>1. What kind of session?</b></div><div class="kinds">
+<details class="panel" id="rawbox"><summary>Raw dashboard data <span class="mut">(JSON, refreshed while open)</span></summary><pre id="raw" style="white-space:pre-wrap;word-break:break-word;font:12px/1.4 var(--mono);max-height:480px;overflow:auto;margin:8px 0 0"></pre></details>
+<details class="panel" id="newbox"><summary>Connect a new session</summary>
+<div><b>1. What kind of session?</b></div><div class="kinds">
 <label class="kind"><input type="radio" name="kind" id="kworker" value="worker" checked> <b>Worker</b><span>Owns work items (design, development, testing) until merged.</span></label>
 <label class="kind"><input type="radio" name="kind" id="kqc" value="qc"> <b>Worker + QC environments</b><span>Also builds and runs pull requests on its own computer so people can look at them. Needs Linux or macOS on a computer people can reach; not for cloud sessions.</span></label>
 <label class="kind" id="mksup" hidden><input type="radio" name="kind" id="ksup" value="supervisor"> <b>Plant manager (supervisor)</b><span>Answers workers' questions and watches the plant; one at a time; most capable model.</span></label>
@@ -2684,7 +2816,7 @@ pre.t{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monos
 <div class="row"><button id="mk">Create prompt</button></div>
 <div class="mut">The prompt carries a one-time credential for this name; do not share it. <span id="pastehint"></span></div>
 <textarea id="prompt" readonly placeholder="The connect prompt appears here."></textarea>
-<div class="row"><button id="copy">Copy</button></div></div>
+<div class="row"><button id="copy">Copy</button></div></details>
 </main><script>
 const $=id=>document.getElementById(id);let tok=sessionStorage.getItem('ftok')||'',info=null,repoUrl='',kind='worker';
 /*render-start*/
@@ -2886,7 +3018,29 @@ if(!await sendNote(rb.dataset.n,text,id))return;delete drafts[k]}
 if(id)await act('/api/v1/messages/read',{ids:[id]});if(document.activeElement)document.activeElement.blur();refresh();return}
 const b=e.target.closest('button[data-a="mute"]');if(!b||!confirm('Mute '+b.dataset.n+'? It can still ask the supervisor.'))return;say(await act('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/messaging?value=mute'));refresh()};
 // The Release Queue: the waiting items, oldest first, and the button that only records a promotion request (the gateway never promotes).
-function refreshRt(r){const ci=r&&r['copilot-cloud']&&r['copilot-cloud'].ciRelease;$('cirel').hidden=!ci;if(ci)$('cirel').innerHTML=`Copilot CI release: ${esc(ci.released)} released, ${esc(ci.refused)} refused`+(ci.ownerAction?` <b>Owner action: ${esc(ci.ownerAction)}</b> (${esc(ci.lastError)})`:'');const ks=['cae-job','cursor-cloud','copilot-cloud'].filter(k=>r&&r[k]&&r[k].maxConcurrent!=null);$('rtsec').hidden=!ks.length;if(!ks.length)return;$('rttext').textContent=ks.map(k=>{const c=r[k];return `${k}: ${c.enabled?'on':'off'}, ${c.running} of ${c.maxConcurrent} running, ${c.today} of ${c.maxExecutionsPerDay} today, ${c.healthy?'healthy':'UNHEALTHY: '+c.unhealthyReason}`}).join('; ');const lk=x=>{const u=x.url||(x.detail&&x.detail.url)||'';return /^https:\/\//.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">session</a>`:''};const ex=ks.flatMap(k=>r[k].executions||[]),la=ks.flatMap(k=>r[k].last||[]);$('rtrows').innerHTML=ex.length||la.length?ex.map(x=>`<tr><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${esc(x.status)}</td><td>${x.registered?'registered':'starting'}</td><td>${lk(x)}</td></tr>`).join('')+la.slice().reverse().map(x=>`<tr class="mut"><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${esc(x.outcome)}</td><td>${esc(x.ended||'')}</td><td>${lk(x)}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>'}
+const RT_NAMES={'cae-job':'Container Apps jobs','copilot-cloud':'Copilot cloud','cursor-cloud':'Cursor cloud'};
+const rtKinds=r=>Object.keys(r||{}).filter(k=>r[k]&&typeof r[k]==='object'&&'maxConcurrent' in r[k]);
+const sessionLink=x=>{const d=x.detail||{},u=x.sessionUrl||x.session_url||x.url||d.sessionUrl||d.session_url||d.url||'';return /^https:\/\/[\w.-]+\//i.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">session</a>`:'<span class="mut">-</span>'};
+const stPill=s=>{const v=String(s||'').toLowerCase();return `<span class="pill ${/fail|error|refused|unhealthy|cancel/.test(v)?'off':/run|progress|registered|start|queued/.test(v)?'info':/succe|done|complete|ok/.test(v)?'on':''}">${esc(s||'-')}</span>`};
+function refreshRt(r){const ow=(r&&r['copilot-cloud']&&r['copilot-cloud'].owned)||[];$('copown').hidden=!ow.length;$('copownrows').innerHTML=ow.map(o=>`<tr><td>#${esc(o.item)}</td><td>${o.url?`<a href="${esc(o.url)}" target="_blank" rel="noopener">${esc(o.task)}</a>`:esc(o.task)}</td><td>${esc(o.phase)}</td><td>${stPill(o.waitingOn)}</td><td>${o.pr?'#'+esc(o.pr):''}</td><td>${esc(o.sessions)}</td></tr>`).join('');const ci=r&&r['copilot-cloud']&&r['copilot-cloud'].ciRelease;$('cirel').hidden=!ci;if(ci)$('cirel').innerHTML=`Copilot CI release: ${esc(ci.released)} released, ${esc(ci.refused)} refused`+(ci.ownerAction?` <b>Owner action: ${esc(ci.ownerAction)}</b> (${esc(ci.lastError)})`:'');
+const ks=rtKinds(r);$('rtsec').hidden=!ks.length;if(!ks.length)return;
+$('rttext').textContent=ks.map(k=>{const c=r[k];return `${k}: ${c.enabled?'on':'off'}, ${c.running} of ${c.maxConcurrent} running, ${c.today} of ${c.maxExecutionsPerDay} today, ${c.healthy?'healthy':'UNHEALTHY: '+c.unhealthyReason}`}).join(' | ');
+let h='';for(const k of ks){const c=r[k],ex=c.executions||[],la=c.last||[];h+=`<tr class="grp"><th colspan="6">${esc(RT_NAMES[k]||k)} <span class="pill ${!c.enabled?'':c.healthy?'on':'off'}">${!c.enabled?'off':c.healthy?'healthy':'unhealthy'}</span> <span class="mut">${esc(c.running)}/${esc(c.maxConcurrent)} running, ${esc(c.today)}/${esc(c.maxExecutionsPerDay)} today</span></th></tr>`;
+h+=ex.map(x=>`<tr><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${stPill(x.status)}</td><td>${x.registered?'registered':'starting'}</td><td>${sessionLink(x)}</td></tr>`).join('')+la.slice().reverse().map(x=>`<tr class="mut"><td>${esc(x.worker)}</td><td>#${esc(x.item)}</td><td>${esc(x.phase)}</td><td>${stPill(x.outcome)}</td><td>${esc(x.ended||'')}</td><td>${sessionLink(x)}</td></tr>`).join('');
+if(!ex.length&&!la.length)h+='<tr><td colspan="6" class="mut">no execution</td></tr>'}
+$('rtrows').innerHTML=h}
+// The summary cards: computed from the dashboard JSON alone (no extra request), drawn with esc().
+function card(lbl,val,det,cls){return `<div class="stat ${cls||''}"><div class="lbl">${esc(lbl)}</div><div class="val">${esc(val)}</div><div class="det">${esc(det)}</div></div>`}
+function renderSummary(d){const a=(d.plant&&d.plant.assignments)||[],r=d.runtimes||{},ks=rtKinds(r),ph={};
+for(const k of ks)for(const x of r[k].executions||[])ph[x.phase||'?']=(ph[x.phase||'?']||0)+1;
+const on=ks.filter(k=>r[k].enabled),ok=on.filter(k=>r[k].healthy);
+const today=ks.reduce((n,k)=>n+(+r[k].today||0),0),max=on.reduce((n,k)=>n+(+r[k].maxExecutionsPerDay||0),0);
+const ci=r['copilot-cloud']&&r['copilot-cloud'].ciRelease,m=d.manager||{},acts=[];if(ci&&ci.ownerAction)acts.push('Copilot CI release');if(m.budgetExhausted)acts.push('supervisor budget');if(m.openQuestions)acts.push(m.openQuestions+' open question(s)');
+const rq=d.releaseQueue&&d.releaseQueue.items||[];
+$('summary').innerHTML=card('In flight',a.length,Object.keys(ph).length?Object.entries(ph).map(([k,n])=>k+' '+n).join(', '):a.filter(x=>x.accepted).length+' accepted',a.length?'':'ok')
++card('Runtimes healthy',on.length?ok.length+' / '+on.length:'-',on.length?on.map(k=>k+(r[k].healthy?'':' (unhealthy)')).join(', '):'no runtime enabled',ok.length<on.length?'off':'ok')
++card('Launches today',max?today+' / '+max:today,ks.map(k=>k+' '+(r[k].today||0)).join(', ')||'-','')
++card('Owner actions',acts.length,acts.join(', ')||(rq.length?rq.length+' item(s) wait for production':'nothing waiting'),acts.length?'dr':'ok')}
 function refreshRq(q){const items=q&&q.items||[],reqs=q&&q.requests||[];$('rqsec').hidden=!q;if(!q)return;const req={};reqs.forEach(r=>req[r.release]=r);
 $('rqtext').textContent=items.length?`${items.length} item(s) waiting; the oldest for ${items[0].minutes} min (aged after ${q.agedMinutes} min or at ${q.agedCount} items)`:'No item waits for production.';
 $('rqrows').innerHTML=items.length?items.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.release||'no release')}</td><td>${esc(x.minutes)} min</td><td>${req[x.release]?'promotion requested by '+esc(req[x.release].by):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';
@@ -2894,12 +3048,12 @@ const first=items.find(x=>x.release);$('rqreq').disabled=!first;$('rqreq').datas
 $('rqreq').onclick=async()=>{const r=$('rqreq').dataset.r;if(!r||!confirm('Record a request to promote '+r+' to UAT? Nothing is deployed: the owner and the cmdemo1 session promote.'))return;const a=await act('/api/v1/release-queue/promotion-request',{release:r});$('msg').textContent=a.status===200?(a.json.already?'already requested: ':'requested: ')+r+' to UAT, recorded only':'refused: '+(a.json.code||a.status);refresh()};
 $('grant').onclick=async()=>{say(await act('/api/v1/supervisor/budget?extra=6'));refresh()};
 $('setpatrol').onclick=async()=>{const v=parseFloat($('patrolmin').value);if(!(v>=5&&v<=240)){$('msg').textContent='patrol interval: 5 to 240 minutes';return}say(await act('/api/v1/supervisor/patrol?minutes='+encodeURIComponent(v)));$('patrolmin').blur();refresh()};
-$('logbox').ontoggle=()=>refresh();
+$('logbox').ontoggle=()=>refresh();$('rawbox').ontoggle=()=>refresh();
 // One token entry: Connect stores it (this tab's sessionStorage only, never a URL) and every action below uses it. While connected
 // the token box is hidden; it comes back only when the gateway refuses the token or after Disconnect.
 function showConn(on){$('tokrow').hidden=on;$('conn').hidden=!on}
 // What a token showed is taken off the page when that token goes (Disconnect, or the gateway refused it): nothing of it stays readable.
-function clearData(){hideMessaging();$('metagg').innerHTML='<tr><td colspan="5" class="mut">open to load</td></tr>';$('metrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('metinfo').textContent='';metAt=0;$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;$('rqsec').hidden=true;$('rtsec').hidden=true;$('rqrows').innerHTML='<tr><td class="mut">none</td></tr>';$('rqtext').textContent='';
+function clearData(){hideMessaging();$('summary').innerHTML='';$('raw').textContent='';$('cirel').hidden=true;$('rtrows').innerHTML='<tr><td class="mut">none</td></tr>';$('rttext').textContent='';$('metagg').innerHTML='<tr><td colspan="5" class="mut">open to load</td></tr>';$('metrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('metinfo').textContent='';metAt=0;$('rows').innerHTML='<tr><td colspan="8" class="mut">Enter the operator token.</td></tr>';$('asg').innerHTML='<tr><td class="mut">none</td></tr>';$('qcrows').innerHTML='<tr><td colspan="10" class="mut">none</td></tr>';$('qcsec').hidden=true;$('rqsec').hidden=true;$('rtsec').hidden=true;$('rqrows').innerHTML='<tr><td class="mut">none</td></tr>';$('rqtext').textContent='';
 $('oprows').innerHTML='<tr><td colspan="9" class="mut">Nothing was sent to the operator.</td></tr>';$('qrows').innerHTML='<tr><td colspan="6" class="mut">none</td></tr>';$('dlog').innerHTML='<tr><td class="mut">none</td></tr>';$('logrows').innerHTML='<tr><td colspan="8" class="mut">none</td></tr>';
 $('qcounts').textContent=$('digest').textContent=$('costtext').textContent='';$('opbadge').hidden=$('qbadge').hidden=true}
 // t: the token this refresh started with. An answer that arrives after Disconnect (or after another token was entered) is dropped, and what the
@@ -2908,7 +3062,7 @@ async function refresh(){if(!tok)return;const t=tok;try{const d=await api('/api/
 const w=info.plant.workers||[];if(info.messaging&&info.messaging.enabled)await refreshMessaging(w);else{hideMessaging();
 $('rows').innerHTML=w.length?groupedRows(w,workerRowHtml,8).html:'<tr><td colspan="8" class="mut">No session has connected yet.</td></tr>'}
 if(tok!==t){if(!tok)clearData();return}
-const a=info.plant.assignments||[];const bu=info.baseUpdate||null,bh=bu&&bu.behind||{};$('basecnt').textContent=bu?`master ${esc((bu.head||'').slice(0,7))}: ${esc(bu.itemsBehind)} owned item(s) behind; ${esc(bu.triggers)} trigger(s), ${esc(bu.eventsSent)} sent, ${esc(bu.gatewayUpdates)} branch(es) updated by the gateway, ${esc(bu.workerBackMerges)} back-merged by workers`:'';$('asg').innerHTML=a.length?a.map(x=>`<tr><td>#${esc(x.item)}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td>${x.accepted?'accepted':'waiting for an answer'}</td><td>${x.kind==='own-item'&&bh[x.item]!=null?(bh[x.item]>0?esc(bh[x.item])+' behind master':'up to date with master'):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';refreshRq(info.releaseQueue);refreshRt(info.runtimes);await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
+const a=info.plant.assignments||[];const bu=info.baseUpdate||null,bh=bu&&bu.behind||{};$('basecnt').textContent=bu?`master ${esc((bu.head||'').slice(0,7))}: ${esc(bu.itemsBehind)} owned item(s) behind; ${esc(bu.triggers)} trigger(s), ${esc(bu.eventsSent)} sent, ${esc(bu.gatewayUpdates)} branch(es) updated by the gateway, ${esc(bu.workerBackMerges)} back-merged by workers`:'';$('asg').innerHTML=a.length?a.map(x=>`<tr><td>${ghLink(repoUrl,'issues',x.item,'#'+esc(x.item))}</td><td>${esc(x.kind)}</td><td>${esc(x.worker)}</td><td><span class="pill ${x.accepted?'on':'dr'}">${x.accepted?'accepted':'waiting for an answer'}</span></td><td>${x.kind==='own-item'&&bh[x.item]!=null?(bh[x.item]>0?esc(bh[x.item])+' behind master':'up to date with master'):''}</td></tr>`).join(''):'<tr><td class="mut">none</td></tr>';refreshRq(info.releaseQueue);refreshRt(info.runtimes);renderSummary(info);if($('rawbox').open)$('raw').textContent=JSON.stringify(info,null,1);await refreshQc();if(!tok)clearData()}catch(e){if(tok!==t){if(!tok)clearData();return}if(e.message==='token refused'){tok='';sessionStorage.removeItem('ftok');info=null;showConn(false);clearData()}$('msg').textContent=e.message}}
 $('go').onclick=()=>{const v=$('tok').value.trim();if(!v){$('msg').textContent='paste the operator token first';return}tok=v;sessionStorage.setItem('ftok',tok);$('tok').value='';refresh()};
 $('bye').onclick=()=>{tok='';info=null;sessionStorage.removeItem('ftok');$('tok').value='';showConn(false);clearData();$('prompt').value='';$('msg').textContent='Disconnected.'};
 $('rows').onclick=async e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.a==='message'){askNote(b.dataset.n,b.dataset.n);return}if(b.dataset.a==='revoke'&&!confirm('Revoke every credential of '+b.dataset.n+'? Its session stops; create a new prompt to connect it again.'))return;if(document.activeElement)document.activeElement.blur();try{await api('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/'+b.dataset.a,'POST');refresh()}catch(x){$('msg').textContent=x.message}};
@@ -2956,6 +3110,8 @@ $('metagg').innerHTML=Object.keys(MET_NAMES).map(k=>statRow(MET_NAMES[k],g[k])).
 const it=m.items||[];$('metrows').innerHTML=it.length?it.map(x=>{const d=x.durations||{};return `<tr><td>#${esc(x.item)}</td><td>${esc(x.column)}</td><td>${dur(d.matchToAccept)}</td><td>${dur(d.acceptToMerge)}</td><td>${dur(d.mergeToDone)}</td><td>${dur(d.matchToDone)}</td></tr>`}).join(''):'<tr><td colspan="6" class="mut">No item in this period.</td></tr>'}
 catch(e){$('metinfo').textContent=e.message}}
 $('metbox').ontoggle=()=>refreshMetrics(true);$('metsince').onchange=()=>refreshMetrics(true);setInterval(()=>refreshMetrics(false),15000);
+// A link like /dashboard#token=<value> connects as Connect does; the fragment never reaches the server, and is removed from the address bar and history at once.
+{const m=/(?:^#|&)token=([^&]*)/.exec(location.hash);if(m){let v='';try{v=decodeURIComponent(m[1]).trim()}catch(e){}if(v){$('tok').value=v;$('go').onclick()}history.replaceState(null,'',location.pathname+location.search)}}
 setInterval(refresh,4000);refresh();
 </script></body></html>
 """;

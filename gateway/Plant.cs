@@ -862,6 +862,9 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         foreach (var (item, holder) in ownerOf.OrderBy(kv => kv.Key))
         {
             if (!Auth.ValidName(holder)) continue;
+            // an owner that is a runtime task still running (Copilot, Cursor, a CAE job) is never "disconnected" or "stalled": it has no stream, and the
+            // runtime manager ends it past its deadline, after which it is listed like any other owner
+            if (RuntimeOf(holder) != null) continue;
             ownedInfo.TryGetValue(item, out var oi);
             var column = oi != null && oi.Column != "" ? oi.Column : Gated(assignments.TryGetValue($"{item}|own-item|owner", out var a) ? a.Column : "");
             var lastCode = ""; for (var i = refusals.Count - 1; i >= 0; i--) if (refusals[i].Item == item && refusals[i].Name == holder) { lastCode = refusals[i].Code; break; }
@@ -1014,6 +1017,12 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             var budget = wantsQuestion ? QuestionBudgetLeft(now, out _) : PatrolBudgetLeft(now);
             return (late, SupervisorHeard(now), budget);
         }
+    }
+
+    // The plant manager never acts on a runtime task that still runs: its owner (by item) or session name (manager-action refuses it, runtime-owner).
+    public bool ManagerRuntimeOwned(int item, string worker)
+    {
+        lock (gate) return (item > 0 && ownerOf.TryGetValue(item, out var h) && RuntimeOf(h) != null) || (worker != "" && RuntimeOf(worker) != null);
     }
 
     // GET /digest: the digest of this moment, on demand (after a restart or a compaction). Nothing is marked reported and no delivery is spent.
@@ -1947,6 +1956,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 var pin = pins?[item.ToString()]?.ToString();
                 // issue 98: a pin set aside after its long wait stays aside while the label names the same worker (a new label is a new pin)
                 if (pinFallback.TryGetValue(item, out var setAside)) { if (setAside == pin) pin = null; else pinFallback.Remove(item); }
+                if (kind == "own-item" && CopilotOwned(item)) pin = null;   // an item a Copilot task owns goes to that task only (Plant.Runtimes.cs)
                 if (assignments.TryGetValue(key, out var ex))
                 {
                     // the offer predates the acceptance: the sweep read the board before the accept (issue 75: a sweep takes tens of seconds and reads

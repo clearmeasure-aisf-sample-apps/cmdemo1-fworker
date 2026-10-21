@@ -10,7 +10,7 @@ mode, served prompts, `/mcp`, one phase per session) and the Cursor runtime ([cu
 | 1 | Copilot SDK in our own job, or Copilot cloud agent | **Copilot cloud agent**: GitHub hosts the run and opens the PR |
 | 2 | How the agent reaches the gateway's tools | **Our stdio MCP package**, proxying to the gateway's `/mcp` |
 | 3 | Identity that starts tasks and holds the seat | **cm-ai-ops-bot with a Copilot seat**; GitHub App tokens once the API accepts them |
-| 4 | Tasks per item | **One task per phase** (Technical Design, Development, Functional Testing) |
+| 4 | Tasks per item | ~~One task per phase~~ superseded 2026-10-21: **one task per item, resumed** (below) |
 | 5 | Rollout | **tdd only, docs-only items, 30 launches a day**, label `runtime:copilot-cloud` |
 
 ## Model (Jeffrey, 2026-10-20)
@@ -31,8 +31,8 @@ the owner's word.
   switches them on.
 - One MCP configuration for all environments: the prompt carries the gateway URL and the one-time code; `fworker-mcp` accepts only the
   three gateway hosts (https, no port or path) and picks `FWORKER_BOOTSTRAP_TOKEN_<ENV>`.
-- Branches: the coding agent pushes only `copilot/*`. The Development task is created with `create_pull_request: true`; `pr_open` with
-  that branch takes the task's draft over (title gets `#N`, marked ready, recorded as the item's pull request). Functional Testing starts
+- Branches: the coding agent pushes only `copilot/*`. The owner task is created with `create_pull_request: true` (since 2026-10-21 in every
+  phase); `pr_open` with that branch takes the task's draft over (title gets `#N`, marked ready, recorded as the item's pull request). Functional Testing starts
   from the branch the Development task reported (`artifacts[].data.head_ref`). One task per phase.
 - An item that already has its open pull request (fix-forward after a red check, rework after an FT FAIL, Functional Testing): the task's
   `base_ref` is that pull request's head branch (verb `item-pr`), and the prompt names the pull request. The agent tasks API never pushes to
@@ -40,6 +40,72 @@ the owner's word.
   old head (else `not-on-item-branch`), retargets the draft to the default branch, takes it over, closes the superseded pull request with a
   comment and deletes its branch. Extra `copilot/*` drafts against the item's branches are closed with their branches.
 - At most `api.copilot.maxLaunchesPerPhase` (3) executions of one item in one phase in a row, however each ended; then the item is parked.
+
+## One task, resumed (Jeffrey, 2026-10-21)
+
+His words: "As soon as AI worker like the cloud session is started up and assigned to a work item that session should stay the owner of that
+work item until that work item has been merged into the master branch and the master branch verified to be green." Chosen option: **one
+task, resumed**. This supersedes "one task per phase" above; the per-phase prompts, tool sets, settle and CI release stay.
+
+**Mechanism.** The agent tasks REST API (2026-03-10) has list, create and get only: no follow-up, continue, stop or archive endpoint. GitHub's
+documented follow-up is a `@copilot` mention on the pull request by a user with write access: "Copilot pushes commits directly to the pull
+request branch" and "remembers context from previous sessions on the same pull request" (docs: cloud-agent/make-changes-to-an-existing-pr;
+changelog 2025-09-30). So:
+
+1. The owner task's **first session** (whatever phase it starts in, Technical Design included) is created with `create_pull_request: true`,
+   so Copilot opens the item's draft pull request at once. Every later session is a follow-up on that same pull request and branch.
+2. A **follow-up** (next phase, fix-forward after red checks, rework after an FT FAIL, a red master) is a comment `@copilot <prompt>` on the
+   pull request, posted with the seat's token (`COPILOT_TASKS_TOKEN`, cm-ai-ops-bot). The execution id is `<task>#<n>`, the task's n-th
+   session; its state is read from `GET .../tasks/{id}` `sessions[n]` (ordered by `created_at`). Not listed yet: queued.
+3. Follow-up prompts are **terse and self-contained**: phase, item, pull request and branch, what changed (the item state's `pr.rejection`:
+   the red checks or the FT findings), the ownership rule, then the bootstrap and the connect lines. Correctness never depends on Copilot's
+   memory, which is a summary per pull request, not a transcript.
+
+**Ownership.** On the first session the item state records `copilot_task` {id, url (html_url, the session link), branch, pr, phase, since,
+previous} (rule verb `copilot-owner`, the gateway's own; refused over HTTP) and the item gets one comment "**Owner:** Copilot task ... owns #N
+from <phase> until its pull request is merged and master is green". The plant routes an owned item to copilot-cloud whatever its label, the
+routing or a connected session says, and ignores a pin label for it (`Plant.CopilotOwns`): no other worker is offered it. The lease of each
+session is the usual per-name one; between sessions the gateway holds the item for the task (no session, no credits, no concurrency slot).
+
+**Waiting.** No session runs while CI, the merge or master run. The usual sweep and webhooks move the item (checks green: next column; red:
+back to Development with `pr.rejection`). The owner watch (every `api.copilot.ciReleaseSeconds`, acting gateway only) reads `copilot-owner
+status` for each owned item with no session running: `ci`, `next-phase`, `parked:<reason>`, `master-green`, `master-broken`, `done`, `closed`.
+
+**Done.** Only when the pull request is merged AND master is green for the merge commit (the settle's `merge.green_at`): the watch closes
+the ownership (`done_at`), comments "**Owner done:** ... Session link: <html_url>" and logs `owner-done`. An item closed without a merge ends
+the ownership without that comment. A **red master** after the merge (`master-broken`) resumes the owner task once per merge commit to fix
+forward on ONE new pull request against master; the item stays parked master-broken and goes on by the existing auto-unpark once master is
+green, then the owner is done.
+
+**Sessions in the prompts.** The agent owns the item until master is green, but each session does its phase step (push, `pr_open`,
+`item_complete` or the verdict), calls `session_end` and ends. It never polls or waits for CI. Before every push that creates or updates the
+pull request (Jeffrey, 2026-10-21: "runs the Private build and the acceptance tests within the session") it runs `pwsh ./PrivateBuild.ps1`
+and `pwsh ./AcceptanceTests.ps1`, pushes only when both pass, and reports both in `item_complete`. cmdemo1-workorders'
+`copilot-setup-steps.yml` installs the SDK and the Playwright Chromium; ubuntu-latest brings PowerShell and Docker (SQL Server container,
+else the SQLite fallback).
+
+**Kept.** `maxLaunchesPerPhase` (3) now caps sessions (resumes) per phase in a row; the 60 min limit per session, `maxConcurrent` (a running
+session counts, an owned but waiting task does not), the daily cap (a master fix-forward counts too) and the credit guard (off; when on, per
+task over all its sessions).
+
+**Status.** `/api/v1/status` → `runtimes."copilot-cloud".owned`: item, task, url, branch, pr, phase, waitingOn (`session` while one runs),
+sessions; the dashboard table "Copilot owned items".
+
+**Limits.**
+- Not verified live before the build: starting a throwaway task as cm-ai-ops-bot was refused by the operator's permission check. The fake
+  GitHub models a mention as a new session of the task whose branch the pull request is on. The live check is the tdd watch after deploy.
+- Whether GitHub lists a mention's session in the same task's `sessions` is undocumented. If it does not, the session still connects with its
+  one-time code and works; its end is seen at `session_end` or at the 60 min deadline.
+- No pull request to resume on (the first session never opened its draft): a new task is created on the owner's branch (`head_ref`), the
+  owner moves to it and the old id is kept in `previous`.
+- Items an earlier gateway ran one task per phase for get an owner at their next phase (a new task from their pull request's branch, as before)
+  and are resumed from then on.
+- After a restart the owner is read back from the item state at the item's next session; an item that only waits on master is picked up by
+  the watch once it is read again.
+- The master fix-forward pull request is opened by Copilot; its CI release and merge follow the usual rules for a pull request that names the item.
+
+Tier 1 (suite `copilot`): the full single-task lifecycle, red CI fix-forward in the same task, FT FAIL rework in the same task, no other
+worker offered while owned, done only after master green, a red master resuming the owner once.
 
 ## CI release (Jeffrey, 2026-10-20: "Build it, no file guard")
 

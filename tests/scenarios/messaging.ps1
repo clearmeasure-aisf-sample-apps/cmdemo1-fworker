@@ -3521,7 +3521,7 @@ querySelectorAll(sel){const out=[];let x;if(sel.indexOf('pre')===0){const re=/<p
 while((x=re.exec(el.innerHTML))){const cell={dataset:{k:x[1],t:x[2]},classList:{add(){}}};Object.defineProperty(cell,'textContent',{set(v){el.texts.push(v)}});out.push(cell)}}
 else{const re=/<textarea class="ans" data-q="([^"]*)"/g;while((x=re.exec(el.innerHTML)))out.push({dataset:{q:x[1]},value:''})}return out}};return el}
 global.document={getElementById:id=>els[id]||(els[id]=mk(id)),addEventListener(){},activeElement:null};
-global.sessionStorage={getItem:()=>TOKEN,setItem(){},removeItem(){}};global.setInterval=()=>0;global.confirm=()=>true;global.prompt=()=>{calls.push({path:'PROMPT',auth:'',method:''});return ''};
+global.sessionStorage={getItem:()=>TOKEN,setItem(){},removeItem(){}};global.setInterval=()=>0;global.location={hash:'',pathname:'/dashboard',search:''};global.history={replaceState(){}};global.confirm=()=>true;global.prompt=()=>{calls.push({path:'PROMPT',auth:'',method:''});return ''};
 const real=fetch;global.fetch=(p,o)=>{calls.push({path:String(p),auth:String(o&&o.headers&&o.headers.Authorization||''),method:String(o&&o.method||'GET')});return real(BASE+p,o)};
 (async()=>{let error='';try{await new Function(fs.readFileSync(pageFile,'utf8').replace(/setInterval\(refresh,4000\);refresh\(\);\s*$/,'')+';return (async()=>{await refresh();'+AFTER+'})();')()}catch(e){error=String(e&&e.stack||e)}
 const out={error,calls,res:global.RES,els:{}};for(const k in els)out.els[k]={html:els[k].innerHTML,text:els[k].textContent,hidden:els[k].hidden,value:String(els[k].value),texts:els[k].texts,cls:els[k].className};

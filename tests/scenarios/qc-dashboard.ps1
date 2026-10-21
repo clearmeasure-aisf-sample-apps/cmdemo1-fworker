@@ -77,6 +77,9 @@ $QcDashScenarios = [ordered]@{
     $b = Qc-Http 'GET' (Dash-Url '/_build')
     Check '/_build gives the environment and the version for the header' ($b.status -eq 200 -and "$($b.json.environment)" -ne '' -and "$($b.json.version)" -ne '')
     Check 'the page header reads /_build' ($pg.body -match "fetch\('/_build'\)" -and $pg.body -match 'id="ver"')
+    $keys = 'header class="top"', 'id="summary"', 'id="asg"', 'id="rtsec"', 'id="rows"', 'id="qsec"', 'id="msgsec"', 'id="qcsec"', 'id="rqsec"', 'id="metbox"', 'id="rawbox"', 'id="newbox"', 'id="mk"', 'id="go"'
+    Check 'the page renders its key sections: header, summary cards, work items, runtimes, sessions, owner panels and the collapsed details' (@($keys | Where-Object { $pg.body -notmatch [regex]::Escape($_) }).Count -eq 0) (@($keys | Where-Object { $pg.body -notmatch [regex]::Escape($_) }) -join ', ')
+    Check 'the page is self-contained: no external script or stylesheet' ($pg.body -notmatch '<script[^>]+src=' -and $pg.body -notmatch '<link[^>]+stylesheet')
 }
 
 'qc: dashboard list shows available, ready, failed and stale rows [full]' = {
@@ -299,6 +302,12 @@ $QcDashScenarios = [ordered]@{
         $capOnly = Dash-Node "console.log(buildPrompt($base,qcProfile:'x',qcAddress:'',qcCapacity:'9'}))"
         Check 'no address and an out-of-range capacity add no such flag' ($capOnly -match '--qc-profile' -and $capOnly -notmatch '--qc-address' -and $capOnly -notmatch '--qc-capacity') $capOnly
     }
+}
+
+'qc: dashboard connects from a #token= fragment and removes it from the address bar' = {
+    $pg = Qc-Http 'GET' (Dash-Url '/dashboard')
+    Check 'the page script reads token= from location.hash and connects' ($pg.body -match 'location\.hash' -and $pg.body -match 'token=\(\[\^&\]\*\)')
+    Check 'the page script calls history.replaceState to drop the fragment' ($pg.body -match "history\.replaceState\(null,''")
 }
 
 }

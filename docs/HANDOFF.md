@@ -261,6 +261,14 @@ on a `copilot/*` branch whose open, in-scope item's pull request has that head; 
 (`permissionMissing`, owner action on the dashboard) means the owner step: org settings → GitHub Apps → factory-worker-author →
 Permissions → Actions: Read & write → accept the change on the installation. Design: `docs/design/copilot-cloud-agent.md`, "CI release".
 
+**One task, resumed (2026-10-21, owner)**: one Copilot task owns an item from its first session until its pull request is merged and master
+is green. The first session (any phase) opens the item's draft pull request; every later phase, fix-forward, FT rework and a red-master fix
+is a follow-up session started by a `@copilot` comment on that pull request (the tasks API has no follow-up endpoint). Owner record: item
+state `copilot_task` (verb `copilot-owner`), comments "**Owner:**" and "**Owner done:** ... Session link". No other worker is offered an
+owned item. Status: `runtimes."copilot-cloud".owned`, dashboard "Copilot owned items". Each session runs `PrivateBuild.ps1` and
+`AcceptanceTests.ps1` before pushing (cmdemo1-workorders `copilot-setup-steps.yml` installs Playwright Chromium). Limits (whether GitHub
+lists a mention's session under the same task) and the design: `docs/design/copilot-cloud-agent.md`, "One task, resumed".
+
 Not built yet: hosted runner on MCP (step 5), the Copilot CLI and Cursor CLI adapters (6), manual seats and `request_role` (7), role runs (8),
 removing `type` (10), the inspector, qc, manager, operator and keeper prompts and tools, `prompt_pin`, the gateway-side lease renewal
 beyond `next_event` and item tool calls.

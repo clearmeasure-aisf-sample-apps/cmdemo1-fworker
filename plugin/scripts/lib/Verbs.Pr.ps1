@@ -246,6 +246,71 @@ function Verb_copilot_settle($a) {
     return @{ ok = $true; id = $n; action = 'awaiting'; pr = [int]$pr.number; sha = "$($prd.head.sha)"; overrode = $(if ($park) { "$($park.reason)" } else { '' }) }
 }
 
+# copilot-owner: the item's owner task (docs/design/copilot-cloud-agent.md, "One task, resumed"). The gateway's own verb (refused over HTTP).
+# Body: item, action get | set | close | status; set: task {id, url, branch, pr, phase}. The item state's copilot_task is the durable record:
+#   get:    the record (null when the item has none, or its task is done)
+#   set:    records the owner task; the first record of a task comments the ownership on the item; later sets update branch and pull request
+#   close:  the owner is done (merged, master green): done_at, a comment with the task's link
+#   status: what the owner waits on: ci (its checks), next-phase, parked:<reason>, master-green, master-broken (with the failed checks and the
+#           merge commit), done (master green for the merge), closed
+function Verb_copilot_owner($a) {
+    $n = Get-ItemNumber $a
+    $action = "$(Need $a 'action')"; if ($action -notin 'get', 'set', 'close', 'status') { Reject 2 'usage' 'action is get, set, close or status' }
+    $st = Get-State $n; $s = $st.state
+    $own = if (Test-Has $s 'copilot_task') { $s.copilot_task } else { $null }
+    if ($action -eq 'get') { return @{ ok = $true; id = $n; task = $(if ($own -and -not ((Test-Has $own 'done_at') -and $own.done_at)) { $own } else { $null }) } }
+    if ($action -eq 'set') {
+        $t = Need $a 'task'
+        $id = "$($t.id)"; if ($id -notmatch '^[A-Za-z0-9-]{1,80}$') { Reject 2 'usage' 'task.id is the agent task id' }
+        $url = "$($t.url)"; if ($url -and $url -notmatch '^https://[A-Za-z0-9./_-]{1,300}$') { $url = '' }
+        $branch = "$($t.branch)"; if ($branch -and $branch -notmatch '^[A-Za-z0-9._/-]{1,200}$') { $branch = '' }
+        $pr = if ("$($t.pr)" -match '^\d{1,7}$') { [int]"$($t.pr)" } else { 0 }
+        $first = -not $own -or "$($own.id)" -ne $id
+        if ($first) {
+            $prev = @(if ($own -and -not ((Test-Has $own 'done_at') -and $own.done_at)) { @($own.previous) + @("$($own.id)") | Where-Object { $_ } })
+            $s.copilot_task = @{ id = $id; url = $url; branch = $branch; pr = $pr; phase = "$($t.phase)"; since = ConvertTo-Iso (Get-UtcNow); previous = $prev }
+        } else {
+            if ($branch) { $own.branch = $branch }; if ($pr -gt 0) { $own.pr = $pr }; if ($url) { $own.url = $url }; if ("$($t.phase)") { $own.phase = "$($t.phase)" }
+        }
+        Save-State $n $st
+        if ($first) {
+            $link = if ($url) { "[$id]($url)" } else { "``$id``" }
+            Add-Comment $n "**Owner:** Copilot task $link owns #$n from $(if ("$($t.phase)") { "$($t.phase)" } else { 'now' }) until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item."
+        }
+        return @{ ok = $true; id = $n; task = $s.copilot_task; first = $first }
+    }
+    if ($action -eq 'close') {
+        if (-not $own) { return @{ ok = $true; id = $n; closed = $false; reason = 'no-owner' } }
+        if ((Test-Has $own 'done_at') -and $own.done_at) { return @{ ok = $true; id = $n; closed = $false; reason = 'already' } }
+        $own.done_at = ConvertTo-Iso (Get-UtcNow); Save-State $n $st
+        if ((Test-Has $a 'unmerged') -and $a.unmerged) { $own.ended = 'closed-unmerged'; Save-State $n $st; return @{ ok = $true; id = $n; closed = $true; unmerged = $true } }
+        $sha = if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha')) { "$($s.merge.sha)" } else { '' }
+        $link = if ("$($own.url)") { "[$($own.id)]($($own.url))" } else { "``$($own.id)``" }
+        $merged = if ([int]$own.pr -gt 0) { ": PR #$($own.pr) merged" } else { '' }
+        if ($sha) { $merged += ' as `' + $sha.Substring(0, [Math]::Min(7, $sha.Length)) + '`' }
+        $sessionLink = if ("$($own.url)") { "$($own.url)" } else { "$($own.id)" }
+        Add-Comment $n "**Owner done:** Copilot task $link finished #$n$merged and master is green. Session link: $sessionLink"
+        return @{ ok = $true; id = $n; closed = $true }
+    }
+    # status
+    $info = Get-ItemInfo $n
+    $m = if (Test-Has $s 'merge') { $s.merge } else { $null }
+    $park = Get-Park $s
+    $o = @{ ok = $true; id = $n; open = [bool]$info.open; column = "$($info.column)"; pr = $(if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }) }
+    if ($m -and (Test-Has $m 'sha') -and $m.sha) {
+        $o.merge_sha = "$($m.sha)"
+        if ((Test-Has $m 'green_at') -and $m.green_at) { $o.waiting = 'done' }
+        elseif ("$($m.awaiting)" -eq 'master-broken') { $o.waiting = 'master-broken'; $o.failed = @(if ($park -and (Test-Has $park 'failed')) { @($park.failed) }) }
+        else { $o.waiting = 'master-green' }
+    }
+    elseif (-not $info.open) { $o.waiting = 'closed' }
+    elseif (Test-Has $s 'awaiting_checks') { $o.waiting = 'ci' }
+    elseif ($park) { $o.waiting = "parked:$($park.reason)" }
+    else { $o.waiting = 'next-phase' }
+    if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $rj = "$($s.pr.rejection)"; $o.rework = $rj.Substring(0, [Math]::Min(600, $rj.Length)) }
+    return $o
+}
+
 # Close a pull request with a comment and delete its branch (a copilot/* branch or the factory's own branch of the item only)
 function Close-PrWithBranch($Pr, [int]$n, [string]$Why) {
     $c = Get-Cfg
