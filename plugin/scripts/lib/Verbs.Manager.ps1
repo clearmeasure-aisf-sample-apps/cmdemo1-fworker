@@ -39,6 +39,9 @@ function Verb_manager_action($a) {
     if ($reason.Length -gt 300) { Reject 2 'usage' 'the reason is at most 300 characters' }
     $by = if ((Test-Has $a 'by') -and "$($a.by)" -match '^[A-Za-z0-9_-]{1,40}$') { "$($a.by)" } else { 'operator' }
 
+    # the Copilot session of the on-demand manager (set by the gateway, never by the caller): a link in the journal line
+    $session = if ((Test-Has $a 'session') -and "$($a.session)" -match '^https://[A-Za-z0-9._~:/?#=&%+@-]{1,300}$') { "$($a.session)" } else { '' }
+
     $info = Get-ItemInfo $n
     if (Test-Label $info $mc.holdLabel) { Reject 10 'owner-hold' "item #$n carries the label '$($mc.holdLabel)': the owner holds it, and the plant manager changes nothing on it" }
     $st = Get-State $n; $s = $st.state
@@ -143,7 +146,7 @@ function Verb_manager_action($a) {
         }
     }
     $s.manager_actions = @(@($recent) + @(@{ at = ConvertTo-Iso $now; action = $action; policy = $policy; by = $by }) | Select-Object -Last ([Math]::Max(10, $mc.perItemPerDay)))
-    $out.journaled = [bool](Add-Journal $n $st 'manager-action' @{ action = $action; policy = $policy; by = $by; reason = $reason; detail = $detail } "$action|$([string]$now.Ticks)")
+    $out.journaled = [bool](Add-Journal $n $st 'manager-action' @{ action = $action; policy = $policy; by = $by; reason = $reason; detail = $detail; session = $session } "$action|$([string]$now.Ticks)")
     Save-State $n $st
     $out.actions_today = $recent.Count + 1; $out.limit = $mc.perItemPerDay
     return $out
