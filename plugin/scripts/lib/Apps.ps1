@@ -53,6 +53,20 @@ function Get-AppToken([string]$Kind) {
     return $r.token
 }
 
+# The installation's 'actions' permission (read, write or none) as the App reads it with its JWT; the CI release reports a missing write
+function Get-AppActionsPermission([string]$Kind) {
+    $info = Get-AppInfo $Kind
+    $envKey = [Environment]::GetEnvironmentVariable("FACTORY_APP_$($Kind.ToUpperInvariant())_KEY")
+    $pem = if ($envKey) { $envKey } else { (& secret-tool lookup service factory-worker kind github-app-private-key app $Kind 2>$null) -join "`n" }
+    if (-not $pem -or $pem.Trim() -eq 'unset' -or -not $info.installation_id) { return '' }
+    $base = if ($env:GITHUB_API_URL) { $env:GITHUB_API_URL.TrimEnd('/') } else { 'https://api.github.com' }
+    $r = Invoke-RestMethod -Uri "$base/app/installations/$($info.installation_id)" -SkipHttpErrorCheck -StatusCodeVariable sc `
+        -Headers @{ Authorization = "Bearer $(New-AppJwt $pem $info.id)"; Accept = 'application/vnd.github+json'; 'User-Agent' = 'factory-worker-gateway' }
+    $pem = $null
+    if ($sc -ne 200) { return '' }
+    $p = $r.permissions.actions; if ($p) { return "$p" } else { return 'none' }
+}
+
 # Run a block with GitHub calls made as an App. Nothing leaks past the block.
 function Use-GhAs([string]$Kind, [scriptblock]$Body) {
     $script:AsToken = Get-AppToken $Kind

@@ -279,6 +279,24 @@ $CopilotScenarios = [ordered]@{
     } finally { Cop-Cleanup @($n, $m) }
 }
 
+'copilot: CI release: passes run with no candidate item; an unlabelled item routed to copilot-cloud by runtimes.routing has its held run released' = {
+    $n = 0
+    try {
+        $h = @{ Authorization = 'Bearer fake-operator' }
+        $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+        $p0 = (Cop-Status).ciRelease.passes
+        Check 'passes run every interval, candidates or not' (Wait-Until -Seconds 40 { (Cop-Status).ciRelease.passes -gt $p0 }) ((Cop-Status).ciRelease | ConvertTo-Json -Compress)
+        $n = New-Item-Fake 'Copilot routed CI item' 'Change src/App/Routed.cs.' @('factory worker', 'Auto Merge') 'Development'
+        $br = "copilot/routed-$n"
+        [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Routed.cs') })
+        $d = Invoke-RestMethod "$gh/pulls" -Method POST -Headers $h -ContentType 'application/json' -Body (@{ title = '[WIP] Routed'; head = $br; base = 'master'; body = 'x'; draft = $true } | ConvertTo-Json)
+        $r = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/open-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n; head = $br; title = 'Routed' } | ConvertTo-Json) -SkipHttpErrorCheck
+        Check 'pr_open records the copilot/ pull request' ($r.ok -and $r.pullRequest.number -eq $d.number) ($r | ConvertTo-Json -Compress -Depth 4)
+        $run = Fake 'held-run' @{ branch = $br }
+        Check 'the held run of the routed item is released' (Wait-Until -Seconds 60 { @((Fake 'held-runs').runs | Where-Object { $_.id -eq $run.id -and $_.reruns -eq 1 }).Count -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
+    } finally { Cop-Cleanup @($n) }
+}
+
 'copilot: fworker-mcp accepts only the three factory gateways (https, no path) or its configured URL, each with its own bootstrap token' = {
     $js = Join-Path $script:Work 'fworker-mcp-check.mjs'
     [IO.File]::WriteAllText($js, "$((Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/fworker-mcp.mjs").Content)")

@@ -20,7 +20,10 @@ sealed class CopilotCiRelease
     public TimeSpan RefusedRetry = TimeSpan.FromMinutes(10);
 
     // One pass. run: the rule verb runner; journal: one line on the item (item, fields, key).
-    public async Task Pass(IReadOnlyCollection<int> items, Func<string, string, Task<(int Code, string Output)>> run, Func<int, JsonObject, string, Task> journal)
+    DateTime probedAt = DateTime.MinValue; string appActions = "";
+    public TimeSpan ProbeEvery = TimeSpan.FromMinutes(30);
+
+    public async Task Pass(IReadOnlyCollection<int> items, bool routeAll, Func<string, string, Task<(int Code, string Output)>> run, Func<int, JsonObject, string, Task> journal)
     {
         string[] skip;
         lock (gate)
@@ -30,7 +33,8 @@ sealed class CopilotCiRelease
             skip = handledSet.Concat(refusedAt.Keys).ToArray();
             passes++; lastPass = now.ToString("o");
         }
-        var (code, output) = await run("ci-release", new JsonObject { ["items"] = new JsonArray(items.Select(i => (JsonNode)i).ToArray()), ["skip"] = new JsonArray(skip.Select(s => (JsonNode)s).ToArray()) }.ToJsonString());
+        var probe = DateTime.UtcNow - probedAt >= ProbeEvery;
+        var (code, output) = await run("ci-release", new JsonObject { ["items"] = new JsonArray(items.Select(i => (JsonNode)i).ToArray()), ["skip"] = new JsonArray(skip.Select(s => (JsonNode)s).ToArray()), ["routeAll"] = routeAll, ["probe"] = probe }.ToJsonString());
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
         if (code != 0 || j?["ok"] is not JsonValue okv || !okv.TryGetValue<bool>(out var ok) || !ok)
         {
@@ -41,6 +45,14 @@ sealed class CopilotCiRelease
         lock (gate)
         {
             pending = j["pending"]?.GetValue<int>() ?? 0;
+            if (probe) probedAt = DateTime.UtcNow;
+            // the installation's Actions permission (read with the App's JWT): anything but write is reported before a run is refused
+            if (probe && j["actions"] is JsonValue av && av.TryGetValue<string>(out var act) && act != "")
+            {
+                appActions = act;
+                if (act != "write") { permissionMissing = true; lastError = $"the App installation has Actions: {act}; a re-run needs write"; }
+                else if (refusedAt.Count == 0) permissionMissing = false;
+            }
             foreach (var r in (j["runs"] as JsonArray) ?? new JsonArray())
             {
                 var id = r?["run"]?.ToString() ?? ""; var result = r?["result"]?.ToString() ?? "";
@@ -72,7 +84,7 @@ sealed class CopilotCiRelease
         lock (gate)
         {
             var o = new JsonObject { ["enabled"] = enabled, ["intervalSeconds"] = seconds, ["released"] = released, ["refused"] = refused, ["lastError"] = lastError, ["passes"] = passes, ["failedPasses"] = failedPasses,
-                ["pending"] = pending, ["lastPass"] = lastPass, ["lastRelease"] = lastRelease, ["permissionMissing"] = permissionMissing };
+                ["pending"] = pending, ["lastPass"] = lastPass, ["lastRelease"] = lastRelease, ["permissionMissing"] = permissionMissing, ["appActions"] = appActions };
             if (permissionMissing) o["ownerAction"] = OwnerAction;
             return o;
         }

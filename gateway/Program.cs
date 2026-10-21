@@ -2134,9 +2134,11 @@ if (copilotManager != null && copilotSettings.CiRelease) _ = Task.Run(async () =
         try
         {
             if (!leader.MayAct || !copilotManager.On) continue;
+            // every pass runs, with or without candidates: the held runs are listed and the App's permission is read (an unlabelled item routed
+            // to copilot-cloud by runtimes.routing is a candidate through its held run's pull request: routeAll)
             var items = plant.CopilotItems();
-            if (items.Length == 0) continue;
-            await copilotCiRelease.Pass(items, (verb, stdin) => rr.RunAsync(verb, stdin, TimeSpan.FromSeconds(120)),
+            var routeAll = copilotManager.Settings.RouteFor("Development", "") == "copilot-cloud";
+            await copilotCiRelease.Pass(items, routeAll, (verb, stdin) => rr.RunAsync(verb, stdin, TimeSpan.FromSeconds(120)),
                 async (item, fields, key) => await rr.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = "ci-released", ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)));
         }
         catch (Exception e) { Console.Error.WriteLine($"ci-release: {e.GetType().Name}"); }

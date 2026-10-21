@@ -52,6 +52,10 @@ gateway does that itself, so development flows without a person (merging green p
   when a held `copilot/*` run exists.
 - **Candidates** (`Plant.CopilotItems`): the items labelled `runtime:copilot-cloud` that the sweep read (only this gateway's `env:` scope) and
   the items the Copilot adapter ran a task for since the process started.
+  When `runtimes.routing` sends every phase of an unlabelled item to `copilot-cloud` (cmdemo1's default), the items named in the titles of
+  the held runs' open pull requests are candidates too (their recorded pull request must still name the branch). Every pass runs, with or
+  without candidates; every 30 minutes the pass also reads the installation's Actions permission with the App's JWT (`appActions` in
+  status). Anything but `write` sets `permissionMissing` and the owner action before a run is refused.
 - **Rule** (verb `ci-release`, `Verbs.Pr.ps1`; the gateway's own, refused over HTTP): `GET actions/runs?status=action_required`, runs whose
   `head_branch` is `copilot/*`. A run is released only when its item is open, in this gateway's env scope (`Get-ItemInfo`), carries no other
   `runtime:` label, and the item's pull request (`Find-ItemPr`, the head recorded by `pr_open`) has that branch and the run's `head_sha` as
