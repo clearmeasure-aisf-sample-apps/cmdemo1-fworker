@@ -52,6 +52,23 @@ $CopilotManagerScenarios = [ordered]@{
     Check 'the question is no longer open' (Wait-Until -Seconds 10 { @(CopMgr-Open | Where-Object { "$($_.text)" -match 'vendor email' }).Count -eq 0 })
     $nt = Mcp-Call 'manager_note' @{ text = 'nothing else needs you'; subject = 'patrol' } $r1
     Check 'manager_note reaches the operator' (-not $nt.isError) ($nt | ConvertTo-Json -Compress -Depth 5)
+    # a Copilot task that owns an item and still runs is neither stalled nor disconnected: the manager cannot release it
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot owner the manager must leave alone' 'x' $CopLabels
+        Check 'the item gets its worker task' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
+        $wr1 = "$((Cop-Exchange (Cop-Code (Cop-Tasks $n)[0]) (Cop-Bootstrap)).body.token)"
+        $cur = ''
+        Check 'the worker is offered the item' (Wait-Until -Seconds 30 { $e = Mcp-Events $wr1 $cur 5; @($e.events | Where-Object { $_.event -eq 'item.assigned' -and $_.item -eq $n }).Count -gt 0 })
+        [void](Mcp-Call 'item_accept' @{ item = $n } $wr1)
+        $rel = Mcp-Call 'manager_action' @{ action = 'release-owner'; item = $n; policy = 'stalled-owner'; reason = 'disconnected' } $r1
+        Check 'release-owner of a running Copilot owner is refused runtime-owner' ($rel.isError -and $rel.body.code -eq 'runtime-owner') ($rel | ConvertTo-Json -Compress -Depth 4)
+        $rq = Mcp-Call 'manager_action' @{ action = 'requeue'; item = $n; policy = 'stuck-offer'; reason = 'x' } $r1
+        Check 'requeue of it is refused too' ($rq.isError -and $rq.body.code -eq 'runtime-owner') ($rq | ConvertTo-Json -Compress -Depth 4)
+        $dg2 = Mcp-Call 'manager_digest' @{} $r1
+        $bad = @(@($dg2.body.digest.attention) | Where-Object { $_.item -eq $n -and $_.kind -in 'stalled', 'disconnected-owner' })
+        Check 'the digest lists no stalled or disconnected owner for it' ($bad.Count -eq 0) ($dg2 | ConvertTo-Json -Compress -Depth 6)
+    } finally { Cop-Cleanup @($n) }
     $se = Mcp-Call 'session_end' @{ reason = 'patrol done' } $r1
     Check 'session_end is accepted' (-not $se.isError) ($se | ConvertTo-Json -Compress -Depth 4)
     Check 'present is cleared and the end is recorded' (Wait-Until -Seconds 15 { $s = CopMgr-Status; $s.present -eq $false -and $s.running -eq $false -and $s.launches -eq 1 -and $s.lastEnd }) ((CopMgr-Status) | ConvertTo-Json -Compress)

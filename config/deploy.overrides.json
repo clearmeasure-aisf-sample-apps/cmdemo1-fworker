@@ -29,7 +29,7 @@
     },
     "copilot": {
       "enabled": true,
-      "maxConcurrent": 1,
+      "maxConcurrent": 3,
       "maxMinutes": 60,
       "maxExecutionsPerDay": 30,
       "ciRelease": true,
@@ -37,7 +37,7 @@
       "environments": {
         "tdd": {
           "gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
-          "manager": { "enabled": true }
+          "manager": { "enabled": false }
         },
         "uat": {
           "enabled": false,

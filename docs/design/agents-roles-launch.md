@@ -512,4 +512,9 @@ Built in `gateway/Runtimes/ManagerCopilot.cs`; Tier 1 suite `copilot-manager` (`
   the gateway from the running task, never by the caller).
 - **End**: `session_end`, the task's own end (`completed`, `failed`, ...), or `maxMinutes`; the name is revoked, the code spent. Log lines
   `{"manager":"copilot-launched"|"copilot-ended"|"copilot-launch-failed", ...}` carry the task, minutes and usage, no token.
+- **Runtime owners are left alone** (defect of 2026-10-21: a manager task released a running Copilot owner and a duplicate draft followed).
+  The digest does not list an owner that is a running runtime task (copilot-cloud, cursor-cloud, cae-job) as stalled or disconnected: it has
+  no stream, and the runtime manager ends it past its deadline. `manager-action` `release-owner` and `requeue` of such an item, and
+  `restart-session` and `drain` of such a name, answer 409 `runtime-owner`. tdd's `api.copilot.environments.tdd.manager.enabled` is false in
+  `config/deploy.overrides.json` until this is deployed and checked; set it back to true to re-enable.
 
