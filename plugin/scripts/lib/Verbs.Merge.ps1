@@ -137,6 +137,7 @@ function Verb_merge($a, [switch]$Gateway) {
     }
     $pr = Get-Pr $prNum
     if (-not (Test-PrBelongs $pr $n)) { return & $park 'pr-mismatch' "PR #$prNum is not a PR belonging to this work item (branch '$($pr.head.ref)'); refusing to merge." }
+    if (-not $pr.merged) { $pr = Set-PrReady $pr }
     if ($pr.merged) {
         # issue 114: the merge recorded before (an item validated again after its merge, 276) keeps its record, merged_at and its wait; a record
         # whose wait an older gateway erased is re-armed instead of starting over at master-green
