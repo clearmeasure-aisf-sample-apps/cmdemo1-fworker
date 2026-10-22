@@ -156,12 +156,13 @@ sealed class World
 
     // The fake Cursor Cloud Agents API v1: POST /v1/agents, GET /v1/agents/{id}, GET .../runs/{runId}, POST .../runs/{runId}/cancel, DELETE /v1/agents/{id}.
     // It wants the bearer key "fake-cursor". Not cleared by /_fake/reset; /_fake/cursor-reset does.
-    readonly List<CursorAgent> cursorAgents = new(); long cursorSeq; int cursorLaunchFailures;
+    readonly List<CursorAgent> cursorAgents = new(); long cursorSeq; int cursorLaunchFailures; bool cursorUsageLimit;
     (int, object?) Cursor(string method, string path, JsonNode? b, string auth)
     {
         if (auth != "Bearer fake-cursor") return (401, "{\"error\":\"unauthorized\"}");
         if (path == "/v1/agents" && method == "POST")
         {
+            if (cursorUsageLimit) return (400, "{\"error\":{\"code\":\"usage_limit_exceeded\",\"message\":\"Your team's prepaid balance is used up. Buy credits for your team to keep going.\"}}");
             if (cursorLaunchFailures > 0) { cursorLaunchFailures--; return (400, "{\"error\":\"bad_request\",\"message\":\"fake: model not available for this account\"}"); }
             var a = new CursorAgent { Id = "bc-" + (++cursorSeq).ToString("x8"), RunId = "run-" + cursorSeq.ToString("x8"), Body = b as JsonObject ?? new JsonObject() };
             cursorAgents.Add(a);
@@ -873,12 +874,13 @@ sealed class World
                 if (b?["state"] is { } st) se.State = st.ToString(); if (b?["premium"] is { } pr) se.Premium = pr.GetValue<double>(); if (b?["credits"] is { } crd) se.Credits = crd.GetValue<double>(); if (b?["headRef"] is { } hr) t.HeadRef = hr.ToString(); if (b?["error"] is { } er) se.Error = er.ToString(); if (b?["run"] is { } rn) se.Run = rn.ToString();
                 return (200, J(("ok", true)));
             }
-            case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; return (200, J(("ok", true)));
+            case "cursor-reset": cursorAgents.Clear(); cursorLaunchFailures = 0; cursorUsageLimit = false; return (200, J(("ok", true)));
             case "cursor-add":   // an agent this gateway did not launch in this process: {"name"}
             {
                 var a = new CursorAgent { Id = "bc-" + (++cursorSeq).ToString("x8"), RunId = "run-" + cursorSeq.ToString("x8"), Body = J(("name", b?["name"]?.ToString() ?? "")), Created = DateTime.UtcNow.AddMinutes(-(b?["ageMinutes"]?.GetValue<double>() ?? 0)) };
                 cursorAgents.Add(a); return (200, J(("ok", true), ("id", a.Id)));
             }
+            case "cursor-usage-limit": cursorUsageLimit = b?["on"]?.GetValue<bool>() ?? true; return (200, J(("ok", true)));
             case "cursor-launch-failures": cursorLaunchFailures = b?["count"]?.GetValue<int>() ?? 1; return (200, J(("ok", true)));
             case "cursor-agent":
             {   // sets an agent's state as Cursor would: {"id", "status": ACTIVE | IDLE | ARCHIVED, "run": RUNNING | FINISHED | ERROR}

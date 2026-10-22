@@ -202,6 +202,13 @@ sealed class RuntimeManager
             await End(t.Name, "settled", failed: false, startFailure: false);
             return;
         }
+        // the runtime refused the launch for its account's quota or billing: no failure of the item, no launch counted, the item keeps waiting
+        if (r.Error == "quota")
+        {
+            lock (gate) { if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            await End(t.Name, "quota-blocked", failed: false, startFailure: false);
+            return;
+        }
         span?.SetStatus(ActivityStatusCode.Error, r.Error);
         lock (gate) failureErrors[(t.Item, t.Phase)] = r.Error;
         await End(t.Name, "start-failed", failed: true, startFailure: true);
@@ -254,7 +261,7 @@ sealed class RuntimeManager
         }
         lock (gate) { if (idle) idleFollowUps[e.Item] = idleFollowUps.GetValueOrDefault(e.Item) + 1; else if (pushed) idleFollowUps.Remove(e.Item); }
         var settled = false;
-        if (Ending != null && outcome is not ("settled" or "start-failed")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
+        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
         // the phase is done pending checks: the next Development task (a fix-forward round) is counted afresh; fixForwardMaxRounds caps those
         if (settled) lock (gate) launches.Remove((e.Item, e.Phase));
         var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome, e.Url) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }

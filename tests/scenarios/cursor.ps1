@@ -143,6 +143,19 @@ $CursorScenarios = [ordered]@{
     } finally { Cur-Cleanup @($n) }
 }
 
+'cursor: a launch refused for the team''s usage limit is a quota block, not a failure: the item waits, starts pause, the owner action shows, and the probe after quotaRetryMinutes clears it' = {
+    $n = 0
+    try {
+        [void](Fake 'cursor-usage-limit' @{ on = $true })
+        $n = New-Item-Fake 'Cursor quota' 'x' $CurLabels
+        Check 'status: quota-exhausted with Cursor''s message and the owner action' (Wait-Until -Seconds 40 { $q = (Cur-Status).quota; $q.exhausted -and "$($q.message)" -like '*prepaid balance*' -and "$($q.ownerAction)" -like 'buy Cursor team credits*' }) ((Cur-Status).quota | ConvertTo-Json -Compress)
+        Check 'the refusal is no failure of the item and the runtime stays healthy' (@((Cur-Status).failures | Where-Object { $_.item -eq $n }).Count -eq 0 -and (Cur-Status).healthy) (Cur-Status | ConvertTo-Json -Compress -Depth 5)
+        Check 'no agent exists while the quota is exhausted' ((Cur-Agents $n).Count -eq 0)
+        [void](Fake 'cursor-usage-limit' @{ on = $false })
+        Check 'after quotaRetryMinutes the probe launches an agent and clears the quota' (Wait-Until -Seconds 90 { (Cur-Agents $n).Count -ge 1 -and -not (Cur-Status).quota.exhausted }) ((Cur-Status).quota | ConvertTo-Json -Compress)
+    } finally { [void](Fake 'cursor-usage-limit' @{ on = $false }); Cur-Cleanup @($n) }
+}
+
 'cursor: an agent that ends by itself is kept as the owner and its item taken back; a restarted gateway deletes no agent and keeps the owner agent' = {
     $n = 0
     try {
