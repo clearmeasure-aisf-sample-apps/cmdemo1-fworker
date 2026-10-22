@@ -13,6 +13,8 @@ sealed partial class Plant
     public RuntimeManager? Cursor { get; set; }
     // the Copilot cloud agent (gateway/Runtimes/CopilotCloudRuntime.cs): items reach it by the runtime:copilot-cloud label
     public RuntimeManager? Copilot { get; set; }
+    // the Octopus runbook runtime (gateway/Runtimes/OctopusRunbookRuntime.cs): items reach it by the runtime:octopus label or a routing rule
+    public RuntimeManager? Octopus { get; set; }
     // the items a Copilot task owns until merged and master green (CopilotCloudRuntime.Owns): only that task is offered them, whatever the label,
     // the routing or a connected session says
     public Func<int, bool>? CopilotOwns { get; set; }
@@ -25,8 +27,8 @@ sealed partial class Plant
     readonly List<(RuntimeManager Rm, RuntimeManager.Ticket T)> pendingProvisions = new();
 
     // the adapter that runs a worker name, or null for a session that connected by itself
-    RuntimeManager? RuntimeOf(string name) => name == "" ? null : Runtimes?.IsRuntimeWorker(name) == true ? Runtimes : Cursor?.IsRuntimeWorker(name) == true ? Cursor : Copilot?.IsRuntimeWorker(name) == true ? Copilot : null;
-    RuntimeManager? RuntimeFor(string kind) => kind == "cae-job" ? Runtimes : kind == "cursor-cloud" ? Cursor : kind == "copilot-cloud" ? Copilot : null;
+    RuntimeManager? RuntimeOf(string name) => name == "" ? null : Runtimes?.IsRuntimeWorker(name) == true ? Runtimes : Cursor?.IsRuntimeWorker(name) == true ? Cursor : Copilot?.IsRuntimeWorker(name) == true ? Copilot : Octopus?.IsRuntimeWorker(name) == true ? Octopus : null;
+    RuntimeManager? RuntimeFor(string kind) => kind == "cae-job" ? Runtimes : kind == "cursor-cloud" ? Cursor : kind == "copilot-cloud" ? Copilot : kind == "octopus" ? Octopus : null;
     readonly HashSet<(int, string)> parkQueued = new();
 
     // The CI release's candidates (CopilotCiRelease.cs): the items labelled runtime:copilot-cloud (the sweep reads only this gateway's env scope)
@@ -47,8 +49,8 @@ sealed partial class Plant
     // runtime worker that already runs for the item, or null for the usual choice).
     (bool Handled, string? Pin) RouteRuntime(Assignment a)
     {
-        var any = Runtimes ?? Cursor ?? Copilot;
-        if (any == null || a.Kind != "own-item" || !((Runtimes?.On ?? false) || (Cursor?.On ?? false) || (Copilot?.On ?? false))) return (false, null);
+        var any = Runtimes ?? Cursor ?? Copilot ?? Octopus;
+        if (any == null || a.Kind != "own-item" || !((Runtimes?.On ?? false) || (Cursor?.On ?? false) || (Copilot?.On ?? false) || (Octopus?.On ?? false))) return (false, null);
         var label = runtimeLabels[a.Item.ToString()]?.ToString() ?? "";
         var ownerRt = OwnerRuntime(a.Item); var owned = ownerRt != null;
         var runtime = ownerRt ?? any.Settings.RouteFor(a.Column, label);

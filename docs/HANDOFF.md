@@ -275,6 +275,14 @@ beyond `next_event` and item tool calls.
 
 ## 5. Open defects and backlog, in priority order
 
+Built 2026-10-22, off everywhere: **the Octopus runbook runtime** (`runtime:octopus`, `gateway/Runtimes/OctopusRunbookRuntime.cs`, design
+`docs/design/octopus-runbook-runtime.md`, suite `octopus`). Workers start as detached containers on self-hosted Octopus tentacles (target
+tag `fworker-host`, environment tdd of Spaces-355) through runbook runs of project `cmdemo1-fworker-runtime`; short roles may overflow to the
+Hosted Ubuntu pool (held, capped at `overflowMax`). Not yet done: the project, its runbooks, the image and the tentacles (built in parallel
+to the contract of the design), a service account for `OCTOPUS_RUNBOOK_API_KEY` (run runbooks of that one project only), the host token
+`FACTORY_OCTOPUS_HOST_TOKEN` in the gateway app and in the project's sensitive variables, and a `runtimes.environments.tdd.octopus` block in
+`config/deploy.overrides.json` (owner decision; not switched on by this change).
+
 Done 2026-10-13 (issues 33, 30 and 31 of this repository): **the gateway finishes an approved item by itself.** A PASS on an `Auto Merge`
 item under policy `auto` is merged by the verdict call, or by the sweep as soon as it can be (checks green, branch brought up to date, after a
 restart or with no owner); the item is never offered while it waits, `/status` lists it under `passUnmerged` and the digest names it

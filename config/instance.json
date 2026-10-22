@@ -312,6 +312,28 @@
       "gatewayUrl": "",
       "agent": "claude",
       "jobs": { "claude": "", "codex": "" }
+    },
+    "octopus": {
+      "enabled": false,
+      "serverUrl": "https://clearmeasure.octopus.app",
+      "spaceId": "Spaces-355",
+      "project": "cmdemo1-fworker-runtime",
+      "environment": "tdd",
+      "hostTag": "fworker-host",
+      "startRunbook": "Start worker",
+      "overflowRunbook": "Start worker (overflow)",
+      "stopRunbook": "Stop worker",
+      "agent": "codex",
+      "perHostCapacity": 2,
+      "overflowRoles": ["plant-manager", "supervisor", "qc", "operator"],
+      "overflowMax": 4,
+      "maxConcurrent": 0,
+      "maxExecutionsPerDay": 0,
+      "maxFailuresPerPhase": 2,
+      "unhealthyAfterFailures": 2,
+      "ackSeconds": 600,
+      "listSeconds": 30,
+      "reportGraceSeconds": 90
     }
   },
   "secrets": {

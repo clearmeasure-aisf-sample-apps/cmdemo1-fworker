@@ -182,6 +182,11 @@ var copilotManager = copilotRuntime != null
     ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
         copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
     : null;
+// the Octopus runbook runtime (gateway/Runtimes/OctopusRunbookRuntime.cs, docs/design/octopus-runbook-runtime.md): runtimes.octopus.enabled and the
+// key of the service account that may run the runbooks of that one project (OCTOPUS_RUNBOOK_API_KEY); off without the key
+var octopusRuntime = ownerMode && tokenSecret.Length > 0 && runtimeSettings.Octopus.On ? new OctopusRunbookRuntime(runtimeSettings.Octopus) : null;
+var octopusManager = octopusRuntime != null ? new RuntimeManager(runtimeSettings, octopusRuntime, runtimeNonces, runtimeSettings.Octopus.Limits(octopusRuntime.Blocked)) : null;
+Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "octopus", ["enabled"] = octopusManager != null, ["configured"] = runtimeSettings.Octopus.Enabled, ["key"] = runtimeSettings.Octopus.ApiKey != "", ["hostToken"] = runtimeSettings.Octopus.HostToken != "" }.ToJsonString());
 ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), created once the plant exists
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
@@ -193,7 +198,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager, Octopus = octopusManager };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -206,7 +211,7 @@ var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEn
 builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
 // one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
 // with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
-foreach (var rmx in new[] { runtimeManager, cursorManager, copilotManager }.OfType<RuntimeManager>()) builder.Services.AddSingleton<IHostedService>(sp =>
+foreach (var rmx in new[] { runtimeManager, cursorManager, copilotManager, octopusManager }.OfType<RuntimeManager>()) builder.Services.AddSingleton<IHostedService>(sp =>
 {
     var rp = sp.GetRequiredService<Plant>(); var rr = sp.GetRequiredService<Runner>();
     rmx.Plant = rp;
@@ -556,6 +561,8 @@ app.Use(async (ctx, next) =>
     }
     // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
     if (port == apiPort && path is "/api/v1/runtime/redeem" or "/api/v1/copilot/exchange") { await next(); return; }
+    // the Octopus reconcile runbook's calls carry the host token, checked by the endpoints themselves (never a gateway credential)
+    if (port == apiPort && path is "/api/v1/runtime/octopus/desired" or "/api/v1/runtime/octopus/report") { await next(); return; }
     var isMcp = port == apiPort && ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
     if (port == apiPort && (path.StartsWith("/api/") || isMcp))
     {
@@ -778,7 +785,7 @@ app.MapGet("/api/v1/dashboard", (HttpContext c) =>
     if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
     if (ownerMode) o["hosts"] = plant.HostStatus();
     if (ownerMode) o["lease"] = plant.LeaseStatus();
-    if (ownerMode && (runtimeManager != null || cursorManager != null || copilotManager != null)) o["runtimes"] = RuntimesBlock();
+    if (ownerMode && (runtimeManager != null || cursorManager != null || copilotManager != null || octopusManager != null)) o["runtimes"] = RuntimesBlock();
     if (ownerMode) lock (snapshotState) o["plantSnapshot"] = snapshotState.DeepClone();
     if (ownerMode) o["leader"] = leader.Status();
     return Results.Text(o.ToJsonString(), "application/json");
@@ -842,6 +849,7 @@ app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) 
     if (runtimeManager != null && runtimeManager.IsRuntimeWorker(name)) _ = Task.Run(() => runtimeManager.Deprovision(name, "revoked"));
     if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) _ = Task.Run(() => cursorManager.Deprovision(name, "revoked"));
     if (copilotManager != null && copilotManager.IsRuntimeWorker(name)) _ = Task.Run(() => copilotManager.Deprovision(name, "revoked"));
+    if (octopusManager != null && octopusManager.IsRuntimeWorker(name)) _ = Task.Run(() => octopusManager.Deprovision(name, "revoked"));
     _ = Task.Run(() => mcpSessionsRef?.End(name, "revoked") ?? Task.CompletedTask);
     return Results.Json(new { ok = true, name, generation = gen, streamClosed = closed, exit = 0 });
 });
@@ -850,6 +858,12 @@ JsonObject RuntimesBlock()
 {
     var o = runtimeManager?.Status() ?? new JsonObject { ["enabled"] = false };
     if (cursorManager?.Status()["cursor-cloud"] is { } cb) o["cursor-cloud"] = cb.DeepClone();
+    if (octopusManager?.Status()["octopus"] is JsonObject ob && octopusRuntime != null)
+    {
+        var oc = (JsonObject)ob.DeepClone();
+        foreach (var (k, v) in octopusRuntime.Status()) oc[k] = v?.DeepClone();
+        o["octopus"] = oc;
+    }
     if (copilotManager?.Status()["copilot-cloud"] is JsonObject pb)
     {
         var pc = (JsonObject)pb.DeepClone();
@@ -862,7 +876,7 @@ JsonObject RuntimesBlock()
 app.MapPost("/api/v1/runtimes/{kind}/reset", (string kind, HttpContext c) =>
 {
     if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator resets a runtime", 30);
-    var rk = kind == "cae-job" ? runtimeManager : kind == "cursor-cloud" ? cursorManager : kind == "copilot-cloud" ? copilotManager : null;
+    var rk = kind == "cae-job" ? runtimeManager : kind == "cursor-cloud" ? cursorManager : kind == "copilot-cloud" ? copilotManager : kind == "octopus" ? octopusManager : null;
     if (rk == null) return Fail(404, "no-runtime", "no such runtime is switched on", 12);
     rk.ResetHealth();
     return Results.Json(new { ok = true, runtime = kind, exit = 0 });
@@ -888,6 +902,31 @@ async Task<(bool Ok, int Generation, bool Closed)> RevokeName(string name, strin
 if (runtimeManager != null) runtimeManager.Revoke = async n => { await RevokeName(n, "runtime"); };
 if (cursorManager != null) cursorManager.Revoke = async n => { await RevokeName(n, "runtime"); };
 if (copilotManager != null) copilotManager.Revoke = async n => { copilotCodes.Forget(n); await RevokeName(n, "runtime"); };
+if (octopusManager != null) octopusManager.Revoke = async n => { await RevokeName(n, "runtime"); };
+// The reconcile loop of the Octopus runbook runtime (docs/design/octopus-runbook-runtime.md 6): the scheduled runbook "Reconcile hosts" asks, per host,
+// which workers should run there and reports the fw-* containers it found. Authenticated by the host token (FACTORY_OCTOPUS_HOST_TOKEN, compared in
+// constant time) only: never the operator token, never a worker credential. The answers name workers, never a credential.
+string HostBearer(HttpContext c) { var a = c.Request.Headers.Authorization.ToString(); return a.StartsWith("Bearer ", StringComparison.Ordinal) ? a[7..].Trim() : ""; }
+app.MapGet("/api/v1/runtime/octopus/desired", async (HttpContext c) =>
+{
+    if (octopusRuntime == null) return Fail(404, "no-runtime", "the octopus runtime is not switched on", 12);
+    if (!octopusRuntime.HostTokenOk(HostBearer(c))) return Fail(401, "unauthorized", "missing or wrong host token", 30);
+    var host = c.Request.Query["host"].ToString().Trim();
+    if (host.Length is 0 or > 200) return Fail(400, "usage", "?host=<machine id or name> is required", 2);
+    JsonObject? d; try { d = await octopusRuntime.Desired(host, c.RequestAborted); } catch { return Fail(503, "not-ready", "the runtime has not read back its workers yet; remove nothing and try again", 20); }
+    return d == null ? Fail(404, "unknown-host", "the host is not a deployment target of the runtime", 12) : Results.Text(d.ToJsonString(), "application/json");
+});
+app.MapPost("/api/v1/runtime/octopus/report", async (HttpContext c) =>
+{
+    if (octopusRuntime == null) return Fail(404, "no-runtime", "the octopus runtime is not switched on", 12);
+    if (!octopusRuntime.HostTokenOk(HostBearer(c))) return Fail(401, "unauthorized", "missing or wrong host token", 30);
+    var (text, tooLarge) = await ReadBody(c, 65536);
+    JsonObject body; try { body = tooLarge ? throw new FormatException() : Messenger.ParseObject(text); } catch { return Fail(400, "usage", "the body is { \"host\": \"<machine>\", \"containers\": [{ \"name\", \"item\", \"state\", \"startedAt\" }] }", 2); }
+    var host = body["host"]?.ToString().Trim() ?? "";
+    if (host.Length is 0 or > 200 || body["containers"] is not JsonArray cs) return Fail(400, "usage", "host and containers are required", 2);
+    var rr = await octopusRuntime.Report(host, cs, c.RequestAborted);
+    return rr == null ? Fail(404, "unknown-host", "the host is not a deployment target of the runtime", 12) : Results.Text(rr.ToJsonString(), "application/json");
+});
 
 app.MapPost("/webhooks/github", async (HttpContext ctx) =>
 {
@@ -1861,6 +1900,16 @@ if (messaging.Enabled && messaging.TestHooks)
     }
 
     // a runtime worker's nonce, as the adapter mints one at provisioning: {"name", "runtime", "tokenSeconds", "ttlSeconds"}
+    // the octopus runtime's start of a worker with an explicit role (the overflow rule; the plant starts own-item workers only)
+    app.MapPost("/api/v1/_test/octopus-provision", async (HttpContext ctx) =>
+    {
+        var (b, err) = await SeamBody(ctx, "the body is a JSON object with item, phase and role");
+        if (b == null) return err!;
+        if (octopusManager == null) return Fail(404, "no-runtime", "the octopus runtime is not switched on", 12);
+        var t = octopusManager.Begin(int.TryParse(b["item"]?.ToString(), out var ti) ? ti : 0, b["phase"]?.ToString() ?? "", "", b["role"]?.ToString() ?? "");
+        await octopusManager.Provision(t);
+        return Results.Json(new { ok = true, name = t.Name, execution = octopusManager.ExecutionOf(t.Name) });
+    });
     app.MapPost("/api/v1/_test/runtime-nonce", async (HttpContext ctx) =>
     {
         var (b, err) = await SeamBody(ctx, "the body is a JSON object with name and runtime");
@@ -3072,7 +3121,7 @@ if(!await sendNote(rb.dataset.n,text,id))return;delete drafts[k]}
 if(id)await act('/api/v1/messages/read',{ids:[id]});if(document.activeElement)document.activeElement.blur();refresh();return}
 const b=e.target.closest('button[data-a="mute"]');if(!b||!confirm('Mute '+b.dataset.n+'? It can still ask the supervisor.'))return;say(await act('/api/v1/workers/'+encodeURIComponent(b.dataset.n)+'/messaging?value=mute'));refresh()};
 // The Release Queue: the waiting items, oldest first, and the button that only records a promotion request (the gateway never promotes).
-const RT_NAMES={'cae-job':'Container Apps jobs','copilot-cloud':'Copilot cloud','cursor-cloud':'Cursor cloud'};
+const RT_NAMES={'cae-job':'Container Apps jobs','octopus':'Octopus runbooks','copilot-cloud':'Copilot cloud','cursor-cloud':'Cursor cloud'};
 const rtKinds=r=>Object.keys(r||{}).filter(k=>r[k]&&typeof r[k]==='object'&&'maxConcurrent' in r[k]);
 const sessionLink=x=>{const d=x.detail||{},u=x.sessionUrl||x.session_url||x.url||d.sessionUrl||d.session_url||d.url||'',t=x.execution||d.agent||d.task||'session';return /^https:\/\/[\w.-]+\//i.test(u)?`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(t)}</a>`:(x.execution?esc(x.execution):'<span class="mut">-</span>')};
 const itemLink=n=>ghLink(repoUrl,'issues',n,'#'+esc(n)),prLink=n=>ghLink(repoUrl,'pull',n,'#'+esc(n));
