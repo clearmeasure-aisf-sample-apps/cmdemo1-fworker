@@ -56,6 +56,7 @@ foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerA
 . (Join-Path $PSScriptRoot 'envscope.ps1')           # the env: label: two gateways (tdd, uat) on one board; suite 'envscope'
 . (Join-Path $PSScriptRoot 'keeper.ps1')            # the backlog keeper session (gateway/Keeper.cs): scenarios named "keeper: ..." join the manager suite
 foreach ($k in $KeeperScenarios.Keys) { $ManagerScenarios[$k] = $KeeperScenarios[$k] }
+. (Join-Path $PSScriptRoot 'octopus.ps1')           # the Octopus runbook runtime against the fake Octopus: suite 'octopus' (uses the helpers of owner.ps1 and runtime.ps1)
 
 # ---- the suites. ORDER IS THE PORT SLOT: append new suites at the end, never reorder (a slot is 100 ports from 6100, see lib.ps1). ----------
 # Env names the environment a suite needs (set before it, removed after it); Timing sets FACTORY_TIMING_* for the suite; Extra is merged into the gateway config.
@@ -143,6 +144,12 @@ $SuiteDefs = @(
     @{ Name = 'cursor-deadline'; Policy = 'auto'; Set = $CursorDeadlineScenarios; Env = 'cursor'; Timing = @{ staleItemMinutes = 600; sessionEndGraceSeconds = 3 }
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             api = @{ cursor = @{ enabled = $true; maxConcurrent = 2; maxMinutes = 0.25; maxExecutionsPerDay = 1000; ackSeconds = 300; listSeconds = 1; idleGraceSeconds = 2; usageRetrySeconds = 0.5; usageWaitSeconds = 20; model = 'auto'; apiUrl = '__FAKE_URL__'; gatewayUrl = 'http://gw.test'; repository = 'https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders' } } } }
+    # the Octopus runbook runtime (octopus.ps1, docs/design/octopus-runbook-runtime.md): the fake Octopus, items opt in by the runtime:octopus label,
+    # one worker per host (two healthy hosts), a 30 s window, reports older than 2 s past a start end a container they do not list; qc may overflow (one at a time)
+    @{ Name = 'octopus'; Policy = 'auto'; Set = $OctopusScenarios; Env = 'octopus'; Timing = @{ staleItemMinutes = 600; continueMinutes = 0; sessionEndGraceSeconds = 3 }
+        Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+            runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = '__FAKE_URL__'; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
+                agent = 'codex'; perHostCapacity = 1; overflowRoles = @('qc'); overflowMax = 1; maxConcurrent = 10; maxExecutionsPerDay = 1000; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 30; listSeconds = 1; reportGraceSeconds = 2 } } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
@@ -223,6 +230,8 @@ function Get-SuiteEnv([string]$Kind) {
         # the copilot suite: owner mode and the token of the fake agent tasks API (COPILOT_TASKS_TOKEN, as the deployed gateway reads it)
         'copilot' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; COPILOT_TASKS_TOKEN = 'fake-copilot' } }
         'envscope' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_LEADER_LEASE = '0' } }
+        # the octopus suite: owner mode, the runbook key and the host token, both composed here at run time (no credential-like fixture in the repository)
+        'octopus' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()); FACTORY_OCTOPUS_HOST_TOKEN = [guid]::NewGuid().ToString('N') } }
         'runtime' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_TEST_ARM_TOKEN = 'fake-arm' } }
         'qc' {
             $adminTokens = Join-Path $script:SuiteRoot 'qc-admin-tokens'; New-Item -ItemType Directory -Force -Path $adminTokens | Out-Null

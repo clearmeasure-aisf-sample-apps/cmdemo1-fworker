@@ -31,6 +31,8 @@ sealed class RuntimeSettings
     public bool PreferConnected = true;
     public List<RoutingRule> Routing = new();
     public CaeJobSettings CaeJob = new();
+    // runtimes.octopus (OctopusRunbookRuntime.cs): its key and host token come from the environment, never from the file
+    public OctopusRunbookSettings Octopus = new();
     public bool AnyOn => CaeJob.On;
 
     public static RuntimeSettings Load(string scriptsDir)
@@ -48,6 +50,7 @@ sealed class RuntimeSettings
             j.ManagedIdentityClientId = ""; j.GatewayUrl = "";
         }
         ApplyVariables(s.CaeJob, Environment.GetEnvironmentVariable);
+        s.Octopus = OctopusRunbookSettings.From(ForEnvironment(root?["runtimes"], env == "" ? "tdd" : env)?["octopus"], Environment.GetEnvironmentVariable);
         return s;
     }
 

@@ -68,7 +68,7 @@ sealed class RuntimeManager
         public DateTime? RegisteredAt, EndedAt;
         public bool Ended;
     }
-    public sealed record Ticket(string Name, int Item, string Phase, string Profile, string Nonce);
+    public sealed record Ticket(string Name, int Item, string Phase, string Profile, string Nonce, string Role = "");
 
     readonly object gate = new();
     readonly RuntimeSettings cfg;
@@ -152,7 +152,7 @@ sealed class RuntimeManager
         }
     }
 
-    public Ticket Begin(int item, string phase, string profile)
+    public Ticket Begin(int item, string phase, string profile, string role = "")
     {
         var name = $"{lim.Prefix}-{item}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant()}";
         var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + lim.TokenSeconds;
@@ -165,7 +165,7 @@ sealed class RuntimeManager
             foreach (var k in launches.Keys.Where(k => k.Item == item && k.Phase != phase).ToList()) launches.Remove(k);
             launches[(item, phase)] = launches.GetValueOrDefault((item, phase)) + 1;
         }
-        return new Ticket(name, item, phase, profile, nonce);
+        return new Ticket(name, item, phase, profile, nonce, role);
     }
 
     public void Registered(string name) { lock (gate) { if (execs.TryGetValue(name, out var e) && e.RegisteredAt == null) { e.RegisteredAt = DateTime.UtcNow; startFailuresInRow = 0; idleFollowUps.Remove(e.Item); } } }
@@ -181,7 +181,7 @@ sealed class RuntimeManager
         using var span = Source.StartActivity("runtime.provision");
         span?.SetTag("fworker.runtime", cae.Kind); span?.SetTag("fworker.worker", t.Name); span?.SetTag("fworker.item", t.Item); span?.SetTag("fworker.phase", t.Phase);
         ProvisionResult r;
-        try { r = await cae.Provision(new ProvisionRequest(t.Name, t.Item, t.Phase, t.Profile, t.Nonce), CancellationToken.None); }
+        try { r = await cae.Provision(new ProvisionRequest(t.Name, t.Item, t.Phase, t.Profile, t.Nonce, t.Role), CancellationToken.None); }
         catch (Exception e) { r = new ProvisionResult(false, "", "start-error: " + e.GetType().Name); }
         Log("provision", t.Name, t.Item, r.Ok ? r.Execution : r.Error);
         if (r.Ok)
@@ -203,6 +203,13 @@ sealed class RuntimeManager
             return;
         }
         // the runtime refused the launch for its account's quota or billing: no failure of the item, no launch counted, the item keeps waiting
+        // the runtime has no free host now (the octopus runtime): the item queues, no failure, no launch counted
+        if (r.Error == "no capacity")
+        {
+            lock (gate) { today = Math.Max(0, today - 1); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            await End(t.Name, "no-capacity", failed: false, startFailure: false);
+            return;
+        }
         if (r.Error == "quota")
         {
             lock (gate) { if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
@@ -261,7 +268,7 @@ sealed class RuntimeManager
         }
         lock (gate) { if (idle) idleFollowUps[e.Item] = idleFollowUps.GetValueOrDefault(e.Item) + 1; else if (pushed) idleFollowUps.Remove(e.Item); }
         var settled = false;
-        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
+        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked" or "no-capacity")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
         // the phase is done pending checks: the next Development task (a fix-forward round) is counted afresh; fixForwardMaxRounds caps those
         if (settled) lock (gate) launches.Remove((e.Item, e.Phase));
         var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome, e.Url) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }

@@ -63,7 +63,7 @@ app.Run(async ctx =>
         // (GraphQL answers 200 with an error of type RATE_LIMITED, REST 403)
         if (rate is { Remaining: <= 0, Resource: "graphql" }) res = (200, "{\"errors\":[{\"type\":\"RATE_LIMITED\",\"message\":\"API rate limit exceeded for installation ID 7.\"}]}");
         else if (rate is { Remaining: <= 0 }) res = (403, "{\"message\":\"API rate limit exceeded for installation ID 7. If you reach out to GitHub Support for help, please include the request ID.\",\"documentation_url\":\"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting\"}");
-        else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.ApiVersionHeader = ctx.Request.Headers["X-GitHub-Api-Version"].ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString()); etag = world.Etag; }
+        else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.ApiVersionHeader = ctx.Request.Headers["X-GitHub-Api-Version"].ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString() is { Length: > 0 } az ? az : ctx.Request.Headers["X-Octopus-ApiKey"].ToString() is { Length: > 0 } ok ? "Octopus " + ok : ""); etag = world.Etag; }
     }
     if (rate is { } rl)
     {
@@ -234,6 +234,87 @@ sealed class World
         }
         return (405, null);
     }
+    // The fake Octopus runbook API (docs/design/octopus-runbook-runtime.md): project cmdemo1-fworker-runtime with its four runbooks, environments
+    // tdd and uat, the deployment targets of /_fake/octo-machines, the run preview with the prompted variables, runbook runs and server tasks. It
+    // wants an X-Octopus-ApiKey (any non-empty one: the suites compose theirs at run time). A detached start or a stop task ends Success at once (the
+    // runbook exits in seconds); an overflow start is held (Executing) until cancelled or set by /_fake/octo-task. Not cleared by /_fake/reset.
+    sealed class OctoMachine { public string Id = "", Name = "", Health = "Healthy", Env = "Environments-11"; public List<string> Roles = new(); public bool Disabled; }
+    sealed class OctoRun { public string Id = "", TaskId = "", RunbookId = "", Snapshot = "", Env = ""; public JsonArray Machines = new(); public JsonObject Form = new(); }
+    sealed class OctoTask { public string Id = "", RunId = "", State = "Success"; public DateTime Queued = DateTime.UtcNow; }
+    static readonly (string Id, string Name)[] OctoBooks = { ("Runbooks-1", "Start worker"), ("Runbooks-2", "Stop worker"), ("Runbooks-3", "Start worker (overflow)"), ("Runbooks-4", "Reconcile hosts") };
+    static readonly string[] OctoVars = { "Fworker.Name", "Fworker.Item", "Fworker.Phase", "Fworker.ModelProfile", "Fworker.Nonce", "Fworker.Agent", "Fworker.Mode" };
+    static string OctoCtl(string book, string v) => $"Variables-{book.Split('-')[1]}{Array.IndexOf(OctoVars, v)}";
+    static List<OctoMachine> DefaultMachines() => new()
+    {
+        new() { Id = "Machines-1", Name = "host-a", Roles = new() { "fworker-host" } }, new() { Id = "Machines-2", Name = "host-b", Roles = new() { "fworker-host" } },
+        new() { Id = "Machines-3", Name = "host-sick", Health = "Unhealthy", Roles = new() { "fworker-host" } }, new() { Id = "Machines-4", Name = "host-uat", Env = "Environments-12", Roles = new() { "fworker-host" } },
+        new() { Id = "Machines-5", Name = "web-1", Roles = new() { "web" } }
+    };
+    List<OctoMachine> octoMachines = DefaultMachines();
+    readonly List<OctoRun> octoRuns = new(); readonly Dictionary<string, OctoTask> octoTasks = new(); int octoCancels, octoUnauthorized; long octoSeq;
+    (int, object?) OctoRb(string method, string path, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b, string auth)
+    {
+        if (!auth.StartsWith("Octopus ") || auth.Length < 12) { octoUnauthorized++; return (401, J(("ErrorMessage", "You must be logged in to perform this action."))); }
+        Match m;
+        if ((m = Regex.Match(path, "^/api/tasks/(ServerTasks-\\d+)(/cancel)?$")).Success)
+        {
+            if (!octoTasks.TryGetValue(m.Groups[1].Value, out var t)) return (404, null);
+            if (m.Groups[2].Success && method == "POST") { octoCancels++; if (t.State is "Queued" or "Executing") t.State = "Canceled"; }
+            return (200, OctoTaskJson(t));
+        }
+        m = Regex.Match(path, "^/api/Spaces-355(/.*)$");
+        if (!m.Success) return (404, J(("ErrorMessage", "space not found")));
+        var rest = m.Groups[1].Value;
+        if (rest == "/projects/all") return (200, new JsonArray(J(("Id", "Projects-901"), ("Name", "cmdemo1-fworker-runtime")), J(("Id", "Projects-902"), ("Name", "cmdemo1-fworker"))));
+        if (rest == "/environments/all") return (200, new JsonArray(J(("Id", "Environments-11"), ("Name", "tdd")), J(("Id", "Environments-12"), ("Name", "uat"))));
+        if (rest == "/projects/Projects-901/runbooks")
+            return (200, J(("Items", new JsonArray(OctoBooks.Select(x => (JsonNode)J(("Id", x.Id), ("Name", x.Name), ("PublishedRunbookSnapshotId", "RunbookSnapshots-" + x.Id.Split('-')[1] + "0"))).ToArray()))));
+        if (rest == "/machines")
+        {
+            var env = q["environmentIds"].ToString(); var role = q["roles"].ToString();
+            var ms = octoMachines.Where(x => (env == "" || x.Env == env) && (role == "" || x.Roles.Contains(role)));
+            return (200, J(("Items", new JsonArray(ms.Select(x => (JsonNode)J(("Id", x.Id), ("Name", x.Name), ("HealthStatus", x.Health), ("IsDisabled", x.Disabled), ("EnvironmentIds", new JsonArray(x.Env)), ("Roles", new JsonArray(x.Roles.Select(r => (JsonNode)r).ToArray())))).ToArray()))));
+        }
+        if ((m = Regex.Match(rest, "^/runbooks/(Runbooks-\\d)/runbookRuns/preview/(Environments-\\d+)$")).Success)
+        {
+            var book = m.Groups[1].Value; if (!OctoBooks.Any(x => x.Id == book)) return (404, null);
+            var els = book == "Runbooks-4" ? new JsonArray() : new JsonArray(OctoVars.Select(v => (JsonNode)J(("Name", OctoCtl(book, v)), ("Control", J(("Type", "SingleLineText"), ("Name", v), ("Label", v), ("Required", true))), ("IsValueRequired", true))).ToArray());
+            return (200, J(("Form", J(("Values", new JsonObject()), ("Elements", els)))));
+        }
+        if (rest == "/runbookRuns" && method == "POST")
+        {
+            var book = b?["RunbookId"]?.ToString() ?? "";
+            if (!OctoBooks.Any(x => x.Id == book) || b?["RunbookSnapshotId"]?.ToString() != "RunbookSnapshots-" + book.Split('-')[1] + "0") return (400, J(("ErrorMessage", "unknown runbook or snapshot")));
+            if (b?["EnvironmentId"]?.ToString() is not ("Environments-11" or "Environments-12")) return (400, J(("ErrorMessage", "unknown environment")));
+            var form = b?["FormValues"] as JsonObject ?? new JsonObject();
+            if (form.Any(kv => !OctoVars.Any(v => OctoCtl(book, v) == kv.Key))) return (400, J(("ErrorMessage", "unknown form value")));
+            var machines = b?["SpecificMachineIds"] as JsonArray ?? new JsonArray();
+            if (machines.Any(x => !octoMachines.Any(mm => mm.Id == x?.ToString()))) return (400, J(("ErrorMessage", "unknown machine")));
+            var n = ++octoSeq;
+            var run = new OctoRun { Id = $"RunbookRuns-{n}", TaskId = $"ServerTasks-{n}", RunbookId = book, Snapshot = b!["RunbookSnapshotId"]!.ToString(), Env = b["EnvironmentId"]!.ToString(), Machines = (JsonArray)machines.DeepClone(), Form = (JsonObject)form.DeepClone() };
+            octoRuns.Add(run);
+            octoTasks[run.TaskId] = new OctoTask { Id = run.TaskId, RunId = run.Id, State = book == "Runbooks-3" ? "Executing" : "Success" };
+            return (201, OctoRunJson(run));
+        }
+        if ((m = Regex.Match(rest, "^/runbookRuns/(RunbookRuns-\\d+)$")).Success)
+        {
+            var run = octoRuns.FirstOrDefault(x => x.Id == m.Groups[1].Value); return run == null ? (404, null) : (200, OctoRunJson(run));
+        }
+        if (rest == "/tasks" && method == "GET")
+        {
+            if (q["project"].ToString() != "Projects-901") return (200, J(("Items", new JsonArray())));
+            var take = int.TryParse(q["take"].ToString(), out var tk) ? tk : 30; var skip = int.TryParse(q["skip"].ToString(), out var sk) ? sk : 0;
+            return (200, J(("Items", new JsonArray(octoTasks.Values.OrderByDescending(t => t.Queued).ThenByDescending(t => long.Parse(t.Id.Split('-')[1])).Skip(skip).Take(take).Select(t => (JsonNode)OctoTaskJson(t)).ToArray()))));
+        }
+        return (404, J(("ErrorMessage", "not found")));
+    }
+    static JsonObject OctoTaskJson(OctoTask t) => J(("Id", t.Id), ("State", t.State), ("IsCompleted", t.State is "Success" or "Failed" or "Canceled" or "TimedOut"), ("QueueTime", t.Queued.ToString("o")), ("Arguments", J(("RunbookRunId", t.RunId))));
+    static JsonObject OctoRunJson(OctoRun r) => J(("Id", r.Id), ("TaskId", r.TaskId), ("RunbookId", r.RunbookId), ("RunbookSnapshotId", r.Snapshot), ("EnvironmentId", r.Env), ("SpecificMachineIds", r.Machines.DeepClone()), ("FormValues", r.Form.DeepClone()));
+    JsonObject OctoState() => J(("cancels", octoCancels), ("unauthorized", octoUnauthorized), ("runs", new JsonArray(octoRuns.Select(r =>
+    {
+        var vals = new JsonObject(); foreach (var v in OctoVars) if (r.Form[OctoCtl(r.RunbookId, v)] is { } x) vals[v.Split('.')[1]] = x.DeepClone();
+        return (JsonNode)J(("id", r.Id), ("task", r.TaskId), ("runbook", OctoBooks.First(x => x.Id == r.RunbookId).Name), ("machines", r.Machines.DeepClone()), ("values", vals), ("state", octoTasks[r.TaskId].State));
+    }).ToArray())));
     static string EnvOf(ArmExec e, string n) => e.Containers.SelectMany(c => c?["env"] as JsonArray ?? new JsonArray()).LastOrDefault(x => x?["name"]?.ToString() == n)?["value"]?.ToString() ?? "";
     JsonObject ArmState() => J(("starts", armStarts), ("stops", armStops), ("executions", new JsonArray(armExecs.Select(e => (JsonNode)J(("name", e.Name), ("job", e.Job), ("status", e.Status),
         ("worker", EnvOf(e, "FWORKER_NAME")), ("item", EnvOf(e, "FWORKER_ITEM")), ("phase", EnvOf(e, "FWORKER_PHASE")), ("nonce", EnvOf(e, "FWORKER_NONCE")), ("profile", EnvOf(e, "FWORKER_MODEL_PROFILE")),
@@ -310,6 +391,7 @@ sealed class World
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
         if (path.StartsWith("/octopus/")) return Octopus(path[9..], q);
         if (path.StartsWith("/subscriptions/")) return Arm(method, path, b, auth);
+        if (path.StartsWith("/api/")) return OctoRb(method, path, q, b, auth);
         if (path.StartsWith("/v1/")) return Cursor(method, path, b, auth);
         if (path.StartsWith("/agents/")) return Copilot(method, path, b, auth);
         var root = $"/repos/{Owner}/{Repo}";
@@ -831,7 +913,7 @@ sealed class World
     readonly Dictionary<string, Rate> rates = new();
     public (string, int, int, long, int)? RateFor(string path)
     {
-        if (path.StartsWith("/_fake/") || path.StartsWith("/octopus/") || path.StartsWith("/_blob/") || path.StartsWith("/_uploads/") || path == "/_healthcheck") return null;
+        if (path.StartsWith("/_fake/") || path.StartsWith("/octopus/") || path.StartsWith("/api/") || path.StartsWith("/_blob/") || path.StartsWith("/_uploads/") || path == "/_healthcheck") return null;
         var res = path == "/graphql" ? "graphql" : "core";
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         if (!rates.TryGetValue(res, out var r)) rates[res] = r = new Rate { Reset = now + 3600 };
@@ -861,6 +943,16 @@ sealed class World
             case "ref-page":   // { size }: matching-refs pages, with at most size refs a page (1 to 100); size 0 or none: it does not page, as GitHub
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "arm": return (200, ArmState());
+            case "octo": return (200, OctoState());
+            case "octo-reset": octoRuns.Clear(); octoTasks.Clear(); octoMachines = DefaultMachines(); octoCancels = 0; octoUnauthorized = 0; return (200, J(("ok", true)));
+            case "octo-machines":   // [{id, name, health, roles, env, disabled}]: the deployment targets of the space
+                octoMachines = (b?["machines"] as JsonArray ?? new JsonArray()).Select(m => new OctoMachine { Id = m!["id"]!.ToString(), Name = m["name"]?.ToString() ?? m["id"]!.ToString(), Health = m["health"]?.ToString() ?? "Healthy", Env = m["env"]?.ToString() ?? "Environments-11", Roles = (m["roles"] as JsonArray)?.Select(x => x!.ToString()).ToList() ?? new() { "fworker-host" }, Disabled = m["disabled"]?.GetValue<bool>() == true }).ToList();
+                return (200, J(("ok", true)));
+            case "octo-task":   // {id, state}: a server task's state as Octopus would set it
+            {
+                if (!octoTasks.TryGetValue(b?["id"]?.ToString() ?? "", out var t)) return (404, J(("ok", false)));
+                t.State = b!["state"]!.ToString(); return (200, J(("ok", true)));
+            }
             case "cursor": return (200, CursorState());
             case "copilot": return (200, CopilotState());
             case "copilot-reset": copilotTasks.Clear(); copilotLaunchFailures = 0; return (200, J(("ok", true)));
