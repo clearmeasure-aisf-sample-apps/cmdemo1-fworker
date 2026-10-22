@@ -69,7 +69,8 @@ $CursorScenarios = [ordered]@{
         [void](Mcp-Call 'session_end' @{ reason = 'scenario done' } $r1)
         $aurl = "https://cursor.com/agents/$($a.id)/fake"
         Check 'the launch comment carries the Cursor session link: the url Cursor answered, as it is' (Wait-Until -Seconds 30 { (Cop-Comments $n "*Cursor session: $aurl*").Count -ge 1 }) (Cop-Brief $n)
-        Check 'status: the execution carries the url' (@((Cur-Status).executions | Where-Object { $_.execution -eq $a.id -and $_.url -eq $aurl }).Count -eq 1) ((Cur-Status) | ConvertTo-Json -Compress -Depth 5)
+        # running or already ended (a slow runner may end it first): the execution, in executions or in last, carries the url
+        Check 'status: the execution carries the url' (Wait-Until -Seconds 20 { $st = Cur-Status; @(@($st.executions) + @($st.last) | Where-Object { $_ -and $_.execution -eq $a.id -and $_.url -eq $aurl }).Count -ge 1 }) ((Cur-Status) | ConvertTo-Json -Compress -Depth 5)
         Check 'the dashboard links the item, the pull request and the agent id (new tab)' (Test-DashLinks)
         Check 'the item names its owner agent, once, and its state records it with runtime cursor-cloud' (Wait-Until -Seconds 30 { (Cop-Comments $n '*Owner:** Cursor agent*').Count -eq 1 -and (Get-ItemState $n).copilot_task.id -eq $a.id -and (Get-ItemState $n).copilot_task.runtime -eq 'cursor-cloud' }) (Cop-Brief $n)
         Check 'the acceptance comment carries the Cursor session link' (Wait-Until -Seconds 30 { @((Cop-Comments $n '*accepted*') | Where-Object { "$($_.body)" -like "*Cursor session: $aurl*" }).Count -ge 1 }) (Cop-Brief $n)
