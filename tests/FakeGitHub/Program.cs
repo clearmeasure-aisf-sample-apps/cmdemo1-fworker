@@ -100,7 +100,7 @@ sealed class Rel { public string Id = ""; public string Version = ""; public str
 sealed class ArmExec { public string Name = "", Job = ""; public string Status = "Running"; public JsonArray Containers = new(); public DateTime Start = DateTime.UtcNow; public DateTime? End; }
 
 // A Cloud Agent of the fake Cursor API (agents-roles-launch.md 10): its id, the launch body as sent, its status and its run.
-sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public int UsageReads; public DateTime Created = DateTime.UtcNow; }
+sealed class CursorAgent { public string Id = "", RunId = "", Status = "ACTIVE", RunStatus = "RUNNING"; public JsonObject Body = new(); public bool Deleted, Cancelled; public int UsageReads; public DateTime Created = DateTime.UtcNow; public JsonArray FollowUps = new(); }
 
 // A task of the fake agent tasks API (docs/design/copilot-cloud-agent.md): its id, the body as sent, the API version header, its state.
 // Its sessions: the first is the task's own; a @copilot comment on the task's pull request (its head branch is the task's) adds one, as GitHub
@@ -165,7 +165,7 @@ sealed class World
             if (cursorLaunchFailures > 0) { cursorLaunchFailures--; return (400, "{\"error\":\"bad_request\",\"message\":\"fake: model not available for this account\"}"); }
             var a = new CursorAgent { Id = "bc-" + (++cursorSeq).ToString("x8"), RunId = "run-" + cursorSeq.ToString("x8"), Body = b as JsonObject ?? new JsonObject() };
             cursorAgents.Add(a);
-            return (201, J(("agent", J(("id", a.Id), ("status", a.Status), ("latestRunId", a.RunId))), ("run", J(("id", a.RunId), ("status", "CREATING")))));
+            return (201, J(("agent", J(("id", a.Id), ("status", a.Status), ("latestRunId", a.RunId), ("url", "https://cursor.com/agents/" + a.Id + "/fake"))), ("run", J(("id", a.RunId), ("status", "CREATING")))));
         }
         if (path == "/v1/models" && method == "GET") return (200, J(("items", new JsonArray(J(("id", "claude-4-sonnet-thinking")), J(("id", "auto")), J(("id", "auto-smart"), ("params", new JsonArray(J(("id", "optimize_for"), ("values", new JsonArray("cost", "balanced", "intelligence"))))))))));
         if (Regex.IsMatch(path, "^/v1/agents/[^/]+/usage$") && method == "GET" && !cursorAgents.Any(x => path == $"/v1/agents/{x.Id}/usage" && !x.Deleted)) return (404, "{\"error\":\"not found\"}");
@@ -176,17 +176,28 @@ sealed class World
             return (200, J(("totalUsage", J(("inputTokens", 1200), ("outputTokens", 340), ("cacheWriteTokens", 0), ("cacheReadTokens", 800), ("totalTokens", 2340))), ("runs", new JsonArray())));
         if (path == "/v1/agents" && method == "GET")
             return (200, J(("items", new JsonArray(cursorAgents.Where(x => !x.Deleted).Select(x => (JsonNode)J(("id", x.Id), ("name", x.Body["name"]?.ToString() ?? ""), ("status", x.Status), ("createdAt", x.Created.ToString("o")))).ToArray()))));
+        // a follow-up run (POST /v1/agents/{id}/runs): a new run of the same agent, with its prompt and MCP servers recorded
+        var fm = Regex.Match(path, "^/v1/agents/([^/]+)/runs$");
+        if (fm.Success && method == "POST")
+        {
+            var fa = cursorAgents.FirstOrDefault(x => x.Id == fm.Groups[1].Value && !x.Deleted);
+            if (fa == null) return (404, "{\"error\":\"not found\"}");
+            if (fa.Status == "ARCHIVED") return (409, "{\"error\":\"agent is archived\"}");
+            fa.RunId = "run-" + (++cursorSeq).ToString("x8"); fa.Status = "ACTIVE"; fa.RunStatus = "RUNNING"; fa.Cancelled = false;
+            fa.FollowUps.Add(new JsonObject { ["run"] = fa.RunId, ["body"] = b?.DeepClone() });
+            return (201, J(("run", J(("id", fa.RunId), ("status", "CREATING")))));
+        }
         var m = Regex.Match(path, "^/v1/agents/([^/]+)(/runs/([^/]+)(/cancel)?)?$");
         if (!m.Success) return (404, null);
         var ag = cursorAgents.FirstOrDefault(x => x.Id == m.Groups[1].Value && !x.Deleted);
         if (ag == null) return (404, "{\"error\":\"not found\"}");
-        if (!m.Groups[2].Success && method == "GET") return (200, J(("agent", J(("id", ag.Id), ("status", ag.Status), ("latestRunId", ag.RunId), ("model", ag.Body["model"]?.DeepClone())))));
+        if (!m.Groups[2].Success && method == "GET") return (200, J(("agent", J(("id", ag.Id), ("status", ag.Status), ("latestRunId", ag.RunId), ("url", "https://cursor.com/agents/" + ag.Id + "/fake"), ("model", ag.Body["model"]?.DeepClone())))));
         if (!m.Groups[2].Success && method == "DELETE") { ag.Deleted = true; return (200, J(("id", ag.Id))); }
         if (m.Groups[4].Success && method == "POST") { ag.Cancelled = true; ag.RunStatus = "CANCELLED"; ag.Status = "IDLE"; return (200, J(("id", ag.RunId))); }
         if (m.Groups[2].Success && method == "GET") return (200, J(("run", J(("id", ag.RunId), ("status", ag.RunStatus)))));
         return (405, null);
     }
-    JsonObject CursorState() => J(("agents", new JsonArray(cursorAgents.Select(a => (JsonNode)J(("id", a.Id), ("status", a.Status), ("run", a.RunStatus), ("deleted", a.Deleted), ("cancelled", a.Cancelled), ("usageReads", a.UsageReads), ("body", a.Body.DeepClone()))).ToArray())));
+    JsonObject CursorState() => J(("agents", new JsonArray(cursorAgents.Select(a => (JsonNode)J(("id", a.Id), ("status", a.Status), ("run", a.RunStatus), ("deleted", a.Deleted), ("cancelled", a.Cancelled), ("usageReads", a.UsageReads), ("runId", a.RunId), ("followUps", a.FollowUps.DeepClone()), ("body", a.Body.DeepClone()))).ToArray())));
 
     // The fake ARM (Microsoft.App/jobs of cloud-worker-runtimes.md 2.1): GET the job, POST start with a container override, GET executions, POST
     // stop. It wants the bearer token "fake-arm". It is not cleared by /_fake/reset (a gateway keeps its executions across scenarios); /_fake/arm-reset does.

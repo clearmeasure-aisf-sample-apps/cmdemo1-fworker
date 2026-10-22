@@ -501,10 +501,7 @@ function Verb_sync_board($a) {
             # cloud-worker-runtimes.md 4.4: a runtime:<kind> label forces the item's runtime; the test label selects the cheapest model profile
             $rtl = @($it.labels | Where-Object { $_ -match '^runtime:[a-z0-9-]{1,20}$' } | Select-Object -First 1)
             if ($rtl.Count -gt 0) { $rtLabels["$n"] = ([string]$rtl[0]).Substring(8) }
-            # agents-roles-launch.md 10: the api mode (Cursor Cloud Agents) takes docs-only items only in v1: Technical Design (which decides docs-only)
-            # and the later columns of an item whose design carries the marker; any other item labelled for it goes the ordinary way
-            # (the Copilot cloud agent takes code and database changes too since 2026-10-20: docs/design/copilot-cloud-agent.md)
-            if ($rtLabels["$n"] -eq 'cursor-cloud' -and $col -ine $designCol -and -not (Test-ItemDocsOnly $s $it)) { $rtl0 = $rtLabels["$n"]; $rtLabels.Remove("$n"); $actions += @{ item = $n; action = 'runtime-label-ignored'; runtime = $rtl0; reason = 'not-docs-only' } }
+            # the api mode (Cursor Cloud Agents and the Copilot cloud agent) takes code and database changes too (Cursor since 2026-10-21)
             if ($c.testLabel -and (Test-NameIn $c.testLabel $it.labels)) { $profiles["$n"] = 'testing' }
             if (-not $it.open -and -not ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting)) {
                 # issue 114: a closed item with a merge record that is not done was stranded by an older gateway (262, 280): its settle is re-armed

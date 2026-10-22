@@ -271,20 +271,23 @@ function Verb_copilot_owner($a) {
     if ($action -eq 'set') {
         $t = Need $a 'task'
         $id = "$($t.id)"; if ($id -notmatch '^[A-Za-z0-9-]{1,80}$') { Reject 2 'usage' 'task.id is the agent task id' }
-        $url = "$($t.url)"; if ($url -and $url -notmatch '^https://[A-Za-z0-9./_-]{1,300}$') { $url = '' }
+        $url = "$($t.url)"; if ($url -and $url -notmatch '^https://[A-Za-z0-9./_?=&%~-]{1,300}$') { $url = '' }
         $branch = "$($t.branch)"; if ($branch -and $branch -notmatch '^[A-Za-z0-9._/-]{1,200}$') { $branch = '' }
         $pr = if ("$($t.pr)" -match '^\d{1,7}$') { [int]"$($t.pr)" } else { 0 }
+        # the runtime of the owner: copilot-cloud (a Copilot task, the default) or cursor-cloud (a Cursor agent with follow-up runs)
+        $rt = if ((Test-Has $t 'runtime') -and "$($t.runtime)" -eq 'cursor-cloud') { 'cursor-cloud' } else { 'copilot-cloud' }
         $first = -not $own -or "$($own.id)" -ne $id
         if ($first) {
             $prev = @(if ($own -and -not ((Test-Has $own 'done_at') -and $own.done_at)) { @($own.previous) + @("$($own.id)") | Where-Object { $_ } })
-            $s.copilot_task = @{ id = $id; url = $url; branch = $branch; pr = $pr; phase = "$($t.phase)"; since = ConvertTo-Iso (Get-UtcNow); previous = $prev }
+            $s.copilot_task = @{ id = $id; url = $url; branch = $branch; pr = $pr; phase = "$($t.phase)"; since = ConvertTo-Iso (Get-UtcNow); previous = $prev; runtime = $rt }
         } else {
             if ($branch) { $own.branch = $branch }; if ($pr -gt 0) { $own.pr = $pr }; if ($url) { $own.url = $url }; if ("$($t.phase)") { $own.phase = "$($t.phase)" }
         }
         Save-State $n $st
         if ($first) {
             $link = if ($url) { "[$id]($url)" } else { "``$id``" }
-            Add-Comment $n "**Owner:** Copilot task $link owns #$n from $(if ("$($t.phase)") { "$($t.phase)" } else { 'now' }) until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item."
+            if ($rt -eq 'cursor-cloud') { Add-Comment $n "**Owner:** Cursor agent $link owns #$n from $(if ("$($t.phase)") { "$($t.phase)" } else { 'now' }) until the change is in production. Between phases the gateway holds the item for this agent and continues it with a follow-up run; no other worker is offered the item." }
+            else { Add-Comment $n "**Owner:** Copilot task $link owns #$n from $(if ("$($t.phase)") { "$($t.phase)" } else { 'now' }) until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item." }
         }
         return @{ ok = $true; id = $n; task = $s.copilot_task; first = $first }
     }
@@ -300,7 +303,8 @@ function Verb_copilot_owner($a) {
         $sessionLink = if ("$($own.url)") { "$($own.url)" } else { "$($own.id)" }
         $rel = if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'release') -and $s.merge.release) { " in release $($s.merge.release)" } else { '' }
         $oc = (Get-Cfg).octopus; $prodAt = if ((Test-Has $oc 'prodUrl') -and "$($oc.prodUrl)") { " ($($oc.prodUrl))" } else { '' }
-        Add-Comment $n "**Owner done:** Copilot task $link finished #$n$merged, master is green and the change is delivered to production$rel$prodAt. Session link: $sessionLink"
+        $who = if ((Test-Has $own 'runtime') -and "$($own.runtime)" -eq 'cursor-cloud') { 'Cursor agent' } else { 'Copilot task' }
+        Add-Comment $n "**Owner done:** $who $link finished #$n$merged, master is green and the change is delivered to production$rel$prodAt. Session link: $sessionLink"
         return @{ ok = $true; id = $n; closed = $true }
     }
     # status
@@ -376,7 +380,7 @@ function Resolve-OwnerPr([int]$n) {
     # a follow-up session may open its own draft on a new branch, stacked on the owner's ("merges into #<pr>", #468 on #466, #474 on #470): the
     # owner's work goes on there, so its current branch is the newest such successor (followed a few levels)
     for ($hop = 0; $hop -lt 3; $hop++) {
-        $succ = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&base=$([uri]::EscapeDataString($br))&per_page=20") | Where-Object { $_ -and "$($_.head.ref)" -like 'copilot/*' -and "$($_.base.ref)" -eq $br } | Sort-Object { [int]$_.number } | Select-Object -Last 1
+        $succ = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&base=$([uri]::EscapeDataString($br))&per_page=20") | Where-Object { $_ -and ("$($_.head.ref)" -like 'copilot/*' -or "$($_.head.ref)" -match "^$([regex]::Escape($c.name))/$n-") -and "$($_.base.ref)" -eq $br } | Sort-Object { [int]$_.number } | Select-Object -Last 1
         if (-not $succ) { break }
         $br = "$($succ.head.ref)"; $pr = $succ
     }

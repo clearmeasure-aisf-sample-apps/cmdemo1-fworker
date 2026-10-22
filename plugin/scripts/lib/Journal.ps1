@@ -36,6 +36,8 @@ function Get-JournalSessionLink($F) {
     if (-not ($F.ContainsKey('url') -and $F.url)) { return '' }
     $u = "$($F.url)"
     if ($u -match '^https://github\.com/[^/\s]+/[^/\s]+/tasks/[^/\s?#]+$') { return " Copilot session: $u" }
+    # a Cursor agent's page (the url Cursor's agents API answers; its transcript stays: the gateway never deletes an agent)
+    if ($u -match '^https://([a-z0-9-]+\.)?cursor\.com/[^\s]+$') { return " Cursor session: $u" }
     return " [session]($u)"
 }
 
@@ -48,7 +50,7 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         'assigned' {
             if ($F.ContainsKey('role') -and $F.role) { return "**$($F.worker)** accepted the $($F.role) job for PR #$($F.pr)$(if ($F.ContainsKey('url') -and $F.url) { " ([session]($($F.url)))" })." }
             $m = if ($F.ContainsKey('model') -and $F.model) { " Model: $($F.model) ($($F.effort)), tier $($F.tier)." } else { '' }
-            $sl = Get-JournalSessionLink $F; $cop = $sl -like ' Copilot session: *'
+            $sl = Get-JournalSessionLink $F; $cop = $sl -like ' Copilot session: *' -or $sl -like ' Cursor session: *'
             $link = if ($cop) { '' } else { $sl }
             $by = if ($F.ContainsKey('by') -and $F.by -eq 'client') { ' (accepted by its client; the session starts on it next)' } else { '' }
             return "**$($F.worker)**$link accepted$($by): it owns this item from $col until it is merged (mode $($F.mode), attempt $($F.attempt)).$m Lease until $($F.lease).$(if ($cop) { $sl })"

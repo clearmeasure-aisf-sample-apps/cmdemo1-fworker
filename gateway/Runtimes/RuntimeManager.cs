@@ -42,6 +42,18 @@ interface IRuntimeWork
     Task<bool?> Pushed(string worker, CancellationToken ct);
 }
 
+// A runtime whose one agent owns an item until it is in production (Copilot: one task resumed; Cursor: one agent with follow-up runs): the
+// gateway's owner watch (Program.cs) reads what each owned item waits on and closes the ownership when it is done.
+interface IItemOwners
+{
+    string Kind { get; }
+    List<CopilotOwner> Owners();
+    bool Running(int item);
+    void Waiting(int item, string column, string waitingOn);
+    void SetPr(int item, int pr, string branch = "");
+    Task CloseOwner(int item);
+}
+
 sealed class RuntimeManager
 {
     public static readonly ActivitySource Source = new("FactoryWorker.Gateway.Runtimes");

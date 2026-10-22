@@ -17,6 +17,10 @@ sealed partial class Plant
     // the routing or a connected session says
     public Func<int, bool>? CopilotOwns { get; set; }
     bool CopilotOwned(int item) => Copilot != null && CopilotOwns?.Invoke(item) == true;
+    // the items a Cursor agent owns until in production (CursorCloudRuntime.Owns): only that agent's follow-up runs are offered them
+    public Func<int, bool>? CursorOwns { get; set; }
+    bool CursorOwned(int item) => Cursor != null && CursorOwns?.Invoke(item) == true;
+    string? OwnerRuntime(int item) => CopilotOwned(item) ? "copilot-cloud" : CursorOwned(item) ? "cursor-cloud" : null;
     JsonObject runtimeLabels = new(), itemProfiles = new();
     readonly List<(RuntimeManager Rm, RuntimeManager.Ticket T)> pendingProvisions = new();
 
@@ -46,8 +50,8 @@ sealed partial class Plant
         var any = Runtimes ?? Cursor ?? Copilot;
         if (any == null || a.Kind != "own-item" || !((Runtimes?.On ?? false) || (Cursor?.On ?? false) || (Copilot?.On ?? false))) return (false, null);
         var label = runtimeLabels[a.Item.ToString()]?.ToString() ?? "";
-        var owned = CopilotOwned(a.Item);
-        var runtime = owned ? "copilot-cloud" : any.Settings.RouteFor(a.Column, label);
+        var ownerRt = OwnerRuntime(a.Item); var owned = ownerRt != null;
+        var runtime = ownerRt ?? any.Settings.RouteFor(a.Column, label);
         if (runtime == "local") return (false, null);
         var rm = RuntimeFor(runtime);
         if (rm == null) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "runtime-unknown"; return (true, null); }   // a kind this gateway has no adapter for
@@ -62,7 +66,7 @@ sealed partial class Plant
         // a connected session first (runtimes.preferConnected), except for an item labelled for the api mode: that label is the operator's choice
         if (rm.Settings.PreferConnected && !owned && !(rm.Kind is "cursor-cloud" or "copilot-cloud" && label == rm.Kind) && Choose(a, null).Worker != null) return (false, null);
         var (ok, code) = rm.CanStart();
-        if (!ok) { if (label != "" || owned) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = code; Journal(a.Item, "waiting", new JsonObject { ["reason"] = owned ? $"the item is owned by a Copilot task; it is resumed once the runtime can start a session ({code})" : $"the item is labelled runtime:{label} and that runtime cannot start a worker now ({code})" }, ""); return (true, null); } return (false, null); }
+        if (!ok) { if (label != "" || owned) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = code; Journal(a.Item, "waiting", new JsonObject { ["reason"] = owned ? $"the item is owned by a {(ownerRt == "cursor-cloud" ? "Cursor agent" : "Copilot task")}; it is resumed once the runtime can start a session ({code})" : $"the item is labelled runtime:{label} and that runtime cannot start a worker now ({code})" }, ""); return (true, null); } return (false, null); }
         var t = rm.Begin(a.Item, a.Column, itemProfiles[a.Item.ToString()]?.ToString() ?? "");
         pendingProvisions.Add((rm, t));
         a.Pin = t.Name; a.Worker = t.Name; a.AckBy = DateTime.UtcNow.AddSeconds(rm.AckSeconds); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";

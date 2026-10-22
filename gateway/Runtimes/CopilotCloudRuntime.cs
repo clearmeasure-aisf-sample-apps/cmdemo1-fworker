@@ -142,7 +142,7 @@ sealed class CopilotOwner
     };
 }
 
-sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
+sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork, IItemOwners
 {
     // one execution: a session of a task (Session 0 is the task's first; Id is the task id for it and "<task>#<n>" for a follow-up)
     sealed class Task_ { public string Id = "", TaskId = "", Url = "", Worker = "", Phase = "", State = "queued", Status = "Running", Via = "task", BaseSha = "", Branch = ""; public long RunId; public int Item, Session, Pr; public bool Guarded; public DateTime Started = DateTime.UtcNow; public DateTime? Ended; public JsonNode? Usage, Artifacts; public JsonArray? Fields; }
@@ -213,6 +213,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork
     // the item's pull request as the rule verb resolved it (copilot-owner status: the open one of the owner task's branch)
     public void SetPr(int item, int pr, string branch = "") { lock (tasks) if (owners.TryGetValue(item, out var o)) { if (pr > 0 && o.Pr != pr) { o.Pr = pr; o.Updated = DateTime.UtcNow; } if (branch.StartsWith("copilot/", StringComparison.Ordinal) && o.Branch != branch) { o.Branch = branch; o.Updated = DateTime.UtcNow; } } }
     public void Close(int item) { lock (tasks) nudge.Remove(item); lock (tasks) if (owners.TryGetValue(item, out var o)) { o.Done = true; o.WaitingOn = "done"; owners.Remove(item); } }
+    public Task CloseOwner(int item) { Close(item); return Task.CompletedTask; }
     public JsonArray OwnedJson() { lock (tasks) return new JsonArray(owners.Values.Where(o => !o.Done).OrderBy(o => o.Item).Select(o => { var j = o.Json(); if (tasks.Values.Any(t => t.Item == o.Item && t.Ended == null)) j["waitingOn"] = "session"; return (JsonNode)j; }).ToArray()); }
 
     async Task<CopilotOwner?> Owner(int item, CancellationToken ct)

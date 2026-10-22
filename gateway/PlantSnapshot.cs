@@ -17,6 +17,8 @@ sealed partial class Plant
 {
     public Func<JsonArray>? CopilotOwnersSnapshot { get; set; }
     public Action<JsonArray>? CopilotOwnersRestore { get; set; }
+    public Func<JsonArray>? CursorOwnersSnapshot { get; set; }
+    public Action<JsonArray>? CursorOwnersRestore { get; set; }
 
     public JsonObject Snapshot()
     {
@@ -41,7 +43,7 @@ sealed partial class Plant
                 {
                     ["holder"] = kv.Value.Holder, ["column"] = kv.Value.Column, ["leaseUntil"] = kv.Value.LeaseUntil?.ToString("o"), ["heartbeat"] = kv.Value.Heartbeat?.ToString("o"), ["parked"] = kv.Value.Parked
                 }))),
-                ["copilotOwners"] = CopilotOwnersSnapshot?.Invoke(),   // the items Copilot tasks own (CopilotCloudRuntime: one task, resumed)
+                ["copilotOwners"] = CopilotOwnersSnapshot?.Invoke(), ["cursorOwners"] = CursorOwnersSnapshot?.Invoke(),   // the items Copilot tasks own (CopilotCloudRuntime: one task, resumed)
                 ["digest"] = DigestSnapshotLocked()   // issue 105: what the patrol digest already reported (DigestCarry.cs)
             };
         }
@@ -103,6 +105,7 @@ sealed partial class Plant
             if (Msg.On) RestoreDigestLocked(s["digest"], now);   // issue 105 (DigestCarry.cs)
             // the Copilot owners come back too (their durable record is the item state; this spares a read per item at the next start)
             if (s["copilotOwners"] is JsonArray co && CopilotOwnersRestore != null) { try { CopilotOwnersRestore(co); } catch { } }
+            if (s["cursorOwners"] is JsonArray cuo && CursorOwnersRestore != null) { try { CursorOwnersRestore(cuo); } catch { } }
             foreach (var w in workers.Values.Where(w => w.Out != null))
             {
                 var mine = ownerOf.Where(kv => kv.Value == w.Name).Select(kv => kv.Key).ToList();

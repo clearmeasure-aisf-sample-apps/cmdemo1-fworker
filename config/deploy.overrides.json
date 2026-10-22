@@ -19,7 +19,7 @@
   "api": {
     "cursor": {
       "enabled": true,
-      "maxConcurrent": 1,
+      "maxConcurrent": 3,
       "maxMinutes": 60,
       "maxExecutionsPerDay": 30,
       "model": "auto",
@@ -62,7 +62,7 @@
         "routing": [
           {
             "phase": "*",
-            "runtime": "copilot-cloud"
+            "runtime": "cursor-cloud"
           }
         ],
         "caeJob": {
