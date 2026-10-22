@@ -25,6 +25,8 @@ sealed class CursorCloudSettings
     public string Environment = "tdd", OptimizeFor = "cost";
     public string ApiUrl = "https://api.cursor.com", ApiKey = "", GatewayUrl = "", Model = "auto",
         Repository = "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders", DefaultBranch = "master";
+    public double QuotaRetryMinutes = 30;
+    public Func<string?>? QuotaBlock;
     public bool On => Enabled && MaxConcurrent > 0 && ApiKey != "" && GatewayUrl != "";
 
     // api.cursor of the instance configuration, then the variables of the gateway app: CURSOR_API_KEY (the key), FACTORY_CURSOR_ENABLED,
@@ -44,7 +46,7 @@ sealed class CursorCloudSettings
             s.MaxConcurrent = (int)D("maxConcurrent", 1); s.MaxExecutionsPerDay = (int)D("maxExecutionsPerDay", 10); s.MaxMinutes = Math.Max(0.1, D("maxMinutes", 60));
             s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.MaxLaunchesPerPhase = (int)D("maxLaunchesPerPhase", 3); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
             s.AckSeconds = D("ackSeconds", 900); s.ListSeconds = Math.Max(1, D("listSeconds", 30)); s.IdleGraceSeconds = D("idleGraceSeconds", 60);
-            s.UsageRetrySeconds = Math.Max(0.5, D("usageRetrySeconds", 10)); s.UsageWaitSeconds = D("usageWaitSeconds", 300); s.OwnerWatchSeconds = Math.Max(1, D("ownerWatchSeconds", 120));
+            s.UsageRetrySeconds = Math.Max(0.5, D("usageRetrySeconds", 10)); s.UsageWaitSeconds = D("usageWaitSeconds", 300); s.OwnerWatchSeconds = Math.Max(1, D("ownerWatchSeconds", 120)); s.QuotaRetryMinutes = D("quotaRetryMinutes", 30);
             s.ApiUrl = S("apiUrl", s.ApiUrl).TrimEnd('/'); s.ApiKey = S("apiKey", ""); s.GatewayUrl = S("gatewayUrl", "").TrimEnd('/'); s.Model = S("model", "auto").Trim(); if (s.Model == "") s.Model = "auto";
             var of = S("optimizeFor", "cost"); s.OptimizeFor = of is "cost" or "balanced" or "intelligence" ? of : "cost";
             s.Repository = S("repository", s.Repository); s.DefaultBranch = S("defaultBranch", s.DefaultBranch);
@@ -68,7 +70,7 @@ sealed class CursorCloudSettings
 
     public RuntimeLimits Limits(Func<string, int, string, long, string> mint) => new()
     {
-        Kind = "cursor-cloud", Prefix = "cur", IsOn = () => On, MaxConcurrent = MaxConcurrent, MaxExecutionsPerDay = MaxExecutionsPerDay, AckSeconds = AckSeconds,
+        Kind = "cursor-cloud", Prefix = "cur", IsOn = () => On, Blocked = () => QuotaBlock?.Invoke(), MaxConcurrent = MaxConcurrent, MaxExecutionsPerDay = MaxExecutionsPerDay, AckSeconds = AckSeconds,
         MaxFailuresPerPhase = MaxFailuresPerPhase, MaxLaunchesPerPhase = MaxLaunchesPerPhase, UnhealthyAfterFailures = UnhealthyAfterFailures, ListSeconds = ListSeconds,
         // the r1 expires 15 minutes after the deadline (agents-roles-launch.md 4)
         TokenSeconds = (long)(MaxMinutes * 60) + 900, MintCredential = mint, RevokeOnEnd = true
@@ -103,6 +105,36 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
     { this.cfg = cfg; this.prompt = prompt; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
 
     public string Kind => "cursor-cloud";
+
+    // The team's prepaid balance / usage limit (Cursor answers a launch 400 usage_limit_exceeded, or a 402): no start until the retry time; the next
+    // start after that is the probe. A refusal is no failure of the item and no launch; a launch that succeeds clears it.
+    DateTime? quotaSince, quotaRetryAt; string quotaMessage = "";
+    public const string QuotaOwnerAction = "buy Cursor team credits / enable usage (the team that owns the Cursor API key)";
+    public static bool IsQuotaError(int status, string? text)
+    {
+        if (status == 402) return true;
+        if (status is < 400 or >= 500 or 429 or 404 or 410 || string.IsNullOrEmpty(text)) return false;
+        foreach (var k in new[] { "usage_limit_exceeded", "payment_required", "insufficient_credits", "insufficient_funds", "prepaid balance", "additional usage is off", "spend_limit" })
+            if (text.Contains(k, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+    public string? QuotaBlocked() { lock (agents) return quotaRetryAt is { } r && DateTime.UtcNow < r ? "quota-exhausted" : null; }
+    public JsonObject QuotaJson() { lock (agents) { var o = new JsonObject { ["exhausted"] = quotaSince != null, ["since"] = quotaSince?.ToString("o"), ["retryAt"] = quotaRetryAt?.ToString("o"), ["message"] = quotaMessage }; if (quotaSince != null) o["ownerAction"] = QuotaOwnerAction; return o; } }
+    void QuotaHit(int item, string text)
+    {
+        string msg; try { msg = JsonNode.Parse(text)?["error"]?["message"]?.ToString() ?? ""; } catch { msg = ""; }
+        if (msg == "") msg = Excerpt(text);
+        lock (agents)
+        {
+            if (quotaSince == null) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-quota-exhausted", ["item"] = item, ["message"] = msg.Length > 200 ? msg[..200] : msg }.ToJsonString());
+            quotaSince ??= DateTime.UtcNow; quotaRetryAt = DateTime.UtcNow.AddMinutes(cfg.QuotaRetryMinutes); quotaMessage = msg.Length > 200 ? msg[..200] : msg;
+        }
+    }
+    void QuotaClear()
+    {
+        lock (agents) { if (quotaSince == null) return; quotaSince = null; quotaRetryAt = null; quotaMessage = ""; }
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-quota-back" }.ToJsonString());
+    }
 
     // ---- the owners -----------------------------------------------------------------------------------------------------------------------------
     public bool Owns(int item) { lock (agents) return owners.TryGetValue(item, out var o) && !o.Done; }
@@ -232,7 +264,9 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
         catch (Exception e) { return new(false, "", "launch-" + e.GetType().Name); }
         var id = j?["agent"]?["id"]?.ToString() ?? j?["id"]?.ToString() ?? "";
         // a launch that failed may still have created the agent (a timeout, an odd answer): it is looked up by its name and deleted
+        if (IsQuotaError(s, text)) { QuotaHit(r.Item, text); return new(false, "", "quota"); }
         if (s is not (200 or 201) || id == "") { return new(false, "", s is 200 or 201 ? "launch-no-id" : $"launch-{s}: {Excerpt(text)}"); }
+        QuotaClear();
         var url = UrlOf(j); if (url == "") url = await ReadUrl(id, ct);
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-agent-url", ["item"] = r.Item, ["agent"] = id, ["url"] = url }.ToJsonString());
         CopilotOwner no;
@@ -256,10 +290,12 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
         int s; JsonNode? j; string text;
         try { (s, j, text) = await SendText(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(own.TaskId)}/runs", body, ct); }
         catch (Exception e) { return new(false, "", "followup-" + e.GetType().Name); }
+        if (IsQuotaError(s, text)) { QuotaHit(r.Item, text); return new(false, "", "quota"); }
         if (s is 404 or 410) return null;
         if (s is 400 or 409 && text.Contains("archiv", StringComparison.OrdinalIgnoreCase)) return null;
         var run = j?["run"]?["id"]?.ToString() ?? j?["id"]?.ToString() ?? "";
         if (s is not (200 or 201 or 202) || run == "") return new(false, "", s is 200 or 201 or 202 ? "followup-no-id" : $"followup-{s}: {Excerpt(text)}");
+        QuotaClear();
         var id = $"{own.TaskId}#{own.Sessions}";
         lock (agents)
         {
