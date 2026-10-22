@@ -237,7 +237,7 @@ jobs:
           docker run --rm -v "$PWD:/src:ro" \
             -e FWRUNNER_SH=/usr/local/bin/fwrunner.sh --entrypoint bash "fwrunner:${FWRUNNER_TAG}" /src/tests/runner/fwrunner.test.sh
           docker run --rm --entrypoint bash "fwrunner:${FWRUNNER_TAG}" -c \
-            'set -e; claude --version; claude --help | grep -q -- --effort; pwsh --version; dotnet --version; node --version; sqlite3 --version; git --version; test "$(id -u)" != 0; test -x /usr/bin/tini; ls /ms-playwright | grep -q chromium; test ! -w /etc/fworker/settings.json'
+            'set -e; claude --version; claude --help | grep -q -- --effort; codex --version; cursor-agent --version; gh --version; pwsh --version; dotnet --version; node --version; sqlite3 --version; git --version; test "$(id -u)" != 0; test -x /usr/bin/tini; ls /ms-playwright | grep -q chromium; test ! -w /etc/fworker/settings.json'
 
       - name: Save the runner image
         if: steps.changed.outputs.build == 'true' && github.event_name != 'pull_request'
@@ -259,10 +259,36 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  # The Octopus runbook scripts (deploy/octopus/scripts) against a fake docker and curl, shellcheck of every deploy and runner script,
+  # and terraform fmt/validate of deploy/octopus (init without a backend: no state, no credential, no Octopus call). A few seconds; every run.
+  octopus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+
+      - name: Runbook script tests
+        run: bash tests/octopus/runbooks.test.sh
+
+      - name: shellcheck
+        run: shellcheck -S warning deploy/octopus/scripts/*.sh deploy/hosts/*.sh tests/octopus/*.sh runner/fwrunner.sh
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+
+      - name: terraform fmt and validate
+        working-directory: deploy/octopus
+        run: |
+          set -euo pipefail
+          terraform fmt -check -diff
+          terraform init -backend=false -input=false
+          terraform validate
+
   # The one check the default-branch ruleset requires: it reports the outcome of the image job and of the tests under a fixed name.
   result:
     name: Build result
-    needs: [image, tests, fwrunner]
+    needs: [image, tests, fwrunner, octopus]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -285,3 +311,9 @@ jobs:
         run: |
           echo "fwrunner: ${FWRUNNER_RESULT}"
           test "${FWRUNNER_RESULT}" = "success"
+      - name: The Octopus runbook checks succeeded
+        env:
+          OCTOPUS_RESULT: ${{ needs.octopus.result }}
+        run: |
+          echo "octopus: ${OCTOPUS_RESULT}"
+          test "${OCTOPUS_RESULT}" = "success"

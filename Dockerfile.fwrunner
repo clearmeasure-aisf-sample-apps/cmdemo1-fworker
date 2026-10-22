@@ -8,6 +8,9 @@
 # fwrunner:<CLAUDE_CODE_VERSION>-<build>. The image holds no credential and no connect prompt: the worker token is redeemed at run time
 # from a one-time nonce, the model credential is the job's managed identity (Entra; FWRUNNER_AGENT=codex uses Azure OpenAI), and git pushes use a per-item token fetched
 # by runner/git-credential-fworker.
+# The same image runs on self-hosted Octopus hosts (deploy/octopus; published as ghcr.io/clearmeasure-aisf-sample-apps/fworker-host by
+# .github/workflows/fworker-host-image.yml): there FWRUNNER_AUTH=key and the chosen agent's API key (ANTHROPIC_API_KEY, OPENAI_API_KEY or
+# CURSOR_API_KEY) arrives as env at docker run; FWRUNNER_AGENT=cursor runs the Cursor agent CLI (cursor-agent).
 FROM mcr.microsoft.com/dotnet/sdk:10.0
 
 ARG PWSH_VERSION=7.5.4
@@ -16,6 +19,14 @@ ARG CLAUDE_CODE_VERSION=2.1.300
 # Codex CLI (FWRUNNER_AGENT=codex): 0.155.1 is the version Microsoft validated with gpt-6-sol on Azure OpenAI
 # (learn.microsoft.com/azure/foundry/openai/how-to/codex, ms.date 2026-09-03)
 ARG CODEX_VERSION=0.155.1
+# GitHub CLI, from GitHub's release tarball
+ARG GH_VERSION=2.103.0
+ARG GH_SHA256=fdd768eb70f6409f80fcfa9f3a1c0adf0fc98d827ab3ce0bed2ac22762c5d786
+# Cursor agent CLI (FWRUNNER_AGENT=cursor): the versioned linux x64 tarball the official installer (https://cursor.com/install) downloads,
+# pinned and verified by sha256; to update, read the new version from the installer and the sha256 of its tarball. false leaves it out
+ARG WITH_CURSOR=true
+ARG CURSOR_VERSION=2026.10.22-27dcf5f
+ARG CURSOR_SHA256=85296944e4600a83c4b764f578d1502bf9c416db200d33a593e8f3ecabfdc294
 # the Playwright version of the work-orders acceptance tests (Microsoft.Playwright.NUnit 1.54.0): its browser revision is the one baked in
 ARG PLAYWRIGHT_VERSION=1.54.0
 # false leaves the browsers out (a smaller image for local proofs of the entrypoint; the released image always has them)
@@ -45,6 +56,26 @@ RUN curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${PW
     && chmod +x /opt/microsoft/powershell/pwsh \
     && ln -sf /opt/microsoft/powershell/pwsh /usr/bin/pwsh \
     && rm -f /tmp/pwsh.tgz
+
+# GitHub CLI
+RUN curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" -o /tmp/gh.tgz \
+    && echo "${GH_SHA256}  /tmp/gh.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/gh.tgz -C /tmp \
+    && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
+    && rm -rf /tmp/gh.tgz "/tmp/gh_${GH_VERSION}_linux_amd64" \
+    && gh --version
+
+# Cursor agent CLI: the pinned tarball, unpacked to /opt/cursor/<version> (root-owned, readable by everyone)
+RUN if [ "$WITH_CURSOR" = "true" ]; then \
+        curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_VERSION}/linux/x64/agent-cli-package.tar.gz" -o /tmp/cursor.tgz \
+        && echo "${CURSOR_SHA256}  /tmp/cursor.tgz" | sha256sum -c - \
+        && mkdir -p "/opt/cursor/${CURSOR_VERSION}" \
+        && tar --strip-components=1 -xzf /tmp/cursor.tgz -C "/opt/cursor/${CURSOR_VERSION}" \
+        && rm -f /tmp/cursor.tgz \
+        && chmod -R a+rX /opt/cursor \
+        && ln -sf "/opt/cursor/${CURSOR_VERSION}/cursor-agent" /usr/local/bin/cursor-agent \
+        && cursor-agent --version; \
+    fi
 
 # node 22, Claude Code and Codex CLI at pinned versions (the npm registry is reached only here, at image build)
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.txz \

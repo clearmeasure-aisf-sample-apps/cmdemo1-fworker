@@ -20,7 +20,11 @@
 # Environment (set per execution by the gateway's adapter on the job template; none is a credential):
 #   FWRUNNER_GATEWAY_URL   gateway base URL (required)            FWRUNNER_NONCE   one-time nonce (required; spent by the redeem)
 #   FWRUNNER_NAME          worker name cae-<item>-<hex> (required) FWRUNNER_ENV     environment name for the prompt (default tdd)
-#   FWRUNNER_AGENT         claude (default) or codex
+#   FWRUNNER_AGENT         claude (default), codex or cursor (cursor: FWRUNNER_AUTH=key only)
+#   FWRUNNER_AUTH          entra (default: the Container Apps job's managed identity, no key) or key (a self-hosted Octopus host,
+#                          deploy/octopus: the chosen agent's API key arrives as env at docker run: ANTHROPIC_API_KEY for claude,
+#                          OPENAI_API_KEY for codex, CURSOR_API_KEY for cursor; every other model key is removed from the environment)
+#   FWRUNNER_RUNTIME       the fworker.runtime telemetry tag (default cae-job; the Octopus runbooks set octopus-host)
 #   FWRUNNER_MODEL, FWRUNNER_EFFORT   model and effort for claude (optional); codex takes the effort (max -> xhigh) and uses the deployment
 #   AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT   codex only (required for it); AZURE_CLIENT_ID picks the managed identity
 #   FWRUNNER_CODEX_SANDBOX  codex sandbox_mode (default danger-full-access: the container is the boundary, as for claude's auto mode)
@@ -43,8 +47,10 @@ agent=${FWRUNNER_AGENT:-claude}
 case "$agent" in
     claude) agentCmd=${FWRUNNER_CLAUDE:-claude} ;;
     codex) agentCmd=${FWRUNNER_CODEX:-codex} ;;
+    cursor) agentCmd=${FWRUNNER_CURSOR:-cursor-agent} ;;
     *) agentCmd='' ;;
 esac
+auth=${FWRUNNER_AUTH:-entra}
 codexDir=${FWRUNNER_CODEX_DIR:-/etc/fworker/codex}
 tokenCmd=${FWRUNNER_TOKEN_CMD:-/usr/local/bin/fwrunner-entra-token}
 # the runtime adapter of the gateway (gateway/Runtimes/CaeJobRuntime.cs) names the execution's values FWORKER_*; FWRUNNER_* wins when both are set
@@ -72,7 +78,7 @@ upload_transcript() {
     at=$(curl -fsS --max-time 30 -H "X-IDENTITY-HEADER: $IDENTITY_HEADER" "$IDENTITY_ENDPOINT?$q" \
         | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).access_token||"")}catch{}})') || at=''
     if [ -z "$at" ]; then say "transcript not uploaded: no storage token for the managed identity"; return 0; fi
-    local blob="${container%/}/$(date -u +%Y-%m-%d)/${name}-${CONTAINER_APP_JOB_EXECUTION_NAME:-local}.jsonl"
+    local blob; blob="${container%/}/$(date -u +%Y-%m-%d)/${name}-${CONTAINER_APP_JOB_EXECUTION_NAME:-local}.jsonl"
     if curl -fsS --max-time 300 -X PUT -H @<(printf 'Authorization: Bearer %s\n' "$at") -H "x-ms-version: 2021-08-06" -H "x-ms-blob-type: BlockBlob" \
         -H "Content-Type: application/x-ndjson" --data-binary "@$transcript" "$blob" -o /dev/null; then
         say "transcript uploaded ($(wc -c < "$transcript") bytes)"
@@ -113,9 +119,19 @@ case "$name" in *[!A-Za-z0-9._-]*) fail "FWRUNNER_NAME has characters outside [A
 case "$streamStale$silent$maxSeconds" in *[!0-9]*) fail "FWRUNNER_STREAM_STALE, FWRUNNER_SILENT and FWRUNNER_MAX_SECONDS are whole seconds" ;; esac
 [ -f "$settings" ] || fail "no settings file at $settings"
 [ -f "$template" ] || fail "no prompt template at $template"
-[ -n "$agentCmd" ] || fail "FWRUNNER_AGENT must be claude or codex, not $agent"
+[ -n "$agentCmd" ] || fail "FWRUNNER_AGENT must be claude, codex or cursor, not $agent"
+case "$auth" in entra|key) ;; *) fail "FWRUNNER_AUTH must be entra or key, not $auth" ;; esac
 command -v "$agentCmd" >/dev/null 2>&1 || fail "$agentCmd is not on the PATH"
-if [ "$agent" = codex ]; then
+# key mode: exactly the chosen agent's key is required and kept; the others are removed before anything runs
+agentKey=''
+if [ "$auth" = key ]; then
+    case "$agent" in claude) keyVar=ANTHROPIC_API_KEY ;; codex) keyVar=OPENAI_API_KEY ;; cursor) keyVar=CURSOR_API_KEY ;; esac
+    agentKey=${!keyVar:-}
+    [ -n "$agentKey" ] || fail "$keyVar is not set (FWRUNNER_AUTH=key, agent $agent)"
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_FOUNDRY_API_KEY ANTHROPIC_FOUNDRY_AUTH_TOKEN AZURE_OPENAI_API_KEY OPENAI_API_KEY CODEX_API_KEY AZURE_OPENAI_AD_TOKEN CURSOR_API_KEY
+elif [ "$agent" = cursor ]; then fail "FWRUNNER_AGENT=cursor needs FWRUNNER_AUTH=key (CURSOR_API_KEY)"
+fi
+if [ "$agent" = codex ] && [ "$auth" = entra ]; then
     [ -n "${AZURE_OPENAI_ENDPOINT:-}" ] || fail "AZURE_OPENAI_ENDPOINT is not set (codex)"
     [ -n "${AZURE_OPENAI_DEPLOYMENT:-}" ] || fail "AZURE_OPENAI_DEPLOYMENT is not set (codex)"
     # the Entra token goes to this host: only an Azure OpenAI or Cognitive Services host, without characters that could break config.toml
@@ -151,8 +167,9 @@ say "nonce redeemed"
 export FACTORY_URL="$url" FACTORY_TOKEN="$token" FACTORY_HOLDER="$name" FACTORY_DATA_DIR="$home/data" FACTORY_SESSION_END_FILE="$marker"
 export GIT_TERMINAL_PROMPT=0     # no credential from the helper (no item owned yet) must fail the git command, not wait for a prompt
 # Claude Code telemetry tags (design 2.9); the item is not known until it is offered, the worker name carries it
-export OTEL_RESOURCE_ATTRIBUTES="${OTEL_RESOURCE_ATTRIBUTES:+$OTEL_RESOURCE_ATTRIBUTES,}fworker.worker=$name,fworker.runtime=cae-job,fworker.agent=$agent"
-unset token resp body ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_FOUNDRY_API_KEY ANTHROPIC_FOUNDRY_AUTH_TOKEN AZURE_OPENAI_API_KEY OPENAI_API_KEY CODEX_API_KEY AZURE_OPENAI_AD_TOKEN
+runtimeTag=${FWRUNNER_RUNTIME:-cae-job}; case "$runtimeTag" in *[!a-z0-9-]*) runtimeTag=cae-job ;; esac
+export OTEL_RESOURCE_ATTRIBUTES="${OTEL_RESOURCE_ATTRIBUTES:+$OTEL_RESOURCE_ATTRIBUTES,}fworker.worker=$name,fworker.runtime=$runtimeTag,fworker.agent=$agent"
+unset token resp body ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_FOUNDRY_API_KEY ANTHROPIC_FOUNDRY_AUTH_TOKEN AZURE_OPENAI_API_KEY OPENAI_API_KEY CODEX_API_KEY AZURE_OPENAI_AD_TOKEN CURSOR_API_KEY
 
 # 2. the plugin, in exactly the gateway's version
 curl -fsS --max-time 120 --retry 3 -H @<(printf 'Authorization: Bearer %s\n' "$FACTORY_TOKEN") "$url/api/v1/plugin" -o "$home/plugin.tgz" \
@@ -184,10 +201,20 @@ if [ "$agent" = codex ]; then
     case "${FWRUNNER_EFFORT:-high}" in minimal|low|medium|high|xhigh) effort=${FWRUNNER_EFFORT:-high} ;; max) effort=xhigh ;; *) effort=high ;; esac
     sandbox=${FWRUNNER_CODEX_SANDBOX:-danger-full-access}
     case "$sandbox" in read-only|workspace-write|danger-full-access) ;; *) fail "FWRUNNER_CODEX_SANDBOX must be read-only, workspace-write or danger-full-access" ;; esac
+    if [ "$auth" = key ]; then
+        # OpenAI API with the key: codex stores it in $CODEX_HOME/auth.json (codex login --with-api-key reads it from stdin)
+        codexModel=${FWRUNNER_MODEL:-gpt-5-codex}
+        case "$codexModel" in *[!A-Za-z0-9._-]*) fail "FWRUNNER_MODEL has characters outside [A-Za-z0-9._-]" ;; esac
+        printf 'model = "%s"\nmodel_reasoning_effort = "%s"\napproval_policy = "never"\nsandbox_mode = "%s"\nproject_doc_max_bytes = 262144\ncheck_for_update_on_startup = false\n\n[sandbox_workspace_write]\nwritable_roots = ["/work", "/tmp"]\nnetwork_access = true\n\n[shell_environment_policy]\ninherit = "all"\nignore_default_excludes = true\nexclude = ["CODEX_*", "OPENAI_*", "ANTHROPIC_*", "CURSOR_*"]\n\n[features]\nmulti_agent = false\n' \
+            "$codexModel" "$effort" "$sandbox" > "$CODEX_HOME/config.toml" || fail "cannot write the codex config"
+        printf '%s' "$agentKey" | "$agentCmd" login --with-api-key > /dev/null 2>> "$runlog" || fail "codex login with the API key failed"
+        agentKey=''
+    else
     base="${AZURE_OPENAI_ENDPOINT%/}/openai/v1"
     sed -e "s|{{DEPLOYMENT}}|$(esc "$AZURE_OPENAI_DEPLOYMENT")|g" -e "s|{{EFFORT}}|$effort|g" -e "s|{{SANDBOX}}|$sandbox|g" \
         -e "s|{{BASE_URL}}|$(esc "$base")|g" -e "s|/usr/local/bin/fwrunner-entra-token|$(esc "$tokenCmd")|g" \
         "$codexDir/config.toml.template" > "$CODEX_HOME/config.toml" || fail "cannot write the codex config"
+    fi
     cp "$codexDir/fworker.rules" "$CODEX_HOME/rules/fworker.rules" || fail "cannot copy the codex rules"
     {
         sed -e "s|{{BASE}}|$(esc "$home")|g" "$codexDir/agents-preamble.md"
@@ -204,15 +231,25 @@ if [ "$agent" = codex ]; then
     grep -q '{{' "$CODEX_HOME/config.toml" && fail "the codex files have an unfilled placeholder"
     # read-only for the session: the policy files cannot be changed for a later re-read
     chmod 0444 "$CODEX_HOME/config.toml" "$CODEX_HOME/rules/fworker.rules" "$CODEX_HOME/AGENTS.md" && chmod 0555 "$CODEX_HOME/rules" || fail "cannot protect the codex files"
-    "$tokenCmd" > /dev/null 2>> "$runlog" || fail "no Entra token for Azure OpenAI from the managed identity (see the stderr lines)"
-    say "codex home ready (deployment $AZURE_OPENAI_DEPLOYMENT, effort $effort, sandbox $sandbox)"
+    if [ "$auth" = entra ]; then
+        "$tokenCmd" > /dev/null 2>> "$runlog" || fail "no Entra token for Azure OpenAI from the managed identity (see the stderr lines)"
+        say "codex home ready (deployment $AZURE_OPENAI_DEPLOYMENT, effort $effort, sandbox $sandbox)"
+    else say "codex home ready (OpenAI API key, model $codexModel, effort $effort, sandbox $sandbox)"; fi
 fi
 
 # 4. the session
+codexModel=${codexModel:-${AZURE_OPENAI_DEPLOYMENT:-}}
 if [ "$agent" = codex ]; then
-    args=(exec --json --strict-config -C "$repoDir" -m "$AZURE_OPENAI_DEPLOYMENT" -)
+    args=(exec --json --strict-config -C "$repoDir" -m "$codexModel" -)
     printf 'Follow the section "Connect prompt" of your AGENTS.md now, starting at CONNECT step 1. You are worker %s.\n' "$name" > "$prompt.start"
     input="$prompt.start"
+elif [ "$agent" = cursor ]; then
+    # Cursor agent CLI headless: the prompt is the last argument (cursor-agent -p reads no prompt from stdin or a file). One argv string
+    # is limited to 128 KiB on Linux (MAX_ARG_STRLEN); the connect prompt is a few KiB, so that limit is far off; --force allows commands without approval (the container is the boundary)
+    args=(-p --output-format stream-json --force)
+    [ -n "${FWRUNNER_MODEL:-}" ] && args+=(--model "$FWRUNNER_MODEL")
+    args+=("$(cat "$prompt")")
+    input=/dev/null
 else
     args=(-p --output-format stream-json --verbose --settings "$settings")
     [ -n "${FWRUNNER_MODEL:-}" ] && args+=(--model "$FWRUNNER_MODEL")
@@ -221,8 +258,10 @@ else
 fi
 : > "$transcript"
 started=$(date +%s)
-if [ "$agent" = codex ]; then say "codex starts (deployment $AZURE_OPENAI_DEPLOYMENT)"; else say "claude starts (model ${FWRUNNER_MODEL:-default}, effort ${FWRUNNER_EFFORT:-default})"; fi
-( cd "$repoDir" && exec "$agentCmd" "${args[@]}" < "$input" ) >> "$transcript" 2>> "$runlog" &
+if [ "$agent" = codex ]; then say "codex starts (model $codexModel)"; elif [ "$agent" = cursor ]; then say "cursor starts (model ${FWRUNNER_MODEL:-default})"; else say "claude starts (model ${FWRUNNER_MODEL:-default}, effort ${FWRUNNER_EFFORT:-default})"; fi
+# key mode: the chosen agent's key is put back into its own environment only
+keyEnv=(); [ -n "$agentKey" ] && keyEnv=("$keyVar=$agentKey")
+( cd "$repoDir" && exec env "${keyEnv[@]}" "$agentCmd" "${args[@]}" < "$input" ) >> "$transcript" 2>> "$runlog" &
 child=$!
 # one short, redacted line per stream-json event on stdout (Log Analytics); the full transcript stays in the file
 ( tail -n +1 -F --pid="$child" "$transcript" 2>/dev/null \
