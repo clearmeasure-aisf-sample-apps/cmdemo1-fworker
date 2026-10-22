@@ -187,6 +187,7 @@ $CopilotScenarios = [ordered]@{
         $ftFrom = Get-Date
         # (a Development task relaunched before the sweep saw the move is stopped too, inside the wait: on a loaded runner it can start late)
         Check 'Functional Testing is a follow-up session of the same task, on its pull request' (Wait-Until -Seconds 90 { foreach ($tt in @((Cop-Tasks $n) | Where-Object { $_.state -in 'queued', 'in_progress' -and "$($_.body.prompt)" -match 'phase development' })) { [void](Fake 'copilot-task' @{ id = $tt.id; state = 'cancelled' }) }; @((Cop-Tasks $n) | Where-Object { "$($_.body.prompt)" -match 'phase functional-testing' -and $_.task -eq $t.id -and $_.via -eq 'comment' -and $_.pr -eq $draft.number }).Count -eq 1 }) ("from $($ftFrom.ToUniversalTime().ToString('o')) to $((Get-Date).ToUniversalTime().ToString('o')) br=$br " + ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.state) $($_.task) $($_.via) $($_.pr)" }) -join '; ')
+        Check 'and its prompt names the current branch and tells a session on a newer branch of the task to use pr_open, not fail' (@((Cop-Tasks $n) | Where-Object { $_.via -eq 'comment' -and "$($_.body.prompt)" -match 'phase functional-testing' -and "$($_.body.prompt)" -match "PR #$($draft.number), branch $br" -and "$($_.body.prompt)" -match 'newer copilot/ branch of this same task' }).Count -ge 1) (((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.via) $($_.pr)" }) -join '; ')
         Check 'one task for the item, no second POST' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1)
     } finally { Cop-Cleanup @($n) }
 }
@@ -778,6 +779,29 @@ $CopilotScenarios = [ordered]@{
         Check 'pr_open is not refused as another item''s branch' ($op2.ok -eq $true) ($op2 | ConvertTo-Json -Compress -Depth 4)
         Check 'and the item''s pull request is on the new branch now' ((Get-ItemState $n).pr.branch -eq $bb) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
         [void](Mcp-Call 'session_end' @{ reason = 'done' } $w)
+    } finally { Cop-Cleanup @($n) }
+}
+
+'copilot: the owner''s later draft on its own branch (not stacked, the older pull request closed) is the item''s current pull request: marked ready, never the closed one, and the item moves on [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot later draft' 'Change docs/Later.md.' @('factory worker', 'Auto Merge', 'env:tdd') 'Release Queue'
+        $ab = "copilot/old-$n"; $bb = "copilot/later-$n"
+        [void](Fake 'push-branch' @{ branch = $ab; files = @('src/App/Later.cs') })
+        $a = Cop-Draft $ab 'master' "Later (#$n)"
+        [void](Invoke-RestMethod "$(Cop-Gh)/pulls/$($a.number)" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
+        [void](Fake 'push-branch' @{ branch = $bb; files = @('src/App/Later.cs', 'src/UnitTests/LaterTests.cs') })
+        $b = Cop-Draft $bb 'master' "Later again (#$n)"
+        $task = Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/agents/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks" -Method POST -Headers @{ Authorization = 'Bearer fake-copilot' } -ContentType 'application/json' -Body (@{ prompt = 'the owner task'; base_ref = 'master'; create_pull_request = $true } | ConvertTo-Json)
+        [void](Fake 'copilot-task' @{ id = $task.id; state = 'completed'; headRef = $ab })
+        $now = (Get-Date).ToUniversalTime().ToString('o')
+        $state = @{ item = $n; pr = @{ number = $b.number; branch = $bb }; copilot_task = @{ id = $task.id; url = ''; branch = $ab; pr = $a.number; phase = 'Development'; since = $now; previous = @() } }
+        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
+        [void](Invoke-RestMethod "$(Cop-Gh)/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
+        [void](Fake 'move' @{ number = $n; column = 'Development' })
+        Check 'the owner follows the later draft, not the closed pull request' (Wait-Until -Seconds 60 { $sx = Get-ItemState $n; $sx.copilot_task.branch -eq $bb -and $sx.copilot_task.pr -eq $b.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
+        Check 'the later draft is marked ready for review' (Wait-Until -Seconds 60 { -not (Cop-FakePr $b.number).draft }) ((Cop-FakePr $b.number) | ConvertTo-Json -Compress -Depth 3)
+        Check 'the item moves on to Functional Testing' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
     } finally { Cop-Cleanup @($n) }
 }
 }

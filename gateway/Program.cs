@@ -2329,7 +2329,7 @@ copilotPrompt = (item, phase, code, pr, why) =>
         // that never connected did its work unseen, or none, and was counted as failed: #415, #416 on 2026-10-21)
         var first = $"FIRST, before you read or change anything: call fworker_connect with code {code} and gateway {copilotSettings.GatewayUrl}, then next_event (wait_seconds 30) until item.assigned for #{item} arrives, then item_accept for #{item}. " +
             "Without that the gateway cannot see this session: its work is not recorded and the session counts as failed. Only then do the step below.\n";
-        var f = first + $"Follow-up session of the task that owns #{item}: phase {phase}. Work on PR #{pr.Number}, branch {pr.Branch} (this session runs on it). " +
+        var f = first + $"Follow-up session of the task that owns #{item}: phase {phase}. Work on PR #{pr.Number}, branch {pr.Branch} (this session runs on it). If `git branch --show-current` shows a different, newer copilot/ branch of this same task, that branch is the item's pull request now (Development: call pr_open with it as head; other phases: work on it); never report FAILURE for that. " +
             "You own #{item} until it is merged and master is green, but THIS session does only this phase step and then ends: never poll or wait for CI; the gateway watches it and resumes you.\n";
         f = f.Replace("{item}", item.ToString());
         if (why.Trim() != "") f += $"What changed: {why.Trim()}\n";
@@ -2344,7 +2344,7 @@ copilotPrompt = (item, phase, code, pr, why) =>
     var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
     // an item with its open pull request: the task starts from that branch (CopilotCloudRuntime.BaseRef), and the fix goes to that pull request
     if (pr != null) text += $"\nThis item's pull request: #{pr.Number}, branch {pr.Branch}. This task starts from that branch; Copilot gives the task its own branch made from it. " +
-        (IsDev(phase) ? $"Fix #{pr.Number}: read why once (pr_checks for the failed job's log, item_get for the review), change the code on the branch this task runs on, which already holds #{pr.Number}'s commits, push, and pass THAT branch as `head` to pr_open, then item_complete and session_end. The gateway makes your task's pull request the item's, closes #{pr.Number} as superseded and waits for the checks itself. Do not start over from master and open nothing else.\n"
+        (IsDev(phase) ? $"Fix #{pr.Number}: read why once (pr_checks for the failed job's log, item_get for the review), change the code on the branch this task runs on, which already holds #{pr.Number}'s commits, push, and pass THAT branch as `head` to pr_open, then item_complete and session_end. The gateway makes your task's pull request the item's, closes #{pr.Number} as superseded and waits for the checks itself. Do not start over from master and open nothing else. If the branch you run on is a newer branch of this same task than #{pr.Number}'s, it is the item's pull request: call pr_open with it as head, do not fail.\n"
             : $"Verify #{pr.Number}; change nothing.\n");
     // one Copilot MCP configuration serves every environment: the prompt names this gateway (fworker-mcp accepts only the three gateway hosts)
     return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";

@@ -122,7 +122,7 @@ function Verb_item_pr($a) {
     $n = Get-ItemNumber $a
     # an owner task's item: the open pull request of the task's branch (a recorded one that was closed or superseded is replaced)
     # item-pr runs without the item lock (NoLockVerbs): the resolution writes the state, so it takes the lock; busy: what the state records
-    $ow = try { Use-ItemLock $n { Resolve-OwnerPr $n } 5 } catch [FactoryReject] { if ($_.Exception.Code -eq 'item-busy') { $null } else { throw } }
+    $ow = try { Use-ItemLock $n { Resolve-OwnerPr $n } 20 } catch [FactoryReject] { if ($_.Exception.Code -eq 'item-busy') { $null } else { throw } }
     $pr = if ($ow) { $ow.pr } else { Find-ItemPr $n }
     if (-not $pr) { return @{ ok = $true; id = $n; found = $false } }
     return @{ ok = $true; id = $n; found = $true; number = [int]$pr.number; branch = "$($pr.head.ref)" }
@@ -362,6 +362,14 @@ function Close-StrayCopilotDrafts([int]$n, [string[]]$Bases, [int]$Keep) {
 # retargeted once that base has no open pull request (merged or closed); while the base's pull request is still open, the stack is consolidated
 # onto the owner's pull request when its branch holds the base's commits (the commit-ancestry guard of #192), the base's pull request is closed as
 # superseded. Returns $null when the item has no owner branch with an open pull request; else @{ pr; changed; retargeted; superseded; refused }.
+# An owner pull request still a draft is marked ready for review (GraphQL): GitHub merges no draft and QC is not offered for one (#483, #488:
+# a PASS parked pass-unmerged on a successor's draft). Returns the pull request as it is afterwards.
+function Set-PrReady($pr) {
+    if (-not $pr -or -not $pr.draft) { return $pr }
+    try { [void](Invoke-GhGraphQL 'mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }' @{ id = "$($pr.node_id)" }) } catch { return $pr }
+    return (Get-Pr ([int]$pr.number))
+}
+
 function Resolve-OwnerPr([int]$n) {
     $c = Get-Cfg; $def = "$($c.defaultBranch)"
     $st = Get-State $n; $s = $st.state
@@ -375,6 +383,14 @@ function Resolve-OwnerPr([int]$n) {
         $succ = @(Invoke-Gh -Path "$(Get-RepoPath)/pulls?state=open&base=$([uri]::EscapeDataString($br))&per_page=20") | Where-Object { $_ -and ("$($_.head.ref)" -like 'copilot/*' -or "$($_.head.ref)" -match "^$([regex]::Escape($c.name))/$n-") -and "$($_.base.ref)" -eq $br } | Sort-Object { [int]$_.number } | Select-Object -Last 1
         if (-not $succ) { break }
         $br = "$($succ.head.ref)"; $pr = $succ
+    }
+    # the item's recorded pull request, when open on a copilot/* branch and newer than the one found, is the owner's current one: a task's later
+    # branch that is not stacked on the owner's (based on the default branch) is found by no base lookup, and the owner branch must not go back
+    # to the closed older pull request (#455: FT sessions were sent to the closed #470, never connected)
+    $recNo = if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'number')) { [int]$s.pr.number } else { 0 }
+    if ($recNo -gt 0 -and (-not $pr -or $recNo -gt [int]$pr.number)) {
+        $rp = try { Get-Pr $recNo } catch { $null }
+        if ($rp -and "$($rp.state)" -eq 'open' -and -not $rp.merged -and "$($rp.head.ref)" -like 'copilot/*') { $pr = $rp; $br = "$($rp.head.ref)" }
     }
     if (-not $pr) { return $null }
     if ("$($s.copilot_task.branch)" -ne $br) { $s.copilot_task.branch = $br; Save-State $n $st }
@@ -408,6 +424,8 @@ function Resolve-OwnerPr([int]$n) {
     }
     if ((Test-Has $s 'awaiting_checks') -and [int]$s.awaiting_checks.pr -ne [int]$pr.number) { $s.awaiting_checks.pr = [int]$pr.number; $s.awaiting_checks.sha = "$($pr.head.sha)"; $s.awaiting_checks.since = ConvertTo-Iso (Get-UtcNow); $o.changed = $true }
     if ([int]$s.copilot_task.pr -ne [int]$pr.number) { $s.copilot_task.pr = [int]$pr.number; $o.changed = $true }
+    # a recorded owner pull request (a successor adopted after Development included) is never left a draft
+    if ($rec -gt 0 -and $pr.draft) { $pr = Set-PrReady $pr; $o.pr = $pr }
     if ($o.changed) {
         Save-State $n $st
         if ($rec -gt 0 -and $rec -ne [int]$pr.number) { Add-Comment $n "The item's pull request is now #$($pr.number), the open pull request of the owner task's branch ``$br`` (the recorded #$rec is closed or superseded)." }

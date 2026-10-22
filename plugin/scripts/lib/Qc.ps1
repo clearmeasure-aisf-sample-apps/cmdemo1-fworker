@@ -331,6 +331,7 @@ function Invoke-QcSync($List, [bool]$Dry) {
                     if ($by) { $res.approvals += @{ item = $n; pr = [int]$pr.number; sha = $head; by = "$by"; ran = [bool]$ran } }
                 }
             }
+            if (-not $Dry -and $pr.draft -and (Test-Has $s 'copilot_task') -and (Test-Has $s 'verdict') -and -not $s.verdict.processed) { $pr = Set-PrReady $pr }
             $el = Get-QcEligibility $c $n $it.labels $it.column $s $pr $null
             if ($el.ok) { $el = Get-QcEligibility $c $n $it.labels $it.column $s $pr (@(Get-PrFiles ([int]$pr.number))) }
             if ($el.ok) {
