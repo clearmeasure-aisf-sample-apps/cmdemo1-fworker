@@ -5,8 +5,14 @@
 #   export OCTOPUS_URL=https://clearmeasure.octopus.app OCTOPUS_APIKEY=...   # an API key of a space manager, never committed
 #   terraform init && terraform plan && terraform apply
 #
-# Sensitive variables are created as placeholders without a value: set them in the Octopus portal (Project > Variables) after the apply;
-# Terraform ignores later changes to their values. The scripts are deploy/octopus/scripts/*.sh (tested by tests/octopus/runbooks.test.sh).
+# The trigger "Reconcile hosts every 5 minutes" stays disabled until -var reconcile_enabled=true (with the gateway's octopus runtime on).
+# The feed's credential comes from -var ghcr_username=<user> and TF_VAR_ghcr_token (read:packages); the user also becomes Fworker.GhcrUsername.
+#
+# The sensitive variables (local.sensitive_names) are not Terraform's: provider 1.21 refuses to create a sensitive variable without a value,
+# and a value in Terraform would sit in the state. Add them in the Octopus portal (Project > Variables) or the API as empty Sensitive
+# variables after the apply, then set the values there; the scripts treat an empty or missing value as unset. A state from before this
+# change holds octopusdeploy_variable.sensitive: `terraform state rm octopusdeploy_variable.sensitive` first, or the apply deletes them.
+# The scripts are deploy/octopus/scripts/*.sh (tested by tests/octopus/runbooks.test.sh).
 
 terraform {
   required_version = ">= 1.6"
@@ -48,6 +54,12 @@ variable "project_group_name" {
   default = "Default Project Group"
 }
 
+variable "reconcile_enabled" {
+  description = "Whether the trigger \"Reconcile hosts every 5 minutes\" runs. Off while the gateway's octopus runtime is disabled."
+  type        = bool
+  default     = false
+}
+
 variable "gateway_url" {
   description = "Base URL of the tdd gateway the workers connect to (FWORKER_GATEWAY_URL)."
   type        = string
@@ -60,10 +72,9 @@ variable "image" {
 }
 
 variable "ghcr_username" {
-  description = "GHCR user for the feed (a machine user or the bot); null leaves the feed anonymous until set in the portal."
+  description = "GHCR user for the feed and Fworker.GhcrUsername (a machine user or the bot; not a secret); null leaves the feed anonymous until set in the portal."
   type        = string
   default     = null
-  sensitive   = true
 }
 
 variable "ghcr_token" {
@@ -124,11 +135,11 @@ locals {
     "Fworker.Cpus"                = "2"
     "Fworker.Memory"              = "8g"
     "Fworker.StartTimeoutSeconds" = "180"
-    "Fworker.GhcrUsername"        = ""
+    "Fworker.GhcrUsername"        = var.ghcr_username == null ? "" : var.ghcr_username
   }
 
-  # placeholders without a value; the values are set in the portal
-  sensitive = {
+  # Sensitive variables of the project, added outside Terraform (see the top): the name and what the value is
+  sensitive_names = {
     "Fworker.AnthropicApiKey" = "Anthropic API key for FWRUNNER_AGENT=claude"
     "Fworker.CursorApiKey"    = "Cursor API key for FWRUNNER_AGENT=cursor"
     "Fworker.OpenAiApiKey"    = "OpenAI API key for FWRUNNER_AGENT=codex"
@@ -267,6 +278,7 @@ resource "octopusdeploy_project_scheduled_trigger" "reconcile" {
   project_id  = octopusdeploy_project.runtime.id
   space_id    = var.space_id
   timezone    = "UTC"
+  is_disabled = !var.reconcile_enabled
   run_runbook_action {
     runbook_id             = octopusdeploy_runbook.reconcile.id
     target_environment_ids = [local.environment_id]
@@ -352,18 +364,6 @@ resource "octopusdeploy_variable" "setting" {
   value    = each.value
 }
 
-resource "octopusdeploy_variable" "sensitive" {
-  for_each     = local.sensitive
-  owner_id     = octopusdeploy_project.runtime.id
-  type         = "Sensitive"
-  name         = each.key
-  description  = each.value
-  is_sensitive = true
-  lifecycle {
-    ignore_changes = [sensitive_value]
-  }
-}
-
 # --- the gateway's identity: a service account with run/view of these runbooks only ----------------------------------------------------
 
 resource "octopusdeploy_user" "gateway" {
@@ -403,3 +403,4 @@ output "runbook_ids" {
   }
 }
 output "gateway_service_account_id" { value = octopusdeploy_user.gateway.id }
+output "sensitive_variables_to_add" { value = keys(local.sensitive_names) }
