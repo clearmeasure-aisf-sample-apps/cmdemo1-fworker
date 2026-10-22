@@ -28,7 +28,64 @@ function Oct-Cleanup([int[]]$Items, [string[]]$Clients = @()) {
     [void](Fake 'octo-reset')
 }
 
+# OIDC mode: the gateway restarted without its API key and with auth oidc, serviceAccountId Users-903; the fake takes Bearer tokens only.
+function Oct-UseOidc([int]$ExpiresIn = 3600) {
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $cfg = $orig | ConvertFrom-Json -AsHashtable; $cfg.runtimes.octopus.auth = 'oidc'; $cfg.runtimes.octopus.serviceAccountId = 'Users-903'; $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+    [void](Fake 'octo-oidc' @{ require = $true; serviceAccountId = 'Users-903'; expiresIn = $ExpiresIn })
+    $key = $env:OCTOPUS_RUNBOOK_API_KEY; Remove-Item Env:OCTOPUS_RUNBOOK_API_KEY -ErrorAction SilentlyContinue
+    Restart-Gateway
+    Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machines-2'; name = 'host-b' }, @{ id = 'Machines-6'; name = 'host-c' })   # a free host for each start
+    return @{ path = $cfgPath; orig = $orig; key = $key }
+}
+function Oct-UseKey($Saved) {
+    [void](Fake 'octo-oidc' @{ require = $false })
+    $env:OCTOPUS_RUNBOOK_API_KEY = $Saved.key
+    Set-Content -Path $Saved.path -Value $Saved.orig -NoNewline; Restart-Gateway
+}
+
 $OctopusScenarios = [ordered]@{
+
+'octopus: auth apiKey: without a configured auth and with OCTOPUS_RUNBOOK_API_KEY set the key is sent, no token exchange is made' = {
+    [void](Fake 'octo-oidc' @{ require = $false })
+    $st = Oct-Status
+    Check 'status: auth apiKey' ($st.auth -eq 'apiKey') ($st | ConvertTo-Json -Compress -Depth 4)
+    $x = Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9101; phase = 'Technical Design'; role = '' }
+    Check 'a Start worker run is made with the key' ((Oct-Runs 'Start worker' 9101).Count -eq 1) ($x | ConvertTo-Json -Compress)
+    Check 'no exchange, no refusal' ((Oct-State).exchanges -eq 0 -and (Oct-State).unauthorized -eq 0)
+    Oct-Cleanup @()
+}
+
+'octopus: auth oidc: the Entra token is exchanged at /token/v1 for the service account; the access token is cached; a 401 renews it once' = {
+    $saved = $null
+    try {
+        $saved = Oct-UseOidc
+        $st = Oct-Status
+        Check 'status: auth oidc, the service account, no key needed' ($st.enabled -eq $true -and $st.auth -eq 'oidc' -and $st.serviceAccountId -eq 'Users-903') ($st | ConvertTo-Json -Compress -Depth 4)
+        [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9111; phase = 'Technical Design'; role = '' })
+        Check 'a Start worker run is made with a Bearer access token' ((Oct-Runs 'Start worker' 9111).Count -eq 1) ((Oct-State) | ConvertTo-Json -Compress -Depth 3)
+        Check 'one exchange, none refused, no 401' ((Oct-State).exchanges -eq 1 -and (Oct-State).exchangeRefusals -eq 0 -and (Oct-State).unauthorized -eq 0) ((Oct-State) | ConvertTo-Json -Compress -Depth 2)
+        [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9112; phase = 'Technical Design'; role = '' })
+        Start-Sleep -Seconds 3
+        Check 'the access token is cached: still one exchange after more calls' ((Oct-Runs 'Start worker' 9112).Count -eq 1 -and (Oct-State).exchanges -eq 1)
+        [void](Fake 'octo-oidc-revoke')
+        [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9113; phase = 'Technical Design'; role = '' })
+        Check 'a 401 renews the token once and the call succeeds' ((Oct-Runs 'Start worker' 9113).Count -eq 1 -and (Oct-State).exchanges -eq 2 -and (Oct-State).unauthorized -ge 1) ((Oct-State) | ConvertTo-Json -Compress -Depth 2)
+        Check 'neither the Entra token nor an access token is in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "$env:FACTORY_TEST_OCTOPUS_ENTRA_TOKEN", 'oat-').Count -eq 0)
+        Check 'status: no token in the runtime block' (-not (((Oct-Status) | ConvertTo-Json -Compress -Depth 8) -match 'oat-|eyJ'))
+    } finally { Oct-Cleanup @(); if ($saved) { Oct-UseKey $saved } }
+}
+
+'octopus: auth oidc: a short-lived access token is exchanged again before it expires' = {
+    $saved = $null
+    try {
+        $saved = Oct-UseOidc -ExpiresIn 2
+        [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9121; phase = 'Technical Design'; role = '' })
+        Start-Sleep -Seconds 2
+        [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9122; phase = 'Technical Design'; role = '' })
+        Check 'both runs made, a new exchange for the second, no 401' ((Oct-Runs 'Start worker' 9122).Count -eq 1 -and (Oct-State).exchanges -ge 2 -and (Oct-State).unauthorized -eq 0) ((Oct-State) | ConvertTo-Json -Compress -Depth 2)
+    } finally { Oct-Cleanup @(); if ($saved) { Oct-UseKey $saved } }
+}
 
 'octopus: provision picks a healthy fworker-host with capacity and runs Start worker there with the prompted variables; the worker redeems and is offered; no capacity left refuses and the item waits' = {
     $a = 0; $b = 0; $c = 0; $na = ''

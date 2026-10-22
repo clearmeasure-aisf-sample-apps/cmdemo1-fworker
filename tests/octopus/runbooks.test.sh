@@ -34,6 +34,9 @@ check "env file removed after the run" '[ -z "$(ls -A "$tmp/det/tmpdir")" ]'
 check "GHCR login with the token on stdin, pull" 'grep -qxF "$ghcr" "$tmp/det/login.stdin" && [ -f "$tmp/det/pulled" ]'
 check "no secret in the output or any argv" 'nosecret det'
 
+sh_ anon start-worker.sh FWORKER_GHCRUSERNAME= FWORKER_GHCRTOKEN=
+check "no GHCR credentials: no docker login, anonymous pull, exit 0" '[ "$(code anon)" = 0 ] && [ ! -e "$tmp/anon/login.stdin" ] && ! grep -qE "(^| )login( |$)" "$tmp/anon/docker.argv" && [ -f "$tmp/anon/pulled" ]'
+
 echo "start-worker: refusals"
 sh_ badname start-worker.sh FWORKER_NAME='Bad_Name;rm'
 check "bad Fworker.Name: exit 1, no docker call" '[ "$(code badname)" = 1 ] && grep -q "Fworker.Name must match" "$tmp/badname.out" && [ ! -e "$tmp/badname/docker.argv" ]'
