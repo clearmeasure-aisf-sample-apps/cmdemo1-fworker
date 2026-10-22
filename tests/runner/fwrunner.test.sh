@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shell test of the fwrunner image's entrypoint and credential helper (runner/fwrunner.sh, runner/git-credential-fworker) against a stub gateway
-# (stub-gateway.js) a fake claude (fake-claude.sh) and a fake codex (fake-codex.sh). Needs bash, node, git, curl, tar. No network beyond 127.0.0.1, no secret.
+# (stub-gateway.js) a fake claude (fake-claude.sh), a fake codex (fake-codex.sh) and a fake cursor-agent (fake-cursor.sh). Needs bash, node, git, curl, tar. No network beyond 127.0.0.1, no secret.
 #   bash tests/runner/fwrunner.test.sh                 # against runner/ of this checkout
 #   docker run --rm -v "$PWD:/src:ro" --entrypoint bash fwrunner /src/tests/runner/fwrunner.test.sh   # inside the image
 # FWRUNNER_TEST_SHOW=1 prints the stdout of the normal run. Exit 0 when every check passes.
@@ -123,9 +123,24 @@ check "no deployment: exit 1" '[ "$(code cxnodep)" = 1 ] && grep -q "AZURE_OPENA
 runc cxhost end AZURE_OPENAI_ENDPOINT=https://evil.example.com/
 check "an endpoint outside Azure OpenAI: exit 1 before any token" '[ "$(code cxhost)" = 1 ] && grep -q "must be https://<resource>.openai.azure.com/" "$tmp/cxhost.out" && [ ! -e "$tmp/cxhost/work/seen-args" ]'
 runc cxbad end FWRUNNER_AGENT=gemini
-check "unknown agent: exit 1" '[ "$(code cxbad)" = 1 ] && grep -q "FWRUNNER_AGENT must be claude or codex" "$tmp/cxbad.out"'
+check "unknown agent: exit 1" '[ "$(code cxbad)" = 1 ] && grep -q "FWRUNNER_AGENT must be claude, codex or cursor" "$tmp/cxbad.out"'
 runc cxexit exit
 check "codex exits without the marker: exit 1" '[ "$(code cxexit)" = 1 ] && grep -q "codex exited by itself (3) without the end marker" "$tmp/cxexit.out"'
+
+echo "key mode (Octopus hosts): the chosen agent's key only"
+restart_stub; run kclaude end "$(secret nonce)" FWRUNNER_AUTH=key FWRUNNER_RUNTIME=octopus-host ANTHROPIC_API_KEY=sk-ant-test-key CURSOR_API_KEY=other-key
+check "claude with ANTHROPIC_API_KEY: exit 0, key in its env, no other key" '[ "$(code kclaude)" = 0 ] && grep -q api-key-set "$tmp/kclaude/work/seen-env" && ! grep -q sk-ant-test-key "$tmp/kclaude.out"'
+restart_stub; run knokey end "$(secret nonce)" FWRUNNER_AUTH=key ANTHROPIC_API_KEY=
+check "key mode without the key: exit 1 before redeem" '[ "$(code knokey)" = 1 ] && grep -q "ANTHROPIC_API_KEY is not set" "$tmp/knokey.out" && ! grep -q "nonce redeemed" "$tmp/knokey.out"'
+restart_stub; run kcursor end "$(secret nonce)" FWRUNNER_AUTH=key FWRUNNER_AGENT=cursor FWRUNNER_CURSOR="$here/fake-cursor.sh" CURSOR_API_KEY=cur-test-key ANTHROPIC_API_KEY=other
+w="$tmp/kcursor/work"
+check "cursor: exit 0, -p stream-json --force, prompt as argument, only CURSOR_API_KEY" '[ "$(code kcursor)" = 0 ] && grep -qx -- -p "$w/seen-args" && grep -qx -- --force "$w/seen-args" && grep -qx stream-json "$w/seen-args" && grep -q "cae-42-kcursor" "$w/seen-args" && grep -qx cursor-key-set "$w/seen-env" && ! grep -q anthropic-key-set "$w/seen-env" && grep -qx token-set "$w/seen-env"'
+check "cursor: stdout redacted, no key" '! grep -q cur-test-key "$tmp/kcursor.out" && ! grep -q "$(secret workerToken)" "$tmp/kcursor.out" && grep -q "nonce redeemed" "$tmp/kcursor.out"'
+restart_stub; run kcurentra end "$(secret nonce)" FWRUNNER_AGENT=cursor FWRUNNER_CURSOR="$here/fake-cursor.sh" CURSOR_API_KEY=cur-test-key
+check "cursor without FWRUNNER_AUTH=key: exit 1" '[ "$(code kcurentra)" = 1 ] && grep -q "needs FWRUNNER_AUTH=key" "$tmp/kcurentra.out"'
+restart_stub; run kcodex end "$(secret nonce)" FWRUNNER_AUTH=key FWRUNNER_AGENT=codex FWRUNNER_CODEX="$here/fake-codex.sh" FWRUNNER_CODEX_DIR="$root/runner/codex" FWRUNNER_MODEL=gpt-test OPENAI_API_KEY=oa-test-key
+w="$tmp/kcodex/work"
+check "codex with OPENAI_API_KEY: exit 0, logged in (auth.json), model from FWRUNNER_MODEL, no Azure provider" '[ "$(code kcodex)" = 0 ] && grep -q oa-test-key "$w/codex/auth.json" && grep -qx gpt-test "$w/seen-args" && ! grep -q model_providers "$w/codex/config.toml" && ! grep -q oa-test-key "$tmp/kcodex.out"'
 
 echo "git-credential-fworker"
 h="$tmp/cred"; mkdir -p "$h/data/tokens"; echo 42 > "$h/session-owning"; secret i1 > "$h/data/tokens/42.owner"

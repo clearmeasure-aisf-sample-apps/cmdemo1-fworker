@@ -3,10 +3,12 @@
 # runs the provider's auth command from the config as Codex would, then behaves like fake-claude.sh's FAKE_MODE=end (JSONL events, the
 # stream-alive file, the end marker after 2 s, exits on TERM) or FAKE_MODE=exit.
 home=${FWRUNNER_HOME:?}
+# `codex login --with-api-key` (FWRUNNER_AUTH=key): the key on stdin goes to $CODEX_HOME/auth.json, as the real CLI keeps it
+if [ "${1:-}" = login ]; then key=$(cat); printf '{"OPENAI_API_KEY":"%s"}\n' "$key" > "$CODEX_HOME/auth.json"; exit 0; fi
 cat > "$home/seen-prompt"
 printf '%s\n' "$@" > "$home/seen-args"
 cmd=$(sed -n 's/^command = "\(.*\)"$/\1/p' "$CODEX_HOME/config.toml")
-tok=$("$cmd" 2>/dev/null)
+tok=$([ -n "$cmd" ] && "$cmd" 2>/dev/null)
 { [ -n "${FACTORY_TOKEN:-}" ] && echo token-set; [ -n "${AZURE_OPENAI_API_KEY:-}${OPENAI_API_KEY:-}" ] && echo api-key-set; pwd
   echo "${FACTORY_SESSION_END_FILE:-}"; echo "codex-home=$CODEX_HOME"; echo "bearer=$tok"; } > "$home/seen-env"
 line() { printf '{"type":"%s","text":"%s"}\n' "$1" "$2"; }
