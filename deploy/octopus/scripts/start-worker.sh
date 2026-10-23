@@ -24,8 +24,8 @@ agent=${agent:-claude}; mode=${mode:-detached}; cpus=${cpus:-2}; memory=${memory
 
 [[ "$name" =~ ^[a-z0-9-]{1,40}$ ]] || fail "Fworker.Name must match ^[a-z0-9-]{1,40}\$"
 [[ "$item" =~ ^[0-9]{1,9}$ ]] || fail "Fworker.Item must be a whole number"
-[[ "$phase" =~ ^[A-Za-z0-9._-]{0,40}$ ]] || fail "Fworker.Phase has characters outside [A-Za-z0-9._-]"
-[[ "$profile" =~ ^[A-Za-z0-9._-]{0,60}$ ]] || fail "Fworker.ModelProfile has characters outside [A-Za-z0-9._-]"
+[[ "$phase" =~ ^[A-Za-z0-9._-]+( [A-Za-z0-9._-]+)*$|^$ ]] && [ ${#phase} -le 40 ] || fail "Fworker.Phase must be words of [A-Za-z0-9._-] separated by single spaces (at most 40)"
+[[ "$profile" =~ ^[A-Za-z0-9._-]+( [A-Za-z0-9._-]+)*$|^$ ]] && [ ${#profile} -le 60 ] || fail "Fworker.ModelProfile must be words of [A-Za-z0-9._-] separated by single spaces (at most 60)"
 [[ "$nonce" =~ ^[A-Za-z0-9_.~-]{1,200}$ ]] || fail "Fworker.Nonce is missing or has characters outside [A-Za-z0-9_.~-]"
 case "$agent" in claude) keyVar=ANTHROPIC_API_KEY; keyName=Fworker.AnthropicApiKey ;; cursor) keyVar=CURSOR_API_KEY; keyName=Fworker.CursorApiKey ;;
     codex) keyVar=OPENAI_API_KEY; keyName=Fworker.OpenAiApiKey ;; *) fail "Fworker.Agent must be claude, cursor or codex" ;; esac

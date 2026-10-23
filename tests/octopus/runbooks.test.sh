@@ -37,7 +37,12 @@ check "no secret in the output or any argv" 'nosecret det'
 sh_ anon start-worker.sh FWORKER_GHCRUSERNAME= FWORKER_GHCRTOKEN=
 check "no GHCR credentials: no docker login, anonymous pull, exit 0" '[ "$(code anon)" = 0 ] && [ ! -e "$tmp/anon/login.stdin" ] && ! grep -qE "(^| )login( |$)" "$tmp/anon/docker.argv" && [ -f "$tmp/anon/pulled" ]'
 
+sh_ spacedphase start-worker.sh FWORKER_PHASE='Technical Design' FWORKER_MODELPROFILE='factory test'
+check "a phase and profile with single spaces pass into the env file" '[ "$(code spacedphase)" = 0 ] && grep -qx "FWORKER_PHASE=Technical Design" "$tmp/spacedphase/c/fw-cae-42-ab/env"'
+
 echo "start-worker: refusals"
+sh_ badphase start-worker.sh FWORKER_PHASE='Design;rm -rf'
+check "a phase with other characters refused, no docker call" '[ "$(code badphase)" = 1 ] && [ ! -e "$tmp/badphase/docker.argv" ]'
 sh_ badname start-worker.sh FWORKER_NAME='Bad_Name;rm'
 check "bad Fworker.Name: exit 1, no docker call" '[ "$(code badname)" = 1 ] && grep -q "Fworker.Name must match" "$tmp/badname.out" && [ ! -e "$tmp/badname/docker.argv" ]'
 sh_ longname start-worker.sh FWORKER_NAME=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
