@@ -378,6 +378,8 @@ resource "octopusdeploy_variable" "setting" {
 
 # --- the gateway's identity: a service account with run/view of these runbooks only ----------------------------------------------------
 
+# The first gateway account (Standard service account, Users-903): Octopus refused its runbook runs with "Missing permission:
+# RunbookRunCreate" even with the permission granted space-wide (2026-10-23). Kept, without a key and out of the team.
 resource "octopusdeploy_user" "gateway" {
   username     = "cmdemo1-fworker-gateway"
   display_name = "cmdemo1 fworker gateway (runtime adapter)"
@@ -385,9 +387,20 @@ resource "octopusdeploy_user" "gateway" {
   is_active    = true
 }
 
+# The gateway's account (Users-904): a service account of type "Agent", whose runbook runs Octopus accepts. Provider 1.21 has no attribute
+# for the type: it was set when the account was created and is imported here (terraform import octopusdeploy_user.gateway_agent Users-904).
+# Its API key (purpose "fworker-gateway-runbooks (Agent)", expires 2027-04-22) is in tdd's vault as fworker-octopus-runbook-api-key; Octopus
+# lets only a person mint it, so rotating it before it expires is a person's job.
+resource "octopusdeploy_user" "gateway_agent" {
+  username     = "cmdemo1-fworker-gateway-agent"
+  display_name = "cmdemo1 fworker gateway (Agent)"
+  is_service   = true
+  is_active    = true
+}
+
 resource "octopusdeploy_user_role" "runbook_runner" {
   name                       = "fworker runbook runner"
-  description                = "Run and view runbooks, view tasks. Scoped to cmdemo1-fworker-runtime by the team."
+  description                = "Run and view runbooks, view tasks (the space permissions of the built-in Runbook consumer)."
   granted_space_permissions  = ["RunbookRunCreate", "RunbookRunView", "RunbookView", "TaskView", "ProjectView", "EnvironmentView", "MachineView", "FeedView", "LibraryVariableSetView", "ArtifactView", "EventView", "InterruptionView", "ProjectGroupView", "TriggerView", "TenantView", "CertificateView", "MachinePolicyView", "TeamView"]
   granted_system_permissions = []
 }
@@ -396,12 +409,14 @@ resource "octopusdeploy_team" "gateway" {
   name        = "cmdemo1-fworker-runtime gateway"
   description = "The gateway's service account: runs the runbooks of cmdemo1-fworker-runtime in tdd."
   space_id    = var.space_id
-  users       = [octopusdeploy_user.gateway.id]
+  users       = [octopusdeploy_user.gateway_agent.id]
   user_role {
     user_role_id = octopusdeploy_user_role.runbook_runner.id
     space_id     = var.space_id
-    # no project or environment limit within the space: Octopus refused the gateway's runbook runs with RunbookRunCreate restricted to the
-    # project, and then to tdd (owner, 2026-10-23); the role itself only runs and views runbooks
+    # the runtime project in tdd only. The 403s of 2026-10-23 were the Standard account type, not this scope: with the Agent account the
+    # narrowed scope was tested and accepted (Stop worker ServerTasks-12099143, Start worker ServerTasks-12099156)
+    project_ids     = [octopusdeploy_project.runtime.id]
+    environment_ids = [local.environment_id]
   }
 }
 
