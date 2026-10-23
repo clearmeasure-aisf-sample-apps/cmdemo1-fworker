@@ -142,6 +142,22 @@ restart_stub; run kcodex end "$(secret nonce)" FWRUNNER_AUTH=key FWRUNNER_AGENT=
 w="$tmp/kcodex/work"
 check "codex with OPENAI_API_KEY: exit 0, logged in (auth.json), model from FWRUNNER_MODEL, no Azure provider" '[ "$(code kcodex)" = 0 ] && grep -q oa-test-key "$w/codex/auth.json" && grep -qx gpt-test "$w/seen-args" && ! grep -q model_providers "$w/codex/config.toml" && ! grep -q oa-test-key "$tmp/kcodex.out"'
 
+echo "manager redeem: patrol prompt, no plugin or clone, MCP config, ends with the agent"
+restart_stub_mgr() { kill "$stub" 2>/dev/null; wait "$stub" 2>/dev/null; rm -f "$tmp/port"; STUB_ROLE=manager node "$here/stub-gateway.js" "$tmp/port" "$tmp/plugin.tgz" & stub=$!; for _ in $(seq 50); do [ -s "$tmp/port" ] && break; sleep 0.1; done; gw="http://127.0.0.1:$(cat "$tmp/port")"; }
+restart_stub_mgr; run mgr done "$(secret nonce)" FWRUNNER_ROLE=supervisor FWRUNNER_MANAGER_TEMPLATE="$root/runner/manager-prompt.template.md"
+w="$tmp/mgr/work"; mtok=$(secret workerToken)
+check "exit 0, patrol logged" '[ "$(code mgr)" = 0 ] && grep -q "manager credential, plant-manager patrol" "$tmp/mgr.out" && grep -q "ended the patrol (0)" "$tmp/mgr.out"'
+check "manager prompt used, not the connect prompt" 'grep -q "PATROL" "$w/seen-prompt" && grep -q "get_prompt" "$w/seen-prompt" && grep -q "$gw/mcp" "$w/seen-prompt" && ! grep -q "CONNECT" "$w/seen-prompt" && ! grep -q "{{" "$w/seen-prompt"'
+check "no plugin download, no clone" '[ ! -e "$w/plugin/scripts/factory.ps1" ] && [ ! -d "$w/repo" ] && ! grep -q "plugin downloaded" "$tmp/mgr.out"'
+check "claude gets the MCP config with the variable, not the token" 'grep -qx -- --mcp-config "$w/seen-args" && grep -qF "\${FACTORY_TOKEN}" "$w/mcp.json" && grep -qx token-set "$w/seen-env"'
+check "token in no output, prompt or config" '[ -n "$mtok" ] && ! grep -qF "$mtok" "$tmp/mgr.out" "$w/seen-prompt" "$w/mcp.json" "$w/seen-args" && grep -q "r1\.\*\*\*" "$tmp/mgr.out"'
+restart_stub_mgr; run mgrhint done "$(secret nonce)" FWRUNNER_MANAGER_TEMPLATE="$root/runner/manager-prompt.template.md"
+check "manager answer without FWRUNNER_ROLE: followed and logged" '[ "$(code mgrhint)" = 0 ] && grep -q "although FWRUNNER_ROLE is" "$tmp/mgrhint.out" && grep -q PATROL "$tmp/mgrhint/work/seen-prompt"'
+restart_stub_mgr; run mgrfail exit "$(secret nonce)" FWRUNNER_ROLE=supervisor FWRUNNER_MANAGER_TEMPLATE="$root/runner/manager-prompt.template.md"
+check "manager agent exits non-zero: exit 1" '[ "$(code mgrfail)" = 1 ]'
+restart_stub; run wkrole end "$(secret nonce)" FWRUNNER_ROLE=supervisor
+check "worker answer with FWRUNNER_ROLE=supervisor: the worker path (hint is no privilege)" '[ "$(code wkrole)" = 0 ] && grep -q CONNECT "$tmp/wkrole/work/seen-prompt" && [ -d "$tmp/wkrole/work/repo/.git" ] && ! grep -q patrol "$tmp/wkrole.out"'
+
 echo "git-credential-fworker"
 h="$tmp/cred"; mkdir -p "$h/data/tokens"; echo 42 > "$h/session-owning"; secret i1 > "$h/data/tokens/42.owner"
 cred() { printf 'protocol=%s\nhost=%s\n\n' "$1" "$2" | FWRUNNER_HOME="$h" FACTORY_DATA_DIR="$h/data" FACTORY_URL="$gw" bash "$helper" get 2>"$h/err"; }
