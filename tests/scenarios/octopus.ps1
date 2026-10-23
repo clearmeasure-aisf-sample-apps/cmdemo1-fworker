@@ -252,4 +252,60 @@ $OctopusScenarios = [ordered]@{
         Check 'no start run was made for them' ((Oct-State).runs.Count -eq 0) ((Oct-State).runs | ConvertTo-Json -Compress -Depth 5)
     } finally { Oct-Cleanup @() }
 }
+
+'octopus: session transcript: the container posts its lines with its w2, the start comment links the gateway''s session page and the Octopus task, the page needs the operator token, the transcript survives a gateway restart' = {
+    $n = 0; $na = ''
+    try {
+        [void](Rt-Api GET '/api/v1/status')   # the gateway learns its own address from the operator's call (no FACTORY_PUBLIC_URL in the suite)
+        $n = New-Item-Fake 'Octopus transcript' 'x' $OctLabels
+        Check 'a Start worker run is made for the item' (Wait-Until -Seconds 30 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        $ra = (Oct-Runs 'Start worker' $n)[0]; $na = "$($ra.values.Name)"
+        $page = "$(Get-GatewayBase)/sessions/$na"
+        Check 'the launched comment carries [session](<gateway>/sessions/<name>) and the Octopus task link' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=launched ' -and $_.body.Contains("[session]($page)") -and $_.body -match '\(\[Octopus task\]\(http[^)]+/tasks/' }).Count -eq 1 }) (@((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join ' | ')
+        $r = Rt-Redeem "$($ra.values.Nonce)"; $w2 = "$($r.body.token)"
+        Check 'the container redeems its nonce' ($r.status -eq 200 -and $w2 -like 'w2.*')
+        $x = Rt-Api POST '/api/v1/runtime/transcript' @{ lines = @('[system init] session starts', 'the token is w2.***', 'line three') } $w2
+        Check 'a batch posted with the w2 is taken' ($x.status -eq 200 -and $x.body.taken -eq 3 -and $x.body.total -eq 3) ($x | ConvertTo-Json -Compress)
+        Check 'no credential posts nothing' ((Rt-Api POST '/api/v1/runtime/transcript' @{ lines = @('x') } '').status -eq 401)
+        Check 'the operator token is no session credential' ((Rt-Api POST '/api/v1/runtime/transcript' @{ lines = @('x') }).status -eq 403)
+        Check 'more than 500 lines a batch is refused' ((Rt-Api POST '/api/v1/runtime/transcript' @{ lines = @(1..501 | ForEach-Object { "l$_" }) } $w2).status -eq 413)
+        $s = Rt-Api GET "/api/v1/sessions/$na"
+        Check 'GET /api/v1/sessions/<name> with the operator token: the lines, the item, live' ($s.status -eq 200 -and @($s.body.lines).Count -eq 3 -and $s.body.lines[2] -eq 'line three' -and $s.body.item -eq $n -and $s.body.live -eq $true -and $s.body.runtime -eq 'octopus') ($s | ConvertTo-Json -Compress -Depth 4)
+        Check 'after=2 answers the lines from number 2 on' (@((Rt-Api GET "/api/v1/sessions/$($na)?after=2").body.lines).Count -eq 1)
+        Check 'the session''s own w2 does not read the transcript' ((Rt-Api GET "/api/v1/sessions/$na" $null $w2).status -eq 403)
+        Check 'no token: 401' ((Rt-Api GET "/api/v1/sessions/$na" $null '').status -eq 401)
+        $html = Invoke-WebRequest -Uri $page -SkipHttpErrorCheck
+        Check 'the page is served without data: it reads the API with the operator token (#token= or the dashboard''s tab)' ($html.StatusCode -eq 200 -and $html.Content -match '/api/v1/sessions/' -and $html.Content -match 'token=' -and $html.Content -notmatch 'line three')
+        $ref = "repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/matching-refs/factory/"
+        Check 'the transcript is stored in GitHub beside the plant snapshot, encrypted' (Wait-Until -Seconds 45 { @((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/$ref") | Where-Object { "$($_.ref)" -match "/transcripts/\d{8}/$([regex]::Escape($na))$" }).Count -eq 1 })
+        $stored = @((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/$ref") | Where-Object { "$($_.ref)" -match "/transcripts/\d{8}/$([regex]::Escape($na))$" })[0].ref
+        $sha = (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/ref/$($stored.Substring(5))").object.sha
+        $msg = "$((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/commits/$sha").message)"
+        Check 'the stored message is ciphertext: no line of the transcript in it' ($msg -like 'fwt1:*' -and $msg -notmatch 'line three|session starts')
+        Restart-Gateway
+        $s2 = Rt-Api GET "/api/v1/sessions/$na"
+        Check 'after a restart (killed, no stop) the transcript is read back from GitHub' ($s2.status -eq 200 -and @($s2.body.lines).Count -eq 3 -and $s2.body.lines[0] -eq '[system init] session starts' -and $s2.body.item -eq $n) ($s2 | ConvertTo-Json -Compress -Depth 4)
+        $x2 = Rt-Api POST '/api/v1/runtime/transcript' @{ lines = @('after the restart') } $w2
+        Check 'the container goes on posting with the same w2; the lines append to what was stored' ($x2.status -eq 200 -and $x2.body.total -eq 4 -and (Rt-Api GET "/api/v1/sessions/$na").body.lines[3] -eq 'after the restart') ($x2 | ConvertTo-Json -Compress)
+        Check 'an unknown session answers 404' ((Rt-Api GET '/api/v1/sessions/oct-1-ffffff').status -eq 404)
+    } finally { Oct-Cleanup @($n) }
+}
+
+'octopus: session transcript: the start comment of a new session is posted even when the item''s journal is full' = {
+    $n = 0
+    try {
+        [void](Rt-Api GET '/api/v1/status')
+        $n = New-Item-Fake 'Octopus transcript journal full' 'x' $OctLabels
+        Check 'a Start worker run is made' (Wait-Until -Seconds 30 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        Check 'its launched line is posted' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=launched ' }).Count -eq 1 })
+        # the journal is past its cap (30 lines and the "journal full" note): a further line of an ordinary kind would not be posted
+        Set-ItemState $n { param($st) $st.journal.count = 40 }
+        $before = @((Get-FakeIssue $n).comments).Count
+        Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machines-2'; name = 'host-b' }, @{ id = 'Machines-6'; name = 'host-c' })   # a free host for the next start
+        $x = Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = $n; phase = 'Technical Design'; role = '' }
+        $na2 = "$($x.body.name)"
+        Check 'the start of a new session is still posted, with its session link' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=launched ' -and $_.body.Contains("/sessions/$na2)") }).Count -eq 1 }) "$na2 $(@((Get-FakeIssue $n).comments | Select-Object -Last 2 | ForEach-Object { $_.body }) -join ' | ')"
+        Check 'and no "journal full" note instead of it' (@((Get-FakeIssue $n).comments | Select-Object -Skip $before | Where-Object { $_.body -match 'journal full' }).Count -eq 0)
+    } finally { Oct-Cleanup @($n) }
+}
 }

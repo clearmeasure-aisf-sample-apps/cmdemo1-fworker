@@ -57,7 +57,14 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
         }
         'routed' { return "told the owner (**$($F.worker)**): $($F.what)." }
         'reassigned' { $sl = Get-JournalSessionLink $F; return "$($F.reason); offering to the next worker.$sl" }
-        'launched' { $sl = Get-JournalSessionLink $F; return "$($F.runtime) started **$($F.worker)** for $(if ($F.phase) { "**$($F.phase)**" } else { 'this item' })$(if ($F.task) { " (task ``$($F.task)``)" }).$sl" }
+        'launched' {
+            # a runtime whose container posts its transcript to the gateway (Octopus hosts, Container Apps): the gateway's page of the session
+            # first, then the runtime's own page (the Octopus task: only the docker run)
+            if ($F.ContainsKey('transcript') -and "$($F.transcript)" -match '^https?://[^\s()<>]+/sessions/[A-Za-z0-9._-]+$') {
+                $tl = if ($F.ContainsKey('url') -and "$($F.url)" -match '^https?://[^\s()<>]+$') { " ([$(if ($F.runtime -eq 'octopus') { 'Octopus task' } else { 'execution' })]($($F.url)))" } else { '' }
+                return "$($F.runtime) started **$($F.worker)** for $(if ($F.phase) { "**$($F.phase)**" } else { 'this item' })$(if ($F.task) { " (task ``$($F.task)``)" }). [session]($($F.transcript))$tl"
+            }
+            $sl = Get-JournalSessionLink $F; return "$($F.runtime) started **$($F.worker)** for $(if ($F.phase) { "**$($F.phase)**" } else { 'this item' })$(if ($F.task) { " (task ``$($F.task)``)" }).$sl" }
         'tier' { return "model tier raised to **$($F.name)** ($($F.reasons))." }
         'waiting' { return "waiting: $($F.reason)." }
         'pin-fallback' { return "the pinned worker **$($F.pin)** could not take the item for $($F.minutes) min ($($F.code)): the pin is set aside and it is offered to **$($F.worker)**. A new worker label pins it again." }
@@ -137,7 +144,11 @@ function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, 
             # qc-ready, qc-failed and question-escalated may take a few slots beyond the cap: they are the lines a person looks for
             # (and manager-action: every action of the plant manager is journaled, docs/design/plant-manager.md 10e; it is limited to 3 a day per item)
             $extra = $Event -in 'qc-ready', 'qc-failed', 'question-escalated', 'manager-action', 'keeper-action'
-            if ([int]$j.count -ge $script:JournalCap + $(if ($extra) { 4 } else { 1 })) { return $false }
+            # the start of a runtime session that carries the link to its transcript is posted whatever the count (the owner: every session
+            # worked on the item is reachable from its comments); one per execution, so the runtime's own limits bound it
+            $always = $Event -eq 'launched' -and $Fields.ContainsKey('transcript') -and $Fields.transcript
+            if (-not $always -and [int]$j.count -ge $script:JournalCap + $(if ($extra) { 4 } else { 1 })) { return $false }
+            if ($always) { $extra = $true }
             $full = [int]$j.count -eq $script:JournalCap -and -not $extra
             $text = if ($full) { "journal full ($script:JournalCap entries); later events are not posted here, see the gateway log." } else { $line }
             $body = "🏭 Plant manager: $text`n`n<!-- plant event=$Event key=$Key -->"

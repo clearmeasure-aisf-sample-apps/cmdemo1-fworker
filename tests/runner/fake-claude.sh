@@ -12,6 +12,8 @@ printf '%s\n' "$@" > "$home/seen-args"
 { [ -n "${FACTORY_TOKEN:-}" ] && echo token-set; [ -n "${ANTHROPIC_API_KEY:-}" ] && echo api-key-set; pwd; echo "${FACTORY_SESSION_END_FILE:-}"; } > "$home/seen-env"
 line() { printf '{"type":"%s","subtype":"%s","text":"%s"}\n' "$1" "$2" "$3"; }
 line system init "session starts"
+k=$(printf 'Q%.0s' $(seq 32))
+line assistant text "more keys: n1.${k} API-${k} sk-proj-${k} key_${k}"
 line assistant text "the worker token is $FACTORY_TOKEN and a pushed token ghs_${FAKE_GHS_SUFFIX:-ZZZZZZZZZZZZZZZZZZZZ} and a key sk-ant-api03-${FAKE_GHS_SUFFIX:-ZZZZ}"
 case "${FAKE_MODE:-end}" in
     end|end-stuck)

@@ -100,9 +100,14 @@ sealed partial class Plant
     // The execution of a runtime worker ended: everything the name still holds goes back to the plan (its owner is dropped, its assignments are
     // removed), its stream is closed and it is forgotten. Answers whether anything was taken back.
     // The execution was started: the item's journal names it and its page (launched; the accepted and ended lines carry the page too).
+    // the gateway's page of a session's transcript (gateway/Transcripts.cs) for a runtime whose container posts its lines, "" for none
+    public Func<string, string, string>? SessionPage { get; set; }
+
     public void RuntimeLaunched(string name, int item, string phase, string kind, string execution, string url)
     {
-        Journal(item, "launched", new JsonObject { ["worker"] = name, ["runtime"] = kind, ["phase"] = phase, ["task"] = execution, ["url"] = url }, "rtl|" + name + "|" + execution);
+        var f = new JsonObject { ["worker"] = name, ["runtime"] = kind, ["phase"] = phase, ["task"] = execution, ["url"] = url };
+        if (SessionPage?.Invoke(kind, name) is { Length: > 0 } page) f["transcript"] = page;
+        Journal(item, "launched", f, "rtl|" + name + "|" + execution);
     }
 
     // the page of a runtime worker's execution ("" for none or a connected session)

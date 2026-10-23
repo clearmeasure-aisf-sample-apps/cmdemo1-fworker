@@ -36,13 +36,14 @@
 #   FWRUNNER_REPO          repository to clone (default the cmdemo1-workorders GitHub URL)
 #   FWRUNNER_TRANSCRIPT_CONTAINER     blob container URL for the transcript upload (optional; managed identity of the job)
 #   FWRUNNER_STREAM_STALE (600), FWRUNNER_SILENT (1800), FWRUNNER_MAX_SECONDS (0 = off; the job's replicaTimeout is the hard end)
+#   FWRUNNER_POST_SECONDS (10; 0 = only at the end), FWRUNNER_POST_MAX_BYTES (8000000): the transcript posted to the gateway (post_transcript)
 #   FWRUNNER_HOME (/work), FWRUNNER_SETTINGS (/etc/fworker/settings.json), FWRUNNER_TEMPLATE (/etc/fworker/connect-prompt.template.md),
 #   FWRUNNER_MANAGER_TEMPLATE (/etc/fworker/manager-prompt.template.md), FWRUNNER_CLAUDE (claude), FWRUNNER_CODEX (codex), FWRUNNER_CODEX_DIR (/etc/fworker/codex), FWRUNNER_TOKEN_CMD
 #   (/usr/local/bin/fwrunner-entra-token): overridable for tests/runner/fwrunner.test.sh.
 set -u
 set -o pipefail
 
-say() { printf '%s fwrunner %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${FWRUNNER_NAME:-?}" "$*"; }
+say() { local l; l=$(printf '%s fwrunner %s: %s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${FWRUNNER_NAME:-?}" "$*"); printf '%s\n' "$l"; [ -n "${posted:-}" ] && printf '%s\n' "$l" | redact >> "$posted"; }
 fail() { say "FAILED: $*"; finish 1; }
 
 home=${FWRUNNER_HOME:-/work}
@@ -68,11 +69,31 @@ repo=${FWRUNNER_REPO:-https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-w
 streamStale=${FWRUNNER_STREAM_STALE:-600}; silent=${FWRUNNER_SILENT:-1800}; maxSeconds=${FWRUNNER_MAX_SECONDS:-0}
 marker="$home/session-ended"; alive="$home/stream-alive"; owning="$home/session-owning"
 transcript="$home/transcript.jsonl"; runlog="$home/fwrunner.log"
-child=0; pump=0; finished=0
+child=0; pump=0; poster=0; finished=0; postEvery=${FWRUNNER_POST_SECONDS:-10}
 
 # the mask applied to everything this script prints that came from the session: w1./w2./i1. worker and item tokens, GitHub installation
-# tokens (ghs_), r1. role (manager) tokens and Anthropic keys (sk-ant-)
-redact() { sed -u -E 's/\b(w1|w2|i1|r1)\.[A-Za-z0-9._~+\/=-]+/\1.***/g; s/(ghs_|ghp_|gho_|ghu_|github_pat_|sk-ant-)[A-Za-z0-9_-]+/\1***/g; s/(Bearer )[A-Za-z0-9._~+\/=-]+/\1***/g; s/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/eyJ***/g'; }
+# tokens (ghs_), r1. role (manager) tokens, n1. one-time nonces, Anthropic (sk-ant-), OpenAI (sk-, sk-proj-), Cursor (key_) and Octopus (API-) keys.
+# The same mask covers the lines posted to the gateway as the session's transcript (post_transcript).
+redact() { sed -u -E 's/\b(w1|w2|i1|r1|n1)\.[A-Za-z0-9._~+\/=-]+/\1.***/g; s/(ghs_|ghp_|gho_|ghu_|ghr_|github_pat_|sk-ant-)[A-Za-z0-9_-]+/\1***/g; s/\bsk-(proj-|svcacct-)?[A-Za-z0-9_-]{16,}/sk-***/g; s/\bkey_[A-Za-z0-9]{24,}/key_***/g; s/\bAPI-[A-Z0-9]{16,}/API-***/g; s/(Bearer )[A-Za-z0-9._~+\/=-]+/\1***/g; s/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/eyJ***/g'; }
+
+# The session's transcript to the gateway (POST /api/v1/runtime/transcript with the session's own credential, gateway/Transcripts.cs): the redacted
+# lines of $posted from the byte offset already sent, at most 400 lines and 200 KB a batch, at most FWRUNNER_POST_MAX_BYTES (8 MB) a session.
+# The credential is read from the environment by node, never put on a command line. A refused or failed batch is sent again by the next round.
+post_transcript() {
+    [ -n "${posted:-}" ] && [ -s "$posted" ] && [ -n "${FACTORY_TOKEN:-}" ] || return 0
+    node -e '
+const fs=require("fs");const [file,offFile,url,max]=process.argv.slice(1);let off=0;try{off=Number(fs.readFileSync(offFile,"utf8"))||0}catch{}
+(async()=>{for(let round=0;round<20;round++){
+  if(off>=Number(max))return;const st=fs.statSync(file);if(st.size<=off)return;
+  const fd=fs.openSync(file,"r");const len=Math.min(st.size-off,200000);const b=Buffer.alloc(len);fs.readSync(fd,b,0,len,off);fs.closeSync(fd);
+  let end=b.lastIndexOf(10);if(end<0){if(len<200000)return;end=len-1}
+  let lines=b.subarray(0,end).toString("utf8").split("\n");if(lines.length>400){lines=lines.slice(0,400)}
+  const used=Buffer.byteLength(lines.join("\n"),"utf8")+1;
+  const r=await fetch(url+"/api/v1/runtime/transcript",{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+process.env.FACTORY_TOKEN},body:JSON.stringify({lines}),signal:AbortSignal.timeout(20000)});
+  if(!r.ok){process.stderr.write("transcript post: HTTP "+r.status+"\n");return}
+  off+=used;fs.writeFileSync(offFile,String(off))}})().catch(e=>process.stderr.write("transcript post: "+e.name+"\n"))' \
+        "$posted" "$home/transcript-posted.offset" "$url" "${FWRUNNER_POST_MAX_BYTES:-8000000}" 2>> "$runlog"
+}
 
 # the transcript to the private blob container, with the job's managed identity (Container Apps: IDENTITY_ENDPOINT, IDENTITY_HEADER)
 upload_transcript() {
@@ -106,9 +127,11 @@ finish() {
     stop_child
     [ "$pump" -gt 0 ] && { wait "$pump" 2>/dev/null; pump=0; }
     # the agent's stderr (auth errors, a refused flag, a crash): its last lines, redacted, reach the log destination
-    [ -s "$runlog" ] && { say "$agent stderr (last 50 lines):"; tail -n 50 "$runlog" | redact; }
+    [ -s "$runlog" ] && { say "$agent stderr (last 50 lines):"; tail -n 50 "$runlog" | grep -v '^transcript post: ' | redact | { if [ -n "${posted:-}" ]; then tee -a "$posted"; else cat; fi; }; }
     upload_transcript
+    [ "$poster" -gt 0 ] && { kill "$poster" 2>/dev/null; wait "$poster" 2>/dev/null; poster=0; }
     say "exit $1"
+    post_transcript
     exit "$1"
 }
 trap 'say "signal: stopping"; finish 1' INT TERM
@@ -122,7 +145,7 @@ json_field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 [ -n "${FWRUNNER_NONCE:-}" ] || fail "FWRUNNER_NONCE is not set"
 case "$FWRUNNER_NONCE" in *[!A-Za-z0-9_.~-]*) fail "FWRUNNER_NONCE has characters outside [A-Za-z0-9_.~-]" ;; esac
 case "$name" in *[!A-Za-z0-9._-]*) fail "FWRUNNER_NAME has characters outside [A-Za-z0-9._-]" ;; esac
-case "$streamStale$silent$maxSeconds" in *[!0-9]*) fail "FWRUNNER_STREAM_STALE, FWRUNNER_SILENT and FWRUNNER_MAX_SECONDS are whole seconds" ;; esac
+case "$streamStale$silent$maxSeconds$postEvery" in *[!0-9]*) fail "FWRUNNER_STREAM_STALE, FWRUNNER_SILENT, FWRUNNER_MAX_SECONDS and FWRUNNER_POST_SECONDS are whole seconds" ;; esac
 [ -f "$settings" ] || fail "no settings file at $settings"
 [ -f "$template" ] || fail "no prompt template at $template"
 [ -n "$agentCmd" ] || fail "FWRUNNER_AGENT must be claude, codex or cursor, not $agent"
@@ -152,7 +175,8 @@ if [ "$agent" = codex ] && [ "$auth" = entra ]; then
     [ -z "${AZURE_OPENAI_API_KEY:-}${OPENAI_API_KEY:-}${CODEX_API_KEY:-}${AZURE_OPENAI_AD_TOKEN:-}" ] || fail "an API key is set; codex authenticates with the managed identity only"
 fi
 mkdir -p "$home/data" "$home/plugin" || fail "cannot create $home"
-rm -f "$marker" "$marker.reason" "$alive" "$owning"
+rm -f "$marker" "$marker.reason" "$alive" "$owning" "$home/transcript-posted.offset"
+posted="$home/transcript-posted.log"; : > "$posted"     # the redacted lines the gateway gets as the session transcript
 say "starts (gateway $url)"
 
 # 1. redeem the nonce: the response carries the worker token; the nonce is spent, so a copy read from ARM afterwards is worthless
@@ -295,9 +319,12 @@ keyEnv=(); [ -n "$agentKey" ] && keyEnv=("$keyVar=$agentKey")
 ( cd "$repoDir" && exec env "${keyEnv[@]}" "$agentCmd" "${args[@]}" < "$input" ) >> "$transcript" 2>> "$runlog" &
 child=$!
 # one short, redacted line per stream-json event on stdout (Log Analytics); the full transcript stays in the file
+# the same redacted lines, shortened to 2000 characters instead of 240, are the transcript the gateway keeps (post_transcript, every postEvery s)
 ( tail -n +1 -F --pid="$child" "$transcript" 2>/dev/null \
-    | sed -u -E 's/^\{"type":"([a-z_.]+)"(,"subtype":"([a-z_]+)")?.*$/[\1 \3] &/' | redact | sed -u -E 's/^(.{240}).+$/\1 .../' ) &
+    | sed -u -E 's/^\{"type":"([a-z_.]+)"(,"subtype":"([a-z_]+)")?.*$/[\1 \3] &/' | redact | sed -u -E 's/^(.{2000}).+$/\1 .../' | tee -a "$posted" \
+    | sed -u -E 's/^(.{240}).+$/\1 .../' ) &
 pump=$!
+if [ "$postEvery" -gt 0 ]; then ( trap "exit 0" TERM; while :; do sleep "$postEvery" & wait $!; post_transcript; done ) & poster=$!; fi
 
 why=''; ok=0; lastSize=0; lastGrowth=$started
 while kill -0 "$child" 2>/dev/null; do

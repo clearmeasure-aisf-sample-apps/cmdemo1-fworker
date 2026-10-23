@@ -283,6 +283,15 @@ to the contract of the design), a service account for `OCTOPUS_RUNBOOK_API_KEY` 
 `FACTORY_OCTOPUS_HOST_TOKEN` in the gateway app and in the project's sensitive variables, and a `runtimes.environments.tdd.octopus` block in
 `config/deploy.overrides.json` (owner decision; not switched on by this change).
 
+Built 2026-10-23: **session transcripts of runtime workers** (owner: a link to the AI session in the item's comments). `runner/fwrunner.sh`
+posts its redacted lines to `POST /api/v1/runtime/transcript` with the session's w2 (r1 for a patrol) every 10 s and at its end;
+`gateway/Transcripts.cs` keeps the last 2 MB per session and stores it encrypted (AES-GCM, key derived from `FACTORY_TOKEN_SECRET`) beside the
+plant snapshot, refs `refs/factory/<instance>/transcripts/<yyyymmdd>/<name>` of cmdemo1-workorders, 14 days. The operator reads it at
+`/sessions/<name>` (operator token: `#token=` or the dashboard tab) and `GET /api/v1/sessions/<name>`. The launched comment of an Octopus or
+Container Apps worker carries `[session](<gateway>/sessions/<name>)` and the Octopus task link, and is posted even when the journal is full.
+The gateway's address for the link is `FACTORY_PUBLIC_URL`, else the address of the last operator call or container redeem: set
+`FACTORY_PUBLIC_URL` in each environment. Changing `FACTORY_TOKEN_SECRET` makes stored transcripts unreadable.
+
 Done 2026-10-13 (issues 33, 30 and 31 of this repository): **the gateway finishes an approved item by itself.** A PASS on an `Auto Merge`
 item under policy `auto` is merged by the verdict call, or by the sweep as soon as it can be (checks green, branch brought up to date, after a
 restart or with no owner); the item is never offered while it waits, `/status` lists it under `passUnmerged` and the digest names it
