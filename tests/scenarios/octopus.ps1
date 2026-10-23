@@ -221,7 +221,10 @@ $OctopusScenarios = [ordered]@{
         $run = (Oct-Runs 'Start worker' $n)[0]; $name = "$($run.values.Name)"
         Restart-Gateway
         Check 'the new gateway adopts the worker with its task' (Wait-Until -Seconds 20 { $s = Oct-Status; $s.relisted -and @($s.executions | Where-Object { $_.worker -eq $name -and $_.item -eq $n -and $_.execution -eq $run.task }).Count -eq 1 }) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
-        Check 'desired still names it on its host' (@((Oct-Host GET "/api/v1/runtime/octopus/desired?host=$($run.machines[0])").body.workers) -contains $name)
+        $d0 = Oct-Host GET "/api/v1/runtime/octopus/desired?host=$($run.machines[0])"
+        Check 'before the host reports after the restart, desired has no workers list (the reconcile removes nothing)' ($d0.status -eq 200 -and "$($d0.body.waitingFor)" -eq 'report' -and -not $d0.body.PSObject.Properties['workers']) ($d0.body | ConvertTo-Json -Compress)
+        [void](Oct-Report "$($run.machines[0])" @(@{ name = "fw-$name"; item = $n; state = 'running' }))
+        Check 'after its report, desired still names it on its host' (@((Oct-Host GET "/api/v1/runtime/octopus/desired?host=$($run.machines[0])").body.workers) -contains $name)
         Start-Sleep -Seconds 5
         Check 'no second run for the item' ((Oct-Runs 'Start worker' $n).Count -eq 1)
         $rv = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/workers/$name/revoke" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck

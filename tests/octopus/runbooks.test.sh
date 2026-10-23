@@ -90,7 +90,7 @@ check "exit 0" '[ "$(code rec)" = 0 ]'
 check "desired asked for this machine" '[ "$(cat "$r/desired.host")" = host-1 ]'
 check "not desired and exited removed, logs in the task log; desired running kept" '[ ! -d "$r/c/fw-gone" ] && [ ! -d "$r/c/fw-ended" ] && [ -d "$r/c/fw-keep" ] && grep -q "log of gone" "$tmp/rec.out" && grep -q "log of ended" "$tmp/rec.out"'
 check "report: host and the remaining container" 'grep -qF "{\"host\":\"host-1\",\"containers\":[{\"name\":\"keep\",\"item\":1,\"state\":\"running\",\"startedAt\":\"2026-10-22T09:00:00Z\"}]}" "$r/report.json"'
-check "bearer header on both calls, never in argv or output" '[ "$(grep -cxF "Authorization: Bearer $hostToken" "$r/curl.headers")" = 2 ] && nosecret rec'
+check "bearer header on all three calls, never in argv or output" '[ "$(grep -cxF "Authorization: Bearer $hostToken" "$r/curl.headers")" = 3 ] && nosecret rec'
 r="$tmp/recdown"; mkdir -p "$r/c"; mk a running 1
 sh_ recdown reconcile-hosts.sh FAKE_CURL_FAIL=1
 check "gateway unreachable: exit 1, nothing removed" '[ "$(code recdown)" = 1 ] && [ -d "$r/c/fw-a" ]'
