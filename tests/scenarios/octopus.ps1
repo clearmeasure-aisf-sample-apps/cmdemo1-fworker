@@ -215,6 +215,7 @@ $OctopusScenarios = [ordered]@{
 'octopus: a gateway restart rebuilds the running workers from the project''s tasks; no second run for their items; desired still names them' = {
     $n = 0
     try {
+        [void](Fake 'octo-v1-empty-form' @{ empty = $false })   # the legacy path: runs that keep their FormValues (Octopus keeps {} for a v1 run)
         $n = New-Item-Fake 'Octopus restart' 'x' $OctLabels
         Check 'a run is made' (Wait-Until -Seconds 60 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
         $run = (Oct-Runs 'Start worker' $n)[0]; $name = "$($run.values.Name)"
@@ -229,5 +230,26 @@ $OctopusScenarios = [ordered]@{
         Start-Sleep -Seconds 3
         Check 'a worker whose Stop run is newer than its Start is not adopted' (@((Oct-Status).executions | Where-Object { $_.worker -eq $name }).Count -eq 0) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
     } finally { Oct-Cleanup @($n) }
+}
+
+# Runs started through runbook-runs/create/v1 keep FormValues {} (the fake's default, as Octopus): the rebuild reads nothing back, the host
+# reports are the source of truth. perHostCapacity is 1: one container on each host is adopted, a second one on host-a is not.
+'octopus: after a restart the running containers the hosts report are adopted up to perHostCapacity; desired names them, the reconcile keeps them, List shows them' = {
+    try {
+        $t0 = (Get-Date).ToUniversalTime()
+        $a1 = 'oct-9201-aaaaaa'; $b1 = 'oct-9202-bbbbbb'; $a2 = 'oct-9203-cccccc'
+        Restart-Gateway
+        Check 'nothing is known before the reports' (@((Oct-Status).executions | Where-Object { $_.worker -in @($a1, $b1, $a2) }).Count -eq 0) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
+        $ra = Oct-Report 'host-a' @(@{ name = "fw-$a1"; item = 9201; state = 'running'; startedAt = $t0.AddMinutes(-10).ToString('o') }, @{ name = "fw-$a2"; item = 9203; state = 'running'; startedAt = $t0.AddMinutes(-5).ToString('o') })
+        $rb = Oct-Report 'host-b' @(@{ name = "fw-$b1"; item = 9202; state = 'running'; startedAt = $t0.AddMinutes(-8).ToString('o') })
+        Check 'the reconcile does not stop the adopted containers' ($ra.status -eq 200 -and $rb.status -eq 200 -and -not (@($ra.body.stop) -contains $a1) -and @($rb.body.stop).Count -eq 0) (@($ra, $rb) | ConvertTo-Json -Compress -Depth 4)
+        Check 'the container beyond the host capacity is not adopted: the reconcile stops it' (@($ra.body.stop) -contains $a2) ($ra | ConvertTo-Json -Compress -Depth 4)
+        $da = Oct-Host GET '/api/v1/runtime/octopus/desired?host=host-a'; $db = Oct-Host GET '/api/v1/runtime/octopus/desired?host=host-b'
+        Check 'desired names each adopted worker on its host, not the one beyond capacity' (@($da.body.workers) -contains $a1 -and -not (@($da.body.workers) -contains $a2) -and @($db.body.workers) -contains $b1) (@($da, $db) | ConvertTo-Json -Compress -Depth 4)
+        $ra2 = Oct-Report 'host-a' @(@{ name = "fw-$a1"; item = 9201; state = 'running' }, @{ name = "fw-$a2"; item = 9203; state = 'running' })
+        Check 'a second report adopts nothing twice and still stops the one beyond capacity' (@($ra2.body.stop) -contains $a2 -and -not (@($ra2.body.stop) -contains $a1)) ($ra2 | ConvertTo-Json -Compress -Depth 4)
+        Check 'List reports the adopted workers: the runtime manager has their executions, running, with their items' (Wait-Until -Seconds 15 { $s = Oct-Status; @($s.executions | Where-Object { ($_.worker -eq $a1 -and $_.item -eq 9201) -or ($_.worker -eq $b1 -and $_.item -eq 9202) }).Count -eq 2 -and @($s.executions | Where-Object { $_.worker -eq $a2 }).Count -eq 0 }) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
+        Check 'no start run was made for them' ((Oct-State).runs.Count -eq 0) ((Oct-State).runs | ConvertTo-Json -Compress -Depth 5)
+    } finally { Oct-Cleanup @() }
 }
 }

@@ -78,7 +78,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         public int Item;
         public DateTime Started = DateTime.UtcNow;
         public DateTime? TaskDone, Ended;
-        public bool StopAsked, Adopted;   // Adopted: read back at a restart, not yet seen in a host report
+        public bool StopAsked, Adopted, FromReport;   // FromReport: adopted from a host report (no start task of this process; TaskId "adopted:<name>")   // Adopted: read back at a restart, not yet seen in a host report
         public string Status = "Processing";
     }
     sealed record Container(string Name, int Item, string State, DateTime? StartedAt);
@@ -401,7 +401,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
                     rec.Status = st;
                     if (st is "Succeeded" or "Failed" or "Stopped") rec.Ended = now;
                 }
-                list.Add(new RuntimeInstance(rec.TaskId, rec.Name, rec.Item, rec.Phase, rec.Status, rec.Started, rec.Ended));
+                list.Add(new RuntimeInstance(rec.TaskId, rec.Name, rec.Item, rec.Phase, rec.Status, rec.Started, rec.Ended, rec.FromReport));
             }
             foreach (var k in recs.Where(kv => kv.Value.Ended < now.AddHours(-1)).Select(kv => kv.Key).ToList()) recs.Remove(k);
         }
@@ -502,9 +502,29 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         lock (gate)
         {
             reports[m] = new HostReport(DateTime.UtcNow, d);
+            if (ready) AdoptReported(m, d);
             var desired = recs.Values.Where(x => x.Ended == null && !x.StopAsked && x.Mode == "detached" && string.Equals(x.Machine, m, StringComparison.OrdinalIgnoreCase)).Select(x => x.Name).ToHashSet();
             var stop = ready ? d.Values.Where(c => c.State == "running" && !desired.Contains(c.Name)).Select(c => (JsonNode)c.Name).ToArray() : Array.Empty<JsonNode>();
             return new JsonObject { ["ok"] = true, ["machine"] = m, ["accepted"] = d.Count, ["stop"] = new JsonArray(stop) };
+        }
+    }
+
+    // Under gate. Runs started through runbook-runs/create/v1 keep FormValues {}, so the restart rebuild cannot read their workers back: the host's
+    // report is the source of truth for its detached containers. A running fw-<name> without a record becomes one (start task done, phase
+    // unknown ""), only after the rebuild (so nothing is adopted twice) and only up to perHostCapacity per host.
+    void AdoptReported(string m, Dictionary<string, Container> d)
+    {
+        var onHost = recs.Values.Count(x => x.Ended == null && x.Mode == "detached" && string.Equals(x.Machine, m, StringComparison.OrdinalIgnoreCase));
+        foreach (var c in d.Values.Where(c => c.State == "running" && !recs.ContainsKey(c.Name)).OrderBy(c => c.StartedAt ?? DateTime.MaxValue).ThenBy(c => c.Name, StringComparer.Ordinal))
+        {
+            if (onHost >= cfg.PerHostCapacity) { Console.WriteLine($"octopus: not adopting {c.Name} on {m}: host at capacity {cfg.PerHostCapacity}"); continue; }
+            recs[c.Name] = new Rec
+            {
+                Name = c.Name, Item = c.Item, Phase = "", Machine = m, MachineName = machineNames.GetValueOrDefault(m, ""), Mode = "detached", State = "Success",
+                TaskId = "adopted:" + c.Name, TaskDone = DateTime.UtcNow, Adopted = true, FromReport = true, Started = c.StartedAt ?? DateTime.UtcNow
+            };
+            onHost++;
+            Console.WriteLine($"octopus: adopted {c.Name} (item {c.Item}) on {m} from its report");
         }
     }
 

@@ -239,7 +239,7 @@ sealed class World
     // wants an X-Octopus-ApiKey (any non-empty one: the suites compose theirs at run time). A detached start or a stop task ends Success at once (the
     // runbook exits in seconds); an overflow start is held (Executing) until cancelled or set by /_fake/octo-task. Not cleared by /_fake/reset.
     sealed class OctoMachine { public string Id = "", Name = "", Health = "Healthy", Env = "Environments-11"; public List<string> Roles = new(); public bool Disabled; }
-    sealed class OctoRun { public string Id = "", TaskId = "", RunbookId = "", Snapshot = "", Env = ""; public JsonArray Machines = new(); public JsonObject Form = new(); }
+    sealed class OctoRun { public string Id = "", TaskId = "", RunbookId = "", Snapshot = "", Env = ""; public JsonArray Machines = new(); public JsonObject Form = new(); public bool EmptyForm; }   // EmptyForm: the run API answers FormValues {} (Form stays for /_fake/octo)
     sealed class OctoTask { public string Id = "", RunId = "", State = "Success"; public DateTime Queued = DateTime.UtcNow; }
     static readonly (string Id, string Name)[] OctoBooks = { ("Runbooks-1", "Start worker"), ("Runbooks-2", "Stop worker"), ("Runbooks-3", "Start worker (overflow)"), ("Runbooks-4", "Reconcile hosts") };
     static readonly string[] OctoVars = { "Fworker.Name", "Fworker.Item", "Fworker.Phase", "Fworker.ModelProfile", "Fworker.Nonce", "Fworker.Agent", "Fworker.Mode" };
@@ -255,7 +255,7 @@ sealed class World
     // OpenID Connect of a service account: POST /token/v1 exchanges an external JWT (any "eyJ..." subject token, the suites compose theirs) for an
     // access token of the service account named by audience. /_fake/octo-oidc { require, serviceAccountId, expiresIn } makes /api take only such
     // a Bearer token (no API key); /_fake/octo-oidc-revoke makes every issued token answer 401, as an expired or revoked one would.
-    bool octoRequireBearer; string octoServiceAccount = "Users-903"; int octoExpiresIn = 3600, octoExchanges, octoExchangeRefusals;
+    bool octoRequireBearer, octoV1EmptyForm = true; string octoServiceAccount = "Users-903"; int octoExpiresIn = 3600, octoExchanges, octoExchangeRefusals;
     readonly HashSet<string> octoAccess = new();
     (int, object?) OctoToken(string method, JsonNode? b)
     {
@@ -315,7 +315,8 @@ sealed class World
         }
         if (rest == "/runbook-runs/create/v1" && method == "POST")
         {
-            // the Executions API: names resolved here, prompted values by variable name, stored by control id as Octopus does
+            // the Executions API: names resolved here, prompted values by variable name. Octopus keeps the run's FormValues empty ({}) for such a
+            // run; /_fake/octo-v1-empty-form { empty: false } keeps them by control id (the legacy rebuild path)
             if (b?["SpaceIdOrName"]?.ToString() != "Spaces-355" || b?["ProjectName"]?.ToString() != "cmdemo1-fworker-runtime") return (400, J(("ErrorMessage", "unknown space or project")));
             var bk = OctoBooks.FirstOrDefault(x => x.Name == b?["RunbookName"]?.ToString());
             if (bk.Id == null) return (400, J(("ErrorMessage", "unknown runbook")));
@@ -338,7 +339,7 @@ sealed class World
                 machines.Add(mm.Id);
             }
             var n = ++octoSeq;
-            var run = new OctoRun { Id = $"RunbookRuns-{n}", TaskId = $"ServerTasks-{n}", RunbookId = book, Snapshot = snap, Env = env, Machines = machines, Form = form };
+            var run = new OctoRun { Id = $"RunbookRuns-{n}", TaskId = $"ServerTasks-{n}", RunbookId = book, Snapshot = snap, Env = env, Machines = machines, Form = form, EmptyForm = octoV1EmptyForm };
             octoRuns.Add(run);
             octoTasks[run.TaskId] = new OctoTask { Id = run.TaskId, RunId = run.Id, State = book == "Runbooks-3" ? "Executing" : "Success" };
             return (201, J(("RunbookRunServerTasks", new JsonArray(J(("RunbookRunId", run.Id), ("ServerTaskId", run.TaskId))))));
@@ -356,7 +357,7 @@ sealed class World
         return (404, J(("ErrorMessage", "not found")));
     }
     static JsonObject OctoTaskJson(OctoTask t) => J(("Id", t.Id), ("State", t.State), ("IsCompleted", t.State is "Success" or "Failed" or "Canceled" or "TimedOut"), ("QueueTime", t.Queued.ToString("o")), ("Arguments", J(("RunbookRunId", t.RunId))));
-    static JsonObject OctoRunJson(OctoRun r) => J(("Id", r.Id), ("TaskId", r.TaskId), ("RunbookId", r.RunbookId), ("RunbookSnapshotId", r.Snapshot), ("EnvironmentId", r.Env), ("SpecificMachineIds", r.Machines.DeepClone()), ("FormValues", r.Form.DeepClone()));
+    static JsonObject OctoRunJson(OctoRun r) => J(("Id", r.Id), ("TaskId", r.TaskId), ("RunbookId", r.RunbookId), ("RunbookSnapshotId", r.Snapshot), ("EnvironmentId", r.Env), ("SpecificMachineIds", r.Machines.DeepClone()), ("FormValues", r.EmptyForm ? new JsonObject() : r.Form.DeepClone()));
     JsonObject OctoState() => J(("cancels", octoCancels), ("unauthorized", octoUnauthorized), ("exchanges", octoExchanges), ("exchangeRefusals", octoExchangeRefusals), ("requireBearer", octoRequireBearer), ("runs", new JsonArray(octoRuns.Select(r =>
     {
         var vals = new JsonObject(); foreach (var v in OctoVars) if (r.Form[OctoCtl(r.RunbookId, v)] is { } x) vals[v.Split('.')[1]] = x.DeepClone();
@@ -992,12 +993,14 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "arm": return (200, ArmState());
             case "octo": return (200, OctoState());
-            case "octo-reset": octoRuns.Clear(); octoTasks.Clear(); octoMachines = DefaultMachines(); octoCancels = 0; octoUnauthorized = 0; octoExchanges = 0; octoExchangeRefusals = 0; return (200, J(("ok", true)));
+            case "octo-reset": octoRuns.Clear(); octoTasks.Clear(); octoMachines = DefaultMachines(); octoCancels = 0; octoUnauthorized = 0; octoExchanges = 0; octoExchangeRefusals = 0; octoV1EmptyForm = true; return (200, J(("ok", true)));
             case "octo-oidc":   // { require, serviceAccountId, expiresIn }
                 octoRequireBearer = b?["require"]?.GetValue<bool>() == true; octoServiceAccount = b?["serviceAccountId"]?.ToString() ?? "Users-903";
                 octoExpiresIn = b?["expiresIn"]?.GetValue<int>() ?? 3600; octoAccess.Clear(); octoExchanges = 0; octoExchangeRefusals = 0; octoUnauthorized = 0;
                 return (200, J(("ok", true)));
             case "octo-oidc-revoke": octoAccess.Clear(); return (200, J(("ok", true)));
+            case "octo-v1-empty-form":   // { empty }: true (the default, as Octopus does) stores a v1 run's FormValues as {}; false keeps them by control id
+                octoV1EmptyForm = b?["empty"]?.GetValue<bool>() != false; return (200, J(("ok", true), ("empty", octoV1EmptyForm)));
             case "octo-machines":   // [{id, name, health, roles, env, disabled}]: the deployment targets of the space
                 octoMachines = (b?["machines"] as JsonArray ?? new JsonArray()).Select(m => new OctoMachine { Id = m!["id"]!.ToString(), Name = m["name"]?.ToString() ?? m["id"]!.ToString(), Health = m["health"]?.ToString() ?? "Healthy", Env = m["env"]?.ToString() ?? "Environments-11", Roles = (m["roles"] as JsonArray)?.Select(x => x!.ToString()).ToList() ?? new() { "fworker-host" }, Disabled = m["disabled"]?.GetValue<bool>() == true }).ToList();
                 return (200, J(("ok", true)));
