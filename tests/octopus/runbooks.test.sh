@@ -55,6 +55,9 @@ sh_ cursor start-worker.sh FWORKER_AGENT=cursor FWORKER_CURSORAPIKEY="$key"
 check "cursor: CURSOR_API_KEY only" '[ "$(code cursor)" = 0 ] && grep -qx "CURSOR_API_KEY=$key" "$tmp/cursor/c/fw-cae-42-ab/env" && ! grep -q ANTHROPIC "$tmp/cursor/c/fw-cae-42-ab/env"'
 sh_ codex start-worker.sh FWORKER_AGENT=codex FWORKER_OPENAIAPIKEY="$key"
 check "codex: OPENAI_API_KEY" '[ "$(code codex)" = 0 ] && grep -qx "OPENAI_API_KEY=$key" "$tmp/codex/c/fw-cae-42-ab/env" && grep -qx FWRUNNER_AGENT=codex "$tmp/codex/c/fw-cae-42-ab/env"'
+mkdir -p "$tmp/prune/c/fw-old-1" "$tmp/prune/c/fw-live-2"; echo exited > "$tmp/prune/c/fw-old-1/state"; echo "old log" > "$tmp/prune/c/fw-old-1/log"; echo running > "$tmp/prune/c/fw-live-2/state"
+sh_ prune start-worker.sh
+check "ended fw-* containers are removed (logs first) before the start; a running one is kept" '[ "$(code prune)" = 0 ] && grep -qx fw-old-1 "$tmp/prune/removed" && ! grep -qx fw-live-2 "$tmp/prune/removed" && grep -q "old log" "$tmp/prune.out"'
 mkdir -p "$tmp/dup/c/fw-cae-42-ab"; echo running > "$tmp/dup/c/fw-cae-42-ab/state"
 sh_ dup start-worker.sh
 check "a running container of the same name: exit 1, not replaced" '[ "$(code dup)" = 1 ] && grep -q "already running" "$tmp/dup.out" && [ ! -e "$tmp/dup/removed" ]'
