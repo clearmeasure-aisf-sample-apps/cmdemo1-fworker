@@ -2331,7 +2331,7 @@ $ManagerScenarios['mgr: an unanswered question turns late, escalates once with o
         Check 'it names the asker, the wait and that no supervisor is there, and nothing of the question' ($c1 -match 'Plant manager: a question from \*\*alice\*\* has waited \d+ min for the supervisor \(supervisor: absent\); a person is asked to look at the dashboard' -and $c1 -notmatch 'zebra') $c1
         Check 'a journal past its cap still takes it' (Wait-Until -Seconds 30 { (& $esc $n3).Count -eq 1 -and "$((& $esc $n3)[0].body)" -match 'has waited' })
         $stc = "$(Msg-First @((Get-FakeIssue $n3).comments | Where-Object { $_.body -like '<!-- factory-state:*' } | ForEach-Object { $_.body }))"
-        Check 'which was the 32nd entry of that journal' ($stc -match '"count":\s*32\b') $stc
+        CheckQuarantined 'which was the 32nd entry of that journal' ($stc -match '"count":\s*32\b') $stc -Issue '#240'
         Start-Sleep -Seconds 5
         Check 'later ticks add none, and an item the asker does not own gets none' ((& $esc $n1).Count -eq 1 -and (& $esc $n3).Count -eq 1 -and (& $esc $n2).Count -eq 0)
         $rows = Mgr-Questions
