@@ -53,10 +53,21 @@
     "space": "Spaces-355",
     "project": "cmdemo1-ui",
     "prodUrl": "https://ca-cmdemo1-prod-ui-bhj5.happyisland-465ac2bf.southcentralus.azurecontainerapps.io",
+    "tddUrl": "",
+    "uatUrl": "",
+    "healthPath": "/_healthcheck/detailed",
+    "health": { "spacingMinutes": 5, "settleMinutes": 10, "retries": 3, "retrySeconds": 20 },
     "environments": {
       "tdd": "tdd",
       "uat": "uat",
       "prod": "prod"
+    }
+  },
+  "delivery": {
+    "autoPromote": {
+      "enabled": false,
+      "environments": ["uat", "prod"],
+      "gatewayEnvironment": ""
     }
   },
   "plant": {

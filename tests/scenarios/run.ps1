@@ -57,6 +57,7 @@ foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerA
 . (Join-Path $PSScriptRoot 'keeper.ps1')            # the backlog keeper session (gateway/Keeper.cs): scenarios named "keeper: ..." join the manager suite
 foreach ($k in $KeeperScenarios.Keys) { $ManagerScenarios[$k] = $KeeperScenarios[$k] }
 . (Join-Path $PSScriptRoot 'octopus.ps1')           # the Octopus runbook runtime against the fake Octopus: suite 'octopus' (uses the helpers of owner.ps1 and runtime.ps1)
+. (Join-Path $PSScriptRoot 'promote.ps1')           # the automatic promotion of a release to uat and prod (Verbs.Promote.ps1): suite 'promote'
 
 # ---- the suites. ORDER IS THE PORT SLOT: append new suites at the end, never reorder (a slot is 100 ports from 6100, see lib.ps1). ----------
 # Env names the environment a suite needs (set before it, removed after it); Timing sets FACTORY_TIMING_* for the suite; Extra is merged into the gateway config.
@@ -150,6 +151,11 @@ $SuiteDefs = @(
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = '__FAKE_URL__'; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
                 agent = 'codex'; perHostCapacity = 1; overflowRoles = @('qc'); overflowMax = 1; maxConcurrent = 10; maxExecutionsPerDay = 1000; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 30; listSeconds = 1; reportGraceSeconds = 2 } } } }
+    # the automatic promotion (promote.ps1, docs/design/auto-promote.md): on, for any gateway environment; tdd and uat health on the fake's /_healthcheck
+    @{ Name = 'promote'; Policy = 'auto'; Set = $PromoteScenarios; Env = 'promote'; Timing = @{ staleItemMinutes = 600 }
+        Extra = @{ delivery = @{ autoPromote = @{ enabled = $true; environments = @('uat', 'prod'); gatewayEnvironment = 'tdd' } }
+            octopus = @{ url = '__FAKE_URL__/octopus'; space = 'Spaces-355'; project = 'cmdemo1-ui'; prodUrl = 'https://ca-cmdemo1-prod-ui.example'; tddUrl = '__FAKE_URL__'; uatUrl = '__FAKE_URL__'; healthPath = '/_healthcheck/detailed'; health = @{ spacingMinutes = 0.05; settleMinutes = 0.1; retries = 2; retrySeconds = 0.5 }
+                environments = @{ tdd = 'tdd'; uat = 'uat'; prod = 'prod' } } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
@@ -229,6 +235,8 @@ function Get-SuiteEnv([string]$Kind) {
         'cursor' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; CURSOR_API_KEY = 'fake-cursor' } }
         # the copilot suite: owner mode and the token of the fake agent tasks API (COPILOT_TASKS_TOKEN, as the deployed gateway reads it)
         'copilot' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; COPILOT_TASKS_TOKEN = 'fake-copilot' } }
+        # the promote suite: the key that creates deployments, composed here at run time
+        'promote' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_LEADER_LEASE = '0'; OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()) } }
         'envscope' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_LEADER_LEASE = '0' } }
         # the octopus suite: owner mode, the runbook key and the host token, both composed here at run time (no credential-like fixture in the repository)
         'octopus' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_TRANSCRIPT_SAVE_SECONDS = '2'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()); FACTORY_OCTOPUS_HOST_TOKEN = [guid]::NewGuid().ToString('N'); FACTORY_TEST_OCTOPUS_ENTRA_TOKEN = ('eyJ0ZXN0.' + [guid]::NewGuid().ToString('N') + '.sig') } }

@@ -462,6 +462,7 @@ function Verb_sync_board($a) {
     $passUnmerged = @()
     # release_queue: the items that wait in the Release Queue for the production deployment, with their release and since when (enhancement 9)
     $releaseQueue = @()
+    $rqLabels = @{}
     # unparked: items whose park the sweep removed because they are closed (issue 82); the plant forgets their parks
     $unparked = @()
     # parks: every parked item the sweep read (issue 99)
@@ -544,6 +545,7 @@ function Verb_sync_board($a) {
                 if (-not $dry -and $r.outcome -eq 'busy' -and "$($s.merge.awaiting)" -eq 'release-queue') { $r = @{ outcome = 'waiting'; awaiting = 'release-queue'; release = "$($s.merge.release)"; queued_at = $(if (Test-Has $s.merge 'queued_at') { $s.merge.queued_at } else { $null }) } }
                 if (-not $dry -and $r.outcome -in 'advanced', 'waiting' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue') {
                     $releaseQueue += @{ item = $n; release = $(if (Test-Has $r 'release') { "$($r.release)" } else { '' }); since = $(if (Test-Has $r 'queued_at') { $r.queued_at } else { $null }) }
+                    $rqLabels["$n"] = @($it.labels)   # (the gates of the automatic promotion, Invoke-AutoPromote)
                 }
                 if (-not $dry -and ($r.outcome -eq 'done' -or ($r.outcome -eq 'advanced' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue'))) { $triggers += @{ item = $n; event = 'item.complete'; path = $(if (Test-Has $r 'path') { "$($r.path)" } else { '' }) } }
                 elseif (-not $dry -and $r.outcome -eq 'parked') { $triggers += @{ item = $n; event = 'item.parked'; reason = $r.reason } }
@@ -775,6 +777,9 @@ function Verb_sync_board($a) {
     }
     $replenish = $null
     if ($null -eq $only -and -not $dry) { try { $replenish = Invoke-Replenish $list $last $designCol } catch { $errors += @{ item = 0; code = 'error'; reason = "replenish: $($_.Exception.Message)" } } }
+    # the automatic promotion of a release to uat and prod (delivery.autoPromote, docs/design/auto-promote.md): a full sweep only, it needs every
+    # item of the release
+    if (-not $dry -and $null -eq $only -and $releaseQueue.Count -gt 0) { try { $actions += @(Invoke-AutoPromote $releaseQueue $rqLabels) } catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = $_.Exception.Message } } }
     return @{ ok = $true; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
 }
 

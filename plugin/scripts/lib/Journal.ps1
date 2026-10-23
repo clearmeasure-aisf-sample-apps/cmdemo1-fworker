@@ -99,6 +99,10 @@ function Get-JournalText([string]$Event, [hashtable]$F) {
             if ("$($F.by)" -eq 'expiry') { return "park ``$($F.code)`` expired ($($F.reason)).$rs The next sweep takes it up again in $col." }
             return "park ``$($F.code)`` released early by $($F.by): $($F.reason).$rs The next sweep takes it up again in $col."
         }
+        # the automatic promotion of a release (delivery.autoPromote, Verbs.Promote.ps1)
+        'promoted' { return "promoted release $($F.release) to **$($F.environment)** (Octopus task ``$($F.task)``); the gateway follows the deployment and answers its Sign-off." }
+        'promotion-waiting' { return "release $($F.release) waits for the automatic promotion to **$($F.environment)**: $($F.reason). The item stays in the Release Queue; the gateway looks again at every sweep." }
+        'promotion-signoff' { return "answered the Sign-off of the deployment of release $($F.release) to **$($F.environment)** (Octopus task ``$($F.task)``): **$($F.result)**$(if ($F.reason) { " ($($F.reason))" })." }
         'released' { return "ownership released by **$($F.worker)** ($($F.reason)); the next trigger assigns it again." }
         'pulled' { return "pulled from **$($F.from)** into ${col}: a worker slot was free and nothing waited there ($($F.wip) of at most $($F.wipLimit) items in the AI columns)." }
         # the plant manager's flow verbs (Verbs.Manager.ps1, docs/design/plant-manager.md 10e): who acted, what, under which policy code, and why
@@ -143,7 +147,7 @@ function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, 
         if (-not $folded) {
             # qc-ready, qc-failed and question-escalated may take a few slots beyond the cap: they are the lines a person looks for
             # (and manager-action: every action of the plant manager is journaled, docs/design/plant-manager.md 10e; it is limited to 3 a day per item)
-            $extra = $Event -in 'qc-ready', 'qc-failed', 'question-escalated', 'manager-action', 'keeper-action'
+            $extra = $Event -in 'qc-ready', 'qc-failed', 'question-escalated', 'manager-action', 'keeper-action', 'promoted', 'promotion-waiting', 'promotion-signoff'
             # the start of a runtime session that carries the link to its transcript is posted whatever the count (the owner: every session
             # worked on the item is reachable from its comments); one per execution, so the runtime's own limits bound it
             $always = $Event -eq 'launched' -and $Fields.ContainsKey('transcript') -and $Fields.transcript

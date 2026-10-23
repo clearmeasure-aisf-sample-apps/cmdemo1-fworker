@@ -94,7 +94,7 @@ sealed class Rev { public long Id; public string State = ""; public string Commi
 sealed class Fault { public Regex Match = null!; public int Status; public int Remaining; public string Body = "{\"message\":\"injected fault\"}"; }
 sealed class GhRel { public long Id; public string Tag = "", Name = "", Body = "", Target = ""; public bool Prerelease; public List<GhAsset> Assets = new(); }
 sealed class GhAsset { public long Id; public string Name = "", ContentType = ""; public long Size; }
-sealed class Rel { public string Id = ""; public string Version = ""; public string Notes = ""; public DateTime At; public double ProdDelay; }
+sealed class Rel { public string Id = ""; public string Version = ""; public string Notes = ""; public DateTime At; public double ProdDelay; public bool Manual; }
 
 // A Container Apps job execution of the fake ARM (cloud worker runtimes): its name, status, env and times.
 sealed class ArmExec { public string Name = "", Job = ""; public string Status = "Running"; public JsonArray Containers = new(); public DateTime Start = DateTime.UtcNow; public DateTime? End; }
@@ -437,7 +437,7 @@ sealed class World
         if (path.StartsWith("/_fake/")) return Control(method, path[7..], q, b);
         foreach (var f in faults.ToList())
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
-        if (path.StartsWith("/octopus/")) return Octopus(path[9..], q);
+        if (path.StartsWith("/octopus/")) return Octopus(method, path[9..], q, b);
         if (path.StartsWith("/subscriptions/")) return Arm(method, path, b, auth);
         if (path == "/token/v1") return OctoToken(method, b);
         if (path.StartsWith("/api/")) return OctoRb(method, path, q, b, auth);
@@ -454,6 +454,10 @@ sealed class World
         }
         if (path == "/user") return (200, J(("login", "factory-bot")));
         if (path == "/_healthcheck") return (healthStatus, healthStatus == 200 ? "ok" : null);        // stands in for the QC environment's app in the QC scenarios
+        // the cmdemo1-ui app of tdd and uat in the promote scenarios: its detailed health (/_fake/health) and the version it runs (/_fake/app-build;
+        // by default the newest release of the fake Octopus)
+        if (path == "/_healthcheck/detailed") return (healthStatus, J(("overallStatus", healthStatus == 200 ? "Healthy" : "Unhealthy")));
+        if (path == "/_build") return (200, J(("version", appBuild != "" ? appBuild : releases.LastOrDefault()?.Version)));
         if (path == "/graphql") return GraphQl(b!);
         if (path == root && method == "GET") return (200, J(("permissions", J(("push", true), ("admin", true)))));
         if (path == root + "/labels" && method == "POST") { var nm = b!["name"]!.ToString(); return labelNames.Add(nm) ? (201, J(("name", nm))) : (422, "{\"message\":\"Validation Failed\"}"); }
@@ -805,6 +809,14 @@ sealed class World
     // request's branch: behind_by is the pull request's Behind (what /_fake/master-merge and /_fake/pr set), ahead_by 1, and the pull request's files.
     (int, object?) Compare(string bas, string head)
     {
+        // the promote scenarios: a master history of their own (/_fake/promote-history), with the commits between base and head as GitHub lists them
+        int pb = promoteHistory.IndexOf(bas), ph = promoteHistory.IndexOf(head);
+        if (pb >= 0 && ph >= 0)
+        {
+            var cs = ph > pb ? promoteHistory.GetRange(pb + 1, ph - pb) : new List<string>();
+            return (200, J(("status", ph > pb ? "ahead" : ph == pb ? "identical" : "behind"), ("ahead_by", cs.Count), ("behind_by", ph < pb ? pb - ph : 0), ("total_commits", cs.Count),
+                ("commits", new JsonArray(cs.Select((x, i) => (JsonNode)J(("sha", x), ("parents", new JsonArray(J(("sha", i == 0 ? bas : cs[i - 1])))))).ToArray()))));
+        }
         var h = History();
         int bi = bas == Master ? h.Count - 1 : h.IndexOf(bas), hi = head == Master ? h.Count - 1 : h.IndexOf(head);
         if (bi >= 0 && hi >= 0)
@@ -928,9 +940,69 @@ sealed class World
         return (200, "{\"errors\":[{\"message\":\"fake graphql: unrecognised query\"}]}");
     }
 
-    (int, object?) Octopus(string path, Microsoft.AspNetCore.Http.IQueryCollection q)
+    // The promotions of the automatic promotion (docs/design/auto-promote.md): a release made by /_fake/octo-release is "manual": Octopus deploys it
+    // to tdd only (state given), and to uat or prod only through POST deployments/create/v1. Such a deployment waits at its Sign-off step (a
+    // manual intervention, pending) until the interruption is answered: Proceed ends the task Success, Abort Failed. /_fake/octo-forbid
+    // { create, interruption } makes those calls answer 403 naming the missing permission, as Octopus does. /_fake/octo-deps lists them.
+    sealed class OctoDep { public string Id = "", RelId = "", Env = "", TaskId = ""; string state = "Executing"; public DateTime? Done; public string State { get => state; set { state = value; Done = value is "Executing" or "Queued" ? null : DateTime.UtcNow; } } public DateTime Created = DateTime.UtcNow; public string Interruption = ""; public bool Pending; public string Result = ""; public string Responsible = ""; }
+    readonly List<OctoDep> octoDeps = new(); string octoForbidCreate = "", octoForbidInterruption = ""; bool octoSignOff = true; int octoCreates; string appBuild = ""; readonly List<string> promoteHistory = new();
+    static readonly Dictionary<string, string> OctoEnvIds = new() { ["tdd"] = "E-tdd", ["uat"] = "E-uat", ["prod"] = "E-prod" };
+    static JsonObject OctoForbidden(string perm) => J(("ErrorMessage", $"You do not have permission to perform this action. Missing permission: {perm}"));
+    JsonObject OctoDepJson(OctoDep d) => J(("Id", d.Id), ("ReleaseId", d.RelId), ("EnvironmentId", d.Env), ("TaskId", d.TaskId), ("Created", d.Created.ToString("o")));
+
+    (int, object?) Octopus(string method, string path, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b)
     {
         if (path == "api/users/me") return (200, J(("Id", "Users-1")));
+        Match pm;
+        if (path == "api/Spaces-355/deployments/create/v1" && method == "POST")
+        {
+            if (octoForbidCreate != "") return (403, OctoForbidden(octoForbidCreate));
+            if (b?["ProjectName"]?.ToString() != "cmdemo1-ui" || b?["SpaceIdOrName"]?.ToString() != "Spaces-355") return (400, J(("ErrorMessage", "unknown project or space")));
+            var rel = releases.FirstOrDefault(r => r.Version == b?["ReleaseVersion"]?.ToString()); if (rel == null) return (400, J(("ErrorMessage", "unknown release")));
+            var tasks = new JsonArray();
+            foreach (var en in (b?["EnvironmentNames"] as JsonArray ?? new JsonArray()).Select(x => x?.ToString() ?? ""))
+            {
+                if (!OctoEnvIds.TryGetValue(en, out var eid)) return (400, J(("ErrorMessage", "unknown environment")));
+                var n = ++octoSeq; octoCreates++;
+                var d = new OctoDep { Id = $"Deployments-P{n}", RelId = rel.Id, Env = eid, TaskId = $"ServerTasks-P{n}", Interruption = octoSignOff ? $"Interruptions-{n}" : "", Pending = octoSignOff, State = octoSignOff ? "Executing" : "Success" };
+                octoDeps.Add(d); tasks.Add(J(("DeploymentId", d.Id), ("ServerTaskId", d.TaskId)));
+            }
+            return (201, J(("DeploymentServerTasks", tasks)));
+        }
+        if (path == "api/Spaces-355/interruptions" && method == "GET")
+        {
+            var reg = q["regarding"].ToString(); var pendingOnly = q["pendingOnly"].ToString() == "true";
+            var its = octoDeps.Where(d => d.Interruption != "" && (reg == "" || d.TaskId == reg) && (!pendingOnly || d.Pending))
+                .Select(d => (JsonNode)J(("Id", d.Interruption), ("TaskId", d.TaskId), ("IsPending", d.Pending), ("Title", "Sign-off"), ("Form", J(("Elements", new JsonArray(J(("Name", "Instructions")), J(("Name", "Notes")), J(("Name", "Result")))))))).ToArray();
+            return (200, J(("Items", new JsonArray(its))));
+        }
+        if ((pm = Regex.Match(path, @"^api/Spaces-355/interruptions/(Interruptions-\d+)/(responsible|submit)$")).Success && method == "POST")
+        {
+            if (octoForbidInterruption != "") return (403, OctoForbidden(octoForbidInterruption));
+            var d = octoDeps.FirstOrDefault(x => x.Interruption == pm.Groups[1].Value); if (d == null) return (404, null);
+            if (pm.Groups[2].Value == "responsible") { d.Responsible = "Users-1"; return (200, J(("Id", d.Interruption))); }
+            if (!d.Pending) return (400, J(("ErrorMessage", "the interruption is no longer pending")));
+            if (d.Responsible == "") return (400, J(("ErrorMessage", "take responsibility first")));
+            var res = b?["Result"]?.ToString() ?? "";
+            if (res is not ("Proceed" or "Abort")) return (400, J(("ErrorMessage", "Result is Proceed or Abort")));
+            d.Pending = false; d.Result = res; d.State = res == "Proceed" ? "Success" : "Failed";
+            return (200, J(("Id", d.Interruption), ("IsPending", false)));
+        }
+        if ((pm = Regex.Match(path, @"^api/Spaces-355/projects/Projects-1/releases/([0-9.]+)$")).Success)
+        {
+            var r = releases.FirstOrDefault(x => x.Version == pm.Groups[1].Value && x.At <= DateTime.UtcNow);
+            return r == null ? (404, null) : (200, J(("Id", r.Id), ("Version", r.Version), ("ReleaseNotes", r.Notes), ("Assembled", r.At.ToString("o"))));
+        }
+        if ((pm = Regex.Match(path, @"^api/Spaces-355/releases/(Releases-\d+)$")).Success && releases.FirstOrDefault(x => x.Id == pm.Groups[1].Value) is { } rr)
+            return (200, J(("Id", rr.Id), ("Version", rr.Version), ("ReleaseNotes", rr.Notes), ("Assembled", rr.At.ToString("o"))));
+        if ((pm = Regex.Match(path, @"^api/Spaces-355/releases/(Releases-\d+)/deployments$")).Success)
+        {
+            var r = releases.FirstOrDefault(x => x.Id == pm.Groups[1].Value); if (r == null) return (404, null);
+            if (r.Manual) return (200, J(("Items", new JsonArray(octoDeps.Where(d => d.RelId == r.Id).Select(d => (JsonNode)OctoDepJson(d)).ToArray()))));
+            return (200, J(("Items", new JsonArray(new[] { ("E-tdd", 0), ("E-uat", 1), ("E-prod", 2) }.Select(e => (JsonNode)J(("Id", $"Deployments-{r.Id}-{e.Item1}"), ("ReleaseId", r.Id), ("EnvironmentId", e.Item1), ("TaskId", $"{r.Id}|{e.Item1}"), ("Created", r.At.AddSeconds(e.Item2).ToString("o")))).ToArray()))));
+        }
+        if ((pm = Regex.Match(path, @"^api/Spaces-355/tasks/(ServerTasks-P?\d+)$")).Success && octoDeps.FirstOrDefault(x => x.TaskId == pm.Groups[1].Value) is { } od)
+            return (200, J(("Id", od.TaskId), ("State", od.State), ("IsCompleted", od.State is "Success" or "Failed" or "Canceled" or "TimedOut"), ("CompletedTime", od.Done?.ToString("o"))));
         if (Regex.IsMatch(path, @"^api/Spaces-355/projects/(cmdemo1-ui|Projects-1)$")) return (200, J(("Id", "Projects-1"), ("Name", "cmdemo1-ui")));
         var made = releases.Where(r => r.At <= DateTime.UtcNow).ToList();   // a release appears once the workflow that makes it has run
         if (path == "api/Spaces-355/projects/Projects-1/releases")
@@ -939,7 +1011,8 @@ sealed class World
         if (path == "api/Spaces-355/deployments")
         {
             var items = new JsonArray();
-            foreach (var r in made) foreach (var (env, idx) in new[] { ("E-tdd", 0), ("E-uat", 1), ("E-prod", 2) })
+            foreach (var d in octoDeps.OrderByDescending(d => d.Created)) items.Add(OctoDepJson(d));
+            foreach (var r in made.Where(r => !r.Manual)) foreach (var (env, idx) in new[] { ("E-tdd", 0), ("E-uat", 1), ("E-prod", 2) })
                 items.Add(J(("Id", $"Deployments-{r.Id}-{env}"), ("ReleaseId", r.Id), ("EnvironmentId", env), ("TaskId", $"{r.Id}|{env}"), ("Created", r.At.AddSeconds(idx).ToString("o"))));
             return (200, J(("Items", items)));
         }
@@ -962,7 +1035,7 @@ sealed class World
     readonly Dictionary<string, Rate> rates = new();
     public (string, int, int, long, int)? RateFor(string path)
     {
-        if (path.StartsWith("/_fake/") || path.StartsWith("/octopus/") || path.StartsWith("/api/") || path.StartsWith("/_blob/") || path.StartsWith("/_uploads/") || path == "/_healthcheck") return null;
+        if (path.StartsWith("/_fake/") || path.StartsWith("/octopus/") || path.StartsWith("/api/") || path.StartsWith("/_blob/") || path.StartsWith("/_uploads/") || path == "/_healthcheck" || path == "/_healthcheck/detailed" || path == "/_build") return null;
         var res = path == "/graphql" ? "graphql" : "core";
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         if (!rates.TryGetValue(res, out var r)) rates[res] = r = new Rate { Reset = now + 3600 };
@@ -993,6 +1066,39 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "arm": return (200, ArmState());
             case "octo": return (200, OctoState());
+            case "octo-release":   // { version, sha, tdd (Success) }: a manual release of cmdemo1-ui carrying sha, deployed to tdd with that state
+            {
+                var ver = b?["version"]?.ToString() ?? ""; var rsha = b?["sha"]?.ToString() ?? "";
+                var r = new Rel { Id = "Releases-" + (releases.Count + 1), Version = ver, Notes = $"Build https://fake/run/1 of {rsha}", At = DateTime.UtcNow.AddSeconds(-1), Manual = true };
+                releases.Add(r);
+                var n = ++octoSeq;
+                octoDeps.Add(new OctoDep { Id = $"Deployments-P{n}", RelId = r.Id, Env = "E-tdd", TaskId = $"ServerTasks-P{n}", State = b?["tdd"]?.ToString() ?? "Success" });
+                foreach (var en in (b?["also"] as JsonArray ?? new JsonArray()).Select(x => x!.ToString()))   // also: environments it is deployed to as well (Success)
+                { var n2 = ++octoSeq; octoDeps.Add(new OctoDep { Id = $"Deployments-P{n2}", RelId = r.Id, Env = OctoEnvIds[en], TaskId = $"ServerTasks-P{n2}", State = "Success" }); }
+                return (200, J(("ok", true), ("id", r.Id)));
+            }
+            case "octo-dep":   // { release (version), env, state }: sets the state of that deployment (the newest of that release and environment)
+            {
+                var r = releases.FirstOrDefault(x => x.Version == b?["release"]?.ToString()); var eid = OctoEnvIds.GetValueOrDefault(b?["env"]?.ToString() ?? "", "");
+                var d = octoDeps.LastOrDefault(x => r != null && x.RelId == r.Id && x.Env == eid); if (d == null) return (404, J(("ok", false)));
+                d.State = b?["state"]?.ToString() ?? "Success"; return (200, J(("ok", true)));
+            }
+            case "octo-forbid":   // { create, interruption }: the permission named in a 403 of that call; "" (default) allows it
+                octoForbidCreate = b?["create"]?.ToString() ?? ""; octoForbidInterruption = b?["interruption"]?.ToString() ?? ""; return (200, J(("ok", true)));
+            case "promote-history":   // { shas }: appends these commits to the promote scenarios' master history (compare between two of them)
+                foreach (var x in b?["shas"] as JsonArray ?? new JsonArray()) promoteHistory.Add(x!.ToString()); return (200, J(("ok", true), ("count", promoteHistory.Count)));
+            case "app-build":   // { version }: what the app's /_build answers; "" (default) the newest release
+                appBuild = b?["version"]?.ToString() ?? ""; return (200, J(("ok", true)));
+            case "octo-signoff":   // { on }: whether a created deployment waits at its Sign-off step (default true)
+                octoSignOff = b?["on"]?.GetValue<bool>() ?? true; return (200, J(("ok", true)));
+            case "octo-deps":
+                return (200, J(("creates", octoCreates), ("deployments", new JsonArray(octoDeps.Select(d => (JsonNode)J(("id", d.Id), ("release", releases.FirstOrDefault(r => r.Id == d.RelId)?.Version), ("env", d.Env[2..]), ("task", d.TaskId), ("state", d.State),
+                    ("interruption", d.Interruption), ("pending", d.Pending), ("result", d.Result))).ToArray()))));
+            case "gh-demo":   // { item }: release demo-<item> with its asset demo-<item>.mp4, as publish-demo leaves it
+            {
+                var tag = $"demo-{b?["item"]}"; var gr = new GhRel { Id = nextGhRel++, Tag = tag, Name = tag, Prerelease = true }; ghReleases[tag] = gr;
+                gr.Assets.Add(new GhAsset { Id = nextGhAsset++, Name = tag + ".mp4", Size = 1000, ContentType = "video/mp4" }); return (200, J(("ok", true)));
+            }
             case "octo-reset": octoRuns.Clear(); octoTasks.Clear(); octoMachines = DefaultMachines(); octoCancels = 0; octoUnauthorized = 0; octoExchanges = 0; octoExchangeRefusals = 0; octoV1EmptyForm = true; return (200, J(("ok", true)));
             case "octo-oidc":   // { require, serviceAccountId, expiresIn }
                 octoRequireBearer = b?["require"]?.GetValue<bool>() == true; octoServiceAccount = b?["serviceAccountId"]?.ToString() ?? "Users-903";
@@ -1055,7 +1161,7 @@ sealed class World
             }
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();
-                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); dispatches.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); dispatches.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); octoDeps.Clear(); octoForbidCreate = ""; octoForbidInterruption = ""; octoSignOff = true; octoCreates = 0; appBuild = ""; promoteHistory.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
                 masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; heldRuns.Clear(); heldReruns = 0; return (200, J(("ok", true)));
             case "issue":

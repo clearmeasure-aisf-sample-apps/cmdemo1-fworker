@@ -2,7 +2,8 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 
 // The Release Queue (enhancement 9 of 2026-10-14). Items whose change is merged, green on master and carried by a release candidate wait in the
-// Release Queue column until production has it; the promotion to uat and prod belongs to the owner and the cmdemo1 session, never to the gateway.
+// Release Queue column until production has it. Since 2026-10-23 the rule scripts of the sweep promote a qualifying release to uat and prod
+// themselves when delivery.autoPromote is on (plugin/scripts/lib/Verbs.Promote.ps1, docs/design/auto-promote.md); this file only keeps the list.
 // What the gateway does about the queue:
 //   - the sweep (sync-board) lists the waiting items with their release and since when (`release_queue`); SetReleaseQueue keeps that list;
 //   - the patrol digest carries release-queue-aged when the oldest item waits too long or too many wait (DigestBuilder);
