@@ -150,6 +150,14 @@ $SuiteDefs = @(
         Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
             runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = '__FAKE_URL__'; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
                 agent = 'codex'; perHostCapacity = 1; overflowRoles = @('qc'); overflowMax = 1; maxConcurrent = 10; maxExecutionsPerDay = 1000; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 30; listSeconds = 1; reportGraceSeconds = 2 } } } }
+    # the on-demand manager through the octopus runtime (octopus.ps1, octopus-runbook-runtime.md 3.1): runtimes.octopus.roles names supervisor, the
+    # Copilot runtime is off, supervisor may overflow (one at a time), a question is late after 3 s, a 15 s cooldown
+    @{ Name = 'octopus-manager'; Policy = 'auto'; Set = $OctopusManagerScenarios; Env = 'octopus'; Timing = @{ staleItemMinutes = 600; continueMinutes = 0; sessionEndGraceSeconds = 3; ratePerMinute = 100000; pairPer10Min = 100000 }
+        Extra = @{ ownerSessions = $true; messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+            manager = @{ enabled = $true; allowedNames = @('supervisor'); allowedAskers = @('alice', 'bob'); answerSlaSeconds = 3; turnBudgetPerHour = 100; turnBudgetPerDay = 1000; stepBudgetPerHour = 1000 }
+            api = @{ copilot = @{ listSeconds = 1; manager = @{ enabled = $true; maxPerDay = 3; cooldownMinutes = 0.25; maxMinutes = 1 } } }
+            runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = '__FAKE_URL__'; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
+                agent = 'codex'; perHostCapacity = 1; roles = @('supervisor'); overflowRoles = @('supervisor', 'qc'); overflowMax = 1; maxConcurrent = 10; maxExecutionsPerDay = 1000; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 30; listSeconds = 1; reportGraceSeconds = 2 } } } }
 )
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
 if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }

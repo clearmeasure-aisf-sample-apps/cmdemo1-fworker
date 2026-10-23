@@ -136,6 +136,7 @@ locals {
     "Fworker.Phase"        = "Board phase of the item"
     "Fworker.ModelProfile" = "Model profile the gateway chose"
     "Fworker.Nonce"        = "One-time nonce the worker redeems at the gateway"
+    "Fworker.Role"         = "Short role (supervisor, qc, operator); empty for an own-item worker"
   }
 
   # String settings with defaults (overridable per environment in the portal)
@@ -309,7 +310,7 @@ resource "octopusdeploy_variable" "prompted" {
   prompt {
     label       = each.key
     description = each.value
-    is_required = each.key != "Fworker.Phase" && each.key != "Fworker.ModelProfile"
+    is_required = !contains(["Fworker.Phase", "Fworker.ModelProfile", "Fworker.Role"], each.key)
     display_settings {
       control_type = "SingleLineText"
     }

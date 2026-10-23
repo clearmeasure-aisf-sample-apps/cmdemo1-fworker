@@ -41,7 +41,11 @@ sealed class ManagerCopilotSettings
 sealed class ManagerCopilot
 {
     readonly ManagerCopilotSettings cfg;
-    readonly CopilotCloudRuntime runtime;
+    readonly CopilotCloudRuntime? runtime;
+    // the octopus runtime, when runtimes.octopus.roles names "supervisor" (docs/design/octopus-runbook-runtime.md 3.1): the task is a runbook run
+    // of role supervisor (Fworker.Role), which may overflow to the Hosted Ubuntu pool; its container redeems its nonce for the role token (RoleToken)
+    readonly RuntimeManager? octopus;
+    public const string OctopusRole = "supervisor";
     readonly CopilotCodes codes;
     readonly Plant plant;
     readonly Func<string, long, string> mint;       // name, expiry -> the task's role token (role manager)
@@ -55,8 +59,19 @@ sealed class ManagerCopilot
     JsonObject? usage;
     Channel<(long, string)>? slot;
 
-    public ManagerCopilot(ManagerCopilotSettings cfg, CopilotCloudRuntime runtime, CopilotCodes codes, Plant plant, Func<string, long, string> mint, Func<string, string> prompt, Func<string, Task> revoke)
-    { this.cfg = cfg; this.runtime = runtime; this.codes = codes; this.plant = plant; this.mint = mint; this.prompt = prompt; this.revoke = revoke; }
+    public ManagerCopilot(ManagerCopilotSettings cfg, CopilotCloudRuntime? runtime, CopilotCodes codes, Plant plant, Func<string, long, string> mint, Func<string, string> prompt, Func<string, Task> revoke, RuntimeManager? octopus = null)
+    {
+        if (runtime == null && octopus == null) throw new ArgumentException("the manager needs the Copilot runtime or the octopus runtime");
+        this.cfg = cfg; this.runtime = runtime; this.codes = codes; this.plant = plant; this.mint = mint; this.prompt = prompt; this.revoke = revoke; this.octopus = octopus;
+    }
+
+    public string Runtime => octopus != null ? "octopus" : "copilot-cloud";
+    // the role token of the octopus task that runs now, for the redeem of its nonce (Program.cs /api/v1/runtime/redeem); null for any other name
+    public string? RoleToken(string who)
+    {
+        lock (gate) if (octopus == null || !running || name != who) return null;
+        return mint(who, DateTimeOffset.UtcNow.AddSeconds(cfg.MaxMinutes * 60 + 300).ToUnixTimeSeconds());
+    }
 
     public bool Enabled => cfg.Enabled;
     public bool Running { get { lock (gate) return running; } }
@@ -104,12 +119,13 @@ sealed class ManagerCopilot
 
     async Task Launch(string why, CancellationToken ct)
     {
+        if (octopus != null) { await LaunchOctopus(why); return; }
         var nm = "mgr-cop-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(3)).ToLowerInvariant();
         var (ok, active, _, ch, _) = plant.RegisterSupervisor(nm, "copilot-auto", "", 0);
         if (!ok || ch == null) { lock (gate) { lastError = "supervisor-active:" + active; lastEnd = DateTime.UtcNow; } return; }
         var expires = DateTimeOffset.UtcNow.AddSeconds(cfg.MaxMinutes * 60 + 300).ToUnixTimeSeconds();
         var code = codes.Mint(nm, mint(nm, expires), TimeSpan.FromMinutes(Math.Max(2, cfg.MaxMinutes)));
-        var (lok, id, link, err) = await runtime.LaunchRole(prompt(code), ct);
+        var (lok, id, link, err) = await runtime!.LaunchRole(prompt(code), ct);
         if (!lok)
         {
             codes.Forget(nm); plant.DisconnectSupervisor(ch); ch.Writer.TryComplete(); plant.SupervisorEnded(nm);
@@ -129,10 +145,44 @@ sealed class ManagerCopilot
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-launched", ["name"] = nm, ["task"] = id, ["why"] = why, ["url"] = link }.ToJsonString());
     }
 
+    // The octopus path: one runbook run of role supervisor, named by the manager, item 0. The slot is the manager's before the run is asked for, so
+    // the container's redeem (RoleToken) and its first /mcp call find it running. No host and no overflow slot: no launch, a cooldown, no failure.
+    async Task LaunchOctopus(string why)
+    {
+        var rt = octopus!;
+        var (can, code) = rt.CanStart();
+        if (!can) { lock (gate) { lastReason = code; lastError = code; } return; }
+        var nm = "mgr-oct-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(3)).ToLowerInvariant();
+        var (ok, active, _, ch, _) = plant.RegisterSupervisor(nm, "octopus", "", 0);
+        if (!ok || ch == null) { lock (gate) { lastError = "supervisor-active:" + active; lastEnd = DateTime.UtcNow; } return; }
+        var (entries, _, _) = plant.ManagerWork();
+        lock (gate)
+        {
+            name = nm; taskId = ""; url = ""; running = true; started = DateTime.UtcNow; lastLaunch = started; usage = null; lastStatus = "Starting"; lastError = ""; minutes = 0; slot = ch;
+        }
+        var t = rt.Begin(0, "patrol", "", OctopusRole, nm);
+        await rt.Provision(t);
+        if (!rt.Alive(nm))
+        {
+            plant.DisconnectSupervisor(ch); ch.Writer.TryComplete(); plant.SupervisorEnded(nm);
+            lock (gate) { running = false; slot = null; name = ""; lastError = "octopus-not-started"; lastEnd = DateTime.UtcNow; lastStatus = "not-started"; }
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "octopus-launch-failed", ["name"] = nm }.ToJsonString());
+            return;
+        }
+        lock (gate)
+        {
+            taskId = rt.ExecutionOf(nm); url = rt.UrlOf(nm); lastStatus = "Running"; launches++; launchedAt.Add(started);
+            seen.Clear(); foreach (var e in entries) seen[e.Key] = e.Bucket;
+        }
+        _ = Task.Run(async () => { try { await foreach (var _ in ch.Reader.ReadAllAsync()) { } } catch { } });
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "octopus-launched", ["name"] = nm, ["task"] = taskId, ["why"] = why, ["url"] = url }.ToJsonString());
+    }
+
     async Task Follow(string who, string id, CancellationToken ct)
     {
         string status = "Running"; string link = ""; JsonObject? use = null; var read = false;
-        try { (read, status, link, use) = await runtime.ReadRole(id, ct); }
+        if (octopus != null) { read = true; status = octopus.Alive(who) ? "Running" : "Succeeded"; link = octopus.UrlOf(who); }
+        else try { (read, status, link, use) = await runtime!.ReadRole(id, ct); }
         catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"manager copilot: read: {e.GetType().Name}"); }
         bool over;
         lock (gate)
@@ -159,7 +209,8 @@ sealed class ManagerCopilot
         plant.SupervisorEnded(who);
         try { await revoke(who); } catch (Exception e) { Console.Error.WriteLine($"manager copilot: revoke: {e.GetType().Name}"); }
         // the usage the sessions report is read once more after the end, for the log and /status
-        try { var (rd, _, l2, u2) = await runtime.ReadRole(id, CancellationToken.None); if (rd) { lock (gate) { if (u2 != null) usage = use = u2; if (l2 != "") url = link = l2; } } } catch { }
+        if (octopus != null) { try { await octopus.Deprovision(who, reason); } catch (Exception e) { Console.Error.WriteLine($"manager octopus: stop: {e.GetType().Name}"); } }
+        else try { var (rd, _, l2, u2) = await runtime!.ReadRole(id, CancellationToken.None); if (rd) { lock (gate) { if (u2 != null) usage = use = u2; if (l2 != "") url = link = l2; } } } catch { }
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-ended", ["name"] = who, ["task"] = id, ["reason"] = reason, ["minutes"] = minutes, ["usage"] = use?.DeepClone(), ["url"] = link }.ToJsonString());
     }
 
@@ -171,7 +222,7 @@ sealed class ManagerCopilot
             var now = DateTime.UtcNow;
             return new JsonObject
             {
-                ["enabled"] = cfg.Enabled, ["present"] = running, ["running"] = running, ["task"] = running || taskId != "" ? taskId : null, ["url"] = url == "" ? null : url,
+                ["enabled"] = cfg.Enabled, ["runtime"] = Runtime, ["present"] = running, ["running"] = running, ["task"] = running || taskId != "" ? taskId : null, ["url"] = url == "" ? null : url,
                 ["launches"] = launches, ["today"] = launchedAt.Count(t => (now - t).TotalHours < 24), ["maxPerDay"] = cfg.MaxPerDay, ["cooldownMinutes"] = cfg.CooldownMinutes, ["maxMinutes"] = cfg.MaxMinutes,
                 ["last"] = lastLaunch == default ? null : lastLaunch.ToString("o"), ["lastEnd"] = lastEnd == default ? null : lastEnd.ToString("o"),
                 ["minutes"] = running ? Math.Round((now - started).TotalMinutes, 1) : minutes, ["status"] = lastStatus, ["usage"] = usage?.DeepClone(), ["next"] = lastReason, ["error"] = lastError == "" ? null : lastError

@@ -4,8 +4,11 @@
 
 $OctLabels = @('factory worker', 'Auto Merge', 'runtime:octopus')
 function Oct-State { Fake 'octo' }
-function Oct-Runs([string]$Runbook, [int]$Item = 0) { , @((Oct-State).runs | Where-Object { $_.runbook -eq $Runbook -and ($Item -eq 0 -or "$($_.values.Item)" -eq "$Item") }) }
+function Oct-Runs([string]$Runbook, [int]$Item = 0) { , @((Oct-State).runs | Where-Object { $_.runbook -eq $Runbook -and ($Item -eq 0 -or ($_.PSObject.Properties['values'] -and $_.values -and $_.values.PSObject.Properties['Item'] -and "$($_.values.Item)" -eq "$Item")) }) }
 function Oct-Status { (Get-Plant).runtimes.octopus }
+# StrictMode-safe lookups: a run's Fworker.Role (a run may carry no values), the manager's block of /status (absent without the manager)
+function Oct-RoleOf($Run) { $v = $Run.PSObject.Properties['values']; if ($null -eq $v -or $null -eq $v.Value) { return '' }; $r = $v.Value.PSObject.Properties['Role']; if ($null -eq $r) { '' } else { "$($r.Value)" } }
+function Oct-Mgr { $p = Get-Plant; $m = $p.PSObject.Properties['manager']; if ($null -eq $m -or $null -eq $m.Value) { return $null }; $c = $m.Value.PSObject.Properties['copilot']; if ($null -eq $c) { $null } else { $c.Value } }
 function Oct-Host([string]$Method, [string]$Path, $Body = $null, [string]$Token = $env:FACTORY_OCTOPUS_HOST_TOKEN) {
     $h = @{}; if ($Token) { $h.Authorization = "Bearer $Token" }
     $p = @{ Uri = "http://127.0.0.1:$($script:ApiPort)$Path"; Method = $Method; Headers = $h; SkipHttpErrorCheck = $true; StatusCodeVariable = 'sc' }
@@ -229,6 +232,58 @@ $OctopusScenarios = [ordered]@{
         Restart-Gateway
         Start-Sleep -Seconds 3
         Check 'a worker whose Stop run is newer than its Start is not adopted' (@((Oct-Status).executions | Where-Object { $_.worker -eq $name }).Count -eq 0) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
+    } finally { Oct-Cleanup @($n) }
+}
+
+# the default configuration (runtimes.octopus.roles unset): nothing but own-item workers is routed to the runtime
+'octopus: by default no role is routed to the runtime: roles is empty and the on-demand manager is not started through it' = {
+    $st = Oct-Status
+    Check 'status: runtimes.octopus.roles is empty' ($null -ne $st.PSObject.Properties['roles'] -and @($st.roles).Count -eq 0) ($st | ConvertTo-Json -Compress -Depth 4)
+    Check 'no on-demand manager runs on this gateway' ($null -eq (Oct-Mgr))
+    Check 'no run was ever made for role supervisor' (@((Oct-State).runs | Where-Object { (Oct-RoleOf $_) -eq 'supervisor' }).Count -eq 0)
+}
+}
+
+# Suite 'octopus-manager' (run.ps1): runtimes.octopus.roles = [supervisor], the Copilot runtime off, overflowRoles [supervisor, qc], overflowMax 1.
+$OctopusManagerScenarios = [ordered]@{
+
+'octopus manager: a late question starts the manager as a runbook run of role supervisor; no host has room, so it overflows held; its nonce redeems for the manager token; a revoke cancels it and frees the slot' = {
+    $nm = ''
+    try {
+        Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a'; health = 'Unavailable' }, @{ id = 'Machines-2'; name = 'host-b'; disabled = $true })
+        $m0 = (Oct-Mgr)
+        Check 'status: the manager is on, through the octopus runtime, idle' ($m0.enabled -eq $true -and $m0.runtime -eq 'octopus' -and $m0.present -eq $false) ($m0 | ConvertTo-Json -Compress)
+        $q = Msg-Post '/api/v1/messages' @{ type = 'question'; text = 'Which file holds the vendor email check?' } (Msg-Token 'alice')
+        Check 'a worker question is accepted' ($q.status -lt 300) ($q | ConvertTo-Json -Compress)
+        Check 'one Start worker (overflow) run is made for role supervisor' (Wait-Until -Seconds 40 { @((Oct-Runs 'Start worker (overflow)') | Where-Object { (Oct-RoleOf $_) -eq 'supervisor' }).Count -eq 1 }) ((Oct-State).runs | ConvertTo-Json -Compress -Depth 5)
+        $r = @((Oct-Runs 'Start worker (overflow)') | Where-Object { (Oct-RoleOf $_) -eq 'supervisor' })[0]; $nm = "$($r.values.Name)"
+        Check 'held, on no machine, item 0, named mgr-oct-<6 hex>' ($r.values.Mode -eq 'held' -and @($r.machines).Count -eq 0 -and "$($r.values.Item)" -eq '0' -and $nm -match '^mgr-oct-[0-9a-f]{6}$') ($r | ConvertTo-Json -Compress -Depth 5)
+        Check 'no Start worker run on a host for it' (@((Oct-Runs 'Start worker') | Where-Object { $_.values.Name -eq $nm }).Count -eq 0)
+        $m = (Oct-Mgr)
+        Check 'status: present, the task is the server task' ($m.present -eq $true -and $m.task -eq $r.task -and $m.launches -eq 1) ($m | ConvertTo-Json -Compress)
+        Check 'status: the overflow slot is in use' ((Oct-Status).overflowInUse -eq 1)
+        $x = Rt-Redeem "$($r.values.Nonce)"
+        Check 'the nonce redeems for a role token of role manager, not a w2' ($x.status -eq 200 -and $x.body.name -eq $nm -and $x.body.role -eq 'manager' -and "$($x.body.token)" -like 'r1.*') ($x | ConvertTo-Json -Compress)
+        $names = Mcp-ToolNames "$($x.body.token)"
+        Check 'the token reaches the manager tools' ($names -contains 'manager_digest' -and -not ($names -contains 'item_accept')) ($names -join ',')
+        Check 'the nonce is spent' ((Rt-Redeem "$($r.values.Nonce)").status -eq 401)
+        $cancels = (Oct-State).cancels
+        [void](Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/workers/$nm/revoke" -Method POST -Headers @{ Authorization = 'Bearer test-token' })
+        Check 'the revoke cancels the held task' (Wait-Until -Seconds 20 { (Oct-State).cancels -ge $cancels + 1 -and @((Oct-State).runs | Where-Object { $_.task -eq $r.task -and $_.state -eq 'Canceled' }).Count -eq 1 })
+        Check 'the manager is no longer present and the slot is free' (Wait-Until -Seconds 30 { (Oct-Mgr).present -eq $false -and (Oct-Status).overflowInUse -eq 0 }) ((Oct-Mgr) | ConvertTo-Json -Compress)
+    } finally { Oct-Cleanup @() }
+}
+
+'octopus manager: a coding worker still never overflows, though supervisor may' = {
+    $n = 0
+    try {
+        Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a'; health = 'Unavailable' })
+        $before = (Oct-Runs 'Start worker (overflow)').Count
+        $n = New-Item-Fake 'Octopus manager coding' 'x' $OctLabels
+        Check 'the item waits for capacity' (Wait-Until -Seconds 40 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=waiting ' -and $_.body -match 'runtime-no-capacity' }).Count -ge 1 })
+        Check 'no overflow run for the item' ((Oct-Runs 'Start worker (overflow)' $n).Count -eq 0 -and (Oct-Runs 'Start worker (overflow)').Count -eq $before)
+        [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9021; phase = 'Development'; role = 'development' })
+        Check 'nor for a coding role given explicitly' ((Oct-Runs 'Start worker (overflow)' 9021).Count -eq 0)
     } finally { Oct-Cleanup @($n) }
 }
 }

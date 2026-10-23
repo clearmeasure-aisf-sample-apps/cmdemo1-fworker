@@ -26,6 +26,10 @@ sealed class OctopusRunbookSettings
     public double AckSeconds = 600, ListSeconds = 30, ReportGraceSeconds = 90;
     // the roles that may overflow to the Hosted Ubuntu pool; a coding role is refused whatever this list says (CodingRoles)
     public List<string> OverflowRoles = new() { "plant-manager", "supervisor", "qc", "operator" };
+    // the short roles the gateway starts through this runtime instead of their default (runtimes.octopus.roles; today "supervisor", the on-demand
+    // plant manager of ManagerCopilot.cs). Default empty: nothing is routed here. A coding role is never one of them (CodingRoles).
+    public List<string> Roles = new();
+    public bool RunsRole(string role) { var r = role.Trim().ToLowerInvariant().Replace(' ', '-'); return r != "" && Roles.Contains(r) && !CodingRoles.Contains(r); }
     public static readonly string[] CodingRoles = { "worker", "development", "coding", "own-item" };
     public static readonly string[] Agents = { "claude", "cursor", "codex" };
     public string ApiKey = "", HostToken = "";
@@ -54,6 +58,7 @@ sealed class OctopusRunbookSettings
             s.ServiceAccountId = S("serviceAccountId", "").Trim(); s.OidcAudience = S("oidcAudience", s.OidcAudience).Trim();
             s.ManagedIdentityClientId = S("managedIdentityClientId", "").Trim();
             if (c["overflowRoles"] is JsonArray roles) s.OverflowRoles = roles.Select(x => x?.ToString().Trim().ToLowerInvariant() ?? "").Where(x => x != "").ToList();
+            if (c["roles"] is JsonArray rr) s.Roles = rr.Select(x => x?.ToString().Trim().ToLowerInvariant() ?? "").Where(x => x != "").ToList();
         }
         s.ApiKey = get("OCTOPUS_RUNBOOK_API_KEY")?.Trim() ?? "";
         s.HostToken = get("FACTORY_OCTOPUS_HOST_TOKEN")?.Trim() ?? "";
@@ -279,7 +284,9 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         var values = new Dictionary<string, string>
         {
             ["Fworker.Name"] = r.WorkerName, ["Fworker.Item"] = r.Item.ToString(CultureInfo.InvariantCulture), ["Fworker.Phase"] = r.Phase, ["Fworker.ModelProfile"] = r.ModelProfile,
-            ["Fworker.Nonce"] = r.Nonce, ["Fworker.Agent"] = cfg.Agent, ["Fworker.Mode"] = mode
+            ["Fworker.Nonce"] = r.Nonce, ["Fworker.Agent"] = cfg.Agent, ["Fworker.Mode"] = mode,
+            // sent only where the runbook prompts for it (Run keeps the form's variables): "" for an own-item worker
+            ["Fworker.Role"] = r.Role
         };
         var (status, task) = await Run(rb.Id, rb.Snapshot, pick?.Id, values, ct);
         if (status is not (200 or 201) || task == "") { lock (gate) recs.Remove(r.WorkerName); return new(false, "", $"runbook-run-{status}"); }
@@ -479,7 +486,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
             return new JsonObject
             {
                 ["perHostCapacity"] = cfg.PerHostCapacity, ["overflowMax"] = cfg.OverflowMax, ["auth"] = cfg.Auth, ["serviceAccountId"] = cfg.ServiceAccountId, ["exchanges"] = exchanges, ["overflowInUse"] = recs.Values.Count(x => x.Ended == null && x.Mode == "held"),
-                ["overflowRoles"] = new JsonArray(cfg.OverflowRoles.Select(x => (JsonNode)x).ToArray()), ["hostTokenSet"] = cfg.HostToken != "",
+                ["overflowRoles"] = new JsonArray(cfg.OverflowRoles.Select(x => (JsonNode)x).ToArray()), ["roles"] = new JsonArray(cfg.Roles.Select(x => (JsonNode)x).ToArray()), ["hostTokenSet"] = cfg.HostToken != "",
                 ["hosts"] = new JsonArray(reports.Select(kv => (JsonNode)new JsonObject { ["machine"] = kv.Key, ["name"] = machineNames.GetValueOrDefault(kv.Key, ""), ["reportedAt"] = kv.Value.At.ToString("o"), ["containers"] = kv.Value.Containers.Count }).ToArray())
             };
     }

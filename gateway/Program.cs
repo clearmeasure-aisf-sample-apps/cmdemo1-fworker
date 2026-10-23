@@ -1244,6 +1244,8 @@ app.MapPost("/api/v1/runtime/redeem", async (HttpContext ctx) =>
         return Results.Json(new { ok = false, code = "unauthorized", reason = "unknown, spent or expired nonce", exit = 30 }, statusCode: 401);
     }
     Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "redeemed", ["worker"] = name, ["kind"] = rt, ["expires"] = expires }.ToJsonString());
+    // a short role started through the runtime (the on-demand manager on octopus): its container gets the role token of that role, not a w2
+    if (managerCopilot?.RoleToken(name!) is { } roleToken) return Results.Json(new { ok = true, name, runtime = rt, role = "manager", expires, token = roleToken, exit = 0 });
     return Results.Json(new { ok = true, name, runtime = rt, expires, token = Auth.WorkerToken2(tokenSecret, name, rt, expires, revocations.Of(name)), exit = 0 });
 });
 
@@ -2344,20 +2346,23 @@ if (cursorRuntime != null && cursorManager != null)
     StartOwnerWatch(cursorRuntime, cursorManager, cursorSettings.OwnerWatchSeconds, null);
 }
 // The plant manager on demand: one short Copilot task for the manager role when the digest holds something that needs a judgement and no supervisor
-// is present (api.copilot.manager, docs/design/agents-roles-launch.md). Enabled only where the configuration says so.
-if (copilotRuntime != null && ownerMode && messaging.ManagerEnabled && messaging.Enabled)
+// is present (api.copilot.manager, docs/design/agents-roles-launch.md). Enabled only where the configuration says so. With runtimes.octopus.roles
+// naming "supervisor" and the octopus runtime on, the task is a runbook run of role supervisor instead (octopus-runbook-runtime.md 3.1).
+var managerOctopus = octopusManager != null && runtimeSettings.Octopus.RunsRole(ManagerCopilot.OctopusRole) ? octopusManager : null;
+if ((copilotRuntime != null || managerOctopus != null) && ownerMode && messaging.ManagerEnabled && messaging.Enabled)
 {
     var mgrCopSettings = ManagerCopilotSettings.Load(scriptsDir, Environment.GetEnvironmentVariable, copilotSettings.Environment);
-    managerCopilot = new ManagerCopilot(mgrCopSettings, copilotRuntime, copilotCodes, plant,
-        (name, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "manager", "api", "copilot-cloud-agent", Auth.Environment, expires, 0, "", "patrol"), revocations.Of(name)),
+    var mgrAgent = managerOctopus != null ? "octopus-" + runtimeSettings.Octopus.Agent : "copilot-cloud-agent";
+    managerCopilot = new ManagerCopilot(mgrCopSettings, managerOctopus != null ? null : copilotRuntime, copilotCodes, plant,
+        (name, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "manager", "api", mgrAgent, Auth.Environment, expires, 0, "", "patrol"), revocations.Of(name)),
         code =>
         {
             var bp = prompts.ByPath("bootstrap/copilot-manager.md");
             var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
             return text + $"\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
         },
-        async name => { await RevokeName(name, "runtime"); });
-    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-config", ["enabled"] = mgrCopSettings.Enabled, ["maxPerDay"] = mgrCopSettings.MaxPerDay, ["cooldownMinutes"] = mgrCopSettings.CooldownMinutes, ["maxMinutes"] = mgrCopSettings.MaxMinutes }.ToJsonString());
+        async name => { await RevokeName(name, "runtime"); }, managerOctopus);
+    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-config", ["runtime"] = managerCopilot.Runtime, ["enabled"] = mgrCopSettings.Enabled, ["maxPerDay"] = mgrCopSettings.MaxPerDay, ["cooldownMinutes"] = mgrCopSettings.CooldownMinutes, ["maxMinutes"] = mgrCopSettings.MaxMinutes }.ToJsonString());
     _ = Task.Run(async () =>
     {
         var ct = app.Lifetime.ApplicationStopping;

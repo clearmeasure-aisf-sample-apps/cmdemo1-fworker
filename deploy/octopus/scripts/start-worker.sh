@@ -15,7 +15,7 @@ ov() {
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
 name=$(ov Fworker.Name); item=$(ov Fworker.Item); phase=$(ov Fworker.Phase); profile=$(ov Fworker.ModelProfile)
-nonce=$(ov Fworker.Nonce); agent=$(ov Fworker.Agent); mode=$(ov Fworker.Mode)
+nonce=$(ov Fworker.Nonce); agent=$(ov Fworker.Agent); mode=$(ov Fworker.Mode); role=$(ov Fworker.Role)
 gateway=$(ov Fworker.GatewayUrl); image=$(ov Fworker.Image)
 cpus=$(ov Fworker.Cpus); memory=$(ov Fworker.Memory); timeout=$(ov Fworker.StartTimeoutSeconds)
 # the overflow runbook prepends FWORKER_MODE_FORCE=held (a dynamic worker must not leave a container behind)
@@ -26,6 +26,7 @@ agent=${agent:-claude}; mode=${mode:-detached}; cpus=${cpus:-2}; memory=${memory
 [[ "$item" =~ ^[0-9]{1,9}$ ]] || fail "Fworker.Item must be a whole number"
 [[ "$phase" =~ ^[A-Za-z0-9._-]{0,40}$ ]] || fail "Fworker.Phase has characters outside [A-Za-z0-9._-]"
 [[ "$profile" =~ ^[A-Za-z0-9._-]{0,60}$ ]] || fail "Fworker.ModelProfile has characters outside [A-Za-z0-9._-]"
+[[ "$role" =~ ^[a-z0-9-]{0,40}$ ]] || fail "Fworker.Role must match ^[a-z0-9-]{0,40}\$"
 [[ "$nonce" =~ ^[A-Za-z0-9_.~-]{1,200}$ ]] || fail "Fworker.Nonce is missing or has characters outside [A-Za-z0-9_.~-]"
 case "$agent" in claude) keyVar=ANTHROPIC_API_KEY; keyName=Fworker.AnthropicApiKey ;; cursor) keyVar=CURSOR_API_KEY; keyName=Fworker.CursorApiKey ;;
     codex) keyVar=OPENAI_API_KEY; keyName=Fworker.OpenAiApiKey ;; *) fail "Fworker.Agent must be claude, cursor or codex" ;; esac
@@ -66,7 +67,7 @@ envFile=$(mktemp); chmod 600 "$envFile"
     printf 'FWORKER_NONCE=%s\n' "$nonce"
     printf 'FWORKER_NAME=%s\nFWORKER_ITEM=%s\nFWORKER_PHASE=%s\nFWORKER_MODEL_PROFILE=%s\n' "$name" "$item" "$phase" "$profile"
     printf 'FWORKER_RUNTIME=octopus\nFWORKER_GATEWAY_URL=%s\n' "$gateway"
-    printf 'FWRUNNER_AGENT=%s\nFWRUNNER_AUTH=key\nFWRUNNER_RUNTIME=octopus-host\n' "$agent"
+    printf 'FWRUNNER_AGENT=%s\nFWRUNNER_AUTH=key\nFWRUNNER_RUNTIME=octopus-host\nFWRUNNER_ROLE=%s\n' "$agent" "$role"
     printf '%s=%s\n' "$keyVar" "$key"
 } > "$envFile"
 # the label carries the nonce so the gateway can tell this start from an older one; the nonce is single use and spent at the redeem
