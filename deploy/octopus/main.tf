@@ -306,13 +306,11 @@ resource "octopusdeploy_variable" "prompted" {
   type     = "String"
   name     = each.key
   value    = ""
-  scope {
-    processes = [octopusdeploy_process.start.id, octopusdeploy_process.start_overflow.id, octopusdeploy_process.stop.id]
-  }
   prompt {
     label       = each.key
     description = each.value
-    # never required: a scheduled Reconcile hosts run sends no values, and Stop worker sends no nonce; the scripts validate what they use
+    # never required and not scoped (Octopus offers no prompt scoped to a runbook process): a scheduled Reconcile hosts run sends no values,
+    # Stop worker sends no nonce; the scripts validate what they use
     is_required = false
     display_settings {
       control_type = "SingleLineText"
@@ -325,9 +323,6 @@ resource "octopusdeploy_variable" "agent" {
   type     = "String"
   name     = "Fworker.Agent"
   value    = var.default_agent
-  scope {
-    processes = [octopusdeploy_process.start.id, octopusdeploy_process.start_overflow.id, octopusdeploy_process.stop.id]
-  }
   prompt {
     label       = "Fworker.Agent"
     description = "Coding CLI of the worker"
@@ -355,9 +350,6 @@ resource "octopusdeploy_variable" "mode" {
   type     = "String"
   name     = "Fworker.Mode"
   value    = "detached"
-  scope {
-    processes = [octopusdeploy_process.start.id, octopusdeploy_process.start_overflow.id, octopusdeploy_process.stop.id]
-  }
   prompt {
     label       = "Fworker.Mode"
     description = "detached: start and exit; held: the task runs as long as the container"

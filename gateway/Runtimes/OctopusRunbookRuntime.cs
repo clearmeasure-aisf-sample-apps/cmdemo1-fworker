@@ -300,7 +300,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         foreach (var (k, v) in values) vars[k] = v;
         var body = new JsonObject
         {
-            ["SpaceId"] = cfg.SpaceId, ["ProjectName"] = cfg.Project, ["RunbookName"] = runbookName, ["EnvironmentNames"] = new JsonArray(cfg.Environment),
+            ["SpaceIdOrName"] = cfg.SpaceId, ["ProjectName"] = cfg.Project, ["RunbookName"] = runbookName, ["EnvironmentNames"] = new JsonArray(cfg.Environment),
             ["Variables"] = vars,
             ["SpecificMachineNames"] = string.IsNullOrEmpty(machineName) ? new JsonArray() : new JsonArray(machineName)
         };
