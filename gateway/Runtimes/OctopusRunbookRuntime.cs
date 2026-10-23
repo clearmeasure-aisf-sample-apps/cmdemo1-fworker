@@ -516,13 +516,25 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
 
     // Under gate. Runs started through runbook-runs/create/v1 keep FormValues {}, so the restart rebuild cannot read their workers back: the host's
     // report is the source of truth for its detached containers. A running fw-<name> without a record becomes one (start task done, phase
-    // unknown ""), only after the rebuild (so nothing is adopted twice) and only up to perHostCapacity per host.
+    // unknown ""), only after the rebuild (so nothing is adopted twice).
+    // Adoption rule (2026-10-23, a live worker beyond perHostCapacity was removed after a restart):
+    //  - every such container is adopted, also beyond perHostCapacity (which limits new starts only); AdoptCeiling only bounds what a
+    //    host-token holder can make us adopt;
+    //  - a name with a record (running, stop asked, or ended: kept ~1 h) is never adopted again, so a worker the gateway ended is still in `stop`;
+    //  - only containers unknown because of the restart: in the host's first report after the rebuild (all it ran across the restart), or later
+    //    when the container's startedAt is before AdoptWindow after the process start (a start run in flight across the restart). A container
+    //    without a record that appears later in steady state (or with no startedAt after the first report) is a stray: not adopted, stopped.
+    const int AdoptCeiling = 20;
+    static readonly TimeSpan AdoptWindow = TimeSpan.FromMinutes(10);
+    readonly DateTime processStart = DateTime.UtcNow;
+    readonly HashSet<string> adoptedFirst = new(StringComparer.OrdinalIgnoreCase);
     void AdoptReported(string m, Dictionary<string, Container> d)
     {
+        var first = adoptedFirst.Add(m);
         var onHost = recs.Values.Count(x => x.Ended == null && x.Mode == "detached" && string.Equals(x.Machine, m, StringComparison.OrdinalIgnoreCase));
-        foreach (var c in d.Values.Where(c => c.State == "running" && !recs.ContainsKey(c.Name)).OrderBy(c => c.StartedAt ?? DateTime.MaxValue).ThenBy(c => c.Name, StringComparer.Ordinal))
+        foreach (var c in d.Values.Where(c => c.State == "running" && !recs.ContainsKey(c.Name) && (first || c.StartedAt < processStart + AdoptWindow)).OrderBy(c => c.StartedAt ?? DateTime.MaxValue).ThenBy(c => c.Name, StringComparer.Ordinal))
         {
-            if (onHost >= cfg.PerHostCapacity) { Console.WriteLine($"octopus: not adopting {c.Name} on {m}: host at capacity {cfg.PerHostCapacity}"); continue; }
+            if (onHost >= AdoptCeiling) { Console.WriteLine($"octopus: not adopting {c.Name} on {m}: {AdoptCeiling} workers already on the host"); continue; }
             recs[c.Name] = new Rec
             {
                 Name = c.Name, Item = c.Item, Phase = "", Machine = m, MachineName = machineNames.GetValueOrDefault(m, ""), Mode = "detached", State = "Success",
