@@ -52,8 +52,20 @@ if [ -n "$ghcrUser" ] && [ -n "$ghcrToken" ]; then
 fi
 unset ghcrToken
 
+# disk first: an ended worker keeps its clone and build output (several GB) until something removes it, and the new one needs the room.
+# Ended fw-* containers go (their last 20 log lines into this task's log), then images no container uses (the previous fworker-host
+# versions left by each pull of :latest)
+while IFS=$'\t' read -r old oldState; do
+    [ -n "$old" ] || continue
+    case "$oldState" in running|restarting|paused) continue ;; esac   # never a live one, whatever the filter returned
+    echo "Removing ended $old ($oldState); last 20 log lines:"
+    docker logs --tail 20 "$old" 2>&1 | sed 's/^/    /' || true
+    docker rm -f "$old" > /dev/null || echo "WARNING: could not remove $old" >&2
+done < <(docker ps -a --filter name='^fw-' --filter status=exited --filter status=dead --format '{{.Names}}\t{{.State}}')
+
 DOCKER_CONFIG="$pullConfig" docker pull --quiet "$image" > /dev/null || fail "docker pull of $image failed"
 rm -rf "$pullConfig"; pullConfig=''
+docker image prune -f > /dev/null 2>&1 || true
 
 # a container of the same name: a running one is the same worker started twice (refused); an ended one is removed
 if state=$(docker inspect --format '{{.State.Status}}' "$container" 2> /dev/null); then
