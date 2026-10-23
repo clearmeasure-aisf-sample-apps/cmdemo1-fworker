@@ -14,6 +14,8 @@ function Oct-Host([string]$Method, [string]$Path, $Body = $null, [string]$Token 
     return @{ status = [int]$sc; body = $r }
 }
 function Oct-Report([string]$HostName, [object[]]$Containers) { Oct-Host POST '/api/v1/runtime/octopus/report' @{ host = $HostName; containers = @($Containers) } }
+# every host reports (no container) once, as Reconcile hosts does: the gateway starts nothing on a host it has not heard from since its start
+function Oct-Up { foreach ($h in 'host-a', 'host-b', 'host-c') { [void](Oct-Report $h @()) } }
 function Oct-Machines([object[]]$Machines) { [void](Fake 'octo-machines' @{ machines = @($Machines) }) }
 $OctDefaultMachines = @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machines-2'; name = 'host-b' }, @{ id = 'Machines-3'; name = 'host-sick'; health = 'Unhealthy' }, @{ id = 'Machines-4'; name = 'host-uat'; env = 'Environments-12' }, @{ id = 'Machines-5'; name = 'web-1'; roles = @('web') })
 # The scenario's items are closed, both hosts report no container (every detached worker ends, gone), held tasks end, the runtime is healthy again.
@@ -36,18 +38,19 @@ function Oct-UseOidc([int]$ExpiresIn = 3600) {
     $key = $env:OCTOPUS_RUNBOOK_API_KEY; Remove-Item Env:OCTOPUS_RUNBOOK_API_KEY -ErrorAction SilentlyContinue
     Restart-Gateway
     Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machines-2'; name = 'host-b' }, @{ id = 'Machines-6'; name = 'host-c' })   # a free host for each start
+    Oct-Up
     return @{ path = $cfgPath; orig = $orig; key = $key }
 }
 function Oct-UseKey($Saved) {
     [void](Fake 'octo-oidc' @{ require = $false })
     $env:OCTOPUS_RUNBOOK_API_KEY = $Saved.key
-    Set-Content -Path $Saved.path -Value $Saved.orig -NoNewline; Restart-Gateway
+    Set-Content -Path $Saved.path -Value $Saved.orig -NoNewline; Restart-Gateway; Oct-Up
 }
 
 $OctopusScenarios = [ordered]@{
 
 'octopus: auth apiKey: without a configured auth and with OCTOPUS_RUNBOOK_API_KEY set the key is sent, no token exchange is made' = {
-    [void](Fake 'octo-oidc' @{ require = $false })
+    [void](Fake 'octo-oidc' @{ require = $false }); Oct-Up
     $st = Oct-Status
     Check 'status: auth apiKey' ($st.auth -eq 'apiKey') ($st | ConvertTo-Json -Compress -Depth 4)
     $x = Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9101; phase = 'Technical Design'; role = '' }
@@ -89,6 +92,7 @@ $OctopusScenarios = [ordered]@{
 
 'octopus: provision picks a healthy fworker-host with capacity and runs Start worker there with the prompted variables; the worker redeems and is offered; no capacity left refuses and the item waits' = {
     $a = 0; $b = 0; $c = 0; $na = ''
+    Oct-Up
     try {
         $a = New-Item-Fake 'Octopus host a' 'x' $OctLabels
         Check 'a Start worker run is made for the item' (Wait-Until -Seconds 30 { (Oct-Runs 'Start worker' $a).Count -eq 1 })
@@ -195,14 +199,14 @@ $OctopusScenarios = [ordered]@{
     $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
     try {
         $cfg = $orig | ConvertFrom-Json -AsHashtable; $cfg.runtimes.octopus.overflowRoles = @('development', 'worker', 'qc'); $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
-        Restart-Gateway
+        Restart-Gateway; Oct-Up
         Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a'; health = 'Unhealthy' })
         [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9011; phase = 'Development'; role = 'development' })
         [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9012; phase = 'Development'; role = 'worker' })
         Check 'development and worker never run on the overflow pool' ((Oct-Runs 'Start worker (overflow)').Count -eq 0)
     } finally {
         Oct-Cleanup @()
-        Set-Content -Path $cfgPath -Value $orig -NoNewline; Restart-Gateway
+        Set-Content -Path $cfgPath -Value $orig -NoNewline; Restart-Gateway; Oct-Up
     }
 }
 

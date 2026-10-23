@@ -288,8 +288,10 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         Host? pick; int overflowInUse;
         lock (gate)
         {
-            pick = hosts.Select(h => (h, n: Load(h.Id))).Where(x => x.n < cfg.PerHostCapacity).OrderBy(x => x.n).ThenBy(x => x.h.Name, StringComparer.Ordinal).Select(x => x.h).FirstOrDefault();
+            pick = hosts.Where(h => reports.ContainsKey(h.Id)).Select(h => (h, n: Load(h.Id))).Where(x => x.n < cfg.PerHostCapacity).OrderBy(x => x.n).ThenBy(x => x.h.Name, StringComparer.Ordinal).Select(x => x.h).FirstOrDefault();
             overflowInUse = recs.Values.Count(x => x.Ended == null && x.Mode == "held");
+            // a host that has not reported since the start is not offered: its running containers are adopted from its first report, and a start
+            // before that could take the slots they hold (2026-10-23: three live workers removed as beyond capacity)
             // reserve the slot before the call, so two starts at once do not pick the same last slot
             recs[r.WorkerName] = new Rec { Name = r.WorkerName, Item = r.Item, Phase = r.Phase, Machine = pick?.Id ?? "", MachineName = pick?.Name ?? "", Mode = pick != null ? "detached" : "held" };
         }
