@@ -281,14 +281,15 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
             ["Fworker.Name"] = r.WorkerName, ["Fworker.Item"] = r.Item.ToString(CultureInfo.InvariantCulture), ["Fworker.Phase"] = r.Phase, ["Fworker.ModelProfile"] = r.ModelProfile,
             ["Fworker.Nonce"] = r.Nonce, ["Fworker.Agent"] = cfg.Agent, ["Fworker.Mode"] = mode
         };
-        var (status, task) = await Run(rb.Id, rb.Snapshot, pick?.Id, values, ct);
-        if (status is not (200 or 201) || task == "") { lock (gate) recs.Remove(r.WorkerName); return new(false, "", $"runbook-run-{status}"); }
+        var (status, task, why) = await Run(rb.Id, rb.Snapshot, pick?.Id, values, ct);
+        if (status is not (200 or 201) || task == "") { lock (gate) recs.Remove(r.WorkerName); return new(false, "", $"runbook-run-{status}{why}"); }
         var url = $"{cfg.ServerUrl}/app#/{cfg.SpaceId}/tasks/{task}";
         lock (gate) if (recs.TryGetValue(r.WorkerName, out var rec)) { rec.TaskId = task; rec.Url = url; }
         return new(true, task, "", url);
     }
 
-    async Task<(int Status, string Task)> Run(string runbookId, string snapshot, string? machine, Dictionary<string, string> values, CancellationToken ct)
+    // why: the permission Octopus names in a refusal ("Missing permission: X"), never any other text of the answer
+    async Task<(int Status, string Task, string Why)> Run(string runbookId, string snapshot, string? machine, Dictionary<string, string> values, CancellationToken ct)
     {
         var ids = await Form(runbookId, ct);
         var form = new JsonObject();
@@ -299,7 +300,8 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
             ["SpecificMachineIds"] = machine != null ? new JsonArray(machine) : new JsonArray()
         };
         var (s, b) = await Send(HttpMethod.Post, Space("/runbookRuns"), body, ct);
-        return (s, b?["TaskId"]?.ToString() ?? "");
+        var miss = System.Text.RegularExpressions.Regex.Match(b?["ErrorMessage"]?.ToString() ?? "", @"Missing permission: ([A-Za-z]{1,60})");
+        return (s, b?["TaskId"]?.ToString() ?? "", miss.Success ? " missing " + miss.Groups[1].Value : "");
     }
 
     public async Task Deprovision(string workerName, string reason, CancellationToken ct)
@@ -318,7 +320,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         await Ids(ct);
         var books = await Runbooks(ct);
         if (!books.TryGetValue(cfg.StopRunbook, out var rb) || rb.Snapshot == "") { lock (gate) rec.StopAsked = false; throw new InvalidOperationException("stop runbook not published"); }
-        var (st, task) = await Run(rb.Id, rb.Snapshot, rec.Machine, new Dictionary<string, string>
+        var (st, task, _) = await Run(rb.Id, rb.Snapshot, rec.Machine, new Dictionary<string, string>
         {
             ["Fworker.Name"] = rec.Name, ["Fworker.Item"] = rec.Item.ToString(CultureInfo.InvariantCulture), ["Fworker.Phase"] = rec.Phase, ["Fworker.ModelProfile"] = "",
             ["Fworker.Nonce"] = "", ["Fworker.Agent"] = cfg.Agent, ["Fworker.Mode"] = "detached"
