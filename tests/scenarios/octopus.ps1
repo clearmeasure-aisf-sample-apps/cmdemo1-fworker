@@ -136,13 +136,13 @@ $OctopusScenarios = [ordered]@{
         Check 'a running container keeps its execution running' (@((Oct-Status).executions | Where-Object { $_.worker -eq $name -and $_.status -eq 'Running' }).Count -eq 1) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
         [void](Oct-Report 'host-a' @(@{ name = "fw-$name"; item = $n; state = 'exited' }))
         Check 'an exited container ends the execution' (Wait-Until -Seconds 20 { @((Oct-Status).last | Where-Object { $_.worker -eq $name }).Count -eq 1 }) ((Oct-Status).last | ConvertTo-Json -Compress -Depth 4)
-        Check 'and the plant plans the item again: a new Start worker run' (Wait-Until -Seconds 30 { @(Oct-Runs 'Start worker' $n | Where-Object { $_.values.Name -ne $name }).Count -ge 1 })
+        Check 'and the plant plans the item again: a new Start worker run' (Wait-Until -Seconds 30 { @((Oct-Runs 'Start worker' $n) | Where-Object { $_.values.Name -ne $name }).Count -ge 1 })
         $name2 = "$((Oct-Runs 'Start worker' $n)[-1].values.Name)"
         $host2 = "$((Oct-Runs 'Start worker' $n)[-1].machines[0])"
         [void](Oct-Report $host2 @(@{ name = "fw-$name2"; item = $n; state = 'running' }))
         Start-Sleep -Seconds 3
         [void](Oct-Report $host2 @())
-        Check 'a container gone from its host is Stopped' (Wait-Until -Seconds 20 { @((Oct-Status).last | Where-Object { $_.worker -eq $name2 -and $_.outcome -eq 'stopped' }).Count -eq 1 }) ((Oct-Status).last | ConvertTo-Json -Compress -Depth 4)
+        Check 'a container gone from its host is Stopped' (Wait-Until -Seconds 20 { [void](Oct-Report $host2 @()); @((Oct-Status).last | Where-Object { $_.worker -eq $name2 -and $_.outcome -eq 'stopped' }).Count -eq 1 }) ((Oct-Status).last | ConvertTo-Json -Compress -Depth 4)
     } finally { Oct-Cleanup @($n) }
 }
 
@@ -159,7 +159,7 @@ $OctopusScenarios = [ordered]@{
         Check 'with no nonce' ("$((@((Oct-State).runs | Where-Object { $_.runbook -eq 'Stop worker' -and $_.values.Name -eq $name }))[0].values.Nonce)" -eq '')
         Check 'desired no longer names it' (-not (@((Oct-Host GET "/api/v1/runtime/octopus/desired?host=$($run.machines[0])").body.workers) -contains $name))
         [void](Oct-Report "$($run.machines[0])" @())
-        Check 'the stopped container ends the execution as stopped by the revoke' (Wait-Until -Seconds 20 { @((Oct-Status).last | Where-Object { $_.worker -eq $name -and $_.outcome -eq 'stopped:revoked' }).Count -eq 1 }) ((Oct-Status).last | ConvertTo-Json -Compress -Depth 4)
+        Check 'the stopped container ends the execution as stopped by the revoke' (Wait-Until -Seconds 20 { [void](Oct-Report "$($run.machines[0])" @()); @((Oct-Status).last | Where-Object { $_.worker -eq $name -and $_.outcome -eq 'stopped:revoked' }).Count -eq 1 }) ((Oct-Status).last | ConvertTo-Json -Compress -Depth 4)
         Check 'one Stop worker run only' (@((Oct-State).runs | Where-Object { $_.runbook -eq 'Stop worker' -and $_.values.Name -eq $name }).Count -eq 1)
     } finally { Oct-Cleanup @($n) }
 }
