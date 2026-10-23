@@ -107,10 +107,9 @@ $OctopusScenarios = [ordered]@{
         [void](Oct-Report 'host-a' @(@{ name = "fw-$na"; item = $a; state = 'running'; startedAt = (Get-Date).ToUniversalTime().ToString('o') }))
         $b = New-Item-Fake 'Octopus host b' 'x' $OctLabels
         Check 'the second item goes to the other host (host-a is full at perHostCapacity 1)' (Wait-Until -Seconds 30 { $x = Oct-Runs 'Start worker' $b; $x.Count -eq 1 -and $x[0].machines[0] -eq 'Machines-2' }) ((Oct-State).runs | ConvertTo-Json -Compress -Depth 5)
-        $before = @((Oct-State).runs).Count
         $c = New-Item-Fake 'Octopus no capacity' 'x' $OctLabels
         Check 'the third item waits: no host has capacity and its role may not overflow' (Wait-Until -Seconds 40 { @((Get-FakeIssue $c).comments | Where-Object { $_.body -match 'plant event=waiting ' -and $_.body -match 'runtime-no-capacity' }).Count -ge 1 })
-        Check 'no run was made for it, not even on the overflow pool' (@((Oct-State).runs).Count -eq $before -and (Oct-Runs 'Start worker (overflow)').Count -eq 0)
+        Check 'no run was made for it, not even on the overflow pool' ((Oct-Runs 'Start worker' $c).Count -eq 0 -and (Oct-Runs 'Start worker (overflow)').Count -eq 0) ((Oct-State).runs | ConvertTo-Json -Compress -Depth 5)
         Check 'a refusal for capacity is no failure: the runtime stays healthy and the item has no failure' ((Oct-Status).healthy -eq $true -and @((Oct-Status).failures | Where-Object { $_.item -eq $c }).Count -eq 0) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
     } finally { Oct-Cleanup @($a, $b, $c) @($na) }
 }

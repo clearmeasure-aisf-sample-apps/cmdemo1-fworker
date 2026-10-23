@@ -182,7 +182,7 @@ sealed class RuntimeManager
         span?.SetTag("fworker.runtime", cae.Kind); span?.SetTag("fworker.worker", t.Name); span?.SetTag("fworker.item", t.Item); span?.SetTag("fworker.phase", t.Phase);
         ProvisionResult r;
         try { r = await cae.Provision(new ProvisionRequest(t.Name, t.Item, t.Phase, t.Profile, t.Nonce, t.Role), CancellationToken.None); }
-        catch (Exception e) { r = new ProvisionResult(false, "", "start-error: " + e.GetType().Name); }
+        catch (Exception e) { r = new ProvisionResult(false, "", "start-error: " + (e is HttpRequestException { Message: var m } && m.StartsWith("octopus ", StringComparison.Ordinal) ? m : e.GetType().Name)); }
         Log("provision", t.Name, t.Item, r.Ok ? r.Execution : r.Error);
         if (r.Ok)
         {

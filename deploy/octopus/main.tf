@@ -306,10 +306,14 @@ resource "octopusdeploy_variable" "prompted" {
   type     = "String"
   name     = each.key
   value    = ""
+  scope {
+    processes = [octopusdeploy_process.start.id, octopusdeploy_process.start_overflow.id, octopusdeploy_process.stop.id]
+  }
   prompt {
     label       = each.key
     description = each.value
-    is_required = each.key != "Fworker.Phase" && each.key != "Fworker.ModelProfile"
+    # never required: a scheduled Reconcile hosts run sends no values, and Stop worker sends no nonce; the scripts validate what they use
+    is_required = false
     display_settings {
       control_type = "SingleLineText"
     }
@@ -321,10 +325,13 @@ resource "octopusdeploy_variable" "agent" {
   type     = "String"
   name     = "Fworker.Agent"
   value    = var.default_agent
+  scope {
+    processes = [octopusdeploy_process.start.id, octopusdeploy_process.start_overflow.id, octopusdeploy_process.stop.id]
+  }
   prompt {
     label       = "Fworker.Agent"
     description = "Coding CLI of the worker"
-    is_required = true
+    is_required = false
     display_settings {
       control_type = "Select"
       select_option {
@@ -348,10 +355,13 @@ resource "octopusdeploy_variable" "mode" {
   type     = "String"
   name     = "Fworker.Mode"
   value    = "detached"
+  scope {
+    processes = [octopusdeploy_process.start.id, octopusdeploy_process.start_overflow.id, octopusdeploy_process.stop.id]
+  }
   prompt {
     label       = "Fworker.Mode"
     description = "detached: start and exit; held: the task runs as long as the container"
-    is_required = true
+    is_required = false
     display_settings {
       control_type = "Select"
       select_option {
@@ -386,7 +396,7 @@ resource "octopusdeploy_user" "gateway" {
 resource "octopusdeploy_user_role" "runbook_runner" {
   name                       = "fworker runbook runner"
   description                = "Run and view runbooks, view tasks. Scoped to cmdemo1-fworker-runtime by the team."
-  granted_space_permissions  = ["RunbookRunCreate", "RunbookRunView", "RunbookView", "TaskView", "ProjectView", "EnvironmentView"]
+  granted_space_permissions  = ["RunbookRunCreate", "RunbookRunView", "RunbookView", "TaskView", "ProjectView", "EnvironmentView", "MachineView", "FeedView", "LibraryVariableSetView", "ArtifactView", "EventView", "InterruptionView", "ProjectGroupView", "TriggerView", "TenantView", "CertificateView", "MachinePolicyView", "TeamView"]
   granted_system_permissions = []
 }
 
