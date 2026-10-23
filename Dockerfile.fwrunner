@@ -94,7 +94,7 @@ RUN if [ "$WITH_PLAYWRIGHT" = "true" ]; then \
     else mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"; fi
 
 # fworker files: root-owned and read-only for the session (settings.json is the reviewed auto-mode policy, design 2.7)
-COPY runner/settings.json runner/connect-prompt.template.md runner/manager-prompt.template.md /etc/fworker/
+COPY runner/settings.json runner/connect-prompt.template.md runner/manager-prompt.template.md runner/cursor-preamble.md /etc/fworker/
 COPY runner/codex/ /etc/fworker/codex/
 COPY runner/fwrunner.sh /usr/local/bin/fwrunner.sh
 COPY runner/git-credential-fworker runner/fwrunner-entra-token /usr/local/bin/

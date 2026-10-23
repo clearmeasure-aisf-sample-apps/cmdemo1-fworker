@@ -278,7 +278,10 @@ elif [ "$agent" = cursor ]; then
     # is limited to 128 KiB on Linux (MAX_ARG_STRLEN); the connect prompt is a few KiB, so that limit is far off; --force allows commands without approval (the container is the boundary)
     args=(-p --output-format stream-json --force)
     [ -n "${FWRUNNER_MODEL:-}" ] && args+=(--model "$FWRUNNER_MODEL")
-    args+=("$(cat "$prompt")")
+    # the skills were written for Claude Code: the preamble says how a Cursor session plays the subagent roles itself (no Agent tool)
+    pre=${FWRUNNER_CURSOR_PREAMBLE:-/etc/fworker/cursor-preamble.md}
+    [ -f "$pre" ] || fail "no cursor preamble at $pre"
+    args+=("$(sed -e "s|{{BASE}}|$(esc "$home")|g" "$pre"; cat "$prompt")")
     input=/dev/null
 else
     args=(-p --output-format stream-json --verbose --settings "$settings")
