@@ -64,6 +64,7 @@ sealed class RuntimeManager
     {
         public string Name = "", Execution = "", Url = "", Phase = "", Status = "provisioning", Outcome = "", StopReason = "";
         public int Item;
+        public string Role = "";   // a short role started by its own owner (ManagerCopilot.cs); "" for an own-item worker
         public DateTime StartedAt = DateTime.UtcNow;
         public DateTime? RegisteredAt, EndedAt;
         public bool Ended;
@@ -152,15 +153,16 @@ sealed class RuntimeManager
         }
     }
 
-    public Ticket Begin(int item, string phase, string profile, string role = "")
+    // name: a short role's own name (ManagerCopilot.cs); null names an own-item worker <prefix>-<item>-<6 hex>
+    public Ticket Begin(int item, string phase, string profile, string role = "", string? name = null)
     {
-        var name = $"{lim.Prefix}-{item}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant()}";
+        name ??= $"{lim.Prefix}-{item}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant()}";
         var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + lim.TokenSeconds;
         var nonce = lim.MintCredential != null ? lim.MintCredential(name, item, phase, expires)
             : nonces.Mint(name, cae.Kind, expires, TimeSpan.FromSeconds(Math.Max(lim.AckSeconds, 60) + 600));
         lock (gate)
         {
-            Roll(); today++; execs[name] = new Exec { Name = name, Item = item, Phase = phase };
+            Roll(); today++; execs[name] = new Exec { Name = name, Item = item, Phase = phase, Role = role };
             // another phase of the item started: the item made progress, the count in a row starts again
             foreach (var k in launches.Keys.Where(k => k.Item == item && k.Phase != phase).ToList()) launches.Remove(k);
             launches[(item, phase)] = launches.GetValueOrDefault((item, phase)) + 1;
@@ -334,7 +336,7 @@ sealed class RuntimeManager
             }
         }
         foreach (var (n, o, f) in ends) await End(n, o, f, false);
-        List<Exec> running; lock (gate) running = execs.Values.Where(e => !e.Ended && e.StopReason == "").ToList();
+        List<Exec> running; lock (gate) running = execs.Values.Where(e => !e.Ended && e.StopReason == "" && e.Role == "").ToList();   // a short role is ended by its owner (its deadline), not for holding no item
         foreach (var e in running)
         {
             var (registered, owns, offered) = Plant?.RuntimeWorkerState(e.Name) ?? (false, false, false);

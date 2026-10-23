@@ -18,7 +18,7 @@ An item reaches the runtime by the label `runtime:octopus` or a `runtimes.routin
 
 - Octopus project `cmdemo1-fworker-runtime`, runbooks `Start worker`, `Stop worker`, `Reconcile hosts` (scheduled). Start/Stop take
   prompted variables: Fworker.Name, Fworker.Item, Fworker.Phase, Fworker.ModelProfile, Fworker.Nonce, Fworker.Agent (claude|cursor|codex),
-  Fworker.Mode (detached|held). Container name `fw-<name>`, labels fworker.name, fworker.item, fworker.nonce.
+  Fworker.Mode (detached|held), Fworker.Role (3.1; "" for an own-item worker). Container name `fw-<name>`, labels fworker.name, fworker.item, fworker.nonce.
 - A fourth runbook `Start worker (overflow)`: the same prompted variables, its step runs on the Octopus Hosted Ubuntu dynamic worker pool
   (no deployment target), with Fworker.Mode = held: the container runs in the step and the task lasts as long as the worker.
 - Adapter Provision: pick a host (machine) among healthy `fworker-host` targets with free capacity (per-host limit from settings, default 2;
@@ -34,10 +34,10 @@ An item reaches the runtime by the label `runtime:octopus` or a `runtimes.routin
   secret env var FACTORY_OCTOPUS_HOST_TOKEN (constant-time compare), never the operator token. Report feeds List (a container gone/exited ->
   instance Stopped so the plant re-plans; see 5 for the one refinement).
 - Settings under `runtimes.octopus` in `config/instance.json`: { enabled false by default, serverUrl, spaceId "Spaces-355", project,
-  environment "tdd", hostTag "fworker-host", perHostCapacity 2, overflowRoles [...], overflowMax 4, maxConcurrent, auth, serviceAccountId,
-  oidcAudience }. The gateway signs in as a service account allowed to run runbooks of that project only, by OIDC with its managed identity
-  (`auth` "oidc", the default when no key is set) or by an API key from env OCTOPUS_RUNBOOK_API_KEY (`auth` "apiKey"); see 8. Disabled when
-  the chosen credential is missing (serviceAccountId empty, or no key). Not enabled in config/deploy.overrides.json.
+  environment "tdd", hostTag "fworker-host", perHostCapacity 2, overflowRoles [...], overflowMax 4, roles [] (3.1), maxConcurrent, auth,
+  serviceAccountId, oidcAudience }. The gateway signs in as a service account allowed to run runbooks of that project only, by OIDC with its
+  managed identity (`auth` "oidc", the default when no key is set) or by an API key from env OCTOPUS_RUNBOOK_API_KEY (`auth` "apiKey"); see 8.
+  Disabled when the chosen credential is missing (serviceAccountId empty, or no key).
 
 Further settings with defaults: `startRunbook`, `overflowRunbook`, `stopRunbook` (the names above), `agent` ("codex"; config/instance.json sets "cursor", the one CLI key in the Octopus project),
 `maxExecutionsPerDay`, `maxFailuresPerPhase` 2, `unhealthyAfterFailures` 2, `ackSeconds` 600 (covers an image pull on a cold host),
@@ -76,10 +76,30 @@ only as long as its task (Mode held). That holds a task slot for the worker's wh
 
 - only for short roles: `overflowRoles` (default plant-manager, supervisor, qc, operator). A coding role is refused whatever the list says
   (`worker`, `development`, `coding`, `own-item`): a coding session runs for hours and builds the product, it never belongs on a shared pool.
-  The role is `ProvisionRequest.Role`; an own-item worker (the plant's phase workers, no role) never overflows. Today only the test seam
-  `POST /api/v1/_test/octopus-provision` passes a role: a manager or QC start through this runtime is not wired yet.
+  The role is `ProvisionRequest.Role`; an own-item worker (the plant's phase workers, no role) never overflows.
 - capped: `overflowMax` (default 4) held tasks at a time, so at least 16 of the 20 slots stay for deployments and starts.
 - used only when no self-hosted machine has a free slot.
+
+### 3.1 Short roles started through this runtime
+
+`runtimes.octopus.roles` (default empty) names the short roles the gateway starts through this runtime instead of their default; a coding
+role is ignored there too. With the default nothing is routed here and every role starts as before. Today one role has a gateway-initiated
+start: `supervisor`, the plant manager on demand (`gateway/Runtimes/ManagerCopilot.cs`, `api.copilot.manager`). With `supervisor` in
+`roles` and the runtime on, the manager's launch (same trigger, cooldown, daily cap and `maxMinutes` deadline) is one Start run instead of a
+Copilot task:
+
+- name `mgr-oct-<6 hex>`, Fworker.Item 0, Fworker.Phase `patrol`, Fworker.Role `supervisor` (the runbooks' prompted variable; the form
+  sends it only where the runbook prompts for it, and it is "" for an own-item worker). It takes a host slot when one is free, else it
+  overflows held if `supervisor` is in `overflowRoles` and a slot of `overflowMax` is free, else no capacity: no launch counted, the
+  manager's cooldown, no failure.
+- the container redeems its nonce at `/api/v1/runtime/redeem` as any worker; for the manager's running name the answer is the role token
+  of role manager (`role: "manager"`, the `/mcp` manager tools only), not a w2.
+- the runtime manager does not stop it for holding no item (a role execution has `Role` set); the manager ends it at session_end, at the
+  task's end, or at its deadline: the name is revoked and the run stopped (held: the server task is cancelled).
+
+QC and operator sessions have no gateway-initiated start yet (a QC environment is offered to a connected worker, the operator session is
+started by hand), so `qc` and `operator` in `roles` have no effect until they do; the test seam `POST /api/v1/_test/octopus-provision`
+passes any role.
 
 ## 4. Host selection and the start
 

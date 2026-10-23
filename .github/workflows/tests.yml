@@ -71,7 +71,7 @@ jobs:
             suites: manager
           - name: operator
             runner: run-all
-            suites: operator,runtime,mcp,cursor,copilot,copilot-manager,envscope,copilot-deadline,cursor-deadline,octopus
+            suites: operator,runtime,mcp,cursor,copilot,copilot-manager,envscope,copilot-deadline,cursor-deadline,octopus,octopus-manager
     steps:
       - uses: actions/checkout@v6.0.1
 

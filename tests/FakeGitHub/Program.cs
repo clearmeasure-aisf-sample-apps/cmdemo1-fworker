@@ -242,7 +242,7 @@ sealed class World
     sealed class OctoRun { public string Id = "", TaskId = "", RunbookId = "", Snapshot = "", Env = ""; public JsonArray Machines = new(); public JsonObject Form = new(); }
     sealed class OctoTask { public string Id = "", RunId = "", State = "Success"; public DateTime Queued = DateTime.UtcNow; }
     static readonly (string Id, string Name)[] OctoBooks = { ("Runbooks-1", "Start worker"), ("Runbooks-2", "Stop worker"), ("Runbooks-3", "Start worker (overflow)"), ("Runbooks-4", "Reconcile hosts") };
-    static readonly string[] OctoVars = { "Fworker.Name", "Fworker.Item", "Fworker.Phase", "Fworker.ModelProfile", "Fworker.Nonce", "Fworker.Agent", "Fworker.Mode" };
+    static readonly string[] OctoVars = { "Fworker.Name", "Fworker.Item", "Fworker.Phase", "Fworker.ModelProfile", "Fworker.Nonce", "Fworker.Agent", "Fworker.Mode", "Fworker.Role" };
     static string OctoCtl(string book, string v) => $"Variables-{book.Split('-')[1]}{Array.IndexOf(OctoVars, v)}";
     static List<OctoMachine> DefaultMachines() => new()
     {

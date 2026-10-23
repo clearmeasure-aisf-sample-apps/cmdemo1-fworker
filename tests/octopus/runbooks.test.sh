@@ -50,6 +50,11 @@ sh_ cursor start-worker.sh FWORKER_AGENT=cursor FWORKER_CURSORAPIKEY="$key"
 check "cursor: CURSOR_API_KEY only" '[ "$(code cursor)" = 0 ] && grep -qx "CURSOR_API_KEY=$key" "$tmp/cursor/c/fw-cae-42-ab/env" && ! grep -q ANTHROPIC "$tmp/cursor/c/fw-cae-42-ab/env"'
 sh_ codex start-worker.sh FWORKER_AGENT=codex FWORKER_OPENAIAPIKEY="$key"
 check "codex: OPENAI_API_KEY" '[ "$(code codex)" = 0 ] && grep -qx "OPENAI_API_KEY=$key" "$tmp/codex/c/fw-cae-42-ab/env" && grep -qx FWRUNNER_AGENT=codex "$tmp/codex/c/fw-cae-42-ab/env"'
+check "no Fworker.Role: FWRUNNER_ROLE empty (an own-item worker)" 'grep -qx FWRUNNER_ROLE= "$c/env"'
+sh_ role start-worker.sh FWORKER_ROLE=supervisor
+check "Fworker.Role passed as FWRUNNER_ROLE" '[ "$(code role)" = 0 ] && grep -qx FWRUNNER_ROLE=supervisor "$tmp/role/c/fw-cae-42-ab/env"'
+sh_ badrole start-worker.sh FWORKER_ROLE='Qc;rm'
+check "bad Fworker.Role: exit 1, no docker call" '[ "$(code badrole)" = 1 ] && grep -q "Fworker.Role must match" "$tmp/badrole.out" && [ ! -e "$tmp/badrole/docker.argv" ]'
 mkdir -p "$tmp/dup/c/fw-cae-42-ab"; echo running > "$tmp/dup/c/fw-cae-42-ab/state"
 sh_ dup start-worker.sh
 check "a running container of the same name: exit 1, not replaced" '[ "$(code dup)" = 1 ] && grep -q "already running" "$tmp/dup.out" && [ ! -e "$tmp/dup/removed" ]'
