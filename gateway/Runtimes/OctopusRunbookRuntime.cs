@@ -92,7 +92,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
     readonly Dictionary<string, HostReport> reports = new(StringComparer.OrdinalIgnoreCase);   // by machine id
     readonly Dictionary<string, string> machineNames = new(StringComparer.OrdinalIgnoreCase); // id -> name
     readonly Dictionary<string, Dictionary<string, string>> formIds = new(StringComparer.Ordinal); // runbook id -> variable name -> control id
-    string projectId = "", environmentId = "";
+    string projectId = "", environmentId = "", identity = "";
     bool rebuilt;
     DateTime noCapacityUntil = DateTime.MinValue;
 
@@ -188,6 +188,8 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         var p = Items(await Get(Space("/projects/all"), ct)).FirstOrDefault(x => x["Name"]?.ToString() == cfg.Project) ?? throw new InvalidOperationException("project-not-found");
         var e = Items(await Get(Space("/environments/all"), ct)).FirstOrDefault(x => string.Equals(x["Name"]?.ToString(), cfg.Environment, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidOperationException("environment-not-found");
         lock (gate) { projectId = p["Id"]!.ToString(); environmentId = e["Id"]!.ToString(); }
+        // the account the credential signs in as (its id and user name, never a key), for /status: shows which identity Octopus checks
+        try { var me = await Get($"{cfg.ServerUrl}/api/users/me", ct); lock (gate) identity = $"{me["Id"]} {me["Username"]}".Trim(); } catch { }
     }
 
     // The records of a previous process are read back once, before anything counts host load, answers desired or judges a report: a
@@ -210,6 +212,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         return d;
     }
 
+    // Used by the restart rebuild only (a run stores FormValues by control id, whichever API created it).
     // The control ids of the prompted variables (Octopus docs, "Run a runbook with prompted variables"): the preview of a run of the runbook in
     // the environment lists Form.Elements, each with Name (the control id that FormValues takes) and Control.Name (the variable's name).
     async Task<Dictionary<string, string>> Form(string runbookId, CancellationToken ct)
@@ -281,27 +284,30 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
             ["Fworker.Name"] = r.WorkerName, ["Fworker.Item"] = r.Item.ToString(CultureInfo.InvariantCulture), ["Fworker.Phase"] = r.Phase, ["Fworker.ModelProfile"] = r.ModelProfile,
             ["Fworker.Nonce"] = r.Nonce, ["Fworker.Agent"] = cfg.Agent, ["Fworker.Mode"] = mode
         };
-        var (status, task, why) = await Run(rb.Id, rb.Snapshot, pick?.Id, values, ct);
+        var (status, task, why) = await Run(book, rb.Snapshot, pick?.Name, values, ct);
         if (status is not (200 or 201) || task == "") { lock (gate) recs.Remove(r.WorkerName); return new(false, "", $"runbook-run-{status}{why}"); }
         var url = $"{cfg.ServerUrl}/app#/{cfg.SpaceId}/tasks/{task}";
         lock (gate) if (recs.TryGetValue(r.WorkerName, out var rec)) { rec.TaskId = task; rec.Url = url; }
         return new(true, task, "", url);
     }
 
+    // Started through the Executions API (POST runbook-runs/create/v1, what the octopus CLI uses): names, not ids, and prompted values by
+    // variable name. The legacy POST runbookRuns refuses a RunbookRunCreate scoped to project and environment.
     // why: the permission Octopus names in a refusal ("Missing permission: X"), never any other text of the answer
-    async Task<(int Status, string Task, string Why)> Run(string runbookId, string snapshot, string? machine, Dictionary<string, string> values, CancellationToken ct)
+    async Task<(int Status, string Task, string Why)> Run(string runbookName, string snapshot, string? machineName, Dictionary<string, string> values, CancellationToken ct)
     {
-        var ids = await Form(runbookId, ct);
-        var form = new JsonObject();
-        foreach (var (k, v) in values) if (ids.TryGetValue(k, out var id)) form[id] = v;
+        var vars = new JsonObject();
+        foreach (var (k, v) in values) vars[k] = v;
         var body = new JsonObject
         {
-            ["ProjectId"] = projectId, ["RunbookId"] = runbookId, ["RunbookSnapshotId"] = snapshot, ["EnvironmentId"] = environmentId, ["FormValues"] = form,
-            ["SpecificMachineIds"] = machine != null ? new JsonArray(machine) : new JsonArray()
+            ["SpaceId"] = cfg.SpaceId, ["ProjectName"] = cfg.Project, ["RunbookName"] = runbookName, ["EnvironmentNames"] = new JsonArray(cfg.Environment),
+            ["Variables"] = vars,
+            ["SpecificMachineNames"] = string.IsNullOrEmpty(machineName) ? new JsonArray() : new JsonArray(machineName)
         };
-        var (s, b) = await Send(HttpMethod.Post, Space("/runbookRuns"), body, ct);
+        var (s, b) = await Send(HttpMethod.Post, Space("/runbook-runs/create/v1"), body, ct);
         var miss = System.Text.RegularExpressions.Regex.Match(b?["ErrorMessage"]?.ToString() ?? "", @"Missing permission: ([A-Za-z]{1,60})");
-        return (s, b?["TaskId"]?.ToString() ?? "", miss.Success ? " missing " + miss.Groups[1].Value : "");
+        var task = (b?["RunbookRunServerTasks"] as JsonArray)?.FirstOrDefault()?["ServerTaskId"]?.ToString() ?? "";
+        return (s, task, miss.Success ? " missing " + miss.Groups[1].Value : "");
     }
 
     public async Task Deprovision(string workerName, string reason, CancellationToken ct)
@@ -320,7 +326,10 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         await Ids(ct);
         var books = await Runbooks(ct);
         if (!books.TryGetValue(cfg.StopRunbook, out var rb) || rb.Snapshot == "") { lock (gate) rec.StopAsked = false; throw new InvalidOperationException("stop runbook not published"); }
-        var (st, task, _) = await Run(rb.Id, rb.Snapshot, rec.Machine, new Dictionary<string, string>
+        string? mname; lock (gate) mname = rec.MachineName != "" ? rec.MachineName : machineNames.TryGetValue(rec.Machine, out var mn) ? mn : null;
+        if (mname == null) { await Hosts(ct); lock (gate) mname = machineNames.TryGetValue(rec.Machine, out var mn2) ? mn2 : null; }
+        if (mname == null) { lock (gate) rec.StopAsked = false; throw new InvalidOperationException($"machine {rec.Machine} not known"); }
+        var (st, task, _) = await Run(cfg.StopRunbook, rb.Snapshot, mname, new Dictionary<string, string>
         {
             ["Fworker.Name"] = rec.Name, ["Fworker.Item"] = rec.Item.ToString(CultureInfo.InvariantCulture), ["Fworker.Phase"] = rec.Phase, ["Fworker.ModelProfile"] = "",
             ["Fworker.Nonce"] = "", ["Fworker.Agent"] = cfg.Agent, ["Fworker.Mode"] = "detached"
@@ -480,7 +489,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         lock (gate)
             return new JsonObject
             {
-                ["perHostCapacity"] = cfg.PerHostCapacity, ["overflowMax"] = cfg.OverflowMax, ["auth"] = cfg.Auth, ["serviceAccountId"] = cfg.ServiceAccountId, ["exchanges"] = exchanges, ["overflowInUse"] = recs.Values.Count(x => x.Ended == null && x.Mode == "held"),
+                ["perHostCapacity"] = cfg.PerHostCapacity, ["overflowMax"] = cfg.OverflowMax, ["auth"] = cfg.Auth, ["identity"] = identity, ["projectId"] = projectId, ["environmentId"] = environmentId, ["serviceAccountId"] = cfg.ServiceAccountId, ["exchanges"] = exchanges, ["overflowInUse"] = recs.Values.Count(x => x.Ended == null && x.Mode == "held"),
                 ["overflowRoles"] = new JsonArray(cfg.OverflowRoles.Select(x => (JsonNode)x).ToArray()), ["hostTokenSet"] = cfg.HostToken != "",
                 ["hosts"] = new JsonArray(reports.Select(kv => (JsonNode)new JsonObject { ["machine"] = kv.Key, ["name"] = machineNames.GetValueOrDefault(kv.Key, ""), ["reportedAt"] = kv.Value.At.ToString("o"), ["containers"] = kv.Value.Containers.Count }).ToArray())
             };

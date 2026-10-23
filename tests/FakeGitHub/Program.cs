@@ -278,6 +278,7 @@ sealed class World
             if (m.Groups[2].Success && method == "POST") { octoCancels++; if (t.State is "Queued" or "Executing") t.State = "Canceled"; }
             return (200, OctoTaskJson(t));
         }
+        if (path == "/api/users/me" && method == "GET") return (200, J(("Id", "Users-1"), ("Username", "fake-gateway")));
         m = Regex.Match(path, "^/api/Spaces-355(/.*)$");
         if (!m.Success) return (404, J(("ErrorMessage", "space not found")));
         var rest = m.Groups[1].Value;
@@ -311,6 +312,36 @@ sealed class World
             octoRuns.Add(run);
             octoTasks[run.TaskId] = new OctoTask { Id = run.TaskId, RunId = run.Id, State = book == "Runbooks-3" ? "Executing" : "Success" };
             return (201, OctoRunJson(run));
+        }
+        if (rest == "/runbook-runs/create/v1" && method == "POST")
+        {
+            // the Executions API: names resolved here, prompted values by variable name, stored by control id as Octopus does
+            if (b?["SpaceId"]?.ToString() != "Spaces-355" || b?["ProjectName"]?.ToString() != "cmdemo1-fworker-runtime") return (400, J(("ErrorMessage", "unknown space or project")));
+            var bk = OctoBooks.FirstOrDefault(x => x.Name == b?["RunbookName"]?.ToString());
+            if (bk.Id == null) return (400, J(("ErrorMessage", "unknown runbook")));
+            var book = bk.Id; var snap = "RunbookSnapshots-" + book.Split('-')[1] + "0";
+            if (b?["Snapshot"]?.ToString() is { Length: > 0 } sn && sn != snap) return (400, J(("ErrorMessage", "unknown snapshot")));
+            var envs = b?["EnvironmentNames"] as JsonArray ?? new JsonArray();
+            var env = envs.Count == 1 ? envs[0]?.ToString() switch { "tdd" => "Environments-11", "uat" => "Environments-12", _ => null } : null;
+            if (env == null) return (400, J(("ErrorMessage", "unknown environment")));
+            var form = new JsonObject();
+            foreach (var kv in b?["Variables"] as JsonObject ?? new JsonObject())
+            {
+                if (!OctoVars.Contains(kv.Key)) return (400, J(("ErrorMessage", "unknown variable")));
+                if (book != "Runbooks-4") form[OctoCtl(book, kv.Key)] = kv.Value?.DeepClone();
+            }
+            var machines = new JsonArray();
+            foreach (var x in b?["SpecificMachineNames"] as JsonArray ?? new JsonArray())
+            {
+                var mm = octoMachines.FirstOrDefault(y => y.Name == x?.ToString());
+                if (mm == null) return (400, J(("ErrorMessage", "unknown machine")));
+                machines.Add(mm.Id);
+            }
+            var n = ++octoSeq;
+            var run = new OctoRun { Id = $"RunbookRuns-{n}", TaskId = $"ServerTasks-{n}", RunbookId = book, Snapshot = snap, Env = env, Machines = machines, Form = form };
+            octoRuns.Add(run);
+            octoTasks[run.TaskId] = new OctoTask { Id = run.TaskId, RunId = run.Id, State = book == "Runbooks-3" ? "Executing" : "Success" };
+            return (201, J(("RunbookRunServerTasks", new JsonArray(J(("RunbookRunId", run.Id), ("ServerTaskId", run.TaskId))))));
         }
         if ((m = Regex.Match(rest, "^/runbookRuns/(RunbookRuns-\\d+)$")).Success)
         {
