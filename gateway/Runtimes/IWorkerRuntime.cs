@@ -7,7 +7,7 @@ sealed record ProvisionRequest(string WorkerName, int Item, string Phase, string
 // Url: the page of the execution a person can open (a Copilot task: its live session, then its transcript), "" when the runtime has none
 sealed record ProvisionResult(bool Ok, string Execution, string Error, string Url = "");
 // Status: Running, Processing, Succeeded, Failed, Stopped, Degraded or Unknown (the execution states of Container Apps jobs)
-sealed record RuntimeInstance(string Execution, string WorkerName, int Item, string Phase, string Status, DateTime? Started, DateTime? Ended);
+sealed record RuntimeInstance(string Execution, string WorkerName, int Item, string Phase, string Status, DateTime? Started, DateTime? Ended, bool Adopted = false);   // Adopted: found by the runtime after its first listing (a host report); the manager adopts it then too
 
 interface IWorkerRuntime
 {

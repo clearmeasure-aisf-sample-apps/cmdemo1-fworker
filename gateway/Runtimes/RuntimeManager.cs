@@ -321,6 +321,12 @@ sealed class RuntimeManager
                 }
                 relisted = true;
             }
+            else
+                foreach (var i in list.Where(i => i.Adopted && i.Status is "Running" or "Processing" && !execs.ContainsKey(i.WorkerName)))
+                {
+                    execs[i.WorkerName] = new Exec { Name = i.WorkerName, Item = i.Item, Phase = i.Phase, Execution = i.Execution, Status = i.Status, StartedAt = now };
+                    Log("adopted", i.WorkerName, i.Item, i.Execution);
+                }
             foreach (var e in execs.Values.Where(e => !e.Ended && e.Execution != ""))
             {
                 var i = list.FirstOrDefault(x => x.Execution == e.Execution);
