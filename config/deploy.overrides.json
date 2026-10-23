@@ -62,7 +62,7 @@
         "routing": [
           {
             "phase": "*",
-            "runtime": "cursor-cloud"
+            "runtime": "octopus"
           }
         ],
         "caeJob": {
@@ -77,7 +77,8 @@
           },
           "managedIdentityClientId": "4b168728-3e6c-4c1a-9bc2-861988d1cf7f",
           "gatewayUrl": "http://ca-cmdemo1-tdd-fworker"
-        }
+        },
+        "octopus": { "enabled": true, "maxConcurrent": 2, "maxExecutionsPerDay": 30, "agent": "cursor", "perHostCapacity": 2, "overflowMax": 0 }
       },
       "uat": {
         "preferConnected": true,
