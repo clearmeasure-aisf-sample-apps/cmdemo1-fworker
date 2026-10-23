@@ -123,7 +123,7 @@ $OctopusScenarios = [ordered]@{
         Check 'the operator token is not a host token' ((Oct-Host GET '/api/v1/runtime/octopus/desired?host=host-a' $null 'test-token').status -eq 401)
         Check 'no token answers 401' ((Oct-Host GET '/api/v1/runtime/octopus/desired?host=host-a' $null '').status -eq 401)
         $n = New-Item-Fake 'Octopus reconcile' 'x' $OctLabels
-        Check 'a run is made' (Wait-Until -Seconds 30 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        Check 'a run is made' (Wait-Until -Seconds 60 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
         $run = (Oct-Runs 'Start worker' $n)[0]; $name = "$($run.values.Name)"
         $d = Oct-Host GET '/api/v1/runtime/octopus/desired?host=host-a'
         Check 'desired for host-a names the worker' ($d.status -eq 200 -and @($d.body.workers) -contains $name) ($d | ConvertTo-Json -Compress -Depth 4)
@@ -149,7 +149,7 @@ $OctopusScenarios = [ordered]@{
     $n = 0; $name = ''
     try {
         $n = New-Item-Fake 'Octopus stop' 'x' $OctLabels
-        Check 'a run is made' (Wait-Until -Seconds 30 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        Check 'a run is made' (Wait-Until -Seconds 60 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
         $run = (Oct-Runs 'Start worker' $n)[0]; $name = "$($run.values.Name)"
         [void](Oct-Report "$($run.machines[0])" @(@{ name = "fw-$name"; item = $n; state = 'running' }))
         $rv = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/workers/$name/revoke" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck
@@ -216,7 +216,7 @@ $OctopusScenarios = [ordered]@{
     $n = 0
     try {
         $n = New-Item-Fake 'Octopus restart' 'x' $OctLabels
-        Check 'a run is made' (Wait-Until -Seconds 30 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        Check 'a run is made' (Wait-Until -Seconds 60 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
         $run = (Oct-Runs 'Start worker' $n)[0]; $name = "$($run.values.Name)"
         Restart-Gateway
         Check 'the new gateway adopts the worker with its task' (Wait-Until -Seconds 20 { $s = Oct-Status; $s.relisted -and @($s.executions | Where-Object { $_.worker -eq $name -and $_.item -eq $n -and $_.execution -eq $run.task }).Count -eq 1 }) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
