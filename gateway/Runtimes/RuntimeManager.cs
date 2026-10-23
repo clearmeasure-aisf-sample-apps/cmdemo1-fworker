@@ -104,6 +104,9 @@ sealed class RuntimeManager
     { this.cfg = cfg; this.cae = cae; this.nonces = nonces; lim = limits ?? RuntimeLimits.Of(cfg.CaeJob); }
 
     public RuntimeSettings Settings => cfg;
+    // the session transcript store (gateway/Transcripts.cs): told when an execution of a runtime whose container posts its lines starts and ends
+    public Action<string, int, string, string>? SessionStarted { get; set; }
+    public Action<string>? SessionEnded { get; set; }
     public RuntimeLimits Limits => lim;
     public string Kind => cae.Kind;
     public bool On => lim.IsOn();
@@ -188,6 +191,7 @@ sealed class RuntimeManager
         {
             bool late; lock (gate) { late = !execs.TryGetValue(t.Name, out var e) || e.Ended || e.StopReason != ""; if (execs.TryGetValue(t.Name, out var e2)) { e2.Execution = r.Execution; e2.Url = r.Url; e2.Status = "Running"; } }
             span?.SetTag("fworker.execution", r.Execution);
+            if (!late) { try { SessionStarted?.Invoke(t.Name, t.Item, t.Phase, cae.Kind); } catch (Exception x) { Log("transcript-failed", t.Name, t.Item, x.Message); } }
             // the item's journal names the execution and its page (a Copilot task: "Copilot session: <url>"); a runtime without a page adds no line
             if (!late && r.Url != "") { try { Plant?.RuntimeLaunched(t.Name, t.Item, t.Phase, cae.Kind, r.Execution, r.Url); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
             // ended or stopped while the start call ran (a revoke, a lapse): stop it now, or it would run unattended
@@ -240,6 +244,7 @@ sealed class RuntimeManager
         {
             if (!execs.TryGetValue(name, out e) || e.Ended) return;
             e.Ended = true; e.EndedAt = DateTime.UtcNow; e.Outcome = outcome;
+            try { SessionEnded?.Invoke(name); } catch { }
             // a failure is counted before the plant takes the item back (RuntimeEnded): a plan in between would otherwise see the phase not yet
             // exhausted and start one execution more than maxFailuresPerPhase
             if (failed) { var n0 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n0 == lim.MaxFailuresPerPhase; if (outcome != "start-failed") failureErrors[(e.Item, e.Phase)] = outcome; }

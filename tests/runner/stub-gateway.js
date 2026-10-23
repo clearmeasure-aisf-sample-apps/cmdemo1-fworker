@@ -8,7 +8,7 @@ const ghs = 'ghs_' + 'A'.repeat(36);
 const i1 = 'i1.' + '42.owner.' + 'B'.repeat(20);
 const idHeader = 'idh-' + 'D'.repeat(12);
 const msiToken = 'eyJ' + 'E'.repeat(20) + '.' + 'F'.repeat(30) + '.' + 'G'.repeat(30);
-let spent = false, workerToken = '', stats = { redeem: 0, plugin: 0, credential: 0 };
+let spent = false, workerToken = '', stats = { redeem: 0, plugin: 0, credential: 0 }, transcript = [], bodies = [];
 const send = (res, code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
 http.createServer((req, res) => {
   let body = '';
@@ -47,6 +47,16 @@ http.createServer((req, res) => {
       if (q.get('resource') !== 'https://cognitiveservices.azure.com' || q.get('client_id') !== '45fb5295-b075-4e74-a1dc-569dda4b62a1') return send(res, 400, { error: 'bad request' });
       return send(res, 200, { access_token: msiToken, expires_on: String(Math.floor(Date.now() / 1000) + 86400), resource: q.get('resource'), token_type: 'Bearer' });
     }
+    if (req.method === 'POST' && req.url === '/api/v1/runtime/transcript') {
+      // the session's transcript (gateway/Transcripts.cs): the worker's own credential; the lines and the raw bodies are kept for the checks
+      stats.transcript = (stats.transcript || 0) + 1;
+      if (!workerToken || auth !== workerToken) return send(res, 401, { ok: false, code: 'unauthorized' });
+      let b = {}; try { b = JSON.parse(body); } catch { return send(res, 400, { ok: false, code: 'usage' }); }
+      if (!Array.isArray(b.lines) || b.lines.length === 0 || b.lines.length > 500) return send(res, 400, { ok: false, code: 'usage' });
+      transcript.push(...b.lines); bodies.push(body);
+      return send(res, 200, { ok: true, taken: b.lines.length, total: transcript.length });
+    }
+    if (req.url === '/_stub/transcript') return send(res, 200, { lines: transcript, raw: bodies.join('\n') });
     if (req.url === '/_stub/stats') return send(res, 200, stats);
     if (req.url === '/_stub/secrets') return send(res, 200, { nonce, ghs, i1, workerToken, idHeader, msiToken });
     send(res, 404, { ok: false });

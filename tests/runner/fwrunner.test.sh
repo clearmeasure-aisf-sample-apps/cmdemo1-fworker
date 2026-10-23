@@ -49,6 +49,10 @@ check "prompt filled, names the worker, holds no credential" 'grep -q "cae-42-no
 check "end marker handled" 'grep -q "end marker: end-session: item 42 ended" "$tmp/normal.out"'
 check "stdout redacted: no w2 token, no ghs_, no sk-ant- value" '! grep -q "$(secret workerToken)" "$tmp/normal.out" && grep -q "w2\.\*\*\*" "$tmp/normal.out" && grep -q "ghs_\*\*\*" "$tmp/normal.out" && grep -q "sk-ant-\*\*\*" "$tmp/normal.out" && ! grep -q ZZZZ "$tmp/normal.out"'
 check "full transcript kept on the execution disk" 'grep -q ZZZZ "$w/transcript.jsonl"'
+tr=$(curl -s "$gw/_stub/transcript")
+check "transcript posted to the gateway with the worker token: the events and fwrunner's own lines" 'printf "%s" "$tr" | grep -q "\[system init\]" && printf "%s" "$tr" | grep -q "end-session" && printf "%s" "$tr" | grep -q "fwrunner cae-42-normal: exit 0" && [ "$(curl -s "$gw/_stub/stats" | node -e "let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>process.stdout.write(String(JSON.parse(s).transcript||0)))")" -ge 1 ]'
+check "posted transcript redacted: no worker token, ghs_, sk-ant-, n1., API-, sk-proj-, key_ value" '! printf "%s" "$tr" | grep -qF "$(secret workerToken)" && ! printf "%s" "$tr" | grep -q "ZZZZ\|QQQQ" && printf "%s" "$tr" | grep -q "w2\.\*\*\*" && printf "%s" "$tr" | grep -q "n1\.\*\*\*" && printf "%s" "$tr" | grep -q "API-\*\*\*" && printf "%s" "$tr" | grep -q "sk-\*\*\*" && printf "%s" "$tr" | grep -q "key_\*\*\*"'
+check "no token on any command line or in the posted state files" '! grep -qF "$(secret workerToken)" "$w/transcript-posted.log" "$w/transcript-posted.offset"'
 check "nonce is single use" '[ "$(curl -s -o /dev/null -w "%{http_code}" -X POST -d "{\"nonce\":\"$nonce\",\"name\":\"x\"}" "$gw/api/v1/runtime/redeem")" = 410 ]'
 
 [ -z "${FWRUNNER_TEST_SHOW:-}" ] || sed 's/^/    | /' "$tmp/normal.out"

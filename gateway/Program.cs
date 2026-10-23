@@ -138,6 +138,13 @@ if (qcSettings.TrustProxy)
 // the shared GitHub budget (GitHubBudget.cs, issue 92): fed by every rule-script answer, read by the verb route and the sweeper
 var githubBudget = GitHubBudget.Load(scriptsDir);
 var runnerInstance = new Runner(entry) { Budget = githubBudget };
+// session transcripts of runtime workers (Transcripts.cs): stored encrypted beside the plant snapshot; FACTORY_TRANSCRIPTS=0 keeps them in memory only
+var transcriptsDurable = ownerMode && tokenSecret.Length > 0 && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPTS") != "0";
+var transcripts = new TranscriptStore(transcriptsDurable ? runnerInstance.RunAsync : null, tokenSecret);
+if (int.TryParse(Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPT_SAVE_SECONDS"), out var tss) && tss >= 0) transcripts.SaveSeconds = tss;
+// the gateway's own address for the links it writes into the journal: FACTORY_PUBLIC_URL, else the address the operator or a container last used
+string seenBase = "";
+string LinkBase() => publicUrl != "" ? publicUrl.TrimEnd('/') : Volatile.Read(ref seenBase);
 builder.Services.AddSingleton(runnerInstance);
 // The plant snapshot (PlantSnapshot.cs, enhancement 5): read back before the first sweep. Owner mode only, and not for the suites'
 // second gateways (FACTORY_TEST_SKIP_REVOCATIONS: their GitHub is a port nothing listens on). FACTORY_PLANT_SNAPSHOT=0 switches it off.
@@ -198,7 +205,8 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager, Octopus = octopusManager };
+        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager, Octopus = octopusManager,
+        SessionPage = (kind, name) => kind is "octopus" or "cae-job" && LinkBase() is { Length: > 0 } lb ? $"{lb}/sessions/{Uri.EscapeDataString(name)}" : "" };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -215,6 +223,7 @@ foreach (var rmx in new[] { runtimeManager, cursorManager, copilotManager, octop
 {
     var rp = sp.GetRequiredService<Plant>(); var rr = sp.GetRequiredService<Runner>();
     rmx.Plant = rp;
+    if (rmx.Kind is "octopus" or "cae-job") { rmx.SessionStarted = transcripts.Started; rmx.SessionEnded = transcripts.Ended; }
     // the gateway's own hands for the adapter: park an item runtime-failed, end the claim a lost execution left, revoke a failed execution's name
     rmx.Park = async (item, phase) =>
     {
@@ -237,6 +246,8 @@ builder.Services.AddMcpServer(o => o.ServerInfo = new() { Name = "fworker", Vers
     .WithHttpTransport(o => o.Stateless = true)
     .WithListToolsHandler(GatewayMcp.ListTools).WithCallToolHandler(GatewayMcp.CallTool);
 var app = builder.Build();
+_ = Task.Run(() => transcripts.Loop(() => leader.MayAct, app.Lifetime.ApplicationStopping));
+app.Lifetime.ApplicationStopping.Register(() => { try { transcripts.Flush(true, TimeSpan.FromSeconds(15)).Wait(TimeSpan.FromSeconds(20)); } catch { } });
 app.Lifetime.ApplicationStopping.Register(() => { try { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"stopping\",\"reason\":\"shutdown requested (signal or host)\",\"upSeconds\":{(long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds}}}"); } catch { } });
 var hub = app.Services.GetRequiredService<EventHub>();
 var runner = app.Services.GetRequiredService<Runner>();
@@ -560,7 +571,7 @@ app.Use(async (ctx, next) =>
         return;
     }
     // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
-    if (port == apiPort && path is "/api/v1/runtime/redeem" or "/api/v1/copilot/exchange") { await next(); return; }
+    if (port == apiPort && path is "/api/v1/runtime/redeem" or "/api/v1/copilot/exchange") { NoteBase(ctx); await next(); return; }
     // the Octopus reconcile runbook's calls carry the host token, checked by the endpoints themselves (never a gateway credential)
     if (port == apiPort && path is "/api/v1/runtime/octopus/desired" or "/api/v1/runtime/octopus/report") { await next(); return; }
     var isMcp = port == apiPort && ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
@@ -575,6 +586,7 @@ app.Use(async (ctx, next) =>
         }
         if (p == null) { await Refuse(ctx, 401, "unauthorized", "missing, malformed, forged or expired credential"); return; }
         ctx.Items["principal"] = p;
+        if (p.Kind == "admin") NoteBase(ctx);
         // /mcp (gateway/Mcp/): a credential whose kind plays no role there is refused before the MCP server reads the request; the tools admit
         // themselves (Admit, through InProcess) when they call their endpoint
         if (isMcp)
@@ -588,6 +600,15 @@ app.Use(async (ctx, next) =>
     }
     await next();
 });
+
+// the scheme and host a caller reached this gateway on (behind the platform's ingress: X-Forwarded-Proto), for LinkBase
+void NoteBase(HttpContext c)
+{
+    if (publicUrl != "" || !c.Request.Host.HasValue) return;
+    var fp = c.Request.Headers["X-Forwarded-Proto"].ToString();
+    var proto = fp is "https" or "http" ? fp : c.Request.Scheme;
+    Volatile.Write(ref seenBase, $"{proto}://{c.Request.Host.Value}");
+}
 
 // The per-principal work of an admitted /api request: the middleware above runs it, and so does an MCP tool's in-process call of an endpoint
 // (gateway/Mcp/InProcess.cs), so a tool counts exactly as the HTTP call it stands for.
@@ -991,7 +1012,7 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (verb is "revoke-worker" or "revocations")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/workers/{name}/revoke", exit = 2 }), "application/json", Encoding.UTF8, 400);
     // likewise the release records of the operator session: only POST /api/v1/operator/record-release keeps the stored refs and this process in step
-    if (verb is "plant-snapshot-save" or "plant-snapshot-load" or "plant-snapshot-clear" or "plant-snapshot-await" or "leader-lease")
+    if (verb is "plant-snapshot-save" or "plant-snapshot-load" or "plant-snapshot-clear" or "plant-snapshot-await" or "leader-lease" or "transcript-save" or "transcript-load" or "transcript-prune")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the plant snapshot is written and read by the gateway itself, at its stop and its start", exit = 2 }), "application/json", Encoding.UTF8, 400);
     if (verb is "operator-release" or "operator-releases")
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/operator/record-release", exit = 2 }), "application/json", Encoding.UTF8, 400);
@@ -1227,6 +1248,37 @@ app.MapGet("/fworker-mcp.mjs", () =>
     using var rd = new StreamReader(st);
     return Results.Text(rd.ReadToEnd(), "text/javascript", Encoding.UTF8);
 });
+// The transcript of a runtime worker's session (Transcripts.cs, runner/fwrunner.sh): the container posts its redacted lines with its own credential
+// (w2 of a worker, r1 of a manager patrol); a credential posts to its own name only. {lines:[...]}: at most 500 lines and 256 KiB a batch.
+app.MapPost("/api/v1/runtime/transcript", async (HttpContext ctx) =>
+{
+    var who = Who(ctx);
+    if (who.Kind is not ("worker" or "manager") || !TranscriptStore.ValidName(who.Name)) return Fail(403, "forbidden", "a runtime session posts its own transcript with its own credential", 30);
+    var buf = new byte[256 * 1024 + 1]; var n = 0; int r0;
+    while (n < buf.Length && (r0 = await ctx.Request.Body.ReadAsync(buf.AsMemory(n, buf.Length - n))) > 0) n += r0;
+    if (n > 256 * 1024) return Fail(413, "too-large", "at most 256 KiB a batch", 2);
+    List<string> lines = [];
+    try { if ((JsonNode.Parse(Encoding.UTF8.GetString(buf, 0, n)) as JsonObject)?["lines"] is JsonArray a) lines = a.Select(x => x?.ToString() ?? "").ToList(); } catch { }
+    if (lines.Count == 0) return Fail(400, "usage", "the body is {\"lines\": [\"...\"]}", 2);
+    if (lines.Count > transcripts.MaxBatchLines) return Fail(413, "too-large", $"at most {transcripts.MaxBatchLines} lines a batch", 2);
+    var (taken, total) = await transcripts.Append(who.Name, lines);
+    if (total < 0) return Results.Json(new { ok = false, code = "busy", reason = "the transcript store is full of unsaved sessions; try again", retryAfterSeconds = 30, exit = 20 }, statusCode: 503);
+    return Results.Json(new { ok = true, taken, total, exit = 0 });
+});
+// The operator reads a session's transcript: after=N answers the lines from number N on (the page polls with it)
+app.MapGet("/api/v1/sessions/{name}", async (HttpContext ctx, string name) =>
+{
+    if (Who(ctx).Kind != "admin") return Fail(403, "forbidden", "session transcripts are read with the operator token", 30);
+    if (!TranscriptStore.ValidName(name)) return Fail(400, "usage", "not a session name", 2);
+    var after = int.TryParse(ctx.Request.Query["after"], out var af) && af > 0 ? af : 0;
+    var o = await transcripts.Read(name, after);
+    if (o == null) return Fail(404, "not-found", "no transcript of this session (none was posted, or it is older than the retention)", 12);
+    o["exit"] = 0;
+    return Results.Text(o.ToJsonString(), "application/json");
+});
+// The page of a session: the operator token from #token=<value> or this tab's connection to the dashboard; live while the session runs
+app.MapGet("/sessions/{name}", (string name) => TranscriptStore.ValidName(name) ? Results.Text(SessionPage.Html, "text/html; charset=utf-8") : Results.NotFound());
+
 app.MapPost("/api/v1/runtime/redeem", async (HttpContext ctx) =>
 {
     if (!revocationsLoaded.Task.IsCompleted)
