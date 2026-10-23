@@ -413,8 +413,10 @@ resource "octopusdeploy_team" "gateway" {
   user_role {
     user_role_id = octopusdeploy_user_role.runbook_runner.id
     space_id     = var.space_id
-    # no project or environment limit within the space: Octopus refused the gateway's runbook runs with RunbookRunCreate restricted to the
-    # project, and then to tdd (owner, 2026-10-23); the role itself only runs and views runbooks
+    # the runtime project in tdd only. The 403s of 2026-10-23 were the Standard account type, not this scope: with the Agent account the
+    # narrowed scope was tested and accepted (Stop worker ServerTasks-12099143, Start worker ServerTasks-12099156)
+    project_ids     = [octopusdeploy_project.runtime.id]
+    environment_ids = [local.environment_id]
   }
 }
 
