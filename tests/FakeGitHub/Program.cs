@@ -316,7 +316,7 @@ sealed class World
         if (rest == "/runbook-runs/create/v1" && method == "POST")
         {
             // the Executions API: names resolved here, prompted values by variable name, stored by control id as Octopus does
-            if (b?["SpaceId"]?.ToString() != "Spaces-355" || b?["ProjectName"]?.ToString() != "cmdemo1-fworker-runtime") return (400, J(("ErrorMessage", "unknown space or project")));
+            if (b?["SpaceIdOrName"]?.ToString() != "Spaces-355" || b?["ProjectName"]?.ToString() != "cmdemo1-fworker-runtime") return (400, J(("ErrorMessage", "unknown space or project")));
             var bk = OctoBooks.FirstOrDefault(x => x.Name == b?["RunbookName"]?.ToString());
             if (bk.Id == null) return (400, J(("ErrorMessage", "unknown runbook")));
             var book = bk.Id; var snap = "RunbookSnapshots-" + book.Split('-')[1] + "0";
