@@ -147,6 +147,17 @@ form. A Start (or overflow Start) whose worker has no newer Stop run becomes a r
 Running or Processing, with a fresh window for the worker to reconnect, so no second worker is started for its item. A detached worker read
 back this way that its host's next report does not list had exited before the restart: it ends Succeeded, not as a failure.
 
+Runs started through `runbook-runs/create/v1` keep `FormValues {}`, so the host's report is the source of truth for its detached
+containers. Adoption from a report (after the rebuild) follows one rule, chosen so that no live worker is removed after a restart:
+
+- every running `fw-<name>` without a record is adopted, also beyond `perHostCapacity` (it limits new starts only); a fixed ceiling of 20
+  per host bounds what a host-token holder can make the gateway adopt;
+- a name with a record (running, stop asked, or ended: kept about an hour) is never adopted again: a worker the gateway ended is still
+  named in `stop`;
+- only containers unknown because of the restart are adopted: those in the host's first report since the process start, and later ones
+  whose `startedAt` is before 10 minutes after the process start (a start run in flight across the restart). A container without a record
+  that appears later in steady state, or without `startedAt` after the first report, is a stray: named in `stop`, not adopted.
+
 ## 8. Security
 
 - **A separate service account** for the gateway: a team whose only role is Runbook Consumer (run and view runbooks, view tasks,
