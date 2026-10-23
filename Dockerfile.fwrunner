@@ -94,12 +94,12 @@ RUN if [ "$WITH_PLAYWRIGHT" = "true" ]; then \
     else mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"; fi
 
 # fworker files: root-owned and read-only for the session (settings.json is the reviewed auto-mode policy, design 2.7)
-COPY runner/settings.json runner/connect-prompt.template.md /etc/fworker/
+COPY runner/settings.json runner/connect-prompt.template.md runner/manager-prompt.template.md /etc/fworker/
 COPY runner/codex/ /etc/fworker/codex/
 COPY runner/fwrunner.sh /usr/local/bin/fwrunner.sh
 COPY runner/git-credential-fworker runner/fwrunner-entra-token /usr/local/bin/
 RUN chmod 0755 /etc/fworker /etc/fworker/codex /usr/local/bin/fwrunner.sh /usr/local/bin/git-credential-fworker /usr/local/bin/fwrunner-entra-token \
-    && chmod 0644 /etc/fworker/settings.json /etc/fworker/connect-prompt.template.md /etc/fworker/codex/* \
+    && chmod 0644 /etc/fworker/settings.json /etc/fworker/connect-prompt.template.md /etc/fworker/manager-prompt.template.md /etc/fworker/codex/* \
     && git config --system credential.https://github.com.helper /usr/local/bin/git-credential-fworker \
     && git config --system credential.https://github.com.useHttpPath false \
     && mkdir -p /work && chown "$APP_UID" /work

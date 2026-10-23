@@ -12,6 +12,11 @@
 #                          is runner/codex/ (config, execpolicy rules) and the skills reach Codex as a generated $CODEX_HOME/AGENTS.md;
 #   5. end marker seen: wait 5 s, TERM, KILL after 10 s, exit 0. The agent ended without the marker, or the watchdog fired: exit 1.
 #
+# Manager patrol: when the redeem answer says role "manager" (an r1 manager credential), the execution is one plant-manager patrol instead of a
+# worker session: no plugin, no clone, the prompt from FWRUNNER_MANAGER_TEMPLATE (connect to the gateway's /mcp with the credential, get_prompt,
+# follow it, session_end), no event-stream watchdog, and the agent ending by itself with exit code 0 is a normal end. The redeem answer decides;
+# FWRUNNER_ROLE (supervisor or manager) is only a hint, and a manager answer without it is still followed and logged.
+#
 # Watchdog (the launcher's codes, without screen checks): stream-disconnected = the client's stream-alive file not touched for
 # FWRUNNER_STREAM_STALE seconds; no-output-while-owning = no new transcript bytes for FWRUNNER_SILENT seconds while the session holds an item.
 # stdout carries one redacted, shortened line per stream-json event; the full transcript stays on the ephemeral disk and goes only to the
@@ -32,7 +37,7 @@
 #   FWRUNNER_TRANSCRIPT_CONTAINER     blob container URL for the transcript upload (optional; managed identity of the job)
 #   FWRUNNER_STREAM_STALE (600), FWRUNNER_SILENT (1800), FWRUNNER_MAX_SECONDS (0 = off; the job's replicaTimeout is the hard end)
 #   FWRUNNER_HOME (/work), FWRUNNER_SETTINGS (/etc/fworker/settings.json), FWRUNNER_TEMPLATE (/etc/fworker/connect-prompt.template.md),
-#   FWRUNNER_CLAUDE (claude), FWRUNNER_CODEX (codex), FWRUNNER_CODEX_DIR (/etc/fworker/codex), FWRUNNER_TOKEN_CMD
+#   FWRUNNER_MANAGER_TEMPLATE (/etc/fworker/manager-prompt.template.md), FWRUNNER_CLAUDE (claude), FWRUNNER_CODEX (codex), FWRUNNER_CODEX_DIR (/etc/fworker/codex), FWRUNNER_TOKEN_CMD
 #   (/usr/local/bin/fwrunner-entra-token): overridable for tests/runner/fwrunner.test.sh.
 set -u
 set -o pipefail
@@ -43,6 +48,7 @@ fail() { say "FAILED: $*"; finish 1; }
 home=${FWRUNNER_HOME:-/work}
 settings=${FWRUNNER_SETTINGS:-/etc/fworker/settings.json}
 template=${FWRUNNER_TEMPLATE:-/etc/fworker/connect-prompt.template.md}
+managerTemplate=${FWRUNNER_MANAGER_TEMPLATE:-/etc/fworker/manager-prompt.template.md}
 agent=${FWRUNNER_AGENT:-claude}
 case "$agent" in
     claude) agentCmd=${FWRUNNER_CLAUDE:-claude} ;;
@@ -65,8 +71,8 @@ transcript="$home/transcript.jsonl"; runlog="$home/fwrunner.log"
 child=0; pump=0; finished=0
 
 # the mask applied to everything this script prints that came from the session: w1./w2./i1. worker and item tokens, GitHub installation
-# tokens (ghs_) and Anthropic keys (sk-ant-)
-redact() { sed -u -E 's/\b(w1|w2|i1)\.[A-Za-z0-9._~+\/=-]+/\1.***/g; s/(ghs_|ghp_|gho_|ghu_|github_pat_|sk-ant-)[A-Za-z0-9_-]+/\1***/g; s/(Bearer )[A-Za-z0-9._~+\/=-]+/\1***/g; s/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/eyJ***/g'; }
+# tokens (ghs_), r1. role (manager) tokens and Anthropic keys (sk-ant-)
+redact() { sed -u -E 's/\b(w1|w2|i1|r1)\.[A-Za-z0-9._~+\/=-]+/\1.***/g; s/(ghs_|ghp_|gho_|ghu_|github_pat_|sk-ant-)[A-Za-z0-9_-]+/\1***/g; s/(Bearer )[A-Za-z0-9._~+\/=-]+/\1***/g; s/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/eyJ***/g'; }
 
 # the transcript to the private blob container, with the job's managed identity (Container Apps: IDENTITY_ENDPOINT, IDENTITY_HEADER)
 upload_transcript() {
@@ -161,7 +167,18 @@ token=$(printf '%s' "$resp" | json_field token)
 rname=$(printf '%s' "$resp" | json_field name)
 [ -n "$token" ] || fail "redeem: no token in the answer"
 [ -z "$rname" ] || [ "$rname" = "$name" ] || fail "redeem: the token is for $rname, not $name"
-say "nonce redeemed"
+role=$(printf '%s' "$resp" | json_field role)
+if [ "$role" = manager ]; then
+    case "${FWRUNNER_ROLE:-}" in
+        supervisor|manager) say "nonce redeemed: manager credential, plant-manager patrol" ;;
+        *) say "nonce redeemed: the gateway answered a manager credential although FWRUNNER_ROLE is '${FWRUNNER_ROLE:-}': plant-manager patrol (the gateway decides)" ;;
+    esac
+    [ -f "$managerTemplate" ] || fail "no manager prompt template at $managerTemplate"
+    streamStale=0     # a patrol has no event stream
+else
+    role=worker
+    say "nonce redeemed"
+fi
 
 # the session's environment: the credential by variable name only; no model key ever (the model is reached with the managed identity)
 export FACTORY_URL="$url" FACTORY_TOKEN="$token" FACTORY_HOLDER="$name" FACTORY_DATA_DIR="$home/data" FACTORY_SESSION_END_FILE="$marker"
@@ -171,6 +188,7 @@ runtimeTag=${FWRUNNER_RUNTIME:-cae-job}; case "$runtimeTag" in *[!a-z0-9-]*) run
 export OTEL_RESOURCE_ATTRIBUTES="${OTEL_RESOURCE_ATTRIBUTES:+$OTEL_RESOURCE_ATTRIBUTES,}fworker.worker=$name,fworker.runtime=$runtimeTag,fworker.agent=$agent"
 unset token resp body ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_FOUNDRY_API_KEY ANTHROPIC_FOUNDRY_AUTH_TOKEN AZURE_OPENAI_API_KEY OPENAI_API_KEY CODEX_API_KEY AZURE_OPENAI_AD_TOKEN CURSOR_API_KEY
 
+if [ "$role" = worker ]; then
 # 2. the plugin, in exactly the gateway's version
 curl -fsS --max-time 120 --retry 3 -H @<(printf 'Authorization: Bearer %s\n' "$FACTORY_TOKEN") "$url/api/v1/plugin" -o "$home/plugin.tgz" \
     || fail "plugin download failed"
@@ -184,13 +202,24 @@ repoDir="$home/repo"
 git clone --quiet --depth 1 "$repo" "$repoDir" 2>&1 | redact || fail "clone of the repository failed"
 [ -d "$repoDir/.git" ] || fail "clone of the repository failed"
 say "repository cloned"
+else
+    repoDir="$home/patrol"; mkdir -p "$repoDir" || fail "cannot create $repoDir"
+fi
 
 # 3. the connect prompt; written to a file of the execution's disk, never to stdout
 prompt="$home/connect-prompt.md"
 esc() { printf '%s' "$1" | sed -e 's/[\/&|]/\\&/g'; }
+if [ "$role" = manager ]; then
+sed -e "s|{{ENV}}|$(esc "${FWRUNNER_ENV:-tdd}")|g" -e "s|{{BASE}}|$(esc "$home")|g" -e "s|{{MCP_URL}}|$(esc "$url/mcp")|g" -e "s|{{NAME}}|$(esc "$name")|g" \
+    "$managerTemplate" > "$prompt" || fail "cannot write the manager prompt"
+# claude reaches the gateway's tools natively; the file names the variable, claude expands it, the credential is never written
+printf '{"mcpServers":{"fworker":{"type":"http","url":"%s/mcp","headers":{"Authorization":"Bearer ${FACTORY_TOKEN}"}}}}\n' "$url" > "$home/mcp.json" \
+    || fail "cannot write the MCP config"
+else
 sed -e "s|{{ENV}}|$(esc "${FWRUNNER_ENV:-tdd}")|g" -e "s|{{BASE}}|$(esc "$home")|g" -e "s|{{SCRIPTS}}|$(esc "$home/plugin/scripts")|g" \
     -e "s|{{REPO_DIR}}|$(esc "$repoDir")|g" -e "s|{{REPO}}|$(esc "$repo")|g" -e "s|{{NAME}}|$(esc "$name")|g" \
     "$template" > "$prompt" || fail "cannot write the connect prompt"
+fi
 grep -q '{{' "$prompt" && fail "the connect prompt has an unfilled placeholder"
 
 # 3b. codex: its home with the filled config, the execpolicy rules and AGENTS.md (the plugin's skills and the connect prompt); the prompt on
@@ -224,7 +253,7 @@ if [ "$agent" = codex ]; then
             d=$(sed -n 's/^description: *//p' "$f" | head -n 1)
             printf -- '- %s (%s): %s\n' "$(basename "$(dirname "$f")")" "$f" "$d"
         done
-        if [ -f "$home/plugin/skills/factory-owner-session/SKILL.md" ]; then
+        if [ "$role" = worker ] && [ -f "$home/plugin/skills/factory-owner-session/SKILL.md" ]; then
             printf '\n## The skill factory-owner-session, in full\n\n'; awk 'NR==1&&/^---$/{f=1;next} f&&/^---$/{f=0;next} !f' "$home/plugin/skills/factory-owner-session/SKILL.md"
         fi
     } > "$CODEX_HOME/AGENTS.md" || fail "cannot write AGENTS.md"
@@ -241,7 +270,8 @@ fi
 codexModel=${codexModel:-${AZURE_OPENAI_DEPLOYMENT:-}}
 if [ "$agent" = codex ]; then
     args=(exec --json --strict-config -C "$repoDir" -m "$codexModel" -)
-    printf 'Follow the section "Connect prompt" of your AGENTS.md now, starting at CONNECT step 1. You are worker %s.\n' "$name" > "$prompt.start"
+    if [ "$role" = manager ]; then printf 'Follow the section "Connect prompt" of your AGENTS.md now, starting at PATROL step 1. You are %s.\n' "$name" > "$prompt.start"
+    else printf 'Follow the section "Connect prompt" of your AGENTS.md now, starting at CONNECT step 1. You are worker %s.\n' "$name" > "$prompt.start"; fi
     input="$prompt.start"
 elif [ "$agent" = cursor ]; then
     # Cursor agent CLI headless: the prompt is the last argument (cursor-agent -p reads no prompt from stdin or a file). One argv string
@@ -254,6 +284,7 @@ else
     args=(-p --output-format stream-json --verbose --settings "$settings")
     [ -n "${FWRUNNER_MODEL:-}" ] && args+=(--model "$FWRUNNER_MODEL")
     [ -n "${FWRUNNER_EFFORT:-}" ] && args+=(--effort "$FWRUNNER_EFFORT")
+    [ "$role" = manager ] && args+=(--mcp-config "$home/mcp.json" --allowedTools mcp__fworker)
     input="$prompt"
 fi
 : > "$transcript"
@@ -291,6 +322,7 @@ done
 if [ -z "$why" ]; then
     wait "$child" 2>/dev/null; code=$?; child=0
     if [ -e "$marker" ]; then ok=1; say "$agent exited ($code) after the end marker"
+    elif [ "$role" = manager ] && [ "$code" -eq 0 ]; then ok=1; say "$agent ended the patrol (0)"
     else say "$agent exited by itself ($code) without the end marker"; fi
 else
     [ "$ok" -eq 1 ] || say "$why"

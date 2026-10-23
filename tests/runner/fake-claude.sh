@@ -3,6 +3,7 @@
 #   end        stream-json lines, the stream-alive file, then the end marker after 2 s; exits on TERM
 #   end-stuck  as end, but ignores TERM (fwrunner.sh must KILL it)
 #   exit       a few lines, then exits 3 without the marker
+#   done       a few lines, then exits 0 without the marker (a manager patrol's normal end)
 #   stale      writes nothing and never touches stream-alive
 #   mute       touches stream-alive and holds an item, but writes no transcript bytes
 home=${FWRUNNER_HOME:?}
@@ -20,6 +21,7 @@ case "${FAKE_MODE:-end}" in
         echo 'end-session: item 42 ended' > "$FACTORY_SESSION_END_FILE.reason"; date -u +%FT%TZ > "$FACTORY_SESSION_END_FILE"
         while :; do sleep 1; done ;;
     exit) sleep 1; exit 3 ;;
+    done) sleep 1; exit 0 ;;
     stale) while :; do sleep 1; done ;;
     mute) echo 42 > "$home/session-owning"; while :; do touch "$home/stream-alive"; sleep 1; done ;;
 esac

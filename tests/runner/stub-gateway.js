@@ -1,6 +1,6 @@
 // A stub of the gateway for tests/runner/fwrunner.test.sh: the three calls the fwrunner image makes (runtime/redeem, plugin,
 // verbs/git-credential) and the managed identity endpoint of Container Apps (/msi/token), by the contract of docs/design/cloud-worker-runtimes.md 2.2 and 2.6. Credential-like values are composed at run time.
-//   node stub-gateway.js <port-file> <plugin.tgz>
+//   node stub-gateway.js <port-file> <plugin.tgz>     STUB_ROLE=manager: the redeem answers a manager credential (role manager, r1. token)
 const http = require('http'), fs = require('fs');
 const [portFile, pluginFile] = process.argv.slice(2);
 const nonce = 'nonce-' + 'x'.repeat(8);
@@ -20,6 +20,10 @@ http.createServer((req, res) => {
       if (b.nonce !== nonce) return send(res, 403, { ok: false, code: 'bad-nonce' });
       if (spent) return send(res, 410, { ok: false, code: 'nonce-spent' });
       spent = true;
+      if (process.env.STUB_ROLE === 'manager') {
+        workerToken = 'r1.' + 'M'.repeat(30) + '.' + 'N'.repeat(43);
+        return send(res, 200, { ok: true, name: b.name, role: 'manager', token: workerToken });
+      }
       workerToken = 'w2.' + b.name + '.cae-job.' + (Math.floor(Date.now() / 1000) + 3600) + '.' + 'C'.repeat(43);
       return send(res, 200, { ok: true, name: b.name, token: workerToken });
     }
