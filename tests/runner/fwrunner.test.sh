@@ -132,11 +132,12 @@ restart_stub; run kclaude end "$(secret nonce)" FWRUNNER_AUTH=key FWRUNNER_RUNTI
 check "claude with ANTHROPIC_API_KEY: exit 0, key in its env, no other key" '[ "$(code kclaude)" = 0 ] && grep -q api-key-set "$tmp/kclaude/work/seen-env" && ! grep -q sk-ant-test-key "$tmp/kclaude.out"'
 restart_stub; run knokey end "$(secret nonce)" FWRUNNER_AUTH=key ANTHROPIC_API_KEY=
 check "key mode without the key: exit 1 before redeem" '[ "$(code knokey)" = 1 ] && grep -q "ANTHROPIC_API_KEY is not set" "$tmp/knokey.out" && ! grep -q "nonce redeemed" "$tmp/knokey.out"'
-restart_stub; run kcursor end "$(secret nonce)" FWRUNNER_AUTH=key FWRUNNER_AGENT=cursor FWRUNNER_CURSOR="$here/fake-cursor.sh" CURSOR_API_KEY=cur-test-key ANTHROPIC_API_KEY=other
+restart_stub; run kcursor end "$(secret nonce)" FWRUNNER_AUTH=key FWRUNNER_AGENT=cursor FWRUNNER_CURSOR="$here/fake-cursor.sh" CURSOR_API_KEY=cur-test-key ANTHROPIC_API_KEY=other FWRUNNER_CURSOR_PREAMBLE="$root/runner/cursor-preamble.md"
 w="$tmp/kcursor/work"
+check "cursor: the prompt starts with the no-subagents preamble, its paths filled" 'grep -q "There are no subagents in this session" "$w/seen-args" && ! grep -q "{{BASE}}" "$w/seen-args"'
 check "cursor: exit 0, -p stream-json --force, prompt as argument, only CURSOR_API_KEY" '[ "$(code kcursor)" = 0 ] && grep -qx -- -p "$w/seen-args" && grep -qx -- --force "$w/seen-args" && grep -qx stream-json "$w/seen-args" && grep -q "cae-42-kcursor" "$w/seen-args" && grep -qx cursor-key-set "$w/seen-env" && ! grep -q anthropic-key-set "$w/seen-env" && grep -qx token-set "$w/seen-env"'
 check "cursor: stdout redacted, no key" '! grep -q cur-test-key "$tmp/kcursor.out" && ! grep -q "$(secret workerToken)" "$tmp/kcursor.out" && grep -q "nonce redeemed" "$tmp/kcursor.out"'
-restart_stub; run kcurentra end "$(secret nonce)" FWRUNNER_AGENT=cursor FWRUNNER_CURSOR="$here/fake-cursor.sh" CURSOR_API_KEY=cur-test-key
+restart_stub; run kcurentra end "$(secret nonce)" FWRUNNER_AGENT=cursor FWRUNNER_CURSOR="$here/fake-cursor.sh" CURSOR_API_KEY=cur-test-key FWRUNNER_CURSOR_PREAMBLE="$root/runner/cursor-preamble.md"
 check "cursor without FWRUNNER_AUTH=key: exit 1" '[ "$(code kcurentra)" = 1 ] && grep -q "needs FWRUNNER_AUTH=key" "$tmp/kcurentra.out"'
 restart_stub; run kcodex end "$(secret nonce)" FWRUNNER_AUTH=key FWRUNNER_AGENT=codex FWRUNNER_CODEX="$here/fake-codex.sh" FWRUNNER_CODEX_DIR="$root/runner/codex" FWRUNNER_MODEL=gpt-test OPENAI_API_KEY=oa-test-key
 w="$tmp/kcodex/work"
