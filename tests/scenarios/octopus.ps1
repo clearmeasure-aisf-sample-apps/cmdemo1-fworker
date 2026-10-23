@@ -14,6 +14,8 @@ function Oct-Host([string]$Method, [string]$Path, $Body = $null, [string]$Token 
     return @{ status = [int]$sc; body = $r }
 }
 function Oct-Report([string]$HostName, [object[]]$Containers) { Oct-Host POST '/api/v1/runtime/octopus/report' @{ host = $HostName; containers = @($Containers) } }
+# every host reports (no container) once, as Reconcile hosts does: the gateway starts nothing on a host it has not heard from since its start
+function Oct-Up { foreach ($h in 'host-a', 'host-b', 'host-c') { [void](Oct-Report $h @()) } }
 function Oct-Machines([object[]]$Machines) { [void](Fake 'octo-machines' @{ machines = @($Machines) }) }
 $OctDefaultMachines = @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machines-2'; name = 'host-b' }, @{ id = 'Machines-3'; name = 'host-sick'; health = 'Unhealthy' }, @{ id = 'Machines-4'; name = 'host-uat'; env = 'Environments-12' }, @{ id = 'Machines-5'; name = 'web-1'; roles = @('web') })
 # The scenario's items are closed, both hosts report no container (every detached worker ends, gone), held tasks end, the runtime is healthy again.
@@ -36,18 +38,20 @@ function Oct-UseOidc([int]$ExpiresIn = 3600) {
     $key = $env:OCTOPUS_RUNBOOK_API_KEY; Remove-Item Env:OCTOPUS_RUNBOOK_API_KEY -ErrorAction SilentlyContinue
     Restart-Gateway
     Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machines-2'; name = 'host-b' }, @{ id = 'Machines-6'; name = 'host-c' })   # a free host for each start
+    Oct-Up
     return @{ path = $cfgPath; orig = $orig; key = $key }
 }
 function Oct-UseKey($Saved) {
     [void](Fake 'octo-oidc' @{ require = $false })
     $env:OCTOPUS_RUNBOOK_API_KEY = $Saved.key
-    Set-Content -Path $Saved.path -Value $Saved.orig -NoNewline; Restart-Gateway
+    Set-Content -Path $Saved.path -Value $Saved.orig -NoNewline; Restart-Gateway; Oct-Up
 }
 
 $OctopusScenarios = [ordered]@{
 
 'octopus: auth apiKey: without a configured auth and with OCTOPUS_RUNBOOK_API_KEY set the key is sent, no token exchange is made' = {
-    [void](Fake 'octo-oidc' @{ require = $false })
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
+    [void](Fake 'octo-oidc' @{ require = $false }); Oct-Up
     $st = Oct-Status
     Check 'status: auth apiKey' ($st.auth -eq 'apiKey') ($st | ConvertTo-Json -Compress -Depth 4)
     $x = Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9101; phase = 'Technical Design'; role = '' }
@@ -57,6 +61,7 @@ $OctopusScenarios = [ordered]@{
 }
 
 'octopus: auth oidc: the Entra token is exchanged at /token/v1 for the service account; the access token is cached; a 401 renews it once' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $saved = $null
     try {
         $saved = Oct-UseOidc
@@ -77,6 +82,7 @@ $OctopusScenarios = [ordered]@{
 }
 
 'octopus: auth oidc: a short-lived access token is exchanged again before it expires' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $saved = $null
     try {
         $saved = Oct-UseOidc -ExpiresIn 2
@@ -88,7 +94,9 @@ $OctopusScenarios = [ordered]@{
 }
 
 'octopus: provision picks a healthy fworker-host with capacity and runs Start worker there with the prompted variables; the worker redeems and is offered; no capacity left refuses and the item waits' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $a = 0; $b = 0; $c = 0; $na = ''
+    Oct-Up
     try {
         $a = New-Item-Fake 'Octopus host a' 'x' $OctLabels
         Check 'a Start worker run is made for the item' (Wait-Until -Seconds 30 { (Oct-Runs 'Start worker' $a).Count -eq 1 })
@@ -115,6 +123,7 @@ $OctopusScenarios = [ordered]@{
 }
 
 'octopus: the reconcile endpoints take the host token only; desired names the host''s workers; an exited container ends its execution and the item is planned again, a container gone from the host is Stopped' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $n = 0; $name = ''
     try {
         Check 'desired with a wrong host token answers 401' ((Oct-Host GET '/api/v1/runtime/octopus/desired?host=host-a' $null ('h' * 40)).status -eq 401)
@@ -146,6 +155,7 @@ $OctopusScenarios = [ordered]@{
 }
 
 'octopus: the stop of a worker runs Stop worker on the machine it was started on; desired no longer names it' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $n = 0; $name = ''
     try {
         $n = New-Item-Fake 'Octopus stop' 'x' $OctLabels
@@ -165,6 +175,7 @@ $OctopusScenarios = [ordered]@{
 
 # The plant starts own-item workers only (no role): a short role is started through the test seam, as a manager start would pass it.
 'octopus: overflow runs a held Start worker (overflow) only for an explicit allowed role, capped at overflowMax; an own-item worker never overflows; its stop cancels the task' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $nx = ''
     try {
         Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a'; health = 'Unavailable' }, @{ id = 'Machines-2'; name = 'host-b'; disabled = $true })
@@ -192,27 +203,30 @@ $OctopusScenarios = [ordered]@{
 }
 
 'octopus: a coding role never overflows, whatever overflowRoles says' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
     try {
         $cfg = $orig | ConvertFrom-Json -AsHashtable; $cfg.runtimes.octopus.overflowRoles = @('development', 'worker', 'qc'); $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
-        Restart-Gateway
+        Restart-Gateway; Oct-Up
         Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a'; health = 'Unhealthy' })
         [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9011; phase = 'Development'; role = 'development' })
         [void](Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = 9012; phase = 'Development'; role = 'worker' })
         Check 'development and worker never run on the overflow pool' ((Oct-Runs 'Start worker (overflow)').Count -eq 0)
     } finally {
         Oct-Cleanup @()
-        Set-Content -Path $cfgPath -Value $orig -NoNewline; Restart-Gateway
+        Set-Content -Path $cfgPath -Value $orig -NoNewline; Restart-Gateway; Oct-Up
     }
 }
 
 'octopus: desired and report answer 404 for a host that is not a target' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     Check 'desired for an unknown host' ((Oct-Host GET '/api/v1/runtime/octopus/desired?host=nobody').status -eq 404)
     Check 'report for an unknown host' ((Oct-Report 'nobody' @()).status -eq 404)
     Check 'report for a target of another tag' ((Oct-Report 'web-1' @()).status -eq 404)
 }
 
 'octopus: a gateway restart rebuilds the running workers from the project''s tasks; no second run for their items; desired still names them' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $n = 0
     try {
         [void](Fake 'octo-v1-empty-form' @{ empty = $false })   # the legacy path: runs that keep their FormValues (Octopus keeps {} for a v1 run)
@@ -238,6 +252,7 @@ $OctopusScenarios = [ordered]@{
 # Runs started through runbook-runs/create/v1 keep FormValues {} (the fake's default, as Octopus): the rebuild reads nothing back, the host
 # reports are the source of truth. perHostCapacity is 1: one container on each host is adopted, a second one on host-a is not.
 'octopus: after a restart the running containers the hosts report are adopted up to perHostCapacity; desired names them, the reconcile keeps them, List shows them' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     try {
         $t0 = (Get-Date).ToUniversalTime()
         $a1 = 'oct-9201-aaaaaa'; $b1 = 'oct-9202-bbbbbb'; $a2 = 'oct-9203-cccccc'
