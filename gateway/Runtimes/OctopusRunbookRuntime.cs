@@ -478,6 +478,9 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         if (m == null) return null;
         lock (gate)
         {
+            // until this host has reported since the start, the gateway cannot know its running containers (they are adopted from the report):
+            // no workers array, so the reconcile script removes nothing
+            if (!reports.ContainsKey(m)) return new JsonObject { ["host"] = host, ["machine"] = m, ["waitingFor"] = "report" };
             var names = recs.Values.Where(x => x.Ended == null && !x.StopAsked && x.Mode == "detached" && string.Equals(x.Machine, m, StringComparison.OrdinalIgnoreCase)).Select(x => x.Name).Order(StringComparer.Ordinal).ToArray();
             return new JsonObject { ["host"] = host, ["machine"] = m, ["workers"] = new JsonArray(names.Select(n => (JsonNode)n).ToArray()) };
         }
