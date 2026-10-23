@@ -92,7 +92,8 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
     readonly Dictionary<string, HostReport> reports = new(StringComparer.OrdinalIgnoreCase);   // by machine id
     readonly Dictionary<string, string> machineNames = new(StringComparer.OrdinalIgnoreCase); // id -> name
     readonly Dictionary<string, Dictionary<string, string>> formIds = new(StringComparer.Ordinal); // runbook id -> variable name -> control id
-    string projectId = "", environmentId = "", identity = "";
+    string projectId = "", environmentId = "", identity = "", identityId = "";
+    JsonObject? permissionCheck;
     bool rebuilt;
     DateTime noCapacityUntil = DateTime.MinValue;
 
@@ -182,6 +183,28 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
 
     static IEnumerable<JsonNode> Items(JsonNode n) => (n as JsonArray ?? n["Items"] as JsonArray ?? new JsonArray()).Where(x => x != null)!;
 
+    // What Octopus attaches to the credential (ids and permission names only, never a key): its RunbookRunCreate grants with their restrictions
+    // and its system permission names, for /status. Read at sign-in and after a refused run.
+    async Task PermissionCheck(CancellationToken ct)
+    {
+        string id; lock (gate) id = identityId;
+        if (id == "") return;
+        try
+        {
+            var p = await Get($"{cfg.ServerUrl}/api/users/{Uri.EscapeDataString(id)}/permissions", ct);
+            static JsonArray Ids(JsonNode? n) => new((n as JsonArray ?? new JsonArray()).Select(x => (JsonNode?)JsonValue.Create(x?.ToString() ?? "")).ToArray());
+            var grants = new JsonArray((p["SpacePermissions"]?["RunbookRunCreate"] as JsonArray ?? new JsonArray()).Select(g => (JsonNode?)new JsonObject
+            {
+                ["space"] = g?["SpaceId"]?.ToString() ?? "", ["projects"] = Ids(g?["RestrictedToProjectIds"]), ["environments"] = Ids(g?["RestrictedToEnvironmentIds"]),
+                ["tenants"] = Ids(g?["RestrictedToTenantIds"]), ["projectGroups"] = Ids(g?["RestrictedToProjectGroupIds"])
+            }).ToArray());
+            var system = Ids(p["SystemPermissions"]);
+            var spaceNames = new JsonArray((p["SpacePermissions"] as JsonObject)?.Select(kv => (JsonNode?)JsonValue.Create(kv.Key)).ToArray() ?? Array.Empty<JsonNode?>());
+            lock (gate) permissionCheck = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runbookRunCreate"] = grants, ["system"] = system, ["spacePermissions"] = spaceNames };
+        }
+        catch (Exception e) { lock (gate) permissionCheck = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["error"] = e is HttpRequestException { Message: var m } && m.StartsWith("octopus ", StringComparison.Ordinal) ? m : e.GetType().Name }; }
+    }
+
     async Task Ids(CancellationToken ct)
     {
         lock (gate) if (projectId != "" && environmentId != "") return;
@@ -189,7 +212,8 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         var e = Items(await Get(Space("/environments/all"), ct)).FirstOrDefault(x => string.Equals(x["Name"]?.ToString(), cfg.Environment, StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidOperationException("environment-not-found");
         lock (gate) { projectId = p["Id"]!.ToString(); environmentId = e["Id"]!.ToString(); }
         // the account the credential signs in as (its id and user name, never a key), for /status: shows which identity Octopus checks
-        try { var me = await Get($"{cfg.ServerUrl}/api/users/me", ct); lock (gate) identity = $"{me["Id"]} {me["Username"]}".Trim(); } catch { }
+        try { var me = await Get($"{cfg.ServerUrl}/api/users/me", ct); lock (gate) { identity = $"{me["Id"]} {me["Username"]}".Trim(); identityId = me["Id"]?.ToString() ?? ""; } } catch { }
+        await PermissionCheck(ct);
     }
 
     // The records of a previous process are read back once, before anything counts host load, answers desired or judges a report: a
@@ -285,7 +309,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
             ["Fworker.Nonce"] = r.Nonce, ["Fworker.Agent"] = cfg.Agent, ["Fworker.Mode"] = mode
         };
         var (status, task, why) = await Run(book, rb.Snapshot, pick?.Name, values, ct);
-        if (status is not (200 or 201) || task == "") { lock (gate) recs.Remove(r.WorkerName); return new(false, "", $"runbook-run-{status}{why}"); }
+        if (status is not (200 or 201) || task == "") { lock (gate) recs.Remove(r.WorkerName); if (status == 403) await PermissionCheck(ct); return new(false, "", $"runbook-run-{status}{why}"); }
         var url = $"{cfg.ServerUrl}/app#/{cfg.SpaceId}/tasks/{task}";
         lock (gate) if (recs.TryGetValue(r.WorkerName, out var rec)) { rec.TaskId = task; rec.Url = url; }
         return new(true, task, "", url);
@@ -489,7 +513,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         lock (gate)
             return new JsonObject
             {
-                ["perHostCapacity"] = cfg.PerHostCapacity, ["overflowMax"] = cfg.OverflowMax, ["auth"] = cfg.Auth, ["identity"] = identity, ["projectId"] = projectId, ["environmentId"] = environmentId, ["serviceAccountId"] = cfg.ServiceAccountId, ["exchanges"] = exchanges, ["overflowInUse"] = recs.Values.Count(x => x.Ended == null && x.Mode == "held"),
+                ["perHostCapacity"] = cfg.PerHostCapacity, ["overflowMax"] = cfg.OverflowMax, ["auth"] = cfg.Auth, ["identity"] = identity, ["permissionCheck"] = permissionCheck?.DeepClone(), ["projectId"] = projectId, ["environmentId"] = environmentId, ["serviceAccountId"] = cfg.ServiceAccountId, ["exchanges"] = exchanges, ["overflowInUse"] = recs.Values.Count(x => x.Ended == null && x.Mode == "held"),
                 ["overflowRoles"] = new JsonArray(cfg.OverflowRoles.Select(x => (JsonNode)x).ToArray()), ["hostTokenSet"] = cfg.HostToken != "",
                 ["hosts"] = new JsonArray(reports.Select(kv => (JsonNode)new JsonObject { ["machine"] = kv.Key, ["name"] = machineNames.GetValueOrDefault(kv.Key, ""), ["reportedAt"] = kv.Value.At.ToString("o"), ["containers"] = kv.Value.Containers.Count }).ToArray())
             };
