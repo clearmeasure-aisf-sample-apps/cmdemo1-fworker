@@ -400,8 +400,8 @@ resource "octopusdeploy_team" "gateway" {
   user_role {
     user_role_id = octopusdeploy_user_role.runbook_runner.id
     space_id     = var.space_id
-    # tdd only, no project limit: Octopus refused runbook runs while RunbookRunCreate was restricted to the project (owner, 2026-10-23)
-    environment_ids = [local.environment_id]
+    # no project or environment limit within the space: Octopus refused the gateway's runbook runs with RunbookRunCreate restricted to the
+    # project, and then to tdd (owner, 2026-10-23); the role itself only runs and views runbooks
   }
 }
 
