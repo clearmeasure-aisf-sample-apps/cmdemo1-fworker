@@ -296,7 +296,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         foreach (var (k, v) in values) if (ids.TryGetValue(k, out var id)) form[id] = v;
         var body = new JsonObject
         {
-            ["RunbookId"] = runbookId, ["RunbookSnapshotId"] = snapshot, ["EnvironmentId"] = environmentId, ["FormValues"] = form,
+            ["ProjectId"] = projectId, ["RunbookId"] = runbookId, ["RunbookSnapshotId"] = snapshot, ["EnvironmentId"] = environmentId, ["FormValues"] = form,
             ["SpecificMachineIds"] = machine != null ? new JsonArray(machine) : new JsonArray()
         };
         var (s, b) = await Send(HttpMethod.Post, Space("/runbookRuns"), body, ct);
