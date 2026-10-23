@@ -65,9 +65,9 @@ variable "project_group_name" {
 }
 
 variable "reconcile_enabled" {
-  description = "Whether the trigger \"Reconcile hosts every 5 minutes\" runs. Off while the gateway's octopus runtime is disabled."
+  description = "Whether the trigger \"Reconcile hosts every 5 minutes\" runs. On since the runtime went live in tdd (2026-10-23)."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "gateway_url" {
@@ -145,7 +145,6 @@ locals {
     "Fworker.Cpus"                = "2"
     "Fworker.Memory"              = "8g"
     "Fworker.StartTimeoutSeconds" = "180"
-    "Fworker.GhcrUsername"        = var.ghcr_username == null ? "" : var.ghcr_username
   }
 
   # Sensitive variables of the project, added outside Terraform (see the top): the name and what the value is
@@ -173,6 +172,10 @@ resource "octopusdeploy_docker_container_registry" "ghcr" {
   registry_path = "clearmeasure-aisf-sample-apps/fworker-host"
   username      = var.ghcr_username
   password      = var.ghcr_token
+  # the credential is set in the live space (the token is a secret, never in a tfvars file): an apply without the two variables keeps it
+  lifecycle {
+    ignore_changes = [username, password]
+  }
 }
 
 # --- runbooks -------------------------------------------------------------------------------------------------------------------------
@@ -376,6 +379,22 @@ resource "octopusdeploy_variable" "setting" {
   value    = each.value
 }
 
+# The GHCR user goes with the feed's credential: set in the live space, kept by an apply that does not pass var.ghcr_username
+resource "octopusdeploy_variable" "ghcr_username" {
+  owner_id = octopusdeploy_project.runtime.id
+  type     = "String"
+  name     = "Fworker.GhcrUsername"
+  value    = var.ghcr_username == null ? "" : var.ghcr_username
+  lifecycle {
+    ignore_changes = [value]
+  }
+}
+
+moved {
+  from = octopusdeploy_variable.setting["Fworker.GhcrUsername"]
+  to   = octopusdeploy_variable.ghcr_username
+}
+
 # --- the gateway's identity: a service account with run/view of these runbooks only ----------------------------------------------------
 
 # The first gateway account (Standard service account, Users-903): Octopus refused its runbook runs with "Missing permission:
@@ -393,7 +412,7 @@ resource "octopusdeploy_user" "gateway" {
 # lets only a person mint it, so rotating it before it expires is a person's job.
 resource "octopusdeploy_user" "gateway_agent" {
   username     = "cmdemo1-fworker-gateway-agent"
-  display_name = "cmdemo1 fworker gateway (Agent)"
+  display_name = "cmdemo1 fworker gateway (runtime adapter, Agent)" # the live name: no update of this account (a PUT could reset its type)
   is_service   = true
   is_active    = true
 }
