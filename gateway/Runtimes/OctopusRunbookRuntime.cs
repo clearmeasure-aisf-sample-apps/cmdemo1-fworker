@@ -1,7 +1,10 @@
 using System.Globalization;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using Azure.Core;
+using Azure.Identity;
 
 // The Octopus runbook runtime (docs/design/octopus-runbook-runtime.md): a worker container is started on a self-hosted machine (an Octopus
 // tentacle with target tag runtimes.octopus.hostTag in runtimes.octopus.environment) by a run of the runbook "Start worker" of project
@@ -9,7 +12,9 @@ using System.Text.Json.Nodes;
 // (Octopus Cloud's task cap is shared with the deployments). Only short roles (overflowRoles, never a coding worker) may run "held" on the
 // Hosted Ubuntu dynamic worker pool (runbook "Start worker (overflow)"), at most overflowMax at a time. The container's life is reported by
 // the scheduled runbook "Reconcile hosts" (POST /api/v1/runtime/octopus/report), which also reads what should run (GET .../desired).
-// The gateway's key (OCTOPUS_RUNBOOK_API_KEY) may run the runbooks of that one project; the CLI keys of the agents are Octopus sensitive
+// The gateway signs in either with a key (auth "apiKey", OCTOPUS_RUNBOOK_API_KEY) or, by default when no key is set, with its managed identity
+// (auth "oidc"): an Entra token for oidcAudience is exchanged at {serverUrl}/token/v1 for an Octopus access token of the service account
+// serviceAccountId (Octopus "OpenID Connect" for service accounts). Either identity may run the runbooks of that one project; the CLI keys of the agents are Octopus sensitive
 // variables and never pass through the gateway. The execution's values are no credential beyond the one-time nonce.
 sealed class OctopusRunbookSettings
 {
@@ -24,7 +29,9 @@ sealed class OctopusRunbookSettings
     public static readonly string[] CodingRoles = { "worker", "development", "coding", "own-item" };
     public static readonly string[] Agents = { "claude", "cursor", "codex" };
     public string ApiKey = "", HostToken = "";
-    public bool On => Enabled && MaxConcurrent > 0 && ApiKey != "" && ServerUrl != "";
+    public string Auth = "oidc", ServiceAccountId = "", OidcAudience = "api://AzureADTokenExchange", ManagedIdentityClientId = "";
+    public bool Oidc => Auth == "oidc";
+    public bool On => Enabled && MaxConcurrent > 0 && ServerUrl != "" && (Oidc ? ServiceAccountId != "" : ApiKey != "");
 
     public static OctopusRunbookSettings From(JsonNode? c, Func<string, string?> get)
     {
@@ -43,10 +50,15 @@ sealed class OctopusRunbookSettings
             s.MaxConcurrent = (int)D("maxConcurrent", 0); s.MaxExecutionsPerDay = (int)D("maxExecutionsPerDay", 0);
             s.MaxFailuresPerPhase = Math.Max(1, (int)D("maxFailuresPerPhase", 2)); s.UnhealthyAfterFailures = Math.Max(1, (int)D("unhealthyAfterFailures", 2));
             s.AckSeconds = D("ackSeconds", 600); s.ListSeconds = Math.Max(1, D("listSeconds", 30)); s.ReportGraceSeconds = D("reportGraceSeconds", 90);
+            s.Auth = S("auth", "").Trim().ToLowerInvariant() switch { "apikey" => "apiKey", "oidc" => "oidc", _ => "" };
+            s.ServiceAccountId = S("serviceAccountId", "").Trim(); s.OidcAudience = S("oidcAudience", s.OidcAudience).Trim();
+            s.ManagedIdentityClientId = S("managedIdentityClientId", "").Trim();
             if (c["overflowRoles"] is JsonArray roles) s.OverflowRoles = roles.Select(x => x?.ToString().Trim().ToLowerInvariant() ?? "").Where(x => x != "").ToList();
         }
         s.ApiKey = get("OCTOPUS_RUNBOOK_API_KEY")?.Trim() ?? "";
         s.HostToken = get("FACTORY_OCTOPUS_HOST_TOKEN")?.Trim() ?? "";
+        if (s.Auth == "") s.Auth = s.ApiKey != "" ? "apiKey" : "oidc";
+        if (s.ManagedIdentityClientId == "") s.ManagedIdentityClientId = get("FACTORY_RUNTIME_IDENTITY_CLIENT_ID")?.Trim() ?? "";
         return s;
     }
 
@@ -84,9 +96,55 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
     bool rebuilt;
     DateTime noCapacityUntil = DateTime.MinValue;
 
-    public OctopusRunbookRuntime(OctopusRunbookSettings cfg, HttpClient? http = null)
+    readonly Func<CancellationToken, Task<string>> entraToken;
+    readonly SemaphoreSlim tokenGate = new(1, 1);
+    string accessToken = ""; DateTime accessUntil = DateTime.MinValue;
+    int exchanges;
+
+    public OctopusRunbookRuntime(OctopusRunbookSettings cfg, HttpClient? http = null, Func<CancellationToken, Task<string>>? entraToken = null)
     {
         this.cfg = cfg; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        this.entraToken = entraToken ?? DefaultEntraToken(cfg);
+    }
+
+    // The gateway's managed identity (its user-assigned one when managedIdentityClientId or FACTORY_RUNTIME_IDENTITY_CLIENT_ID names it), for the
+    // audience the Octopus OIDC identity expects. A test gateway against a loopback Octopus takes FACTORY_TEST_OCTOPUS_ENTRA_TOKEN instead; that
+    // variable is ignored for any other server.
+    static Func<CancellationToken, Task<string>> DefaultEntraToken(OctopusRunbookSettings cfg)
+    {
+        var test = Environment.GetEnvironmentVariable("FACTORY_TEST_OCTOPUS_ENTRA_TOKEN");
+        if (!string.IsNullOrEmpty(test) && Uri.TryCreate(cfg.ServerUrl, UriKind.Absolute, out var u) && u.IsLoopback) return _ => Task.FromResult(test);
+        var cred = cfg.ManagedIdentityClientId != "" ? new ManagedIdentityCredential(ManagedIdentityId.FromUserAssignedClientId(cfg.ManagedIdentityClientId)) : new ManagedIdentityCredential(ManagedIdentityId.SystemAssigned);
+        var scope = new TokenRequestContext(new[] { cfg.OidcAudience.TrimEnd('/') + "/.default" });
+        return async ct => (await cred.GetTokenAsync(scope, ct)).Token;
+    }
+
+    // The Octopus access token of the service account, cached until a minute before it expires (or half its life when that is shorter).
+    // Token exchange (RFC 8693) at {serverUrl}/token/v1, the token_endpoint of Octopus's /.well-known/openid-configuration. Never logged.
+    async Task<string> AccessToken(bool renew, CancellationToken ct)
+    {
+        await tokenGate.WaitAsync(ct);
+        try
+        {
+            if (!renew && accessToken != "" && DateTime.UtcNow < accessUntil) return accessToken;
+            var jwt = await entraToken(ct);
+            var body = new JsonObject
+            {
+                ["grant_type"] = "urn:ietf:params:oauth:grant-type:token-exchange", ["audience"] = cfg.ServiceAccountId,
+                ["subject_token_type"] = "urn:ietf:params:oauth:token-type:jwt", ["subject_token"] = jwt
+            };
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{cfg.ServerUrl}/token/v1") { Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json") };
+            using var resp = await http.SendAsync(req, ct);
+            var text = await resp.Content.ReadAsStringAsync(ct);
+            JsonNode? j = null; try { if (text.Length > 0) j = JsonNode.Parse(text); } catch { }
+            var at = j?["access_token"]?.ToString() ?? "";
+            if (!resp.IsSuccessStatusCode || at == "") throw new HttpRequestException($"octopus token exchange answered {(int)resp.StatusCode}");
+            var life = double.TryParse(j?["expires_in"]?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var e) && e > 0 ? e : 300;
+            accessToken = at; accessUntil = DateTime.UtcNow.AddSeconds(Math.Max(0, Math.Min(life - 60, life / 2)));
+            exchanges++;
+            return at;
+        }
+        finally { tokenGate.Release(); }
     }
 
     public string Kind => "octopus";
@@ -100,13 +158,19 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
 
     async Task<(int Status, JsonNode? Body)> Send(HttpMethod m, string url, JsonNode? body, CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(m, url);
-        req.Headers.Add("X-Octopus-ApiKey", cfg.ApiKey);
-        if (body != null) req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
-        using var resp = await http.SendAsync(req, ct);
-        var text = await resp.Content.ReadAsStringAsync(ct);
-        JsonNode? j = null; try { if (text.Length > 0) j = JsonNode.Parse(text); } catch { }
-        return ((int)resp.StatusCode, j);
+        for (var attempt = 0; ; attempt++)
+        {
+            using var req = new HttpRequestMessage(m, url);
+            if (cfg.Oidc) req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await AccessToken(attempt > 0, ct));
+            else req.Headers.Add("X-Octopus-ApiKey", cfg.ApiKey);
+            if (body != null) req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+            using var resp = await http.SendAsync(req, ct);
+            // an access token Octopus no longer takes (revoked, expired early): one new exchange and one retry
+            if (cfg.Oidc && attempt == 0 && resp.StatusCode == System.Net.HttpStatusCode.Unauthorized) continue;
+            var text = await resp.Content.ReadAsStringAsync(ct);
+            JsonNode? j = null; try { if (text.Length > 0) j = JsonNode.Parse(text); } catch { }
+            return ((int)resp.StatusCode, j);
+        }
     }
 
     async Task<JsonNode> Get(string url, CancellationToken ct)
@@ -414,7 +478,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         lock (gate)
             return new JsonObject
             {
-                ["perHostCapacity"] = cfg.PerHostCapacity, ["overflowMax"] = cfg.OverflowMax, ["overflowInUse"] = recs.Values.Count(x => x.Ended == null && x.Mode == "held"),
+                ["perHostCapacity"] = cfg.PerHostCapacity, ["overflowMax"] = cfg.OverflowMax, ["auth"] = cfg.Auth, ["serviceAccountId"] = cfg.ServiceAccountId, ["exchanges"] = exchanges, ["overflowInUse"] = recs.Values.Count(x => x.Ended == null && x.Mode == "held"),
                 ["overflowRoles"] = new JsonArray(cfg.OverflowRoles.Select(x => (JsonNode)x).ToArray()), ["hostTokenSet"] = cfg.HostToken != "",
                 ["hosts"] = new JsonArray(reports.Select(kv => (JsonNode)new JsonObject { ["machine"] = kv.Key, ["name"] = machineNames.GetValueOrDefault(kv.Key, ""), ["reportedAt"] = kv.Value.At.ToString("o"), ["containers"] = kv.Value.Containers.Count }).ToArray())
             };

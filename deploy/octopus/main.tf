@@ -29,6 +29,16 @@ provider "octopusdeploy" {
   space_id = var.space_id
 }
 
+# the default of the prompted Fworker.Agent; the gateway passes its runtimes.octopus.agent at every run
+variable "default_agent" {
+  type    = string
+  default = "cursor"
+  validation {
+    condition     = contains(["claude", "cursor", "codex"], var.default_agent)
+    error_message = "default_agent must be claude, cursor or codex."
+  }
+}
+
 variable "space_id" {
   type    = string
   default = "Spaces-355"
@@ -310,7 +320,7 @@ resource "octopusdeploy_variable" "agent" {
   owner_id = octopusdeploy_project.runtime.id
   type     = "String"
   name     = "Fworker.Agent"
-  value    = "claude"
+  value    = var.default_agent
   prompt {
     label       = "Fworker.Agent"
     description = "Coding CLI of the worker"

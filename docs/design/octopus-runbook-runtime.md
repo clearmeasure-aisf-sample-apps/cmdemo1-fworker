@@ -34,11 +34,12 @@ An item reaches the runtime by the label `runtime:octopus` or a `runtimes.routin
   secret env var FACTORY_OCTOPUS_HOST_TOKEN (constant-time compare), never the operator token. Report feeds List (a container gone/exited ->
   instance Stopped so the plant re-plans; see 5 for the one refinement).
 - Settings under `runtimes.octopus` in `config/instance.json`: { enabled false by default, serverUrl, spaceId "Spaces-355", project,
-  environment "tdd", hostTag "fworker-host", perHostCapacity 2, overflowRoles [...], overflowMax 4, maxConcurrent }. API key from env
-  OCTOPUS_RUNBOOK_API_KEY (a service account allowed to run runbooks of that project only). Disabled when the key is missing. Not enabled in
-  config/deploy.overrides.json.
+  environment "tdd", hostTag "fworker-host", perHostCapacity 2, overflowRoles [...], overflowMax 4, maxConcurrent, auth, serviceAccountId,
+  oidcAudience }. The gateway signs in as a service account allowed to run runbooks of that project only, by OIDC with its managed identity
+  (`auth` "oidc", the default when no key is set) or by an API key from env OCTOPUS_RUNBOOK_API_KEY (`auth` "apiKey"); see 8. Disabled when
+  the chosen credential is missing (serviceAccountId empty, or no key). Not enabled in config/deploy.overrides.json.
 
-Further settings with defaults: `startRunbook`, `overflowRunbook`, `stopRunbook` (the names above), `agent` ("codex"),
+Further settings with defaults: `startRunbook`, `overflowRunbook`, `stopRunbook` (the names above), `agent` ("codex"; config/instance.json sets "cursor", the one CLI key in the Octopus project),
 `maxExecutionsPerDay`, `maxFailuresPerPhase` 2, `unhealthyAfterFailures` 2, `ackSeconds` 600 (covers an image pull on a cold host),
 `listSeconds` 30, `reportGraceSeconds` 90.
 
@@ -148,10 +149,30 @@ back this way that its host's next report does not list had exited before the re
 
 ## 8. Security
 
-- **A separate service account** for the gateway's key (`OCTOPUS_RUNBOOK_API_KEY`): a team whose only role is Runbook Consumer (run and
-  view runbooks, view tasks, deployment targets and environments) on project `cmdemo1-fworker-runtime` in environment tdd. It cannot edit a
-  runbook, deploy a release or read a sensitive variable. It is not the read-only `cmdemo1-reader` and not the operator identities. Without
-  the key the runtime is off, whatever the file says.
+- **A separate service account** for the gateway: a team whose only role is Runbook Consumer (run and view runbooks, view tasks,
+  deployment targets and environments) on project `cmdemo1-fworker-runtime` in environment tdd. It cannot edit a runbook, deploy a release
+  or read a sensitive variable. It is not the read-only `cmdemo1-reader` and not the operator identities. Without its credential the runtime
+  is off, whatever the file says.
+- **No long-lived key: OIDC with the gateway's managed identity** (`auth` "oidc", default). Octopus "OpenID Connect" for service accounts,
+  "Using OIDC with other issuers" (octopus.com/docs/api/authentication/openid-connect/other-issuers). The gateway asks Entra (Azure.Identity
+  `ManagedIdentityCredential`, the user-assigned identity of `managedIdentityClientId` or env FACTORY_RUNTIME_IDENTITY_CLIENT_ID, else the
+  system-assigned one) for a token of scope `<oidcAudience>/.default`, default `api://AzureADTokenExchange` (the audience managed identities
+  issue for federation; its tokens are Entra v2), and exchanges it at `POST {serverUrl}/token/v1` (the `token_endpoint` of Octopus's
+  `/.well-known/openid-configuration`), JSON `{ grant_type: urn:ietf:params:oauth:grant-type:token-exchange, audience: <serviceAccountId>,
+  subject_token_type: urn:ietf:params:oauth:token-type:jwt, subject_token: <Entra JWT> }`. The answer's `access_token` is sent as
+  `Authorization: Bearer`, cached until a minute before `expires_in` (half its life when shorter); a 401 makes one new exchange and one
+  retry. Neither token is logged or shown in `/status` (which shows `auth`, `serviceAccountId` and the exchange count).
+  What an Octopus administrator enters (Configuration > Users > the service account > OpenID Connect > Add new OIDC identity, type "Other
+  issuer"):
+  - **Issuer URL:** `https://login.microsoftonline.com/<tenant id>/v2.0` (the gateway's Entra tenant; `iss` of the token, no trailing slash)
+  - **Subject:** the **object (principal) id** of the gateway's managed identity (`az identity show -n <identity> -g <rg> --query principalId`,
+    or `az containerapp identity show` for a system-assigned one) — not its client id; exact and case-sensitive
+  - **Audience (custom):** `api://AzureADTokenExchange` (must equal `oidcAudience`; the token's `aud` is not the service account id)
+  - then set `runtimes.octopus.serviceAccountId` to the service account's id (e.g. `Users-903`, the "Service Account Id" shown on that page)
+  Tests: a loopback serverUrl takes the Entra token from FACTORY_TEST_OCTOPUS_ENTRA_TOKEN (ignored for any other server), as cae-job's
+  FACTORY_TEST_ARM_TOKEN.
+- **API key** (`auth` "apiKey", env `OCTOPUS_RUNBOOK_API_KEY`, sent as `X-Octopus-ApiKey`): kept for a server without OIDC. With no `auth`
+  setting a set key selects this mode.
 - **The host token** (`FACTORY_OCTOPUS_HOST_TOKEN`) is the only credential of the reconcile endpoints, compared in constant time; the
   operator token, a worker credential or no token answer 401. Unset, the endpoints refuse every call. It is stored in the gateway app's
   secrets and as a sensitive variable of the Octopus project; it lets a caller read worker names and report containers, nothing more.

@@ -252,9 +252,25 @@ sealed class World
     };
     List<OctoMachine> octoMachines = DefaultMachines();
     readonly List<OctoRun> octoRuns = new(); readonly Dictionary<string, OctoTask> octoTasks = new(); int octoCancels, octoUnauthorized; long octoSeq;
+    // OpenID Connect of a service account: POST /token/v1 exchanges an external JWT (any "eyJ..." subject token, the suites compose theirs) for an
+    // access token of the service account named by audience. /_fake/octo-oidc { require, serviceAccountId, expiresIn } makes /api take only such
+    // a Bearer token (no API key); /_fake/octo-oidc-revoke makes every issued token answer 401, as an expired or revoked one would.
+    bool octoRequireBearer; string octoServiceAccount = "Users-903"; int octoExpiresIn = 3600, octoExchanges, octoExchangeRefusals;
+    readonly HashSet<string> octoAccess = new();
+    (int, object?) OctoToken(string method, JsonNode? b)
+    {
+        if (method != "POST") return (405, null);
+        string F(string k) => b?[k]?.ToString() ?? "";
+        if (F("grant_type") != "urn:ietf:params:oauth:grant-type:token-exchange" || F("subject_token_type") != "urn:ietf:params:oauth:token-type:jwt" || !F("subject_token").StartsWith("eyJ") || F("audience") != octoServiceAccount)
+        { octoExchangeRefusals++; return (400, J(("error", "invalid_grant"))); }
+        var at = "oat-" + Guid.NewGuid().ToString("N"); octoAccess.Add(at); octoExchanges++;
+        return (200, J(("access_token", at), ("issued_token_type", "urn:ietf:params:oauth:token-type:access_token"), ("token_type", "Bearer"), ("expires_in", octoExpiresIn)));
+    }
     (int, object?) OctoRb(string method, string path, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b, string auth)
     {
-        if (!auth.StartsWith("Octopus ") || auth.Length < 12) { octoUnauthorized++; return (401, J(("ErrorMessage", "You must be logged in to perform this action."))); }
+        var bearerOk = auth.StartsWith("Bearer ") && octoAccess.Contains(auth[7..]);
+        var keyOk = !octoRequireBearer && auth.StartsWith("Octopus ") && auth.Length >= 12;
+        if (!bearerOk && !keyOk) { octoUnauthorized++; return (401, J(("ErrorMessage", "You must be logged in to perform this action."))); }
         Match m;
         if ((m = Regex.Match(path, "^/api/tasks/(ServerTasks-\\d+)(/cancel)?$")).Success)
         {
@@ -310,7 +326,7 @@ sealed class World
     }
     static JsonObject OctoTaskJson(OctoTask t) => J(("Id", t.Id), ("State", t.State), ("IsCompleted", t.State is "Success" or "Failed" or "Canceled" or "TimedOut"), ("QueueTime", t.Queued.ToString("o")), ("Arguments", J(("RunbookRunId", t.RunId))));
     static JsonObject OctoRunJson(OctoRun r) => J(("Id", r.Id), ("TaskId", r.TaskId), ("RunbookId", r.RunbookId), ("RunbookSnapshotId", r.Snapshot), ("EnvironmentId", r.Env), ("SpecificMachineIds", r.Machines.DeepClone()), ("FormValues", r.Form.DeepClone()));
-    JsonObject OctoState() => J(("cancels", octoCancels), ("unauthorized", octoUnauthorized), ("runs", new JsonArray(octoRuns.Select(r =>
+    JsonObject OctoState() => J(("cancels", octoCancels), ("unauthorized", octoUnauthorized), ("exchanges", octoExchanges), ("exchangeRefusals", octoExchangeRefusals), ("requireBearer", octoRequireBearer), ("runs", new JsonArray(octoRuns.Select(r =>
     {
         var vals = new JsonObject(); foreach (var v in OctoVars) if (r.Form[OctoCtl(r.RunbookId, v)] is { } x) vals[v.Split('.')[1]] = x.DeepClone();
         return (JsonNode)J(("id", r.Id), ("task", r.TaskId), ("runbook", OctoBooks.First(x => x.Id == r.RunbookId).Name), ("machines", r.Machines.DeepClone()), ("values", vals), ("state", octoTasks[r.TaskId].State));
@@ -391,6 +407,7 @@ sealed class World
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
         if (path.StartsWith("/octopus/")) return Octopus(path[9..], q);
         if (path.StartsWith("/subscriptions/")) return Arm(method, path, b, auth);
+        if (path == "/token/v1") return OctoToken(method, b);
         if (path.StartsWith("/api/")) return OctoRb(method, path, q, b, auth);
         if (path.StartsWith("/v1/")) return Cursor(method, path, b, auth);
         if (path.StartsWith("/agents/")) return Copilot(method, path, b, auth);
@@ -944,7 +961,12 @@ sealed class World
                 refPage = Math.Clamp(b?["size"]?.GetValue<int>() ?? 0, 0, 100); return (200, J(("ok", true)));
             case "arm": return (200, ArmState());
             case "octo": return (200, OctoState());
-            case "octo-reset": octoRuns.Clear(); octoTasks.Clear(); octoMachines = DefaultMachines(); octoCancels = 0; octoUnauthorized = 0; return (200, J(("ok", true)));
+            case "octo-reset": octoRuns.Clear(); octoTasks.Clear(); octoMachines = DefaultMachines(); octoCancels = 0; octoUnauthorized = 0; octoExchanges = 0; octoExchangeRefusals = 0; return (200, J(("ok", true)));
+            case "octo-oidc":   // { require, serviceAccountId, expiresIn }
+                octoRequireBearer = b?["require"]?.GetValue<bool>() == true; octoServiceAccount = b?["serviceAccountId"]?.ToString() ?? "Users-903";
+                octoExpiresIn = b?["expiresIn"]?.GetValue<int>() ?? 3600; octoAccess.Clear(); octoExchanges = 0; octoExchangeRefusals = 0; octoUnauthorized = 0;
+                return (200, J(("ok", true)));
+            case "octo-oidc-revoke": octoAccess.Clear(); return (200, J(("ok", true)));
             case "octo-machines":   // [{id, name, health, roles, env, disabled}]: the deployment targets of the space
                 octoMachines = (b?["machines"] as JsonArray ?? new JsonArray()).Select(m => new OctoMachine { Id = m!["id"]!.ToString(), Name = m["name"]?.ToString() ?? m["id"]!.ToString(), Health = m["health"]?.ToString() ?? "Healthy", Env = m["env"]?.ToString() ?? "Environments-11", Roles = (m["roles"] as JsonArray)?.Select(x => x!.ToString()).ToList() ?? new() { "fworker-host" }, Disabled = m["disabled"]?.GetValue<bool>() == true }).ToList();
                 return (200, J(("ok", true)));
