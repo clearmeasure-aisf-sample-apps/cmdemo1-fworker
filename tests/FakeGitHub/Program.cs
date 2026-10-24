@@ -941,7 +941,7 @@ sealed class World
     }
 
     // The promotions of the automatic promotion (docs/design/auto-promote.md): a release made by /_fake/octo-release is "manual": Octopus deploys it
-    // to tdd only (state given), and to uat or prod only through POST deployments/create/v1. Such a deployment waits at its Sign-off step (a
+    // to tdd only (state given), and to uat or prod only through POST deployments/create/untenanted/v1. Such a deployment waits at its Sign-off step (a
     // manual intervention, pending) until the interruption is answered: Proceed ends the task Success, Abort Failed. /_fake/octo-forbid
     // { create, interruption } makes those calls answer 403 naming the missing permission, as Octopus does. /_fake/octo-deps lists them.
     sealed class OctoDep { public string Id = "", RelId = "", Env = "", TaskId = ""; string state = "Executing"; public DateTime? Done; public string State { get => state; set { state = value; Done = value is "Executing" or "Queued" ? null : DateTime.UtcNow; } } public DateTime Created = DateTime.UtcNow; public string Interruption = ""; public bool Pending; public string Result = ""; public string Responsible = ""; }
@@ -954,7 +954,7 @@ sealed class World
     {
         if (path == "api/users/me") return (200, J(("Id", "Users-1")));
         Match pm;
-        if (path == "api/Spaces-355/deployments/create/v1" && method == "POST")
+        if (path == "api/Spaces-355/deployments/create/untenanted/v1" && method == "POST")
         {
             if (octoForbidCreate != "") return (403, OctoForbidden(octoForbidCreate));
             if (b?["ProjectName"]?.ToString() != "cmdemo1-ui" || b?["SpaceIdOrName"]?.ToString() != "Spaces-355") return (400, J(("ErrorMessage", "unknown project or space")));

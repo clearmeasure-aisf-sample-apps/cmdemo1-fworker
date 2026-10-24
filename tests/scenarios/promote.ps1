@@ -144,7 +144,7 @@ $PromoteScenarios = [ordered]@{
     $sha = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 40)
     [void](Fake 'octo-release' @{ version = '3.8.1'; sha = $sha })
     # a person's deployment to uat, created before the gateway's sweep could
-    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/octopus/api/Spaces-355/deployments/create/v1" -Method POST -Headers @{ 'X-Octopus-ApiKey' = ('API-' + 'PERSON') } -Body (@{ SpaceIdOrName = 'Spaces-355'; ProjectName = 'cmdemo1-ui'; ReleaseVersion = '3.8.1'; EnvironmentNames = @('uat') } | ConvertTo-Json) -ContentType 'application/json')
+    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/octopus/api/Spaces-355/deployments/create/untenanted/v1" -Method POST -Headers @{ 'X-Octopus-ApiKey' = ('API-' + 'PERSON') } -Body (@{ SpaceIdOrName = 'Spaces-355'; ProjectName = 'cmdemo1-ui'; ReleaseVersion = '3.8.1'; EnvironmentNames = @('uat') } | ConvertTo-Json) -ContentType 'application/json')
     $i = Pm-Item '3.8.1' -NoRelease -Sha $sha
     Start-Sleep -Seconds 8
     Check 'its Sign-off is not answered' (@(Pm-Dep '3.8.1' 'uat')[0].pending) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)

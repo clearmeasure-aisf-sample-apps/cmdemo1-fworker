@@ -47,7 +47,7 @@ it is said again only when the reasons change). The other items of the release a
 
 - Before creating, the deployments of the release are read again (`GET /api/{space}/releases/{id}/deployments`); one to the target means no
   POST. So a restart, a second sweep or a person's deployment never leads to a second deployment.
-- Create: `POST /api/{space}/deployments/create/v1` with `SpaceIdOrName`, `ProjectName`, `ReleaseVersion`, `EnvironmentNames` (the Executions
+- Create: `POST /api/{space}/deployments/create/untenanted/v1` (the route this server advertises; `create/v1` answers 404) with `SpaceIdOrName`, `ProjectName`, `ReleaseVersion`, `EnvironmentNames` (the Executions
   API). The task and deployment ids are recorded on each item (`merge.promoted.<env>`) and journaled once: "promoted release X to uat (Octopus
   task Y)".
 - Following: each sweep reads the task. While it runs and the deployment is one the gateway created (its task is recorded on an item), the

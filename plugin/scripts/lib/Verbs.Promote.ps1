@@ -287,7 +287,9 @@ function Invoke-AutoPromote($Queue, $Labels) {
             # read again just before: a deployment of this release to the target that appeared since (another sweep, a person) is never doubled
             $again = Get-ReleaseDeployments $ver
             if ($again -and $again.deployments.ContainsKey($tname.ToLower())) { $out += @{ item = $items[0]; action = 'promotion-following'; release = $ver; environment = $tname; task = $again.deployments[$tname.ToLower()].task }; continue }
-            $r = Invoke-OctoPost "api/$($o.space)/deployments/create/v1" @{ SpaceIdOrName = "$($o.space)"; ProjectName = "$($o.project)"; ReleaseVersion = $ver; EnvironmentNames = @($tname) }
+            # the Executions API route this server advertises for an untenanted project (ExecutionsCreateApiDeploymentCreateV1); deployments/create/v1 is 404
+            $createPath = "api/$($o.space)/deployments/create/untenanted/v1"
+            $r = Invoke-OctoPost $createPath @{ SpaceIdOrName = "$($o.space)"; ProjectName = "$($o.project)"; ReleaseVersion = $ver; EnvironmentNames = @($tname) }
             if ($r.status -in 200, 201) {
                 $dt = if ($r.body -and $r.body.PSObject.Properties['DeploymentServerTasks']) { @($r.body.DeploymentServerTasks)[0] } else { $null }
                 if (-not $dt) { $out += @{ item = $items[0]; action = 'promotion-error'; release = $ver; environment = $tname; status = $r.status }; continue } $task = "$($dt.ServerTaskId)"; $depId = "$($dt.DeploymentId)"; $at = ConvertTo-Iso (Get-UtcNow); $key = $tk
@@ -299,7 +301,14 @@ function Invoke-AutoPromote($Queue, $Labels) {
                 $perm = Get-OctoMissingPermission $r.body
                 $common += "Octopus refused to create the deployment (403$(if ($perm) { ", missing permission $perm" })); the owner grants it to the gateway's Octopus account"
             }
-            else { $out += @{ item = $items[0]; action = 'promotion-error'; release = $ver; environment = $tname; status = $r.status }; continue }
+            else {
+                # any other answer is a waiting reason on the items (journalled once per change) and a log line: the path, the status and
+                # Octopus' ErrorMessage (first 200 characters), never the request or a key
+                $em = if ($r.body -and $r.body.PSObject.Properties['ErrorMessage']) { "$($r.body.ErrorMessage)" } else { '' }
+                if ($em.Length -gt 200) { $em = $em.Substring(0, 200) }
+                $common += "Octopus answered $($r.status) to POST /$createPath$(if ($em) { ": $em" }); the gateway tries again at every sweep"
+                $out += @{ item = $items[0]; action = 'promotion-error'; release = $ver; environment = $tname; status = $r.status; path = "/$createPath"; error = $em }
+            }
         }
         foreach ($n in $items) {
             $why = @($common) + @($gaps[$n]) + @($items | Where-Object { $_ -ne $n -and $gaps[$_].Count } | ForEach-Object { "#$_, carried by this release, does not qualify" })
