@@ -301,6 +301,9 @@ $OctopusScenarios = [ordered]@{
         $sha = (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/ref/$($stored.Substring(5))").object.sha
         $msg = "$((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/commits/$sha").message)"
         Check 'the stored message is ciphertext: no line of the transcript in it' ($msg -like 'fwt1:*' -and $msg -notmatch 'line three|session starts')
+        # the first stored copy may predate the last lines (saved at most every FACTORY_TRANSCRIPT_SAVE_SECONDS): wait past a few save intervals so
+        # every posted line is stored before the gateway is killed (a slow CI machine saw the copy without the last line)
+        Start-Sleep -Seconds 8
         Restart-Gateway
         $s2 = Rt-Api GET "/api/v1/sessions/$na"
         Check 'after a restart (killed, no stop) the transcript is read back from GitHub' ($s2.status -eq 200 -and @($s2.body.lines).Count -eq 3 -and $s2.body.lines[0] -eq '[system init] session starts' -and $s2.body.item -eq $n) ($s2 | ConvertTo-Json -Compress -Depth 4)
