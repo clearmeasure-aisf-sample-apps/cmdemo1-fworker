@@ -21,7 +21,7 @@ Only the acting gateway sweeps (the leader lease), so only it promotes.
 The candidates are the releases recorded on Release Queue items (`merge.release`). A release is a master build and carries every earlier
 commit, so it is judged by its whole content relative to the target environment: the commit running there (the release of the newest successful
 deployment of the project to that environment, its commit) and the release's commit are compared through the GitHub compare API (the gateway's
-own access). Every first-parent master commit in (deployed, release] must be the merge commit of a Release Queue item, and every such item must
+own access). Every first-parent master commit in (deployed, release] must be the merge commit of a factory work item in any column (a Release Queue item, or found through the pull request its squash message names: a docs-only item in Done, a merge not settled yet, which makes the release wait), and every such item must
 pass the item gates; a commit that is no item's merge commit (a person's merge, a direct push, a bot pull request) blocks the release and is
 named. A release not newer than what runs in the target is skipped. Fail closed: when the running commit, the release's commit or the range
 cannot be read, the release waits and says why. So release N+1 never carries an unqualified change of release N.
@@ -47,7 +47,7 @@ it is said again only when the reasons change). The other items of the release a
 
 - Before creating, the deployments of the release are read again (`GET /api/{space}/releases/{id}/deployments`); one to the target means no
   POST. So a restart, a second sweep or a person's deployment never leads to a second deployment.
-- Create: `POST /api/{space}/deployments/create/v1` with `SpaceIdOrName`, `ProjectName`, `ReleaseVersion`, `EnvironmentNames` (the Executions
+- Create: `POST /api/{space}/deployments/create/untenanted/v1` (the route this server advertises; `create/v1` answers 404) with `SpaceIdOrName`, `ProjectName`, `ReleaseVersion`, `EnvironmentNames` (the Executions
   API). The task and deployment ids are recorded on each item (`merge.promoted.<env>`) and journaled once: "promoted release X to uat (Octopus
   task Y)".
 - Following: each sweep reads the task. While it runs and the deployment is one the gateway created (its task is recorded on an item), the

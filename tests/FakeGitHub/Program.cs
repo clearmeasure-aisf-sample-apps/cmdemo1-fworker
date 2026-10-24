@@ -815,7 +815,7 @@ sealed class World
         {
             var cs = ph > pb ? promoteHistory.GetRange(pb + 1, ph - pb) : new List<string>();
             return (200, J(("status", ph > pb ? "ahead" : ph == pb ? "identical" : "behind"), ("ahead_by", cs.Count), ("behind_by", ph < pb ? pb - ph : 0), ("total_commits", cs.Count),
-                ("commits", new JsonArray(cs.Select((x, i) => (JsonNode)J(("sha", x), ("parents", new JsonArray(J(("sha", i == 0 ? bas : cs[i - 1])))))).ToArray()))));
+                ("commits", new JsonArray(cs.Select((x, i) => (JsonNode)J(("sha", x), ("commit", J(("message", prs.Values.FirstOrDefault(p => p.MergeSha == x) is { } mp ? $"{mp.Title} (#{mp.Number})\n\nbody" : "A change"))), ("parents", new JsonArray(J(("sha", i == 0 ? bas : cs[i - 1])))))).ToArray()))));
         }
         var h = History();
         int bi = bas == Master ? h.Count - 1 : h.IndexOf(bas), hi = head == Master ? h.Count - 1 : h.IndexOf(head);
@@ -941,7 +941,7 @@ sealed class World
     }
 
     // The promotions of the automatic promotion (docs/design/auto-promote.md): a release made by /_fake/octo-release is "manual": Octopus deploys it
-    // to tdd only (state given), and to uat or prod only through POST deployments/create/v1. Such a deployment waits at its Sign-off step (a
+    // to tdd only (state given), and to uat or prod only through POST deployments/create/untenanted/v1. Such a deployment waits at its Sign-off step (a
     // manual intervention, pending) until the interruption is answered: Proceed ends the task Success, Abort Failed. /_fake/octo-forbid
     // { create, interruption } makes those calls answer 403 naming the missing permission, as Octopus does. /_fake/octo-deps lists them.
     sealed class OctoDep { public string Id = "", RelId = "", Env = "", TaskId = ""; string state = "Executing"; public DateTime? Done; public string State { get => state; set { state = value; Done = value is "Executing" or "Queued" ? null : DateTime.UtcNow; } } public DateTime Created = DateTime.UtcNow; public string Interruption = ""; public bool Pending; public string Result = ""; public string Responsible = ""; }
@@ -954,7 +954,7 @@ sealed class World
     {
         if (path == "api/users/me") return (200, J(("Id", "Users-1")));
         Match pm;
-        if (path == "api/Spaces-355/deployments/create/v1" && method == "POST")
+        if (path == "api/Spaces-355/deployments/create/untenanted/v1" && method == "POST")
         {
             if (octoForbidCreate != "") return (403, OctoForbidden(octoForbidCreate));
             if (b?["ProjectName"]?.ToString() != "cmdemo1-ui" || b?["SpaceIdOrName"]?.ToString() != "Spaces-355") return (400, J(("ErrorMessage", "unknown project or space")));
@@ -1085,6 +1085,12 @@ sealed class World
             }
             case "octo-forbid":   // { create, interruption }: the permission named in a 403 of that call; "" (default) allows it
                 octoForbidCreate = b?["create"]?.ToString() ?? ""; octoForbidInterruption = b?["interruption"]?.ToString() ?? ""; return (200, J(("ok", true)));
+            case "merged-pr":   // { ref, title, sha, files }: a pull request merged as commit sha (a squash merge: its message is "<title> (#<number>)")
+            {
+                var pr = new Pr { Number = nextPr++, Ref = b?["ref"]?.ToString() ?? "x", Title = b?["title"]?.ToString() ?? "x", Sha = NewSha(), Open = false, Merged = true, MergeSha = b?["sha"]?.ToString(), Author = "factory-worker-author[bot]" };
+                foreach (var f in b?["files"] as JsonArray ?? new JsonArray()) pr.Files.Add(f!.ToString());
+                prs[pr.Number] = pr; return (200, J(("ok", true), ("number", pr.Number)));
+            }
             case "promote-history":   // { shas }: appends these commits to the promote scenarios' master history (compare between two of them)
                 foreach (var x in b?["shas"] as JsonArray ?? new JsonArray()) promoteHistory.Add(x!.ToString()); return (200, J(("ok", true), ("count", promoteHistory.Count)));
             case "app-build":   // { version }: what the app's /_build answers; "" (default) the newest release

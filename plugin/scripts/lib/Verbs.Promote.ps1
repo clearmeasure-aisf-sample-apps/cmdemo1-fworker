@@ -132,10 +132,43 @@ function Get-ReleaseContent($Rd, [string]$TargetName, $BySha) {
     if ($cur -ne $dep.commit.ToLower()) { return @{ skip = $false; gaps = @("the first-parent history from the release back to $TargetName ($($dep.commit.Substring(0,7))) cannot be followed"); items = @() } }
     $gaps = @(); $items = @()
     foreach ($sha in $chain) {
-        if ($BySha.ContainsKey($sha)) { $items += [int]$BySha[$sha] }
-        else { $gaps += "commit $($sha.Substring(0,7)) in the release is not the merge commit of a work item in the Release Queue" }
+        if ($BySha.ContainsKey($sha)) { $items += [int]$BySha[$sha]; continue }
+        # not a queued item's: the factory item whose merge it is, in any column (a docs-only item went straight to Done; a merge not settled yet)
+        $msg = if ($byCommit[$sha].PSObject.Properties['commit'] -and $byCommit[$sha].commit.PSObject.Properties['message']) { "$($byCommit[$sha].commit.message)" } else { '' }
+        $f = Find-CommitItem $sha $msg
+        if ($f.item -gt 0) { $items += $f.item; if ($f.gap) { $gaps += $f.gap } }
+        else { $gaps += "commit $($sha.Substring(0,7)) in the release is not the merge commit of a factory work item" }
     }
     return @{ skip = $false; gaps = $gaps; items = @($items | Sort-Object -Unique) }
+}
+
+# The factory work item a master commit is the merge of, from the pull request its squash message names ("... (#P)"): that pull request was merged
+# as this commit, and an item it names (branch <name>/<N>-..., "#N" in the title, "Closes #N" in the body) records the merge (merge.sha) or, not
+# picked up yet, the pull request. @{ item (0: none); gap ('' when settled) }.
+function Find-CommitItem([string]$Sha, [string]$Message) {
+    $first = ($Message -split "`n")[0]
+    $pm = [regex]::Match($first, '\(#(\d+)\)\s*$'); if (-not $pm.Success) { return @{ item = 0; gap = '' } }
+    $prNum = [int]$pm.Groups[1].Value
+    $pr = Invoke-Gh -Path "$(Get-RepoPath)/pulls/$prNum" -Allow 404
+    if ($pr -is [hashtable] -or -not $pr.merged -or "$($pr.merge_commit_sha)".ToLower() -ne $Sha) { return @{ item = 0; gap = '' } }
+    $cands = @()
+    $bm = [regex]::Match("$($pr.head.ref)", '/(\d+)-'); if ($bm.Success) { $cands += [int]$bm.Groups[1].Value }
+    foreach ($x in [regex]::Matches("$($pr.title)", '(?<![0-9])#(\d+)(?![0-9])')) { $cands += [int]$x.Groups[1].Value }
+    $bodyText = if ($pr.PSObject.Properties['body']) { "$($pr.body)" } else { '' }
+    foreach ($x in [regex]::Matches($bodyText, '(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)')) { $cands += [int]$x.Groups[1].Value }
+    foreach ($n in @($cands | Where-Object { $_ -gt 0 -and $_ -ne $prNum } | Select-Object -Unique)) {
+        $s = try { (Get-State $n).state } catch [FactoryReject] { $null }
+        if (-not $s) { continue }
+        if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'sha') -and "$($s.merge.sha)".ToLower() -eq $Sha) {
+            $aw = if ((Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { "$($s.merge.awaiting)" } else { '' }
+            $done = (Test-Has $s.merge 'done_at') -and $s.merge.done_at
+            if ($aw -eq 'release-queue' -or (-not $aw -and $done)) { return @{ item = $n; gap = '' } }
+            return @{ item = $n; gap = "#$n's merge ($($Sha.Substring(0,7))) is not settled yet$(if ($aw) { " (awaiting $aw)" })" }
+        }
+        $ownPr = ((Test-Has $s 'verdict') -and (Test-Has $s.verdict 'pr') -and [int]$s.verdict.pr -eq $prNum) -or ((Test-Has $s 'pr') -and $s.pr -is [System.Collections.IDictionary] -and (Test-Has $s.pr 'number') -and [int]$s.pr.number -eq $prNum)
+        if ($ownPr) { return @{ item = $n; gap = "#$n's merge of PR #$prNum ($($Sha.Substring(0,7))) is not picked up by the gateway yet" } }
+    }
+    return @{ item = 0; gap = '' }
 }
 
 # what one item lacks for the promotion of its release (reasons; empty when it qualifies)
@@ -226,7 +259,7 @@ function Invoke-AutoPromote($Queue, $Labels) {
         $items = [int[]]@(@($own) + @($content.items) | Sort-Object -Unique)
         $gaps = @{}; $itemGaps = @()
         $gone = $false
-        foreach ($n in $items) { try { $gaps[$n] = @(Get-ItemPromotionGaps $n $Labels["$n"]) } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { throw }; $gone = $true; break }; $itemGaps += $gaps[$n] }
+        foreach ($n in $items) { try { $gaps[$n] = @(Get-ItemPromotionGaps $n $(if ($Labels.ContainsKey("$n")) { $Labels["$n"] } else { @((Get-ItemInfo $n).labels) })) } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { throw }; $gone = $true; break }; $itemGaps += $gaps[$n] }
         if ($gone) { continue }   # an item of the release vanished since the sweep read it: judged again at the next sweep
         $common = @(@($content.gaps)); $note = ''
         $pd = $rd.deployments[$pname.ToLower()]
@@ -254,7 +287,9 @@ function Invoke-AutoPromote($Queue, $Labels) {
             # read again just before: a deployment of this release to the target that appeared since (another sweep, a person) is never doubled
             $again = Get-ReleaseDeployments $ver
             if ($again -and $again.deployments.ContainsKey($tname.ToLower())) { $out += @{ item = $items[0]; action = 'promotion-following'; release = $ver; environment = $tname; task = $again.deployments[$tname.ToLower()].task }; continue }
-            $r = Invoke-OctoPost "api/$($o.space)/deployments/create/v1" @{ SpaceIdOrName = "$($o.space)"; ProjectName = "$($o.project)"; ReleaseVersion = $ver; EnvironmentNames = @($tname) }
+            # the Executions API route this server advertises for an untenanted project (ExecutionsCreateApiDeploymentCreateV1); deployments/create/v1 is 404
+            $createPath = "api/$($o.space)/deployments/create/untenanted/v1"
+            $r = Invoke-OctoPost $createPath @{ SpaceIdOrName = "$($o.space)"; ProjectName = "$($o.project)"; ReleaseVersion = $ver; EnvironmentNames = @($tname) }
             if ($r.status -in 200, 201) {
                 $dt = if ($r.body -and $r.body.PSObject.Properties['DeploymentServerTasks']) { @($r.body.DeploymentServerTasks)[0] } else { $null }
                 if (-not $dt) { $out += @{ item = $items[0]; action = 'promotion-error'; release = $ver; environment = $tname; status = $r.status }; continue } $task = "$($dt.ServerTaskId)"; $depId = "$($dt.DeploymentId)"; $at = ConvertTo-Iso (Get-UtcNow); $key = $tk
@@ -266,7 +301,14 @@ function Invoke-AutoPromote($Queue, $Labels) {
                 $perm = Get-OctoMissingPermission $r.body
                 $common += "Octopus refused to create the deployment (403$(if ($perm) { ", missing permission $perm" })); the owner grants it to the gateway's Octopus account"
             }
-            else { $out += @{ item = $items[0]; action = 'promotion-error'; release = $ver; environment = $tname; status = $r.status }; continue }
+            else {
+                # any other answer is a waiting reason on the items (journalled once per change) and a log line: the path, the status and
+                # Octopus' ErrorMessage (first 200 characters), never the request or a key
+                $em = if ($r.body -and $r.body.PSObject.Properties['ErrorMessage']) { "$($r.body.ErrorMessage)" } else { '' }
+                if ($em.Length -gt 200) { $em = $em.Substring(0, 200) }
+                $common += "Octopus answered $($r.status) to POST /$createPath$(if ($em) { ": $em" }); the gateway tries again at every sweep"
+                $out += @{ item = $items[0]; action = 'promotion-error'; release = $ver; environment = $tname; status = $r.status; path = "/$createPath"; error = $em }
+            }
         }
         foreach ($n in $items) {
             $why = @($common) + @($gaps[$n]) + @($items | Where-Object { $_ -ne $n -and $gaps[$_].Count } | ForEach-Object { "#$_, carried by this release, does not qualify" })
