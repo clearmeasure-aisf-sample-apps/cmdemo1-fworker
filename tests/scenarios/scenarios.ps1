@@ -624,4 +624,34 @@ $QueueScenarios = [ordered]@{
     $m2 = F 'w1' @('merge', '--item', $b, '--pr', $pb); CheckExit 'the docs-only change merges while the code change is still in the queue' $m2 0
     $m3 = F 'w1' @('merge', '--item', $c2, '--pr', $pc); CheckExit 'a second code change waits for the first, the docs-only one holds no place' $m3 21 'merge-queue'
 }
+
+# DbUp migration numbers (defect of 2026-10-23: items 580 and 589 each added 040 and both merged): Development's complete and the merge refuse a
+# pull request whose src/Database/scripts/Update/NNN_*.sql has the number of a different script on the base branch
+'migration number: a script numbered as one on master is refused at complete, and the renumbered one passes' = {
+    $dir = 'src/Database/scripts/Update'
+    $n = New-Item-Fake 'Access notes' 'x' $L; Do-TechnicalDesign $n 'w1' $false
+    [void](Fake 'master-merge' @{ files = @("$dir/039_Earlier.sql", "$dir/040_AddFloorToWorkOrder.sql") })
+    $pr = Do-Development $n @("$dir/040_AddAccessNotesToWorkOrder.sql", 'src/Core/Model/WorkOrder.cs')
+    $r = Do-DevComplete $n; CheckExit 'complete is refused' $r 10 'migration-number-taken'
+    Check 'the reason names both scripts and the next free number' ("$($r.reason)" -like '*040_AddAccessNotesToWorkOrder.sql*' -and "$($r.reason)" -like '*040_AddFloorToWorkOrder.sql*' -and "$($r.reason)" -like '*041*') "$($r.reason)"
+    Fake 'push-branch' @{ branch = "factory-worker/$n-development"; files = @("$dir/041_AddAccessNotesToWorkOrder.sql", 'src/Core/Model/WorkOrder.cs') } | Out-Null
+    $r = Do-DevComplete $n; CheckExit "renumbered to 041: complete passes (PR #$pr)" $r 0
+}
+
+'migration number: two pull requests that took the same number race, and the second is refused at merge' = {
+    $dir = 'src/Database/scripts/Update'
+    $a = New-Item-Fake 'Floor' 'x' $L; Do-TechnicalDesign $a 'w1' $false
+    $b = New-Item-Fake 'Access notes' 'x' $L; Do-TechnicalDesign $b 'w1' $false
+    $pa = Do-Development $a @("$dir/040_AddFloorToWorkOrder.sql")
+    $pb = Do-Development $b @("$dir/040_AddAccessNotesToWorkOrder.sql")
+    CheckExit 'A completes' (Do-DevComplete $a) 0
+    CheckExit 'B completes (master has no 040 yet)' (Do-DevComplete $b) 0
+    CheckExit 'B PASS' (Do-Verdict $b $pb) 0
+    # A lands on master outside the factory's merge (as a person's merge would), so it holds no place in the merge queue: in the merge-queue suite
+    # B then reaches the migration guard instead of waiting for A's release candidate
+    [void](Fake 'master-merge' @{ number = $pa }); Check 'A merged and takes 040' ((Get-FakePr $pa).merged)
+    $m = F 'w1' @('merge', '--item', $b, '--pr', $pb); CheckExit 'B is refused at merge' $m 10 'migration-number-taken'
+    Check 'the refusal names both scripts and 041' ("$($m.reason)" -like '*040_AddAccessNotesToWorkOrder.sql*' -and "$($m.reason)" -like '*040_AddFloorToWorkOrder.sql*' -and "$($m.reason)" -like '*041*') "$($m.reason)"
+    Check 'B is not merged' (-not (Get-FakePr $pb).merged)
+}
 }

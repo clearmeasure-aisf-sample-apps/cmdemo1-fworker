@@ -1610,3 +1610,18 @@ $OwnerScenarios['settle: a stranded merged item is re-armed by the sweep and set
     $o = New-Item-Fake 'Not merged' 'x' $OwnerLabels 'Todo'
     $r = & $rs $o 'x'; Check 'an item without a merge record is refused' ($r.status -eq 409 -and $r.code -eq 'not-merged') ($r | ConvertTo-Json -Compress)
 }
+
+# DbUp migration numbers (defect of 2026-10-23): another pull request took the number on master after this one's Development; the gateway's merge
+# after the PASS refuses it and sends the item back to Development to renumber
+$OwnerScenarios['migration number: the gateway does not merge a PASS whose DbUp number was taken on master meanwhile'] = {
+    $dir = 'src/Database/scripts/Update'
+    $n = New-Item-Fake 'Access notes' 'x' $OwnerLabels; Do-TechnicalDesign $n 'w1' $false
+    $pr = Do-Development $n @("$dir/040_AddAccessNotesToWorkOrder.sql")
+    Do-DevComplete $n | Out-Null
+    Check 'in Functional Testing' (Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Functional Testing' })
+    [void](Fake 'master-merge' @{ files = @("$dir/040_AddFloorToWorkOrder.sql") })
+    $v = Do-Verdict $n $pr; CheckExit 'the PASS verdict' $v 0
+    Check 'demoted to Development' (Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Development' }) "column $((Get-FakeIssue $n).column)"
+    Check 'not merged' (-not (Get-FakePr $pr).merged)
+    Check 'the comment names the collision and 041' (@((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -like '*040_AddFloorToWorkOrder.sql*' -and "$($_.body)" -like '*041*' }).Count -ge 1)
+}

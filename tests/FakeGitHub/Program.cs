@@ -587,6 +587,13 @@ sealed class World
                 var hb = m.Groups[1].Value.StartsWith("heads/") && branches.Remove(m.Groups[1].Value[6..]);
                 if (hb) deletedRefs.Add(m.Groups[1].Value);
                 return refs.Remove("refs/" + m.Groups[1].Value) || hb ? (204, null) : (422, "{\"message\":\"Reference does not exist\"}"); }
+        if ((m = Regex.Match(path, $"^{root}/contents/(.+)$")).Success && method == "GET")
+        {   // as GitHub for a directory: its entries on the base branch (every file a commit of the base branch added under it)
+            var dir = m.Groups[1].Value.TrimEnd('/') + "/";
+            var names = masterFiles.Values.SelectMany(f => f).Where(f => f.StartsWith(dir, StringComparison.Ordinal) && !f[dir.Length..].Contains('/')).Distinct().OrderBy(f => f, StringComparer.Ordinal).ToList();
+            if (names.Count == 0) return (404, "{\"message\":\"Not Found\"}");
+            return (200, new JsonArray(names.Select(f => (JsonNode)J(("name", f[dir.Length..]), ("path", f), ("type", "file"))).ToArray()));
+        }
         if (path == root + "/branches/" + Master && method == "GET") return (200, J(("name", Master), ("commit", J(("sha", masterSha)))));
         if ((m = Regex.Match(path, $"^{root}/compare/([^.]+)\\.\\.\\.(.+)$")).Success && method == "GET") return Compare(m.Groups[1].Value, m.Groups[2].Value);
         if (path == root + "/pulls" && method == "GET")

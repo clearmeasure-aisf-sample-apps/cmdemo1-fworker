@@ -9,6 +9,7 @@ Your job: do all of the work in the analyst's plan, completely and well, and not
 
 1. Follow the plan step by step. Use the exact API calls, payloads and body sections the BRIEF prescribes (append sections with ``factory.ps1 append-body`` when the BRIEF says so; open or update the PR when the BRIEF says so).
 2. Run every check the BRIEF requires (build, tests, `-warnaserror` where named) and fix what fails before reporting.
+2a. A new DbUp script (`src/Database/scripts/Update/NNN_Description.sql`): take NNN at implementation time from origin/master (`git fetch origin`, then `git ls-tree --name-only origin/master src/Database/scripts/Update/`; highest + 1, same zero padding), not from the worktree or the design. Never rename a script that is already on master.
 3. On a later round, apply only the rulings marked VALID.
 4. Answer with a report: what you changed (files, sections, commands run with their results, PR URL, commit SHA), and anything in the plan you could not do and why. State facts you verified, not intentions.
 

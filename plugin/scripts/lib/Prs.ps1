@@ -29,6 +29,29 @@ function Get-PrFiles([int]$Number) {
     return $all
 }
 
+# Migration numbers (defect of 2026-10-23: two parallel pull requests each added DbUp script 040, both merged). The DbUp scripts of the pull
+# request (src/Database/scripts/Update/NNN_*.sql, added or renamed into place) whose NNN is already the number of a DIFFERENT script on the base
+# branch, read through GitHub's contents listing of that directory. Answers $null when there is no collision, else { pr; master; next }: the first
+# colliding pair and the next free number (one above the highest of the base branch and the pull request), padded as the script's number.
+function Get-MigrationCollision([int]$PrNumber, $Files = $null) {
+    $dir = 'src/Database/scripts/Update'; $rx = '^src/Database/scripts/Update/(\d+)_[^/]*\.sql$'
+    if ($null -eq $Files) { $Files = Get-PrFiles $PrNumber }
+    $mine = @($Files | Where-Object { "$($_.status)" -ne 'removed' -and "$($_.filename)" -match $rx } | ForEach-Object { "$($_.filename)" })
+    if (-not $mine.Count) { return $null }
+    $ls = Invoke-Gh -Path "$(Get-RepoPath)/contents/$($dir)?ref=$([uri]::EscapeDataString("$((Get-Cfg).defaultBranch)"))" -Allow 404
+    $onMaster = if ($ls -is [hashtable] -and $ls.ContainsKey('status')) { @() } else { @($ls | Where-Object { "$($_.name)" -match '^(\d+)_[^/]*\.sql$' } | ForEach-Object { "$dir/$($_.name)" }) }
+    $num = { param($f) [int]([regex]::Match("$f", '/(\d+)_[^/]*$').Groups[1].Value) }
+    $max = (@(@($onMaster) + @($mine) | ForEach-Object { & $num $_ }) | Measure-Object -Maximum).Maximum
+    foreach ($f in $mine) {
+        $hit = @($onMaster | Where-Object { $_ -ne $f -and (& $num $_) -eq (& $num $f) -and $mine -notcontains $_ })
+        if ($hit.Count) {
+            $width = [regex]::Match($f, '/(\d+)_').Groups[1].Value.Length
+            return @{ pr = $f; master = $hit[0]; next = ([int]$max + 1).ToString().PadLeft($width, '0') }
+        }
+    }
+    return $null
+}
+
 function Test-DocsOnlyFiles($Files) {
     $pats = (Get-Cfg).docsOnlyPaths
     if (@($Files).Count -eq 0) { return $false }
