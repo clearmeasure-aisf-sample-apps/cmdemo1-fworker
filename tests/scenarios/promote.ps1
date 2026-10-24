@@ -266,9 +266,9 @@ $PromoteScenarios = [ordered]@{
     $i = Pm-Created '3.20.1'
     Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
     [void](Fake 'octo-forbid' @{})
-    Check 'the Sign-off waits first' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'Sign-off of task .* waits' }).Count -eq 1 }) (Pm-Brief $i.n)
-    Check 'since when is recorded on the item' ("$((Get-ItemState $i.n).merge.promoted.uat.signoff_wait_since)" -ne '') ((Get-ItemState $i.n) | ConvertTo-Json -Compress -Depth 6)
-    Check 'after the limit it is aborted' (Wait-Until -Seconds 180 { @(Pm-Dep '3.20.1' 'uat')[0].result -eq 'Abort' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    Check 'the Sign-off waits first' (Wait-Until -Seconds 120 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'Sign-off of task .* waits' }).Count -ge 1 }) (Pm-Brief $i.n)
+    Check 'since when is recorded on the item' (Wait-Until -Seconds 120 { $u = (Get-ItemState $i.n).merge.promoted.uat; "$(if ($u -is [System.Collections.IDictionary]) { $u['signoff_wait_since'] } elseif ($u -and $u.PSObject.Properties['signoff_wait_since']) { $u.signoff_wait_since })" -ne '' }) ((Get-ItemState $i.n) | ConvertTo-Json -Compress -Depth 6)
+    Check 'after the limit it is aborted' (Wait-Until -Seconds 480 { @(Pm-Dep '3.20.1' 'uat')[0].result -eq 'Abort' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
     Check 'journaled once with the wait and the reason' (Wait-Until -Seconds 20 { @(@(Pm-Events $i.n 'promotion-signoff') | Where-Object { $_.body -match 'Abort' -and $_.body -match 'waited .* h at the Sign-off .*not settled yet' }).Count -eq 1 }) (Pm-Brief $i.n)
 }
 

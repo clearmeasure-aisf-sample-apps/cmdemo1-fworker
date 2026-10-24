@@ -39,7 +39,7 @@ function Get-ReleaseDeployments([string]$Version) {
     $dItems = if ($dl -and $dl.PSObject.Properties['Items']) { @($dl.Items) } else { @() }
     foreach ($d in @($dItems | Where-Object { $_ } | Sort-Object { [DateTime]$_.Created } -Descending)) {
         $name = "$($envs[$d.EnvironmentId])".ToLower(); if (-not $name -or $res.deployments.ContainsKey($name)) { continue }
-        $task = Invoke-Octo "api/$sp/tasks/$($d.TaskId)"
+        $task = Invoke-Octo "api/$sp/tasks/$($d.TaskId)"; if (-not $task) { continue }   # (gone since the list was read)
         $res.deployments[$name] = @{ state = "$($task.State)"; completed = [bool]$task.IsCompleted; deployment = "$($d.Id)"; task = "$($d.TaskId)"
             completed_at = $(if ($task.PSObject.Properties['CompletedTime'] -and $task.CompletedTime) { "$($task.CompletedTime)" } else { $null }) }
     }
