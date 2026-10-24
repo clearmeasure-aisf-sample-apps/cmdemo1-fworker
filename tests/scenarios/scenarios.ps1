@@ -646,8 +646,10 @@ $QueueScenarios = [ordered]@{
     $pb = Do-Development $b @("$dir/040_AddAccessNotesToWorkOrder.sql")
     CheckExit 'A completes' (Do-DevComplete $a) 0
     CheckExit 'B completes (master has no 040 yet)' (Do-DevComplete $b) 0
-    CheckExit 'A PASS' (Do-Verdict $a $pa) 0; CheckExit 'B PASS' (Do-Verdict $b $pb) 0
-    $m = F 'w1' @('merge', '--item', $a, '--pr', $pa); CheckExit 'A merges and takes 040' $m 0
+    CheckExit 'B PASS' (Do-Verdict $b $pb) 0
+    # A lands on master outside the factory's merge (as a person's merge would), so it holds no place in the merge queue: in the merge-queue suite
+    # B then reaches the migration guard instead of waiting for A's release candidate
+    [void](Fake 'master-merge' @{ number = $pa }); Check 'A merged and takes 040' ((Get-FakePr $pa).merged)
     $m = F 'w1' @('merge', '--item', $b, '--pr', $pb); CheckExit 'B is refused at merge' $m 10 'migration-number-taken'
     Check 'the refusal names both scripts and 041' ("$($m.reason)" -like '*040_AddAccessNotesToWorkOrder.sql*' -and "$($m.reason)" -like '*040_AddFloorToWorkOrder.sql*' -and "$($m.reason)" -like '*041*') "$($m.reason)"
     Check 'B is not merged' (-not (Get-FakePr $pb).merged)
