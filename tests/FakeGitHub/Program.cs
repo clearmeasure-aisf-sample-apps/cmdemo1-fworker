@@ -976,7 +976,7 @@ sealed class World
                 .Select(d => (JsonNode)J(("Id", d.Interruption), ("TaskId", d.TaskId), ("IsPending", d.Pending), ("Title", "Sign-off"), ("Form", J(("Elements", new JsonArray(J(("Name", "Instructions")), J(("Name", "Notes")), J(("Name", "Result")))))))).ToArray();
             return (200, J(("Items", new JsonArray(its))));
         }
-        if ((pm = Regex.Match(path, @"^api/Spaces-355/interruptions/(Interruptions-\d+)/(responsible|submit)$")).Success && method == "POST")
+        if ((pm = Regex.Match(path, @"^api/Spaces-355/interruptions/(Interruptions-\d+)/(responsible|submit)$")).Success && method == (Regex.IsMatch(path, "/responsible$") ? "PUT" : "POST"))   // as Octopus: responsible is PUT, submit POST
         {
             if (octoForbidInterruption != "") return (403, OctoForbidden(octoForbidInterruption));
             var d = octoDeps.FirstOrDefault(x => x.Interruption == pm.Groups[1].Value); if (d == null) return (404, null);

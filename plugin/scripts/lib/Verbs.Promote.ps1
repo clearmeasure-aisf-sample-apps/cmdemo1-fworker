@@ -7,13 +7,13 @@
 # step (a manual intervention) of a deployment the gateway created is answered by the gateway: Proceed when the gates still hold, Abort when not.
 
 # the key that may create deployments and answer interruptions: the runbook service account's (OCTOPUS_RUNBOOK_API_KEY), else the reader key
-function Invoke-OctoPost([string]$Path, $Body) {
+function Invoke-OctoPost([string]$Path, $Body, [string]$Method = 'POST') {
     $key = if ($env:OCTOPUS_RUNBOOK_API_KEY) { $env:OCTOPUS_RUNBOOK_API_KEY } else { $env:OCTOPUS_API_KEY }
     if (-not $key) { Reject 30 'secret-missing' 'neither OCTOPUS_RUNBOOK_API_KEY nor OCTOPUS_API_KEY is set on the gateway' }
     $o = (Get-Cfg).octopus
     $uri = "$($o.url.TrimEnd('/'))/$($Path.TrimStart('/'))"
     $json = if ($null -eq $Body) { '{}' } else { $Body | ConvertTo-Json -Depth 6 -Compress }
-    try { $res = Invoke-WebRequest -Uri $uri -Method POST -Headers @{ 'X-Octopus-ApiKey' = $key; 'User-Agent' = 'factory-worker-gateway' } -ContentType 'application/json' -Body $json -SkipHttpErrorCheck -TimeoutSec 30 }
+    try { $res = Invoke-WebRequest -Uri $uri -Method $Method -Headers @{ 'X-Octopus-ApiKey' = $key; 'User-Agent' = 'factory-worker-gateway' } -ContentType 'application/json' -Body $json -SkipHttpErrorCheck -TimeoutSec 30 }
     catch { return @{ status = 0; body = $null } }
     $b = try { "$($res.Content)" | ConvertFrom-Json } catch { $null }
     return @{ status = [int]$res.StatusCode; body = $b }
@@ -213,7 +213,7 @@ function Resolve-SignOff([string]$Task, [string[]]$Gaps) {
     $done = 0; $result = if ($Gaps.Count) { 'Abort' } else { 'Proceed' }
     $pending = if ($list -and $list.PSObject.Properties['Items']) { @(@($list.Items) | Where-Object { $_ -and $_.PSObject.Properties['IsPending'] -and $_.IsPending }) } else { @() }
     foreach ($i in $pending) {
-        $r = Invoke-OctoPost "api/$sp/interruptions/$($i.Id)/responsible" $null
+        $r = Invoke-OctoPost "api/$sp/interruptions/$($i.Id)/responsible" $null 'PUT'   # Octopus takes responsibility by PUT only (POST answers 405)
         if ($r.status -notin 200, 201) { return @{ answered = $done; result = $result; refused = $(if ($r.status -eq 403) { Get-OctoMissingPermission $r.body } else { "$($r.status)" }); status = $r.status } }
         $notes = if ($Gaps.Count) { "Aborted by the factory worker gateway: $($Gaps -join '; ')" } else { 'Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md).' }
         $r = Invoke-OctoPost "api/$sp/interruptions/$($i.Id)/submit" @{ Result = $result; Notes = $notes; Instructions = $null }
