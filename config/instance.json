@@ -67,7 +67,8 @@
     "autoPromote": {
       "enabled": false,
       "environments": ["uat", "prod"],
-      "gatewayEnvironment": ""
+      "gatewayEnvironment": "",
+      "signoffWaitHours": 2
     }
   },
   "plant": {

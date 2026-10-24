@@ -48,6 +48,13 @@ function Pm-Dep([string]$Ver, [string]$EnvName) { @((Pm-Deps).deployments | Wher
 function Pm-Events([int]$n, [string]$Event) { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match "plant event=$Event " }) }
 function Pm-Brief([int]$n) { (@((Get-FakeIssue $n).comments | ForEach-Object { ("$($_.body)" -replace '\s+', ' ').Substring(0, [Math]::Min(220, ("$($_.body)" -replace '\s+', ' ').Length)) }) -join ' | ') }
 
+function Pm-Created([string]$Ver) {
+    [void](Fake 'octo-forbid' @{ interruption = 'InterruptionSubmit' })
+    $i = Pm-Item $Ver
+    Check "the deployment of $Ver to uat is created" (Wait-Until -Seconds 40 { @(Pm-Dep $Ver 'uat').Count -eq 1 }) (Pm-Brief $i.n)
+    return $i
+}
+
 $PromoteScenarios = [ordered]@{
 
 'promote: every gate met: the release goes to uat, its Sign-off is answered, then to prod, each deployment created once, and the item is delivered' = {
@@ -205,6 +212,64 @@ $PromoteScenarios = [ordered]@{
     Check 'no deployment meanwhile' ((Pm-Deps).creates -eq 0)
     Set-ItemState $d.n { param($st) $st.merge.awaiting = $null; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o') }
     Check 'settled: the release goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.14.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
+}
+
+# The Sign-off of a created deployment: the gateway cannot answer it while the interruption calls are refused, so the scenario changes the world
+# first, then lets it answer.
+
+'promote: the health reads are kept in the item state, and a Sign-off after a gateway restart proceeds while tdd is Healthy' = {
+    $i = Pm-Created '3.15.1'
+    Check 'the reads are kept in the state comment of the item' ((Get-ItemState $i.n).ContainsKey('promote_health')) ((Get-ItemState $i.n) | ConvertTo-Json -Compress -Depth 6)
+    Restart-Gateway
+    [void](Fake 'octo-forbid' @{})
+    Check 'Proceed' (Wait-Until -Seconds 40 { @(Pm-Dep '3.15.1' 'uat')[0].result -eq 'Proceed' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+}
+
+'promote: a newer release running in tdd does not abort the Sign-off of the uat deployment' = {
+    $i = Pm-Created '3.16.1'
+    [void](Fake 'app-build' @{ version = '9.9.9' })
+    [void](Fake 'octo-forbid' @{})
+    Check 'Proceed' (Wait-Until -Seconds 40 { @(Pm-Dep '3.16.1' 'uat')[0].result -eq 'Proceed' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+}
+
+'promote: a Hold label put on an item while the Sign-off waits aborts it' = {
+    $i = Pm-Created '3.17.1'
+    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$($i.n)/labels" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ labels = @('Hold') } | ConvertTo-Json) -ContentType 'application/json')
+    [void](Fake 'octo-forbid' @{})
+    Check 'Abort' (Wait-Until -Seconds 40 { @(Pm-Dep '3.17.1' 'uat')[0].result -eq 'Abort' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    Check 'journaled with the Hold label' (Wait-Until -Seconds 20 { @(@(Pm-Events $i.n 'promotion-signoff') | Where-Object { $_.body -match 'Abort' -and $_.body -match "'Hold' label" }).Count -eq 1 }) (Pm-Brief $i.n)
+}
+
+'promote: a waiting reason (a merge in the release not settled) leaves the Sign-off pending; settled, it proceeds' = {
+    $d = Pm-DoneItem
+    $i = Pm-Created '3.18.1'
+    Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
+    [void](Fake 'octo-forbid' @{})
+    Check 'the Sign-off wait is explained' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'Sign-off of task .* waits: .*not settled yet' }).Count -eq 1 }) (Pm-Brief $i.n)
+    Check 'and it stays pending' (@(Pm-Dep '3.18.1' 'uat')[0].pending) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    Set-ItemState $d.n { param($st) $st.merge.awaiting = $null; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o') }
+    Check 'settled: Proceed' (Wait-Until -Seconds 40 { @(Pm-Dep '3.18.1' 'uat')[0].result -eq 'Proceed' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+}
+
+'promote: with a newer release already in tdd, the older one is not deployed to uat; the newer one carries its items' = {
+    $a = Pm-Item '3.19.1'
+    $b = Pm-Item '3.19.2'
+    Check 'the newer release goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.19.2' 'uat').Count -eq 1 }) (Pm-Brief $b.n)
+    Start-Sleep -Seconds 6
+    Check 'the older one is never deployed to uat (no aborted deployment)' (@(Pm-Dep '3.19.1' 'uat').Count -eq 0) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    Check 'the older release''s item is carried: journaled as promoted with the newer release' (Wait-Until -Seconds 20 { @(@(Pm-Events $a.n 'promoted') | Where-Object { $_.body -match 'release 3\.19\.2 to \*\*uat\*\*' }).Count -eq 1 }) (Pm-Brief $a.n)
+}
+
+
+'promote: a Sign-off that waits on a reason that never clears is aborted after signoffWaitHours (0.03 h in the suite), once [full]' = {
+    $d = Pm-DoneItem
+    $i = Pm-Created '3.20.1'
+    Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
+    [void](Fake 'octo-forbid' @{})
+    Check 'the Sign-off waits first' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'Sign-off of task .* waits' }).Count -eq 1 }) (Pm-Brief $i.n)
+    Check 'since when is recorded on the item' ("$((Get-ItemState $i.n).merge.promoted.uat.signoff_wait_since)" -ne '') ((Get-ItemState $i.n) | ConvertTo-Json -Compress -Depth 6)
+    Check 'after the limit it is aborted' (Wait-Until -Seconds 180 { @(Pm-Dep '3.20.1' 'uat')[0].result -eq 'Abort' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    Check 'journaled once with the wait and the reason' (Wait-Until -Seconds 20 { @(@(Pm-Events $i.n 'promotion-signoff') | Where-Object { $_.body -match 'Abort' -and $_.body -match 'waited .* h at the Sign-off .*not settled yet' }).Count -eq 1 }) (Pm-Brief $i.n)
 }
 
 }
