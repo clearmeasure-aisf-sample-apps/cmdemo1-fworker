@@ -9,7 +9,7 @@ Get-ChildItem (Join-Path $root 'plugin/scripts') -Recurse -Filter *.ps1 | ForEac
     Check $_.Name ($errs.Count -eq 0); $errs | ForEach-Object { "       $($_.Message) line $($_.Extent.StartLineNumber)" }
 }
 $env:FACTORY_CONFIG = Join-Path $root 'config/instance.json'
-foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Sweep', 'Models', 'Journal', 'Owner') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
+foreach ($f in 'Core', 'Board', 'Prs', 'Checks', 'Verbs.Item', 'Apps', 'Verbs.Pr', 'Verbs.Inspect', 'Verbs.Merge', 'Verbs.Delivery', 'Verbs.Promote', 'Verbs.Sweep', 'Models', 'Journal', 'Owner') { . (Join-Path $root "plugin/scripts/lib/$f.ps1") }
 "rules"
 Check 'docs-only: docs and md only' (Test-DocsOnlyFiles @(@{filename='docs/a.md'}, @{filename='README.md'}))
 Check 'docs-only: src file is code' (-not (Test-DocsOnlyFiles @(@{filename='docs/a.md'}, @{filename='src/X.cs'})))

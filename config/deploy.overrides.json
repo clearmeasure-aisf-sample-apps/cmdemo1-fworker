@@ -16,6 +16,14 @@
   "operator": {
     "enabled": true
   },
+  "octopus": {
+    "tddUrl": "https://ca-cmdemo1-tdd-ui.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+    "uatUrl": "https://ca-cmdemo1-uat-ui-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
+    "healthPath": "/_healthcheck/detailed"
+  },
+  "delivery": {
+    "autoPromote": { "enabled": true, "environments": ["uat", "prod"], "gatewayEnvironment": "tdd" }
+  },
   "api": {
     "cursor": {
       "enabled": true,

@@ -182,9 +182,12 @@ function Save-State([int]$Item, $Holder) {
     $json = $s | ConvertTo-Json -Depth 12
     $summary = "state of #$Item for ``$((Get-Cfg).name)`` (machine-read; edits by others are ignored)"
     $body = "$(Get-StateMarker)`n$summary`n`n``````json`n$json`n```````n"
+    # a state comment that is gone since it was read (deleted by a person) is written again as a new one, never an error
     if ($Holder.commentId) {
-        Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/comments/$($Holder.commentId)" -Body @{ body = $body } | Out-Null
-    } else {
+        $r0 = Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/comments/$($Holder.commentId)" -Body @{ body = $body } -Allow 404
+        if ($r0 -is [hashtable] -and $r0.ContainsKey('status') -and $r0.status -eq 404) { $Holder.commentId = $null }
+    }
+    if (-not $Holder.commentId) {
         $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$Item/comments" -Body @{ body = $body }
         $Holder.commentId = $r.id
     }

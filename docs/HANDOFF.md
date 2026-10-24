@@ -93,7 +93,15 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   as soon as guard rails a to e allow, without waiting; it may drain, resume and set the capacity of a worker name as the operator does, and read the
   cycle-time metrics. It still cannot mint, revoke, switch messaging or call a verb, and container logs stay with the operator (no read-only
   wrapper exists).
-- **uat and prod stay manual.**
+- **uat and prod stay manual** for sessions and for the gateway's own image (`cmdemo1-fworker`).
+- **The gateway promotes cmdemo1-ui by itself, gated by checks** (Jeffrey, 2026-10-23): the acting tdd gateway deploys a release of
+  `cmdemo1-ui` from tdd to uat and then to prod, no AI session and no person in the loop, when every item the release carries has `Auto Merge`
+  and no `Hold` label, was merged by the gateway after a Functional Testing PASS, and (a `video` item) has its demo MP4 published; the release's
+  deployment to the previous environment succeeded; and that environment's app is healthy. It answers the Sign-off of the deployments it
+  created (Proceed, or Abort when a gate failed meanwhile) and never creates a second deployment of a release to an environment. Otherwise the
+  release waits in the Release Queue and each item is told why, once per reason. `delivery.autoPromote` (off in the source defaults, on for
+  the tdd gateway in `config/deploy.overrides.json`); design `docs/design/auto-promote.md`. Needs the Octopus permissions listed there granted
+  to the gateway's Octopus account (owner action). When it is live, cmdemo1-system's `ui-auto-promote.yml` stops promoting ui.
 - **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so, and the worker connect prompt says an item is owned until its pull request is merged; changing that text changes a hash pinned by the operator suite, a protected path, so it needs the owner's review), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
 - **Messaging and the supervisor are on for every registered worker** (`allowedWorkers` and `allowedAskers` are `*`), set in
