@@ -815,7 +815,7 @@ sealed class World
         {
             var cs = ph > pb ? promoteHistory.GetRange(pb + 1, ph - pb) : new List<string>();
             return (200, J(("status", ph > pb ? "ahead" : ph == pb ? "identical" : "behind"), ("ahead_by", cs.Count), ("behind_by", ph < pb ? pb - ph : 0), ("total_commits", cs.Count),
-                ("commits", new JsonArray(cs.Select((x, i) => (JsonNode)J(("sha", x), ("parents", new JsonArray(J(("sha", i == 0 ? bas : cs[i - 1])))))).ToArray()))));
+                ("commits", new JsonArray(cs.Select((x, i) => (JsonNode)J(("sha", x), ("commit", J(("message", prs.Values.FirstOrDefault(p => p.MergeSha == x) is { } mp ? $"{mp.Title} (#{mp.Number})\n\nbody" : "A change"))), ("parents", new JsonArray(J(("sha", i == 0 ? bas : cs[i - 1])))))).ToArray()))));
         }
         var h = History();
         int bi = bas == Master ? h.Count - 1 : h.IndexOf(bas), hi = head == Master ? h.Count - 1 : h.IndexOf(head);
@@ -1085,6 +1085,12 @@ sealed class World
             }
             case "octo-forbid":   // { create, interruption }: the permission named in a 403 of that call; "" (default) allows it
                 octoForbidCreate = b?["create"]?.ToString() ?? ""; octoForbidInterruption = b?["interruption"]?.ToString() ?? ""; return (200, J(("ok", true)));
+            case "merged-pr":   // { ref, title, sha, files }: a pull request merged as commit sha (a squash merge: its message is "<title> (#<number>)")
+            {
+                var pr = new Pr { Number = nextPr++, Ref = b?["ref"]?.ToString() ?? "x", Title = b?["title"]?.ToString() ?? "x", Sha = NewSha(), Open = false, Merged = true, MergeSha = b?["sha"]?.ToString(), Author = "factory-worker-author[bot]" };
+                foreach (var f in b?["files"] as JsonArray ?? new JsonArray()) pr.Files.Add(f!.ToString());
+                prs[pr.Number] = pr; return (200, J(("ok", true), ("number", pr.Number)));
+            }
             case "promote-history":   // { shas }: appends these commits to the promote scenarios' master history (compare between two of them)
                 foreach (var x in b?["shas"] as JsonArray ?? new JsonArray()) promoteHistory.Add(x!.ToString()); return (200, J(("ok", true), ("count", promoteHistory.Count)));
             case "app-build":   // { version }: what the app's /_build answers; "" (default) the newest release

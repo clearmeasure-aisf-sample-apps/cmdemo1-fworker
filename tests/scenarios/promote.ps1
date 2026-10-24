@@ -28,6 +28,21 @@ function Pm-Item([string]$Ver, [string[]]$Labels = $PromoteLabels, [string]$Tdd 
     [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
     return @{ n = $n; sha = $sha }
 }
+# A factory item in Done whose pull request was merged as a commit before the next release (a docs-only keeper item goes there straight from
+# Functional Testing): its PR is merged as that commit, its state records the merge; -Awaiting leaves the merge unsettled
+function Pm-DoneItem([string]$Awaiting = '') {
+    Pm-Base
+    $sha = Pm-Sha
+    $n = New-Item-Fake 'Promote docs item' 'x' $PromoteLabels 'Done'
+    $pr = (Fake 'merged-pr' @{ ref = "factory-worker/$n-docs"; title = "Docs change (#$n)"; sha = $sha; files = @('docs/x.md') }).number
+    [void](Fake 'promote-history' @{ shas = @($sha) })
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    $st = @{ schema = 1; item = $n; verdict = @{ passed = $true; pr = $pr; processed = $true }; merge = @{ sha = $sha; pr = $pr; merged_at = $now; green_at = $now; docs_only = $true } }
+    if ($Awaiting) { $st.merge.awaiting = $Awaiting } else { $st.merge.awaiting = $null; $st.merge.done_at = $now }
+    $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n$($st | ConvertTo-Json -Depth 8)`n```````n"
+    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+    return @{ n = $n; sha = $sha; pr = $pr }
+}
 function Pm-Deps { Fake 'octo-deps' }
 function Pm-Dep([string]$Ver, [string]$EnvName) { @((Pm-Deps).deployments | Where-Object { $_.release -eq $Ver -and $_.env -eq $EnvName }) }
 function Pm-Events([int]$n, [string]$Event) { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match "plant event=$Event " }) }
@@ -163,7 +178,7 @@ $PromoteScenarios = [ordered]@{
     $stray = Pm-Sha
     [void](Fake 'promote-history' @{ shas = @($stray) })
     $i = Pm-Item '3.11.1'
-    Check 'the item is told the commit' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match "commit $($stray.Substring(0,7)) in the release is not the merge commit of a work item" }).Count -eq 1 }) (Pm-Brief $i.n)
+    Check 'the item is told the commit' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match "commit $($stray.Substring(0,7)) in the release is not the merge commit of a factory work item" }).Count -eq 1 }) (Pm-Brief $i.n)
     Start-Sleep -Seconds 6
     Check 'no deployment' ((Pm-Deps).creates -eq 0)
 }
@@ -173,6 +188,23 @@ $PromoteScenarios = [ordered]@{
     Check 'the item is told the running commit is not known' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'the commit running in uat is not known' }).Count -eq 1 }) (Pm-Brief $i.n)
     Start-Sleep -Seconds 6
     Check 'no deployment' ((Pm-Deps).creates -eq 0)
+}
+
+
+'promote: a docs-only item in Done whose gateway merge after a PASS is in the release counts as factory work: the release is promoted' = {
+    $d = Pm-DoneItem
+    $i = Pm-Item '3.13.1'
+    Check 'the release goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.13.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
+    Check 'no stranger commit was named' (@(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'not the merge commit' }).Count -eq 0) (Pm-Brief $i.n)
+}
+
+'promote: a factory merge in the release that is not settled yet makes the release wait, then it is promoted' = {
+    $d = Pm-DoneItem 'release-candidate'
+    $i = Pm-Item '3.14.1'
+    Check 'the release waits, naming the unsettled merge' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match "#$($d.n)'s merge \($($d.sha.Substring(0,7))\) is not settled yet \(awaiting release-candidate\)" }).Count -eq 1 }) (Pm-Brief $i.n)
+    Check 'no deployment meanwhile' ((Pm-Deps).creates -eq 0)
+    Set-ItemState $d.n { param($st) $st.merge.awaiting = $null; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o') }
+    Check 'settled: the release goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.14.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
 }
 
 }
