@@ -185,6 +185,14 @@ function Verb_merge($a, [switch]$Gateway) {
     while ($null -eq $pr.mergeable -and (Get-Date) -lt $end) { Start-Sleep -Seconds $t.mergeabilityPollSeconds; $pr = Get-Pr $prNum }
     if ($Gateway -and $null -eq $pr.mergeable) { return & $wait 'mergeability-unknown' }
     if ($pr.mergeable -eq $false) { $d = Invoke-Demote $n $info $st "GitHub reports PR #$prNum is NOT mergeable (mergeable_state '$($pr.mergeable_state)')" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; detail = $d } }
+    # two pull requests that each add the same DbUp number race: the first merged takes it, the second is refused here (the gateway sends it back to
+    # Development to renumber; a session is told why)
+    $mig = Get-MigrationCollision $prNum
+    if ($mig) {
+        $why = "PR #$prNum adds $($mig.pr), but $($mig.master) on $($c.defaultBranch) already has that number; the branch's script must be renumbered to $($mig.next) (never the one on $($c.defaultBranch): DbUp runs a renamed script again)"
+        if ($Gateway) { $d = Invoke-Demote $n $info $st "merge refused: $why" 'merge'; return @{ ok = $true; id = $n; outcome = $d.outcome; reason = 'migration-number-taken'; detail = $d } }
+        Reject 10 'migration-number-taken' "merge refused: $why" @{ prNumber = $prNum; script = $mig.pr; taken_by = $mig.master; next = $mig.next }
+    }
     # issue 103: once the gateway brought the branch up to date before its merge, the merge is the gateway's: a session's own merge call (the one the
     # functional-testing skill makes after a PASS) waits as the gateway does, instead of polling the new head's checks and parking it out of date
     $gatewayOwns = $Gateway -or ($c.mergePolicy -eq 'auto' -and (Test-GatewayMerge) -and (Test-Has $s.verdict 'pre_merge_update') -and $s.verdict.pre_merge_update)

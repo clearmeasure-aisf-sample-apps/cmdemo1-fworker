@@ -467,6 +467,10 @@ function Verb_complete($a) {
     if ($docsOnly -and -not (Test-ItemDocsOnly $s $info)) {
         Reject 10 'development-docs-only-pr' "the pull request changes only documentation and the item's technical design did not record it as docs-only ($($c.docsOnlyMarker) inside the design section)" @{ prNumber = $pr.number }
     }
+    $mig = Get-MigrationCollision ([int]$pr.number)
+    if ($mig) {
+        Reject 10 'migration-number-taken' "the pull request adds $($mig.pr), but $($mig.master) on $($c.defaultBranch) already has that number. Renumber this branch's script to $($mig.next) (never rename the script on $($c.defaultBranch): DbUp runs a renamed script again), push, then call complete again." @{ prNumber = $pr.number; script = $mig.pr; taken_by = $mig.master; next = $mig.next }
+    }
     $chk = Get-ChecksFor $prd.head.sha
     # the one CI rule (issue 102, Prs.ps1): a red head is re-run once, or waits for a run still going or for a defect of the base branch, before it
     # is refused; the re-runs it made (pr.rerun) are kept with the pull request record
