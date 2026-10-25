@@ -78,7 +78,7 @@ sealed partial class Plant
                     Reason = GatedCode(o["reason"]?.ToString()), Pr = Num(o["pr"]), Pin = Name(o["pin"]), Worker = worker, CreatedAt = Time(o["createdAt"]) ?? now, MatchedNoted = true
                 };
                 if (accepted) { a.Accepted = true; a.AcceptedAt = Time(o["acceptedAt"]) ?? now; }
-                else if (worker != "") { a.AckBy = now.AddSeconds(ackSeconds); a.AckExtended = false; }
+                else if (worker != "") { a.AckBy = now.AddSeconds(ackSeconds); }
                 else { a.WaitingSince = now; a.WaitingCode = a.Pin != "" ? "pinned-unavailable" : "no-session"; }
                 assignments[key] = a; na++;
             }

@@ -324,6 +324,30 @@ $OctopusScenarios = [ordered]@{
     } finally { Oct-Cleanup @($n) }
 }
 
+# Issue #706 of the workorders board: the accepted line was posted before the offered and launched lines. The worker accepts while the gateway's
+# lines are still on their way (each takes 6 s to post): the comments still read offered, launched, assigned, in the order they were created.
+'octopus: journal order: a worker that accepts before the offered and launched lines are posted still reads offered, launched, assigned' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
+    $n = 0; $na = ''
+    try {
+        [void](Rt-Api GET '/api/v1/status')   # the gateway learns its own address (the launched line carries the session page)
+        Fake 'latency' @{ ms = 6000; match = 'plant event=(offered|launched)' } | Out-Null
+        $n = New-Item-Fake 'Octopus journal order' 'x' $OctLabels
+        Check 'a Start worker run is made for the item' (Wait-Until -Seconds 30 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        $ra = (Oct-Runs 'Start worker' $n)[0]; $na = "$($ra.values.Name)"
+        $r = Rt-Redeem "$($ra.values.Nonce)"
+        Start-RuntimeClient $na "$($r.body.token)"
+        $acc = Rt-Own $na $n; CheckExit 'the worker accepts the item' $acc 0
+        Check 'it accepted before the launched line was posted' (@((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=launched ' }).Count -eq 0)
+        Fake 'latency' @{ ms = 0 } | Out-Null
+        Check 'the three lines are posted' (Wait-Until -Seconds 40 { @((Get-Journal $n) | Where-Object { $_ -in 'offered', 'launched', 'assigned' }).Count -ge 3 }) ((Get-Journal $n) -join ',')
+        $c = @((Get-FakeIssue $n).comments | Where-Object { $_.body -match '<!-- plant event=(offered|launched|assigned) ' })
+        $order = @($c | Sort-Object { [long]$_.id } | ForEach-Object { [regex]::Match($_.body, 'plant event=([\w-]+)').Groups[1].Value })
+        Check 'by created order: offered, launched, assigned, once each' (($order -join ',') -eq 'offered,launched,assigned') ($order -join ',')
+        Check 'the assigned line keeps its text and marker' (@($c | Where-Object { $_.body -match "<!-- plant event=assigned key=owner\|" -and $_.body -match [regex]::Escape($na) }).Count -eq 1) (@($c | ForEach-Object { $_.body }) -join ' | ')
+    } finally { try { Fake 'latency' @{ ms = 0 } | Out-Null } catch { }; Oct-Cleanup @($n) @($na) }
+}
+
 'octopus: session transcript: the start comment of a new session is posted even when the item''s journal is full' = {
     $n = 0
     try {

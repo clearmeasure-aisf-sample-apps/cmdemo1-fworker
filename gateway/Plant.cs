@@ -56,7 +56,7 @@ sealed class Assignment
     public int Item, Pr;
     public DateTime CreatedAt, AckBy, AcceptedAt;
     public HashSet<string> Declined = new();
-    public bool Accepted, AckExtended;   // AckExtended: the offer's window was lengthened once for a journal wait
+    public bool Accepted;
     public DateTime? Accepting;          // the accept verb of the offered session is running (BeginAccept): the window does not lapse meanwhile
     public bool MatchedNoted;                      // its "matched" journal line is queued: once per assignment
     public string Sha = "", EnvId = "";            // qc-env only
@@ -1782,7 +1782,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             {
                 a.Worker = restoreWorker;
                 if (restoreAccepted) { a.Accepted = true; a.AcceptedAt = DateTime.UtcNow; qcOf[key] = restoreWorker; }
-                else { a.AckBy = DateTime.UtcNow.AddSeconds(ackSeconds); a.AckExtended = false; if (workers.TryGetValue(restoreWorker, out var rw)) Push(rw, AssignedJson(a), false); }
+                else { a.AckBy = DateTime.UtcNow.AddSeconds(ackSeconds); if (workers.TryGetValue(restoreWorker, out var rw)) Push(rw, AssignedJson(a), false); }
                 return (a, "");
             }
             var (w, why) = ChooseQc(a);
@@ -1843,7 +1843,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // A directed event for one worker (qc.reset, qc.teardown).
     public void SendTo(string name, JsonObject evt) { lock (gate) { if (workers.TryGetValue(name, out var w)) Push(w, evt.ToJsonString()); } }
 
-    // The journal lines of one item are written one after the other, in the order the plant decided them (matched, offered, waiting, reassigned):
+    // The journal lines of one item are written one after the other, in the order the plant decided them (matched, offered, launched, assigned, waiting, reassigned):
     // each is a rule-script call of its own that waits for the item lock, and calls started together reach that lock in any order. Called under
     // gate; only the chaining happens here, the call itself runs on the pool after the line before it has ended (ended, not succeeded: the journal
     // is best-effort). Nothing waits for it, so an offer is never held back by GitHub.
@@ -1851,7 +1851,6 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     readonly HashSet<int> waitingQueued = new();
     void Journal(int item, string ev, JsonObject fields, string key)
     {
-        async Task Write() { try { await journal(item, ev, fields, key); } catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); } }
         lock (gate)
         {
             // the repeated "waiting" of a sweep or a tick (no key; the rule script posts one per 30 minutes) is not queued behind one that is still to be written
@@ -1860,36 +1859,43 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             // issue 144: a reassigned line says why (a code, never the journal's text); the code is for the operator stream only, not the journal
             var why = fields["opCode"]?.ToString() ?? ""; fields.Remove("opCode");
             if (ev is "matched" or "offered" or "reassigned") OperatorPlantEvent(ev, item, fields["worker"]?.ToString() ?? "", fields["column"]?.ToString() ?? "", ev == "reassigned" ? why : "");
-            var prev = journalTail.TryGetValue(item, out var t) ? t : Task.CompletedTask;
-            var next = prev.ContinueWith(_ => Write(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
-            journalTail[item] = next;
-            next.ContinueWith(_ => { lock (gate) { if (repeat) waitingQueued.Remove(item); if (journalTail.TryGetValue(item, out var cur) && ReferenceEquals(cur, next)) journalTail.Remove(item); } }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+            Chain(item, () => WriteJournal(item, ev, fields, key), repeat ? () => waitingQueued.Remove(item) : null);
         }
     }
-    // For the accept verb, whose own line (assigned) is written by the rule script: the lines decided before it, and how long the acceptance may
-    // wait for them. Never more than 60 s and never more than half of what is left of the offer's window (live, two lines took 40 s on a loaded
-    // gateway; the deployed window is 120 s). The wait is not taken from the window: the offer is accepted only when the rule script returns, so
-    // the time granted here is added to the window of the worker that is answering, or the tick would offer the item again meanwhile.
-    public (Task Written, TimeSpan AtMost) JournalBefore(int item, string assignment, string name)
+    async Task WriteJournal(int item, string ev, JsonObject fields, string key) { try { await journal(item, ev, fields, key); } catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); } }
+    // under gate: one more link of the item's chain; after runs (under gate) once it has ended
+    void Chain(int item, Func<Task> write, Action? after = null)
     {
-        lock (gate)
-        {
-            if (!journalTail.TryGetValue(item, out var t)) return (Task.CompletedTask, TimeSpan.Zero);
-            var a = assignments.Values.FirstOrDefault(x => x.Id == assignment);
-            var mine = a is { Accepted: false } && a.Worker != "" && a.Worker == name;
-            var wait = Math.Clamp(a is { Accepted: false } && a.Worker != "" ? (a.AckBy - DateTime.UtcNow).TotalSeconds / 2 : 30, 0, 60);
-            if (mine)
-            {   // once per offer: a worker that calls accept again and again must not hold the item by lengthening its own window each time
-                if (a!.AckExtended) return (Task.CompletedTask, TimeSpan.Zero);
-                a.AckExtended = true; a.AckBy = a.AckBy.AddSeconds(wait);
-            }
-            return (t, TimeSpan.FromSeconds(wait));
-        }
+        var prev = journalTail.TryGetValue(item, out var t) ? t : Task.CompletedTask;
+        var next = prev.ContinueWith(_ => write(), CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+        journalTail[item] = next;
+        next.ContinueWith(_ => { lock (gate) { after?.Invoke(); if (journalTail.TryGetValue(item, out var cur) && ReferenceEquals(cur, next)) journalTail.Remove(item); } }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
+
+    // The "launched" line of a runtime execution is known only when its start call returns (it names the execution and its page), and the worker
+    // it starts may accept before that (the octopus runtime): the line's place is taken on the chain when the launch is decided, so the "assigned"
+    // line queued by the acceptance follows it. The place is filled by RuntimeLaunched, or given up when the start call ends without a line
+    // (RuntimeLaunchDone) or after LaunchSlotMinutes.
+    readonly Dictionary<string, TaskCompletionSource<(JsonObject Fields, string Key)?>> launchSlots = new();
+    public double LaunchSlotMinutes { get; set; } = 10;
+    void ReserveLaunched(int item, string name)
+    {
+        var slot = new TaskCompletionSource<(JsonObject Fields, string Key)?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        launchSlots[name] = slot;
+        Chain(item, async () =>
+        {
+            (JsonObject Fields, string Key)? line = null;
+            try { line = await slot.Task.WaitAsync(TimeSpan.FromMinutes(LaunchSlotMinutes)); }
+            catch (TimeoutException) { lock (gate) { if (launchSlots.TryGetValue(name, out var cur) && ReferenceEquals(cur, slot)) launchSlots.Remove(name); } }
+            if (line is { } l) await WriteJournal(item, "launched", l.Fields, l.Key);
+        });
+    }
+    // the start call of a runtime execution ended: a place it still holds is given up (it wrote no launched line)
+    public void RuntimeLaunchDone(string name) { lock (gate) { if (launchSlots.Remove(name, out var slot)) slot.TrySetResult(null); } }
 
     void Offer(Assignment a, WorkerInfo w, string? why)
     {
-        a.Worker = w.Name; a.AckBy = DateTime.UtcNow.AddSeconds(AckFor(w.Name)); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";
+        a.Worker = w.Name; a.AckBy = DateTime.UtcNow.AddSeconds(AckFor(w.Name)); a.WaitingSince = null; a.WaitingCode = "";
         Push(w, AssignedJson(a), false);
         var trig = lastTrigger.TryGetValue(a.Item, out var t) ? t : "the sweep";
         Journal(a.Item, "offered", new JsonObject { ["worker"] = w.Name, ["type"] = w.Type, ["ackSeconds"] = ackSeconds }, "off|" + a.Id + "|" + w.Name);
@@ -2187,6 +2193,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     if (mergeRefused.Count > 200) mergeRefused.Remove(mergeRefused.MinBy(kv => kv.Value.At).Key);
                     break;
             }
+            // the accept verb leaves its "assigned" line to the gateway (Owner.ps1): queued on the item's chain, after the offered and launched lines
+            // the plant decided before it (a launch still starting holds its place, ReserveLaunched), so the comments read in the plant's order
+            if (verb == "accept" && response["journal"] is JsonObject jl && jl["event"]?.ToString() == "assigned" && jl["fields"] is JsonObject jf)
+                Journal(item, "assigned", (JsonObject)jf.DeepClone(), jl["key"]?.ToString() ?? "");
             switch (verb)
             {
                 case "accept" when who.Kind == "item":

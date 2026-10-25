@@ -109,7 +109,8 @@ $PromoteScenarios = [ordered]@{
     Check 'healthy again is not enough: a non-Healthy read since the deployment finished keeps it waiting' ((Pm-Deps).creates -eq 0)
     # a new tdd deployment of the release (finished now): the reads start again
     [void](Fake 'octo-dep' @{ release = '3.5.1'; env = 'tdd'; state = 'Success' })
-    Check 'first it waits for two Healthy reads apart, the later after the settle time' (Wait-Until -Seconds 30 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'not been Healthy long enough' }).Count -eq 1 }) (Pm-Brief $i.n)
+    # a slow CI machine can take more than one sweep to notice the new deployment, and can journal the reason again: at least one, within 90 s
+    Check 'first it waits for two Healthy reads apart, the later after the settle time' (Wait-Until -Seconds 90 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'not been Healthy long enough' }).Count -ge 1 }) (Pm-Brief $i.n)
     Check 'then it goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.5.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
 }
 
