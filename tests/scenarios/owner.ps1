@@ -563,7 +563,8 @@ $OwnerScenarios['owner: with a slow GitHub the journal of an item still reads ma
 }
 
 # The acceptance does not wait for the journal: its "assigned" line is queued by the gateway on the item's chain, behind the lines before it.
-# Here "offered" and "assigned" each take 10 s to post in an 18 s window: the accept ends well inside the window, the journal still reads in order.
+# Here "offered" and "assigned" each take 10 s to post in an 18 s window: the accept ends inside the window (it may wait for the offered line's
+# post, never for its own assigned line), the journal still reads in order.
 $OwnerScenarios['owner: with a slow journal an accept does not wait for it and its offer does not lapse; the journal reads matched, offered, assigned [full]'] = {
     $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $oldSweep = $env:FACTORY_SWEEP_SECONDS
     try {
@@ -576,7 +577,8 @@ $OwnerScenarios['owner: with a slow journal an accept does not wait for it and i
         Check 'the item is offered' (Wait-Until -Seconds 70 { (Get-Assigned 'slow-k' $n).Count -gt 0 })
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $r = Fo 'slow-k' @('accept', '--item', $n, '--assignment', (Get-Assigned 'slow-k' $n)[0].assignment)
-        Check 'the accept succeeds without waiting for the journal' ($r.exit -eq 0 -and $sw.Elapsed.TotalSeconds -lt 10) "$($r.exit) $($sw.Elapsed.TotalSeconds)"
+        # at most one slow line ahead of it (the offered line can hold the item's lock while it posts): well under both lines (20 s) and the 18 s window
+        Check 'the accept succeeds without waiting for the journal' ($r.exit -eq 0 -and $sw.Elapsed.TotalSeconds -lt 16) "$($r.exit) $($sw.Elapsed.TotalSeconds)"
         [void](Wait-Until -Seconds 40 { @(Get-Journal $n) -contains 'assigned' })
         Fake 'latency' @{ ms = 0 } | Out-Null
         Start-Sleep -Seconds 6     # ticks, sweeps and any journal line still on its way
