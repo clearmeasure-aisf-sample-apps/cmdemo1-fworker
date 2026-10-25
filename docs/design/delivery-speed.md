@@ -15,6 +15,7 @@ Diagrams (PlantUML sources and rendered SVG in `docs/design/diagrams/`):
 | One plan pass: ranking and admission | `dsp-scheduler.puml` | [dsp-scheduler.svg](diagrams/dsp-scheduler.svg) |
 | A slot freed by the session's end | `dsp-slot.puml` | [dsp-slot.svg](diagrams/dsp-slot.svg) |
 | From the push to prod | `dsp-delivery.puml` | [dsp-delivery.svg](diagrams/dsp-delivery.svg) |
+| A gateway release: state handed over | `dsp-restart.puml` | [dsp-restart.svg](diagrams/dsp-restart.svg) |
 
 ![Components](diagrams/dsp-component.svg)
 
@@ -36,7 +37,8 @@ the merge and prod. The design rests on one rule: **no slot sits idle while work
 | 9 | Smoke test instead of the 10-minute health waits | 11: health evidence per target | Composite of evidence |
 | 10 | Promote the newest qualifying release only | 12: promotion train | Supersession |
 
-Plus flow metrics (13), so each change is measured on the next batch instead of assumed.
+Plus flow metrics (13), so each change is measured on the next batch instead of assumed, and a state model (18), so a
+release of the gateway itself loses nothing this design adds.
 
 Estimated effect on a batch like #706 to #721 (16 items), from this batch's own stage times:
 
@@ -113,7 +115,8 @@ the first `Wait` becomes the item's waiting code, journaled only when it changes
 ### 3.3 Triggers
 
 A plan pass runs on: **slot freed** (4.1), **item became ready** (handoff, hold released, retry due), the incremental pass and
-the full sweep (180 s). Today only the last two exist for unpinned items.
+the full sweep (180 s). Today only the last two exist for unpinned items. The new triggers run outside the sweep, so they check
+the leader lease before acting, as the sweep and tick do (`Leader.cs`): a standby or a stopping process never plans (18).
 
 ## 4. Capacity: a slot ledger with event-driven release (idea 1)
 
@@ -354,7 +357,7 @@ Defaults keep today's behaviour; tdd's overrides switch each phase on.
 | P5b | release the merge group's build (10), after the kit's `release.yml` change | workorders, kit, fworker | ~8 to 10 min less per release |
 | P6 | health evidence, Smoke test runbook, due timers (11); promotion train (12) | fworker, workorders, Octopus | ~10 to 12 min less per release |
 
-Each phase: scenario tests in `tests/scenarios` (the fake GitHub gains merge groups, dequeues and `expectedHeadOid`; the fake
+Each phase: scenario tests in `tests/scenarios`, including a restart scenario for every piece of state the phase adds (18.4) (the fake GitHub gains merge groups, dequeues and `expectedHeadOid`; the fake
 Octopus gains the Smoke test runbook, host metrics and the `host-full` outcome), the pre-commit review, a PR with auto-merge,
 then a tdd test batch measured by `flow`.
 
@@ -368,3 +371,114 @@ then a tdd test batch measured by `flow`.
   commits), the full build runs (10.2); correct, only slower.
 - **Smoke tests in uat stay read-only;** the category is reviewed like any other test.
 - **Cursor agents' reading of answers:** the cursor scenario suite gains a check that the session continues after exit 21.
+- **An outright kill** restores the last periodic snapshot (30 s for hand-over changes, 10 min otherwise); per-item budgets are
+  kept out of the snapshot (18.2), so a kill can only cost time, not a check; runtime health can be up to 30 s stale.
+- **GitHub as the state store has no compare-and-swap** (18.1.2): the `rev` check narrows a stale write's window but cannot close
+  it.
+
+## 18. State across a release of the gateway
+
+### 18.0 How a release hands over today
+
+A new fworker release starts a new process while the old one still runs. The leader lease (`Leader.cs`, a compare-and-swap ref
+whose epoch only grows) makes **the newest process the actor**:
+
+1. The new process takes the lease at once with epoch e+1 and is **Starting**: it already serves verbs, webhooks and host reports,
+   and waits up to `leaderHandoverSeconds` (90) for its predecessor's final snapshot (`plant-snapshot-await`, Program.cs:378-383).
+2. The old process sees the later epoch at its next check (within `leaderCheckSeconds`, 15), stops starting new passes, writes its
+   final **plant snapshot** (`PlantSnapshot.cs`: assignments, owners, bot holders, drains, the digest), ends its streams with
+   `stream.replaced` and answers 503 `gateway-replaced` from then on (Program.cs:405-410). The platform's later SIGTERM to it does
+   nothing more (Program.cs:419-424).
+3. The new process restores that snapshot (a predecessor's snapshot is accepted however old; without a predecessor, at most
+   `plantSnapshotMaxAgeMinutes` 30), becomes **Acting**, and its first sweep corrects anything the snapshot got wrong. The
+   Octopus runtime rebuilds its records from the project's task history (`OctopusRunbookRuntime.cs:415`) and starts nothing on a
+   host before that host's first report. Worker containers keep running and reconnect.
+4. A holder that stops with no successor (a scale-in) writes its snapshot at SIGTERM and releases the lease.
+
+Besides the final one, the snapshot is rewritten every 30 s after a hand-over change and every 10 min otherwise
+(Program.cs:532-545), so an outright kill restores the last periodic snapshot.
+
+![Restart](diagrams/dsp-restart.svg)
+
+### 18.1 Gaps in today's handover that this design must close first
+
+Reading the code for this section found four gaps that exist today; the design's new state would inherit them:
+
+1. **Fencing covers new passes only.** `MayAct` is checked when a sweeper iteration starts (Program.cs:2721). A `sync-board`
+   already running (up to 280 s) keeps merging, settling, promoting and answering Sign-offs inside the rule script; after it
+   returns, `plant.Plan` runs without a new check (Program.cs ~2805) and `LaunchProvisions` starts runtime sessions
+   (Plant.Runtimes.cs:82-85). Meanwhile the successor acts as soon as the final snapshot lands. **Fix:** pass the lease epoch into
+   `sync-board` and check the lease before each mutating step (merge, settle, promotion, Sign-off, `Save-State`); check `MayAct`
+   again before `Plan` and in `RuntimeManager.Provision`; on supersession, await the running rule script for at most 45 s, then
+   kill the runner's child process, and only then write the final snapshot, so it lands inside the successor's
+   `leaderHandoverSeconds` (90); a `sync-board` can otherwise run up to 280 s.
+2. **State writes are blind.** `Save-State` overwrites the state comment with a PATCH (Board.ps1:203-204) and the item lock is per
+   container, so a stale process can undo a newer write, a budget increment included. GitHub offers no conditional PATCH for
+   comments. **Fix:** a `rev` number in the state, re-read and compared right before the PATCH, under the lease check of 18.1.1.
+   This narrows the window; it cannot close it, because the store has no compare-and-swap.
+3. **Retry budgets live in memory.** `failures` per item and phase, `launches` per phase (`MaxLaunchesPerPhase`), `idleFollowUps`,
+   and `startFailuresInRow` / `healthy` (RuntimeManager.cs:87, 128-131, 169, 256-260) are lost at a restart, so a restart (or a
+   crash loop) grants extra rounds. **Fix:** 18.2.
+4. **The day budget is undercounted after a restart.** `today` counts every launch (RuntimeManager.cs:166), but after a restart it
+   is rebuilt only from relisted instances that look running (line 330), and `Rebuild` keeps only starts with no later stop
+   (OctopusRunbookRuntime.cs:413-455). **Fix:** count every Start and overflow run queued since 00:00 UTC from the task history,
+   without the stop exclusion, except runs that ended `host-full` (4.2): like a "no capacity" start (RuntimeManager.cs:219), a
+   `host-full` start is refunded in process, so the rebuilt count skips it too.
+
+### 18.2 Where each new piece of state lives
+
+Each piece of state is in exactly one class:
+1. **durable per item**, in the item's state comment (`Save-State`, with `rev`), written by the verb that changes it before it
+   answers;
+2. **snapshot**, in the plant snapshot ref, added to `SnapStructure` so it is rewritten at the 30 s cadence;
+3. **derived** at start from the durable sources, never persisted.
+
+| State | Section | Class | Where, or how it is rebuilt |
+|---|---|---|---|
+| Ranking, admission results, waiting codes | 3 | derived | the first plan pass |
+| "Resume" rank of an item | 3.1 | derived | an owned item without a live session, from the snapshot's owners and the item state |
+| Slot ledger: executions, hosts, tombstones | 4.1 | snapshot | plus the task history, corrected by the host reports |
+| Session footprints (p95 samples per host) | 4.2 | snapshot | otherwise learned again; no burst slot until 10 samples |
+| `host-full` blocks | 4.2 | snapshot | 30 s long; losing one costs at most one refused start |
+| Runtime health (`startFailuresInRow`, `healthy`) | 4 | snapshot | runtime-wide; after a kill it can be up to 30 s stale, which can delay or repeat one "unhealthy" decision but grants no item an extra round |
+| Day budget (`maxExecutionsPerDay`) | 4 | derived | every Start and overflow run since 00:00 UTC (18.1.4) |
+| Runtime failures, launches per phase, `idleFollowUps` | 8 | **durable per item** | moved out of memory (18.1.3) |
+| Checks watcher, verdict head, cleared PASS | 5 | durable per item | already in the item state |
+| Session lineage (last 10 sessions) | 5.6 | durable per item | each comment's footer links its session |
+| Waiting count for the replenisher | 6 | derived | the first plan pass; until then the replenisher creates nothing |
+| Design footprint (`design.files`) | 7 | durable per item | written at `append-body` |
+| File-overlap hold: by #N, since, until | 7 | durable per item | released by the first sweep if #N merged or left meanwhile |
+| Demotion, mechanical, fix-forward, automatic-retry counts | 8 | durable per item | `demotions` already is |
+| Merge entry: strategy, queued head, time, re-enqueue used | 9 | durable per item | the queue itself is GitHub's; read back with the pull request |
+| Health reads, smoke task per release and environment | 11 | durable per item | `promote_health` already is (last 30 reads kept, `Verbs.Promote.ps1:99`); its result is read back from Octopus |
+| Due timers | 11 | derived | recomputed from deployment and smoke finish times |
+| Train choice | 12 | derived | decided again from Octopus and the item states |
+| Flow times per item | 13 | durable per item | one timestamp per stage, the last 3 rounds |
+
+**Size budget.** GitHub caps a comment at 65,536 characters and `Save-State` has no size check. The state keeps a 48,000-character
+budget: `promote_health`, `flow` and the lineage are trimmed to their limits above, and a write over budget drops the oldest
+entries of those three first and is journaled.
+
+### 18.3 Rules that keep a release safe
+
+- **Budgets are durable** (18.1.3, 18.2): a release or a crash loop never grants an extra round.
+- **Fencing per action** (18.1.1): every mutating step checks the lease epoch first, inside the rule scripts too.
+- **New triggers go through the gated sweeper.** "Slot freed" queues the numbers of the items that were waiting on that runtime
+  (from the last plan) with `hub.RequestSweep(item)`, so the incremental pass reads them and `Plan(scope)` can offer them at once;
+  a bare `RequestSweep()` would wait for the next full sweep (`MinSeconds` 60). Due timers queue their item the same way. The
+  sweeper runs only while Acting; requests made while Starting stay queued and run when it acts.
+- **Idempotent actions.** A start reserves the slot and names its execution before the runbook run is posted (as today); an enqueue
+  passes `expectedHeadOid` and is skipped when the pull request already has a queue entry; a promotion reads the deployments again
+  before it creates one (as today); a smoke run starts only when the item state has no task id for that release and environment.
+- **Reconcile at once, safely.** After Acting and the runtime's rebuild, the gateway runs Reconcile hosts once (same project, same
+  Executions call as Start and Stop, no prompted values) and retries once if it fails; otherwise it waits for the scheduled run. It
+  starts nothing on a host before that host's report, which also frees slots of sessions that ended during the handover.
+- **Workers are not interrupted.** Containers run on across the release; an accepted assignment keeps its worker and id.
+
+### 18.4 Tests
+
+Each phase adds restart scenarios with `Restart-Gateway` (graceful) and a kill:
+- a release while an item is held, in the merge queue, during a smoke run, during Functional Testing with pending checks, and
+  **while a `sync-board` is merging or promoting** (18.1.1);
+- afterwards: the same budgets, no second enqueue, start, smoke run, deployment or Sign-off answer, no undone state write, no lost
+  slot, and a day budget equal to the launches of the day.
