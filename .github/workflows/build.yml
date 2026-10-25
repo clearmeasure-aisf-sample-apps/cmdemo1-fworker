@@ -100,6 +100,9 @@ jobs:
           # started.
           # BUILD_SECRET_<NAME>: the lines go here (add-demo-deployable.ps1 -BuildSecret replaces this one)
           FROM_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          # The commit the app reports (ARG SOURCE_COMMIT): the pull request's own head, else the commit pushed. On a
+          # pull_request run GITHUB_SHA is GitHub's test merge of the pull request, which never reaches the default branch.
+          SOURCE_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           test -f Dockerfile || { echo "No Dockerfile at the root of the repository."; exit 1; }
@@ -138,11 +141,14 @@ jobs:
           # The values are in their files: no command after this line inherits them.
           for variable in "${!BUILD_SECRET_@}"; do unset "$variable"; done
           # The version and the commit travel with the image as labels; a Dockerfile that declares ARG VERSION gets
-          # the version at build time too (docker ignores a build argument the Dockerfile does not declare only with a
-          # warning, so it is passed only when declared).
+          # the version at build time too, and one that declares ARG SOURCE_COMMIT gets the commit (an app cannot read
+          # it from .git: .dockerignore leaves that out). Docker ignores a build argument the Dockerfile does not declare
+          # only with a warning, so each is passed only when declared.
           version_arg=()
           if grep -Eq '^\s*ARG\s+VERSION(=|\s|$)' Dockerfile; then version_arg=(--build-arg "VERSION=${VERSION}"); fi
-          docker build --file Dockerfile "${version_arg[@]}" "${secret_args[@]}" \
+          commit_arg=()
+          if grep -Eq '^\s*ARG\s+SOURCE_COMMIT(=|\s|$)' Dockerfile; then commit_arg=(--build-arg "SOURCE_COMMIT=${SOURCE_COMMIT_SHA}"); fi
+          docker build --file Dockerfile "${version_arg[@]}" "${commit_arg[@]}" "${secret_args[@]}" \
             --label "org.opencontainers.image.version=${VERSION}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
