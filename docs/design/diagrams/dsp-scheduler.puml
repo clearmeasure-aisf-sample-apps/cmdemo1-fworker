@@ -1,0 +1,36 @@
+@startuml dsp-scheduler
+skinparam dpi 150
+title Delivery speed: one plan pass (ranking, then admission rules in order)
+
+start
+:Trigger: slot freed, item became ready,\nfull sweep (180 s) or incremental pass;
+:Collect waiting items:\nresumes, handoffs, queued cards;
+:Rank (stable sort):
+1. pinned
+2. **resume of an owned item (session lost, hold released, retry)**
+3. priority label: top > high > none
+4. **deeper column first: Functional Testing > Development > Technical Design**
+5. **age: oldest card first**
+6. **generated (keeper-replenish) items last**;
+repeat :next item in rank order;
+  if (Depends on #N not closed, Release Queue or Done?) then (yes)
+    :wait **depends-on**;
+  elseif (**held for file overlap (set at Technical Design's end)?**) then (yes)
+    :wait **file-overlap #N**;
+  elseif (runtime at maxConcurrent or day budget?) then (yes)
+    :wait runtime-at-capacity / runtime-budget;
+  elseif (**no host below perHostCapacity, and no burst slot with headroom\n(burst slots only: memory for the session footprint, load, disk)?**) then (yes)
+    if (**docs-only item and overflowItems allows it?**) then (yes)
+      :start on the hosted pool\n(Start worker (overflow));
+    else (no)
+      :wait **host-headroom**;
+    endif
+  else (admitted)
+    :reserve slot in the ledger;
+    :offer to a connected worker\nor start a runtime session;
+  endif
+repeat while (more items and free slots?) is (yes)
+-> no;
+:journal waiting codes\n(only on change);
+stop
+@enduml

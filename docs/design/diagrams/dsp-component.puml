@@ -1,0 +1,49 @@
+@startuml dsp-component
+!include <C4/C4_Component>
+LAYOUT_TOP_DOWN()
+skinparam dpi 150
+title Delivery speed: gateway components after the change (new or changed in bold)
+
+System_Ext(gh, "GitHub", "board, pull requests, merge queue, Actions (Build, Release)")
+System_Ext(octo, "Octopus Deploy", "Spaces-355: runbooks Start worker, Reconcile hosts, Smoke test; app deployments tdd (with acceptance tests), uat, prod")
+System_Ext(hosts, "Tentacle hosts", "fworker-host machines (omarchy, more later); worker containers")
+System_Ext(pool, "Octopus hosted pool", "overflow for docs-only sessions")
+
+Container_Boundary(gw, "fworker gateway (tdd)") {
+  Component(sweep, "Sweep", "rule scripts", "reads the board; writes state; settle and promote passes")
+  Component(sched, "**Scheduler**", "Plant.Plan", "**one ranked queue: pinned, resume, priority, deeper column, age; generated items last**")
+  Component(adm, "**Admission rules**", "Specification chain", "**Depends on, file-overlap hold, runtime capacity and budget, host headroom; each a waiting code**")
+  Component(plant, "Plant", "offers, owners, journal", "one owner per item; session lineage")
+  Component(rtm, "**Slot ledger**", "RuntimeManager + OctopusRunbookRuntime", "**slots freed by session events; host reports reconcile and carry memory, load, disk; host-full is not a failure**")
+  Component(owner, "**Owner session flow**", "verbs complete / wait-event", "**Development hands straight to Functional Testing; CI runs alongside**")
+  Component(rec, "**Recovery policy**", "Policy object", "**quality and mechanical demotions with separate budgets; one automatic retry before a human park**")
+  Component(merge, "**Merge coordinator**", "Strategy", "**direct (today), train, or GitHub merge queue (with the ruleset)**")
+  Component(deliv, "Delivery", "Verbs.Delivery", "release candidate per merge")
+  Component(train, "**Promotion train**", "Verbs.Promote", "**newest qualifying release per environment; older ones superseded**")
+  Component(ev, "**Health evidence**", "Composite", "**version, Healthy read, settle, smoke (uat); per target environment**")
+  Component(rep, "**Replenisher**", "Replenish.ps1", "**creates activity items only when nothing real waits; lowest rank**")
+  Component(flow, "**Flow metrics**", "status + journal", "**lead time per stage, per item and per batch**")
+}
+
+Rel(sweep, sched, "waiting items")
+Rel(sched, adm, "next candidate")
+Rel(adm, rtm, "capacity and headroom")
+Rel(sched, plant, "offer")
+Rel(plant, rtm, "start / end session")
+Rel(rtm, octo, "Start worker", "runbook-runs/create")
+Rel(octo, hosts, "run container")
+Rel(octo, pool, "overflow container")
+Rel(hosts, rtm, "Reconcile hosts report (containers + metrics)")
+Rel(owner, plant, "phase events")
+Rel(owner, rec, "demotion reason")
+Rel(owner, merge, "PASS on head H")
+Rel(merge, gh, "enqueue H; follow merge group")
+Rel(gh, deliv, "master build, release")
+Rel(deliv, train, "queued releases")
+Rel(train, ev, "evidence for target")
+Rel(ev, octo, "Smoke test runbook (uat); deployment results")
+Rel(train, octo, "create deployment, answer Sign-off")
+Rel(rep, sched, "generated items (lowest rank)")
+Rel(rtm, sched, "slot freed: plan now")
+Rel(plant, flow, "stage times")
+@enduml

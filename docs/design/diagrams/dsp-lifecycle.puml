@@ -1,0 +1,60 @@
+@startuml dsp-lifecycle
+skinparam dpi 150
+hide empty description
+title Delivery speed: one work item's states (new states and transitions in bold)
+
+[*] --> Queued : card in Technical Design
+state Queued : ranked by the scheduler
+Queued --> Designing : offered; admission passes
+Designing --> Held : <b>Technical Design complete:</b>\n<b>files overlap an item in Development..merged</b>
+state "<b>Held (file overlap)</b>" as Held : session ends, slot freed
+Held --> Resuming : <b>the holding item merged, parked, closed or left;</b>\n<b>or maxHoldMinutes</b>
+state "<b>Resuming</b>" as Resuming : rank 2; back to the column it left
+Resuming --> Designing
+Resuming --> Developing
+Resuming --> Verifying
+Designing --> Developing : no overlap
+Developing --> Verifying : <b>pushed head H: Functional Testing starts at once</b>
+state Verifying {
+  state "Functional Testing on H (verdict + video)" as FT
+  [*] --> FT
+  --
+  state "CI on H (checks watcher, no park)" as CI
+  [*] --> CI
+}
+note right of Verifying
+  <b>same session, same head H;</b>
+  <b>no slot held idle while CI runs</b>
+end note
+Verifying --> Ready : PASS on H and CI green on H
+Verifying --> Developing : FAIL verdict\n(quality demotion, budget 2)
+Verifying --> Developing : <b>CI red on H, before or after the PASS</b>\n<b>(fix-forward round, budget 4)</b>
+Ready --> InQueue : <b>enqueue H (strategy queue)</b>\nor direct / train merge
+state "<b>In merge queue</b>" as InQueue : group built and tested;\nonly non-failing PRs merge
+InQueue --> Merged : group green; master moves to the tested commit
+InQueue --> InQueue : <b>group red, PR alone green:</b>\n<b>re-enqueue once</b>
+InQueue --> Developing : <b>conflict (mechanical, budget 4; FT again)</b>\n<b>or red again (fix-forward round)</b>
+Merged --> Candidate : <b>master build reuses the group's build</b>\n<b>when its commit is exactly master</b>
+state "Release candidate" as Candidate
+Candidate --> Promoting : <b>newest qualifying release carries it</b>
+state Promoting {
+  state "tdd deployed\n(with acceptance tests)" as T
+  state "uat deployed" as U
+  state "prod deployed" as P
+  T --> U : version + Healthy read\n<b>+ settle 2 min</b>
+  U --> P : version + Healthy read + settle 10\n<b>+ smoke(uat)</b>
+}
+Promoting --> Done : prod deployed
+Done --> [*]
+
+Developing --> Lost : session ends while owning
+Verifying --> Lost
+state "Session lost" as Lost
+Lost --> Resuming : <b>resume ranks second</b>
+Developing --> Parked : budget spent
+Verifying --> Parked : budget spent
+InQueue --> Parked : budget spent
+state "Parked" as Parked
+Parked --> Resuming : <b>mechanical or runtime cause:</b>\n<b>one automatic retry when it cleared</b>
+Parked --> [*] : quality park or second park:\nhuman
+@enduml
