@@ -76,6 +76,7 @@ $QcDashScenarios = [ordered]@{
     Check 'the webhook port does not serve /api/v1/qc' ($hk.status -eq 404) "$($hk.status)"
     $b = Qc-Http 'GET' (Dash-Url '/_build')
     Check '/_build gives the environment and the version for the header' ($b.status -eq 200 -and "$($b.json.environment)" -ne '' -and "$($b.json.version)" -ne '')
+    Check '/_build names the commit it was built from: 40 hex digits, or null when the build did not pass one' ($b.json.ContainsKey('commit') -and ($null -eq $b.json.commit -or "$($b.json.commit)" -match '^[0-9a-f]{40}$')) "$($b.json | ConvertTo-Json -Compress)"
     Check 'the page header reads /_build' ($pg.body -match "fetch\('/_build'\)" -and $pg.body -match 'id="ver"')
     $keys = 'header class="top"', 'id="summary"', 'id="asg"', 'id="rtsec"', 'id="rows"', 'id="qsec"', 'id="msgsec"', 'id="qcsec"', 'id="rqsec"', 'id="metbox"', 'id="rawbox"', 'id="newbox"', 'id="mk"', 'id="go"'
     Check 'the page renders its key sections: header, summary cards, work items, runtimes, sessions, owner panels and the collapsed details' (@($keys | Where-Object { $pg.body -notmatch [regex]::Escape($_) }).Count -eq 0) (@($keys | Where-Object { $pg.body -notmatch [regex]::Escape($_) }) -join ', ')

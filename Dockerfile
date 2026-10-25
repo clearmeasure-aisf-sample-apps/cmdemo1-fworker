@@ -11,8 +11,12 @@ COPY gateway/Gateway.csproj gateway/
 RUN dotnet restore gateway/Gateway.csproj
 COPY gateway/ gateway/
 ARG VERSION=0.0.0
+# the commit the image is built from, when the build passes it (/_build answers it as "commit"; empty: null). .git is not in the
+# context, so nothing else can supply it. A master build that reuses a pull request's image carries the commit that build was given
+# (kit build.yml), not master's: a hint only; the Octopus release is the authority.
+ARG SOURCE_COMMIT=
 RUN dotnet publish gateway/Gateway.csproj --configuration Release --no-restore --output /app/publish \
-    -p:UseAppHost=false -p:Version=${VERSION}
+    -p:UseAppHost=false -p:Version=${VERSION} -p:SourceRevisionId=${SOURCE_COMMIT}
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 ARG PWSH_VERSION=7.5.4
