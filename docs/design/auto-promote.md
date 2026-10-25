@@ -37,8 +37,9 @@ The target is the first of `environments` without a successful deployment of the
    (`/_healthcheck/detailed`) answers `overallStatus` `Healthy`; no non-Healthy read since that deployment finished (one means waiting for a
    new deployment there); at least two Healthy reads `octopus.health.spacingMinutes` (5) apart, the later `settleMinutes` (10) after the
    deployment finished. An unreachable read is retried `retries` (3) times about `retrySeconds` (20 to 30) apart before it counts as
-   non-Healthy. One read per sweep, kept per release and environment in the state directory (`health-<env>-<version>-<release id>.json`); lost on a
-   restart, collecting starts again. The health of the previous environment is read only once every item and content gate holds. A failed write of the reads is a gap (and a line in the gateway log).
+   non-Healthy. One read per sweep, kept per release and environment in the state comment of the release's first item (`promote_health`), so a
+   gateway restart keeps them. Not created while the previous environment runs another (newer) release: the newer one is promoted instead, so
+   no deployment is created only to be aborted. The health of the previous environment is read only once every item and content gate holds. A failed write of the reads is a gap (and a line in the gateway log).
 
 A failed gate: no deployment; each item gets one journal line `promotion-waiting` with every reason (keyed by release, target and reasons, so
 it is said again only when the reasons change). The other items of the release are told which item holds it back.
@@ -52,8 +53,11 @@ it is said again only when the reasons change). The other items of the release a
   task Y)".
 - Following: each sweep reads the task. While it runs and the deployment is one the gateway created (its task is recorded on an item), the
   pending interruptions of that task (`GET /api/{space}/interruptions?regarding=<task>&pendingOnly=true`), the Sign-off step, are answered:
-  `POST .../interruptions/{id}/responsible`, then `POST .../interruptions/{id}/submit` with `Result` `Proceed` when every gate still holds
-  (read again at that moment), else `Abort` with the reasons in `Notes`. A deployment someone else created is never answered.
+  `POST .../interruptions/{id}/responsible`, then `POST .../interruptions/{id}/submit` with `Result` `Proceed`, or `Abort` with the reasons in `Notes` only for a hard failure read again
+  at that moment: an item gate (a Hold label, an item that no longer qualifies), a commit of the release that is no factory work item's, a
+  release at least as new already in the target, the previous environment's app not Healthy now (one read with retries). A waiting reason (a
+  merge not settled, a range not readable) leaves the Sign-off pending, explained once; a Sign-off still waiting after `delivery.autoPromote.signoffWaitHours` (2) is aborted ("waited N h at the Sign-off: ..."), since a pending one blocks later deployments of the project to that environment. Since when it waits: `merge.promoted.<env>.signoff_wait_since` on the release's first item. Hard and waiting reasons are told apart by where they come from, not by their text. The version running in the previous environment and
+  the reads window decide the creation only; they are not asked at the Sign-off. A deployment someone else created is never answered.
 - A deployment that ended `Failed` (or aborted) is explained once and not deployed again by the gateway: the operator deploys again, or the
   item goes back to Development. The prod deployment's success is what settle already watches: it moves the items to Done ("Delivered to Prod").
 

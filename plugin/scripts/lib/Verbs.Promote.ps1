@@ -39,7 +39,7 @@ function Get-ReleaseDeployments([string]$Version) {
     $dItems = if ($dl -and $dl.PSObject.Properties['Items']) { @($dl.Items) } else { @() }
     foreach ($d in @($dItems | Where-Object { $_ } | Sort-Object { [DateTime]$_.Created } -Descending)) {
         $name = "$($envs[$d.EnvironmentId])".ToLower(); if (-not $name -or $res.deployments.ContainsKey($name)) { continue }
-        $task = Invoke-Octo "api/$sp/tasks/$($d.TaskId)"
+        $task = Invoke-Octo "api/$sp/tasks/$($d.TaskId)"; if (-not $task) { continue }   # (gone since the list was read)
         $res.deployments[$name] = @{ state = "$($task.State)"; completed = [bool]$task.IsCompleted; deployment = "$($d.Id)"; task = "$($d.TaskId)"
             completed_at = $(if ($task.PSObject.Properties['CompletedTime'] -and $task.CompletedTime) { "$($task.CompletedTime)" } else { $null }) }
     }
@@ -69,7 +69,19 @@ function Read-EnvHealth([string]$Uri) {
 # version), and its octopus.healthPath answers overallStatus Healthy; no non-Healthy read since the release's deployment there finished; at least
 # two Healthy reads octopus.health.spacingMinutes (5) apart, the later settleMinutes (10) after that deployment finished. One read per call; the
 # reads are kept in the state directory per release and environment (lost on a restart: collecting starts again). An empty URL skips the gate.
-function Test-EnvHealth([string]$EnvKey, [string]$Version, $FinishedAt, [string]$ReleaseId = "") {
+# one read now of an environment's app, for the Sign-off of a deployment already created: '' when Healthy, else the reason (the version match
+# and the reads window decided the creation; they are not asked again, so a newer release there or a restart of the gateway does not abort it)
+function Test-EnvHealthNow([string]$EnvKey) {
+    $o = (Get-Cfg).octopus; $prop = "$($EnvKey)Url"
+    $url = if (Test-Has $o $prop) { "$($o.$prop)".TrimEnd('/') } else { '' }
+    if (-not $url) { return "no health URL for $EnvKey (octopus.$prop is empty)" }
+    $path = if ((Test-Has $o 'healthPath') -and "$($o.healthPath)") { "$($o.healthPath)" } else { '/_healthcheck/detailed' }
+    $st = Read-EnvHealth "$url$path"
+    if ($st -eq 'Healthy') { return '' }
+    return "the $EnvKey app answered $st on $path"
+}
+
+function Test-EnvHealth([string]$EnvKey, [string]$Version, $FinishedAt, [string]$ReleaseId = "", [int]$StoreItem = 0) {
     $o = (Get-Cfg).octopus; $prop = "$($EnvKey)Url"
     $url = if (Test-Has $o $prop) { "$($o.$prop)".TrimEnd('/') } else { '' }
     if (-not $url) { return @{ gap = "no health URL for $EnvKey (octopus.$prop is empty)"; note = '' } }
@@ -77,13 +89,22 @@ function Test-EnvHealth([string]$EnvKey, [string]$Version, $FinishedAt, [string]
     $running = try { $b = Invoke-RestMethod -Uri "$url/_build" -TimeoutSec 15; if ($b -and $b.PSObject.Properties['version']) { "$($b.version)" } else { '' } } catch { '' }
     if ($running -ne $Version) { return @{ gap = "the $EnvKey app does not run release $Version yet (/_build: $(if ($running) { $running } else { 'no version' }))"; note = '' } }
     $fin = ConvertFrom-Iso $FinishedAt; if (-not $fin) { $fin = Get-UtcNow }
-    $file = Join-Path (Get-StateDir) ("health-$EnvKey-$($Version -replace '[^0-9.]', '')-$($ReleaseId -replace '[^A-Za-z0-9-]', '').json")
-    $reads = @(); try { if (Test-Path $file) { $reads = @(Get-Content -Raw $file | ConvertFrom-Json -AsHashtable) } } catch { $reads = @() }
+    # the reads are kept in the state comment of the release's first item (promote_health.<env>|<release id>): a gateway restart keeps them
+    $hkey = "$EnvKey|$ReleaseId"
+    $reads = @()
+    try { $s0 = (Get-State $StoreItem).state; if ((Test-Has $s0 'promote_health') -and (Test-Has $s0.promote_health $hkey)) { $reads = @($s0.promote_health[$hkey]) } } catch { $reads = @() }
     $reads = @($reads | Where-Object { $_ -and (ConvertFrom-Iso $_.at) -ge $fin })
     $now = Get-UtcNow
     $reads += @{ at = ConvertTo-Iso $now; status = (Read-EnvHealth "$url$path") }
-    try { ConvertTo-Json -InputObject @($reads | Select-Object -Last 200) -Depth 4 | Set-Content -Path $file -ErrorAction Stop }
-    catch { [Console]::Error.WriteLine("promote: the health reads of $EnvKey could not be saved: $($_.Exception.Message)"); return @{ gap = "the health reads of $EnvKey could not be saved in the gateway's state directory (see the gateway log)"; note = '' } }
+    $keep = @($reads | Select-Object -Last 30)
+    try {
+        [void](Use-ItemLock $StoreItem {
+            $f = Get-State $StoreItem
+            if (-not (Test-Has $f.state 'promote_health')) { $f.state.promote_health = @{} }
+            foreach ($k in @($f.state.promote_health.Keys)) { if ($k -ne $hkey -and "$k" -like "$EnvKey|*") { $f.state.promote_health.Remove($k) } }
+            $f.state.promote_health[$hkey] = $keep; Save-State $StoreItem $f } 10)
+    }
+    catch { [Console]::Error.WriteLine("promote: the health reads of $EnvKey could not be saved on #$($StoreItem): $($_.Exception.Message)"); return @{ gap = "the health reads of $EnvKey could not be saved on #$StoreItem (see the gateway log)"; note = '' } }
     $bad = @($reads | Where-Object { "$($_.status)" -ne 'Healthy' }) | Select-Object -First 1
     if ($bad) { return @{ gap = "the $EnvKey app answered $($bad.status) on $path at $($bad.at), after its deployment of $Version finished: the release waits for a new deployment there"; note = '' } }
     $spacing = Get-HealthSetting 'spacingMinutes' 5; $settle = Get-HealthSetting 'settleMinutes' 10
@@ -130,16 +151,16 @@ function Get-ReleaseContent($Rd, [string]$TargetName, $BySha) {
     $chain = @(); $cur = $Rd.commit.ToLower()
     while ($byCommit.ContainsKey($cur)) { $chain += $cur; $p = @($byCommit[$cur].parents)[0]; $cur = if ($p) { "$($p.sha)".ToLower() } else { '' } }
     if ($cur -ne $dep.commit.ToLower()) { return @{ skip = $false; gaps = @("the first-parent history from the release back to $TargetName ($($dep.commit.Substring(0,7))) cannot be followed"); items = @() } }
-    $gaps = @(); $items = @()
+    $gaps = @(); $items = @(); $hardGaps = @()   # hard: a failure the Sign-off aborts on (the others are waiting reasons)
     foreach ($sha in $chain) {
         if ($BySha.ContainsKey($sha)) { $items += [int]$BySha[$sha]; continue }
         # not a queued item's: the factory item whose merge it is, in any column (a docs-only item went straight to Done; a merge not settled yet)
         $msg = if ($byCommit[$sha].PSObject.Properties['commit'] -and $byCommit[$sha].commit.PSObject.Properties['message']) { "$($byCommit[$sha].commit.message)" } else { '' }
         $f = Find-CommitItem $sha $msg
         if ($f.item -gt 0) { $items += $f.item; if ($f.gap) { $gaps += $f.gap } }
-        else { $gaps += "commit $($sha.Substring(0,7)) in the release is not the merge commit of a factory work item" }
+        else { $g1 = "commit $($sha.Substring(0,7)) in the release is not the merge commit of a factory work item"; $gaps += $g1; $hardGaps += $g1 }
     }
-    return @{ skip = $false; gaps = $gaps; items = @($items | Sort-Object -Unique) }
+    return @{ skip = $false; gaps = $gaps; hard = $hardGaps; items = @($items | Sort-Object -Unique) }
 }
 
 # The factory work item a master commit is the merge of, from the pull request its squash message names ("... (#P)"): that pull request was merged
@@ -265,12 +286,42 @@ function Invoke-AutoPromote($Queue, $Labels) {
         $pd = $rd.deployments[$pname.ToLower()]
         if (-not $pd) { $common += "it has no deployment to $pname" }
         elseif ($pd.state -ne 'Success') { $common += "its deployment to $pname is $(if ($pd.completed) { "$($pd.state)" } else { "still $($pd.state)" }) ($($pd.deployment))" }
-        elseif ($itemGaps.Count -eq 0 -and $common.Count -eq 0) { $h = Test-EnvHealth $pk $ver $pd.completed_at $rd.release_id; if ($h.gap) { $common += $h.gap }; $note = "$($h.note)" }
+        elseif ($itemGaps.Count -eq 0 -and $common.Count -eq 0 -and -not ($have -and -not $have.completed)) { $h = Test-EnvHealth $pk $ver $pd.completed_at $rd.release_id $own[0]; if ($h.gap) { $common += $h.gap }; $note = "$($h.note)" }
         if ($have -and -not $have.completed) {
             # following a deployment: only one the gateway created gets its Sign-off answered, with the gates read again just now
             $ours = (Get-PromotedTasks $items $tk) -contains $have.task
             if (-not $ours) { $out += @{ item = $items[0]; action = 'promotion-following'; release = $ver; environment = $tname; task = $have.task; state = $have.state; ours = $false }; continue }
-            $all = @($common) + @($itemGaps)
+            # The Sign-off asks again only what can get worse while it waits, and aborts only for a hard failure: an item gate (a Hold label, an item
+            # that no longer qualifies), a commit of the release that is no factory work item's, the release superseded in the target, the previous
+            # environment's app not Healthy now (one read). A waiting reason (a merge not settled, a range not readable) leaves it pending. Neither
+            # the version running in the previous environment (a newer release there is fine: this one passed there) nor the reads window is asked.
+            $hard = @($itemGaps) + @(if (Test-Has $content 'hard') { @($content.hard) })
+            if ($content.skip) { $hard += "a release at least as new already runs in $tname" }
+            $soft = @(@($common) | Where-Object { $_ -notin $hard })
+            if ($hard.Count -eq 0 -and $soft.Count -eq 0) { $hn = Test-EnvHealthNow $pk; if ($hn) { $hard += $hn } }
+            if ($hard.Count -eq 0 -and $soft.Count -gt 0) {
+                # a waiting Sign-off blocks later deployments of the project to that environment: after delivery.autoPromote.signoffWaitHours (2)
+                # it is aborted. Since when it waits is kept on the release's first item (merge.promoted.<env>.signoff_wait_since).
+                $limitH = if (Test-Has $ap 'signoffWaitHours') { [double]$ap.signoffWaitHours } else { 2 }
+                $key = $tk; $task0 = $have.task; $nowIso = ConvertTo-Iso (Get-UtcNow)
+                $since = $null
+                try { $s1 = (Get-State $own[0]).state; if ((Test-Has $s1 'merge') -and (Test-Has $s1.merge 'promoted') -and (Test-Has $s1.merge.promoted $key) -and (Test-Has $s1.merge.promoted[$key] 'signoff_wait_since') -and "$($s1.merge.promoted[$key].task)" -eq $task0) { $since = ConvertFrom-Iso $s1.merge.promoted[$key].signoff_wait_since } } catch [FactoryReject] { }
+                if (-not $since) {
+                    $n0 = [int]$own[0]
+                    try { [void](Use-ItemLock $n0 { $f = Get-State $n0; $s = $f.state; if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'promoted') -and (Test-Has $s.merge.promoted $key)) { $s.merge.promoted[$key].signoff_wait_since = $nowIso; Save-State $n0 $f } } 10) }
+                    catch [FactoryReject] { if ($_.Exception.Code -notin 'item-busy', 'github-not-found', 'item-not-found') { throw } }
+                    $since = ConvertFrom-Iso $nowIso
+                }
+                $waitedH = ((Get-UtcNow) - $since).TotalHours
+                if ($waitedH -ge $limitH) { $hard = @("waited $([Math]::Round($waitedH, 1)) h at the Sign-off (limit $limitH h): $($soft -join '; ')") }
+            }
+            if ($hard.Count -eq 0 -and $soft.Count -gt 0) {
+                $why = "the Sign-off of task $($have.task) waits: $($soft -join '; ')"
+                Add-PromotionJournal $items 'promotion-waiting' @{ release = $ver; environment = $tname; reason = $why } "$ver|$tk|signoff-wait|$why"
+                $out += @{ item = $items[0]; action = 'promotion-following'; release = $ver; environment = $tname; task = $have.task; state = $have.state; ours = $true; signoff = 'waiting' }
+                continue
+            }
+            $all = $hard
             $so = Resolve-SignOff $have.task $all
             if ($so.refused) {
                 $why = "Octopus refused to answer the Sign-off of task $($have.task) ($(if ($so.status -eq 403) { "403, missing permission $($so.refused)" } else { "status $($so.refused)" })); the owner grants it to the gateway's Octopus account"
