@@ -691,6 +691,8 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     // the GitHub budget and the sweep's passes (issue 92)
     o["github"] = githubBudget.Status();
     o["sweep"] = hub.SweepStatus(sweepMinSeconds);
+    // the session transcripts: sessions held, how many have lines not yet saved to GitHub, saves and failures
+    o["transcripts"] = transcripts.Status();
     if (ownerMode) o["revocations"] = revSkipReason != "" ? new JsonObject { ["state"] = "skipped", ["reason"] = revSkipReason }
         : revocationsOff ? new JsonObject { ["state"] = "off", ["reason"] = "test-switch" }
         : new JsonObject { ["state"] = revocationsLoaded.Task.IsCompleted ? "loaded" : "loading", ["failedAttempts"] = Volatile.Read(ref revAttempts) };

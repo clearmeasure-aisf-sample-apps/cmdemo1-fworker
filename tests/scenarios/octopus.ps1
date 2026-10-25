@@ -312,6 +312,9 @@ $OctopusScenarios = [ordered]@{
         $sha = (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/ref/$($stored.Substring(5))").object.sha
         $msg = "$((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/commits/$sha").message)"
         Check 'the stored message is ciphertext: no line of the transcript in it' ($msg -like 'fwt1:*' -and $msg -notmatch 'line three|session starts')
+        # the lines are saved before the kill: the first save can hold the session without its lines, the next one carries them
+        $saved = Wait-Until -Seconds 60 { $t = (Rt-Api GET '/api/v1/status').body.transcripts; $t.dirty -eq 0 -and $t.saving -eq 0 }
+        Check 'before the restart every transcript line is saved (none dirty, no save running)' $saved ((Rt-Api GET '/api/v1/status').body.transcripts | ConvertTo-Json -Compress)
         Restart-Gateway
         $s2 = Rt-Api GET "/api/v1/sessions/$na"
         Check 'after a restart (killed, no stop) the transcript is read back from GitHub' ($s2.status -eq 200 -and @($s2.body.lines).Count -eq 3 -and $s2.body.lines[0] -eq '[system init] session starts' -and $s2.body.item -eq $n) ($s2 | ConvertTo-Json -Compress -Depth 4)
