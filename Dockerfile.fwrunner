@@ -86,12 +86,15 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
     && claude --version \
     && codex --version
 
-# Playwright Chromium with its OS dependencies, shared by every user of the image
+# Playwright Chromium with its OS dependencies, shared by every user of the image. The directory itself is writable (sticky, like /tmp):
+# `playwright install` (the shot tool's, the acceptance tests' playwright.ps1) takes its lock file __dirlock there even when the browsers are
+# already present, and failed with EACCES for the session user ("Chromium could not be installed": no screenshot, no video)
 RUN if [ "$WITH_PLAYWRIGHT" = "true" ]; then \
         npx --yes "playwright@${PLAYWRIGHT_VERSION}" install --with-deps chromium \
         && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH" \
+        && chmod 1777 "$PLAYWRIGHT_BROWSERS_PATH" \
         && rm -rf /var/lib/apt/lists/* /root/.npm; \
-    else mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"; fi
+    else mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" && chmod 1777 "$PLAYWRIGHT_BROWSERS_PATH"; fi
 
 # fworker files: root-owned and read-only for the session (settings.json is the reviewed auto-mode policy, design 2.7)
 COPY runner/settings.json runner/connect-prompt.template.md runner/manager-prompt.template.md runner/cursor-preamble.md /etc/fworker/

@@ -9,7 +9,7 @@
 home=${FWRUNNER_HOME:?}
 cat > "$home/seen-prompt"
 printf '%s\n' "$@" > "$home/seen-args"
-{ [ -n "${FACTORY_TOKEN:-}" ] && echo token-set; [ -n "${ANTHROPIC_API_KEY:-}" ] && echo api-key-set; pwd; echo "${FACTORY_SESSION_END_FILE:-}"; } > "$home/seen-env"
+{ [ -n "${FACTORY_TOKEN:-}" ] && echo token-set; [ -n "${ANTHROPIC_API_KEY:-}" ] && echo api-key-set; pwd; echo "${FACTORY_SESSION_END_FILE:-}"; echo "playwright=${PLAYWRIGHT_BROWSERS_PATH:-}"; } > "$home/seen-env"
 line() { printf '{"type":"%s","subtype":"%s","text":"%s"}\n' "$1" "$2" "$3"; }
 line system init "session starts"
 k=$(printf 'Q%.0s' $(seq 32))

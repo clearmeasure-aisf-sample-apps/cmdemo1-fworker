@@ -33,6 +33,7 @@ sealed class TranscriptStore
     string tree = "";
     DateTime prunedAt = DateTime.MinValue;
     long saves, saveFailures, loads;
+    int saving;
 
     public bool Durable => run != null && key.Length > 0;
 
@@ -57,6 +58,8 @@ sealed class TranscriptStore
         }
     }
 
+    // whether this gateway holds a transcript of the session (in memory: started or loaded since its start)
+    public bool Has(string name) { lock (gate) return sessions.ContainsKey(name); }
     public void Ended(string name) { lock (gate) if (sessions.TryGetValue(name, out var s) && s.Ended == null) { s.Ended = DateTime.UtcNow; s.Dirty = true; s.SavedAt = DateTime.MinValue; } }
 
     Session? Get(string name, bool create)
@@ -146,7 +149,7 @@ sealed class TranscriptStore
         }
     }
 
-    public JsonObject Status() { lock (gate) return new JsonObject { ["durable"] = Durable, ["sessions"] = sessions.Count, ["dirty"] = sessions.Values.Count(s => s.Dirty), ["saves"] = saves, ["saveFailures"] = saveFailures, ["loads"] = loads, ["days"] = Days, ["maxBytes"] = MaxBytes }; }
+    public JsonObject Status() { lock (gate) return new JsonObject { ["durable"] = Durable, ["sessions"] = sessions.Count, ["dirty"] = sessions.Values.Count(s => s.Dirty), ["saving"] = Volatile.Read(ref saving), ["saves"] = saves, ["saveFailures"] = saveFailures, ["loads"] = loads, ["days"] = Days, ["maxBytes"] = MaxBytes }; }
 
     // ---- the durable copy ----------------------------------------------------------------------------------------------------------------------
     string Seal(JsonObject doc)
@@ -196,12 +199,13 @@ sealed class TranscriptStore
                 // the stored message is capped at 900000 characters: older lines are left out of the stored copy until it fits
                 var skip = 0; string data;
                 while (true) { data = Seal(Doc(s, skip)); if (data.Length <= 880000 || skip >= s.Lines.Count) break; skip += Math.Max(1, (s.Lines.Count - skip) / 4); }
-                work.Add((s.Name, s.Day, data)); s.Dirty = false; s.SavedAt = now;
+                work.Add((s.Name, s.Day, data)); s.Dirty = false; s.SavedAt = now; Interlocked.Increment(ref saving); // saving: taken and not yet answered, counted in the same lock as Dirty
             }
         }
         using var cts = new CancellationTokenSource(timeout);
         foreach (var (name, day, data) in work)
         {
+            try {
             if (cts.IsCancellationRequested) { lock (gate) if (sessions.TryGetValue(name, out var s0)) s0.Dirty = true; continue; }
             var ok = false;
             try
@@ -214,6 +218,7 @@ sealed class TranscriptStore
             catch (Exception e) { Console.Error.WriteLine($"transcript-save {name}: {e.GetType().Name}"); }
             if (ok) Interlocked.Increment(ref saves);
             else { Interlocked.Increment(ref saveFailures); lock (gate) if (sessions.TryGetValue(name, out var s1)) s1.Dirty = true; }
+            } finally { Interlocked.Decrement(ref saving); }
         }
         // held in memory: an ended and saved session for an hour, then it is read back from the store when someone asks
         lock (gate) foreach (var s in sessions.Values.Where(x => !x.Dirty && x.Ended is { } e && DateTime.UtcNow - e > TimeSpan.FromHours(1)).ToList()) sessions.Remove(s.Name);

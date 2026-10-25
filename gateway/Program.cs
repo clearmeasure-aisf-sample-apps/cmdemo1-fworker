@@ -555,6 +555,24 @@ if (leaderOn)
 
 static bool FixedEquals(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
 Principal Who(HttpContext c) => (Principal)c.Items["principal"]!;
+// {name, url} of the AI session behind a session credential, null for the operator, the gateway itself and a click. octopus and cae-job: the
+// gateway's transcript page; cursor-cloud and copilot-cloud: the agent's or task's page; the on-demand manager: its Copilot session; a connected
+// session: the transcript page when this gateway holds one, else the name only (url "")
+JsonObject? SessionLinkOf(Principal p)
+{
+    if (p.Kind is not ("item" or "worker" or "role" or "manager" or "keeper") || !TranscriptStore.ValidName(p.Name)) return null;
+    var kind = plant.RuntimeKindOf(p.Name); if (kind == "") kind = p.Runtime;
+    var lb = LinkBase();
+    var page = lb != "" ? $"{lb}/sessions/{Uri.EscapeDataString(p.Name)}" : "";
+    var url = kind switch
+    {
+        "octopus" or "cae-job" => page,
+        "cursor-cloud" or "copilot-cloud" => plant.RuntimeUrlOf(p.Name),
+        _ => p.Kind == "manager" && managerCopilot?.SessionUrl(p.Name) is { Length: > 0 } mu ? mu : transcripts.Has(p.Name) ? page : ""
+    };
+    if (url != "" && !(url.StartsWith("https://", StringComparison.Ordinal) || url.StartsWith("http://", StringComparison.Ordinal)) || url.Contains('?') || url.Contains('#') || url.Any(char.IsWhiteSpace)) url = "";
+    return new JsonObject { ["name"] = p.Name, ["url"] = url };
+}
 static async Task Refuse(HttpContext c, int status, string code, string reason, int exit = 30) { c.Response.StatusCode = status; await c.Response.WriteAsJsonAsync(new { ok = false, code, reason, exit }); }
 
 app.Use(async (ctx, next) =>
@@ -673,6 +691,8 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     // the GitHub budget and the sweep's passes (issue 92)
     o["github"] = githubBudget.Status();
     o["sweep"] = hub.SweepStatus(sweepMinSeconds);
+    // the session transcripts: sessions held, how many have lines not yet saved to GitHub, saves and failures
+    o["transcripts"] = transcripts.Status();
     if (ownerMode) o["revocations"] = revSkipReason != "" ? new JsonObject { ["state"] = "skipped", ["reason"] = revSkipReason }
         : revocationsOff ? new JsonObject { ["state"] = "off", ["reason"] = "test-switch" }
         : new JsonObject { ["state"] = revocationsLoaded.Task.IsCompleted ? "loaded" : "loading", ["failedAttempts"] = Volatile.Read(ref revAttempts) };
@@ -1165,6 +1185,10 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     if (ownerMode && verb == "accept" && who.Kind == "item" && plant.JournalBefore(who.Item, who.Assignment, who.Name) is { AtMost.Ticks: > 0 } earlier)
         await Task.WhenAny(earlier.Written, Task.Delay(earlier.AtMost));
     if (ownerMode && who.Role == "qc" && verb is "accept" or "qc-progress" or "qc-fail" or "qc-stopped") qc.Arrived(who);
+    // the AI session that calls (a worker, role, manager or keeper credential): the rule scripts end every comment they write for it with a link
+    // to that session (Board.ps1 Add-Comment). Never a token: the page of the gateway, or the runtime's own page of the agent or task.
+    authorized.Remove("_session");
+    if (SessionLinkOf(who) is { } sl) authorized["_session"] = sl;
     var (code, output) = await runner.RunAsync(verb, authorized.ToJsonString(), timeout);
     if (mgrTicket != null)
     {   // the plant's part of an item action of the plant manager, after its rule script changed the item (Manager.cs)

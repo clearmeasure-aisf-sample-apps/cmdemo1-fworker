@@ -128,14 +128,14 @@ function Verb_approve_pr($a) {
         $reviewer = Get-AppLogin 'reviewer'
         $author = "$(Get-Prop (Get-Prop $pr 'user' $null) 'login' '')"
         if ($author -and $author -ieq $reviewer) { Reject 10 'approver-is-author' "the approver '$reviewer' authored the pull request" }
-        Use-GhAs 'reviewer' { Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls/$prNum/reviews" -Body @{ event = 'APPROVE'; commit_id = $sha; body = "Factory inspector approval of $sha.`n`n$summary" } | Out-Null }
+        Use-GhAs 'reviewer' { Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls/$prNum/reviews" -Body @{ event = 'APPROVE'; commit_id = $sha; body = (Add-SessionFooter "Factory inspector approval of $sha.`n`n$summary") } | Out-Null }
         $s.approval = @{ sha = $sha; by = $reviewer; kind = 'inspector'; at = ConvertTo-Iso (Get-UtcNow) }
         if (Test-OwnerMode) { $s.Remove('bot'); Save-State $n $st } else { $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n }
         Add-Comment $n "inspector approved PR #$prNum at ``$($sha.Substring(0,7))`` as $reviewer."
         return @{ ok = $true; id = $n; verdict = 'APPROVE'; approved_sha = $sha; by = $reviewer; next = 'merge' }
     }
     if ($verdict -eq 'REQUEST CHANGES') {
-        Use-GhAs 'reviewer' { Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls/$prNum/reviews" -Body @{ event = 'REQUEST_CHANGES'; commit_id = $sha; body = "Factory inspector requests changes at $sha.`n`n$summary" } -Allow 422 | Out-Null }
+        Use-GhAs 'reviewer' { Invoke-Gh -Method POST -Path "$(Get-RepoPath)/pulls/$prNum/reviews" -Body @{ event = 'REQUEST_CHANGES'; commit_id = $sha; body = (Add-SessionFooter "Factory inspector requests changes at $sha.`n`n$summary") } -Allow 422 | Out-Null }
         $s.verdict.processed = $true
         $d = Invoke-Demote $n $info $st "inspector requested changes: $summary" 'verdict'
         return @{ ok = $true; id = $n; verdict = 'REQUEST CHANGES'; outcome = $d.outcome; detail = $d }

@@ -55,8 +55,8 @@ function Verb_get_item($a) {
     $marker = Get-StateMarker
     $comments = @(Get-Comments $n | Where-Object { -not $_.body.StartsWith($marker) } | ForEach-Object {
         $b = "$($_.body)"; $blocks = @(if ($_.user.login -eq $login) { Get-DerivedBlocks $b })
-        # a factory comment made entirely of a block is data derived from a message; one that mixes a block with other text lists its blocks
-        $whole = $blocks.Count -gt 0 -and (((Remove-DerivedBlocks $b) -replace '<!-- factory-journal:[^>]*-->', '' -replace '^\s*\S+ [^:\r\n]{1,80}:', '').Trim() -eq '')
+        # a factory comment made entirely of a block (and the AI session footer) is data derived from a message; one that mixes a block with other text lists its blocks
+        $whole = $blocks.Count -gt 0 -and (((Remove-DerivedBlocks $b) -replace '<!-- factory-journal:[^>]*-->', '' -replace '(?m)^AI session: .*$', '' -replace '^\s*\S+ [^:\r\n]{1,80}:', '').Trim() -eq '')
         if ($b.Length -gt 4000) { $b = $b.Substring(0, 4000) + ' …[truncated]' }
         $row = @{ id = $_.id; author = $_.user.login; author_trust = $(if ($whole) { 'derived-from-message' } elseif ($_.user.login -eq $login) { 'factory' } else { 'untrusted' }); at = $_.created_at; body = $b }
         if ($blocks.Count -gt 0 -and -not $whole) { $row.derived_blocks = $blocks }

@@ -112,6 +112,17 @@ $OctopusScenarios = [ordered]@{
         Check 'the container redeems the nonce for its w2' ($r.status -eq 200 -and $r.body.name -eq $na -and $r.body.runtime -eq 'octopus') ($r | ConvertTo-Json -Compress)
         Start-RuntimeClient $na "$($r.body.token)"
         Check 'the worker is offered the item' (Wait-Until -Seconds 20 { (Get-Assigned $na $a).Count -gt 0 })
+        # every comment the worker's verbs write ends with the link to its session: the gateway's page of the transcript; the gateway's own lines do not
+        [void](Rt-Api GET '/api/v1/status')   # the gateway learns its own address from the operator's call
+        $own = Rt-Own $na $a; CheckExit 'the runtime worker owns the item' $own 0
+        $cr = Fo $na @('comment', '--item', $a, '--body', 'octopus worker note'); CheckExit 'the worker comments' $cr 0
+        $foot = "AI session: [$na]($(Get-GatewayBase)/sessions/$na)"
+        $wc = @((Get-FakeIssue $a).comments | Where-Object { "$($_.body)" -match 'octopus worker note' })
+        Check 'the worker''s comment ends with one AI session footer that links the gateway''s session page' ($wc.Count -eq 1 -and "$($wc[0].body)" -match ("octopus worker note`n`n" + [regex]::Escape($foot) + "`n`n<!-- factory-journal:") -and ([regex]::Matches("$($wc[0].body)", 'AI session: ')).Count -eq 1) "$($wc | ForEach-Object { $_.body })"
+        $oc = Rt-Api POST '/api/v1/verbs/comment' @{ item = $a; body = 'operator note' }
+        $oc2 = @((Get-FakeIssue $a).comments | Where-Object { "$($_.body)" -match 'operator note' })
+        Check 'a comment of the operator token carries no AI session footer' ($oc.status -eq 200 -and $oc2.Count -eq 1 -and "$($oc2[0].body)" -notmatch 'AI session: ') ($oc | ConvertTo-Json -Compress)
+        Check 'the plant manager''s own lines carry no AI session footer' (@((Get-FakeIssue $a).comments | Where-Object { "$($_.body)" -match 'plant event=' -and "$($_.body)" -match 'AI session: ' }).Count -eq 0)
         [void](Oct-Report 'host-a' @(@{ name = "fw-$na"; item = $a; state = 'running'; startedAt = (Get-Date).ToUniversalTime().ToString('o') }))
         $b = New-Item-Fake 'Octopus host b' 'x' $OctLabels
         Check 'the second item goes to the other host (host-a is full at perHostCapacity 1)' (Wait-Until -Seconds 30 { $x = Oct-Runs 'Start worker' $b; $x.Count -eq 1 -and $x[0].machines[0] -eq 'Machines-2' }) ((Oct-State).runs | ConvertTo-Json -Compress -Depth 5)
@@ -301,9 +312,9 @@ $OctopusScenarios = [ordered]@{
         $sha = (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/ref/$($stored.Substring(5))").object.sha
         $msg = "$((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/commits/$sha").message)"
         Check 'the stored message is ciphertext: no line of the transcript in it' ($msg -like 'fwt1:*' -and $msg -notmatch 'line three|session starts')
-        # the first stored copy may predate the last lines (saved at most every FACTORY_TRANSCRIPT_SAVE_SECONDS): wait past a few save intervals so
-        # every posted line is stored before the gateway is killed (a slow CI machine saw the copy without the last line)
-        Start-Sleep -Seconds 8
+        # the lines are saved before the kill: the first save can hold the session without its lines, the next one carries them
+        $saved = Wait-Until -Seconds 60 { $t = (Rt-Api GET '/api/v1/status').body.transcripts; $t.dirty -eq 0 -and $t.saving -eq 0 }
+        Check 'before the restart every transcript line is saved (none dirty, no save running)' $saved ((Rt-Api GET '/api/v1/status').body.transcripts | ConvertTo-Json -Compress)
         Restart-Gateway
         $s2 = Rt-Api GET "/api/v1/sessions/$na"
         Check 'after a restart (killed, no stop) the transcript is read back from GitHub' ($s2.status -eq 200 -and @($s2.body.lines).Count -eq 3 -and $s2.body.lines[0] -eq '[system init] session starts' -and $s2.body.item -eq $n) ($s2 | ConvertTo-Json -Compress -Depth 4)
