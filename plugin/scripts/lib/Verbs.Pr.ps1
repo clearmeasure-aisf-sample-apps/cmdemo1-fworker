@@ -338,7 +338,7 @@ function Verb_copilot_owner($a) {
 # Close a pull request with a comment and delete its branch (a copilot/* branch or the factory's own branch of the item only)
 function Close-PrWithBranch($Pr, [int]$n, [string]$Why) {
     $c = Get-Cfg
-    [void](Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$($Pr.number)/comments" -Body @{ body = $Why } -Allow 404, 422)
+    [void](Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$($Pr.number)/comments" -Body @{ body = (Add-SessionFooter $Why) } -Allow 404, 422)
     [void](Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($Pr.number)" -Body @{ state = 'closed' })
     $ref = "$($Pr.head.ref)"
     if ($ref -like 'copilot/*' -or $ref -match "^$([regex]::Escape($c.name))/$n-") { [void](Invoke-Gh -Method DELETE -Path "$(Get-RepoPath)/git/refs/heads/$ref" -Allow 404, 422) }

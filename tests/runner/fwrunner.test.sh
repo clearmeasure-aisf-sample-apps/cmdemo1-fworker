@@ -44,6 +44,18 @@ check "nonce redeemed, plugin downloaded" 'grep -q "nonce redeemed" "$tmp/normal
 check "repository cloned" '[ -d "$w/repo/.git" ]'
 check "claude ran in the checkout with the token in its env, no model key" 'grep -qx token-set "$w/seen-env" && ! grep -q api-key-set "$w/seen-env" && grep -qx "$w/repo" "$w/seen-env"'
 check "FACTORY_SESSION_END_FILE is the marker" 'grep -qx "$w/session-ended" "$w/seen-env"'
+# inside the image (PLAYWRIGHT_BROWSERS_PATH set): the agent sees the baked browsers, they are complete, and the session user can take
+# Playwright's install lock there (an EACCES on __dirlock was "Chromium could not be installed": no screenshot, no video)
+if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+    check "the agent's env names the baked browsers" 'grep -qx "playwright=$PLAYWRIGHT_BROWSERS_PATH" "$w/seen-env"'
+    check "the session user can write the browsers directory (install lock)" 'touch "$PLAYWRIGHT_BROWSERS_PATH/__fwtest.$$" && rm -f "$PLAYWRIGHT_BROWSERS_PATH/__fwtest.$$"'
+    if [ -n "$(ls -A "$PLAYWRIGHT_BROWSERS_PATH" 2>/dev/null)" ]; then
+        for b in chromium chromium_headless_shell ffmpeg; do
+            check "baked $b is complete" 'ls "$PLAYWRIGHT_BROWSERS_PATH"/${b}-*/INSTALLATION_COMPLETE >/dev/null 2>&1'
+        done
+        check "the baked headless shell starts" 'timeout 30 $(ls "$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/chrome-linux/headless_shell | head -1) --no-sandbox --disable-gpu --dump-dom about:blank >/dev/null 2>&1'
+    fi
+fi
 check "claude args: -p, stream-json, settings, model, effort" 'grep -qx -- -p "$w/seen-args" && grep -qx stream-json "$w/seen-args" && grep -qx "$root/runner/settings.json" "$w/seen-args" && grep -qx claude-sonnet-5-5 "$w/seen-args" && grep -qx high "$w/seen-args"'
 check "prompt filled, names the worker, holds no credential" 'grep -q "cae-42-normal" "$w/seen-prompt" && ! grep -q "{{" "$w/seen-prompt" && ! grep -q "w2\." "$w/seen-prompt"'
 check "end marker handled" 'grep -q "end marker: end-session: item 42 ended" "$tmp/normal.out"'

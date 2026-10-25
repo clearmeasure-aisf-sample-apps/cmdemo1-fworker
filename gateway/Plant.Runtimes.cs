@@ -112,6 +112,8 @@ sealed partial class Plant
 
     // the page of a runtime worker's execution ("" for none or a connected session)
     public string RuntimeUrlOf(string name) => RuntimeOf(name)?.UrlOf(name) ?? "";
+    // the runtime kind of a runtime worker ("" for a connected session)
+    public string RuntimeKindOf(string name) => RuntimeOf(name)?.Kind ?? "";
 
     public bool RuntimeEnded(string name, int item, string outcome, string url = "")
     {

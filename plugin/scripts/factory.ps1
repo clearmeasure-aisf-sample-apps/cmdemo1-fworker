@@ -50,6 +50,9 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
         if ($verb -notin $ServerVerbs) { Reject 2 'unknown-verb' "unknown verb '$verb'" }
         $raw = [Console]::In.ReadToEnd()
         $a = if ($raw.Trim()) { $raw | ConvertFrom-Json -AsHashtable -DateKind String } else { @{} }
+        # the AI session the gateway runs this verb for (Program.cs SessionLinkOf): the footer of every comment written for it (Board.ps1)
+        $script:FactorySession = $null
+        if ($a -is [System.Collections.IDictionary] -and $a.ContainsKey('_session')) { $script:FactorySession = $a['_session']; $a.Remove('_session') }
         $fn = 'Verb_' + ($verb -replace '-', '_')
         $r = if ((Test-Has $a 'item') -and $verb -notin $NoLockVerbs) { Use-ItemLock ([int]$a.item) { & $fn $a } } else { & $fn $a }
         $r.verb = $verb

@@ -46,7 +46,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $bin 'Shot.dll'))) {
     Copy-Item -Recurse -Force -LiteralPath (Join-Path $PSScriptRoot '../tools/shot') -Destination $src
     $r = Run $dotnet @('build', $src, '-c', 'Release', '--nologo', '-v', 'q', '-o', $bin, '-nodeReuse:false') $work
     if ($r.code -ne 0) { Out @{ ok = $false; code = 'shot-build-failed'; reason = 'the screenshot tool did not build (needs nuget.org)'; tail = $r.tail } 20 }
-    $r = Run $dotnet @((Join-Path $bin 'Shot.dll'), 'install') $work 1200
+    # browsers baked into the machine (the fworker-host image: PLAYWRIGHT_BROWSERS_PATH=/ms-playwright with Chromium, its headless shell and
+    # ffmpeg of the tool's Playwright version) are used as they are: no download, and no install lock in a directory the session may not write
+    $pwDir = "$env:PLAYWRIGHT_BROWSERS_PATH"
+    $baked = $pwDir -and (Test-Path -LiteralPath $pwDir) -and @('chromium-*', 'chromium_headless_shell-*', 'ffmpeg-*' | Where-Object {
+        -not @(Get-ChildItem -LiteralPath $pwDir -Directory -Filter $_ -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'INSTALLATION_COMPLETE') }).Count }).Count -eq 0
+    $r = if ($baked) { @{ code = 0; tail = '' } } else { Run $dotnet @((Join-Path $bin 'Shot.dll'), 'install') $work 1200 }
     if ($r.code -ne 0) { Remove-Item -Recurse -Force -LiteralPath $bin -ErrorAction SilentlyContinue; Out @{ ok = $false; code = 'browser-install-failed'; reason = 'Chromium did not install (needs the Playwright CDN and the usual Linux libraries)'; tail = $r.tail } 20 }
 }
 if ($verb -eq 'prepare') { Out @{ ok = $true; prepared = $true; db = $db } 0 }

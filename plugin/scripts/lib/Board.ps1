@@ -139,8 +139,25 @@ function Close-Issue([int]$Item) {
     Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/$Item" -Body @{ state = 'closed'; state_reason = 'completed' } | Out-Null
 }
 
+# The last line of a comment written for an AI session's verb: "AI session: [<name>](<url>)", the name alone without a page; '' when the gateway
+# runs the verb for itself, the operator or a click (no _session). An https or http page only, no query (a token never travels in a link).
+function Get-SessionFooter {
+    $s = $script:FactorySession
+    if (-not ($s -is [System.Collections.IDictionary]) -or "$($s['name'])" -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$') { return '' }
+    $u = "$($s['url'])"
+    if ($u -and $u -match '^https?://[^\s?#()<>\[\]]+$') { return "AI session: [$($s['name'])]($u)" }
+    return "AI session: $($s['name'])"
+}
+# $Body with the session footer as its last line, once: only this session's exact footer at the very end counts as present (a worker's own
+# text that quotes or imitates a footer never suppresses the real one)
+function Add-SessionFooter([string]$Body) {
+    $f = Get-SessionFooter
+    if (-not $f -or $Body.TrimEnd().EndsWith($f)) { return $Body }
+    return "$Body`n`n$f"
+}
+
 function Add-Comment([int]$Item, [string]$Text) {
-    $body = "🤖 $((Get-Cfg).name): $Text`n`n<!-- factory-journal:$((Get-Cfg).name) -->"
+    $body = "🤖 $((Get-Cfg).name): $(Add-SessionFooter $Text)`n`n<!-- factory-journal:$((Get-Cfg).name) -->"
     Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$Item/comments" -Body @{ body = $body } | Out-Null
 }
 

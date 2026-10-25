@@ -112,6 +112,17 @@ $OctopusScenarios = [ordered]@{
         Check 'the container redeems the nonce for its w2' ($r.status -eq 200 -and $r.body.name -eq $na -and $r.body.runtime -eq 'octopus') ($r | ConvertTo-Json -Compress)
         Start-RuntimeClient $na "$($r.body.token)"
         Check 'the worker is offered the item' (Wait-Until -Seconds 20 { (Get-Assigned $na $a).Count -gt 0 })
+        # every comment the worker's verbs write ends with the link to its session: the gateway's page of the transcript; the gateway's own lines do not
+        [void](Rt-Api GET '/api/v1/status')   # the gateway learns its own address from the operator's call
+        $own = Rt-Own $na $a; CheckExit 'the runtime worker owns the item' $own 0
+        $cr = Fo $na @('comment', '--item', $a, '--body', 'octopus worker note'); CheckExit 'the worker comments' $cr 0
+        $foot = "AI session: [$na]($(Get-GatewayBase)/sessions/$na)"
+        $wc = @((Get-FakeIssue $a).comments | Where-Object { "$($_.body)" -match 'octopus worker note' })
+        Check 'the worker''s comment ends with one AI session footer that links the gateway''s session page' ($wc.Count -eq 1 -and "$($wc[0].body)" -match ("octopus worker note`n`n" + [regex]::Escape($foot) + "`n`n<!-- factory-journal:") -and ([regex]::Matches("$($wc[0].body)", 'AI session: ')).Count -eq 1) "$($wc | ForEach-Object { $_.body })"
+        $oc = Rt-Api POST '/api/v1/verbs/comment' @{ item = $a; body = 'operator note' }
+        $oc2 = @((Get-FakeIssue $a).comments | Where-Object { "$($_.body)" -match 'operator note' })
+        Check 'a comment of the operator token carries no AI session footer' ($oc.status -eq 200 -and $oc2.Count -eq 1 -and "$($oc2[0].body)" -notmatch 'AI session: ') ($oc | ConvertTo-Json -Compress)
+        Check 'the plant manager''s own lines carry no AI session footer' (@((Get-FakeIssue $a).comments | Where-Object { "$($_.body)" -match 'plant event=' -and "$($_.body)" -match 'AI session: ' }).Count -eq 0)
         [void](Oct-Report 'host-a' @(@{ name = "fw-$na"; item = $a; state = 'running'; startedAt = (Get-Date).ToUniversalTime().ToString('o') }))
         $b = New-Item-Fake 'Octopus host b' 'x' $OctLabels
         Check 'the second item goes to the other host (host-a is full at perHostCapacity 1)' (Wait-Until -Seconds 30 { $x = Oct-Runs 'Start worker' $b; $x.Count -eq 1 -and $x[0].machines[0] -eq 'Machines-2' }) ((Oct-State).runs | ConvertTo-Json -Compress -Depth 5)

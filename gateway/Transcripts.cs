@@ -57,6 +57,8 @@ sealed class TranscriptStore
         }
     }
 
+    // whether this gateway holds a transcript of the session (in memory: started or loaded since its start)
+    public bool Has(string name) { lock (gate) return sessions.ContainsKey(name); }
     public void Ended(string name) { lock (gate) if (sessions.TryGetValue(name, out var s) && s.Ended == null) { s.Ended = DateTime.UtcNow; s.Dirty = true; s.SavedAt = DateTime.MinValue; } }
 
     Session? Get(string name, bool create)
