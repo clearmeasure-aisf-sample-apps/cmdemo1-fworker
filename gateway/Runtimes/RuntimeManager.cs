@@ -181,6 +181,12 @@ sealed class RuntimeManager
     // ---- outside the plant's lock -----------------------------------------------------------------------------------------------------------
     public async Task Provision(Ticket t)
     {
+        // the plant's place for the launched line is given up however the start call ends (RuntimeLaunched fills it first when it writes one)
+        try { await ProvisionCore(t); }
+        finally { try { Plant?.RuntimeLaunchDone(t.Name); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
+    }
+    async Task ProvisionCore(Ticket t)
+    {
         using var span = Source.StartActivity("runtime.provision");
         span?.SetTag("fworker.runtime", cae.Kind); span?.SetTag("fworker.worker", t.Name); span?.SetTag("fworker.item", t.Item); span?.SetTag("fworker.phase", t.Phase);
         ProvisionResult r;

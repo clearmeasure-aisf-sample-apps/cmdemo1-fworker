@@ -71,8 +71,9 @@ sealed partial class Plant
         if (!ok) { if (label != "" || owned) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = code; Journal(a.Item, "waiting", new JsonObject { ["reason"] = owned ? $"the item is owned by a {(ownerRt == "cursor-cloud" ? "Cursor agent" : "Copilot task")}; it is resumed once the runtime can start a session ({code})" : $"the item is labelled runtime:{label} and that runtime cannot start a worker now ({code})" }, ""); return (true, null); } return (false, null); }
         var t = rm.Begin(a.Item, a.Column, itemProfiles[a.Item.ToString()]?.ToString() ?? "");
         pendingProvisions.Add((rm, t));
-        a.Pin = t.Name; a.Worker = t.Name; a.AckBy = DateTime.UtcNow.AddSeconds(rm.AckSeconds); a.AckExtended = false; a.WaitingSince = null; a.WaitingCode = "";
+        a.Pin = t.Name; a.Worker = t.Name; a.AckBy = DateTime.UtcNow.AddSeconds(rm.AckSeconds); a.WaitingSince = null; a.WaitingCode = "";
         Journal(a.Item, "offered", new JsonObject { ["worker"] = t.Name, ["type"] = "runtime", ["runtime"] = rm.Kind, ["ackSeconds"] = rm.AckSeconds }, "off|" + a.Id + "|" + t.Name);
+        ReserveLaunched(a.Item, t.Name);   // the launched line's place, before the worker's acceptance can queue its assigned line
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["plant"] = "runtime-route", ["item"] = a.Item, ["phase"] = a.Column, ["worker"] = t.Name, ["label"] = label }.ToJsonString());
         return (true, null);
     }
@@ -107,7 +108,12 @@ sealed partial class Plant
     {
         var f = new JsonObject { ["worker"] = name, ["runtime"] = kind, ["phase"] = phase, ["task"] = execution, ["url"] = url };
         if (SessionPage?.Invoke(kind, name) is { Length: > 0 } page) f["transcript"] = page;
-        Journal(item, "launched", f, "rtl|" + name + "|" + execution);
+        var key = "rtl|" + name + "|" + execution;
+        lock (gate)
+        {   // the place taken when the launch was decided (ReserveLaunched); a launch without one (or whose place lapsed) is queued now
+            if (launchSlots.Remove(name, out var slot)) slot.TrySetResult((f, key));
+            else Journal(item, "launched", f, key);
+        }
     }
 
     // the page of a runtime worker's execution ("" for none or a connected session)

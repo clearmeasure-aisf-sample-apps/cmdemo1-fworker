@@ -562,9 +562,9 @@ $OwnerScenarios['owner: with a slow GitHub the journal of an item still reads ma
     }
 }
 
-# The acceptance waits for the journal lines before it, and an offer counts as accepted only when the rule script has returned: that wait must not
-# be taken from the offer's window. Here "offered" and "assigned" each take 10 s to post in an 18 s window: the accept ends after the window.
-$OwnerScenarios['owner: an accept that waited for a slow journal does not let its offer lapse: the item is not offered again while it is being accepted [full]'] = {
+# The acceptance does not wait for the journal: its "assigned" line is queued by the gateway on the item's chain, behind the lines before it.
+# Here "offered" and "assigned" each take 10 s to post in an 18 s window: the accept ends well inside the window, the journal still reads in order.
+$OwnerScenarios['owner: with a slow journal an accept does not wait for it and its offer does not lapse; the journal reads matched, offered, assigned [full]'] = {
     $oldAck = $env:FACTORY_ASSIGN_ACK_SECONDS; $oldSweep = $env:FACTORY_SWEEP_SECONDS
     try {
         # no sweep while the accept runs, as with the deployed 180 s: a sweep that sees the claim the accept has just written drops the open
@@ -576,7 +576,8 @@ $OwnerScenarios['owner: an accept that waited for a slow journal does not let it
         Check 'the item is offered' (Wait-Until -Seconds 70 { (Get-Assigned 'slow-k' $n).Count -gt 0 })
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $r = Fo 'slow-k' @('accept', '--item', $n, '--assignment', (Get-Assigned 'slow-k' $n)[0].assignment)
-        Check 'the accept succeeds, after the 18 s window of the offer had passed' ($r.exit -eq 0 -and $sw.Elapsed.TotalSeconds -gt 18) "$($r.exit) $($sw.Elapsed.TotalSeconds)"
+        Check 'the accept succeeds without waiting for the journal' ($r.exit -eq 0 -and $sw.Elapsed.TotalSeconds -lt 10) "$($r.exit) $($sw.Elapsed.TotalSeconds)"
+        [void](Wait-Until -Seconds 40 { @(Get-Journal $n) -contains 'assigned' })
         Fake 'latency' @{ ms = 0 } | Out-Null
         Start-Sleep -Seconds 6     # ticks, sweeps and any journal line still on its way
         $j = Get-Journal $n

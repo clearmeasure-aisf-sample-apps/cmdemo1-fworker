@@ -1146,8 +1146,6 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "github-budget", reason = $"the gateway's GitHub budget ({gl.Resource}) is below its reserve; only accept, claim-item, release and my-items run until the reset", retryAfterSeconds = Math.Max(1, (int)(gl.ResetAt - DateTime.UtcNow).TotalSeconds), resetAt = gl.ResetAt.ToString("o"), exit = 20 }), "application/json", Encoding.UTF8, 503);
     }
     var timeout = TimeSpan.FromSeconds(verb is "wait-for-checks" ? 140 : 580);
-    // the journal of an item reads in event order: the lines the plant decided before this acceptance (matched, offered) are written before the
-    // rule script writes "assigned". The wait is bounded by the plant, which adds it to the offer's window of this worker.
     // issue 30: only the offer that stands for this session now can be accepted (a late accept of a withdrawn offer is refused, exit 11)
     var accepting = false;
     if (ownerMode && verb == "accept" && who.Kind == "item")
@@ -1162,8 +1160,6 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
         // a runtime worker's acceptance carries its execution's page (a Copilot task's session), for the item's journal
         if (!(authorized["url"] is JsonValue) && plant.RuntimeUrlOf(who.Name) is { Length: > 0 } ru) authorized["url"] = ru;
     }
-    if (ownerMode && verb == "accept" && who.Kind == "item" && plant.JournalBefore(who.Item, who.Assignment, who.Name) is { AtMost.Ticks: > 0 } earlier)
-        await Task.WhenAny(earlier.Written, Task.Delay(earlier.AtMost));
     if (ownerMode && who.Role == "qc" && verb is "accept" or "qc-progress" or "qc-fail" or "qc-stopped") qc.Arrived(who);
     var (code, output) = await runner.RunAsync(verb, authorized.ToJsonString(), timeout);
     if (mgrTicket != null)

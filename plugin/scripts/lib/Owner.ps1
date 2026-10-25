@@ -38,10 +38,12 @@ function Verb_accept($a) {
     $r = Verb_claim_item $claimArgs
     if (-not (Test-Has $r 'already') -or -not $r.already) {
         $mt = Verb_model_tier @{ item = $n }
-        [void](Add-Journal $n $null 'assigned' @{ worker = $holder; column = $r.column; mode = $r.mode; attempt = $r.launches; lease = $r.lease_until
+        # the "assigned" line is not posted here: the gateway queues it on the item's journal chain once this verb has succeeded, behind the
+        # offered and launched lines it decided before (gateway/Plant.cs, OnVerb accept), so the comments read in the plant's order
+        $r.journal = @{ event = 'assigned'; key = "owner|$assignment"; fields = @{ worker = $holder; column = $r.column; mode = $r.mode; attempt = $r.launches; lease = $r.lease_until
             by = $(if ((Test-Has $a 'accepted_by') -and "$($a.accepted_by)" -eq 'client') { 'client' } else { 'session' })
             model = $(if (Test-Has $a 'model') { "$($a.model)" } else { '' }); effort = $(if (Test-Has $a 'effort') { "$($a.effort)" } else { '' }); tier = $mt.tier
-            url = $(if (Test-Has $a 'url') { "$($a.url)" } else { '' }) } "owner|$assignment" -Save)
+            url = $(if (Test-Has $a 'url') { "$($a.url)" } else { '' }) } }
     }
     $r.kind = 'own-item'; $r.assignment = $assignment
     return $r
