@@ -82,6 +82,8 @@ var runnerInstance = new Runner(entry) { Budget = githubBudget };
 var transcriptsDurable = ownerMode && tokenSecret.Length > 0 && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPTS") != "0";
 var transcripts = new TranscriptStore(transcriptsDurable ? runnerInstance.RunAsync : null, tokenSecret);
 if (int.TryParse(Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPT_SAVE_SECONDS"), out var tss) && tss >= 0) transcripts.SaveSeconds = tss;
+builder.Services.AddSingleton(transcripts);
+builder.Services.AddSingleton<TranscriptService>();
 // the gateway's own address for the links it writes into the journal: FACTORY_PUBLIC_URL, else the address the operator or a container last used
 string seenBase = "";
 string LinkBase() => publicUrl != "" ? publicUrl.TrimEnd('/') : Volatile.Read(ref seenBase);
@@ -114,6 +116,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<RevocationService>
 builder.Services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, revocationOptions.SkipRevocations, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));
 builder.Services.AddSingleton<IOperatorReleaseLoader>(sp => sp.GetRequiredService<OperatorReleaseLoader>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OperatorReleaseLoader>());
+// the transcripts' save loop (TranscriptService) starts after the revocation read
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TranscriptService>());
 // the runtime adapter (gateway/Runtimes/, cloud-worker-runtimes.md 4): only in owner mode with a token secret and a runtime switched on in the configuration
 var runtimeSettings = RuntimeSettings.Load(scriptsDir);
 var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new RuntimeManager(runtimeSettings, new CaeJobRuntime(runtimeSettings.CaeJob), runtimeNonces) : null;
@@ -211,8 +215,8 @@ builder.Services.AddMcpServer(o => o.ServerInfo = new() { Name = "fworker", Vers
     .WithHttpTransport(o => o.Stateless = true)
     .WithListToolsHandler(GatewayMcp.ListTools).WithCallToolHandler(GatewayMcp.CallTool);
 var app = builder.Build();
-_ = Task.Run(() => transcripts.Loop(() => leader.MayAct, app.Lifetime.ApplicationStopping));
-app.Lifetime.ApplicationStopping.Register(() => { try { transcripts.Flush(true, TimeSpan.FromSeconds(15)).Wait(TimeSpan.FromSeconds(20)); } catch { } });
+// the transcripts' final flush (TranscriptService): registered here, before the hand-over's callback, so that it runs after it
+app.Services.GetRequiredService<TranscriptService>().RegisterFinalFlush();
 app.Lifetime.ApplicationStopping.Register(() => { try { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"stopping\",\"reason\":\"shutdown requested (signal or host)\",\"upSeconds\":{(long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds}}}"); } catch { } });
 var hub = app.Services.GetRequiredService<EventHub>();
 var runner = app.Services.GetRequiredService<Runner>();
