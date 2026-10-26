@@ -92,7 +92,9 @@ var snapshotOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_S
 // The leader lease (Leader.cs, issue 94): only the process that holds it acts on the board. Owner mode with a GitHub identity, not the suites' second
 // gateways; FACTORY_LEADER_LEASE=0 switches it off (every process acts, and the snapshot is written at SIGTERM and read once, as before).
 var leaderOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && revocationOptions.GitHubConfigured;
-var leader = new GatewayLeader(runnerInstance, LeaderSettings.Load(scriptsDir, leaderOn),
+var leaderSettings = LeaderSettings.Load(scriptsDir, leaderOn);
+builder.Services.AddSingleton(leaderSettings);
+var leader = new GatewayLeader(runnerInstance, leaderSettings,
     (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0");
 builder.Services.AddSingleton<ILeadership>(leader);
 // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
@@ -138,6 +140,19 @@ Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["run
 ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), created once the plant exists
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
+// the settings of the plant and the base watch, loaded once and registered as singletons (gateway-composition.md 3 A); the factories below used to
+// load them when they ran, after Build(), and nothing is written between here and there, so the one warning ManagerActionSettings can print keeps its place
+var leaseSettings = LeaseSettings.Load(scriptsDir);
+var hostSettings = HostSettings.Load(scriptsDir);
+var managerActionSettings = ManagerActionSettings.Load(scriptsDir);
+var baseUpdateSettings = BaseUpdateSettings.Load(scriptsDir);
+builder.Services.AddSingleton(leaseSettings);
+builder.Services.AddSingleton(hostSettings);
+builder.Services.AddSingleton(managerActionSettings);
+builder.Services.AddSingleton(baseUpdateSettings);
+builder.Services.AddSingleton(runtimeSettings);
+builder.Services.AddSingleton(cursorSettings);
+builder.Services.AddSingleton(copilotSettings);
 builder.Services.AddSingleton(sp =>
 {
     var runner = sp.GetRequiredService<Runner>();
@@ -146,14 +161,14 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = timing.PassUnmergedDigestMinutes, OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = instanceConfig.IntakeColumn, Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager, Octopus = octopusManager,
+        PassUnmergedDigestMinutes = timing.PassUnmergedDigestMinutes, OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = leaseSettings, IntakeColumn = instanceConfig.IntakeColumn, Hosts = hostSettings, MgrActions = managerActionSettings, Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager, Octopus = octopusManager,
         SessionPage = (kind, name) => kind is "octopus" or "cae-job" && LinkBase() is { Length: > 0 } lb ? $"{lb}/sessions/{Uri.EscapeDataString(name)}" : "" };
 
 });
 builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
 builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, publicUrl, tokenSecret));
 // master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs)
-builder.Services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), BaseUpdateSettings.Load(scriptsDir), ownerMode));
+builder.Services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, ownerMode));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
 // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
 var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : timing.SweepMinSeconds);

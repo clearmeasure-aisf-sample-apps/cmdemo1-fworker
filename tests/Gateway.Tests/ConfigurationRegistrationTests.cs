@@ -25,6 +25,21 @@ public sealed class ConfigurationRegistrationTests(TwoPortGateway gw) : IClassFi
         Same<KeeperSettings>(sp);
         Same<GitHubBudget>(sp);
         Same<ILeadership>(sp);
+        Same<QcSettings>(sp);
+        Same<LeaderSettings>(sp);
+        Same<LeaseSettings>(sp);
+        Same<HostSettings>(sp);
+        Same<ManagerActionSettings>(sp);
+        Same<BaseUpdateSettings>(sp);
+        Same<RuntimeSettings>(sp);
+        Same<CursorCloudSettings>(sp);
+        Same<CopilotCloudSettings>(sp);
+        // the plant holds the registered instances, not copies of its own
+        var plant = sp.GetRequiredService<Plant>();
+        Assert.Same(sp.GetRequiredService<LeaseSettings>(), plant.Lease);
+        Assert.Same(sp.GetRequiredService<HostSettings>(), plant.Hosts);
+        Assert.Same(sp.GetRequiredService<ManagerActionSettings>(), plant.MgrActions);
+        Assert.Same(sp.GetRequiredService<MessagingSettings>(), plant.Msg);
         Assert.IsType<GatewayLeader>(sp.GetRequiredService<ILeadership>());
         Assert.False(sp.GetRequiredService<ILeadership>().On);   // FACTORY_LEADER_LEASE=0 in the fixture
         Assert.True(sp.GetRequiredService<ILeadership>().MayAct);
