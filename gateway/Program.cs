@@ -103,7 +103,7 @@ var copilotRuntime = runtimes.CopilotRuntime;
 var copilotManager = runtimes.Copilot;
 var octopusRuntime = runtimes.OctopusRuntime;
 var octopusManager = runtimes.Octopus;
-ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), created once the plant exists
+ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), resolved below; null where it is not enabled
 
 if (qcSettings.TrustProxy) app.UseForwardedHeaders();
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
@@ -1937,38 +1937,16 @@ if (cursorRuntime != null && cursorManager != null)
     cursorSettings.QuotaBlock = cursorRuntime.QuotaBlocked;
     StartOwnerWatch(cursorRuntime, cursorManager, cursorSettings.OwnerWatchSeconds, null);
 }
-// The plant manager on demand: one short Copilot task for the manager role when the digest holds something that needs a judgement and no supervisor
-// is present (api.copilot.manager, docs/design/agents-roles-launch.md). Enabled only where the configuration says so.
-if (copilotRuntime != null && ownerMode && messaging.ManagerEnabled && messaging.Enabled)
-{
-    var mgrCopSettings = ManagerCopilotSettings.Load(scriptsDir, Environment.GetEnvironmentVariable, copilotSettings.Environment);
-    managerCopilot = new ManagerCopilot(mgrCopSettings, copilotRuntime, copilotCodes, plant,
-        (name, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "manager", "api", "copilot-cloud-agent", Auth.Environment, expires, 0, "", "patrol"), revocations.Of(name)),
-        code =>
-        {
-            var bp = prompts.ByPath("bootstrap/copilot-manager.md");
-            var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
-            return text + $"\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
-        },
-        async name => { await revocationService.RevokeAsync(name, "runtime"); });
-    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-config", ["enabled"] = mgrCopSettings.Enabled, ["maxPerDay"] = mgrCopSettings.MaxPerDay, ["cooldownMinutes"] = mgrCopSettings.CooldownMinutes, ["maxMinutes"] = mgrCopSettings.MaxMinutes }.ToJsonString());
-    _ = Task.Run(async () =>
-    {
-        var ct = app.Lifetime.ApplicationStopping;
-        while (!ct.IsCancellationRequested)
-        {
-            try { await Task.Delay(TimeSpan.FromSeconds(copilotSettings.ListSeconds < 5 ? 5 : 30), ct); } catch (OperationCanceledException) { return; }
-            try { if (leader.MayAct) await managerCopilot.Tick(ct); }
-            catch (OperationCanceledException) { return; }
-            catch (Exception e) { Console.Error.WriteLine($"manager copilot: {e.GetType().Name}"); }
-        }
-    });
-}
+// The plant manager on demand (api.copilot.manager, docs/design/agents-roles-launch.md): registered where it is enabled and ticked by
+// ManagerCopilotService (AddGatewayBackground); resolved here, where it was made before C5d, so its start-up line keeps its place. Its bootstrap
+// text reads the prompt files from the container (registered by AddGatewayRuntimes since C5b).
+managerCopilot = app.Services.GetService<ManagerCopilot>();
 // the tools call the endpoints in process, found through the container's EndpointDataSource (gateway/Mcp/InProcess.cs)
 GatewayMcp.Tools = new McpTools(new InProcess(app.Services.GetRequiredService<EndpointDataSource>(), app.Services, Admit), mcpSessions, t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
 {
     if (messaging.Enabled && ownerMode) plant.Touch(name);
     if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }
 }) { Prompts = prompts, ManagerLive = n => managerCopilot?.Live(n) == true, ManagerEnd = (n, why) => managerCopilot?.End(n, why) ?? Task.CompletedTask };
-_ = Task.Run(async () => { while (true) { await Task.Delay(TimeSpan.FromSeconds(30)); try { mcpSessions.Sweep(); } catch (Exception e) { Console.Error.WriteLine($"mcp sessions: {e.Message}"); } } });
+// swept every 30 s by McpSessionSweeper (AddGatewayBackground), handed over until a later step registers the worker sessions
+composition.McpSessions = mcpSessions;
 app.Run();

@@ -40,4 +40,8 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
 
     // AddGatewayBackground
     public int SweepMinSeconds { get; set; }
+
+    // Made by Program.cs after Build() and handed over here before app.Run() (C5d), until a later step registers them in the container: the
+    // worker sessions at /mcp, swept by McpSessionSweeper at each pass. (The prompt files are a singleton since C5b: AddGatewayRuntimes.)
+    public WorkerSessions? McpSessions { get; set; }
 }

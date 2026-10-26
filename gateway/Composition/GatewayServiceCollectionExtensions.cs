@@ -8,8 +8,8 @@ using System.Text.Json.Nodes;
 //   AddGatewayIdentity       revocations, runtime nonces, RevocationService (C4a)
 //   AddGatewayRuntimes       the prompt files, the prompt builders, RuntimeRegistry (the runtime adapters and managers) and their settings (C5b)
 //   AddGatewayPlant          the plant's settings, IPlantHooks, Plant, Messenger, QcHub, BaseWatch, the operator's releases (C4b)
-//   AddGatewayBackground     every hosted service, in start order                   -> C5c: CopilotCiReleaseService, CloudOwnerWatch;
-//                                                                                       C5d: ManagerCopilotService, McpSessionSweeper
+//   AddGatewayBackground     every hosted service, in start order; last the on-demand manager (its settings, ManagerCopilot and
+//                            ManagerCopilotService, C5d) and McpSessionSweeper (C5d)  -> C5c: CopilotCiReleaseService, CloudOwnerWatch
 //   AddGatewayMcp            the MCP server at /mcp
 //
 // Rules that keep the start what it was before C5a, and that a later step keeps:
@@ -230,7 +230,47 @@ static class GatewayServiceCollectionExtensions
         });
         services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct });
         c.SweepMinSeconds = sweepMinSeconds;
+        // C5d: the two loops Program.cs started last, after Build(), in that order: the on-demand manager's tick, then the MCP session sweep
+        services.AddGatewayManagerCopilot(c);
+        services.AddHostedService(sp => new McpSessionSweeper(() => c.McpSessions, McpSessionSweeper.DefaultInterval));
         return services;
+    }
+
+    // The plant manager on demand (gateway/Runtimes/ManagerCopilot.cs, api.copilot.manager): its settings always, the manager and its tick
+    // (ManagerCopilotService) only where Program.cs made them before C5d: the Copilot runtime on, owner mode, manager.enabled and messaging.enabled.
+    // Elsewhere no ManagerCopilot is registered, so GetService<ManagerCopilot>() is null where Program.cs's local was null.
+    static void AddGatewayManagerCopilot(this IServiceCollection services, GatewayComposition c)
+    {
+        var gw = c.Gateway; var messaging = c.Messaging;
+        var copilotRuntime = c.Runtimes.CopilotRuntime; var copilotCodes = c.Runtimes.CopilotCodes; var revocations = c.Revocations;
+        services.AddSingleton(sp =>
+        {
+            var copilotSettings = sp.GetRequiredService<CopilotCloudSettings>();
+            return ManagerCopilotSettings.Load(gw.ScriptsDir, Environment.GetEnvironmentVariable, copilotSettings.Environment);
+        });
+        if (copilotRuntime == null || !gw.OwnerMode || !messaging.ManagerEnabled || !messaging.Enabled) return;
+        // made when first resolved: Program.cs resolves it where it constructed it, so its start-up line (copilot-config) keeps its place
+        services.AddSingleton(sp =>
+        {
+            var copilotSettings = sp.GetRequiredService<CopilotCloudSettings>();
+            var mgrCopSettings = sp.GetRequiredService<ManagerCopilotSettings>();
+            var revocationService = sp.GetRequiredService<RevocationService>();
+            var prompts = sp.GetRequiredService<PromptStore>();   // the prompt files AddGatewayRuntimes registered
+            var manager = new ManagerCopilot(mgrCopSettings, copilotRuntime, copilotCodes, sp.GetRequiredService<Plant>(),
+                (name, expires) => Auth.RoleToken(gw.TokenSecret, new RoleClaims(name, "manager", "api", "copilot-cloud-agent", Auth.Environment, expires, 0, "", "patrol"), revocations.Of(name)),
+                code =>
+                {
+                    var bp = prompts.ByPath("bootstrap/copilot-manager.md");
+                    var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
+                    return text + $"\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
+                },
+                async name => { await revocationService.RevokeAsync(name, "runtime"); });
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-config", ["enabled"] = mgrCopSettings.Enabled, ["maxPerDay"] = mgrCopSettings.MaxPerDay, ["cooldownMinutes"] = mgrCopSettings.CooldownMinutes, ["maxMinutes"] = mgrCopSettings.MaxMinutes }.ToJsonString());
+            return manager;
+        });
+        services.AddSingleton(sp => new ManagerCopilotService(sp.GetRequiredService<ManagerCopilot>(), sp.GetRequiredService<ILeadership>(),
+            sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, ManagerCopilotService.IntervalFor(sp.GetRequiredService<CopilotCloudSettings>().ListSeconds)));
+        services.AddHostedService(sp => sp.GetRequiredService<ManagerCopilotService>());
     }
 
     // The MCP server at /mcp (gateway/Mcp/, docs/design/agents-roles-launch.md 6): stateless Streamable HTTP; the middleware authenticates it like /api.
