@@ -696,6 +696,11 @@
       "checks": 13,
       "seconds": 39.1
     },
+    "runner gate: a rule script shares no .NET startup profile; a corrupt one in HOME stops no sweep (issue 375)": {
+      "tier": "full",
+      "checks": 9,
+      "seconds": 55.0
+    },
     "leader: the lease is a compare-and-swap with a growing epoch; a superseded holder can neither renew nor release; a final snapshot never overwrites a later epoch": {
       "tier": "fast",
       "checks": 11,
