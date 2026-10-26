@@ -27,6 +27,7 @@ static class EndpointModuleExtensions
         services.AddSingleton<PluginArchive>();
         services.AddSingleton(sp => new StatusQuery(sp, c.SweepMinSeconds));
         services.AddSingleton<MetricsCache>();
+        services.AddSingleton<WebhookDeduplicator>();
         // mapped in this order, the order Program.cs mapped these routes in
         services.AddSingleton<IEndpointModule, HealthEndpoints>();
         services.AddSingleton<IEndpointModule, StatusEndpoints>();
@@ -34,6 +35,17 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule, DashboardEndpoints>();
         services.AddSingleton<IEndpointModule, PluginEndpoints>();
         services.AddSingleton<IEndpointModule, OperatorReleaseEndpoints>();
+        // C7b: what is not a service of its own comes from the composition (the runtime nonces; the worker sessions at /mcp, made after the mapping)
+        services.AddSingleton<IEndpointModule>(sp => new WorkerAdminEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(),
+            sp.GetRequiredService<KeeperSettings>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<Revocations>(),
+            sp.GetRequiredService<RevocationService>(), sp.GetRequiredService<RuntimeRegistry>(), () => c.McpSessions));
+        services.AddSingleton<IEndpointModule>(sp => new RuntimeHostEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<Plant>(),
+            sp.GetRequiredService<Revocations>(), sp.GetRequiredService<RevocationService>(), sp.GetRequiredService<RuntimeRegistry>(), c.RuntimeNonces));
+        services.AddSingleton<IEndpointModule, WebhookEndpoints>();
+        services.AddSingleton<IEndpointModule, CopilotEndpoints>();
+        services.AddSingleton<IEndpointModule, TranscriptEndpoints>();
+        services.AddSingleton<IEndpointModule, ItemAdminEndpoints>();
+        services.AddSingleton<IEndpointModule, DemoEndpoints>();
         return services;
     }
 
