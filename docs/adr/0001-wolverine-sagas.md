@@ -73,6 +73,15 @@ taken is decision 1 of the plan's section 7.
 5. **The tdd gateway does all v2 work.** It is the only acting gateway and delivers the app to tdd, uat and prod. The uat and prod
    gateways must start and stay ready with every capability on v1 and no database.
 
+6. **Forward compatible with a system-level gateway** (`docs/design/system-gateway.md`, the owner's decisions of 2026-10-25): one
+   acting gateway per system working items in any of the system's repositories; one repository per item, its issue living there;
+   policy per repository and per deployable; toolchains matched by capability; `Depends on` across repositories gating delivery per
+   environment; one queue with per-repository WIP limits. v1 stays home-repository-only; v2 is repository-aware from its first line.
+   The refactoring builds the hooks now: qualified ids in v2, a system catalog behind an interface, coordinators keyed by repository
+   and deployable, budgets per credential, the repository in the token, and isolation tests with a second repository. Adding a
+   repository later is a gateway release plus webhooks, the factory Apps, Octopus grants with `pipelineSignOff`, and worker images,
+   not a redesign.
+
 ## Consequences
 
 - **Gains when done:**
@@ -90,6 +99,8 @@ taken is decision 1 of the plan's section 7.
   - more CI time (SQL Server in the Tier 1 jobs).
 - **Open decisions and approvals,** each asked before its phase (plan section 7):
   - the base: fworker (this plan) or the AI Software Factory;
+  - the system catalog's source (`instance.json` or cmdemo1-system's `system.json`) and the split of `Depends on` between
+    repositories (`system-gateway.md` 5);
   - cmdemo1-aisf off board 679;
   - `FACTORY_V2_OFF` kept in cmdemo1-system's infrastructure code;
   - at least one replica for the acting gateway;

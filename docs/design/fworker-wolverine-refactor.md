@@ -296,8 +296,27 @@ as in `wolverine-factory.md` 2, so the saga rows follow the board.
 6. **The delivery-speed decisions R7 needs:** the merge queue ruleset, the workorders pipeline changes, the kit's `release.yml`, the uat
    settle, and overflow for docs-only items.
 7. **The incident rollback policy** in prod (R8).
+8. **For the system-level gateway** (`system-gateway.md` 5): the system catalog's source (`instance.json` or cmdemo1-system's
+   `system.json`), and the split of `Depends on` between repositories (same repository: start gate; across repositories: delivery per
+   environment).
 
-## 8. Risks
+## 8. Forward compatibility with a system-level gateway
+
+The owner wants the gateway to work items in any of the system's repositories later (`system-gateway.md`). v1 stays
+home-repository-only until R9 and v2 is repository-aware from its first line; the hooks H1 to H12 are built inside these phases:
+- R0: the `Depends on` parser and the board reading ignore other repositories;
+- R1: the system catalog, the `ItemId` contract, the token's repository claim, and the isolation scenarios with a second repository;
+- R2: qualified ids in the schema and partition keys;
+- R3 and R4: integrations per repository, budgets per credential, a secret per hook source, business-key deduplication;
+- R5: delivery trains per deployable with the delivered-to table and the `dependencies-delivered` slot, and policy per deployable;
+- R6: merge policy, the WIP intake rule and the views per repository;
+- R7: toolchain admission and runtime capabilities;
+- R8: the IncidentSaga keyed by (deployable, environment);
+- R9: QC keyed by (repository, pull request), and the transcript table with the qualified item.
+With one repository configured, each hook behaves exactly like today. Two decisions join section 7: the catalog's source, and the
+split of `Depends on` between repositories.
+
+## 9. Risks
 
 - **A subtle difference in a ported rule:** parity tests per rule function, the golden-write harness, shadow runs for the first saga, and
   Tier 1 as the black-box check.
