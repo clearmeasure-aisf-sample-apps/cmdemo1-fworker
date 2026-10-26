@@ -535,16 +535,16 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'copilot-task' @{ id = $s2.id; state = 'completed' })
         Check 'the gateway merges the pull request' (Wait-Until -Seconds 120 { (Cop-FakePr $d.number).merged })
         Check 'master goes green for the merge' (Wait-Until -Seconds 120 { (Cop-Comments $n '*master is GREEN*').Count -ge 1 }) (Cop-Brief $n)
-        # the Release Queue sees the production deployment of the release that carries the merge (the fake's Octopus may already have; else it
-        # is written as the settle leaves it)
-        if (-not (Wait-Until -Seconds 15 { (Cop-Comments $n '*Owner done:*').Count -gt 0 })) {
-            Set-ItemState $n { param($st) $st.merge.release = '2.4.999'; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = $null }
-        }
-        Check 'delivered to production: the owner is done, with the task''s link' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
+        # the Release Queue sees the production deployment of the release that carries the merge: the fake's merge makes that release and its prod
+        # deployment succeeds at once (releaseMode auto), so the settle's own path always delivers: a sweep for the candidate, one for the delivery.
+        # (No harness write stands in for it: one that raced the gateway's own delivery made the scenario's writes depend on the timing, issue #386.)
+        Check 'the Release Queue sees the production delivery of the merge''s release' (Wait-Until -Seconds 90 { (Cop-Comments $n '*Delivered to `*`*Prod`*`**').Count -ge 1 }) (Cop-Brief $n)
+        # the owner watch reads the item at most every max(30 s, 3 x ciReleaseSeconds) and closes the owner once the settle recorded done_at
+        Check 'delivered to production: the owner is done, with the task''s link' (Wait-Until -Seconds 90 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)
         $cs = @((Get-FakeIssue $n).comments | ForEach-Object { "$($_.body)" })
         $gi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'master is GREEN' }); $oi = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -like '*Owner done:*' })
         $di = [array]::FindIndex([string[]]$cs, [Predicate[string]]{ param($x) $x -match 'Delivered to \*\*Prod\*\*' })
-        Check 'the owner is done only after master is green and the production delivery' ($gi -ge 0 -and $oi -gt $gi -and ($di -lt 0 -or $oi -gt $di) -and "$($cs[$oi])" -match 'delivered to production' -and "$($cs[$oi])" -match 'ca-cmdemo1-prod-ui') "green $gi delivered $di done $oi $($cs[$oi])"
+        Check 'the owner is done only after master is green and the production delivery' ($gi -ge 0 -and $oi -gt $gi -and $di -ge 0 -and $oi -gt $di -and "$($cs[$oi])" -match 'delivered to production' -and "$($cs[$oi])" -match 'ca-cmdemo1-prod-ui') "green $gi delivered $di done $oi $($cs[$oi])"
         Check 'the done comment carries the session link' ("$($cs[$oi])" -match "https://github\.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks/$([regex]::Escape($t.id))")
         Check 'one task, three sessions, never a second task' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1 -and (Cop-Tasks $n).Count -eq 3) ((Cop-Tasks $n) | ForEach-Object { "$($_.id) $($_.via)" }) -join '; '
         Check 'no worker but the task''s sessions was offered the item' (Cop-NotOffered $n) (Cop-Brief $n)

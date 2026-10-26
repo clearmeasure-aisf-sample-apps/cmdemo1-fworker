@@ -330,7 +330,7 @@ function Get-CredentialName([string]$Cred) {
 # One request to the gateway. Returns @{ transport; status; body (hashtable or $null); raw; error }. A transport failure is not an exception here.
 function Invoke-GatewayJson($Cfg, [string]$Method, [string]$Path, $Body, [string]$Cred, [int]$TimeoutSec = 30) {
     try {
-        $p = @{ Uri = "$($Cfg.url)$Path"; Method = $Method; Headers = @{ Authorization = "Bearer $Cred" }; SkipHttpErrorCheck = $true; TimeoutSec = $TimeoutSec }
+        $p = @{ Uri = "$($Cfg.url)$Path"; Method = $Method; Headers = (@{ Authorization = "Bearer $Cred" } + (Get-FwCauseHeaders)); SkipHttpErrorCheck = $true; TimeoutSec = $TimeoutSec }
         if ($null -ne $Body) { $p.Body = ($Body | ConvertTo-Json -Depth 6 -Compress); $p.ContentType = 'application/json' }
         $resp = Invoke-WebRequest @p
     } catch { return @{ transport = $false; status = 0; body = $null; raw = ''; error = "$($_.Exception.Message)" } }
@@ -1046,7 +1046,7 @@ function Invoke-WaitEvent($a, $cfg) {
     $cur = if ($withMsg -and $name) { Get-InboxCursor $name } else { $null }
     $qs = "item=$($a.item)&after=$(if ($a.ContainsKey('after')) { $a.after } else { 0 })&timeout=$(if ($a.ContainsKey('timeout')) { $a.timeout } else { 60 })"
     if ($withMsg) { $qs += '&messages=1'; if ($cur -and $cur.epoch) { $qs += "&epoch=$([uri]::EscapeDataString("$($cur.epoch)"))" } }
-    try { $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/wait?$qs" -Headers @{ Authorization = "Bearer $tok" } -SkipHttpErrorCheck -TimeoutSec 150 }
+    try { $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/wait?$qs" -Headers (@{ Authorization = "Bearer $tok" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec 150 }
     catch { Write-Out @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
     $j = try { $resp.Content | ConvertFrom-Json -AsHashtable } catch { $null }
     if (-not $j) { Write-Out @{ ok = $false; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)" } 20 }
@@ -1093,7 +1093,7 @@ function Invoke-EndSession($a, $cfg) {
     $cred = Get-WorkerCredential $cfg $name
     $drained = $false; $note = ''
     try {
-        $r = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/workers/$([uri]::EscapeDataString($name))/drain" -Method POST -Headers @{ Authorization = "Bearer $cred" } -SkipHttpErrorCheck -TimeoutSec 30
+        $r = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/workers/$([uri]::EscapeDataString($name))/drain" -Method POST -Headers (@{ Authorization = "Bearer $cred" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec 30
         $drained = [int]$r.StatusCode -eq 200
         if (-not $drained) { $note = "drain answered $([int]$r.StatusCode)" }
     } catch { $note = "drain not sent: $($_.Exception.Message)" }
@@ -1109,3 +1109,7 @@ function Invoke-EndSession($a, $cfg) {
     if ($note) { $o.note = $note }
     Write-Out $o 0
 }
+
+# Test-only (Tier 1 golden writes): factory.ps1 client mode defines Get-FwCauseHeaders (the X-Fake-Cause of a harness's call). This file is also
+# loaded on its own (tests, tools); then no call carries a cause id and no header is sent.
+if (-not (Get-Command -Name Get-FwCauseHeaders -CommandType Function -ErrorAction SilentlyContinue)) { function Get-FwCauseHeaders { return @{} } }

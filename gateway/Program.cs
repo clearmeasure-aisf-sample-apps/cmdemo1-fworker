@@ -575,6 +575,18 @@ JsonObject? SessionLinkOf(Principal p)
 }
 static async Task Refuse(HttpContext c, int status, string code, string reason, int exit = 30) { c.Response.StatusCode = status; await c.Response.WriteAsJsonAsync(new { ok = false, code, reason, exit }); }
 
+// Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless FACTORY_TEST_CAUSE_HEADER=1: a request's X-Fake-Cause is held
+// while the request is served, so every rule-script run started meanwhile carries it (TestCause.cs); cleared at the end of the request
+if (TestCause.On)
+    app.Use(async (ctx, next) =>
+    {
+        var cause = ctx.Request.Headers["X-Fake-Cause"].ToString();
+        if (cause.Length == 0) { await next(); return; }
+        var box = TestCause.Begin(cause);
+        try { await next(); }
+        finally { TestCause.End(box); }
+    });
+
 app.Use(async (ctx, next) =>
 {
     var port = ctx.Connection.LocalPort;
@@ -2522,6 +2534,8 @@ sealed class Runner(string entry)
 
     async Task<(int Code, string Output)> RunProcessAsync(string verb, string stdin, TimeSpan timeout)
     {
+        // test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless FACTORY_TEST_CAUSE_HEADER=1: the serving request's cause id as "_cause"
+        stdin = TestCause.Inject(stdin);
         var queuedAt = DateTime.UtcNow;
         using var slot = await limiter.EnterAsync(verb, RunnerGate.MaxWait(RunnerGate.ClassOf(verb), timeout));
         if (slot is null)

@@ -137,6 +137,9 @@ $PromoteScenarios = [ordered]@{
     Check 'once, and nothing was created' (@(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'DeploymentCreate' }).Count -eq 1 -and (Pm-Deps).creates -eq 0) (Pm-Brief $i.n)
     [void](Fake 'octo-forbid' @{})
     Check 'granted: it goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.6.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
+    # a later sweep answers the deployment's Sign-off (responsible, submit, then the journal line): waited for, so those writes land in this
+    # scenario's own record every time and not only when a sweep happens to come before the record closes (issue #386)
+    Check 'and its Sign-off is answered Proceed by the gateway, journaled once' (Wait-Until -Seconds 40 { @(Pm-Dep '3.6.1' 'uat')[0].result -eq 'Proceed' -and @(Pm-Events $i.n 'promotion-signoff').Count -eq 1 }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
 }
 
 'promote: a gate that fails while the Sign-off waits makes the gateway abort it; a 403 of the interruption names the permission' = {

@@ -53,6 +53,7 @@ $CursorScenarios = [ordered]@{
         Check 'no other credential in the launch body' (-not $b.PSObject.Properties['envVars'] -and -not (($b | ConvertTo-Json -Compress -Depth 8) -match 'fake-cursor|i1\.|w1\.|w2\.'))
         Check 'neither the key nor the r1 is in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-cursor').Count -eq 0 -and @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch (Cur-R1 $a)).Count -eq 0)
         $st = Cur-Status
+        $w0 = "$(@($st.executions | Where-Object { $_.execution -eq $a.id })[0].worker)"
         Check 'status: the agent runs under the cursor-cloud runtime' ($st.running -eq 1 -and @($st.executions | Where-Object { $_.item -eq $n -and $_.execution -eq $a.id }).Count -eq 1) ($st | ConvertTo-Json -Compress -Depth 5)
         $r1 = Cur-R1 $a
         Check 'the r1 is a worker of the api mode: the worker tools' ((Mcp-ToolNames $r1) -contains 'get_prompt')
@@ -76,7 +77,10 @@ $CursorScenarios = [ordered]@{
         Check 'the acceptance comment carries the Cursor session link' (Wait-Until -Seconds 30 { @((Cop-Comments $n '*accepted*') | Where-Object { "$($_.body)" -like "*Cursor session: $aurl*" }).Count -ge 1 }) (Cop-Brief $n)
         Check 'the owner comment links the agent' ((Cop-Comments $n ("*Owner:** Cursor agent " + [WildcardPattern]::Escape("[$($a.id)]($aurl)") + "*")).Count -eq 1) (Cop-Brief $n)
         Check 'session_end ends the run; the agent is kept (not deleted) and owns the item' (Wait-Until -Seconds 45 { $x = @((Cur-State).agents | Where-Object { $_.id -eq $a.id }); $x.Count -eq 1 -and -not $x[0].deleted -and @((Cur-Status).owned | Where-Object { $_.item -eq $n -and $_.agent -eq $a.id }).Count -eq 1 }) ((Cur-Status) | ConvertTo-Json -Compress -Depth 5)
-        Check 'status shows the model asked for and the model Cursor reports' (Wait-Until -Seconds 10 { $d = @((Cur-Status).last | Where-Object { $_.execution -eq $a.id }); $d.Count -eq 1 -and $d[0].detail.model.id -eq 'auto-smart' -and $d[0].detail.reportedModel.id -eq 'auto-smart' -and $d[0].detail.released }) ((Cur-Status).last | ConvertTo-Json -Compress -Depth 6)
+        # the runtime loop ends the execution (its last row) once it reads the cancelled run; then the End releases the claim, a full sweep re-plans
+        # the item and routes it to a new cursor-cloud worker, and that worker's provision makes the follow-up run: each link is waited for in turn
+        Check 'status shows the model asked for and the model Cursor reports' (Wait-Until -Seconds 60 { $d = @((Cur-Status).last | Where-Object { $_.execution -eq $a.id }); $d.Count -eq 1 -and $d[0].detail.model.id -eq 'auto-smart' -and $d[0].detail.reportedModel.id -eq 'auto-smart' -and $d[0].detail.released }) ((Cur-Status).last | ConvertTo-Json -Compress -Depth 6)
+        Check 'the item is offered again to a new cursor-cloud worker' (Wait-Until -Seconds 90 { $cs = Cur-Status; @(@($cs.executions) + @($cs.last) | Where-Object { $_ -and $_.item -eq $n -and $_.worker -ne $w0 }).Count -ge 1 }) ((Cur-Status) | ConvertTo-Json -Compress -Depth 5)
         Check 'the next run of the item is a follow-up run of the same agent, with a fresh r1, never a second agent' (Wait-Until -Seconds 45 { (Cur-FollowUps $a.id).Count -ge 1 }) ((Cur-State) | ConvertTo-Json -Compress -Depth 6)
         $fu = (Cur-FollowUps $a.id)[0]
         Check 'the follow-up names the item, the phase and the ownership' ("$($fu.body.prompt.text)" -match "Follow-up run: you still own #$n" -and "$($fu.body.prompt.text)" -match "#$n, phase technical-design") "$($fu.body.prompt.text)"
@@ -105,7 +109,7 @@ $CursorScenarios = [ordered]@{
         Check 'the Technical Design agent is launched' (Wait-Until -Seconds 30 { (Cur-Agents $n).Count -gt 0 })
         $a = (Cur-Agents $n)[0]; $r1 = Cur-R1 $a
         Cur-Accept $r1 $n
-        Check 'the owner is recorded' (Wait-Until -Seconds 30 { (Get-ItemState $n).copilot_task.id -eq $a.id }) (Cop-Brief $n)
+        Check 'the owner is recorded' (Wait-Until -Seconds 30 { $s = Get-ItemState $n; $s -and $s.ContainsKey('copilot_task') -and $s.copilot_task.id -eq $a.id }) (Cop-Brief $n)
         # the design is done (as item_complete would move it), then the run ends
         [void](Fake 'move' @{ number = $n; column = 'Development' })
         [void](Mcp-Call 'session_end' @{ reason = 'design done' } $r1)
@@ -132,10 +136,11 @@ $CursorScenarios = [ordered]@{
         Check 'the gateway merges the pull request' (Wait-Until -Seconds 120 { (Cop-FakePr $prn).merged })
         Check 'not done before master is green and the delivery' ((Cop-Comments $n '*Owner done:*').Count -eq 0)
         Check 'master goes green for the merge' (Wait-Until -Seconds 120 { (Cop-Comments $n '*master is GREEN*').Count -ge 1 }) (Cop-Brief $n)
-        if (-not (Wait-Until -Seconds 15 { (Cop-Comments $n '*Owner done:*').Count -gt 0 })) {
-            Set-ItemState $n { param($st) $st.merge.release = '2.4.999'; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = $null }
-        }
-        Check 'delivered to production: the owner is done, with the agent''s link' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Owner done:** Cursor agent*').Count -eq 1 }) (Cop-Brief $n)
+        # the fake's merge makes the release that carries it and its prod deployment succeeds at once, so the settle's own path always delivers
+        # (no harness write stands in for it: one that raced the gateway's own delivery made the writes depend on the timing, issue #386)
+        Check 'the Release Queue sees the production delivery of the merge''s release' (Wait-Until -Seconds 90 { (Cop-Comments $n '*Delivered to `*`*Prod`*`**').Count -ge 1 }) (Cop-Brief $n)
+        # the owner watch reads the item at most every 30 s and closes the owner once the settle recorded done_at
+        Check 'delivered to production: the owner is done, with the agent''s link' (Wait-Until -Seconds 90 { (Cop-Comments $n '*Owner done:** Cursor agent*').Count -eq 1 }) (Cop-Brief $n)
         Check 'the done comment carries the agent''s session link' ((Cop-Comments $n "*Owner done:** Cursor agent*https://cursor.com/agents/$($a.id)/fake*").Count -eq 1) (Cop-Brief $n)
         Check 'and the agent is never deleted: its transcript stays readable' (Wait-Until -Seconds 10 { @((Cur-State).agents | Where-Object { $_.id -eq $a.id -and -not $_.deleted }).Count -eq 1 })
         Check 'one agent for the item, never a second' ((Cur-Agents $n).Count -eq 1)
@@ -164,7 +169,8 @@ $CursorScenarios = [ordered]@{
         $a = (Cur-Agents $n)[0]
         [void](Fake 'cursor-agent' @{ id = $a.id; status = 'IDLE'; run = 'FINISHED' })
         Check 'its end is seen; the agent is kept as the owner' (Wait-Until -Seconds 20 { @((Cur-Status).last | Where-Object { $_.execution -eq $a.id }).Count -ge 1 -and @((Cur-State).agents | Where-Object { $_.id -eq $a.id -and -not $_.deleted }).Count -eq 1 }) ((Cur-Status) | ConvertTo-Json -Compress -Depth 5)
-        Check 'the owner record names it' (Wait-Until -Seconds 20 { (Get-ItemState $n).copilot_task.id -eq $a.id })
+        # (the owner is saved by an asynchronous rule script after the state comment exists: until then the state has no copilot_task)
+        Check 'the owner record names it' (Wait-Until -Seconds 20 { $s = Get-ItemState $n; $s -and $s.ContainsKey('copilot_task') -and $s.copilot_task.id -eq $a.id }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
         $o = (Fake 'cursor-add' @{ name = 'fworker-tdd-cur-999-abcdef'; ageMinutes = 30 }).id
         $young = (Fake 'cursor-add' @{ name = 'fworker-tdd-cur-997-abcdef' }).id
         $other = (Fake 'cursor-add' @{ name = 'fworker-prod-cur-998-abcdef'; ageMinutes = 30 }).id

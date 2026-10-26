@@ -627,6 +627,7 @@ function Verb_publish_demo($a) {
     }
     $up = ("$($rel.upload_url)" -replace '\{.*$', '') + "?name=$assetName"
     $h = @{ Authorization = "Bearer $(Get-GhToken)"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'factory-worker-gateway' }
+    $cause = Get-FactoryCause; if ($cause) { $h['X-Fake-Cause'] = $cause }   # (test-only: the golden writes' cause id, lib/Core.ps1 Get-FactoryCause)
     $sc = 0; $asset = $null
     for ($try = 1; $try -le 2; $try++) {
         try { $asset = Invoke-RestMethod -Uri $up -Method POST -Headers $h -ContentType 'video/mp4' -InFile $full -SkipHttpErrorCheck -StatusCodeVariable 'sc' -OperationTimeoutSeconds 480 -ConnectionTimeoutSeconds 30 }
