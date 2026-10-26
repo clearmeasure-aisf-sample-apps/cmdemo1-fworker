@@ -116,8 +116,13 @@ try {
     Check 'config: the CI release of the Copilot agent''s held workflow runs is on wherever the mode is, a pass every 120 s (owner 2026-10-20: no file guard)' ($copSrc.ciRelease -eq $true -and $copSrc.ciReleaseSeconds -eq 120 -and $copDep.ciRelease -eq $true -and $copDep.ciReleaseSeconds -eq 120)
     $ciText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'plugin' 'scripts' 'lib' 'Verbs.Pr.ps1')
     Check 'CI release: only copilot/ runs, only the item''s pull request head, re-run (never approve) with the gateway''s own identity' ($ciText -match "head_branch\)`" -like 'copilot/\*'" -and $ciText -match 'head-mismatch' -and $ciText -match '/actions/runs/\$\(\[long\]\$r\.id\)/rerun"' -and $ciText -notmatch 'runs/[^"]*/approve' -and $ciText -notmatch 'Use-GhAs')
-    $progText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'gateway' 'Program.cs')
-    Check 'gateway: every runtime adapter gets its own poll loop (AddSingleton<IHostedService>; AddHostedService would keep only the first RuntimeLoop, so Copilot never relisted)' ($progText -match 'OfType<RuntimeManager>\(\)\) builder\.Services\.AddSingleton<IHostedService>' -and $progText -notmatch 'AddHostedService\(sp =>\s*\{\s*var rp = ')
+    # every gateway source, one file at a time: the registration moved from Program.cs to gateway/Composition/ (C5a, #278) and may move again.
+    # Wanted: a loop that registers each RuntimeLoop with AddSingleton<IHostedService>; refused: any AddHostedService that makes a RuntimeLoop
+    # (the lambda up to `new RuntimeLoop(` with no other Add* call between, or AddHostedService<RuntimeLoop>), anywhere in gateway/
+    $gwSources = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..' 'gateway') -Recurse -Filter '*.cs' -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName })
+    $loopEach = 'foreach \([^\n]*?\) (?:builder\.)?services\.AddSingleton<IHostedService>\(sp =>\s*\{(?:(?!\bAdd(?:Singleton|HostedService|Transient|Scoped)\b)[\s\S])*?new RuntimeLoop\('
+    $loopHosted = 'AddHostedService(?:<RuntimeLoop>|\((?:(?!\bAdd(?:Singleton|HostedService|Transient|Scoped)\b)[\s\S])*?new RuntimeLoop\()'
+    Check 'gateway: every runtime adapter gets its own poll loop (AddSingleton<IHostedService>; AddHostedService would keep only the first RuntimeLoop, so Copilot never relisted)' ($gwSources.Count -gt 0 -and @($gwSources | Where-Object { $_ -match $loopEach }).Count -ge 1 -and @($gwSources | Where-Object { $_ -match $loopHosted }).Count -eq 0)
     $mergedAll = Get-Content -Raw $merged | ConvertFrom-Json -AsHashtable
     Check 'config: the env: label scopes no gateway in the source defaults and only tdd when deployed (uat and prod are switched on by the owner, environment-test-factories.md 3)' (@((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).envScope).Count -eq 0 -and (@($mergedAll.envScope) -join ',') -eq 'tdd')
     Check 'config: the legacy credential kinds stay accepted in the source defaults (auth.legacyKinds)' ((Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).auth.legacyKinds -eq $true)
