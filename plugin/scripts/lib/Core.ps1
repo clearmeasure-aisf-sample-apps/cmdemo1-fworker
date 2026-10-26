@@ -177,6 +177,21 @@ function Use-ItemLock([int]$Item, [scriptblock]$Body, [int]$WaitSeconds = 45) {
     try { & $Body } finally { $fs.Dispose() }
 }
 
+# Issue 411: the board intake. A verb that creates a work item (the keeper's New-KeeperItem) holds it from the new issue until its card is in its
+# column; the sweep's board guard places a card only under it. Without it a guard that listed the labelled issues in between found the card without
+# a column and placed it itself, so the verb's own move never happened. A lock of this machine, as the item lock (one gateway sweeps the board).
+# (The body's variables are the caller's: PowerShell scopes a script block dynamically, so this function's own names are unusual.)
+function Use-IntakeLock([scriptblock]$IntakeBody, [int]$IntakeWaitSeconds = 45) {
+    $intakeLockPath = Join-Path (Get-StateDir) 'board-intake.lock'
+    $intakeLockStream = $null
+    $intakeDeadline = (Get-Date).AddSeconds($IntakeWaitSeconds)
+    while ($true) {
+        try { $intakeLockStream = [IO.File]::Open($intakeLockPath, 'OpenOrCreate', 'ReadWrite', 'None'); break }
+        catch { if ((Get-Date) -gt $intakeDeadline) { Reject 20 'intake-busy' 'another work item is being put on the board' @{ retryAfterSeconds = 5 } }; Start-Sleep -Milliseconds 300 }
+    }
+    try { & $IntakeBody } finally { $intakeLockStream.Dispose() }
+}
+
 function Test-NameIn([string]$Name, $List) { foreach ($x in $List) { if ($x -ieq $Name) { return $true } }; return $false }
 function Get-ColumnIndex([string]$Name) {
     $ai = (Get-Cfg).columns.ai

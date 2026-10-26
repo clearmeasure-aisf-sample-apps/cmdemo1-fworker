@@ -59,15 +59,20 @@ function Set-IssueBody([int]$n, [string]$Body) {
     Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/$n" -Body @{ body = $Body } | Out-Null
 }
 # A new work item: the issue with the factory label and the given labels, its card on the board in the keeper's column, one journal line.
+# Issue 411: from the issue to its card's column under the board-intake lock (Use-IntakeLock, Core.ps1), so the sweep's board guard never finds the
+# labelled issue without a column and places the card itself.
 function New-KeeperItem([string]$Title, [string]$Body, [string[]]$Labels, $Call, [string]$Detail) {
     $c = Get-Cfg
     if ((Get-EnvLabel) -and @(@($Labels) | Where-Object { "$_" -ilike 'env:*' -and "$_" -ine (Get-EnvLabel) }).Count) { Reject 10 'env-mismatch' "an item created here carries '$(Get-EnvLabel)' only" }
     $all = @(@($c.label) + @(Get-EnvLabel) + @($Labels) | Where-Object { $_ } | Select-Object -Unique)
-    $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues" -Body @{ title = $Title; body = $Body; labels = $all }
-    $n = [int]$r.number
-    $info = Get-ItemInfo $n
-    if (-not $info.cardId) { [void](Add-ToBoard $info.nodeId); $info = Get-ItemInfo $n }
-    if ("$($info.column)" -ine $Call.cfg.column) { Move-Card $info $Call.cfg.column }
+    $n = Use-IntakeLock {
+        $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues" -Body @{ title = $Title; body = $Body; labels = $all }
+        $made = [int]$r.number
+        $info = Get-ItemInfo $made
+        if (-not $info.cardId) { [void](Add-ToBoard $info.nodeId); $info = Get-ItemInfo $made }
+        if ("$($info.column)" -ine $Call.cfg.column) { [void](Move-Card $info $Call.cfg.column) }
+        $made
+    }
     Add-KeeperJournal $n $null 'create-item' $Call $Detail
     return $n
 }

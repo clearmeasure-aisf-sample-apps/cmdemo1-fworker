@@ -409,15 +409,25 @@ function Invoke-BoardGuard($List, [int]$Max = 20) {
             if ($done -ge $Max -or $fails -ge 3) { return , $acts.ToArray() }   # attempts count, failed ones too; three failures in a row end the pass
             $done++
             try {
-                $info = Get-ItemInfo $n
-                if (-not $info.open -or "$($info.column)") { $placed[$n] = $true; $done--; continue }   # (a read that found it placed is no attempt)
-                $card = if ($info.cardId) { $info.cardId } else { Add-ToBoard "$($info.nodeId)" }
-                Move-Card @{ number = $n; cardId = $card } $intake
+                # issue 411: the re-read and the placement under the board-intake lock, taken without waiting. A verb that creates an item holds it
+                # from the new issue to its card's column: a busy lock leaves the issue to that verb (a skip; the next sweep reads it again), and a
+                # re-read under the lock finds the verb's card already in its column.
+                $how = Use-IntakeLock {
+                    $info = Get-ItemInfo $n
+                    if (-not $info.open -or "$($info.column)") { 'placed' }
+                    else {
+                        $card = if ($info.cardId) { $info.cardId } else { Add-ToBoard "$($info.nodeId)" }
+                        [void](Move-Card @{ number = $n; cardId = $card } $intake)
+                        if ($info.cardId) { 'repaired' } else { 'added' }
+                    }
+                } 0
+                if ($how -eq 'placed') { $placed[$n] = $true; $done--; continue }   # (a read that found it placed is no attempt)
                 $placed[$n] = $true; $fails = 0
-                $acts.Add(@{ item = $n; action = 'board-added'; column = $intake; repaired = [bool]$info.cardId })
+                $acts.Add(@{ item = $n; action = 'board-added'; column = $intake; repaired = ($how -eq 'repaired') })
                 try { Use-ItemLock $n { [void](Add-Journal $n $null 'board-added' @{ column = $intake } "$n") } 3 }
                 catch { $acts.Add(@{ item = $n; action = 'board-added-unjournalled'; reason = "$($_.Exception.Message)" }) }
             } catch [FactoryReject] {
+                if ($_.Exception.Code -eq 'intake-busy') { $acts.Add(@{ item = $n; action = 'skip'; reason = 'board-guard: intake-busy' }); $done--; continue }   # (no attempt, no failure)
                 if ($_.Exception.Code -eq 'github-rate-limited') { $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = 'rate limited: the pass ends' }); return , $acts.ToArray() }
                 $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = "$($_.Exception.Message)" }); $fails++
             } catch { $acts.Add(@{ item = $n; action = 'board-add-failed'; reason = "$($_.Exception.Message)" }); $fails++ }

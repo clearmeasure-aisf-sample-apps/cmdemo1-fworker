@@ -291,17 +291,24 @@ function Invoke-QcSync($List, [bool]$Dry) {
             if ($live.Count -gt 0 -and -not $Dry) {
                 # a head that moved marks the live record stale. The write runs under the item lock on a fresh read: a verb that finished meanwhile
                 # (qc-stopped, a reset) is not overwritten with what this sweep read earlier.
+                # Issue 407: without waiting for the lock. A busy one skips the item for this sweep (a qc-skip): the next sweep finds the same moved
+                # head and marks the record on a fresh read, and the grace of the head-changed teardown counts from that mark. The gateway acts only
+                # on the records a sweep reports (Qc.Reconcile), so one sweep without them changes nothing.
                 $toStale = @($live | Where-Object { "$($_.sha)" -ne $head -and "$($_.state)" -ne 'stale' -and (Test-QcMove "$($_.state)" 'stale') })
                 if ($toStale.Count -gt 0) {
-                    Use-ItemLock $n {
-                        $st2 = Get-State $n
-                        foreach ($r0 in $toStale) {
-                            $cur = Get-QcRec $st2.state ([int]$r0.pr)
-                            if ($null -ne $cur -and "$($cur.sha)" -ne $head -and "$($cur.state)" -ne 'stale' -and (Test-QcMove "$($cur.state)" 'stale')) {
-                                Set-QcState $cur 'stale'; Save-QcRecord $n $st2 $cur; $res.actions += @{ item = $n; action = 'qc-stale'; pr = [int]$r0.pr }
+                    $busy = $false
+                    try {
+                        Use-ItemLock $n {
+                            $st2 = Get-State $n
+                            foreach ($r0 in $toStale) {
+                                $cur = Get-QcRec $st2.state ([int]$r0.pr)
+                                if ($null -ne $cur -and "$($cur.sha)" -ne $head -and "$($cur.state)" -ne 'stale' -and (Test-QcMove "$($cur.state)" 'stale')) {
+                                    Set-QcState $cur 'stale'; Save-QcRecord $n $st2 $cur; $res.actions += @{ item = $n; action = 'qc-stale'; pr = [int]$r0.pr }
+                                }
                             }
-                        }
-                    }
+                        } 0
+                    } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; $busy = $true }
+                    if ($busy) { $res.actions += @{ item = $n; action = 'qc-skip'; reason = 'qc-stale: item-busy' }; continue }
                     $st = Get-State $n; $s = $st.state
                     $live = @(); if (Test-Has $s 'qc') { foreach ($k in $s.qc.Keys) { if (Test-QcLive $s.qc[$k]) { $live += $s.qc[$k] } } }
                 }
@@ -325,7 +332,15 @@ function Invoke-QcSync($List, [bool]$Dry) {
                     $by = Find-HumanApproval $pr
                     if ($null -ne $rec0 -and ((Test-QcLive $rec0) -or (Test-Has $rec0 'approved'))) {
                         $differs = if ($by) { -not (Test-Has $rec0 'approved') -or "$($rec0.approved.sha)" -ne $head -or "$($rec0.approved.by)" -ne "$by" } else { Test-Has $rec0 'approved' }
-                        if ($differs) { Use-ItemLock $n { $st3 = Get-State $n; [void](Update-QcApproved $n $st3 (Get-QcRec $st3.state ([int]$pr.number)) $head $by) } }
+                        # Issue 407: without waiting for the lock. A busy one skips the item for this sweep (a qc-skip), the owner's wake-up included:
+                        # the merge gate reads the approval from GitHub, not this copy, and the next sweep compares again on a fresh read, saves the
+                        # copy and reports the approval (the gateway wakes the owner once per approval).
+                        if ($differs) {
+                            $busy = $false
+                            try { Use-ItemLock $n { $st3 = Get-State $n; [void](Update-QcApproved $n $st3 (Get-QcRec $st3.state ([int]$pr.number)) $head $by) } 0 }
+                            catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; $busy = $true }
+                            if ($busy) { $res.actions += @{ item = $n; action = 'qc-skip'; reason = 'qc-approved: item-busy' }; continue }
+                        }
                     }
                     $ran = ($null -ne $rec0) -and (Test-Has $rec0 'ran_sha') -and "$($rec0.ran_sha)" -eq $head
                     if ($by) { $res.approvals += @{ item = $n; pr = [int]$pr.number; sha = $head; by = "$by"; ran = [bool]$ran } }
@@ -337,7 +352,8 @@ function Invoke-QcSync($List, [bool]$Dry) {
             if ($el.ok) {
                 if (-not $Dry) {
                     # this sweep holds no item lock and read the state a while ago: only the journal line of the offer is written, under the lock
-                    # on a fresh read (Save-JournalKeys), never the state as it was read here
+                    # on a fresh read (Save-JournalKeys), never the state as it was read here. Save-JournalKeys keeps Use-ItemLock's wait (issue 407):
+                    # the line is posted already, and a key left unsaved would post it again at the next sweep
                     $jk0 = Get-JournalKeys $s
                     $o = Update-QcOffer $n $st $pr
                     if ($o -ne 'unchanged') { $jk1 = @(Get-JournalKeys $s | Where-Object { $jk0 -notcontains $_ }); if ($jk1.Count -gt 0) { Save-JournalKeys $n $jk1 }; $res.actions += @{ item = $n; action = 'qc-offer'; pr = [int]$pr.number; outcome = $o } }
