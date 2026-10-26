@@ -32,3 +32,5 @@ Fix it on factory-worker/{item}-development (fetch it first: git fetch origin; g
 @@ cursor-work-item
 
 This session's work item: #{item}, phase {slug} (column {phase}).
+@@ master-fix
+Follow-up session of the task that owns #{item}: master is red after PR #{pr} was merged as {sha}{failed}. Fix forward: make a new branch from master, fix the failing checks, run the tests, push and open ONE pull request against master titled "Fix master after #{pr} (#{item})". Never wait for CI; end the session after opening it.

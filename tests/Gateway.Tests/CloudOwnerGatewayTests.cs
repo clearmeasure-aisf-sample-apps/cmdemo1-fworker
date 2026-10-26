@@ -86,7 +86,7 @@ public sealed class CloudOwnerGatewayTests(CloudOwnersGateway gw) : IClassFixtur
     RuntimeRegistry Runtimes => gw.Host.Services.GetRequiredService<RuntimeRegistry>();
 
     IReadOnlyList<JsonObject> InputsOf(string verb, int item) =>
-        StubPwsh.Inputs(gw.Env.StubLog, verb).Select(i => (JsonObject)JsonNode.Parse(i.Text)!).Where(j => (int?)j["item"] == item).ToList();
+        StubPwsh.Inputs(gw.Env.StubLog, verb).Select(i => { try { return JsonNode.Parse(i.Text) as JsonObject; } catch { return null; } }).OfType<JsonObject>().Where(j => (int?)j["item"] == item).ToList();   // a line still being written is skipped
 
     static async Task<bool> Until(Func<bool> done, double seconds = 20)
     {
