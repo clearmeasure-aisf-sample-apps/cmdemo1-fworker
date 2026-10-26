@@ -1,0 +1,3 @@
+# suite: qc
+# scenario: qc: runner pool no state of a call reaches the next call
+# runs: 2

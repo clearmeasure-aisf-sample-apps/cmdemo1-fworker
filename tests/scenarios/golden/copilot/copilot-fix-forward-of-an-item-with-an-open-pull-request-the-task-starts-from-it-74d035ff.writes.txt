@@ -1,0 +1,30 @@
+# suite: copilot
+# scenario: copilot: fix-forward of an item with an open pull request: the task starts from its branch, pr_open makes the task's draft the item's pull request, closes the superseded one and its branch, and closes extra drafts; no duplicates (Functional Testing from that branch: the scenario above)
+# runs: 3
+gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
+gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8219 sha256:c4776b5c \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
+harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
+harness POST /repos/{repo}/pulls 201 {"base":"copilot/thing-fix-8","body":"x","draft":true,"head":"copilot/thing-extra-8","title":"[WIP] Thing"}
+harness POST /repos/{repo}/pulls 201 {"base":"copilot/thing-{#1}","body":"Fixes the failing check of #{#2}.","draft":true,"head":"copilot/thing-fix-8","title":"[WIP] Thing"}
+harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/thing-{#1}","title":"[WIP] Thing"}
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
+rule DELETE /repos/{repo}/git/refs/heads/copilot/thing-extra-8 204 -
+rule DELETE /repos/{repo}/git/refs/heads/copilot/thing-{#1} 204 -
+rule PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
+rule PATCH /repos/{repo}/pulls/{#2} 200 {"title":"Thing (#{#1})"}
+rule PATCH /repos/{repo}/pulls/{#3} 200 {"base":"master"}
+rule PATCH /repos/{repo}/pulls/{#3} 200 {"title":"Thing (#{#1})"}
+rule PATCH /repos/{repo}/pulls/{#4} 200 {"state":"closed"}
+rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#2}"}}
+rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#3}"}}
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Development** (task `{task}#1`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task}#1 -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Development** (task `{task}`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cop-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cop-{session} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (succeeded); offering to the next worker. Copilot session: {agent-url}\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **Owner:** Copilot task [{task}]({agent-url}) owns #{#1} from Development until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item.\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: Development is done pending checks: the Copilot task ended, and PR #{#2} carries the change (head `{sha}`). The gateway waits for its checks and moves the item on when they are green; red checks go back to Development to fix forward.\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REJECTED a Development completion - PR #{#2} checks are 'failure' (Build result). Re-dispatching Development to fix forward (round 1).\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"Superseded by #{#3}, the pull request of #{#1} now: it holds this branch's commits and the fix. Closed by the factory worker gateway."}
+rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"Closed by the factory worker gateway: an extra draft of a task of #{#1}; the item's pull request is #{#3}."}
+rule STATE factory-worker v1 #{#1}

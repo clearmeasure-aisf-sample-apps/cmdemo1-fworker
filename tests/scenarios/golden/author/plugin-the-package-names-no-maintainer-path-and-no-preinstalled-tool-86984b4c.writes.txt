@@ -1,0 +1,3 @@
+# suite: author
+# scenario: plugin: the package names no maintainer path and no preinstalled tool
+# runs: 2

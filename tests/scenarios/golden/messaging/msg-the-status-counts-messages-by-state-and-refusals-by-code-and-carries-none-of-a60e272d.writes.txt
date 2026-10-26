@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: the status counts messages by state and refusals by code, and carries none of their text
+# runs: 2

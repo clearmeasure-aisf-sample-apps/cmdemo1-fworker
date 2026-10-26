@@ -1,0 +1,10 @@
+# suite: owner
+# scenario: owner: a build slot is freed when its work ends: the item released, the session disconnected for good, the name revoked
+# runs: 2
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/slot-a/1","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **slot-a** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **slot-a** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|slot-a -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: ownership released by **slot-a** (scenario: the item is given up); the next trigger assigns it again.\n\n<!-- plant event=released key=rel|{n} -->"}
+rule STATE factory-worker v1 #{#1}

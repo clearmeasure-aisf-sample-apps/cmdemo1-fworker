@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: the supervisor token opens no worker stream and no trigger wait, and downloads the plugin
+# runs: 2

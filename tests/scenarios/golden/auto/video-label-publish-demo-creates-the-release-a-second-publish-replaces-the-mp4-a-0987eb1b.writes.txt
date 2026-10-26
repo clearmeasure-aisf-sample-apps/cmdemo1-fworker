@@ -1,0 +1,21 @@
+# suite: auto
+# scenario: video label: publish-demo creates the release, a second publish replaces the MP4, and the PASS stands
+# runs: 2
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+rule DELETE /repos/{repo}/releases/assets/{id} 204 -
+rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+rule POST /_uploads/repos/{repo}/releases/{id}/assets?name=demo-{#1}.mp4 201 {"len":"{n}"}
+rule POST /_uploads/repos/{repo}/releases/{id}/assets?name=demo-{#3}.mp4 201 {"len":"{n}"}
+rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
+rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: demo video published: [demo-{#1}.mp4](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/download/demo-{#1}/demo-{#1}.mp4) on release [demo-{#1}](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/tag/demo-{#1}) (0 MB).\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: demo video replaced: [demo-{#1}.mp4](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/download/demo-{#1}/demo-{#1}.mp4) on release [demo-{#1}](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/tag/demo-{#1}) (0 MB).\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation verdict for **Functional Testing**: PASS - criterion 1 at 00:12\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: demo video published: [demo-{#3}.mp4](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/download/demo-{#3}/demo-{#3}.mp4) on release [demo-{#3}](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/tag/demo-{#3}) (0 MB).\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
+rule POST /repos/{repo}/releases 201 {"body":"Functional Validation demo media for #{#1} (published by the factory worker gateway).","draft":false,"name":"Demo video for #{#1}","prerelease":true,"tag_name":"demo-{#1}","target_commitish":"master"}
+rule POST /repos/{repo}/releases 201 {"body":"Functional Validation demo media for #{#3} (published by the factory worker gateway).","draft":false,"name":"Demo video for #{#3}","prerelease":true,"tag_name":"demo-{#3}","target_commitish":"master"}
+rule STATE factory-worker v1 #{#1}

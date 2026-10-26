@@ -1,0 +1,9 @@
+# suite: manager
+# scenario: lease: progress counts only within progressMaxMinutes of the session's own last verb; after it the check stands and the item is taken back [full]
+# runs: 2
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **carol** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: carol did not answer the check after {dur} without a verb; offered again; offering to the next worker.\n\n<!-- plant event=reassigned key=back|8|{n} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **carol** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|carol -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the gateway ended the lease of **carol** (no-answer-to-item-check); the item is offered again in resume mode.\n\n<!-- plant event=lease-expired key=exp|{n} -->"}
+rule STATE factory-worker v1 #{#1}

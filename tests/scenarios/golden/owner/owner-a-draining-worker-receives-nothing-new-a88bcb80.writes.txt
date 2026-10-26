@@ -1,0 +1,3 @@
+# suite: owner
+# scenario: owner: a draining worker receives nothing new [full]
+# runs: 2

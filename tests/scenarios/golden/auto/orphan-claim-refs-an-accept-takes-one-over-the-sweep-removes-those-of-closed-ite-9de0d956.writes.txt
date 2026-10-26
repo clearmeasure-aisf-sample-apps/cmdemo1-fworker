@@ -1,0 +1,12 @@
+# suite: auto
+# scenario: orphan claim refs: an accept takes one over, the sweep removes those of closed items and keeps a young one (issue 47)
+# runs: 2
+harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}
+harness POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+harness POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
+harness POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#2} 204 -
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule POST /repos/{repo}/git/refs 422 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule STATE factory-worker v1 #{#1}

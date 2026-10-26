@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: the peer list shows the sessions a worker may see, with nothing of addresses, tokens or ids
+# runs: 2

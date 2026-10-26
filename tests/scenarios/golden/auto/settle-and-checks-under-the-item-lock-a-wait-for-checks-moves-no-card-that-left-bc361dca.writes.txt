@@ -1,0 +1,15 @@
+# suite: auto
+# scenario: settle and checks under the item lock: a wait for checks moves no card that left Development, and a Release Queue card without a merge record is flagged once
+# runs: 2
+harness POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"f","i":"card_{#1}","o":"opt_Functional_Testing","p":"p"}}
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#2} checks are still running; the gateway is watching them and will advance the item when green. The worker's job here is done.\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: the wait for the checks of PR #{#2} ended without moving the card: it is in **Functional Testing**, not in **Development** where the wait began.\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: flagged `release-queue-without-merge` in **Release Queue**: the card is in the Release Queue but the item has no merge record (its pull request is not merged by the factory); a person moves it back.\n\n<!-- plant event=flagged key=rq-no-merge -->"}
+rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
+rule STATE factory-worker v1 #{#1}
+rule STATE factory-worker v1 #{#3}

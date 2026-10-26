@@ -1,0 +1,18 @@
+# suite: auto
+# scenario: ci rule: a failure master has too costs no round; it is reported once, and when master passes again the gateway updates the branch and the new head completes the column
+# runs: 2
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
+rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
+rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+rule POST /repos/{repo}/actions/runs/{id}/rerun-failed-jobs 201 -
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **master** passes Acceptance Tests [shard 3/6] again: the gateway merged master into the branch of PR #{#2}; the checks of the new head decide.\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#2} checks are green; development complete. PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#2} is red only on checks that fail on **master** as well (Acceptance Tests [shard 3/6]): a defect of master, not of this change. It costs this item no fix-forward round and no demotion; the gateway waits, merges master into the branch once master passes those checks again, and judges the new head.\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:418 sha256:96d01015 \"\uD83E\uDD16 factory-worker: PR #{#2} checks failed and the gateway applies the CI rule (r…\"}"}
+rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
+rule PUT /repos/{repo}/pulls/{#2}/update-branch 202 {"expected_head_sha":"{sha}"}
+rule STATE factory-worker v1 #{#1}

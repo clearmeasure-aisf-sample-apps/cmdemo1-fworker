@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: sends racing reconnects lose nothing and repeat nothing
+# runs: 2

@@ -1,0 +1,17 @@
+# suite: owner
+# scenario: msg: messaging and the supervisor are off by default
+# runs: 2
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#2} 204 -
+rule PATCH /repos/{repo}/issues/{#2} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+rule PATCH /repos/{repo}/issues/{#2} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n\n<!-- aisf:assumption source=m-{n}-{n} from=alice -->\n> a closed block\n<!-- /aisf:assumption -->\n<!-- aisf:assumption source=m-{n}-{n} from=alice -->\nACCEPTANCE-AFTER-AN-OPEN-MARKER\n"}
+rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#2}","o":"opt_Development","p":"PVT_fake"}}
+rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#2}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: the words aisf:assumption are ordinary text here\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: PR #{#3} has a PASS verdict and is not merged yet: its required checks are still running (`checks-pending`). The gateway merges it by itself when that clears; no session has to call anything.\n\n<!-- plant event=merge-waiting key={time}|checks-pending -->"}
+rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **dave** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|dave -->"}
+rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation verdict for **Functional Testing**: PASS - Both criteria met.\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#2}","draft":false,"head":"factory-worker/{#2}-development","title":"Trial {#2} (#{#2})"}
+rule STATE factory-worker v1 #{#2}

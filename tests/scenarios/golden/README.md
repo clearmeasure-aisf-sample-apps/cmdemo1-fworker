@@ -10,7 +10,8 @@ writes as they are; a difference fails the scenario.
 `Get-ScenarioSlug` of `tests/scenarios/lib.ps1`: the scenario's name without its ` [full]` tag (so a change of tier keeps the file),
 lowercase, every run of other characters one `-`, at most 80 characters, then `-` and the first 8 hex digits of the SHA-256 of that name.
 
-No baseline is committed yet: until a scenario has a file here it is recorded only, never compared.
+A scenario without a file here is recorded only, never compared. The first baseline holds only the scenarios whose normalized writes
+were identical in two CI runs (no optional lines); the others are record-only until their writes are made stable.
 
 ## What is recorded
 
@@ -33,37 +34,70 @@ dropped (`/_fake/state` is unchanged by the recorder).
 
 ## Format and normalization
 
-Header lines start with `# ` (`suite`, `scenario`, `writes`, `leftover`, `runs`) and are never compared. Every other line is one write:
+Header lines start with `# ` and are never compared: `suite`, `scenario`, `runs` (golden files); `writes` (the writes compared),
+`leftover`, `timing` (the writes left out, below) and `bases` (the fake's counters at the scenario's start, `number=` being the first item
+number the scenario can create; for reading a record offline) in records. Every other line is one write:
 
 ```
 <source> <METHOD> <normalized path>[ <graphql mutation field>] <status> <normalized body as compact JSON, or ->
 ```
 
-The file holds the sorted, distinct lines: a set. The order of the writes and how often one repeats are not compared, because the sweep,
-the plant ticks, the base-update loop and the transcript loop make both depend on timing.
+or, for an item's factory-state comment, one line for all its accepted writes (below):
 
-Normalization (applied to the path and to every JSON string, recursively):
+```
+<source> STATE <kind> #{#k}
+```
 
-- Issue and pull request numbers are relative to the scenario's start: the first one the scenario creates is `{#1}`, one created before it
-  `{#old}` (in `/issues/n`, `/pulls/n`, `factory-worker/n-...`, `I_n`, `PR_n`, `card_n`, `#n`, and JSON numbers named `number`, `item`,
-  `issue`, `pr`, `pull_number`). Comment ids in `/issues/comments/n` become `{c}`; review, check, job, run, artifact, release and asset ids
-  in paths `{id}`.
-- `/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders` becomes `/repos/{repo}`; the query string is dropped (except `name=` of an upload).
-- A fenced `json` block inside a string (the factory-state comment) is parsed and normalized as JSON.
-- Tokens (`w1.`, `r1.`, `b1.`, `i1.`, `eyJ...`, `fake-app-...`, `oat-...`, `API-...`) become `{token}`; session links `{session-link}`;
-  Cursor and Copilot agent URLs `{agent-url}`; `caj-test-xxxxxx` `{exec}`; `task-`, `bc-`, `run-` ids `{task}`, `{agent}`, `{run}`;
-  `ServerTasks-n`, `RunbookRuns-n` `ServerTasks-{n}`, `RunbookRuns-{n}`.
-- ISO-8601 dates and times become `{time}`; GUIDs `{guid}`; 40-hex runs `{sha}`; 32-hex runs `{hex32}`; `127.0.0.1:port` and
-  `localhost:port` `...:{port}`; durations (`12 s`, `3.5min`, ...) `{dur}`; then every remaining run of 4 or more digits and every decimal
-  `{n}`. Integers of 1 to 3 digits stay (counts, exit codes, step numbers). Nothing inside a `{...}` placeholder is masked again.
-- JSON numbers whose key ends in `seconds`, `ms`, `minutes`, `at`, `time`, `epoch`, `since`, `until`, `expires`, `ttl`, `reads`,
-  `attempt(s)`, `size`, `len`, `length` or `bytes`, or whose key is `id`, become `{n}`; so does any other number of 4 or more digits or with
-  a fraction. Object keys are sorted.
-- A normalized string longer than 400 characters becomes `{len:L sha256:XXXXXXXX "first 80 characters…"}`.
-- A write whose path names an item or pull request from before the scenario (`{#old}`) is left out of `.writes.txt` (it is in the raw file
-  with `"leftover":true`): such writes come from earlier scenarios' background work and from group boundaries that move. Pull requests
-  the fake seeds through `/_fake` (numbered from its own counter, starting at 1) also count as `{#old}`, so writes to them are not
-  compared either.
+The file holds the sorted (ordinal), distinct lines: a set. The order of the writes and how often one repeats are not compared, because the
+sweep, the plant ticks, the base-update loop and the transcript loop make both depend on timing.
+
+A path first has `/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders` replaced by `/repos/{repo}` and review, check, job, run,
+artifact, release and asset ids replaced by `{id}`; its query string is dropped (except `name=` of an upload). Then the path and every JSON
+string value, recursively, are normalized in this order:
+
+1. A fenced `json` block inside a string (the factory-state comment) is parsed and normalized as JSON; its top-level `journal` (the state's
+   copy of the journal: counts, folds, keys, which follow the plant's timing) is removed.
+2. Tokens become `{token}`: `w1.`, `r1.`, `b1.`, `i1.`, `n1.` (nonces), `c1.` (connect codes), `eyJ...`, `fake-app-...`, `oat-...`,
+   `API-...`. Session links become `{session-link}`; Cursor and Copilot agent URLs `{agent-url}`; `caj-test-xxxxxx` `{exec}`; `task-`,
+   `bc-`, `run-` ids `{task}`, `{agent}`, `{run}`; `ServerTasks-n`, `RunbookRuns-n`, `Interruptions-n` `ServerTasks-{n}`,
+   `RunbookRuns-{n}`, `Interruptions-{n}`; session names `cae-`, `oct-`, `cur-`, `cop-` (with an optional `mgr-` and item number before
+   the 6 hex digits) `<prefix>-{session}`; `fwt1:<base64>` (sealed transcripts) `fwt1:{blob}`; assignment ids `a-xxxxx` `a-{id}`; review
+   refs `rv-xxxxxxxxxx` `rv-{sha}`; a hex run of 7 to 40 characters in backticks `` `{sha}` ``.
+3. Issue and pull request numbers are relative to the scenario's start: the first one the scenario creates is `{#1}`, one created before
+   it `{#old}`, one 1000 or more above the start `{#far}` (a fixed number of the harness). This applies in `/issues/n`, `/pulls/n`,
+   `/pull/n`, `/claims/n`, `/qc/n`, `factory-worker/n-...`, `I_n`, `PR_n`, `card_n`, `#n` (not `}#n`, a session's ordinal after
+   `{task}`), after `Trial `, `Back-merge `, `copilot/<word>-`, `demo-`, `--item `, `--pr `, `pr=`, the key of a `plant event=qc-...`,
+   `"item":`, `"issue":`, `"pr":`, `"number":`, `"pull_number":` (JSON inside a string), to JSON numbers named `number`, `item`, `issue`,
+   `pr`, `pull_number`, and to the string values of `Fworker.Item` and of the `FWORKER_ITEM` environment entry. Comment ids in
+   `/issues/comments/n` become `{c}`.
+4. ISO-8601 dates and times become `{time}`; GUIDs `{guid}`; 40-hex runs `{sha}`; 32-hex runs `{hex32}`; `127.0.0.1:port` and
+   `localhost:port` `...:{port}`.
+5. Outside `{...}` placeholders: durations (`12 s`, `3.5min`, ...) become `{dur}`; decimals `{n}`; a run of 7 or more lowercase hex characters with
+   a digit and a letter, or of exactly 7 digits, `{sha}` (short SHAs, before their digits could be masked); then every remaining run of 4
+   or more digits `{n}`. Integers of 1 to 3 digits stay (counts, exit codes, step numbers).
+6. Comma lists of check names, whose order varies, are sorted: the list that opens a parenthesis (`(B, A; ...)`, `(B, A)`; one nested
+   level of parentheses inside an item is allowed) and the list of `with B, A passing`. JSON arrays named `failed` and
+   `failed_checks` are sorted too.
+
+JSON numbers whose key ends in `seconds`, `ms`, `minutes`, `at`, `time`, `epoch`, `since`, `until`, `expires`, `ttl`, `reads`,
+`attempt(s)`, `size`, `len`, `length` or `bytes`, or whose key is `id`, become `{n}`; so does any other number of 4 or more digits or with
+a fraction. Object keys are sorted. A normalized string longer than 400 characters becomes `{len:L sha256:XXXXXXXX "first 80
+characters…"}` (the raw file has the whole text).
+
+Writes that are kept in the raw file but not compared:
+
+- Leftover (`"leftover":true`, header `leftover`): a write whose path, or whose factory-state comment, names an item or pull request from
+  before the scenario (`{#old}`). Such writes come from earlier scenarios' background work and from group boundaries that move. Pull
+  requests the fake seeds through `/_fake` (numbered from its own counter, starting at 1) also count as `{#old}`.
+- Timing (`"timing":true`, header `timing`): the plant's journal comments of its sweep observations (`<!-- plant event=matched` and
+  `<!-- plant event=waiting`), and every fold edit of a repeated journal line (its marker carries `fold=N`). Whether the sweep sees an
+  item in a column before the scenario ends, and how often a line repeats, depend on the sweep's and the plant's timing. Every other
+  plant journal line (offered, assigned, launched, reassigned, released, qc-..., promoted, ...) is compared.
+
+Factory-state comments: the gateway writes an item's state comment once and then rewrites it many times; how many snapshots there are,
+and so whether the last one is the comment's POST or a later PATCH, depends on timing. The accepted writes (status below 300) of one
+(source, item) state comment therefore give a single `STATE` line, without a body: the last snapshot is not compared either, because
+where the background loops have got to when the scenario ends is timing too (the raw file has every snapshot). A refused write (status 300 or more) keeps its own line, with the body `{"body":"{factory-state <kind> #{#k}}"}`.
 
 ## Comparison
 

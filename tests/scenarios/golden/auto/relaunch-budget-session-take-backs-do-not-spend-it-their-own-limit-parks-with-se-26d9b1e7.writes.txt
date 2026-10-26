@@ -1,0 +1,18 @@
+# suite: auto
+# scenario: relaunch budget: session take-backs do not spend it, their own limit parks with session-relaunch-budget, and the park codes say why
+# runs: 2
+harness STATE factory-worker v1 #{#1}
+harness STATE factory-worker v1 #{#2}
+harness STATE factory-worker v1 #{#3}
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#2} 204 -
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#3} 204 -
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: 11 sessions in a row lost **Technical Design** to session trouble (last: no-answer-to-item-check), over the limit of 10; parked until a worker is free (the sweep lifts it).\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83E\uDD16 factory-worker: relaunch budget (3) spent in **Technical Design**; parked for a human.\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: relaunch budget (3) spent in **Functional Testing** without a validation verdict; parked for a human.\n\n<!-- factory-journal:factory-worker -->"}
+rule STATE factory-worker v1 #{#1}
+rule STATE factory-worker v1 #{#2}
+rule STATE factory-worker v1 #{#3}

@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: another supervisor name is refused while the first is heard, and the same name replaces its stream
+# runs: 2

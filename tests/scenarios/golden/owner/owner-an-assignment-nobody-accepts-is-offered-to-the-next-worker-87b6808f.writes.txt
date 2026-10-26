@@ -1,0 +1,8 @@
+# suite: owner
+# scenario: owner: an assignment nobody accepts is offered to the next worker [full]
+# runs: 2
+rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: bob did not confirm within {dur}; offering to the next worker.\n\n<!-- plant event=reassigned key=ack|a-{id}|bob -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **bob** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|bob -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **carol** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|carol -->"}
+rule STATE factory-worker v1 #{#1}

@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: the first answer wins between the operator and the supervisor, and a wrong answer or caller is refused
+# runs: 2

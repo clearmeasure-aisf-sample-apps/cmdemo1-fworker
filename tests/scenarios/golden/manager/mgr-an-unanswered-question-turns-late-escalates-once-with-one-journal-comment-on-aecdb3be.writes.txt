@@ -1,0 +1,8 @@
+# suite: manager
+# scenario: mgr: an unanswered question turns late, escalates once with one journal comment on an item its asker owns, and is moot when the asker loses the item
+# runs: 2
+harness POST /repos/{repo}/issues/{#3}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#3}\",\"schema\":1}\n```\n"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: a question from **alice** has waited {dur} for the supervisor (supervisor: absent); a person is asked to look at the dashboard.\n\n<!-- plant event=question-escalated key=q|m-{sha}-{n} -->"}
+rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: a question from **bob** has waited {dur} for the supervisor (supervisor: absent); a person is asked to look at the dashboard.\n\n<!-- plant event=question-escalated key=q|m-{sha}-{n} -->"}
+rule STATE factory-worker v1 #{#1}
+rule STATE factory-worker v1 #{#3}

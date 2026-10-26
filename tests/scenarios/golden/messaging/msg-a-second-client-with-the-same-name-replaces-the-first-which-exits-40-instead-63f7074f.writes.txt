@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: a second client with the same name replaces the first, which exits 40 instead of reconnecting
+# runs: 2

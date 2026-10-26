@@ -1,0 +1,4 @@
+# suite: owner
+# scenario: sweep throttle: one full sweep per sweepMinSeconds; a trigger of an item between them gets an incremental pass of that item only [full]
+# runs: 2
+rule STATE factory-worker v1 #{#1}
