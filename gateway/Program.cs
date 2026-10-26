@@ -667,7 +667,11 @@ app.MapGet("/ready", () => leader.Replaced ? Results.Json(new { ready = false, w
 app.MapGet("/", () => Results.Redirect("/dashboard"));
 WorkerSessions? mcpSessionsRef = null;
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
-app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, pluginHash = PluginHash(), promptsHash = prompts.Hash, started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
+// commit: the source revision built into the informational version ("<version>+<sha>"), a full 40-hex commit or null; a hint for
+// tools that compare releases (the Octopus release stays the authority: a reused pull request image carries the commit its pull
+// request build was given, not master's)
+var buildCommit = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion is { } iv && iv.Split('+') is [_, var rev] && System.Text.RegularExpressions.Regex.IsMatch(rev, "^[0-9a-f]{40}$") ? rev : null;
+app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, commit = buildCommit, pluginHash = PluginHash(), promptsHash = prompts.Hash, started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
 app.MapGet("/api/v1/status", (HttpContext c) =>
 {
     if (Admitted(c).Kind != "admin") return Results.StatusCode(403);
