@@ -43,6 +43,9 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     foreach ($d in $fakeDll, $gwDll) { if (-not (Test-Path $d)) { throw "build first: $d is missing" } }
     $env:FAKE_PORT = "$($script:FakePort)"; $env:FACTORY_CONFIG = $cfgPath   # (the fake reads docsOnlyPaths from it)
     $env:FAKE_PROXY_PORT = "$($script:ProxyPort)"   # the fake's TCP forwarder in front of a gateway (leader.ps1): idle until a scenario names a backend
+    # the golden writes (tests/scenarios/golden/README.md): the fake records every scenario's writes into TEST_WRITES_DIR (CI), else the suite's work directory
+    if ((Get-GoldenMode) -eq 'off') { Remove-Item Env:FAKE_RECORD_DIR -ErrorAction SilentlyContinue }
+    else { $env:FAKE_RECORD_DIR = $(if ($env:TEST_WRITES_DIR) { $env:TEST_WRITES_DIR } else { Join-Path $work 'writes' }) }
     $script:Procs += Start-Process dotnet -ArgumentList $fakeDll -PassThru -RedirectStandardOutput (Join-Path $work 'fake.out') -RedirectStandardError (Join-Path $work 'fake.err')
     $env:GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; $env:GH_TOKEN = 'fake-operator'; $env:OCTOPUS_API_KEY = 'fake'
     $env:FACTORY_CONFIG = $cfgPath; $env:FACTORY_STATE_DIR = Join-Path $work 'state'; $(if ($env:TEST_REAL_APPS) { Remove-Item Env:FACTORY_FAKE_APPS -ErrorAction SilentlyContinue } else { $env:FACTORY_FAKE_APPS = '1' })
@@ -225,10 +228,119 @@ function Do-Verdict([int]$n, [int]$pr, [string]$Holder = 'w1', [bool]$Passed = $
 function Get-ScenarioTier([string]$Name) { if ($Name -match '\s\[full\]\s*$') { 'full' } else { 'fast' } }
 $script:ScenarioStats = New-Object System.Collections.ArrayList
 $script:SuiteName = ''
+
+# Golden writes (tests/scenarios/golden/README.md): the fake records every scenario's writes (FAKE_RECORD_DIR) and Run-Scenario compares them
+# with tests/scenarios/golden/<suite>/<slug>.writes.txt where that file exists. TEST_GOLDEN: compare (the default), record (never compare), off.
+function Get-GoldenMode {
+    $m = "$env:TEST_GOLDEN".Trim().ToLowerInvariant()
+    if ($m -eq '') { return 'compare' }
+    if ($m -in 'compare', 'record', 'off') { return $m }
+    Write-Host "    (TEST_GOLDEN='$env:TEST_GOLDEN' is not compare, record or off: compare)"
+    return 'compare'
+}
+# The file name of a scenario's record: the name without its " [full]" tag (a change of tier keeps the golden), lowercase, each run of other
+# characters one '-', at most 80 characters, then '-' and the first 8 hex digits of the SHA-256 of that name (two names never share a file).
+function Get-ScenarioSlug([string]$Name) {
+    $base = $Name -replace '\s\[full\]\s*$', ''
+    $s = ($base.ToLowerInvariant() -replace '[^a-z0-9]+', '-').Trim('-')
+    if ($s.Length -gt 80) { $s = $s.Substring(0, 80).TrimEnd('-') }
+    if ($s -eq '') { $s = 'scenario' }
+    $h = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($base))).Substring(0, 8).ToLowerInvariant()
+    return "$s-$h"
+}
+function Get-RecField($Object, [string]$Key) { if ($null -eq $Object) { return $null }; $p = $Object.PSObject.Properties[$Key]; if ($p) { return $p.Value }; return $null }
+# The write lines of a record or a golden file: every line but the empty ones and the '# ' header lines.
+function Read-WritesLines([string]$Path) { @([IO.File]::ReadAllLines($Path, [Text.UTF8Encoding]::new($false)) | Where-Object { $_ -ne '' -and -not $_.StartsWith('# ') }) }
+# Golden lines without a prefix are required, lines starting '? ' optional: the record matches when it holds every required line and nothing
+# that is neither required nor optional (a set: order and repeats do not count).
+function Compare-WritesFiles([string]$Golden, [string]$Record) {
+    $required = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $optional = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($l in Read-WritesLines $Golden) { if ($l.StartsWith('? ')) { [void]$optional.Add($l.Substring(2)) } else { [void]$required.Add($l) } }
+    $got = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($l in Read-WritesLines $Record) { [void]$got.Add($l) }
+    $missing = @($required | Where-Object { -not $got.Contains($_) } | Sort-Object -CaseSensitive)
+    $unexpected = @($got | Where-Object { -not $required.Contains($_) -and -not $optional.Contains($_) } | Sort-Object -CaseSensitive)
+    return @{ ok = ($missing.Count -eq 0 -and $unexpected.Count -eq 0); missing = $missing; unexpected = $unexpected }
+}
+# After a scenario: the fake's answer to scenario-end ($Rec: ok, file, raw, writes, leftover), checked against the golden file when one exists.
+function Compare-GoldenWrites($Rec, [string]$Name, [string]$Mode = (Get-GoldenMode)) {
+    if ((Get-RecField $Rec 'recording') -eq $false) { return }   # a fake started without FAKE_RECORD_DIR records nothing
+    $file = "$(Get-RecField $Rec 'file')"
+    if (-not (Get-RecField $Rec 'ok') -or $file -eq '') { Check 'golden writes recorded' $false "(the fake wrote no record: $(Get-RecField $Rec 'reason'))"; return }
+    if ($Mode -ne 'compare') { return }
+    # the golden file has the record's own suite directory and file name, so the fake's spelling of both is the only one
+    $golden = Join-Path $script:Root (Join-Path 'tests/scenarios/golden' (Join-Path (Split-Path -Leaf (Split-Path -Parent $file)) (Split-Path -Leaf $file)))
+    if (-not (Test-Path -LiteralPath $golden)) { return }   # no golden file: this scenario is recorded only
+    $r = Compare-WritesFiles $golden $file
+    $detail = ''
+    if (-not $r.ok) {
+        $lines = @($r.missing | ForEach-Object { "- missing     $_" }) + @($r.unexpected | ForEach-Object { "+ unexpected  $_" })
+        $shown = @($lines | Select-Object -First 10)
+        if ($lines.Count -gt $shown.Count) { $shown += "... and $($lines.Count - $shown.Count) more" }
+        $shown += "golden: $golden"; $shown += "record: $file"; $shown += "raw:    $(Get-RecField $Rec 'raw')"
+        $detail = "(the writes differ from the golden file: $($r.missing.Count) missing, $($r.unexpected.Count) unexpected)`n        " + ($shown -join "`n        ")
+    }
+    Check 'golden writes unchanged' $r.ok $detail
+}
+# Makes golden files from the records of several runs of the same code (each -From directory is one run: its *.writes.txt files, searched
+# recursively, are keyed by their directory, the suite, and their name): a line of every run is required, a line of only some runs optional
+# ('? '). A scenario missing from a run is reported and left out. Run it as
+#   pwsh -NoProfile -c ". tests/scenarios/lib.ps1; Merge-GoldenWrites -From a,b -Out tests/scenarios/golden"
+function Merge-GoldenWrites([string[]]$From, [string]$Out = (Join-Path $script:Root 'tests/scenarios/golden')) {
+    $dirs = @($From | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    if ($dirs.Count -eq 0) { throw 'Merge-GoldenWrites: name at least one -From directory' }
+    $runs = [System.Collections.Generic.List[hashtable]]::new(); $headers = @{}
+    foreach ($d in $dirs) {
+        if (-not (Test-Path -LiteralPath $d -PathType Container)) { throw "Merge-GoldenWrites: $d is not a directory" }
+        $map = @{}
+        foreach ($f in @(Get-ChildItem -LiteralPath $d -Recurse -File -Filter '*.writes.txt')) {
+            $key = "$($f.Directory.Name)/$($f.Name)"
+            if (-not $map.ContainsKey($key)) { $map[$key] = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
+            foreach ($l in Read-WritesLines $f.FullName) { [void]$map[$key].Add($l) }
+            if (-not $headers.ContainsKey($key)) { $headers[$key] = @([IO.File]::ReadAllLines($f.FullName, [Text.UTF8Encoding]::new($false)) | Where-Object { $_ -like '# suite: *' -or $_ -like '# scenario: *' }) }
+        }
+        $runs.Add($map)
+    }
+    $keys = @($runs | ForEach-Object { $_.Keys } | Sort-Object -Unique -CaseSensitive)
+    $merged = 0; $left = 0
+    foreach ($key in $keys) {
+        $absent = @(for ($i = 0; $i -lt $runs.Count; $i++) { if (-not $runs[$i].ContainsKey($key)) { $dirs[$i] } })
+        if ($absent.Count -gt 0) { Write-Host "  left out: $key (not recorded in $($absent -join ', '))"; $left++; continue }
+        $all = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($m in $runs) { $all.UnionWith($m[$key]) }
+        $required = [System.Collections.Generic.List[string]]::new(); $optional = [System.Collections.Generic.List[string]]::new()
+        foreach ($l in $all) { if (@($runs | Where-Object { -not $_[$key].Contains($l) }).Count -eq 0) { $required.Add($l) } else { $optional.Add("? $l") } }
+        $required.Sort([StringComparer]::Ordinal); $optional.Sort([StringComparer]::Ordinal)
+        $text = @($headers[$key]) + "# runs: $($runs.Count)" + @($required) + @($optional)
+        $path = Join-Path $Out $key
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+        [IO.File]::WriteAllText($path, (($text -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
+        $merged++
+    }
+    Write-Host "merged $merged scenarios from $($runs.Count) runs into $Out; $left left out"
+}
 function Run-Scenario([string]$Name, [scriptblock]$Body) {
     $script:Current = $Name; Write-Host "  $Name"
     $tmStart = [Diagnostics.Stopwatch]::StartNew(); $tmChecks = $script:Checks; $tmFailed = $script:Failures.Count
-    try { Fake 'reset' @{} | Out-Null; & $Body } catch { Check 'no unexpected exception' $false $_.Exception.Message }
+    $goldenMode = Get-GoldenMode
+    try {
+        Fake 'reset' @{} | Out-Null
+        # the record of this scenario's writes starts after the reset (tests/scenarios/golden/README.md)
+        if ($goldenMode -ne 'off') {
+            try { Fake 'scenario-begin' @{ suite = $script:SuiteName; scenario = $Name; scenarioSlug = (Get-ScenarioSlug $Name) } | Out-Null }
+            catch { Check 'golden writes recorded' $false "(the fake did not begin the record: $($_.Exception.Message))"; $goldenMode = 'off' }
+        }
+        & $Body
+    }
+    catch { Check 'no unexpected exception' $false $_.Exception.Message }
+    finally {
+        if ($goldenMode -ne 'off') {
+            $goldenRec = $null
+            try { $goldenRec = Fake 'scenario-end' @{} } catch { Check 'golden writes recorded' $false "(the fake did not end the record: $($_.Exception.Message))" }
+            if ($null -ne $goldenRec) { try { Compare-GoldenWrites $goldenRec $Name $goldenMode } catch { Check 'golden writes recorded' $false "(the record could not be compared: $($_.Exception.Message))" } }
+        }
+    }
     $tmCount = $script:Checks - $tmChecks
     Write-Host ("    scenario took {0:N1}s, {1} checks" -f $tmStart.Elapsed.TotalSeconds, $tmCount)
     [void]$script:ScenarioStats.Add([ordered]@{ suite = $script:SuiteName; name = $Name; tier = (Get-ScenarioTier $Name); seconds = [math]::Round($tmStart.Elapsed.TotalSeconds, 1); checks = $tmCount; failed = ($script:Failures.Count - $tmFailed) })

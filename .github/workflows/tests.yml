@@ -10,6 +10,9 @@
 # limit. The others run side by side under run-all.ps1.
 # A new suite (a new entry in $SuiteDefs of tests/scenarios/run.ps1) must be added to one of the jobs below: the step "Every suite is in
 # a job" fails the run when one is missing.
+# Every scenario's writes to the fake GitHub are recorded (TEST_WRITES_DIR) and compared with tests/scenarios/golden where a golden file
+# exists; each Tier 1 job uploads its records as the artifact writes-<job>-<attempt> (tests/scenarios/golden/README.md says how to re-record).
+# The job unit runs the smoke test and tests/Gateway.Tests (the gateway in process: routes and their guards, start and stop) in minutes.
 name: Tests
 
 on:
@@ -115,6 +118,8 @@ jobs:
           RUNNER_KIND: ${{ matrix.runner }}
           SUITE_GROUPS: ${{ matrix.groups }}
           SUITE_GROUP: ${{ matrix.group }}
+          # the fake writes each scenario's record here (run-all.ps1 and the group children inherit it); TEST_GOLDEN unset: compare
+          TEST_WRITES_DIR: ${{ runner.temp }}/writes
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/suite-logs"
@@ -140,16 +145,66 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # The golden-write records of every scenario (passed or not), the input of a new baseline (tests/scenarios/golden/README.md); the run
+      # attempt in the name lets a re-run upload its own. The directory itself (not a glob) is the artifact's root, so a job of one suite keeps
+      # its <suite>/ directory too (Merge-GoldenWrites keys a record by it).
+      - name: Keep the records of the writes
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: writes-${{ matrix.name }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/writes
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The quick tests: the smoke test and the gateway in process (tests/Gateway.Tests). No suite runs here.
+  unit:
+    name: Smoke and gateway tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: PowerShell ${{ env.PWSH_VERSION }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pwsh"
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" | tar -xz -C "$RUNNER_TEMP/pwsh"
+          chmod +x "$RUNNER_TEMP/pwsh/pwsh"
+          echo "$RUNNER_TEMP/pwsh" >> "$GITHUB_PATH"
+
+      - name: Smoke
+        run: pwsh -NoProfile -File tests/smoke.ps1
+
+      # the gateway's rule scripts are a stub in these tests (tests/Gateway.Tests/StubPwsh.cs): no PowerShell runs in them
+      - name: Gateway tests
+        run: dotnet test tests/Gateway.Tests --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --logger "trx;LogFileName=gateway-tests.trx" --results-directory "$RUNNER_TEMP/gateway-tests"
+
+      - name: Keep the test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gateway-tests-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gateway-tests
+          if-no-files-found: ignore
+          retention-days: 7
+
   # One outcome under a fixed name, for the job of build.yml that calls this workflow.
   result:
     name: Tests result
-    needs: tier1
+    needs: [tier1, unit]
     if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Every suite job succeeded
+      - name: Every job succeeded
         env:
           TIER1_RESULT: ${{ needs.tier1.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
         run: |
-          echo "tier1: ${TIER1_RESULT}"
+          echo "tier1: ${TIER1_RESULT} unit: ${UNIT_RESULT}"
           test "${TIER1_RESULT}" = "success"
+          test "${UNIT_RESULT}" = "success"
