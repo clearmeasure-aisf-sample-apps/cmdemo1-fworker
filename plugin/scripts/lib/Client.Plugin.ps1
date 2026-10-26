@@ -6,14 +6,14 @@ function Sync-Plugin($Cfg) {
     if (-not (Test-Path -LiteralPath (Join-Path $root '.plugin-managed'))) { return @{ ok = $false; code = 'not-managed'; reason = 'this plugin directory was not downloaded from a gateway (no .plugin-managed marker); it is never overwritten' } }
     $vf = Join-Path $root '.plugin-version'
     $local = try { (Get-Content -Raw -LiteralPath $vf | ConvertFrom-Json).hash } catch { '' }
-    try { $b = Invoke-RestMethod -Uri "$($Cfg.url)/_build" -TimeoutSec 20 } catch { return @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message } }
+    try { $b = Invoke-RestMethod -Uri "$($Cfg.url)/_build" -Headers (Get-FwCauseHeaders) -TimeoutSec 20 } catch { return @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message } }
     if (-not $b.PSObject.Properties['pluginHash'] -or -not $b.pluginHash) { return @{ ok = $false; code = 'gateway-old'; reason = 'the gateway does not publish a plugin hash' } }
     if ($b.pluginHash -eq $local) { return @{ ok = $true; updated = $false; hash = $local } }
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "fw-plugin-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
     try {
         $tgz = Join-Path $tmp 'plugin.tgz'
-        Invoke-WebRequest -Uri "$($Cfg.url)/api/v1/plugin" -Headers @{ Authorization = "Bearer $(Get-ConfigToken $Cfg)" } -OutFile $tgz -TimeoutSec 60 | Out-Null
+        Invoke-WebRequest -Uri "$($Cfg.url)/api/v1/plugin" -Headers (@{ Authorization = "Bearer $(Get-ConfigToken $Cfg)" } + (Get-FwCauseHeaders)) -OutFile $tgz -TimeoutSec 60 | Out-Null
         $new = Join-Path $tmp 'new'; New-Item -ItemType Directory -Force -Path $new | Out-Null
         & tar -xzf $tgz -C $new
         if ($LASTEXITCODE -ne 0) { return @{ ok = $false; code = 'extract-failed'; reason = 'tar could not extract the plugin archive' } }
@@ -36,3 +36,7 @@ function Invoke-PluginSync($Cfg) {
     $code = if ($r.ok) { 0 } elseif ($r.code -eq 'not-managed') { 10 } else { 20 }
     Write-Out $r $code
 }
+
+# Test-only (Tier 1 golden writes): factory.ps1 client mode defines Get-FwCauseHeaders (the X-Fake-Cause of a harness's call). This file is also
+# loaded on its own (tests, tools); then no call carries a cause id and no header is sent.
+if (-not (Get-Command -Name Get-FwCauseHeaders -CommandType Function -ErrorAction SilentlyContinue)) { function Get-FwCauseHeaders { return @{} } }

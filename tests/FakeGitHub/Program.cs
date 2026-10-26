@@ -6,6 +6,9 @@ using System.Text.RegularExpressions;
 // Test control lives under /_fake/*: create items, push branches, set CI profiles, inject faults, read the whole state.
 // Octopus lives under /octopus/*. No secret is checked: any token is accepted.
 
+// merge-golden: the golden files from several runs' records (GoldenMerge.cs); a command of its own, before any web host is built
+if (args.Length > 0 && args[0] == "merge-golden") { Environment.Exit(GoldenMerge.Run(args[1..])); }
+
 var port = int.TryParse(Environment.GetEnvironmentVariable("FAKE_PORT"), out var p0) ? p0 : 5200;
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls($"http://127.0.0.1:{port}");
@@ -44,7 +47,7 @@ app.Run(async ctx =>
     {
         int uw; lock (gate) { uw = world.LatencyFor(method, path, ""); } if (uw > 0) await Task.Delay(uw);
         long len = 0; var buf = new byte[65536]; int k; while ((k = await ctx.Request.Body.ReadAsync(buf)) > 0) len += k;
-        (int, string) up; lock (gate) { up = world.UploadAsset(path, query["name"].ToString(), ctx.Request.ContentType ?? "", len, port); world.Recorder?.Record(method, path, ctx.Request.QueryString.Value ?? "", up.Item1, ctx.Request.Headers.UserAgent.ToString(), new JsonObject { ["len"] = len }, null); }
+        (int, string) up; lock (gate) { up = world.UploadAsset(path, query["name"].ToString(), ctx.Request.ContentType ?? "", len, port); world.Recorder?.Record(method, path, ctx.Request.QueryString.Value ?? "", up.Item1, ctx.Request.Headers.UserAgent.ToString(), new JsonObject { ["len"] = len }, null, ctx.Request.Headers["X-Fake-Cause"].ToString()); }
         ctx.Response.StatusCode = up.Item1; ctx.Response.ContentType = "application/json"; await ctx.Response.WriteAsync(up.Item2); return;
     }
     string body; using (var rd = new StreamReader(ctx.Request.Body)) body = await rd.ReadToEndAsync();
@@ -72,7 +75,7 @@ app.Run(async ctx =>
         if (rate is { Remaining: <= 0, Resource: "graphql" }) res = (200, "{\"errors\":[{\"type\":\"RATE_LIMITED\",\"message\":\"API rate limit exceeded for installation ID 7.\"}]}");
         else if (rate is { Remaining: <= 0 }) res = (403, "{\"message\":\"API rate limit exceeded for installation ID 7. If you reach out to GitHub Support for help, please include the request ID.\",\"documentation_url\":\"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting\"}");
         else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.ApiVersionHeader = ctx.Request.Headers["X-GitHub-Api-Version"].ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString() is { Length: > 0 } az ? az : ctx.Request.Headers["X-Octopus-ApiKey"].ToString() is { Length: > 0 } ok ? "Octopus " + ok : ""); etag = world.Etag; }
-        if (recWrite) world.Recorder!.Record(method, path, ctx.Request.QueryString.Value ?? "", res.Item1, ctx.Request.Headers.UserAgent.ToString(), recBody, recField);
+        if (recWrite) world.Recorder!.Record(method, path, ctx.Request.QueryString.Value ?? "", res.Item1, ctx.Request.Headers.UserAgent.ToString(), recBody, recField, ctx.Request.Headers["X-Fake-Cause"].ToString());
     }
     if (rate is { } rl)
     {
@@ -450,8 +453,8 @@ sealed class World
 
     public (int, object?) Handle(string method, string path, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b, string auth = "")
     {
-        // the golden writes' cause windows are the harness's bookkeeping, not a request of the product: not in the log (README, golden writes)
-        if (path is not ("/_fake/cause" or "/_fake/group-check" or "/_fake/quiet")) log.Add($"{method} {path}");
+        // the golden writes' group check and settle polls are the harness's bookkeeping, not a request of the product: not in the log (README, golden writes)
+        if (path is not ("/_fake/group-check" or "/_fake/quiet")) log.Add($"{method} {path}");
         if (path.StartsWith("/_fake/")) return Control(method, path[7..], q, b);
         foreach (var f in faults.ToList())
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
@@ -1199,13 +1202,11 @@ sealed class World
                 e.Status = b!["status"]!.ToString(); if (e.Status is not ("Running" or "Processing")) e.End = DateTime.UtcNow;
                 return (200, J(("ok", true), ("name", e.Name)));
             }
-            // the golden-write record of one scenario (WriteRecorder.cs): begin { suite, scenario, scenarioSlug } after the reset, end {} after the body;
-            // the counters at both (Bases()) tell the numbers the scenario's own writes handed out from those of earlier scenarios and the harness
+            // the golden-write record of one scenario (WriteRecorder.cs): begin { suite, scenario, scenarioSlug } after the reset (it answers the
+            // scenario's cause nonce, with which the harness tags its calls: X-Fake-Cause), end {} after the body; the counters at both (Bases())
+            // tell the numbers the scenario's own writes handed out from those of earlier scenarios and the harness
             case "scenario-begin": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Begin(b, Bases()));
             case "scenario-end": return Recorder == null ? (200, J(("ok", true), ("recording", false))) : Recorder.End(Bases());
-            // cause { open: true | false }: the harness brackets each request of its own to the gateway (lib.ps1, F), so that a write made while one
-            // is open can be told as caused by the scenario from the background work of the gateway (tests/scenarios/golden/README.md)
-            case "cause": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Cause(b));
             // group-check { goldenDir }: at the end of a group (lib.ps1), the tail lines of every scenario of this process against the later writes
             case "group-check": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.GroupCheck(b));
             // quiet: how long ago the last write came, so the harness can close a record once the gateway's tail work has gone quiet
@@ -1331,6 +1332,14 @@ sealed class World
                     if (cons[k] != null) l.Add(new Check { Id = nextCheck++, Name = b["name"]!.ToString(), Conclusion = cons[k]!.ToString(), App = b["app"]?.ToString() ?? "github-actions" });
                 }
                 return (200, J(("ok", true)));
+            }
+            // deliver-prod {}: the production deployment of every release whose prodDelaySeconds is not yet up is due now (a scenario holds
+            // the delivery with a long delay, acts while it is pending, then lets it happen: no race with the delay's clock)
+            case "deliver-prod":
+            {
+                var now = DateTime.UtcNow; var n = 0;
+                foreach (var r in releases) if (r.At.AddSeconds(r.ProdDelay) > now) { r.ProdDelay = Math.Max(0, (now - r.At).TotalSeconds); n++; }
+                return (200, J(("ok", true), ("released", n)));
             }
             case "config":
                 if (b?["masterRed"] != null) masterRed = b["masterRed"]!.GetValue<bool>();

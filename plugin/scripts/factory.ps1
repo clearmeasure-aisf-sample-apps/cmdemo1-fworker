@@ -26,6 +26,9 @@ $Rest = [string[]]$args
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
 . (Join-Path $here 'lib/Paths.ps1')
+# test-only (Tier 1 golden writes, tests/scenarios/golden/README.md): the cause id of the harness's call a rule-script run serves (server mode
+# below sets it; lib/Core.ps1 Get-FactoryCause reads it). $null in every other run, in both modes
+$script:FactoryCause = $null
 
 $ServerVerbs = @('get-item', 'append-body', 'comment', 'claim-item', 'record-review', 'move-next', 'complete', 'open-pr', 'update-pr', 'pr-checks',
     'wait-for-checks', 'validation-verdict', 'inspect-facts', 'approve-pr', 'clear-hold', 'merge', 'get-delivery', 'model-tier', 'accept', 'release', 'my-items', 'journal', 'settle', 'sync-board', 'ingest-event', 'check-secrets',
@@ -53,6 +56,10 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
         # the AI session the gateway runs this verb for (Program.cs SessionLinkOf): the footer of every comment written for it (Board.ps1)
         $script:FactorySession = $null
         if ($a -is [System.Collections.IDictionary] -and $a.ContainsKey('_session')) { $script:FactorySession = $a['_session']; $a.Remove('_session') }
+        # test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless FACTORY_TEST_CAUSE_HEADER=1: the cause id of the harness's
+        # call whose request the gateway served when it started this run (gateway/TestCause.cs), sent as X-Fake-Cause with every write
+        $script:FactoryCause = $null
+        if ($env:FACTORY_TEST_CAUSE_HEADER -eq '1' -and $a -is [System.Collections.IDictionary] -and $a.ContainsKey('_cause')) { $script:FactoryCause = "$($a['_cause'])"; $a.Remove('_cause') }
         $fn = 'Verb_' + ($verb -replace '-', '_')
         $r = if ((Test-Has $a 'item') -and $verb -notin $NoLockVerbs) { Use-ItemLock ([int]$a.item) { & $fn $a } } else { & $fn $a }
         $r.verb = $verb
@@ -75,6 +82,14 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
 }
 
 # ---------------------------------------------------------------- client mode
+# Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md): the cause id the harness gave this call (FACTORY_TEST_CAUSE), read once and
+# taken out of the environment, so that no process this client starts (a session, a spawned worker, a stream) carries it. Every request of the
+# call to the gateway sends it as X-Fake-Cause (Get-FwCauseHeaders); without the variable no header is sent and nothing else changes.
+$script:FwTestCause = "$env:FACTORY_TEST_CAUSE"
+if ($script:FwTestCause) { Remove-Item Env:FACTORY_TEST_CAUSE -ErrorAction SilentlyContinue }
+# the extra headers of a request to the gateway: X-Fake-Cause with this call's cause id, or none
+function Get-FwCauseHeaders { $c = Get-Variable -Name FwTestCause -Scope Script -ValueOnly -ErrorAction SilentlyContinue; if ($c) { return @{ 'X-Fake-Cause' = "$c" } }; return @{} }
+
 function Get-ClientConfig {
     # the supervisor session's only credential is FACTORY_SUPERVISOR_TOKEN (worker-messaging.md 6.4): it stands in where no FACTORY_TOKEN is set
     $cfg = @{ url = $env:FACTORY_URL; token = $(if ($env:FACTORY_TOKEN) { $env:FACTORY_TOKEN } else { $env:FACTORY_SUPERVISOR_TOKEN }) }
@@ -127,6 +142,7 @@ if ($mcAt -ge 1) {
     foreach ($x in @('-NoProfile', '-NonInteractive', '-File', $(if ($PSCommandPath) { $PSCommandPath } else { Join-Path $here 'factory.ps1' }))) { $psi.ArgumentList.Add($x) }
     for ($i = 0; $i -lt $Rest.Count; $i++) { if ($i -ne $mcAt -and $i -ne $mcAt + 1) { $psi.ArgumentList.Add($Rest[$i]) } }
     $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.StandardOutputEncoding = [Console]::OutputEncoding   # (what the child writes with)
+    if ($script:FwTestCause) { $psi.Environment['FACTORY_TEST_CAUSE'] = $script:FwTestCause }   # (the child runs the verb: it sends the cause id, test-only)
     $child = [Diagnostics.Process]::Start($psi); $text = $child.StandardOutput.ReadToEnd(); $child.WaitForExit(); $code = $child.ExitCode
     $text = $text.TrimEnd("`r", "`n")
     if ($text.Length -le $mc) { [Console]::Out.WriteLine($text); exit $code }
@@ -163,7 +179,7 @@ if ($verb -eq 'model-for') {
             # An owner-mode worker holds a worker credential, which is refused for item verbs: the item's own token answers the question.
             . (Join-Path $here 'lib/Client.Own.ps1')
             $tk = Select-ItemToken $cc $m.item
-            $resp = Invoke-WebRequest -Uri "$($cc.url)/api/v1/verbs/model-tier" -Method POST -Body (@{ item = $m.item } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = "Bearer $tk" } -SkipHttpErrorCheck -TimeoutSec 60
+            $resp = Invoke-WebRequest -Uri "$($cc.url)/api/v1/verbs/model-tier" -Method POST -Body (@{ item = $m.item } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers (@{ Authorization = "Bearer $tk" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec 60
             $j = $resp.Content | ConvertFrom-Json -AsHashtable
             if ($j.ok) { $tier = [int]$j.tier; $why = @($j.reasons); if (-not $profile -and $j.profile) { $profile = "$($j.profile)" } } else { $note = "gateway refused: $($j.code)" }
         } catch { $note = 'gateway unreachable; using the starting tier' }
@@ -214,7 +230,7 @@ if ($verb -eq 'unpark') {
     if (-not $u.ContainsKey('item') -or "$($u.item)" -notmatch '^\d+$' -or -not $why -or $why -eq 'True') { Write-Out @{ ok = $false; verb = $verb; code = 'usage'; reason = 'unpark --item N --reason "why the park is released early"' } 2 }
     $uc = Get-ClientConfig
     try {
-        $resp = Invoke-WebRequest -Uri "$($uc.url)/api/v1/items/$([int]$u.item)/unpark" -Method POST -Body (@{ reason = $why } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = "Bearer $(Get-ConfigToken $uc)" } -SkipHttpErrorCheck -TimeoutSec 170
+        $resp = Invoke-WebRequest -Uri "$($uc.url)/api/v1/items/$([int]$u.item)/unpark" -Method POST -Body (@{ reason = $why } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers (@{ Authorization = "Bearer $(Get-ConfigToken $uc)" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec 170
     } catch { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
     $j = $null; try { $j = $resp.Content | ConvertFrom-Json -AsHashtable } catch { }
     if (-not $j) { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)" } $(if ([int]$resp.StatusCode -in 401, 403) { 30 } else { 20 }) }
@@ -241,7 +257,7 @@ if ($verb -eq 'pr-checks' -and $a.ContainsKey('save')) {
     while ($true) {
         $a.page = $pageNo
         try {
-            $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/verbs/$verb" -Method POST -Body ($a | ConvertTo-Json -Depth 10 -Compress) -ContentType 'application/json' -Headers @{ Authorization = "Bearer $callToken" } -SkipHttpErrorCheck -TimeoutSec 170
+            $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/verbs/$verb" -Method POST -Body ($a | ConvertTo-Json -Depth 10 -Compress) -ContentType 'application/json' -Headers (@{ Authorization = "Bearer $callToken" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec 170
         } catch { Write-Out @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
         $j = $null; try { $j = $resp.Content | ConvertFrom-Json -AsHashtable } catch { }
         if (-not $j) { Write-Out @{ ok = $false; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)" } 20 }
@@ -265,7 +281,7 @@ if ($verb -eq 'build-slot') {
     $bs = @{ action = $(if ($a.ContainsKey('release')) { 'release' } else { 'acquire' }) }
     if ($a.ContainsKey('ttl')) { $bs.ttlSeconds = [double]"$($a.ttl)" }
     if ($a.ContainsKey('item')) { $bs.item = [int]$a.item }
-    try { $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/build-slot" -Method POST -Body ($bs | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = "Bearer $callToken" } -SkipHttpErrorCheck -TimeoutSec 30 }
+    try { $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/build-slot" -Method POST -Body ($bs | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers (@{ Authorization = "Bearer $callToken" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec 30 }
     catch { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
     $j = try { $resp.Content | ConvertFrom-Json -AsHashtable } catch { $null }
     if (-not $j) { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)" } 20 }
@@ -287,7 +303,7 @@ if ($verb -eq 'publish-demo') {
     $hd = [byte[]]::new(8); $fs = [IO.File]::OpenRead($file); try { $got = $fs.Read($hd, 0, 8) } finally { $fs.Dispose() }
     if ($got -lt 8 -or [Text.Encoding]::ASCII.GetString($hd, 4, 4) -ne 'ftyp') { Write-Out @{ ok = $false; verb = $verb; code = 'not-mp4'; reason = 'the file is not an MP4 (its header has no ftyp box): convert it, for example ffmpeg -i flow.webm demo.mp4' } 2 }
     try {
-        $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/demo/$([int]$a.item)" -Method POST -InFile $file -ContentType 'video/mp4' -Headers @{ Authorization = "Bearer $callToken" } -SkipHttpErrorCheck -TimeoutSec 1260
+        $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/demo/$([int]$a.item)" -Method POST -InFile $file -ContentType 'video/mp4' -Headers (@{ Authorization = "Bearer $callToken" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec 1260
     } catch { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 30 } 20 }
     $j = $null; try { $j = $resp.Content | ConvertFrom-Json -AsHashtable } catch { }
     if (-not $j) { Write-Out @{ ok = $false; verb = $verb; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)" } $(if ([int]$resp.StatusCode -in 401, 403) { 30 } else { 20 }) }
@@ -297,7 +313,7 @@ if ($verb -eq 'publish-demo') {
 $resp = $null
 try {
     $resp = Invoke-WebRequest -Uri "$($cfg.url)/api/v1/verbs/$verb" -Method POST -Body ($a | ConvertTo-Json -Depth 10 -Compress) -ContentType 'application/json' `
-        -Headers @{ Authorization = "Bearer $callToken" } -SkipHttpErrorCheck -TimeoutSec 170
+        -Headers (@{ Authorization = "Bearer $callToken" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec 170
 } catch { Write-Out @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
 $body = $resp.Content
 $code = 0

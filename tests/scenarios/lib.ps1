@@ -44,8 +44,12 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     $env:FAKE_PORT = "$($script:FakePort)"; $env:FACTORY_CONFIG = $cfgPath   # (the fake reads docsOnlyPaths from it)
     $env:FAKE_PROXY_PORT = "$($script:ProxyPort)"   # the fake's TCP forwarder in front of a gateway (leader.ps1): idle until a scenario names a backend
     # the golden writes (tests/scenarios/golden/README.md): the fake records every scenario's writes into TEST_WRITES_DIR (CI), else the suite's work directory
-    if ((Get-GoldenMode) -eq 'off') { Remove-Item Env:FAKE_RECORD_DIR -ErrorAction SilentlyContinue }
-    else { $env:FAKE_RECORD_DIR = $(if ($env:TEST_WRITES_DIR) { $env:TEST_WRITES_DIR } else { Join-Path $work 'writes' }) }
+    # The gateway passes a request's X-Fake-Cause on to the rule scripts it runs while serving it only with FACTORY_TEST_CAUSE_HEADER=1 (gateway/
+    # TestCause.cs); every gateway a suite starts later (Restart-Gateway, a second gateway) inherits it from this process. FACTORY_TEST_CAUSE is
+    # never left set here: it goes to one call of F only (Invoke-F), never to a gateway or a stream a scenario starts itself.
+    if ((Get-GoldenMode) -eq 'off') { Remove-Item Env:FAKE_RECORD_DIR -ErrorAction SilentlyContinue; Remove-Item Env:FACTORY_TEST_CAUSE_HEADER -ErrorAction SilentlyContinue }
+    else { $env:FAKE_RECORD_DIR = $(if ($env:TEST_WRITES_DIR) { $env:TEST_WRITES_DIR } else { Join-Path $work 'writes' }); $env:FACTORY_TEST_CAUSE_HEADER = '1' }
+    Remove-Item Env:FACTORY_TEST_CAUSE -ErrorAction SilentlyContinue
     $script:Procs += Start-Process dotnet -ArgumentList $fakeDll -PassThru -RedirectStandardOutput (Join-Path $work 'fake.out') -RedirectStandardError (Join-Path $work 'fake.err')
     $env:GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; $env:GH_TOKEN = 'fake-operator'; $env:OCTOPUS_API_KEY = 'fake'
     $env:FACTORY_CONFIG = $cfgPath; $env:FACTORY_STATE_DIR = Join-Path $work 'state'; $(if ($env:TEST_REAL_APPS) { Remove-Item Env:FACTORY_FAKE_APPS -ErrorAction SilentlyContinue } else { $env:FACTORY_FAKE_APPS = '1' })
@@ -164,9 +168,11 @@ function Invoke-RunnerHost($h, [string[]]$CallArgs, [string]$Stdin = '', $CallEn
 }
 function Get-ProcessEnv { $e = @{}; $all = [Environment]::GetEnvironmentVariables(); foreach ($k in $all.Keys) { $e["$k"] = "$($all[$k])" }; return $e }
 function Stop-ClientHost { $h = $script:ClientHost; $script:ClientHost = $null; Stop-RunnerHost $h }
-function Invoke-ClientHost([string[]]$FactoryArgs) {
+function Invoke-ClientHost([string[]]$FactoryArgs, [string]$Cause = '') {
     if (-not $script:ClientHost -or $script:ClientHost.proc.HasExited) { $script:ClientHost = Start-RunnerHost (Join-Path $script:Root 'plugin/scripts/factory.ps1') }
-    $r = Invoke-RunnerHost $script:ClientHost $FactoryArgs '' (Get-ProcessEnv) (Get-Location).ProviderPath
+    # (the call's cause id goes into this call's environment only, never into this process's: F)
+    $callEnv = Get-ProcessEnv; if ($Cause) { $callEnv['FACTORY_TEST_CAUSE'] = $Cause }
+    $r = Invoke-RunnerHost $script:ClientHost $FactoryArgs '' $callEnv (Get-Location).ProviderPath
     if ($null -eq $r) {
         $hc = $(try { if ($script:ClientHost.proc.HasExited) { $script:ClientHost.proc.ExitCode } else { 0 } } catch { 0 })
         Stop-ClientHost
@@ -176,41 +182,39 @@ function Invoke-ClientHost([string[]]$FactoryArgs) {
     $script:ClientHostCalls++
     return @{ code = [int]$r.code; text = ("$($r.out)$($r.err)" -replace "`r`n", "`n").TrimEnd("`n") }
 }
-# The cause windows of the golden writes (tests/scenarios/golden/README.md): while a scenario's record is open, each call of F is bracketed with
-# /_fake/cause, so that the fake tells the writes the call caused from the gateway's background work. Not the verbs that only wait or stream
-# (a window open for minutes would take in whatever the sweep writes meanwhile), nor those that only read (scenarios poll them): a window
-# that opens while the scenario writes nothing only lets a background write count as caused. A write one of them makes is background.
-$script:GoldenOpen = $false
+# The cause ids of the golden writes (tests/scenarios/golden/README.md: Caused and background writes): while a scenario's record is open, each
+# call of F gets the id "<nonce>.<n>" (the nonce from scenario-begin, n counted per scenario). The client sends it as X-Fake-Cause with every
+# request of the call to the gateway (FACTORY_TEST_CAUSE), the gateway hands it to every rule-script run it starts while serving that request
+# (FACTORY_TEST_CAUSE_HEADER=1, gateway/TestCause.cs) and the rule scripts send it with every write; the fake counts a write as caused when its
+# request carried the scenario's id. Not tagged: the verbs that only wait or stream (they would tag whatever their long requests set off) and
+# those that only read (scenarios poll them): a write one of them makes is background.
+$script:GoldenOpen = $false; $script:CauseNonce = ''; $script:CauseSeq = 0
 $script:CauseSkipVerbs = @('subscribe', 'wait-event', 'wait-for-checks', 'inbox', 'message-status', 'presence', 'get-item', 'peers', 'model-for', 'model-tier', 'questions', 'qc-list', 'pr-checks', 'inspect-facts', 'plant-digest')
-# (one HttpClient for all windows: two calls per verb, so a new client per call, as Invoke-RestMethod makes, would add to every suite's time)
-$script:CauseClient = $null
-function Set-CauseWindow([bool]$Open) {
-    try {
-        if ($null -eq $script:CauseClient) { $script:CauseClient = [System.Net.Http.HttpClient]::new(); $script:CauseClient.Timeout = [TimeSpan]::FromSeconds(5) }
-        $content = [System.Net.Http.StringContent]::new($(if ($Open) { '{"open":true}' } else { '{"open":false}' }), [Text.Encoding]::UTF8, 'application/json')
-        $script:CauseClient.PostAsync("http://127.0.0.1:$($script:FakePort)/_fake/cause", $content).GetAwaiter().GetResult().Dispose()
-    }
-    catch { }
-}
 # (the role verbs name their action second: `operator status`, `keeper ...`, `supervisor ...`)
 $script:CauseRoleVerbs = @('operator', 'keeper', 'supervisor')
 $script:CauseSkipRoleActions = @('status', 'metrics', 'act-log', 'release-check')
 function F([string]$Holder, [string[]]$FactoryArgs) {
     $skip = $FactoryArgs.Count -gt 0 -and ($FactoryArgs[0] -in $script:CauseSkipVerbs -or ($FactoryArgs[0] -in $script:CauseRoleVerbs -and $FactoryArgs.Count -gt 1 -and $FactoryArgs[1] -in $script:CauseSkipRoleActions))
-    $cause = $script:GoldenOpen -and -not $skip
-    if ($cause) { Set-CauseWindow $true }
-    try { return Invoke-F $Holder $FactoryArgs }
-    finally { if ($cause) { Set-CauseWindow $false } }
+    $id = ''
+    # (the count is raised as a statement of its own: ++$x inside "$( )" outputs nothing, so every id came out as "<nonce>.")
+    if ($script:GoldenOpen -and -not $skip -and $script:CauseNonce) { $script:CauseSeq++; $id = "$($script:CauseNonce).$($script:CauseSeq)" }
+    return Invoke-F $Holder $FactoryArgs -Cause $id
 }
-function Invoke-F([string]$Holder, [string[]]$FactoryArgs) {
+# -Cause: the call's cause id (F), passed to the client as FACTORY_TEST_CAUSE of that call only: in the runner host's call environment, or set
+# around the spawned pwsh and removed right after it
+function Invoke-F([string]$Holder, [string[]]$FactoryArgs, [string]$Cause = '') {
     $env:FACTORY_HOLDER = $Holder
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $hosted = $script:UseClientHost -and $FactoryArgs.Count -gt 0 -and $FactoryArgs[0] -notin $script:RealProcessVerbs
     if ($env:TEST_CLIENT_HOST -eq '0') { $hosted = $false } elseif ($env:TEST_CLIENT_HOST -eq '1' -and $FactoryArgs.Count -gt 0 -and $FactoryArgs[0] -notin $script:RealProcessVerbs) { $hosted = $true }
-    if ($hosted) { $hc = Invoke-ClientHost $FactoryArgs; $text = $hc.text; $code = $hc.code }
+    if ($hosted) { $hc = Invoke-ClientHost $FactoryArgs $Cause; $text = $hc.text; $code = $hc.code }
     else {
-        $out = & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/factory.ps1') @FactoryArgs 2>&1
-        $code = $LASTEXITCODE
+        if ($Cause) { $env:FACTORY_TEST_CAUSE = $Cause }
+        try {
+            $out = & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/factory.ps1') @FactoryArgs 2>&1
+            $code = $LASTEXITCODE
+        }
+        finally { if ($Cause) { Remove-Item Env:FACTORY_TEST_CAUSE -ErrorAction SilentlyContinue } }
         $text = ($out | ForEach-Object { "$_" }) -join "`n"
     }
     $script:VerbCalls++; $script:VerbSeconds += $sw.Elapsed.TotalSeconds
@@ -411,58 +415,17 @@ function Add-GoldenMiss([string]$Section, [string]$Scenario, [string]$Suite, [st
 # (Compare-CauseLines): then the golden file gets them in the order of the first run's record; else the scenario is reported unstable, gets no
 # golden file, and a golden file it had in -Out is removed (it is recorded only, until it is made stable). Its settled lines ('+ ') are those
 # settled in every record (the intersection); its tail lines ('~ ') those that every record's group set holds (its '+ ' and '~ ' lines and
-# the '~ ' lines of its <slug>.later.txt) and that are neither '+ ' nor '= ' lines. A scenario missing from a run is reported and left out. Run it as
-#   pwsh -NoProfile -c ". tests/scenarios/lib.ps1; Merge-GoldenWrites -From a,b -Out tests/scenarios/golden"
+# the '~ ' lines of its <slug>.later.txt) and that are neither '+ ' nor '= ' lines. A scenario missing from a run is reported and left out.
+# The merge itself is the fake's command (tests/FakeGitHub/GoldenMerge.cs, build it first), so it runs without PowerShell as
+#   dotnet tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll merge-golden --from a,b --out tests/scenarios/golden
+# and this function only calls it (relative directories are of the current location, which a native command starts in).
 function Merge-GoldenWrites([string[]]$From, [string]$Out = (Join-Path $script:Root 'tests/scenarios/golden')) {
     $dirs = @($From | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     if ($dirs.Count -eq 0) { throw 'Merge-GoldenWrites: name at least one -From directory' }
-    # $runs[i][key]: the records of that scenario in run i (more than one when a run recorded it twice: each is compared like a run of its own)
-    $runs = [System.Collections.Generic.List[hashtable]]::new(); $headers = @{}
-    foreach ($d in $dirs) {
-        if (-not (Test-Path -LiteralPath $d -PathType Container)) { throw "Merge-GoldenWrites: $d is not a directory" }
-        $map = @{}
-        foreach ($f in @(Get-ChildItem -LiteralPath $d -Recurse -File -Filter '*.writes.txt' | Sort-Object FullName)) {
-            $key = "$($f.Directory.Name)/$($f.Name)"
-            if (-not $map.ContainsKey($key)) { $map[$key] = [System.Collections.Generic.List[hashtable]]::new() }
-            $map[$key].Add((Read-WritesSections $f.FullName -Later))
-            if (-not $headers.ContainsKey($key)) { $headers[$key] = @([IO.File]::ReadAllLines($f.FullName, [Text.UTF8Encoding]::new($false)) | Where-Object { $_ -like '# suite: *' -or $_ -like '# scenario: *' }) }
-        }
-        $runs.Add($map)
-    }
-    $keys = @($runs | ForEach-Object { $_.Keys } | Sort-Object -Unique -CaseSensitive)
-    $merged = 0; $left = 0; $unstable = 0
-    foreach ($key in $keys) {
-        $absent = @(for ($i = 0; $i -lt $runs.Count; $i++) { if (-not $runs[$i].ContainsKey($key)) { $dirs[$i] } })
-        if ($absent.Count -gt 0) { Write-Host "  left out: $key (not recorded in $($absent -join ', '))"; $left++; continue }
-        $recs = [System.Collections.Generic.List[hashtable]]::new()
-        foreach ($m in $runs) { foreach ($x in $m[$key]) { $recs.Add($x) } }
-        $path = Join-Path $Out $key
-        $bad = @($recs | Where-Object { $_.other.Count -gt 0 })
-        if ($bad.Count -gt 0) { Write-Host "  left out: $key (a record has lines without '= ', '+ ' or '~ ': not the format of this recorder)"; $left++; continue }
-        $diff = $null
-        for ($i = 1; $i -lt $recs.Count -and $null -eq $diff; $i++) { $diff = Compare-CauseLines $recs[0].cause $recs[$i].cause }
-        if ($null -ne $diff) {
-            $unstable++
-            Write-Host "  unstable: $key (caused writes of $($diff.object), write $($diff.index): '$($diff.expected)' / '$($diff.actual)')"
-            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path; Write-Host "    removed its golden file $path" }
-            continue
-        }
-        $background = [System.Collections.Generic.HashSet[string]]::new($recs[0].background, [StringComparer]::Ordinal)
-        $group = $null
-        foreach ($x in $recs) {
-            $gs = [System.Collections.Generic.HashSet[string]]::new($x.background, [StringComparer]::Ordinal); $gs.UnionWith($x.tail); $gs.UnionWith($x.later)
-            $background.IntersectWith($x.background)
-            if ($null -eq $group) { $group = $gs } else { $group.IntersectWith($gs) }
-        }
-        $group.ExceptWith($background); $group.ExceptWith($recs[0].cause)
-        $bl = [System.Collections.Generic.List[string]]::new($background); $bl.Sort([StringComparer]::Ordinal)
-        $tl = [System.Collections.Generic.List[string]]::new($group); $tl.Sort([StringComparer]::Ordinal)
-        $text = @($headers[$key]) + "# runs: $($recs.Count)" + @($recs[0].cause | ForEach-Object { "= $_" }) + @($bl | ForEach-Object { "+ $_" }) + @($tl | ForEach-Object { "~ $_" })
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
-        [IO.File]::WriteAllText($path, (($text -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
-        $merged++
-    }
-    Write-Host "merged $merged scenarios from $($runs.Count) runs into $Out; $unstable unstable (no golden file), $left left out"
+    $dll = Join-Path $script:Root 'tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll'
+    if (-not (Test-Path -LiteralPath $dll)) { throw "Merge-GoldenWrites: build first: $dll is missing" }
+    & dotnet $dll merge-golden --from ($dirs -join ',') --out $Out
+    if ($LASTEXITCODE -ne 0) { throw "Merge-GoldenWrites: merge-golden ended with exit $LASTEXITCODE" }
 }
 # Before a scenario's record is closed (and before the group check): the gateway's background work the scenario set off (the sweep's journal
 # lines, plant offers and reassignments, runtime ends, promotion sign-offs) is let finish, so whether such a tail write lands in the record
@@ -488,22 +451,59 @@ function Wait-RecordSettled {
         Start-Sleep -Milliseconds ([int][math]::Max(50, [math]::Min($wait, $left)))
     }
 }
+# Before a scenario's /_fake/reset: the reset must not land while the gateway's sweep is reading the items it removes. A sweep that is settling an
+# item the scenario before merged (its release candidate, its delivery) then finds the card or the Octopus task gone and logs a sweep error, which
+# the suite's invariant counts (issue #386: seen on item 25 of the auto suite). A sweep is running when the runner's latest start of sync-board
+# (/api/v1/status runner.recent) is later than lastSweep, the end of the last full sweep: then the reset waits until that sweep has ended
+# (polled every 100 ms, at most 5 s). A sweep that starts after the reset reads the new world, so no wait is needed when none runs; nor without
+# a gateway, before its first sweep, or when none of the runner's last 30 starts was a sweep.
+# A scenario that edits an item's state which every sweep reads and saves (Set-ItemState) needs more: no sweep may start between its read and
+# its save around the edit. -Fresh N also waits until the last full sweep ended less than N seconds ago (after a sweep the loop waits 2 s before
+# the next one, gateway/Sweeper.cs), so the edit goes early into that gap.
+function ConvertTo-UtcTime($v) {
+    if ($v -is [datetime]) { if ($v.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($v, [DateTimeKind]::Utc) }; return $v.ToUniversalTime() }
+    if ("$v") { try { return [datetimeoffset]::Parse("$v", [Globalization.CultureInfo]::InvariantCulture).UtcDateTime } catch { return $null } }
+    return $null
+}
+function Wait-SweepGap([double]$Fresh = 0) {
+    $base = try { Get-GatewayBase } catch { $null }
+    if (-not $base) { return }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $s = try { Invoke-RestMethod "$base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2 } catch { $null }
+        if ($null -eq $s) { return }
+        $last = ConvertTo-UtcTime $s.lastSweep
+        if ($null -eq $last) { return }
+        $runner = $s.PSObject.Properties['runner']; $recent = $(if ($runner -and $runner.Value.PSObject.Properties['recent']) { @($runner.Value.recent) } else { @() })
+        $starts = @($recent | Where-Object { $_ -and $_.verb -eq 'sync-board' } | ForEach-Object { ConvertTo-UtcTime $_.at } | Where-Object { $null -ne $_ })
+        $running = $starts.Count -gt 0 -and @($starts | Sort-Object)[-1] -gt $last
+        $stale = $Fresh -gt 0 -and ([datetime]::UtcNow - $last).TotalSeconds -ge $Fresh
+        if (-not $running -and -not $stale) { return }
+        if ($sw.ElapsedMilliseconds -ge 5000) { return }
+        Start-Sleep -Milliseconds 100
+    }
+}
 function Run-Scenario([string]$Name, [scriptblock]$Body) {
     $script:Current = $Name; Write-Host "  $Name"
     $tmStart = [Diagnostics.Stopwatch]::StartNew(); $tmChecks = $script:Checks; $tmFailed = $script:Failures.Count
     $goldenMode = Get-GoldenMode
     try {
+        try { Wait-SweepGap } catch { }
         Fake 'reset' @{} | Out-Null
         # the record of this scenario's writes starts after the reset (tests/scenarios/golden/README.md)
         if ($goldenMode -ne 'off') {
-            try { Fake 'scenario-begin' @{ suite = $script:SuiteName; scenario = $Name; scenarioSlug = (Get-ScenarioSlug $Name) } | Out-Null; $script:GoldenOpen = $true }
+            try {
+                $begun = Fake 'scenario-begin' @{ suite = $script:SuiteName; scenario = $Name; scenarioSlug = (Get-ScenarioSlug $Name) }
+                # the scenario's cause nonce: F tags each call with "<nonce>.<n>" ('' when the fake records nothing: no call is tagged)
+                $script:CauseNonce = "$(Get-RecField $begun 'cause')"; $script:CauseSeq = 0; $script:GoldenOpen = $true
+            }
             catch { Check 'golden writes recorded' $false "(the fake did not begin the record: $($_.Exception.Message))"; $goldenMode = 'off' }
         }
         & $Body
     }
     catch { Check 'no unexpected exception' $false $_.Exception.Message }
     finally {
-        $script:GoldenOpen = $false   # (no cause window opens after the body)
+        $script:GoldenOpen = $false; $script:CauseNonce = ''; $script:CauseSeq = 0   # (no call is tagged after the body)
         if ($goldenMode -ne 'off') {
             $goldenRec = $null
             try { Wait-RecordSettled } catch { }

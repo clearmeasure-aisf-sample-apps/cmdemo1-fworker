@@ -33,40 +33,66 @@ not waited for when the gateway is down or never swept) and `/_fake/quiet` says 
 not count), at most 5 s after the body in all. So a tail write the scenario set off lands in the record however fast the runner was. The
 end writes
 `<FAKE_RECORD_DIR>/<suite>/<slug>.writes.txt` (normalized, compared) and `<slug>.raw.jsonl` (every write as sent, for reading a
-difference). `GET /_fake/writes` shows the open record (each write with `window`, and `causeDepth`), and `unlabelledWrites`: the writes
+difference). `GET /_fake/writes` shows the open record (each write with its `cause`, the request's `X-Fake-Cause` or null, and the
+scenario's `nonce`), and `unlabelledWrites`: the writes
 made while no scenario was open, counted (they are in no record, but the group check below reads them; `/_fake/state` is unchanged by the
 recorder).
 
 ### Caused and background writes
 
-Every compared write is either caused by the scenario or background:
+Every compared write is either caused by the scenario or background. Which one is decided by where the write came from, never by when it
+came:
 
-- Cause windows: while a scenario's record is open, `F` (lib.ps1, the scripted worker's call of the real client) brackets each call with
-  `POST /_fake/cause {"open":true}` before it and `{"open":false}` after it has returned (also when it throws). The fake counts the open
-  windows (nested calls nest; a close without an open is ignored; scenario-begin and scenario-end set the count to 0) and marks each write
-  with whether a window was open when it came. Not bracketed (`$script:CauseSkipVerbs`): the client verbs that only wait or stream
-  (`subscribe`, `wait-event`, `wait-for-checks`), whose window would stay open for as long as they wait, and those that only read
-  (`inbox`, `message-status`, `presence`, `get-item`, `peers`, `model-for`, `model-tier`, `questions`, `qc-list`, `pr-checks`,
-  `inspect-facts`, `plant-digest`), which scenarios poll: a window that opens while the scenario writes nothing only lets a background
-  write count as caused. A write one of them makes is background.
-- Caused (`= `): every harness write, and a `rule` write that came inside a window and is not of a background kind. A verb's rule script
-  runs and ends inside its window (the gateway answers the client only when the script has ended), so everything it writes is caused.
-- Background (`+ ` settled, `~ ` tail, below): every other write: one that came outside every window (the sweep, the plant's ticks, the base-update, transcript and
-  release loops, the runtimes, and whatever the scenario's own direct requests to the gateway set off: only `F` is bracketed), and one of
-  a background kind whatever its window. The background kinds (`WriteRecorder.BackgroundKinds`): `plant` (a body with
-  `<!-- plant event=`), `state` (a factory-state comment), `merge-watch` (a journal comment, `<!-- factory-journal:`, of the sweep's
-  merge watch in `plugin/scripts/lib/Verbs.Delivery.ps1`: "master is GREEN at", "master checks failed at", "master is BROKEN", "release
-  candidate **V** carries", "no release candidate" (also "published no release candidate"), "Delivered to **Prod**"), `claims`, `transcripts`, `snapshot` (`plant-snapshot`), `leader`
-  (`gateway-leader`) and `revoked` (a path or `ref` with `/claims/`, `/transcripts/`, `plant-snapshot`, `gateway-leader`, `/revoked/`;
-  a git commit whose message is a sealed transcript `fwt1:...`, a plant snapshot or the leader lease counts as its ref's kind), and
-  `gateway` (every write of the gateway's own C# clients: the Cursor, Copilot, ARM and Octopus runtimes).
+- Cause ids: `/_fake/scenario-begin` makes a nonce for the scenario (8 random lowercase hex digits) and answers it as `cause`; the harness
+  keeps it (`$script:CauseNonce` of lib.ps1) until the body ends. While the record is open, `F` (lib.ps1, the scripted worker's call of the
+  real client) gives each call the id `<nonce>.<n>`, n counted from 1 in the scenario, and passes it to the client as the environment
+  variable `FACTORY_TEST_CAUSE` of that call only (the runner host's call environment, or set around the spawned `pwsh` and removed right
+  after it; the harness's own process never keeps it, and a gateway the harness starts never has it).
+- The client (`plugin/scripts/factory.ps1`, client mode) reads `FACTORY_TEST_CAUSE` once, removes it from its process environment (so a
+  session, a spawned worker or another client it starts does not inherit it; the `--max-chars` child gets it back explicitly, since it runs
+  the verb) and sends it as the header `X-Fake-Cause` with every request of the call to the gateway. Without the variable it sends no such
+  header and nothing else changes. The thread jobs and long-lived stream loops of `subscribe` carry no id.
+- The gateway, only when it runs with `FACTORY_TEST_CAUSE_HEADER=1` (`Start-TestEnv` sets it when the golden mode is not `off`; every
+  gateway a suite starts inherits it), holds a request's `X-Fake-Cause` in a request-scoped holder while it serves that request
+  (`gateway/TestCause.cs`: an `AsyncLocal` box, set by a middleware and cleared when the request ends). Every rule-script run it starts
+  meanwhile, pooled or spawned (`Runner.RunProcessAsync`), gets the id as the field `_cause` of its JSON arguments, when the id is 1 to 80
+  characters of `[A-Za-z0-9._-]`. Without the variable the gateway reads no header and adds nothing.
+- The rule script (`factory.ps1 --server`), with `FACTORY_TEST_CAUSE_HEADER=1`, takes `_cause` out of its arguments before the verb runs
+  and sends it as `X-Fake-Cause` with every write: the GitHub calls of `Invoke-GhRaw` (lib/Core.ps1, REST and GraphQL), the release asset
+  upload of `publish-demo` (lib/Verbs.Pr.ps1) and the Octopus calls of `Invoke-OctoPost` (lib/Verbs.Promote.ps1). Without the variable the
+  key is left as it is.
+- The fake keeps each write's `X-Fake-Cause` and counts the write as carrying the scenario's id when the id is the open scenario's nonce or
+  starts with the nonce and `.`, decided when the write comes; an id of an earlier scenario never counts.
 
-The background kinds exist because nothing in a request tells which rule-script run made it: the gateway runs up to
-`runner.maxProcesses` rule scripts at once (RunnerGate.cs), the sweep's among them, and all of them send the same User-Agent and token.
-So a sweep or a loop that writes while a verb's window is open would count as caused; the kinds above are what those write. The limit
-that remains: a background write of another kind (a sweep's board move or close, a journal comment other than the merge watch's, a merge or a promotion sign-off of the
-gateway's loops) that comes while a window is open counts as caused. When that happens in one run and not in another, the scenario's
-caused writes differ between the runs, and the baseline gets no file for it (below).
+So the writes of a call are those of the verb's own rule-script run and of every rule-script run the gateway starts while serving that
+request, however late in the call they come; a write of the sweep, the plant's ticks or any other loop carries no id, even when it comes
+while a call runs. Work that outlives the request (a task the request set off that starts a rule script after the answer has gone) carries
+no id: its writes are background.
+
+Not tagged (`$script:CauseSkipVerbs`): the client verbs that only wait or stream (`subscribe`, `wait-event`, `wait-for-checks`), whose
+long requests would tag whatever the gateway starts while they wait, and those that only read (`inbox`, `message-status`, `presence`,
+`get-item`, `peers`, `model-for`, `model-tier`, `questions`, `qc-list`, `pr-checks`, `inspect-facts`, `plant-digest`), which scenarios
+poll; nor the role verbs `operator`, `keeper` and `supervisor` with the actions `status`, `metrics`, `act-log` and `release-check`. They
+carry no id, so a write one of them sets off is background.
+
+- Caused (`= `): every harness write, and a `rule` write whose request carried the scenario's id and is not of a background kind.
+- Background (`+ ` settled, `~ ` tail, below): every other write: one that carried no id of the scenario (the sweep, the plant's ticks,
+  the base-update, transcript and release loops, the runtimes, and whatever the scenario's own direct requests to the gateway set off:
+  only `F` tags its calls), and one of a background kind whatever it carried. The background kinds (`WriteRecorder.BackgroundKinds`):
+  `plant` (a body with `<!-- plant event=`), `state` (a factory-state comment), `merge-watch` (a journal comment, `<!-- factory-journal:`,
+  of the sweep's merge watch in `plugin/scripts/lib/Verbs.Delivery.ps1`: "master is GREEN at", "master checks failed at", "master is
+  BROKEN", "release candidate **V** carries", "no release candidate" (also "published no release candidate"), "Delivered to **Prod**"),
+  `claims`, `transcripts`, `snapshot` (`plant-snapshot`), `leader` (`gateway-leader`) and `revoked` (a path or `ref` with `/claims/`,
+  `/transcripts/`, `plant-snapshot`, `gateway-leader`, `/revoked/`; a git commit whose message is a sealed transcript `fwt1:...`, a plant
+  snapshot or the leader lease counts as its ref's kind), and `gateway` (every write of the gateway's own C# clients: the Cursor, Copilot,
+  ARM and Octopus runtimes, which send no id).
+
+The background kinds stay background because what the gateway's own loops write can carry a call's id too: a plant tick, a snapshot or a
+state rewrite that a verb's request sets off runs while that request is served, and the merge watch's lines come whenever a sweep next
+looks at a merged item, so whether they carry an id follows the timing. The limit that remains: a rule-script run that a fire-and-forget
+task starts while the request is still being served carries the id (the task holds the request's holder until the request ends), so its
+writes of another kind count as caused. When that happens in one run and not in another, the scenario's caused writes differ between the
+runs, and the baseline gets no file for it (below).
 
 ### Settled and tail lines
 
@@ -104,7 +130,7 @@ names of a `pr` key come from the scenario's own writes, so a deployment or pull
 (`Deployments-NNN`, `{#old}`) in the later lines and does not match; and when the process wrote more than the fake keeps (400,000 writes),
 the check `golden tail writes: the fake kept every write of the process` fails and says how many were not kept.
 
-`raw.jsonl` keeps for each write `window` (a window was open), `kind` (a background kind, `commit` or `verb`) and `class` (`cause`,
+`raw.jsonl` keeps for each write `cause` (the request's `X-Fake-Cause`, or null), `kind` (a background kind, `commit` or `verb`) and `class` (`cause`,
 `background`, `leftover` or `timing`).
 
 ## Format and normalization
@@ -112,7 +138,7 @@ the check `golden tail writes: the fake kept every write of the process` fails a
 Header lines start with `# ` and are never compared: `suite`, `scenario`, `runs` (golden files); `writes` (the writes compared),
 `leftover`, `timing` (the writes left out, below), `bases` and `ends` (the fake's counters at the scenario's start and at its end,
 `number=` of `bases` being the first item number the scenario can create; for reading a record offline), `normalize-errors` (below,
-only when there was one), `windows` (how many cause windows opened), `cause`, `background` and `tail` (the number of `= `, `+ ` and
+only when there was one), `calls` (how many distinct cause ids of the scenario caused a write of the record), `cause`, `background` and `tail` (the number of `= `, `+ ` and
 `~ ` lines) in records. Every other line is one write in one of three sections:
 
 ```
@@ -168,7 +194,8 @@ string value, recursively, are normalized in this order:
    `Fworker.Item` and of the `FWORKER_ITEM` environment entry. Comment ids in `/issues/comments/n` become `{c}`.
 4. ISO-8601 dates and times become `{time}`; GUIDs `{guid}`; 40-hex runs `{sha}`; 32-hex runs `{hex32}`; `127.0.0.1:port` and
    `localhost:port` `...:{port}`.
-5. Outside `{...}` placeholders: durations (`12 s`, `3.5min`, ...) become `{dur}`; decimals `{n}`; a run of 7 or more lowercase hex characters with
+5. Outside `{...}` placeholders: a run of 7 to 40 lowercase hex characters right after `head `, `at `, `commit ` or `sha ` becomes `{sha}`
+   whatever its characters (a short SHA with no digit, about 1 in 1000); durations (`12 s`, `3.5min`, ...) become `{dur}`; decimals `{n}`; a run of 7 or more lowercase hex characters with
    a digit and a letter, or of exactly 7 digits, `{sha}` (short SHAs, before their digits could be masked); then every remaining run of 4
    or more digits `{n}`. Integers of 1 to 3 digits stay (counts, exit codes, step numbers).
 6. Comma lists of check names, whose order varies, are sorted: the list that opens a parenthesis (`(B, A; ...)`, `(B, A)`; one nested
@@ -244,7 +271,7 @@ Modes, from `TEST_GOLDEN`:
 |---|---|---|
 | unset or `compare` (CI) | yes | where a golden file exists |
 | `record` | yes | never |
-| `off` | no (`FAKE_RECORD_DIR` is not set; no cause windows) | never |
+| `off` | no (`FAKE_RECORD_DIR` and `FACTORY_TEST_CAUSE_HEADER` are not set; no cause ids) | never |
 
 Records go to `TEST_WRITES_DIR` when it is set (CI: `$RUNNER_TEMP/writes`), else to `writes/` in the suite's work directory.
 
@@ -267,11 +294,13 @@ jobs (above), so runs of different groupings can be merged.
    gh run download <run-id> --pattern 'writes-*-1' --dir /tmp/writes-1
    gh run download <run-id> --pattern 'writes-*-2' --dir /tmp/writes-2
    ```
-4. Merge them into this directory (it searches each directory recursively; a scenario missing from a run is reported and left out; more
-   runs are more `-From` directories):
+4. Merge them into this directory with the fake's command (`tests/FakeGitHub/GoldenMerge.cs`; build the fake first). It searches each
+   directory recursively; a scenario missing from a run is reported and left out; more runs are more directories, comma-separated or in
+   more `--from`:
    ```
-   pwsh -NoProfile -c ". tests/scenarios/lib.ps1; Merge-GoldenWrites -From /tmp/writes-1,/tmp/writes-2 -Out tests/scenarios/golden"
+   dotnet tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll merge-golden --from /tmp/writes-1,/tmp/writes-2 --out tests/scenarios/golden
    ```
+   `Merge-GoldenWrites -From ... -Out ...` of lib.ps1 runs the same command.
    For a full re-baseline, remove the old golden files first (`git rm -q 'tests/scenarios/golden/*/*.writes.txt'`), so that a scenario
    left out or unstable keeps none.
 5. Commit the golden files. The next CI run compares, and must be green on unchanged code.

@@ -8,8 +8,8 @@ using System.Text.RegularExpressions;
 // The golden-write recorder of Tier 1 (docs: tests/scenarios/golden/README.md). With FAKE_RECORD_DIR set, every write that reaches the fake
 // (POST, PUT, PATCH, DELETE and GraphQL mutations; not /_fake/*, not the credential mints) is kept for the open scenario, and
 // /_fake/scenario-end writes it normalized to <dir>/<suite>/<slug>.writes.txt and raw to <slug>.raw.jsonl. The file has three sections: "= "
-// the writes the scenario caused (the harness's own, and those inside a cause window of /_fake/cause that are not of a background kind), in
-// order; "+ " the settled background lines (first written at or before the last caused write) and "~ " the tail ones, sorted and distinct.
+// the writes the scenario caused (the harness's own, and those whose request carried the open scenario's cause id in X-Fake-Cause and that are
+// not of a background kind), in order; "+ " the settled background lines (first written at or before the last caused write) and "~ " the tail ones, sorted and distinct.
 // /_fake/group-check (at the end of the process) normalizes every later write against each closed scenario: <slug>.later.txt.
 // Recording only observes: the fake answers every request exactly as it does without it. Every member is called under the fake's one lock.
 sealed class WriteRecorder
@@ -18,8 +18,9 @@ sealed class WriteRecorder
     // readable lines: no \u escapes for quotes, angle brackets and the like (the files are compared as text, never parsed by a browser)
     static readonly JsonSerializerOptions Plain = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
-    // Window: whether a cause window of the harness was open when the write came (Cause)
-    sealed record Entry(long Seq, long Ms, string Method, string Path, string Query, int Status, string Source, JsonNode? Body, string? Field, bool Window);
+    // Cause: the request's X-Fake-Cause header ("" when it had none): the id of the harness's call (F in lib.ps1) whose verb made the write.
+    // Caused: that id is the open scenario's (its nonce, or nonce + "." + the call's number), decided when the write came (Record)
+    sealed record Entry(long Seq, long Ms, string Method, string Path, string Query, int Status, string Source, JsonNode? Body, string? Field, string Cause, bool Caused);
 
     readonly string dir;
     readonly List<Entry> entries = new();
@@ -27,14 +28,16 @@ sealed class WriteRecorder
     Dictionary<string, long> bases = new();
     string? suite, scenario, slug;
     long seq;
-    // the cause windows: how many requests of the harness to the gateway are open now (a count, so overlapping requests nest), and how many opened
-    int depth; long windows;
+    // the open scenario's cause nonce (8 random lowercase hex, Begin): the harness tags each call of F with "<nonce>.<n>", so an id of an earlier
+    // scenario (a verb or a gateway request that outlived its scenario) never counts as this one's
+    string? nonce;
 
-    // The kinds of write that are always background, also inside a cause window: what the gateway's own loops write (the plant's journal lines,
+    // The kinds of write that are always background, also when the request carried the scenario's cause id: what the gateway's own loops write (the plant's journal lines,
     // factory-state comments, claim refs, transcripts, the plant snapshot, the leader lease, revocation refs, and every write of the gateway's
     // own C# clients: the Cursor, Copilot, ARM and Octopus runtimes), and the journal lines of the sweep's merge watch (Verbs.Delivery.ps1:
     // master green, failed or broken, the release candidate, delivered to prod), which come whenever the sweep next looks at a merged item.
-    // A sweep or loop that runs while a verb of the harness runs writes them too, and nothing in a request tells the two apart (Kind).
+    // A loop the gateway starts while serving a verb's request (a plant tick, a snapshot) can carry the verb's cause id too, and the merge watch's
+    // lines come whenever the sweep looks, so they stay background whatever the request carried (Kind).
     public static readonly HashSet<string> BackgroundKinds = new(StringComparer.Ordinal) { "plant", "state", "merge-watch", "claims", "transcripts", "snapshot", "leader", "revoked", "gateway" };
     // the merge watch's journal lines (Add-Comment in plugin/scripts/lib/Verbs.Delivery.ps1), told by their text: "no release candidate" covers
     // "published no release candidate", "still no release candidate" and "but no release candidate carrying it"
@@ -76,10 +79,16 @@ sealed class WriteRecorder
     public static string SourceOf(string userAgent) =>
         userAgent.StartsWith("factory-worker-gateway", StringComparison.Ordinal) ? "rule" : userAgent.Contains("PowerShell", StringComparison.Ordinal) ? "harness" : "gateway";
 
-    /// <summary>Keeps one write. <paramref name="ms"/>: the time since the scenario's begin, for a replay of a raw record (null: the clock).</summary>
-    public void Record(string method, string path, string query, int status, string userAgent, JsonNode? body, string? field, long? ms = null)
+    /// <summary>Whether a request's cause id is the open scenario's: its nonce, or the nonce followed by "." and the call's number.</summary>
+    bool IsCaused(string cause) =>
+        scenario != null && nonce is { Length: > 0 } n && cause.Length > 0 && (cause == n || cause.StartsWith(n + ".", StringComparison.Ordinal));
+
+    /// <summary>Keeps one write. <paramref name="cause"/>: the request's X-Fake-Cause header ("" when none). <paramref name="ms"/>: the time since
+    /// the scenario's begin, for a replay of a raw record (null: the clock).</summary>
+    public void Record(string method, string path, string query, int status, string userAgent, JsonNode? body, string? field, string? cause, long? ms = null)
     {
-        var e = new Entry(scenario == null ? 0 : ++seq, ms ?? clock.ElapsedMilliseconds, method, path, query, status, SourceOf(userAgent), body, field, depth > 0);
+        cause ??= "";
+        var e = new Entry(scenario == null ? 0 : ++seq, ms ?? clock.ElapsedMilliseconds, method, path, query, status, SourceOf(userAgent), body, field, cause, IsCaused(cause));
         // (the timing writes, which are never compared, do not keep a scenario from going quiet)
         if (!Normalizer.IsTimingJournal(body) && !Normalizer.IsTimingWrite(method, path)) lastWriteTick = Environment.TickCount64;
         // every write of the process, also one made while no scenario is open, for the group check of the tail lines (GroupCheck)
@@ -169,18 +178,6 @@ sealed class WriteRecorder
         return new JsonObject { ["ok"] = true, ["recording"] = true, ["scenarios"] = closed.Count, ["checked"] = checkedCount, ["missing"] = missing, ["processWrites"] = all.Count, ["droppedProcessWrites"] = droppedProcessWrites };
     }
 
-    /// <summary>/_fake/cause { open: true | false }: a request of the harness to the gateway begins or ends. A close without an open is ignored.</summary>
-    public JsonObject Cause(JsonNode? b)
-    {
-        bool open; try { open = b?["open"] is JsonValue v && v.GetValueKind() == JsonValueKind.True; } catch { open = false; }
-        if (scenario != null)
-        {
-            if (open) { depth++; windows++; }
-            else if (depth > 0) depth--;
-        }
-        return new JsonObject { ["ok"] = true, ["recording"] = true, ["open"] = scenario != null, ["depth"] = depth };
-    }
-
     /// <summary>The kind of a write: one of <see cref="BackgroundKinds"/>, "commit" (another git commit) or "verb" (any other write).
     /// <paramref name="state"/>: its factory-state comment (Normalizer.StateOf), or null.</summary>
     static string Kind(Entry e, string? state)
@@ -223,8 +220,9 @@ sealed class WriteRecorder
         if (suite == "") suite = "unnamed";
         if (slug == "") slug = "scenario-" + Hash8(scenario);
         bases = new Dictionary<string, long>(worldBases);
-        entries.Clear(); seq = 0; depth = 0; windows = 0; clock.Restart();
-        return new JsonObject { ["ok"] = true, ["recording"] = true };
+        entries.Clear(); seq = 0; clock.Restart();
+        nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant();
+        return new JsonObject { ["ok"] = true, ["recording"] = true, ["cause"] = nonce };
     }
 
     /// <summary>Writes the open scenario's record. <paramref name="worldEnds"/>: the fake's counters now (Bases() at the end), so that a number
@@ -284,8 +282,8 @@ sealed class WriteRecorder
             }
             // one write the normalization cannot read (a regex timeout, an odd body) is one line of its own, never the loss of the record
             catch (Exception ex) { line = $"{e.Source} {e.Method} {{normalize-error}} {ex.GetType().Name}"; add = true; failed = true; left = false; timed = false; errors++; }
-            // cause or background: a write of the harness is always the scenario's; any other is the scenario's when it came inside a cause window
-            // and is not of a background kind
+            // cause or background: a write of the harness is always the scenario's; any other is the scenario's when its request carried the
+            // scenario's cause id (a rule-script run of one of its F calls) and it is not of a background kind
             var kind = Kind(e, state[i]);
             string cls;
             if (left) { leftover++; cls = "leftover"; }
@@ -298,7 +296,7 @@ sealed class WriteRecorder
                 if (state[i] != null && e.Status < 300 && !failed) line = $"{e.Source} STATE {state[i]}";
                 cause.Add(line); lastCause = Math.Max(lastCause, e.Ms);
             }
-            else if (e.Window && !BackgroundKinds.Contains(kind)) { kept++; cls = "cause"; cause.Add(line); lastCause = Math.Max(lastCause, e.Ms); }
+            else if (e.Caused && !BackgroundKinds.Contains(kind)) { kept++; cls = "cause"; cause.Add(line); lastCause = Math.Max(lastCause, e.Ms); }
             else
             {
                 kept++; cls = "background";
@@ -313,7 +311,7 @@ sealed class WriteRecorder
             raw.Append(new JsonObject
             {
                 ["seq"] = e.Seq, ["ms"] = e.Ms, ["method"] = e.Method, ["path"] = e.Path, ["query"] = e.Query, ["status"] = e.Status, ["source"] = e.Source,
-                ["field"] = e.Field, ["body"] = e.Body?.DeepClone(), ["leftover"] = left, ["timing"] = timed, ["window"] = e.Window, ["kind"] = kind, ["class"] = cls, ["line"] = line
+                ["field"] = e.Field, ["body"] = e.Body?.DeepClone(), ["leftover"] = left, ["timing"] = timed, ["cause"] = e.Cause.Length > 0 ? e.Cause : null, ["kind"] = kind, ["class"] = cls, ["line"] = line
             }.ToJsonString(Plain)).Append('\n');
         }
         var sd = Path.Combine(dir, suite!);
@@ -332,7 +330,9 @@ sealed class WriteRecorder
             var first = stateLines.TryGetValue(l, out var sk) && stateFirst.TryGetValue(sk, out var sf) ? sf : firstMs.TryGetValue(l, out var fm) ? fm : long.MaxValue;
             (first <= lastCause ? settled : tail).Add(l);
         }
-        text.Append("# windows: ").Append(windows).Append('\n').Append("# cause: ").Append(cause.Count).Append('\n').Append("# background: ").Append(settled.Count).Append('\n')
+        // calls: how many of the harness's calls (distinct cause ids) caused a write of the record
+        var calls = entries.Where(e => e.Caused).Select(e => e.Cause).Distinct(StringComparer.Ordinal).Count();
+        text.Append("# calls: ").Append(calls).Append('\n').Append("# cause: ").Append(cause.Count).Append('\n').Append("# background: ").Append(settled.Count).Append('\n')
             .Append("# tail: ").Append(tail.Count).Append('\n');
         // "= " the caused writes in the order they came, "+ " the settled background lines, "~ " the tail ones (both distinct, sorted ordinal)
         foreach (var l in cause) text.Append("= ").Append(l).Append('\n');
@@ -343,14 +343,14 @@ sealed class WriteRecorder
         File.WriteAllText(rawFile, raw.ToString(), utf8);
         var own = new HashSet<string>(cause, StringComparer.Ordinal); own.UnionWith(lines);
         closed.Add(new Closed(suite!, slug!, scenario!, norm, all.Count, own));
-        scenario = null; suite = null; slug = null; entries.Clear(); depth = 0;
-        return (200, new JsonObject { ["ok"] = true, ["file"] = file, ["raw"] = rawFile, ["writes"] = kept, ["leftover"] = leftover, ["timing"] = timing, ["cause"] = cause.Count, ["background"] = settled.Count, ["tail"] = tail.Count, ["windows"] = windows });
+        scenario = null; suite = null; slug = null; entries.Clear(); nonce = null;
+        return (200, new JsonObject { ["ok"] = true, ["file"] = file, ["raw"] = rawFile, ["writes"] = kept, ["leftover"] = leftover, ["timing"] = timing, ["cause"] = cause.Count, ["background"] = settled.Count, ["tail"] = tail.Count, ["calls"] = calls });
     }
 
     public JsonObject Open() => new()
     {
         ["open"] = scenario != null, ["suite"] = suite, ["scenario"] = scenario, ["unlabelledWrites"] = Unlabelled,
-        ["writes"] = new JsonArray(entries.Select(e => (JsonNode)new JsonObject { ["seq"] = e.Seq, ["ms"] = e.Ms, ["method"] = e.Method, ["path"] = e.Path, ["query"] = e.Query, ["status"] = e.Status, ["source"] = e.Source, ["field"] = e.Field, ["window"] = e.Window, ["body"] = e.Body?.DeepClone() }).ToArray()), ["causeDepth"] = depth
+        ["writes"] = new JsonArray(entries.Select(e => (JsonNode)new JsonObject { ["seq"] = e.Seq, ["ms"] = e.Ms, ["method"] = e.Method, ["path"] = e.Path, ["query"] = e.Query, ["status"] = e.Status, ["source"] = e.Source, ["field"] = e.Field, ["cause"] = e.Cause.Length > 0 ? e.Cause : null, ["body"] = e.Body?.DeepClone() }).ToArray()), ["nonce"] = nonce
     };
 
     static string RawText(JsonNode? body) { try { return body?.ToJsonString(Plain) ?? ""; } catch { return ""; } }
@@ -588,7 +588,7 @@ sealed class WriteRecorder
             // 2.-3. times, GUIDs, SHAs and 32-hex runs; 6. ports
             foreach (var (re, to) in Masks) s = re.Replace(s, to);
             // 7.-8. durations, then every remaining run of 4 or more digits and every decimal (never inside a placeholder)
-            s = MaskOutside(s, t => Digits.Replace(ShortHex.Replace(Decimal.Replace(Duration.Replace(t, "{dur}"), "{n}"), "{sha}"), "{n}"));
+            s = MaskOutside(s, t => Digits.Replace(ShortHex.Replace(Decimal.Replace(Duration.Replace(NamedSha.Replace(t, "{sha}"), "{dur}"), "{n}"), "{sha}"), "{n}"));
             // 9. comma lists of check names, which come in varying order, sorted: the list that opens a parenthesis ("(B, A; …)", "(B, A)")
             // and the list of "with B, A passing"
             s = ParenList.Replace(s, m =>
@@ -693,6 +693,9 @@ sealed class WriteRecorder
         static readonly Regex Digits = new("\\d{4,}");
         // a hex run of 7 or more with a digit and a letter, or exactly 7 digits (the fake's short SHAs; a 7-digit number is never a count here)
         static readonly Regex ShortHex = new("\\b(?:(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,}|\\d{7})\\b");
+        // a SHA where the text names one ("at head fbdfbfa", "master is GREEN at ..."): any 7 to 40 hex characters, also all letters or all digits,
+        // which ShortHex leaves (about 1 short SHA in 1000 has no digit; seen as an unstable caused write, issue #386)
+        static readonly Regex NamedSha = new("(?<=\\b(?:head|at|commit|sha) )[0-9a-f]{7,40}\\b", RegexOptions.None, T);
         static readonly Regex IdSegment = new("/(reviews|check-runs|jobs|runs|artifacts|releases|assets)/(\\d+)");
         static readonly Regex UploadName = new("(?:^|[?&])name=([^&]*)");
 

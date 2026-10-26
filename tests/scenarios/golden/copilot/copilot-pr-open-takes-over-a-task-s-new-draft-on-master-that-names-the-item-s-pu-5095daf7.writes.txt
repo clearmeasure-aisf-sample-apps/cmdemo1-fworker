@@ -16,6 +16,4 @@
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **Owner:** Copilot task [{task}]({agent-url}) owns #{#1} from Development until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item.\n\n<!-- factory-journal:factory-worker -->"}
 + rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"Superseded by #{#3}, the pull request of #{#1} now: it holds this branch's commits and the fix. Closed by the factory worker gateway."}
 + rule STATE factory-worker v1 #{#1}
-~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}
-~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (stopped); offering to the next worker. Copilot session: {agent-url}\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}

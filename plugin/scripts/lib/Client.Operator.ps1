@@ -93,7 +93,7 @@ function Invoke-OperatorSubscribe($a) {
 
 # One call of the gateway with the operator session credential: prints the gateway's JSON and exits with its exit code.
 function Invoke-OperatorCall($Cfg, [string]$Method, [string]$Path, $Body = $null, [int]$TimeoutSec = 150) {
-    $p = @{ Uri = "$($Cfg.url)$Path"; Method = $Method; Headers = @{ Authorization = "Bearer $(Get-OperatorCredential)" }; SkipHttpErrorCheck = $true; TimeoutSec = $TimeoutSec }
+    $p = @{ Uri = "$($Cfg.url)$Path"; Method = $Method; Headers = (@{ Authorization = "Bearer $(Get-OperatorCredential)" } + (Get-FwCauseHeaders)); SkipHttpErrorCheck = $true; TimeoutSec = $TimeoutSec }
     if ($null -ne $Body) { $p.Body = ($Body | ConvertTo-Json -Depth 6 -Compress); $p.ContentType = 'application/json; charset=utf-8' }
     try { $resp = Invoke-WebRequest @p } catch { Write-Out @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
     $text = $resp.Content; if ($text -is [byte[]]) { $text = [Text.Encoding]::UTF8.GetString($text) }
@@ -179,3 +179,7 @@ function Invoke-OperatorVerb([string]$Sub, $a, $cfg) {
         default { Usage 'operator verbs: release-check, record-release, status, peers, digest, questions, traffic, send, answer, read, mode, grant, drain, resume, capacity, metrics' }
     }
 }
+
+# Test-only (Tier 1 golden writes): factory.ps1 client mode defines Get-FwCauseHeaders (the X-Fake-Cause of a harness's call). This file is also
+# loaded on its own (tests, tools); then no call carries a cause id and no header is sent.
+if (-not (Get-Command -Name Get-FwCauseHeaders -CommandType Function -ErrorAction SilentlyContinue)) { function Get-FwCauseHeaders { return @{} } }

@@ -473,6 +473,18 @@ JsonObject? SessionLinkOf(Principal p)
     return new JsonObject { ["name"] = p.Name, ["url"] = url };
 }
 
+// Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless FACTORY_TEST_CAUSE_HEADER=1: a request's X-Fake-Cause is held
+// while the request is served, so every rule-script run started meanwhile carries it (TestCause.cs); cleared at the end of the request
+if (TestCause.On)
+    app.Use(async (ctx, next) =>
+    {
+        var cause = ctx.Request.Headers["X-Fake-Cause"].ToString();
+        if (cause.Length == 0) { await next(); return; }
+        var box = TestCause.Begin(cause);
+        try { await next(); }
+        finally { TestCause.End(box); }
+    });
+
 app.Use(async (ctx, next) =>
 {
     var port = ctx.Connection.LocalPort;
