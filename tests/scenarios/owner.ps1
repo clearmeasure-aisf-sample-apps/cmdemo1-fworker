@@ -915,7 +915,9 @@ $OwnerScenarios['owner: the plant survives a graceful restart: owner, accepted a
         $logs = Get-ChildItem -Path $script:Work -File -Filter 'gateway*.out' | ForEach-Object { Get-Content $_.FullName } | Where-Object { $_ -match '"gateway":"plant-(snapshot|restore)"' }
         $saved = $logs | Where-Object { $_ -match '"gateway":"plant-snapshot"' -and $_ -match '"exit":0' }
         Check 'at SIGTERM the gateway wrote its plant to GitHub: exit 0' (@($saved).Count -ge 1) (($logs -join "`n") + ' ' + (((Get-FakeState).refs) -join ' '))
-        [void](Wait-Until -Seconds 60 { $null -ne (Get-Plant).plantSnapshot.restore })
+        # the restore runs in the background after the start (gateway/Program.cs): /ready and the status answer before it, and until it has run the
+        # status has no plantSnapshot.restore, which StrictMode would throw on; wait for the field itself
+        [void](Wait-Until -Seconds 60 { $null -ne (Get-Plant).plantSnapshot.PSObject.Properties['restore'] })
         $st = Get-Plant; $rs = $st.plantSnapshot.restore
         Check 'the next start restored it before its first sweep: assignments and the owner' ($rs.skipped -eq '' -and $rs.assignments -ge 2 -and $rs.owners -ge 1) ($rs | ConvertTo-Json -Compress)
         Check 'the snapshot is used once: the start removed the ref after reading it' ((Wait-Until -Seconds 30 { @((Get-FakeState).refs | Where-Object { $_ -match '/plant-snapshot$' }).Count -eq 0 })) (((Get-FakeState).refs) -join ' ')
