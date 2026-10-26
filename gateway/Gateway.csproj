@@ -13,5 +13,8 @@
   <ItemGroup>
     <!-- the Copilot cloud agent's stdio MCP proxy, served at /fworker-mcp.mjs -->
     <EmbeddedResource Include="Mcp/fworker-mcp.mjs" LogicalName="fworker-mcp.mjs" />
+    <!-- the dashboard page and its connect-prompt generator, put together by Templates/DashboardPage.cs, served at /dashboard -->
+    <EmbeddedResource Include="Templates/dashboard.html" LogicalName="dashboard.html" />
+    <EmbeddedResource Include="Templates/connect-prompt.js" LogicalName="connect-prompt.js" />
   </ItemGroup>
 </Project>
