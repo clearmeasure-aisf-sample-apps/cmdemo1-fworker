@@ -1333,6 +1333,14 @@ sealed class World
                 }
                 return (200, J(("ok", true)));
             }
+            // deliver-prod {}: the production deployment of every release whose prodDelaySeconds is not yet up is due now (a scenario holds
+            // the delivery with a long delay, acts while it is pending, then lets it happen: no race with the delay's clock)
+            case "deliver-prod":
+            {
+                var now = DateTime.UtcNow; var n = 0;
+                foreach (var r in releases) if (r.At.AddSeconds(r.ProdDelay) > now) { r.ProdDelay = Math.Max(0, (now - r.At).TotalSeconds); n++; }
+                return (200, J(("ok", true), ("released", n)));
+            }
             case "config":
                 if (b?["masterRed"] != null) masterRed = b["masterRed"]!.GetValue<bool>();
                 if (b?["prodDelaySeconds"] != null) prodDelay = b["prodDelaySeconds"]!.GetValue<double>();

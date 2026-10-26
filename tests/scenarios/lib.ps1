@@ -196,7 +196,8 @@ $script:CauseSkipRoleActions = @('status', 'metrics', 'act-log', 'release-check'
 function F([string]$Holder, [string[]]$FactoryArgs) {
     $skip = $FactoryArgs.Count -gt 0 -and ($FactoryArgs[0] -in $script:CauseSkipVerbs -or ($FactoryArgs[0] -in $script:CauseRoleVerbs -and $FactoryArgs.Count -gt 1 -and $FactoryArgs[1] -in $script:CauseSkipRoleActions))
     $id = ''
-    if ($script:GoldenOpen -and -not $skip -and $script:CauseNonce) { $id = "$($script:CauseNonce).$(++$script:CauseSeq)" }
+    # (the count is raised as a statement of its own: ++$x inside "$( )" outputs nothing, so every id came out as "<nonce>.")
+    if ($script:GoldenOpen -and -not $skip -and $script:CauseNonce) { $script:CauseSeq++; $id = "$($script:CauseNonce).$($script:CauseSeq)" }
     return Invoke-F $Holder $FactoryArgs -Cause $id
 }
 # -Cause: the call's cause id (F), passed to the client as FACTORY_TEST_CAUSE of that call only: in the runner host's call environment, or set
@@ -455,15 +456,16 @@ function Wait-RecordSettled {
 # the suite's invariant counts (issue #386: seen on item 25 of the auto suite). After every sweep the loop waits 2 s before the next one
 # (gateway/Sweeper.cs), so the reset goes in that gap: at once when the last full sweep ended less than 1.5 s ago, else after the sweep that runs
 # now has ended (lastSweep moves), at most 5 s. No wait without a gateway, or when its last sweep is more than 8 s old (a suite whose sweep
-# interval is long: no sweep is due), or when it never swept.
-function Wait-SweepGap {
+# interval is long: no sweep is due), or when it never swept. A scenario that edits an item's state which the sweep also saves (Set-ItemState)
+# makes the edit in the same gap, so no sweep reads the state before the edit and saves it after (-MaxAge: how recent the last sweep must be).
+function Wait-SweepGap([double]$MaxAge = 1.5) {
     $base = try { Get-GatewayBase } catch { $null }
     if (-not $base) { return }
     $read = { try { $v = (Invoke-RestMethod "$base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2).lastSweep; if ($v -is [datetime]) { $v.ToUniversalTime() } elseif ("$v") { [datetime]::Parse("$v").ToUniversalTime() } else { $null } } catch { $null } }
     $first = & $read
     if ($null -eq $first) { return }
     $age = ([datetime]::UtcNow - $first).TotalSeconds
-    if ($age -lt 1.5 -or $age -gt 8) { return }
+    if ($age -lt $MaxAge -or $age -gt 8) { return }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     while ($sw.ElapsedMilliseconds -lt 5000) {
         Start-Sleep -Milliseconds 100
