@@ -588,7 +588,7 @@ sealed class WriteRecorder
             // 2.-3. times, GUIDs, SHAs and 32-hex runs; 6. ports
             foreach (var (re, to) in Masks) s = re.Replace(s, to);
             // 7.-8. durations, then every remaining run of 4 or more digits and every decimal (never inside a placeholder)
-            s = MaskOutside(s, t => Digits.Replace(ShortHex.Replace(Decimal.Replace(Duration.Replace(t, "{dur}"), "{n}"), "{sha}"), "{n}"));
+            s = MaskOutside(s, t => Digits.Replace(ShortHex.Replace(Decimal.Replace(Duration.Replace(NamedSha.Replace(t, "{sha}"), "{dur}"), "{n}"), "{sha}"), "{n}"));
             // 9. comma lists of check names, which come in varying order, sorted: the list that opens a parenthesis ("(B, A; …)", "(B, A)")
             // and the list of "with B, A passing"
             s = ParenList.Replace(s, m =>
@@ -693,6 +693,9 @@ sealed class WriteRecorder
         static readonly Regex Digits = new("\\d{4,}");
         // a hex run of 7 or more with a digit and a letter, or exactly 7 digits (the fake's short SHAs; a 7-digit number is never a count here)
         static readonly Regex ShortHex = new("\\b(?:(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,}|\\d{7})\\b");
+        // a SHA where the text names one ("at head fbdfbfa", "master is GREEN at ..."): any 7 to 40 hex characters, also all letters or all digits,
+        // which ShortHex leaves (about 1 short SHA in 1000 has no digit; seen as an unstable caused write, issue #386)
+        static readonly Regex NamedSha = new("(?<=\\b(?:head|at|commit|sha) )[0-9a-f]{7,40}\\b", RegexOptions.None, T);
         static readonly Regex IdSegment = new("/(reviews|check-runs|jobs|runs|artifacts|releases|assets)/(\\d+)");
         static readonly Regex UploadName = new("(?:^|[?&])name=([^&]*)");
 

@@ -450,11 +450,33 @@ function Wait-RecordSettled {
         Start-Sleep -Milliseconds ([int][math]::Max(50, [math]::Min($wait, $left)))
     }
 }
+# Before a scenario's /_fake/reset: the reset must not land while the gateway's sweep is reading the items it removes. A sweep that is settling an
+# item the scenario before merged (its release candidate, its delivery) then finds the card or the Octopus task gone and logs a sweep error, which
+# the suite's invariant counts (issue #386: seen on item 25 of the auto suite). After every sweep the loop waits 2 s before the next one
+# (gateway/Sweeper.cs), so the reset goes in that gap: at once when the last full sweep ended less than 1.5 s ago, else after the sweep that runs
+# now has ended (lastSweep moves), at most 5 s. No wait without a gateway, or when its last sweep is more than 8 s old (a suite whose sweep
+# interval is long: no sweep is due), or when it never swept.
+function Wait-SweepGap {
+    $base = try { Get-GatewayBase } catch { $null }
+    if (-not $base) { return }
+    $read = { try { $v = (Invoke-RestMethod "$base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2).lastSweep; if ($v -is [datetime]) { $v.ToUniversalTime() } elseif ("$v") { [datetime]::Parse("$v").ToUniversalTime() } else { $null } } catch { $null } }
+    $first = & $read
+    if ($null -eq $first) { return }
+    $age = ([datetime]::UtcNow - $first).TotalSeconds
+    if ($age -lt 1.5 -or $age -gt 8) { return }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt 5000) {
+        Start-Sleep -Milliseconds 100
+        $now = & $read
+        if ($null -eq $now -or $now -ne $first) { return }
+    }
+}
 function Run-Scenario([string]$Name, [scriptblock]$Body) {
     $script:Current = $Name; Write-Host "  $Name"
     $tmStart = [Diagnostics.Stopwatch]::StartNew(); $tmChecks = $script:Checks; $tmFailed = $script:Failures.Count
     $goldenMode = Get-GoldenMode
     try {
+        try { Wait-SweepGap } catch { }
         Fake 'reset' @{} | Out-Null
         # the record of this scenario's writes starts after the reset (tests/scenarios/golden/README.md)
         if ($goldenMode -ne 'off') {

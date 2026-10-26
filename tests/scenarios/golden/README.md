@@ -194,7 +194,8 @@ string value, recursively, are normalized in this order:
    `Fworker.Item` and of the `FWORKER_ITEM` environment entry. Comment ids in `/issues/comments/n` become `{c}`.
 4. ISO-8601 dates and times become `{time}`; GUIDs `{guid}`; 40-hex runs `{sha}`; 32-hex runs `{hex32}`; `127.0.0.1:port` and
    `localhost:port` `...:{port}`.
-5. Outside `{...}` placeholders: durations (`12 s`, `3.5min`, ...) become `{dur}`; decimals `{n}`; a run of 7 or more lowercase hex characters with
+5. Outside `{...}` placeholders: a run of 7 to 40 lowercase hex characters right after `head `, `at `, `commit ` or `sha ` becomes `{sha}`
+   whatever its characters (a short SHA with no digit, about 1 in 1000); durations (`12 s`, `3.5min`, ...) become `{dur}`; decimals `{n}`; a run of 7 or more lowercase hex characters with
    a digit and a letter, or of exactly 7 digits, `{sha}` (short SHAs, before their digits could be masked); then every remaining run of 4
    or more digits `{n}`. Integers of 1 to 3 digits stay (counts, exit codes, step numbers).
 6. Comma lists of check names, whose order varies, are sorted: the list that opens a parenthesis (`(B, A; ...)`, `(B, A)`; one nested

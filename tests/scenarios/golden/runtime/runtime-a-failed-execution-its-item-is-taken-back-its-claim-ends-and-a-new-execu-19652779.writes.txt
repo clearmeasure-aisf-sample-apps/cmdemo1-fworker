@@ -7,9 +7,9 @@
 + rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cae-{session}/1","sha":"{sha}"}
-+ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/cae-{session}","sha":"{sha}"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **cae-{session}** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cae-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cae-{session} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cae-{session} ended (failed); offering to the next worker.\n\n<!-- plant event=reassigned key=rtend|a-{id}|cae-{session} -->"}
 + rule STATE factory-worker v1 #{#1}
 ~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
+~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/cae-{session}","sha":"{sha}"}

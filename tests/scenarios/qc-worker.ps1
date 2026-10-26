@@ -49,10 +49,13 @@ function Qw-Worker([string]$Name = 'qwl', [string]$Extra = '--qc-capacity 1') {
 function Qw-Track($x, [string]$Worker, [string]$Profile) { [void]$script:QwEnvs.Add(@{ n = $x.n; pr = $x.pr; env = $x.env; worker = $Worker; profile = $Profile }) }
 function Qw-Alive([int]$ProcId) {
     if ($ProcId -le 0) { return $false }
-    if (Test-Path "/proc/$ProcId/stat") { return ((Get-Content -Raw "/proc/$ProcId/stat") -notmatch '^\d+ \(.*\) Z') }
-    return $false
+    # (read, not tested first: a process that ends between a Test-Path and the read takes its /proc entry with it, and that is "not alive")
+    $stat = try { [IO.File]::ReadAllText("/proc/$ProcId/stat") } catch [IO.IOException] { $null } catch [UnauthorizedAccessException] { $null }
+    if ($null -eq $stat) { return $false }
+    return ($stat -notmatch '^\d+ \(.*\) Z')
 }
-function Qw-Env([int]$ProcId) { if (Test-Path "/proc/$ProcId/environ") { return @((Get-Content -Raw "/proc/$ProcId/environ") -split "`0" | Where-Object { $_ }) }; return @() }
+# (the same for its environment: a process that is gone has none)
+function Qw-Env([int]$ProcId) { $e = try { [IO.File]::ReadAllText("/proc/$ProcId/environ") } catch [IO.IOException] { $null } catch [UnauthorizedAccessException] { $null }; if ($null -eq $e) { return @() }; return @($e -split "`0" | Where-Object { $_ }) }
 function Qw-PortOpen([int]$Port) { try { $c = [Net.Sockets.TcpClient]::new(); $ar = $c.BeginConnect('127.0.0.1', $Port, $null, $null); $ok = $ar.AsyncWaitHandle.WaitOne(500) -and $c.Connected; $c.Close(); return $ok } catch { return $false } }
 function Qw-HttpOk([string]$Url) { try { return ([int](Invoke-WebRequest $Url -TimeoutSec 3 -SkipHttpErrorCheck -NoProxy).StatusCode -eq 200) } catch { return $false } }
 function Qw-EnvPid([string]$Env, [string]$File) { $f = Join-Path (Join-Path (Qw-BaseDir) $Env) $File; if (Test-Path $f) { return [int](Get-Content -Raw $f).Trim() }; return 0 }
