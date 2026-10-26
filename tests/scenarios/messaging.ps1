@@ -2267,6 +2267,10 @@ $ManagerScenarios['mgr: a directive reaches one worker, an announcement every wo
             Check 'as supervisor.announcement, with the supervisor''s role, its declared model and its warning' ($ea.event -eq 'supervisor.announcement' -and $ea.provider -eq 'client' -and $ea.fromKind -eq 'supervisor' -and $ea.fromModel -eq 'claude-opus-5-5' -and $ea.trust -eq 'supervisor-text' -and $ea.text -eq 'Gateway restarts at 15:00.' -and $ea.warning -like 'From the supervisor session*') ($ea | ConvertTo-Json -Compress -Depth 6)
             $carol = Msg-Client 'carol' 's5-dir-1'
             Check 'carol, without a stream until now, gets it on connect' (Msg-WaitPrinted $carol $an.id)
+            # the client prints, then acknowledges the delivery (Send-MessageAck): a kill between the two leaves the message pushed but not
+            # delivered, and the gateway sends it again on the next connect (a lost acknowledgement is resent by design). The kill waits until the
+            # gateway holds carol's copy as delivered, so the check below is about a delivered message.
+            [void](Wait-Until -Seconds 30 { $ij = Msg-Json (Msg-Api 'GET' "/api/v1/inbox?id=$($an.id)" (Msg-Token 'carol')); $ij.ContainsKey('messages') -and @($ij.messages | Where-Object { "$($_['state'])" -in 'delivered', 'handled' }).Count -eq 1 })
             Stop-Process -Id $carol.proc.Id -Force
             $carol2 = Msg-Client 'carol' 's5-dir-2'
             Check 'carol connects once more' (Msg-WaitEvent $carol2 'worker.registered')
