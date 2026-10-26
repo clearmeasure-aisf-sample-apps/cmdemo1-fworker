@@ -49,6 +49,9 @@ $LeaseScenarios['lease: the client accepts an owner offer itself (acceptedBy cli
             Check 'the next sweep offers it again, in resume mode' ($re -and $re.data.mode -eq 'resume') ($re | ConvertTo-Json -Compress -Depth 5)
             $r = Msg-Json (Msg-Verb 'claim-item' (Msg-ItemToken $n 'owner' 'alice') @{ item = $n; renew = $true })
             Check 'the old owner cannot renew the claim it lost' ($r.exit -eq 40 -and $r.code -eq 'claim-not-held') ($r | ConvertTo-Json -Compress)
+            # (issue #395) the offer is pushed to bob first and journalled after it, one rule-script run later on the item's journal chain (Plant.Offer);
+            # this gateway is stopped when the body ends, so without this wait the line was often never written
+            Check 'the journal says it was offered to bob' (Wait-Until -Seconds 30 { @((Ls-Journal $n 'offered') | Where-Object { $_.body -match 'offered to \*\*bob\*\*' }).Count -ge 1 }) ((Ls-Journal $n 'offered').body -join "`n")
         } finally { Msg-Close $bob }
     }
 }

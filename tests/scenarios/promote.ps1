@@ -146,6 +146,10 @@ $PromoteScenarios = [ordered]@{
     # a later sweep answers the deployment's Sign-off (responsible, submit, then the journal line): waited for, so those writes land in this
     # scenario's own record every time and not only when a sweep happens to come before the record closes (issue #386)
     Check 'and its Sign-off is answered Proceed by the gateway and journaled' (Wait-Until -Seconds 40 { @(Pm-Dep '3.6.1' 'uat')[0].result -eq 'Proceed' -and @(Pm-Events $i.n 'promotion-signoff').Count -ge 1 }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    # (issue #395) the sweep after the Sign-off finds uat Success and judges prod: its first uat health read cannot fill the reads window, so it
+    # journals that the release waits for prod. The sweep that journaled the Sign-off can end after the body, and Wait-RecordSettled then took it
+    # for the sweep since the body and closed the record before the next one wrote this line
+    Check 'then it waits for prod until the uat app has been healthy long enough' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'automatic promotion to \*\*prod\*\*: the uat app has not been Healthy long enough' }).Count -ge 1 }) (Pm-Brief $i.n)
 }
 
 'promote: a gate that fails while the Sign-off waits makes the gateway abort it; a 403 of the interruption names the permission' = {
@@ -248,6 +252,8 @@ $PromoteScenarios = [ordered]@{
     [void](Fake 'app-build' @{ version = '9.9.9' })
     [void](Fake 'octo-forbid' @{})
     Check 'Proceed' (Wait-Until -Seconds 40 { @(Pm-Dep '3.16.1' 'uat')[0].result -eq 'Proceed' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    # (issue #395) the sweep after the Sign-off judges prod and journals why it waits (the uat app runs 9.9.9): waited for, as in the 403 scenario
+    Check 'then it waits for prod: the uat app does not run the release yet' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'automatic promotion to \*\*prod\*\*: the uat app does not run release 3\.16\.1 yet' }).Count -ge 1 }) (Pm-Brief $i.n)
 }
 
 'promote: a Hold label put on an item while the Sign-off waits aborts it' = {

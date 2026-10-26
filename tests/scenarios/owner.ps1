@@ -793,15 +793,23 @@ $OwnerScenarios['pass-merge: a push after the verdict voids it: not merged, the 
     Check 'not merged, and the reason names the change after the verdict, once' (-not (Get-FakePr $x.pr).merged -and $why -eq 1) "merged=$((Get-FakePr $x.pr).merged) comments=$why"
 }
 
+# The race in a fixed order (issue #395): which side merged followed the clock (the session's call or the sweep after the grace), so the merge and
+# its comment were caused writes in one run and background in the next. Both sides merge under the item lock. Here the session's merge call takes
+# the lock first and holds it while the checks of the head still run (it polls them); the sweep, once the grace is over, tries the item and finds
+# it busy (/status pass-unmerged item-busy: the two really met); only then do the checks finish, and the session's call merges. A sweep after the
+# merge must not merge again.
 $OwnerScenarios['pass-merge: the session''s merge call racing the sweep merges once [full]'] = {
     $x = Pm-ToValidation
-    Fake 'pr' @{ number = $x.pr; delaySeconds = 6 } | Out-Null
+    Fake 'pr' @{ number = $x.pr; delaySeconds = 3600 } | Out-Null     # the checks run until the scenario lets them finish
     $v = Pm-QuietPass $x; CheckExit 'the PASS verdict' $v 0
-    Start-Sleep -Seconds 7     # the grace is nearly over: the sweep and the session's call meet while the checks finish
-    $m = F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
-    Check 'the session''s merge: merged or already-merged' ($m.exit -eq 0 -and $m.outcome -in 'merged', 'already-merged') ($m | ConvertTo-Json -Compress -Depth 4)
-    Start-Sleep -Seconds 6
-    Check 'merged once' ((Get-FakePr $x.pr).merged -and (Pm-MergeComments $x.n $x.pr) -eq 1) "$(Pm-MergeComments $x.n $x.pr)"
+    $call = Start-FAsync 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
+    $busy = Wait-Until -Seconds 60 { @((Get-Plant).plant.passUnmerged | Where-Object { $_.item -eq $x.n -and $_.code -eq 'item-busy' }).Count -eq 1 }
+    Check 'the sweep tries the item while the session''s call holds it: pass-unmerged item-busy' $busy ((Get-Plant).plant.passUnmerged | ConvertTo-Json -Compress)
+    Fake 'pr' @{ number = $x.pr; delaySeconds = 0 } | Out-Null        # the checks finish
+    $m = Receive-FAsync $call
+    Check 'the session''s merge call merges' ($m.exit -eq 0 -and $m.outcome -eq 'merged') ($m | ConvertTo-Json -Compress -Depth 4)
+    Wait-Sweeps -Count 1
+    Check 'merged once, also after a sweep' ((Get-FakePr $x.pr).merged -and (Pm-MergeComments $x.n $x.pr) -eq 1) "$(Pm-MergeComments $x.n $x.pr)"
 }
 
 $OwnerScenarios['pass-merge: a pull request merged by a person settles the item from Development and from a PASS parked for a person'] = {
@@ -1200,6 +1208,9 @@ $OwnerScenarios['owner: auto-unpark: master-broken is lifted only once the check
     $ms = (Get-ItemState $k).merge
     Check "the item is judged on master's green head, not its merge commit" ($ms.judge_sha -eq $mm.sha -and $null -ne $ms.awaiting) ($ms | ConvertTo-Json -Compress)
     Check 'journalled as unparked by the sweep' ((Get-SweepUnparks $k) -eq 1)
+    # (issue #395) the unpark only puts the wait back to master-green (Verbs.Sweep.ps1 goes on past the settle step); the next sweep's settle step
+    # judges that head and journals "master is GREEN". The scenario ended before it, so the next scenario's reset often removed the item first.
+    Check 'the next sweep finds the judged head green: master GREEN journalled, waiting for the release candidate' (Wait-Until -Seconds 40 { "$((Get-ItemState $k).merge.awaiting)" -eq 'release-candidate' -and @((Get-FakeIssue $k).comments | Where-Object { "$($_.body)" -match 'master is GREEN at' -and "$($_.body)" -match 'factory-journal:' }).Count -eq 1 }) ((Get-ItemState $k).merge | ConvertTo-Json -Compress)
 }
 
 # The board guard: an open issue with the factory label that has no card is put on the board in the intake column by the sweep, journalled once, and
