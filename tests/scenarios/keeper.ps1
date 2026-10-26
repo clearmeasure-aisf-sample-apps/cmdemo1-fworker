@@ -125,11 +125,7 @@ $KeeperScenarios['keeper: replenish creates one docs-only item per Done item on 
         param($g)
         Check 'a Done item gets one new item' (Wait-Until -Seconds 60 { @(& $made $d1).Count -eq 1 }) ((Get-FakeState).issues | ForEach-Object { $_.title } | Out-String)
         $n1 = @(& $made $d1)[0]
-        # replenish creates the issue first, then puts it on the board and in its column (Replenish.ps1): read until the card is placed, the
-        # first read can come between the two (column null)
-        $placed = Wait-Until -Seconds 30 { $x = @(& $made $d1)[0]; @('enhancement', 'Auto Merge', 'factory worker', 'env:tdd' | Where-Object { $x.labels -notcontains $_ }).Count -eq 0 -and $x.column -eq 'Technical Design' }
-        $n1 = @(& $made $d1)[0]
-        Check 'it carries enhancement, Auto Merge, factory worker and env:tdd and sits in Technical Design' $placed ($n1 | ConvertTo-Json -Compress -Depth 3)
+        Check 'it carries enhancement, Auto Merge, factory worker and env:tdd and sits in Technical Design' (@('enhancement', 'Auto Merge', 'factory worker', 'env:tdd' | Where-Object { $n1.labels -notcontains $_ }).Count -eq 0 -and $n1.column -eq 'Technical Design') ($n1 | ConvertTo-Json -Compress -Depth 3)
         Check 'it says the gateway created it to keep activity going and only docs change' ("$($n1.body)" -match 'to keep activity going' -and "$($n1.body)" -match 'Only Markdown files under `docs/`' -and "$($n1.title)" -like 'Docs: *') "$($n1.title)"
         Check 'the finished item has a journal line naming the new item' (Wait-Until -Seconds 20 { @((Get-FakeIssue $d1).comments | Where-Object { $_.body -match 'plant event=replenish ' -and $_.body -match "#$($n1.number)" }).Count -eq 1 }) (((Get-FakeIssue $d1).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(80, $_.body.Length)) }) -join ' | ')
         Start-Sleep -Seconds 8
