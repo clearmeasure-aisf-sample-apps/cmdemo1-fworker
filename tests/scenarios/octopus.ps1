@@ -22,6 +22,18 @@ $OctDefaultMachines = @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machin
 function Oct-Cleanup([int[]]$Items, [string[]]$Clients = @()) {
     foreach ($n in $Items) { if ($n) { Rt-Close $n } }
     foreach ($c in $Clients) { if ($c -and $script:Workers.ContainsKey($c)) { Stop-OwnerClient $c } }
+    # The plant keeps a closed item's assignment until a sweep that read the board after the close: the host reports below let the gateway start
+    # workers again, and an assignment of the last sweep before the close was started then (asynchronously, after the octo-reset below: the next
+    # scenario found a Start worker run for this scenario's item). So the reports wait for a full sweep begun after the close and for the plant
+    # to hold no unaccepted assignment of these items (an accepted one is its owner's and starts nothing).
+    $closed = @($Items | Where-Object { $_ })
+    if ($closed.Count) {
+        $f0 = try { [long](Get-Plant).sweep.full } catch { [long]-1 }
+        if ($f0 -ge 0) {
+            $quiet = Wait-Until -Seconds 90 { try { $p = Get-Plant; [long]$p.sweep.full -ge $f0 + 2 -and @($p.plant.assignments | Where-Object { [int]$_.item -in $closed -and -not $_.accepted }).Count -eq 0 } catch { $false } }
+            if (-not $quiet) { Write-Host "    note  Oct-Cleanup: after 90 s still fewer than two full sweeps since the close, or an unaccepted assignment of item(s) $($closed -join ', '); the host reports go ahead" }
+        }
+    }
     Oct-Machines $OctDefaultMachines
     foreach ($r in @((Oct-State).runs | Where-Object { $_.state -eq 'Executing' })) { [void](Fake 'octo-task' @{ id = $r.task; state = 'Success' }) }
     [void](Wait-Until -Seconds 30 { [void](Oct-Report 'host-a' @()); [void](Oct-Report 'host-b' @()); (Oct-Status).running -eq 0 })
