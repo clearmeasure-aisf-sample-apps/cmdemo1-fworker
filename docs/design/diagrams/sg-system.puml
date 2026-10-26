@@ -1,0 +1,37 @@
+@startuml sg-system
+!include <C4/C4_Container>
+LAYOUT_TOP_DOWN()
+skinparam dpi 150
+title System-level gateway (future): one acting gateway per system, one repository per work item
+
+Person(owner, "Owner", "files issues in the repository they change; reviews where a repository's policy asks")
+System_Boundary(gw, "fworker gateway of cmdemo1 (the acting one, tdd)") {
+  Container(reg, "System catalog", "ISystemCatalog, read from cmdemo1-system system.json (last good copy kept)", "repositories: branch, checks, build, merge strategy, docs and protected paths, toolchain, WIP limit, policy; deployables: Octopus project, environments, health, evidence, promoter, database; home; board")
+  Container(ingress, "Event ingress", "S3", "org or App webhooks; business-key dedup; correlation to ItemId")
+  Container(intake, "Intake", "rules", "per-repository WIP limit")
+  Container(sched, "CapacityScheduler", "one per system", "one ranked queue; admission: Depends on (same repository), overlap (repo, path), toolchain match, budgets")
+  Container(items, "WorkItemSagas", "ItemId owner/repo#N + generation", "one repository each; plan by kind; repository from the token")
+  Container(mt, "MergeTrainSagas", "one per repository", "the repository's checks and merge strategy")
+  Container(dt, "DeliveryTrainSagas", "one per deployable and environment", "evidence per deployable, incl. dependencies-delivered(env)")
+  ContainerDb(dtt, "Delivered-to table", "item, environment, release", "kept from DeliveredTo / Undelivered")
+}
+System_Ext(repos, "Repositories on board 679", "cmdemo1-workorders, -app2-ui, -dashboard, -aisf, -fworker, -system (later others)")
+System_Ext(oct, "Octopus Spaces-355", "cmdemo1-ui, -app2-ui, -dashboard, -aisf, -fworker, -system; tdd, uat, prod")
+System_Ext(pools, "Worker pools", "Tentacle hosts and cloud agents advertising toolchains (.NET+SQL, pwsh+terraform+az, node)")
+
+Rel(owner, repos, "issues, reviews")
+Rel(repos, ingress, "webhooks")
+Rel(ingress, items, "events")
+Rel(intake, items, "start (within the WIP limit)")
+Rel(items, sched, "RequestSlot(repo, toolchain)")
+Rel(sched, pools, "start a matching worker")
+Rel(items, mt, "ReadyToMerge")
+Rel(mt, dt, "ItemMerged(owner/repo@sha, dependencies)")
+Rel(dt, oct, "promote (where the gateway is the promoter); Sign-offs")
+Rel(dt, dtt, "write")
+Rel(dtt, dt, "read: dependencies delivered here?")
+Rel(reg, intake, "WIP limits")
+Rel(reg, sched, "toolchains")
+Rel(reg, mt, "checks, strategy")
+Rel(reg, dt, "deployables, evidence, promoter")
+@enduml

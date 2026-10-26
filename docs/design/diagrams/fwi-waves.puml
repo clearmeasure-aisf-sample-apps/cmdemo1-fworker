@@ -1,0 +1,114 @@
+@startuml fwi-waves
+skinparam dpi 150
+title Implementing ADR 0001: stage C first and stabilised, then the waves (fork = tasks that may run together)
+
+start
+:W-1 decisions and prerequisites\n(#253, #254 merged; Program.cs frozen for outside PRs);
+partition "Stage C  Program.cs becomes a composition root (behaviour-neutral)" {
+  fork
+    :C-1 defect: board reading ignores other repositories;
+  fork again
+    :C0 safety net: golden writes, route-and-auth table,\nin-process calls, start-up test, CI job for smoke and parity;
+  end fork
+  fork
+    :C1 classes after app.Run to files;
+  fork again
+    :C2 dashboard and connect prompt as embedded resources;
+  end fork
+  :C3 configuration (options, InstanceConfig);
+  fork
+    :C4a RevocationService;
+    :C4b OperatorReleaseLoader;
+  fork again
+    :C4c TranscriptService;
+  end fork
+  :C4d LeadershipService + SnapshotCoordinator;
+  :C5a AddGateway*, IPlantHooks, InProcess via EndpointDataSource;
+  fork
+    :C5b prompt builders, RuntimeRegistry;
+    :C5c CopilotCiRelease, owner verbs, CloudOwnerWatch;
+  fork again
+    :C5d ManagerCopilotService, McpSessionSweeper;
+  end fork
+  :C6 GatewayAuthMiddleware, AdmissionService,\nICallerContext, PublicBase;
+  :C7a modules: health, status, metrics, dashboard,\nplugin, operator releases; endpoint filters;
+  fork
+    :C7b modules: runtime hosts, Copilot, transcripts,\nwebhook, demo, item and worker admin;
+  fork again
+    :C7c modules: wait, events/SSE, presence,\nmessaging, supervisor, test hooks;
+  end fork
+  :C7d VerbEndpoints + VerbPipeline;
+  :C8 policies, statics to DI, architecture test;
+}
+:stabilisation gate: architecture test; golden writes unchanged;\n2 measured tdd batches; promoted to uat and prod; 2 quiet weeks;
+partition "W0  safety and quick wins" {
+  :W0.0 flags;
+  fork
+    :W0.1 fencing;
+    fork
+      :W0.2 day budget;
+      :W0.7 durable budgets;
+      fork
+        :W0.8 flow metrics;
+      fork again
+        :W0.9 ranking, slot freed;
+        note right: W0.9 also after W0.6
+      end fork
+    fork again
+      :W0.3 rev, state budget;
+    fork again
+      :W0.6 replenish backpressure;
+      :W0.4 Depends-on refs;
+    end fork
+  fork again
+    :W0.5 exit-21 text;
+  end fork
+}
+:gate: tdd batch no slower; golden baseline re-recorded;
+partition "W1  structure and seams" {
+  :W1.0 projects, seam stubs;
+  fork
+    :W1.1 ItemId, catalog;
+    fork
+      :W1.2 catalog wiring;
+    fork again
+      :W1.8 token repo claim;
+    end fork
+  fork again
+    :W1.3 Domain first ports;
+  fork again
+    :W1.4 S1 in VerbPipeline;
+    fork
+      :W1.6 S3 ingress, S6 loopback;
+    fork again
+      :W1.7 S4 item state;
+    end fork
+    :W1.9 isolation tests;
+    note right: W1.9 after W0.4 and W1.0
+  fork again
+    :W1.5 S2 commands, S5 timers;
+  fork again
+    :W1.10 verb inventory;
+  end fork
+}
+:gate: golden writes identical to the W0-gate baseline;
+fork
+  partition "W2..W9 (the plan's tables are the source for their tasks, parallel groups and gates)" {
+    :W2 Wolverine host inert (7-day soak);
+    :W3 durable side effects;
+    :W4 ingress, board reconciler;
+    :W5 DeliveryTrainSaga (3 shadow releases);
+    :W6 docs plan;
+    :W7 feature plan;
+    :W8 incidents;
+    :W9 retire v1;
+  }
+fork again
+  partition "Lane D beside W1..W7" {
+    :D2, D3 (before W5);
+    :D4, D5 (before W6);
+    :D1, D6, D7 (before W7);
+  }
+end fork
+stop
+@enduml
