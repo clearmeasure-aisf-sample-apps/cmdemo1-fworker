@@ -51,205 +51,62 @@ if (keeper.Enabled) messaging.Reserved.UnionWith(keeper.Names);
 var builder = WebApplication.CreateBuilder(args);
 var apiPort = gw.ApiPort;
 var hookPort = gw.HookPort;
-// Container mode (FACTORY_SINGLE_PORT, or ASPNETCORE_HTTP_PORTS from the image): one listener on every interface; the routes separate by path
-// (webhook: HMAC only; /api: bearer token; /health, /_build, /dashboard page: anonymous). Local mode keeps two loopback listeners.
+// Container mode (FACTORY_SINGLE_PORT): one listener for the API and the webhook (GatewayHostingExtensions); the middleware tells them apart by path
 var singlePort = gw.SinglePort;
-if (singlePort > 0) { apiPort = singlePort; hookPort = singlePort; builder.WebHost.ConfigureKestrel(k => k.ListenAnyIP(singlePort)); }
-else builder.WebHost.ConfigureKestrel(k => { k.ListenLocalhost(apiPort); k.ListenLocalhost(hookPort); });
-builder.Logging.SetMinimumLevel(LogLevel.Warning);
-builder.Services.AddSingleton<EventHub>();
-builder.Services.AddSingleton(qcSettings);
-// the configuration as read above, the same instances the locals hold (registered as instances: ValidateOnBuild has nothing to construct)
-builder.Services.AddSingleton(gw);
-builder.Services.AddSingleton(instanceConfig);
-builder.Services.AddSingleton(timing);
-builder.Services.AddSingleton(revocationOptions);
-builder.Services.AddSingleton(messaging);
-builder.Services.AddSingleton(keeper);
-// The client address of a QC click comes from X-Forwarded-For only when qc.trustProxy is on, and then only through the proxies listed in qc.knownProxies.
-if (qcSettings.TrustProxy)
-    builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>(o =>
-    {
-        o.ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto;
-        o.ForwardLimit = null; o.KnownProxies.Clear(); o.KnownIPNetworks.Clear();
-        foreach (var p in qcSettings.KnownProxies) o.KnownProxies.Add(System.Net.IPAddress.Parse(p));
-    });
-// the shared GitHub budget (GitHubBudget.cs, issue 92): fed by every rule-script answer, read by the verb route and the sweeper
-var githubBudget = GitHubBudget.Load(scriptsDir);
-builder.Services.AddSingleton(githubBudget);
-var runnerInstance = new Runner(entry) { Budget = githubBudget };
-// session transcripts of runtime workers (Transcripts.cs): stored encrypted beside the plant snapshot; FACTORY_TRANSCRIPTS=0 keeps them in memory only
-var transcriptsDurable = ownerMode && tokenSecret.Length > 0 && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPTS") != "0";
-var transcripts = new TranscriptStore(transcriptsDurable ? runnerInstance.RunAsync : null, tokenSecret);
-if (int.TryParse(Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPT_SAVE_SECONDS"), out var tss) && tss >= 0) transcripts.SaveSeconds = tss;
-builder.Services.AddSingleton(transcripts);
-builder.Services.AddSingleton<TranscriptService>();
+if (singlePort > 0) { apiPort = singlePort; hookPort = singlePort; }
 // the gateway's own address for the links it writes into the journal: FACTORY_PUBLIC_URL, else the address the operator or a container last used
 string seenBase = "";
 string LinkBase() => publicUrl != "" ? publicUrl.TrimEnd('/') : Volatile.Read(ref seenBase);
-builder.Services.AddSingleton(runnerInstance);
-// The plant snapshot (PlantSnapshot.cs, enhancement 5): read back before the first sweep. Owner mode only, and not for the suites'
-// second gateways (FACTORY_TEST_SKIP_REVOCATIONS: their GitHub is a port nothing listens on). FACTORY_PLANT_SNAPSHOT=0 switches it off.
-var snapshotOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_PLANT_SNAPSHOT") != "0";
-// The leader lease (Leader.cs, issue 94): only the process that holds it acts on the board. Owner mode with a GitHub identity, not the suites' second
-// gateways; FACTORY_LEADER_LEASE=0 switches it off (every process acts, and the snapshot is written at SIGTERM and read once, as before).
-var leaderOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && revocationOptions.GitHubConfigured;
-var leaderSettings = LeaderSettings.Load(scriptsDir, leaderOn);
-builder.Services.AddSingleton(leaderSettings);
-var leader = new GatewayLeader(runnerInstance, leaderSettings,
-    (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0");
-builder.Services.AddSingleton<ILeadership>(leader);
-// claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
-var sweepGap = new SweepGap();
-// the plant snapshot and the lease's start, hand-over and stop (gateway/Leadership/): the restore before the first sweep, the write of every change
-builder.Services.AddSingleton(leader);
-builder.Services.AddSingleton(sp => new SnapshotCoordinator(snapshotOn, timing.PlantSnapshotMaxAgeMinutes, leader, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>(), sweepGap));
-builder.Services.AddSingleton<ISnapshotCoordinator>(sp => sp.GetRequiredService<SnapshotCoordinator>());
-builder.Services.AddSingleton<LeadershipService>();
-var revocations = new Revocations();
-var runtimeNonces = new RuntimeNonces();   // the one-time nonces of runtime workers (Auth.cs, cloud-worker-runtimes.md 2.6)
-// the revoked credentials (gateway/Identity/RevocationService.cs): the read at start and the revocation; its read starts with the host, before the other hosted services
-builder.Services.AddSingleton(sp => new RevocationService(revocationOptions, ownerMode, tokenSecret, messaging.TestHooks, instanceConfig.OwnerSessions || messaging.On || messaging.OperatorEnabled,
-    revocations, sp.GetRequiredService<Runner>().RunAsync, runtimeNonces, sp.GetRequiredService<Plant>().Revoke));
-builder.Services.AddSingleton<IRevocationService>(sp => sp.GetRequiredService<RevocationService>());
-builder.Services.AddHostedService(sp => sp.GetRequiredService<RevocationService>());
-// the operator session's recorded releases (gateway/Operator/OperatorReleaseLoader.cs): read once at start, after the revocations' read has started
-builder.Services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, revocationOptions.SkipRevocations, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));
-builder.Services.AddSingleton<IOperatorReleaseLoader>(sp => sp.GetRequiredService<OperatorReleaseLoader>());
-builder.Services.AddHostedService(sp => sp.GetRequiredService<OperatorReleaseLoader>());
-// the transcripts' save loop (TranscriptService) starts after the revocation read
-builder.Services.AddHostedService(sp => sp.GetRequiredService<TranscriptService>());
-// the lease's start (LeadershipService) waits for the revocation read; without the lease, the snapshot's one read
-builder.Services.AddHostedService(sp => sp.GetRequiredService<LeadershipService>());
-// the runtime adapter (gateway/Runtimes/, cloud-worker-runtimes.md 4): only in owner mode with a token secret and a runtime switched on in the configuration
-var runtimeSettings = RuntimeSettings.Load(scriptsDir);
-var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new RuntimeManager(runtimeSettings, new CaeJobRuntime(runtimeSettings.CaeJob), runtimeNonces) : null;
-// the api mode, v1 Cursor Cloud Agents (gateway/Runtimes/CursorCloudRuntime.cs, agents-roles-launch.md 10): api.cursor.enabled and a key (CURSOR_API_KEY)
-// and the gateway's public URL; the bootstrap prompt is read from prompts/ (set below, once the prompts are loaded)
-var cursorSettings = CursorCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
-Func<int, string, string?, string> cursorPrompt = (_, _, _) => "";
-static bool IsDev(string column) => column.Trim().Equals("Development", StringComparison.OrdinalIgnoreCase);
-static string PhaseSlug(string column) => column.Trim().ToLowerInvariant().Replace(' ', '-');
-var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, (item, phase, why) => cursorPrompt(item, phase, why)) : null;
-var cursorManager = cursorRuntime != null
-    ? new RuntimeManager(runtimeSettings, cursorRuntime, runtimeNonces,
-        cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
-    : null;
-// the Copilot cloud agent (gateway/Runtimes/CopilotCloudRuntime.cs, docs/design/copilot-cloud-agent.md): api.copilot.enabled, a token
-// (COPILOT_TASKS_TOKEN) and the gateway's public URL; the task's prompt carries a one-time code for the worker's r1 (copilotCodes)
-var copilotSettings = CopilotCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
-var copilotCiRelease = new CopilotCiRelease { RefusedRetry = TimeSpan.FromSeconds(Math.Max(10, 5 * copilotSettings.CiReleaseSeconds)) };   // the CI release of the Copilot agent's held workflow runs (gateway/Runtimes/CopilotCiRelease.cs)
-var copilotCodes = new CopilotCodes();
-Func<int, string, string, ItemPr?, string?, string> copilotPrompt = (_, _, _, _, _) => "";
-Func<int, CancellationToken, Task<ItemPr?>> copilotItemPr = (_, _) => Task.FromResult<ItemPr?>(null);
-var copilotRuntime = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
-    ? new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr, why) => copilotPrompt(item, phase, code, pr, why), itemPr: (item, ct) => copilotItemPr(item, ct)) : null;
-var copilotManager = copilotRuntime != null
-    ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
-        copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", PhaseSlug(phase)), revocations.Of(name))))
-    : null;
-// the Octopus runbook runtime (gateway/Runtimes/OctopusRunbookRuntime.cs, docs/design/octopus-runbook-runtime.md): runtimes.octopus.enabled and the
-// key of the service account that may run the runbooks of that one project (OCTOPUS_RUNBOOK_API_KEY); off without the key
-var octopusRuntime = ownerMode && tokenSecret.Length > 0 && runtimeSettings.Octopus.On ? new OctopusRunbookRuntime(runtimeSettings.Octopus) : null;
-var octopusManager = octopusRuntime != null ? new RuntimeManager(runtimeSettings, octopusRuntime, runtimeNonces, runtimeSettings.Octopus.Limits(octopusRuntime.Blocked)) : null;
-Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "octopus", ["enabled"] = octopusManager != null, ["configured"] = runtimeSettings.Octopus.Enabled, ["auth"] = runtimeSettings.Octopus.Auth, ["key"] = runtimeSettings.Octopus.ApiKey != "", ["hostToken"] = runtimeSettings.Octopus.HostToken != "" }.ToJsonString());
-ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), created once the plant exists
-Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
-Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
-// the settings of the plant and the base watch, loaded once and registered as singletons (gateway-composition.md 3 A); the factories below used to
-// load them when they ran, after Build(), and nothing is written between here and there, so the one warning ManagerActionSettings can print keeps its place
-var leaseSettings = LeaseSettings.Load(scriptsDir);
-var hostSettings = HostSettings.Load(scriptsDir);
-var managerActionSettings = ManagerActionSettings.Load(scriptsDir);
-var baseUpdateSettings = BaseUpdateSettings.Load(scriptsDir);
-builder.Services.AddSingleton(leaseSettings);
-builder.Services.AddSingleton(hostSettings);
-builder.Services.AddSingleton(managerActionSettings);
-builder.Services.AddSingleton(baseUpdateSettings);
-builder.Services.AddSingleton(runtimeSettings);
-builder.Services.AddSingleton(cursorSettings);
-builder.Services.AddSingleton(copilotSettings);
-builder.Services.AddSingleton(sp =>
-{
-    var runner = sp.GetRequiredService<Runner>();
-    return new Plant(tokenSecret, async (item, ev, fields, key) =>
-    {
-        try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
-        catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
-    }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = timing.PassUnmergedDigestMinutes, OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = leaseSettings, IntakeColumn = instanceConfig.IntakeColumn, Hosts = hostSettings, MgrActions = managerActionSettings, Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager, Octopus = octopusManager,
-        SessionPage = (kind, name) => kind is "octopus" or "cae-job" && LinkBase() is { Length: > 0 } lb ? $"{lb}/sessions/{Uri.EscapeDataString(name)}" : "" };
 
-});
-builder.Services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
-builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, publicUrl, tokenSecret));
-// master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs)
-builder.Services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, ownerMode));
-builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
-// a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
-var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : timing.SweepMinSeconds);
-builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
-// one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
-// with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
-foreach (var rmx in new[] { runtimeManager, cursorManager, copilotManager, octopusManager }.OfType<RuntimeManager>()) builder.Services.AddSingleton<IHostedService>(sp =>
-{
-    var rp = sp.GetRequiredService<Plant>(); var rr = sp.GetRequiredService<Runner>();
-    rmx.Plant = rp;
-    if (rmx.Kind is "octopus" or "cae-job") { rmx.SessionStarted = transcripts.Started; rmx.SessionEnded = transcripts.Ended; }
-    // the gateway's own hands for the adapter: park an item runtime-failed, end the claim a lost execution left, revoke a failed execution's name
-    rmx.Park = async (item, phase) =>
-    {
-        var (code, _) = await rr.RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "runtime-failed", ["phase"] = phase, ["by"] = "the runtime adapter" }.ToJsonString(), TimeSpan.FromSeconds(120));
-        if (code != 0) throw new InvalidOperationException($"park-item answered exit {code}");
-        rp.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "runtime-failed" });
-    };
-    rmx.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
-    return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct };
-});
-builder.Services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct });
-// A background loop that throws must not end the process (the default of .NET stops the host): the loops catch and go on, and this is the net under them.
-builder.Services.Configure<HostOptions>(o => o.BackgroundServiceExceptionBehavior = BackgroundServiceExceptionBehavior.Ignore);
-// What ended a process is in its last lines: an exception nobody caught (a crash), or "stopping" (the platform asked: SIGTERM at a scale-in, a new
-// revision, a failed probe). Neither line present means the process was killed outright (out of memory).
-AppDomain.CurrentDomain.UnhandledException += (_, ue) => { try { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"unhandled-exception\",\"terminating\":{(ue.IsTerminating ? "true" : "false")},\"type\":{JsonSerializer.Serialize(ue.ExceptionObject?.GetType().FullName ?? "")},\"message\":{JsonSerializer.Serialize((ue.ExceptionObject as Exception)?.Message ?? "")}}}"); } catch { } };
-TaskScheduler.UnobservedTaskException += (_, te) => { try { te.SetObserved(); Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"unobserved-task-exception\",\"type\":{JsonSerializer.Serialize(te.Exception.InnerException?.GetType().FullName ?? "")},\"message\":{JsonSerializer.Serialize(te.Exception.InnerException?.Message ?? "")}}}"); } catch { } };
-// The MCP server at /mcp (gateway/Mcp/, docs/design/agents-roles-launch.md 6): stateless Streamable HTTP; the middleware authenticates it like /api
-builder.Services.AddMcpServer(o => o.ServerInfo = new() { Name = "fworker", Version = "1" })
-    .WithHttpTransport(o => o.Stateless = true)
-    .WithListToolsHandler(GatewayMcp.ListTools).WithCallToolHandler(GatewayMcp.CallTool);
+// The composition (gateway/Composition/, gateway-composition.md 3 B): the host, then one registration method per area, in the order the objects
+// were made before C5a (GatewayServiceCollectionExtensions.cs says what each holds and which later task changes it).
+var composition = new GatewayComposition(gw, instanceConfig, timing, revocationOptions, qcSettings, messaging, keeper, LinkBase);
+builder.AddGatewayHosting(composition);
+builder.Services
+    .AddGatewayConfiguration(composition)
+    .AddGatewayCore(composition)
+    .AddGatewayLeadership(composition)
+    .AddGatewayIdentity(composition)
+    .AddGatewayRuntimes(composition)
+    .AddGatewayPlant(composition)
+    .AddGatewayBackground(composition)
+    .AddGatewayMcp();
 var app = builder.Build();
-// the transcripts' final flush (TranscriptService): registered here, before the hand-over's callback, so that it runs after it
-app.Services.GetRequiredService<TranscriptService>().RegisterFinalFlush();
-app.Lifetime.ApplicationStopping.Register(() => { try { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"stopping\",\"reason\":\"shutdown requested (signal or host)\",\"upSeconds\":{(long)(DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime()).TotalSeconds}}}"); } catch { } });
+// the stopping callbacks in their order (transcript flush, "stopping" line, hand-over) and the plant's wait for the snapshot
+app.UseGatewayLifetime();
+
+// What the handlers below still capture, until C6 and C7 move them into services and endpoint modules: the container's singletons, and what
+// the composition made outside it (the runtimes until C5b, the revocations and nonces until C6).
 var hub = app.Services.GetRequiredService<EventHub>();
 var runner = app.Services.GetRequiredService<Runner>();
 var plant = app.Services.GetRequiredService<Plant>();
 var snapshots = app.Services.GetRequiredService<ISnapshotCoordinator>();
-plant.RestoredTask = snapshots.Restored;   // the plant manager's mode and summary wait for the snapshot (Manager.cs)
 var qc = app.Services.GetRequiredService<QcHub>();
 var messenger = app.Services.GetRequiredService<Messenger>();
 var baseWatch = app.Services.GetRequiredService<BaseWatch>();
-// owner leases (gateway/Lease.cs): the plant decides, the rule scripts change the claim; a renewal answers the new lease, a take-back is followed by a sweep
-if (ownerMode)
-{
-    plant.OnRenew = async (item, holder) =>
-    {
-        var (rc, ro) = await runner.RunAsync("claim-item", new JsonObject { ["item"] = item, ["holder"] = holder, ["renew"] = true }.ToJsonString(), TimeSpan.FromSeconds(120));
-        DateTime? until = null;
-        if (rc == 0) try { if (DateTime.TryParse(JsonNode.Parse(ro)?["lease_until"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var u)) until = u; } catch { }
-        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["lease"] = "renew", ["item"] = item, ["holder"] = holder, ["exit"] = rc }.ToJsonString());
-        return until;
-    };
-    plant.OnTakeBack = async (item, holder, reason) =>
-    {
-        var (rc, eo) = await runner.RunAsync("expire-claim", new JsonObject { ["item"] = item, ["holder"] = holder, ["reason"] = reason }.ToJsonString(), TimeSpan.FromSeconds(120));
-        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["lease"] = "taken-back", ["item"] = item, ["holder"] = holder, ["reason"] = reason, ["exit"] = rc }.ToJsonString());
-        // an answer of "not held by that owner" is no failure: the claim is gone or another owner holds it, so the plant lets go too
-        return rc == 0;
-    };
-    plant.RequestSweepAfterTakeBack = item => hub.RequestSweep(item);
-}
-baseWatch.MayAct = () => leader.MayAct;
+var revocationService = app.Services.GetRequiredService<RevocationService>();
+var githubBudget = composition.GitHubBudget;
+var transcripts = composition.Transcripts;
+var leader = composition.Leader;
+var revocations = composition.Revocations;
+var runtimeNonces = composition.RuntimeNonces;
+var sweepMinSeconds = composition.SweepMinSeconds;
+var runtimes = composition.Runtimes;
+var runtimeManager = runtimes.CaeJob;
+var cursorSettings = app.Services.GetRequiredService<CursorCloudSettings>();
+var cursorRuntime = runtimes.CursorRuntime;
+var cursorManager = runtimes.Cursor;
+var copilotSettings = app.Services.GetRequiredService<CopilotCloudSettings>();
+var copilotCiRelease = runtimes.CopilotCiRelease;
+var copilotCodes = runtimes.CopilotCodes;
+var copilotRuntime = runtimes.CopilotRuntime;
+var copilotManager = runtimes.Copilot;
+var octopusRuntime = runtimes.OctopusRuntime;
+var octopusManager = runtimes.Octopus;
+ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), created once the plant exists
+static bool IsDev(string column) => column.Trim().Equals("Development", StringComparison.OrdinalIgnoreCase);
+static string PhaseSlug(string column) => GatewayRuntimes.PhaseSlug(column);
+
 if (qcSettings.TrustProxy) app.UseForwardedHeaders();
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
 var started = DateTime.UtcNow;
@@ -265,14 +122,6 @@ string PluginHash()
     foreach (var f in PluginFiles(root)) sb.Append(Path.GetRelativePath(root, f).Replace('\\', '/')).Append('\n').Append(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))).Append('\n');
     return pluginHashCache = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).ToLowerInvariant();
 }
-
-
-// Revocations (gateway/Identity/RevocationService.cs, Auth.cs): resolved here, where the start used to set them up, so their start-up lines and the
-// check of the test switch keep their place; the read of the generations starts with the host. Until it succeeds no session credential is accepted.
-var revocationService = app.Services.GetRequiredService<RevocationService>();
-// the hand-over at the stop (LeadershipService), or without the lease the write of the plant: registered after the transcripts' final flush and the
-// "stopping" line, so that it runs before both (callbacks run last-registered first); the lease's start runs with the host, once the revocations are read
-app.Services.GetRequiredService<LeadershipService>().RegisterStopping();
 
 Principal Who(HttpContext c) => (Principal)c.Items["principal"]!;
 // {name, url} of the AI session behind a session credential, null for the operator, the gateway itself and a click. octopus and cae-job: the
@@ -1944,7 +1793,7 @@ mcpSessions.OnEnded = async (name, reason) =>
     if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) await cursorManager.Deprovision(name, reason);
     if (copilotManager != null && copilotManager.IsRuntimeWorker(name)) await copilotManager.Deprovision(name, reason);
 };
-copilotItemPr = async (item, ct) =>
+runtimes.CopilotItemPr = async (item, ct) =>
 {
     var (rc, output) = await app.Services.GetRequiredService<Runner>().RunAsync("item-pr", new JsonObject { ["item"] = item }.ToJsonString(), TimeSpan.FromSeconds(60));
     if (rc != 0) return null;
@@ -2124,7 +1973,7 @@ if (copilotRuntime != null && ownerMode && messaging.ManagerEnabled && messaging
         }
     });
 }
-copilotPrompt = (item, phase, code, pr, why) =>
+runtimes.CopilotPrompt = (item, phase, code, pr, why) =>
 {
     // a follow-up session of the owner task (why != null): terse, self-contained (phase, item, pull request, what changed), so its correctness does
     // not depend on Copilot's memory of the earlier sessions; then the same connect lines as a first session
@@ -2154,7 +2003,7 @@ copilotPrompt = (item, phase, code, pr, why) =>
     // one Copilot MCP configuration serves every environment: the prompt names this gateway (fworker-mcp accepts only the three gateway hosts)
     return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
 };
-cursorPrompt = (item, phase, why) =>
+runtimes.CursorPrompt = (item, phase, why) =>
 {
     var bp = prompts.ByPath("bootstrap/api.md");
     var text = bp == null ? "" : prompts.Render(bp, "cursor-cloud-agent")["text"]!.ToString();
@@ -2167,7 +2016,8 @@ cursorPrompt = (item, phase, why) =>
     if (IsDev(phase)) f += $"Fix it on factory-worker/{item}-development (fetch it first: git fetch origin; git checkout factory-worker/{item}-development; git pull). Run the private build and the acceptance tests before the push, as the rules below say; then pr_open with that branch, item_complete, session_end.\n";
     return f + "\n" + text + tail;
 };
-GatewayMcp.Tools = new McpTools(new InProcess(app, Admit), mcpSessions, t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
+// the tools call the endpoints in process, found through the container's EndpointDataSource (gateway/Mcp/InProcess.cs)
+GatewayMcp.Tools = new McpTools(new InProcess(app.Services.GetRequiredService<EndpointDataSource>(), app.Services, Admit), mcpSessions, t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
 {
     if (messaging.Enabled && ownerMode) plant.Touch(name);
     if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }

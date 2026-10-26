@@ -42,9 +42,10 @@ sealed class LeaseSettings
 sealed partial class Plant
 {
     public LeaseSettings Lease { get; set; } = new();
-    // Run outside the gate: renew the owner's claim (claim-item --renew) and end it (expire-claim). Set by Program.cs; nothing happens while unset.
-    public Func<int, string, Task<DateTime?>>? OnRenew { get; set; }
-    public Func<int, string, string, Task<bool>>? OnTakeBack { get; set; }
+    // Run outside the gate: renew the owner's claim (claim-item --renew) and end it (expire-claim), through the hooks given to the constructor
+    // (IPlantHooks, PlantHooks.cs; owner mode only). Nothing happens without them.
+    public Func<int, string, Task<DateTime?>>? OnRenew => plantHooks == null ? null : plantHooks.RenewAsync;
+    public Func<int, string, string, Task<bool>>? OnTakeBack => plantHooks == null ? null : plantHooks.TakeBackAsync;
 
     // per item: the owner the plant saw accept it through the verb (only these and the owners a sweep listed with a lease are watched, never a
     // test seam's), the last call of the owner for it, the last renewal, an item.check sent and not yet answered, the deadline of a client
@@ -286,7 +287,7 @@ sealed partial class Plant
         RequestSweepAfterTakeBack?.Invoke(item);
     }
     // the item's incremental pass (issue 92): it is offered again without waiting for the next full sweep
-    public Action<int>? RequestSweepAfterTakeBack { get; set; }
+    public Action<int>? RequestSweepAfterTakeBack => plantHooks == null ? null : plantHooks.RequestSweep;
 
     // Plan's hook for a new own-item assignment: the worker it was just taken back from is not offered it first.
     // Only while another session could take it: a plant with that one worker offers the item to it again rather than to nobody.

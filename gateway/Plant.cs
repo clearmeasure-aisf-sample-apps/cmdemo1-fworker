@@ -75,8 +75,10 @@ sealed class Assignment
 // What the sweep reports of one owned item (sync-board `owned`), or what a verb answer said of its lease until the next sweep (worker-messaging.md 3.9).
 sealed record OwnedInfo(string Holder, string Column, DateTime? LeaseUntil, DateTime? Heartbeat, bool Parked, DateTime At);
 
-sealed partial class Plant(string secret, Func<int, string, JsonObject, string, Task> journal, double ackSeconds)
+// hooks: the lease's renewal, take-back and the sweep after it (PlantHooks.cs, Lease.cs); null outside owner mode, where none of them runs
+sealed partial class Plant(string secret, Func<int, string, JsonObject, string, Task> journal, double ackSeconds, IPlantHooks? hooks = null)
 {
+    readonly IPlantHooks? plantHooks = hooks;
     // The one lock (worker-messaging.md 3.5): workers, assignments, the directory maps, and the MessageStore (counters, inboxes, presence, modes,
     // the supervisor slot). Lock order: nothing is called under it that takes another lock, except a channel TryWrite and a signal completion,
     // which never run the reader's code inline.
