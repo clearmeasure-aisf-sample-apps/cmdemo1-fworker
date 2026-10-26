@@ -1,0 +1,32 @@
+@startuml wvf-incident
+skinparam dpi 150
+hide empty description
+title Wolverine factory: IncidentSaga (id = app + environment + generation; signals join)
+
+[*] --> Detected : alert webhook, confirmed Unhealthy reads\n(both suppressed while the environment deploys),\nDeliveryTrain: prod deployment failed
+state Detected : open or join the incident issue; notify the owner;\nhold the environment's DeliveryTrain\n(the incident's own hotfix and rollback pass the hold)
+Detected --> Triaging
+state Triaging : /_healthcheck, /_telemetry, App Insights errors,\nrecent releases; read-only AI analyst session
+Triaging --> RollingBack : a recent release correlates, no migration\nsince the previous one, policy allows
+Triaging --> Fixing : a code defect, or a migration\nmakes rollback unsafe
+Triaging --> Escalated : unclear
+state RollingBack : Rollback(env, previous release) to the DeliveryTrain\n(Sign-off per policy); items of the rolled-back release:\nUndelivered(env) within their settle window
+state Fixing : WorkItemSaga on the hotfix plan\n(rank top, every quality gate)
+RollingBack --> Verifying : deployment succeeded
+Fixing --> Verifying : DeliveredTo(prod)
+state Escalated : the owner decides
+Escalated --> RollingBack : owner: roll back
+Escalated --> Fixing : owner: fix forward
+Escalated --> Verifying : owner: fixed by hand
+Escalated --> Resolved : owner: close
+state Verifying : Healthy reads and error rate at baseline for the window
+Verifying --> Resolved : signal clear
+Verifying --> Triaging : still failing
+state Resolved : note from the history; close the issue;\nrelease the DeliveryTrain hold
+Resolved --> [*]
+Detected --> Escalated : timeout
+Triaging --> Escalated : timeout
+RollingBack --> Escalated : timeout or failed
+Fixing --> Escalated : timeout
+Verifying --> Escalated : timeout
+@enduml

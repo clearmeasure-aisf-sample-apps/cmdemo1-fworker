@@ -1,0 +1,35 @@
+@startuml dsp-slot
+skinparam dpi 150
+title Delivery speed: a slot is freed by the session's end, the host report only reconciles
+
+participant "Worker container\noct-N-x (host omarchy)" as W
+participant "Gateway: Plant" as P
+participant "Gateway: slot ledger\n(RuntimeManager)" as L
+participant "Gateway: scheduler" as S
+participant "Octopus" as O
+participant "Reconcile hosts\n(every 5 min)" as R
+
+== today ==
+W -> P : session_end, container exits
+note over L : slot held until the next host report\n(up to 5 min) + list poll (30 s);\nnext offer waits for the next full sweep (up to 180 s)
+
+== after the change ==
+W -> P : **session_end (or stream closed, end marker)**
+P -> L : **End(execution, reason)**
+L -> L : **slot free now; tombstone: Load() ignores this container**
+L -> S : **slot freed: plan now (incremental pass)**
+S -> S : rank + admission (see dsp-scheduler)
+S -> L : reserve slot for item M (host with most headroom)
+L -> O : POST runbook-runs/create (Start worker, item M)
+alt **host check passes: fw-* containers below the limit (waits up to 30 s for an exiting one);\nmemory, load, disk only for a burst slot**
+  O -> W : docker run fw-M (on omarchy)
+else **host-full**
+  O --> L : **task outcome host-full: not a failure**
+  L -> L : **block this host for hostFullSeconds**
+  L -> S : **plan again (another host or wait host-headroom)**
+end
+W -> P : redeem, accept M
+...
+R -> L : **report: containers + memAvailableMb, cpus, load1, diskFreeMb, memPeakMb per container**
+L -> L : **reconcile: adopt unknown, clear tombstones,\nlearn session footprint (p95 of memory.peak)**
+@enduml

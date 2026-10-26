@@ -1,0 +1,37 @@
+@startuml dsp-delivery
+skinparam dpi 150
+title Delivery speed: from the push to prod (new steps in bold)
+
+participant "Owner session" as W
+participant "Gateway" as G
+participant "GitHub\nPR + merge queue" as Q
+participant "Actions\nBuild / Release" as A
+participant "Octopus" as O
+participant "tdd / uat / prod" as E
+
+W -> Q : push head H, open PR
+Q -> A : Build on H (push)
+W -> W : **Functional Testing on H at once (verdict + video)**
+note right of W : CI and FT run side by side;\nboth must hold for the same H
+A --> G : checks green on H
+W -> G : PASS on H
+G -> Q : **enqueue H (expected head H, squash; only non-failing PRs merge)**
+Q -> A : **Build on the merge group (H on top of master and the PRs ahead)**
+A --> Q : **group green**
+Q -> Q : **master normally moves to the tested commit C**
+Q -> A : Build on master C
+A -> A : **a group run with head exactly C exists: carry its packages and build-version, skip the rebuild**\n(otherwise the full build runs)
+A -> O : Release workflow: release R(C), **version from build-version**
+O -> E : deploy R to tdd (with its acceptance tests)
+G -> G : settle: R carries C, item in Release Queue
+G -> E : Healthy read, /_build = R, **settle 2 min**
+G -> G : **train: newest qualifying release for uat is R (older ones superseded)**
+G -> O : create deployment R to uat; answer Sign-off
+O -> E : deploy R to uat
+G -> O : **Smoke test runbook on uat for R (during the settle)**
+O --> G : **smoke PASS**
+G -> E : Healthy reads, settle 10 min (unchanged)
+G -> O : create deployment R to prod; answer Sign-off
+O -> E : deploy R to prod
+G -> G : every item in R: Done
+@enduml

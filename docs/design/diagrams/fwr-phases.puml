@@ -1,0 +1,51 @@
+@startuml fwr-phases
+skinparam dpi 150
+title fworker refactor: phases and their gates (each phase: several PRs, behind flags, in the tdd gateway)
+
+start
+partition "R0  Prerequisites and safety" {
+  :aisf off board 679; acting gateway min 1 replica; PR #253 merged;
+  :v1 fixes (fencing, durable budgets, day budget, rev check); quick wins;\nflow metrics in the state comment; golden-write harness;
+}
+:gate: Tier 1 green; a tdd batch no slower;
+partition "R1  Structure and seams, all v1" {
+  :projects (host name kept); first Domain ports + parity tests;
+  :S1 to S6 on v1; answers return posted journal lines; verb inventory;
+}
+:gate: golden writes identical; per-item event sequences unchanged;
+partition "R2  Wolverine host, inert" {
+  :Azure SQL (acting gateway), Solo mode on the lease holder,\nbackground storage setup; OpenTelemetry; dead-letter admin;
+  :shadow history of every journal line and event; SQL Server in CI;
+}
+:gate: 7 days; every posted line has a history row;\nacts with the database stopped; uat/prod start without one;
+partition "R3  Durable side effects" {
+  :runtime start/stop with result messages, runbook runs,\njournal via the journal verb, Copilot reservation; classified errors;
+}
+:gate: no lost or duplicated line, start or stop, with a kill;
+partition "R4  Durable ingress and board reconciler" {
+  :webhooks and the Octopus watcher into the inbox; correlation map;\nboard reconciler (or projects_v2_item delivery);
+}
+:gate: every board change of a batch has its event;
+partition "R5  DeliveryTrainSaga" {
+  :ItemMerged(commit, gates) from v1; shadow, then authoritative\nwith no Sign-off pending; v1 promotion off at the same moment;
+}
+:gate: zero shadow difference over 3 releases; one batch to prod;
+partition "R6  Docs plan" {
+  :replenish-marker + Auto Merge items; separate runtime, offered only to its sessions;\ndirect merge by the saga; every v1 path skips or forwards v2 items;
+}
+:gate: 8 docs items to Done on v2; v1 unaffected on its own slots;
+partition "R7  Feature plan" {
+  :full scheduler (v1 asks via S6); merge moved into C# and the train;\ndelivery-speed section 5; smoke evidence; approved cross-repo pieces;
+}
+:gate: an 8-item code batch to prod on v2, against the baseline;
+partition "R8  Incidents" {
+  :IncidentSaga, hotfix plan, alert webhooks, rollback via the train;
+}
+:gate: a staged incident in tdd, end to end;
+partition "R9  Retire v1" {
+  :QC ported; every verb to its destination (inventory table);\ntranscripts to the database; Balanced mode; session mailbox;
+  :remove the sweep engine, server rule scripts, lease, snapshot;
+}
+:gate: no v1 item; Tier 1 green with every capability on v2;
+stop
+@enduml

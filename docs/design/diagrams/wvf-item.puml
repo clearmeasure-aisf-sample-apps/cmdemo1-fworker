@@ -1,0 +1,46 @@
+@startuml wvf-item
+skinparam dpi 150
+title Wolverine factory: one feature item, as messages
+
+participant "GitHub\n(webhook)" as GH
+participant "Factory API" as API
+participant "WorkItemSaga\n#N (plan feature)" as S
+participant "CapacityScheduler" as C
+participant "Integration\nhandlers" as I
+participant "AI session" as W
+participant "MergeTrainSaga" as M
+participant "DeliveryTrainSaga\n(per environment)" as D
+participant "Octopus\nwatcher" as O
+
+GH -> API : projects_v2_item: #N moved to Technical Design
+API -> S : WorkItemQueued(#N)  [starts the saga, generation g]
+S -> C : RequestSlot(#N, rank facts)
+C -> S : SlotGranted(runtime, host)
+S -> I : StartSession(#N, arm a1)  [name reserved before launch]
+I -> W : launch
+S -> S : schedule PhaseLeaseExpired(#N, g, a1)
+W -> API : append-body (event); complete(TD) (decision)
+API -> S : InvokeAsync: PhaseCompleted(#N, TD, files)
+S -> S : overlap check: footprints of items\nin Development..merged, read in the invoke
+S --> API : continue: next_column Development
+S -> C : Clear(#N)  [after the commit]
+W -> API : complete(Dev, head H)
+API -> S : InvokeAsync: PhaseCompleted(#N, Dev, H)
+S --> API : continue: next_column Functional Testing (CI alongside)
+GH -> API : check_suite on H
+API -> S : ChecksCompleted(#N, H, green)
+W -> API : validation-verdict PASS on H
+API -> S : InvokeAsync: VerdictRecorded(#N, PASS, H)
+S -> M : ReadyToMerge(#N, H)
+W -> API : session_end
+API -> C : SessionEnded(session)  [the slot is freed here]
+M -> I : EnqueueMerge(PR, expectedHead H)
+GH -> API : push to master C (merge group landed)
+API -> M : GroupMerged(C)
+M -> S : Merged(#N, C)
+M -> D : ItemMerged(#N, C)
+O -> D : ReleaseCreated(R, C); deployments of R
+D -> D : evidence; newest qualifying release; Sign-offs
+D -> S : DeliveredTo(#N, prod, R)
+S -> S : MarkCompleted()
+@enduml
