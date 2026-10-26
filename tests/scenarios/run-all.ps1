@@ -16,6 +16,9 @@ param([ValidateSet('fast', 'full')][string] $Tier = 'fast', [int] $Parallel = 4,
 $Suites = @($Suites | ForEach-Object { $_ -split ',' } | Where-Object { $_ })   # pwsh -File passes "a,b" as one string
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+# No pwsh this starts (the listings, every suite) reads or writes a .NET multicore-JIT startup profile in any HOME (the real one or a suite's): a corrupt one makes every later pwsh exit 139 (issue 375).
+# The runtime reads the value as hex (0x65535, 415029), which exceeds any processor count: multicore JIT is off.
+if (-not $env:DOTNET_MultiCoreJitMinNumCpus) { $env:DOTNET_MultiCoreJitMinNumCpus = '65535' }
 . (Join-Path $here 'guard.ps1')
 if (Assert-TestRunMayStart 'run-all.ps1' ([bool]$Force) $MinFreeDiskMb $MinAvailableMb) { $Parallel = 1 }
 $env:FACTORY_TEST_RUN_HELD = "$PID"
