@@ -359,7 +359,7 @@ $OwnerScenarios['owner: a pinned item is only ever offered to its worker: after 
     # 3. the pinned worker is not connected
     $n3 = New-Item-Fake 'Pinned, worker offline' 'x' ($OwnerLabels + 'worker:pin-c')
     Check 'the item pinned to a worker that is not connected waits' (Wait-Until -Seconds 30 { $x = @(& $asg $n3); $x.Count -eq 1 -and "$($x[0].worker)" -eq '' })
-    Start-Sleep -Seconds 10     # more than two accept windows and several sweeps
+    Wait-Sweeps -Count 3 -MinSeconds 10     # more than two accept windows (10 s at least) and several sweeps
     Check 'neither waiting item was offered to anybody' ((Get-Assigned 'pin-b' $n2).Count -eq 0 -and (Get-Assigned 'pin-b' $n3).Count -eq 0 -and (Get-Assigned 'pin-a' $n2).Count -eq 0 -and @(& $offersOf $n2).Count -eq 0 -and @(& $offersOf $n3).Count -eq 0) "$((& $offersOf $n2) -join ',') $((& $offersOf $n3) -join ',')"
     Start-OwnerClient 'pin-c' 'persistent-local' '--capacity 2'
     Check 'the pinned worker connects and is offered its item' (Wait-Until -Seconds 30 { (Get-Assigned 'pin-c' $n3).Count -ge 1 })
@@ -597,7 +597,7 @@ $OwnerScenarios['owner: an item that waits for its pinned worker has matched fir
     $n = New-Item-Fake 'Pinned waiting' 'x' ($OwnerLabels + 'worker:pin-late')
     Check 'the item waits, without a worker' (Wait-Until -Seconds 30 { @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $n -and "$($_.worker)" -eq '' }).Count -eq 1 })
     Check 'its journal says matched, then waiting' (Wait-Until -Seconds 20 { ((Get-Journal $n) -join ',') -eq 'matched,waiting' }) ((Get-Journal $n) -join ',')
-    Start-Sleep -Seconds 7     # three sweeps and more
+    Wait-Sweeps -Count 3 -MinSeconds 7     # three sweeps and more
     Check 'more sweeps add no line' (((Get-Journal $n) -join ',') -eq 'matched,waiting') ((Get-Journal $n) -join ',')
     Start-OwnerClient 'pin-late' 'persistent-local' '--capacity 5'
     Check 'the pinned worker connects and is offered the item' (Wait-Until -Seconds 30 { (Get-Assigned 'pin-late' $n).Count -ge 1 })
@@ -763,7 +763,7 @@ $OwnerScenarios['pass-merge: a pull request that cannot be merged takes the exis
     Fake 'pr' @{ number = $x.pr; conflict = $true } | Out-Null
     $v = Do-Verdict $x.n $x.pr; CheckExit 'the PASS verdict' $v 0
     Check 'the verdict answer: demoted, and next says so' ($v.merge.outcome -eq 'demoted' -and $v.next -eq 'demoted') ($v | ConvertTo-Json -Compress -Depth 5)
-    Start-Sleep -Seconds 8
+    Wait-Sweeps -Count 2 -MinSeconds 8     # several sweeps
     $st = Pm-State $x.n
     Check 'back in Development once, not merged' ((Get-FakeIssue $x.n).column -eq 'Development' -and $st.demotions -eq 1 -and -not (Get-FakePr $x.pr).merged) "$((Get-FakeIssue $x.n).column) $($st.demotions)"
     Check 'one merge-failed comment after several sweeps' (@((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match 'merge failed' }).Count -eq 1)
@@ -778,7 +778,7 @@ $OwnerScenarios['pass-merge: an item without the Auto Merge label, or a verdict 
     $rv = F 'w1' @('record-review', '--item', $y.n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "pmrv$($y.n).md" "ok`nREVIEW: COMPLETE"))
     $pv = Pm-Server 'validation-verdict' @{ item = $y.n; passed = $true; summary = 'ok'; pr = $y.pr; review_ref = $rv.review_ref; holder = 'w1' } @{ mergePolicy = 'peer-approved' }
     Check 'peer-approved: the verdict asks for the approval and merges nothing' ($pv.exit -eq 0 -and $pv.next -eq 'approve' -and -not (Pv $pv 'merge') -and -not (Get-FakePr $y.pr).merged) ($pv | ConvertTo-Json -Compress -Depth 4)
-    Start-Sleep -Seconds 6
+    Wait-Sweeps -Count 2 -MinSeconds 6     # several sweeps
     Check 'the item without the label is still not merged after several sweeps' (-not (Get-FakePr $x.pr).merged)
 }
 
@@ -973,7 +973,7 @@ $OwnerScenarios['owner: one item per session: a session that held an item is off
         $ob = @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $b })
         Check 'the second item is not offered to the session that holds the first (an offer sent before the accept is taken back)' ((Get-Assigned 'fresh1' $b).Count -eq $sinceAccept -and $ob.Count -eq 1 -and "$($ob[0].worker)" -eq '') ($ob | ConvertTo-Json -Compress)
         $r = Fo 'fresh1' @('release', '--item', $a, '--reason', 'scenario: the item ends'); CheckExit 'the session releases its item' $r 0
-        Start-Sleep -Seconds 8     # sweeps and ticks: the session is no longer at any capacity
+        Wait-Sweeps -Count 2 -MinSeconds 8     # sweeps and ticks: the session is no longer at any capacity
         Check 'after its item was released the same session is still offered no other item' ((Get-Assigned 'fresh1' $b).Count -eq $sinceAccept)
         $wb = @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $b })
         Check 'the second item waits, without a worker' ($wb.Count -eq 1 -and "$($wb[0].worker)" -eq '') ($wb | ConvertTo-Json -Compress)
@@ -1079,7 +1079,7 @@ $OwnerScenarios['owner: a hold:owner label holds the item for a person: no offer
         Invoke-RestMethod "$api/issues/$n/labels" -Method POST -Headers $gh -Body (@{ labels = @('hold:owner') } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
         Check 'with the label the next sweep drops the open offer' (Wait-Until -Seconds 30 { @(& $open).Count -eq 0 }) ((& $open) | ConvertTo-Json -Compress)
         $seen = (Get-Assigned 'hld1' $n).Count
-        Start-Sleep -Seconds 8
+        Wait-Sweeps -Count 2 -MinSeconds 8     # the sweeps that would offer it
         Check 'and offers it to nobody' ((Get-Assigned 'hld1' $n).Count -eq $seen -and @(& $open).Count -eq 0)
         $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim-item is refused' $r 10 'held-by-label'
         $r = Fo 'hld1' @('accept', '--item', $n, '--assignment', (Get-Assigned 'hld1' $n)[-1].assignment)
@@ -1153,7 +1153,7 @@ $OwnerScenarios['owner: auto-unpark: a red-shard park is lifted once the pull re
     $pr = Do-Development $n
     $old = Get-Head $pr
     Set-ItemState $n { param($st) $st.Remove('claim'); $st.park = (New-TestPark 'fix-forward-exhausted' @{ pr = $pr; head = $old }) }
-    Start-Sleep -Seconds 12
+    Wait-Sweeps -Count 3 -MinSeconds 12     # the sweeps that would lift it
     Check 'green on the head the park judged: still parked' ((Get-ItemState $n).ContainsKey('park'))
     [void](Fake 'push-branch' @{ branch = "factory-worker/$n-development"; files = @('docs/trial.md') })
     Check 'a newer green head: the sweep lifts the park' (Wait-Until -Seconds 40 { -not (Get-ItemState $n).ContainsKey('park') }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
@@ -1162,7 +1162,7 @@ $OwnerScenarios['owner: auto-unpark: a red-shard park is lifted once the pull re
     Check 'handed to its column, so it is offered at once' ($st.handoff.column -eq 'Development' -or $st.ContainsKey('claim'))
     # at the limit (autoUnparkMax 3) a park is a person's again
     Set-ItemState $n { param($st) $st.Remove('claim'); $st.Remove('handoff'); $st.auto_unparks = @{ 'fix-forward-exhausted' = 3 }; $st.park = (New-TestPark 'fix-forward-exhausted' @{ pr = $pr; head = $old }) }
-    Start-Sleep -Seconds 12
+    Wait-Sweeps -Count 3 -MinSeconds 12     # the sweeps that would lift it
     Check 'lifted three times already: left parked' ((Get-ItemState $n).ContainsKey('park'))
 }
 
@@ -1174,7 +1174,7 @@ $OwnerScenarios['owner: auto-unpark: a park of session trouble is lifted once a 
         # sessions left connected by earlier scenarios may be free already: the "still parked" check holds only when none is
         $freeBefore = @((Get-Plant).plant.workers | Where-Object { $_.connected -and -not $_.draining -and [int]$_.owned -lt [int]$_.capacity -and "$($_.name)" -ne 'unpark1' }).Count
         if ($freeBefore -eq 0) {
-            Start-Sleep -Seconds 12
+            Wait-Sweeps -Count 3 -MinSeconds 12     # the sweeps that would lift it
             Check 'no free worker: still parked' ((Get-ItemState $m).ContainsKey('park'))
         }
         Start-OwnerClient 'unpark1' 'persistent-local'
@@ -1191,7 +1191,7 @@ $OwnerScenarios['owner: auto-unpark: master-broken is lifted only once the check
     $red = ('e' * 40); $at = (Get-Date).ToUniversalTime().ToString('o')
     # a check that has no passing run on master's head (a skipped or absent job, as on a docs-only head) keeps the park
     Set-ItemState $k { param($st) $st.Remove('claim'); $st.merge = @{ sha = $red; merged_at = $at; awaiting = $null; rerun_attempted = $true }; $st.park = (New-TestPark 'master-broken' @{ failed = @('Acceptance shard 1'); sha = $red }) }
-    Start-Sleep -Seconds 12
+    Wait-Sweeps -Count 3 -MinSeconds 12     # the sweeps that would lift it
     Check 'master green but the failed check has not passed on it: still parked' ((Get-ItemState $k).ContainsKey('park'))
     Set-ItemState $k { param($st) $st.park = (New-TestPark 'master-broken' @{ failed = @('Build result'); sha = $red }) }
     Check 'the failed check passed on master: the park is lifted' (Wait-Until -Seconds 40 { -not (Get-ItemState $k).ContainsKey('park') }) ((Get-ItemState $k) | ConvertTo-Json -Compress -Depth 5)
@@ -1412,7 +1412,7 @@ $OwnerScenarios['unpark: a closed item keeps no park: the sweep removes it, and 
         Invoke-RestMethod "$api/issues/$b" -Method PATCH -Body '{"state":"closed"}' -ContentType 'application/json' -Headers $gh | Out-Null
         Check 'the next sweep removes the park of the closed item' (Wait-Until -Seconds 60 { -not (Pm-State $b).ContainsKey('park') }) ((Pm-State $b) | ConvertTo-Json -Compress -Depth 4)
         Check 'and journals it once, as removed by the sweep' (@((Get-FakeIssue $b).comments | Where-Object { $_.body -match 'plant event=unparked' -and $_.body -like '*by the sweep*' -and $_.body -like '*The item is closed*' }).Count -eq 1) (((Get-FakeIssue $b).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(120, $_.body.Length)) }) -join ' | ')
-        Start-Sleep -Seconds 6
+        Wait-Sweeps -Count 2 -MinSeconds 6     # the sweeps that would offer it
         $j = [string[]](Get-Journal $b); $u = [array]::LastIndexOf($j, 'unparked')
         Check 'nothing is offered after it' ($u -ge 0 -and @($j | Select-Object -Skip ($u + 1) | Where-Object { $_ -in 'matched', 'offered' }).Count -eq 0) ($j -join ',')
     } finally { Stop-OwnerClient 'cpk' }
@@ -1471,20 +1471,20 @@ $OwnerScenarios['intake: a free slot and an empty Technical Design pull the top 
         # clients left running by earlier scenarios reconnect after the restart and would offer a free slot: stop them all first
         foreach ($w in @($script:Workers.Keys)) { Stop-OwnerClient $w }
         Restart-Gateway
-        Start-Sleep -Seconds 6
+        Wait-Sweeps -Count 2 -MinSeconds 6     # full sweeps of the restarted gateway, the ones that pull
         Check 'with no session connected nothing is pulled' ((& $col $a) -eq 'Todo' -and (& $col $b) -eq 'Todo') "a: $(& $col $a), b: $(& $col $b); connected: $(@((Get-Plant).plant.workers | Where-Object { $_.connected } | ForEach-Object { $_.name }) -join ', ')"
         Start-OwnerClient 'in1' 'persistent-local' '--capacity 1 --no-auto-accept'
         Check 'a free slot pulls the top item that may come: moved to Technical Design and offered' (Wait-Until -Seconds 60 { (& $col $a) -eq 'Technical Design' -and (Get-Assigned 'in1' $a).Count -gt 0 }) "a: $(& $col $a)"
         Check 'the held, the pinned and the waiting item stay in Todo' ((& $col $held) -eq 'Todo' -and (& $col $pinned) -eq 'Todo' -and (& $col $waits) -eq 'Todo')
         Check 'the journal says why it was pulled' (@((Get-FakeIssue $a).comments | Where-Object { $_.body -like '*pulled from **Todo** into*plant event=pulled*' }).Count -eq 1)
-        Start-Sleep -Seconds 6
+        Wait-Sweeps -Count 2 -MinSeconds 6     # the full sweeps that would pull
         Check 'while it waits for its session nothing more is pulled' ((& $col $b) -eq 'Todo')
         $r = Fo 'in1' @('accept', '--item', $a, '--assignment', (Get-Assigned 'in1' $a)[-1].assignment); CheckExit 'in1 accepts it' $r 0
         Start-OwnerClient 'in2' 'persistent-local' '--capacity 1 --no-auto-accept'
         Check 'the next free slot pulls the next item' (Wait-Until -Seconds 60 { (& $col $b) -eq 'Technical Design' -and (Get-Assigned 'in2' $b).Count -gt 0 }) "b: $(& $col $b)"
         $r = Fo 'in2' @('accept', '--item', $b, '--assignment', (Get-Assigned 'in2' $b)[-1].assignment); CheckExit 'in2 accepts it' $r 0
         Start-OwnerClient 'in3' 'persistent-local' '--capacity 1 --no-auto-accept'
-        Start-Sleep -Seconds 10
+        Wait-Sweeps -Count 3 -MinSeconds 10     # the full sweeps that would pull
         Check 'at the WIP limit (2 items in the AI columns) a free slot pulls nothing' ((& $col $c3) -eq 'Todo' -and (Get-Assigned 'in3' $c3).Count -eq 0) "third: $(& $col $c3)"
     } finally {
         foreach ($w in 'in1', 'in2', 'in3') { Stop-OwnerClient $w }
@@ -1566,7 +1566,7 @@ $OwnerScenarios['settle: a merged item whose master Build stays red keeps its se
         $j0 = (Get-Journal $x.n).Count; $a0 = (Get-Assigned 'stl1' $x.n).Count
         $r = F 'op' @('unpark', '--item', $x.n, '--reason', 'scenario: master is red, a person looks')
         Check 'unpark removes the park but offers nothing: the item is merged' ($r.exit -eq 0 -and $r.reoffer -eq $false -and "$((Pv (Pv (Pm-State $x.n) 'merge') 'awaiting'))" -eq 'master-broken') ($r | ConvertTo-Json -Compress -Depth 4)
-        Start-Sleep -Seconds 10
+        Wait-Sweeps -Count 3 -MinSeconds 10     # the sweeps that would offer it
         $after = @((Get-Journal $x.n) | Select-Object -Skip $j0)
         Check 'no sweep offers the merged item to a worker' (@($after | Where-Object { $_ -in 'matched', 'offered' }).Count -eq 0 -and (Get-Assigned 'stl1' $x.n).Count -eq $a0) ($after -join ',')
         Check 'it still waits: the card is not moved on' ((Get-FakeIssue $x.n).column -in 'Functional Testing')
@@ -1628,3 +1628,27 @@ $OwnerScenarios['migration number: the gateway does not merge a PASS whose DbUp 
     Check 'not merged' (-not (Get-FakePr $pr).merged)
     Check 'the comment names the collision and 041' (@((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -like '*040_AddFloorToWorkOrder.sql*' -and "$($_.body)" -like '*041*' }).Count -ge 1)
 }
+
+# ---- barriers: the scenarios a group of the owner suite may start with (run.ps1 -Groups n cuts the suite into contiguous runs only here) --------
+# A barrier leans on no worker and no state that an earlier scenario left behind (it stops every session it did not start itself, or starts only its
+# own, or restarts the gateway), and no scenario after it leans on one before it, so its group passes alone on a fresh gateway. The first scenario of
+# the suite starts group 0 whatever this list says. The names are matched with or without their " [full]" tag; a name that is not in the suite (the
+# scenarios of checks.ps1, cirule.ps1, budget.ps1, baseupdate.ps1, runner-gate.ps1, leader.ps1 and journal-fold.ps1 join it later) is only a cut
+# point that does not exist. Before adding one, run its group alone: run.ps1 -Suite owner -Groups n -Group g.
+$OwnerBarriers = [System.Collections.Generic.HashSet[string]]::new()
+@(
+    'owner: a pinned item gets its worker''s free slot first, and keeps it while it waits for that worker (issue 46)'   # stops every session first
+    'owner: sessions of one host share its limit of owned items and its build slot; a low-effort session gets capacity 1'   # stops every session first
+    'owner: a build slot is freed when its work ends: the item released, the session disconnected for good, the name revoked'   # stops every session, restarts the gateway
+    'offers: a late accept of a withdrawn offer is refused (stale-assignment) and never takes a worker over its capacity'   # stops every session first
+    'offers: a session that let two offers in a row lapse is not offered more until it calls a verb, and the status shows the cool-down'   # stops every session first
+    'owner: auto-unpark: a red-shard park is lifted once the pull request is green on a newer head, not on the head it judged'   # the start of group 1 of 2 since the owner suite was split
+    'intake: a free slot and an empty Technical Design pull the top Todo item that is not held, pinned or waiting, up to the WIP limit'   # stops every session, restarts the gateway
+    'owner: pr-checks with an item token reads the checks of that item''s own pull request and of no other'   # (checks.ps1) items pinned to nobody, the scripted holder only
+    'ci rule (gateway merge): a PASS whose head is red on a defect of master waits without a demotion, and is merged once master is fixed'   # (cirule.ps1) the scripted holder only
+    'sweep throttle: one full sweep per sweepMinSeconds; a trigger of an item between them gets an incremental pass of that item only'   # (budget.ps1) restarts the gateway
+    'base update: a verdict recorded between the trigger and the delayed update stops the gateway''s update'   # (baseupdate.ps1) Bu-Worker starts the sessions it needs
+    'runner gate: at most runner.maxProcesses rule scripts at once; a freed slot goes to the sweep first, the journal last; a verb that waits too long is runner-busy'   # (runner-gate.ps1) restarts the gateway
+    'leader: the lease is a compare-and-swap with a growing epoch; a superseded holder can neither renew nor release; a final snapshot never overwrites a later epoch'   # (leader.ps1)
+    'journal fold: repeated matched, waiting and reassigned lines edit one comment per kind; another line ends the fold; folds do not count against the cap'   # (journal-fold.ps1) an item no sweep touches
+) | ForEach-Object { [void]$OwnerBarriers.Add($_) }

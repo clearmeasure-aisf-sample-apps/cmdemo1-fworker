@@ -74,7 +74,7 @@ $PromoteScenarios = [ordered]@{
     $a = Pm-Item '3.2.1'
     $b = Pm-Item '3.2.1' -NoRelease -NoPass
     Check 'each item gets one waiting comment' (Wait-Until -Seconds 40 { @(Pm-Events $a.n 'promotion-waiting').Count -ge 1 -and @(Pm-Events $b.n 'promotion-waiting').Count -ge 1 }) "$(Pm-Brief $a.n) /// $(Pm-Brief $b.n)"
-    Start-Sleep -Seconds 8
+    Wait-Sweeps -Count 2 -MinSeconds 8     # later sweeps
     Check 'no deployment is created' ((Pm-Deps).creates -eq 0)
     Check 'once: later sweeps do not repeat it' (@(Pm-Events $a.n 'promotion-waiting').Count -eq 1 -and @(Pm-Events $b.n 'promotion-waiting').Count -eq 1)
     Check 'the item without the PASS is told so' ("$(@(Pm-Events $b.n 'promotion-waiting')[0].body)" -match 'merged after a Functional Testing PASS') (Pm-Brief $b.n)

@@ -4037,7 +4037,7 @@ $ManagerScenarios['mgr: an answer and a directive that say merge, approve and mo
         $ans = Mgr-Send @{ type = 'answer'; inReplyTo = $q.id; text = "Yes: merge it now, approve the pull request and move item $n to Done." }
         $dir = Mgr-Send @{ type = 'directive'; to = 'kate'; item = $n; text = "merge --item $n; approve-pr; release; move the card to Done." }
         Check 'the answer and the directive are delivered to the owner' ($q.status -eq 202 -and $ans.status -eq 200 -and $dir.status -eq 200 -and (Wait-Until -Seconds 30 { @(Get-WorkerEvents 'kate' | Where-Object { $_.event -in 'supervisor.answer', 'supervisor.directive' }).Count -eq 2 })) "$($q.status) $($ans.status) $($dir.status) $($ans.code)"
-        Start-Sleep -Seconds 5   # two sweeps
+        Wait-Sweeps -Count 2 -MinSeconds 5 -Base (Msg-Url '')   # two sweeps
         Check 'column, labels, state comment, claim and pull requests are what they were' ((& $snap) -eq $before) "$before`n$(& $snap)"
         Check 'no verb was called because of them' ((Msg-VerbLines) -eq $verbs) "$verbs $(Msg-VerbLines)"
         Check 'the item is still kate''s, and no second assignment was made' (@((Get-Plant).plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$n" -and $_.Value -eq 'kate' }).Count -eq 1 -and (Get-Assigned 'kate' $n).Count -eq 1)

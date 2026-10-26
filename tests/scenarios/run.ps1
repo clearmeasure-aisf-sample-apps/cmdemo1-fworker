@@ -4,8 +4,8 @@
 #   no -Suite    every suite, one after the other, in this process (as before)
 #   -Suite name  exactly one suite, with its own port slot (see Set-TestPorts in lib.ps1), its own HOME and TMPDIR; run-all.ps1 starts many of these at once
 #   -Tier fast   skips the scenarios tagged [full] (lib.ps1 Get-ScenarioTier) and reports how many; the default here is full (everything), run-all.ps1 defaults to fast
-#   -ListScenarios  prints suite, scenario and tier, tab separated
-#   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json (owner: contiguous runs in suite order, as its scenarios build on each other); the suites 'qc', 'messaging' and 'manager' default to 4 groups and 'owner' to 2, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
+#   -ListScenarios  prints suite, scenario and tier, tab separated; with -Suite only what that suite would run (after -Tier and -Only), with -Groups n -Group g only that group's share
+#   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json (owner: contiguous runs in suite order, cut only at its barriers, as its scenarios build on each other); the suites 'qc', 'messaging' and 'manager' default to 4 groups and 'owner' to 2, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
 #   -ListSuites  prints the suite names, one per line, in slot order (slot = line number, from 0)
 #   Start guards (guard.ps1): refuses with exit 4 when another run.ps1 or run-all.ps1 is active on this machine, or when the temp filesystem has less than
 #   -MinFreeDiskMb (default 2048) free; with less than -MinAvailableMb (default 1500) of memory a suite runs in half its groups. -Force starts anyway.
@@ -58,6 +58,8 @@ foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerA
 foreach ($k in $KeeperScenarios.Keys) { $ManagerScenarios[$k] = $KeeperScenarios[$k] }
 . (Join-Path $PSScriptRoot 'octopus.ps1')           # the Octopus runbook runtime against the fake Octopus: suite 'octopus' (uses the helpers of owner.ps1 and runtime.ps1)
 . (Join-Path $PSScriptRoot 'promote.ps1')           # the automatic promotion of a release to uat and prod (Verbs.Promote.ps1): suite 'promote'
+# every barrier of the owner suite (owner.ps1) names one of its scenarios: a renamed one would move the cut of its groups without a word
+foreach ($barrier0 in $OwnerBarriers) { if (-not $OwnerScenarios.Contains($barrier0) -and -not $OwnerScenarios.Contains("$barrier0 [full]")) { throw "owner.ps1 `$OwnerBarriers names no scenario of the owner suite: '$barrier0'" } }
 
 # ---- the suites. ORDER IS THE PORT SLOT: append new suites at the end, never reorder (a slot is 100 ports from 6100, see lib.ps1). ----------
 # Env names the environment a suite needs (set before it, removed after it); Timing sets FACTORY_TIMING_* for the suite; Extra is merged into the gateway config.
@@ -157,14 +159,61 @@ $SuiteDefs = @(
             octopus = @{ url = '__FAKE_URL__/octopus'; space = 'Spaces-355'; project = 'cmdemo1-ui'; prodUrl = 'https://ca-cmdemo1-prod-ui.example'; tddUrl = '__FAKE_URL__'; uatUrl = '__FAKE_URL__'; healthPath = '/_healthcheck/detailed'; health = @{ spacingMinutes = 0.05; settleMinutes = 0.1; retries = 2; retrySeconds = 0.5 }
                 environments = @{ tdd = 'tdd'; uat = 'uat'; prod = 'prod' } } } }
 )
+
+# ---- which scenarios run: Run-Suite runs them and -ListScenarios -Suite prints them, through the same functions, so the two cannot differ ----------
+function Get-OnlyNames($Set) { @($Set.Keys | Where-Object { -not $Only -or $_ -match $Only }) }
+function Get-TierNames([string[]]$Names) { @(foreach ($n in @($Names)) { if ($n -and ($Tier -eq 'full' -or (Get-ScenarioTier $n) -eq 'fast')) { $n } }) }
+# The share of group $Index (from 0) of $Count of a suite's scenarios, kept in suite order; every scenario is in exactly one group. Seconds per scenario
+# come from scenario-stats.json (run-all.ps1 -Tier full rewrites it); one it does not know counts as 30 s, about the mean seen in CI for the long
+# suites (owner 29, auto 46, manager 19 s per scenario). owner: contiguous runs, cut only where a scenario of $OwnerBarriers (owner.ps1) starts, the
+# barrier nearest to each even share of the seconds; its scenarios lean on workers and state that earlier ones left behind, so a balanced pick from
+# anywhere in the suite breaks them. The others: longest scenario first onto the least loaded group.
+function Select-GroupShare([string]$SuiteName, [string[]]$RunNames, [int]$Count, [int]$Index) {
+    if (-not $RunNames) { return @() }
+    $st = @{}; try { $st = (Get-Content -Raw (Join-Path $PSScriptRoot 'scenario-stats.json') | ConvertFrom-Json -AsHashtable)[$SuiteName] } catch { }
+    if ($SuiteName -eq 'owner') {
+        $secs = @($RunNames | ForEach-Object { $k = $_ -replace '\s\[full\]\s*$', ''; $(if ($st -and $st.ContainsKey($k)) { [double]$st[$k].seconds } else { 30.0 }) })
+        $total = ($secs | Measure-Object -Sum).Sum; if (-not ($total -gt 0)) { $secs = @($secs | ForEach-Object { 1.0 }); $total = [double]$secs.Count }
+        $starts = New-Object double[] $RunNames.Count; $acc = 0.0
+        for ($i = 0; $i -lt $RunNames.Count; $i++) { $starts[$i] = $acc; $acc += $secs[$i] }
+        $cuts = @(0)   # the index each group starts at; a group with no barrier left after the one before it is empty
+        for ($c = 1; $c -lt $Count; $c++) {
+            $target = $total * $c / $Count; $best = $RunNames.Count
+            for ($i = $cuts[-1] + 1; $i -lt $RunNames.Count; $i++) {
+                $isBarrier = $OwnerBarriers.Contains($RunNames[$i]) -or $OwnerBarriers.Contains(($RunNames[$i] -replace '\s\[full\]\s*$', ''))
+                if ($isBarrier -and ($best -eq $RunNames.Count -or [math]::Abs($starts[$i] - $target) -lt [math]::Abs($starts[$best] - $target))) { $best = $i }
+            }
+            $cuts += $best
+        }
+        $cuts += $RunNames.Count
+        return @(for ($i = $cuts[$Index]; $i -lt $cuts[$Index + 1]; $i++) { $RunNames[$i] })
+    }
+    $load = New-Object double[] $Count; $mine = @{}
+    foreach ($n in ($RunNames | Sort-Object { $k = $_ -replace '\s\[full\]\s*$', ''; if ($st -and $st.ContainsKey($k)) { -[double]$st[$k].seconds } else { -30.0 } })) {
+        $k = $n -replace '\s\[full\]\s*$', ''; $sec = $(if ($st -and $st.ContainsKey($k)) { [double]$st[$k].seconds } else { 30.0 }); $gi = 0; for ($i = 1; $i -lt $Count; $i++) { if ($load[$i] -lt $load[$gi]) { $gi = $i } }
+        $load[$gi] += $sec; if ($gi -eq $Index) { $mine[$n] = $true }
+    }
+    return @($RunNames | Where-Object { $mine.ContainsKey($_) })
+}
+
 if ($ListSuites) { $SuiteDefs | ForEach-Object { $_.Name }; exit 0 }
-if ($ListScenarios) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
+# -ListScenarios alone: every scenario of every suite, whatever -Tier and -Only say (run-all.ps1 reads it); with -Suite see below
+if ($ListScenarios -and -not $Suite) { foreach ($d0 in $SuiteDefs) { foreach ($k0 in $d0.Set.Keys) { "$($d0.Name)`t$k0`t$(Get-ScenarioTier $k0)" } }; exit 0 }
 if ($Suite -and -not @($SuiteDefs | Where-Object { $_.Name -eq $Suite }).Count) { Write-Host "unknown suite '$Suite'; known: $(($SuiteDefs | ForEach-Object { $_.Name }) -join ', ')"; exit 2 }
 
 # ---- qc runs as independent groups: this process starts them, waits (at most -GroupTimeoutMinutes), and adds up their results ---------------
 if ($Groups -le 0) { $Groups = $(if ($Suite -in 'qc', 'messaging', 'manager') { 4 } elseif ($Suite -eq 'owner') { 2 } else { 1 }); if ($lowMemory -and $Groups -gt 1) { $Groups = [int]($Groups / 2); Write-Host "memory is short: $Groups groups at once" } }
 if ($Groups -gt 10) { Write-Host "-Groups ${Groups}: at most 10 (each group has a port range of 100 inside the 1000 of its suite)"; exit 2 }
 if ($Group -ge $Groups) { Write-Host "-Group $Group is outside -Groups $Groups (groups are numbered from 0)"; exit 2 }
+# -ListScenarios -Suite s [-Groups n -Group g] [-Tier] [-Only]: the scenarios that run would run there (suite, scenario and tier, tab separated), and
+# nothing else; without -Group the whole suite. A guard can prove with it that every scenario of a suite runs in exactly one of its groups.
+if ($ListScenarios) {
+    $d0 = @($SuiteDefs | Where-Object { $_.Name -eq $Suite })[0]
+    $n0 = @(Get-TierNames @(Get-OnlyNames $d0.Set))
+    if ($Groups -gt 1 -and $Group -ge 0) { $n0 = @(Select-GroupShare $Suite $n0 $Groups $Group) }
+    foreach ($k0 in $n0) { "$Suite`t$k0`t$(Get-ScenarioTier $k0)" }
+    exit 0
+}
 if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
     # Group port ranges lie above every suite slot (6100 + 100 * slot, up to 7899): 10000 + 1000 * slot + 100 * group. TEST_PORT_BASE moves the first group; TEST_FAKE_PORT and TEST_API_PORT name one port each, so they cannot apply to several groups and are not passed on.
     $base0 = $(if ($env:TEST_PORT_BASE) { [int]$env:TEST_PORT_BASE } else { 10000 + 1000 * @($SuiteDefs | ForEach-Object { $_.Name }).IndexOf($Suite) })
@@ -257,27 +306,15 @@ $script:GwVerbs = 0
 function Count-GatewayVerbs { foreach ($f in Get-ChildItem -Path $script:Work -Filter 'gateway*.out' -ErrorAction SilentlyContinue) { $script:GwVerbs += @(Select-String -Path $f.FullName -Pattern '"verb":"').Count } }
 $script:Skipped = New-Object System.Collections.ArrayList
 function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
-    $names = @($Set.Keys | Where-Object { -not $Only -or $_ -match $Only })
-    $runNames = @($names | Where-Object { $Tier -eq 'full' -or (Get-ScenarioTier $_) -eq 'fast' })
+    $names = @(Get-OnlyNames $Set)
+    $runNames = @(Get-TierNames $names)
     foreach ($n in $names) { if ($runNames -notcontains $n) { [void]$script:Skipped.Add(@{ suite = $script:SuiteName; name = $n }) } }
-    if ($Groups -gt 1 -and $Group -ge 0) {   # this child's share (seconds from scenario-stats.json), kept in suite order: owner in contiguous runs, the others longest scenario first onto the least loaded group
-        $st = @{}; try { $st = (Get-Content -Raw (Join-Path $PSScriptRoot 'scenario-stats.json') | ConvertFrom-Json -AsHashtable)[$script:SuiteName] } catch { }
-        $load = New-Object double[] $Groups; $mine = @{}
-        if ($script:SuiteName -eq 'owner') {
-            # owner: contiguous runs in suite order, cut at even shares of the seconds. Its scenarios lean on workers and state that earlier ones
-            # left behind (alice, bob, carol...), so a balanced pick from anywhere in the suite breaks them; a contiguous run keeps the order intact.
-            $secs = @($runNames | ForEach-Object { $k = $_ -replace '\s\[full\]\s*$', ''; $(if ($st -and $st.ContainsKey($k)) { [double]$st[$k].seconds } else { 30.0 }) })
-            $total = ($secs | Measure-Object -Sum).Sum; if (-not ($total -gt 0)) { $secs = @($secs | ForEach-Object { 1.0 }); $total = [double]$secs.Count }; $acc = 0.0
-            for ($i = 0; $i -lt $runNames.Count; $i++) { $gi = [math]::Min($Groups - 1, [int][math]::Floor(($acc + $secs[$i] / 2) / $total * $Groups)); $acc += $secs[$i]; if ($gi -eq $Group) { $mine[$runNames[$i]] = $true } }
-        } else {
-        foreach ($n in ($runNames | Sort-Object { $k = $_ -replace '\s\[full\]\s*$', ''; if ($st -and $st.ContainsKey($k)) { -[double]$st[$k].seconds } else { -30.0 } })) {
-            $k = $n -replace '\s\[full\]\s*$', ''; $sec = $(if ($st -and $st.ContainsKey($k)) { [double]$st[$k].seconds } else { 30.0 }); $gi = 0; for ($i = 1; $i -lt $Groups; $i++) { if ($load[$i] -lt $load[$gi]) { $gi = $i } }
-            $load[$gi] += $sec; if ($gi -eq $Group) { $mine[$n] = $true }
-        }
-        }
-        $runNames = @($runNames | Where-Object { $mine.ContainsKey($_) })
+    if ($Groups -gt 1 -and $Group -ge 0) { $runNames = @(Select-GroupShare $script:SuiteName $runNames $Groups $Group) }   # this child's share
+    if ($runNames.Count -eq 0) {
+        # (not a failure: a fast-tier run can leave a group nothing to do; with all scenarios it means the cut left no barrier for this group)
+        if ($Groups -gt 1 -and $Group -ge 0 -and -not $Only) { Write-Host "group $Group of $Groups of suite $($script:SuiteName) is empty (tier $Tier): no scenario runs in it" }
+        return
     }
-    if ($runNames.Count -eq 0) { return }
     $cfg = @{ mergePolicy = $Policy; humanApprovers = @('factory-worker-testperson[bot]') }; foreach ($k in $Extra.Keys) { $cfg[$k] = $Extra[$k] }
     Start-TestEnv $cfg
     try {
