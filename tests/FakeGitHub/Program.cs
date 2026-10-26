@@ -89,7 +89,8 @@ app.Run(async ctx =>
 });
 app.Run();
 
-sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow; }
+sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow;
+    public string? Repo; }   // Repo: owner/name of another repository whose issue is linked to the board; null: the configured repository
 sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
 sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public string Base = "master"; public List<Comment> Comments = new(); public bool Dispatched; }
 sealed record Redirect(string To);
@@ -493,6 +494,8 @@ sealed class World
             }
             return (201, J(("token", "fake-app-" + iss), ("expires_at", DateTime.UtcNow.AddHours(1).ToString("o"))));
         }
+        // an issue of another repository linked to the board (Issue.Repo) is not one of this repository: as GitHub, its number answers 404 here
+        if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)(/.*)?$")).Success && issues.TryGetValue(int.Parse(m.Groups[1].Value), out var fi) && fi.Repo != null) return (404, "{\"message\":\"Not Found\"}");
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)/labels(/(.+))?$")).Success && issues.TryGetValue(int.Parse(m.Groups[1].Value), out var li))
         {
             if (method == "POST") { foreach (var l in b!["labels"]!.AsArray()) if (!li.Labels.Contains(l!.ToString())) li.Labels.Add(l!.ToString()); return (200, new JsonArray(li.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())); }
@@ -511,7 +514,7 @@ sealed class World
             var st = q["state"].ToString() is { Length: > 0 } sv ? sv : "open";
             var want = q["labels"].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             int per = Math.Clamp(int.TryParse(q["per_page"], out var pp) ? pp : 30, 1, 100), pg = Math.Max(1, int.TryParse(q["page"], out var pq) ? pq : 1);
-            var rows = issues.Values.Where(i => st == "all" || (st == "open") == i.Open).Where(i => want.All(w => i.Labels.Contains(w, StringComparer.OrdinalIgnoreCase)))
+            var rows = issues.Values.Where(i => i.Repo == null).Where(i => st == "all" || (st == "open") == i.Open).Where(i => want.All(w => i.Labels.Contains(w, StringComparer.OrdinalIgnoreCase)))
                 .OrderByDescending(i => i.Number).Skip((pg - 1) * per).Take(per)
                 .Select(i => (JsonNode)J(("number", i.Number), ("node_id", i.Node), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body), ("created_at", i.Created.ToString("o")), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))).ToArray();
             return (200, new JsonArray(rows));
@@ -944,7 +947,7 @@ sealed class World
         }
         if (q.Contains("issue(number"))
         {
-            var n = v["n"]!.GetValue<int>(); if (!issues.TryGetValue(n, out var i)) return (200, Data(J(("repository", J(("issue", null))))));
+            var n = v["n"]!.GetValue<int>(); if (!issues.TryGetValue(n, out var i) || i.Repo != null) return (200, Data(J(("repository", J(("issue", null))))));   // an issue of another repository is not one of this repository
             var card = i.Card == null ? new JsonArray() : new JsonArray(J(("id", i.Card), ("project", J(("number", 679))), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column)))));
             return (200, Data(J(("repository", J(("issue", J(("id", i.Node), ("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("url", $"https://fake/issues/{i.Number}"), ("createdAt", i.Created.ToString("o")),
                 ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))), ("projectItems", J(("nodes", card))))))))));
@@ -952,8 +955,15 @@ sealed class World
         if (q.Contains("items(first"))
         {
             var nodes = issues.Values.Where(i => i.Card != null).Select(i => (JsonNode)J(("id", i.Card), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column))),
-                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
+                ("content", J(("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("repository", J(("nameWithOwner", i.Repo ?? $"{Owner}/{Repo}"))), ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))).ToArray();
             return (200, Data(J(("organization", J(("projectV2", J(("items", J(("pageInfo", J(("hasNextPage", false), ("endCursor", null))), ("nodes", new JsonArray(nodes)))))))))));
+        }
+        if (q.Contains("node(id"))
+        {   // the issue behind a projects_v2_item webhook (content_node_id): its number, repository and labels; null for an unknown node
+            var id = v["id"]?.ToString(); var i = issues.Values.FirstOrDefault(x => x.Node == id);
+            if (i == null) return (200, Data(J(("node", null))));
+            return (200, Data(J(("node", J(("number", i.Number), ("repository", J(("nameWithOwner", i.Repo ?? $"{Owner}/{Repo}"))),
+                ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))))))));
         }
         if (q.Contains("fields(first"))
         {
@@ -1202,6 +1212,7 @@ sealed class World
                 var i = new Issue { Number = nextNumber++, Title = b!["title"]!.ToString(), Body = b["body"]?.ToString() ?? "", Column = b["column"]?.ToString() };
                 if (b["createdAt"] is { } ca) i.Created = DateTime.Parse(ca.ToString(), null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);   // an item of an earlier date
                 i.Node = "I_" + i.Number; foreach (var l in b["labels"]?.AsArray() ?? new JsonArray()) i.Labels.Add(l!.ToString());
+                i.Repo = b["repo"]?.ToString();   // { repo: "owner/name" }: an issue of another repository linked to the board
                 issues[i.Number] = i; if (i.Column != null || b["onBoard"]?.GetValue<bool>() == true) i.Card = "card_" + i.Number;
                 return (200, J(("number", i.Number)));
             }
