@@ -2535,6 +2535,7 @@ sealed class Runner(string entry)
         if (pool is not null && await pool.TryRunAsync(verb, stdin, timeout) is { } pooled) return pooled;
         var psi = new ProcessStartInfo("pwsh") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", entry, "--server", verb }) psi.ArgumentList.Add(a);
+        RunnerEnv.Apply(psi);
         using var p = Process.Start(psi)!;
         var key = Interlocked.Increment(ref liveKey); live[key] = p;
         try
