@@ -1640,6 +1640,7 @@ $OwnerBarriers = [System.Collections.Generic.HashSet[string]]::new()
     'owner: a pinned item gets its worker''s free slot first, and keeps it while it waits for that worker (issue 46)'   # stops every session first
     'owner: sessions of one host share its limit of owned items and its build slot; a low-effort session gets capacity 1'   # stops every session first
     'owner: a build slot is freed when its work ends: the item released, the session disconnected for good, the name revoked'   # stops every session, restarts the gateway
+    'pass-merge: a PASS on an Auto Merge item with green checks is merged by the verdict call itself; the session''s merge call answers already-merged'   # new items, the scripted holder only (Pm-ToValidation, as the ci rule barrier); the pass-merge scenarios after it start and stop their own sessions
     'offers: a late accept of a withdrawn offer is refused (stale-assignment) and never takes a worker over its capacity'   # stops every session first
     'offers: a session that let two offers in a row lapse is not offered more until it calls a verb, and the status shows the cool-down'   # stops every session first
     'owner: auto-unpark: a red-shard park is lifted once the pull request is green on a newer head, not on the head it judged'   # the start of group 1 of 2 since the owner suite was split
@@ -1648,6 +1649,7 @@ $OwnerBarriers = [System.Collections.Generic.HashSet[string]]::new()
     'ci rule (gateway merge): a PASS whose head is red on a defect of master waits without a demotion, and is merged once master is fixed'   # (cirule.ps1) the scripted holder only
     'sweep throttle: one full sweep per sweepMinSeconds; a trigger of an item between them gets an incremental pass of that item only'   # (budget.ps1) restarts the gateway
     'base update: a verdict recorded between the trigger and the delayed update stops the gateway''s update'   # (baseupdate.ps1) Bu-Worker starts the sessions it needs
+    'base update (conflict mode): master moves; a clean branch that is behind is left alone, and the owner of a conflicting one is told once, reason conflict'   # (baseupdate.ps1) restarts the gateway, its own sessions bc1 and bc2, new items
     'runner gate: at most runner.maxProcesses rule scripts at once; a freed slot goes to the sweep first, the journal last; a verb that waits too long is runner-busy'   # (runner-gate.ps1) restarts the gateway
     'leader: the lease is a compare-and-swap with a growing epoch; a superseded holder can neither renew nor release; a final snapshot never overwrites a later epoch'   # (leader.ps1)
     'journal fold: repeated matched, waiting and reassigned lines edit one comment per kind; another line ends the fold; folds do not count against the cap'   # (journal-fold.ps1) an item no sweep touches

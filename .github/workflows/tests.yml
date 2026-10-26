@@ -41,18 +41,24 @@ jobs:
       matrix:
         # parallel: how many entries of suites run-all.ps1 runs at once (an @all/n entry is n processes on its own)
         include:
-          # auto: one process, 39 scenarios, 1,782 s beside 3 other suites: 4 groups, one per runner
+          # auto: one process, 40 scenarios, about 1,740 s of scenarios alone on a runner (run 40277285785): 6 groups of about 290 s, one per runner
           - name: auto-0
-            suites: auto@0/4
+            suites: auto@0/6
             parallel: 1
           - name: auto-1
-            suites: auto@1/4
+            suites: auto@1/6
             parallel: 1
           - name: auto-2
-            suites: auto@2/4
+            suites: auto@2/6
             parallel: 1
           - name: auto-3
-            suites: auto@3/4
+            suites: auto@3/6
+            parallel: 1
+          - name: auto-4
+            suites: auto@4/6
+            parallel: 1
+          - name: auto-5
+            suites: auto@5/6
             parallel: 1
           - name: peer-approved
             suites: peer-approved@all/2
@@ -63,24 +69,30 @@ jobs:
           - name: merge-queue-b
             suites: merge-queue@1/2,qc-proxy
             parallel: 2
-          # owner: 2,365 s of scenarios, one group of 6 per job (contiguous runs, cut only at the barriers of owner.ps1)
+          # owner: about 2,600 s of scenarios, one group of 8 per job (contiguous runs, cut only at the barriers of owner.ps1: the largest is about 440 s)
           - name: owner-0
-            suites: owner@0/6
+            suites: owner@0/8
             parallel: 1
           - name: owner-1
-            suites: owner@1/6
+            suites: owner@1/8
             parallel: 1
           - name: owner-2
-            suites: owner@2/6
+            suites: owner@2/8
             parallel: 1
           - name: owner-3
-            suites: owner@3/6
+            suites: owner@3/8
             parallel: 1
           - name: owner-4
-            suites: owner@4/6
+            suites: owner@4/8
             parallel: 1
           - name: owner-5
-            suites: owner@5/6
+            suites: owner@5/8
+            parallel: 1
+          - name: owner-6
+            suites: owner@6/8
+            parallel: 1
+          - name: owner-7
+            suites: owner@7/8
             parallel: 1
           - name: copilot-0
             suites: copilot@0/3
@@ -91,10 +103,13 @@ jobs:
           - name: copilot-2
             suites: copilot@2/3
             parallel: 1
-          # promote whole, as before: its slot (28) puts group ports at 38000-38999, inside Linux's ephemeral range (32768-60999)
-          - name: promote
-            suites: promote,copilot-deadline,cursor-deadline
+          # promote (slot 28): its group ports 38000-38199 are below the ephemeral range the step "Ephemeral ports above the test ports" sets
+          - name: promote-a
+            suites: promote@0/2,copilot-deadline,cursor-deadline
             parallel: 3
+          - name: promote-b
+            suites: promote@1/2
+            parallel: 1
           - name: operator
             suites: operator,runtime,mcp,envscope
             parallel: 2
@@ -102,16 +117,23 @@ jobs:
             suites: cursor,copilot-manager,octopus
             parallel: 3
           - name: gate-a
-            suites: qc-gate@all/2
+            suites: qc-gate@all/3
             parallel: 1
+          # the six one-scenario qc-gate suites, about 1,040 s together: two jobs of 3 at once
           - name: gate-b
-            suites: qc-gate-race,qc-gate-grace,qc-gate-lease,qc-gate-waiting,qc-gate-idle,qc-gate-lifetime
+            suites: qc-gate-race,qc-gate-grace,qc-gate-idle
+            parallel: 3
+          - name: gate-c
+            suites: qc-gate-lease,qc-gate-waiting,qc-gate-lifetime
             parallel: 3
           - name: workers-a
-            suites: qc-worker@0/2,author
+            suites: qc-worker@0/3,author
             parallel: 2
           - name: workers-b
-            suites: qc-worker@1/2
+            suites: qc-worker@1/3
+            parallel: 1
+          - name: workers-c
+            suites: qc-worker@2/3
             parallel: 1
           # qc and messaging: their 4 groups in one job, as before (the rule-script pool and the client host: no pwsh per call)
           - name: qc
@@ -148,6 +170,15 @@ jobs:
           for project in tests/FakeGitHub gateway; do
             dotnet build "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --verbosity quiet
           done
+
+      # Every port Tier 1 listens on is below 40000: a suite's slot range 6100-8999, a group's 10000 + 1000 * slot + 100 * group + 0..99 (slot
+      # at most 28, group at most 9: at most 38999). Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of
+      # one suite could take the port a group of a high slot (23 and up: 33000 and up) is about to listen on. This moves that range above them.
+      - name: Ephemeral ports above the test ports
+        run: |
+          set -euo pipefail
+          sudo sysctl -w net.ipv4.ip_local_port_range="40000 60999"
+          cat /proc/sys/net/ipv4/ip_local_port_range
 
       - name: Smoke
         run: pwsh -NoProfile -File tests/smoke.ps1

@@ -216,6 +216,8 @@ if ($ListScenarios) {
 }
 if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
     # Group port ranges lie above every suite slot (6100 + 100 * slot, up to 8999): 10000 + 1000 * slot + 100 * group. TEST_PORT_BASE moves the first group; TEST_FAKE_PORT and TEST_API_PORT name one port each, so they cannot apply to several groups and are not passed on.
+    # The ranges of slots 23 and up (33000 and up) lie in Linux's default ephemeral range (32768-60999), where an outgoing connection can take a port
+    # before its group listens on it: CI (.github/workflows/tests.yml) moves the ephemeral range to 40000-60999 first; a local run of such a group can collide.
     $base0 = $(if ($env:TEST_PORT_BASE) { [int]$env:TEST_PORT_BASE } else { 10000 + 1000 * @($SuiteDefs | ForEach-Object { $_.Name }).IndexOf($Suite) })
     $gDir = Join-Path ([IO.Path]::GetTempPath()) "factory-groups-$([guid]::NewGuid().ToString('N').Substring(0,6))"; New-Item -ItemType Directory -Force -Path $gDir | Out-Null
     $swAll = [Diagnostics.Stopwatch]::StartNew(); $kids = @(); $tot = 0; $fails = @(); $sc = @(); $skip = [ordered]@{}; $vc = 0; $vs = 0.0; $gv = 0; $cc = 0; $bad = $false; $quar = @()
