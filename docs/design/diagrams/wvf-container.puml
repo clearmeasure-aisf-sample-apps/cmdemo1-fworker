@@ -1,0 +1,40 @@
+@startuml wvf-container
+!include <C4/C4_Container>
+LAYOUT_LEFT_RIGHT()
+skinparam dpi 150
+title Wolverine factory: containers (one factory per board, durable state in Azure SQL)
+
+Person(owner, "Owner", "board, dashboard, approvals")
+System_Boundary(f, "AI factory (Container App, Balanced mode, min 1 replica)") {
+  Container(api, "Factory API", "ASP.NET", "GitHub and Azure Monitor webhooks in; MCP and verbs for AI sessions (event verbs publish, decision verbs invoke the saga); dashboard; dead-letter admin")
+  Container(watch, "Octopus watcher", "polling (ADR-0054)", "ReleaseCreated(commit), DeploymentStarted/Finished, SignOffRequested")
+  Container(bus, "Wolverine runtime", "WolverineFx 6.x, pinned", "durable local queues with inbox/outbox; globally partitioned SQL queue for coordinators; scheduled timeouts; recurring reconcilers; rate limits; leader election")
+  Container(sagas, "Workflows", "sagas, EF Core storage", "WorkItemSaga (plans: feature, docs, hotfix); CapacityScheduler; MergeTrain; DeliveryTrain; IncidentSaga")
+  Container(int, "Integration handlers", "one command per side effect", "GitHub, Octopus, Cursor, Copilot, runtimes; idempotent; classified errors; rate limits")
+  Container(mail, "Session mailbox", "table", "pushes to live sessions, served by any node")
+}
+ContainerDb(sql, "Azure SQL", "factory database", "wolverine_* envelopes, nodes, dead letters; saga rows; correlation map; item history; mailbox; rate-limit buckets")
+System_Ext(gh, "GitHub", "board 679, issues, PRs, merge queue, Actions")
+System_Ext(oct, "Octopus Deploy", "Spaces-355: releases, deployments, Sign-offs, runbooks")
+System_Ext(ai, "AI runtimes", "Cursor and Copilot cloud agents; worker containers on Tentacle hosts")
+System_Ext(mon, "Azure Monitor / App Insights", "alerts, telemetry; the factory's own health alert goes to the owner directly")
+
+Rel(owner, gh, "moves cards, labels, comments")
+Rel(owner, api, "dashboard, approvals, replays")
+Rel(gh, api, "webhooks", "HMAC")
+Rel(mon, api, "alert webhooks")
+Rel(ai, api, "MCP / verbs", "item token")
+Rel(watch, oct, "poll")
+Rel(watch, bus, "publish events")
+Rel(api, bus, "publish events; invoke sagas")
+Rel(bus, sagas, "deliver")
+Rel(sagas, bus, "commands, timeouts")
+Rel(bus, int, "deliver commands")
+Rel(int, gh, "REST / GraphQL", "GitHub App")
+Rel(int, oct, "REST", "Agent account")
+Rel(int, ai, "launch, follow-up, stop")
+Rel(sagas, mail, "pushes")
+Rel(ai, api, "next_event / stream")
+Rel(api, mail, "serves pushes")
+Rel(bus, sql, "envelopes, saga rows, schedules")
+@enduml
