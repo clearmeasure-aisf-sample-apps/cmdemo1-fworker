@@ -1,0 +1,46 @@
+@startuml wvf-sagas
+skinparam dpi 150
+skinparam componentStyle rectangle
+title Wolverine factory: sagas, coordinators and integration handlers
+
+[WorkItemSaga\none instance per item; id = repo#issue + generation\n--\nplans (data): feature: Design > Develop > Verify > Merge > Deliver\ndocs: Design > Develop > Verify > Merge\nhotfix: Develop > Verify > Merge > Deliver (rank top, every gate)\n--\nchosen at start; switched after Design (docs-only)\nor after the merge (no release)] as PF
+package "Coordinators (globally partitioned queue; single writer)" {
+  [CapacityScheduler\none per factory] as CAP
+  [MergeTrainSaga\none per repository] as MT
+  [DeliveryTrainSaga\none per deployable and environment] as DT
+}
+[IncidentSaga\nid = app + environment + generation] as INC
+package "Integration handlers (commands; idempotent; classified errors)" {
+  [GitHub: Comment, Label, MoveCard\n(versioned projection), EnqueueMerge] as GHH
+  [Octopus: CreateDeployment,\nAnswerSignOff, RunRunbook] as OCH
+  [Runtimes: StartSession,\nFollowUp, StopSession] as RTH
+}
+[Octopus watcher\n(polling)] as OW
+[Reconcilers\n(recurring jobs)] as REC
+database "Correlation map" as MAP
+database "Item history" as HIST
+
+PF --> CAP : RequestSlot / SlotGranted / Held / Clear
+PF --> RTH : StartSession(arm id)
+RTH --> CAP : SessionEnded
+PF --> MT : ReadyToMerge(H) / Merged(C)
+MT --> DT : ItemMerged(C)
+OW --> DT : ReleaseCreated(R, C), deployments
+DT --> PF : DeliveredTo(env) / Undelivered(env)
+DT --> OCH : CreateDeployment, AnswerSignOff
+MT --> GHH : EnqueueMerge
+PF --> GHH : projection
+DT --> INC : prod deployment failed
+INC --> DT : hold / release the environment
+INC --> PF : start (hotfix plan)
+PF --> INC : hotfix DeliveredTo(prod)
+INC --> DT : Rollback(env, to release)\n(policy, no new migration)
+REC --> PF : corrective events
+REC --> DT
+GHH ..> MAP
+RTH ..> MAP
+OW ..> MAP
+PF ..> HIST
+DT ..> HIST
+INC ..> HIST
+@enduml

@@ -1,0 +1,52 @@
+@startuml gwc-target
+skinparam dpi 150
+skinparam componentStyle rectangle
+title Gateway composition: Program.cs only composes; behaviour lives in modules, services and policies
+
+package "Program.cs (about 40 lines)" {
+  [CreateBuilder(args)\nAddGatewayConfiguration\nAddGatewayHosting\nServices.AddGateway*(...)\nBuild\nUseGatewayPipeline\nMapGatewayEndpoints\nRun] as P
+}
+package "Composition (extension methods)" {
+  [AddGatewayCore\nRunner, EventHub, Plant(IPlantHooks), Messenger,\nQcHub, BaseWatch, budgets, PromptStore] as C1
+  [AddGatewayIdentity\nRevocationService, RuntimeNonces,\nTokenMinter, AdmissionService,\nICallerContext, PublicBase] as C2
+  [AddGatewayRuntimes\nRuntimeRegistry (managers by kind),\nprompt builders] as C3
+  [AddGatewayBackground\nall hosted services] as C4
+  [AddGatewayEndpoints\nIEndpointModule list] as C5
+}
+package "Configuration (options)" {
+  [GatewayOptions, InstanceConfig,\nTimingOptions, *Settings] as A
+}
+package "Runtime: hosted services (own their state)" {
+  [Sweeper, PlantTicker, BaseWatch] as E1
+  [LeadershipService +\nSnapshotCoordinator] as E2
+  [RevocationService loader,\nOperatorReleaseLoader] as E3
+  [TranscriptService, CopilotCiReleaseService,\nCloudOwnerWatch x2, CopilotOwnerVerbs, CopilotSettleClient,\nManagerCopilotService,\nMcpSessionSweeper, RuntimeLoop x n] as E4
+}
+package "Runtime: HTTP" {
+  [GatewayAuthMiddleware] as I
+  [Endpoint modules (about 20):\nHealth, Status, Metrics, Dashboard, Plugin,\nWorkerAdmin, RuntimeHost, Copilot, Transcript,\nWebhook, Verb (VerbPipeline = seam S1), ItemAdmin,\nDemo, Wait, EventStream, Presence, Messaging,\nSupervisor, OperatorRelease, TestHooks, Qc, Mcp] as D
+  [Endpoint filters (filters only; InProcess bypasses middleware):\nMessagingOn, SupervisorOn, OperatorOn,\nOwnerMode, Admin, SupervisorBudget] as DF
+}
+package "Rules (policy classes, later Fworker.Domain)" {
+  [VerbPolicy, CredentialPolicy,\nMetricsAccessPolicy, PresencePolicy,\nReleaseRecordPolicy, DerivedTextRule] as F
+}
+package "Static content" {
+  [embedded: dashboard (CSS, HTML, JS)\nGateway/Templates (connect, Copilot, Cursor, master-fix)] as G
+}
+
+P --> A
+P --> C1
+P --> C2
+P --> C3
+P --> C4
+P --> C5
+C4 --> E1
+C4 --> E2
+C4 --> E3
+C4 --> E4
+C5 --> D
+D --> DF
+D --> F
+D --> G
+I --> C2
+@enduml
