@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: an answer, a directive and an operator note reach a session whose inbox is full of peer notes
-# runs: 3
+# runs: 4

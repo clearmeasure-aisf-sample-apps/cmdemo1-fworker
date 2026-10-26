@@ -1,6 +1,6 @@
 # suite: promote
 # scenario: promote: a master commit in the release that is no queued item's merge commit keeps the release waiting, naming the commit
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.11.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: release 3.11.1 waits for the automatic promotion to **uat**: commit {sha} in the release is not the merge commit of a factory work item. The item stays in the Release Queue; the gateway looks again at every sweep.\n\n<!-- plant event=promotion-waiting key=3.11.1|uat|commit {sha} in the release is not the merge commit of a factory work item -->"}
 + rule STATE factory-worker v1 #{#1}

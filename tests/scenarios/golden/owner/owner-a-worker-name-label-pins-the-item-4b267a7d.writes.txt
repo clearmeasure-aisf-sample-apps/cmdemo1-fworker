@@ -1,5 +1,5 @@
 # suite: owner
 # scenario: owner: a worker:<name> label pins the item [full]
-# runs: 3
+# runs: 4
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **bob** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|bob -->"}
 + rule STATE factory-worker v1 #{#1}

@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a red master after the merge resumes the owner task once to fix forward; the owner is done only once master is green and the change is in production [full]
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/red-{#1}","title":"Red (#{#1})"}
 = harness STATE factory-worker v1 #{#1}
 = harness STATE factory-worker v1 #{#1}

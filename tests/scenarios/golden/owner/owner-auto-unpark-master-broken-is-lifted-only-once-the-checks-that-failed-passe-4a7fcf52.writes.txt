@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: auto-unpark: master-broken is lifted only once the checks that failed passed on master, then judged on that head
-# runs: 3
+# runs: 4
 = harness STATE factory-worker v1 #{#1}
 = harness STATE factory-worker v1 #{#1}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}

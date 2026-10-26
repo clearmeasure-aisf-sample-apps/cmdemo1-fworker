@@ -1,6 +1,6 @@
 # suite: octopus
 # scenario: octopus: the stop of a worker runs Stop worker on the machine it was started on; desired no longer names it
-# runs: 3
+# runs: 4
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 + gateway POST /api/Spaces-355/runbook-runs/create/v1 201 {"EnvironmentNames":["tdd"],"ProjectName":"cmdemo1-fworker-runtime","RunbookName":"Start worker","SpaceIdOrName":"Spaces-355","SpecificMachineNames":["host-a"],"Variables":{"Fworker.Agent":"codex","Fworker.Item":"{#1}","Fworker.Mode":"detached","Fworker.ModelProfile":"","Fworker.Name":"oct-{session}","Fworker.Nonce":"{token}","Fworker.Phase":"Technical Design"}}
 + gateway POST /api/Spaces-355/runbook-runs/create/v1 201 {"EnvironmentNames":["tdd"],"ProjectName":"cmdemo1-fworker-runtime","RunbookName":"Stop worker","SpaceIdOrName":"Spaces-355","SpecificMachineNames":["host-a"],"Variables":{"Fworker.Agent":"codex","Fworker.Item":"{#1}","Fworker.Mode":"detached","Fworker.ModelProfile":"","Fworker.Name":"oct-{session}","Fworker.Nonce":"","Fworker.Phase":"Technical Design"}}

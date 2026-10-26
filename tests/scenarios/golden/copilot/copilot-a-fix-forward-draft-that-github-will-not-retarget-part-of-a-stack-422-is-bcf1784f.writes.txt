@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a fix-forward draft that GitHub will not retarget (part of a stack, 422) is closed and the item's pull request is opened on its branch, superseding the old one
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/stack-{#1}","title":"[WIP] Thing"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/stack-{#1}","body":"x","draft":true,"head":"copilot/stack-fix-{#1}","title":"Fix (#{#1})"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

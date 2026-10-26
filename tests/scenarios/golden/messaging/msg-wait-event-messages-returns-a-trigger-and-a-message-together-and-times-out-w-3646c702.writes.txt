@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: wait-event --messages returns a trigger and a message together, and times out with neither
-# runs: 3
+# runs: 4

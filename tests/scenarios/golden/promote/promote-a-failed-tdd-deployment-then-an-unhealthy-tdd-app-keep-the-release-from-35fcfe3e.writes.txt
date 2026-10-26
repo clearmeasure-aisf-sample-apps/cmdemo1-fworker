@@ -1,6 +1,6 @@
 # suite: promote
 # scenario: promote: a failed tdd deployment, then an unhealthy tdd app, keep the release from uat
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.5.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 + rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.5.1","SpaceIdOrName":"Spaces-355"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.5.1 to **uat** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.5.1|uat -->"}

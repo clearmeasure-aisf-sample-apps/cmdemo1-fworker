@@ -1,6 +1,6 @@
 # suite: promote
 # scenario: promote: an item merged without a PASS verdict holds the whole release back, explained once on each item
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.2.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 = harness POST /repos/{repo}/issues/{#2}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#2}\",\"merge\":{\"awaiting\":\"release-queue\",\"by\":\"person\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.2.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":false,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: release 3.2.1 waits for the automatic promotion to **uat**: #{#2}, carried by this release, does not qualify. The item stays in the Release Queue; the gateway looks again at every sweep.\n\n<!-- plant event=promotion-waiting key=3.2.1|uat|#{#2}, carried by this release, does not qualify -->"}

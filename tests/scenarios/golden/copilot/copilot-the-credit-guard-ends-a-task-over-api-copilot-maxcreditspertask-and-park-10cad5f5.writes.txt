@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: the credit guard ends a task over api.copilot.maxCreditsPerTask and parks its item credit-guard; after an unpark, an item whose pull request already carries the change starts no new Development task: it waits for its checks
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/credit-{#1}","title":"Credit (#{#1})"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 + gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}

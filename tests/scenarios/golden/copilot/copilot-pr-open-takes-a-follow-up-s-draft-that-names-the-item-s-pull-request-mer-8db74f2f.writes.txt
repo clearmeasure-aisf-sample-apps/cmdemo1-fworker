@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: pr_open takes a follow-up's draft that names the item's pull request ("merges into #N"): a pull request number is no other item [full]
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/par-{#1}","title":"[WIP] Par"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/par-{#1}","body":"I've created this new PR, which merges into #{#2}, to address your comment.","draft":true,"head":"copilot/par2-{#1}","title":"[WIP] Par again"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

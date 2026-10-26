@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: the owner publishes the demo video with its item token; another item and a worker credential are refused [full]
-# runs: 3
+# runs: 4
 = rule POST /repos/{repo}/releases 201 {"body":"Functional Validation demo media for #{#1} (published by the factory worker gateway).","draft":false,"name":"Demo video for #{#1}","prerelease":true,"tag_name":"demo-{#1}","target_commitish":"master"}
 = rule POST /_uploads/repos/{repo}/releases/{id}/assets?name=demo-{#1}.mp4 201 {"len":"{n}"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: demo video published: [demo-{#1}.mp4](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/download/demo-{#1}/demo-{#1}.mp4) on release [demo-{#1}](https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/releases/tag/demo-{#1}) (0 MB).\n\n<!-- factory-journal:factory-worker -->"}

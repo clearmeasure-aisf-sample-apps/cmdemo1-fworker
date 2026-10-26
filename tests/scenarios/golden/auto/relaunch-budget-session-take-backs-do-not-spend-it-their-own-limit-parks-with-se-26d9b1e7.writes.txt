@@ -1,6 +1,6 @@
 # suite: auto
 # scenario: relaunch budget: session take-backs do not spend it, their own limit parks with session-relaunch-budget, and the park codes say why
-# runs: 3
+# runs: 4
 = harness STATE factory-worker v1 #{#1}
 = harness STATE factory-worker v1 #{#1}
 = harness STATE factory-worker v1 #{#1}

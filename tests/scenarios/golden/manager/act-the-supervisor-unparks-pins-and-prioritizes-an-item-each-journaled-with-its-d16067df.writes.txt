@@ -1,6 +1,6 @@
 # suite: manager
 # scenario: act: the supervisor unparks, pins and prioritizes an item, each journaled with its policy; the fourth action of a day, hold:owner, advise mode and the never-verbs are refused
-# runs: 3
+# runs: 4
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: worker reported **FAILURE** for **Technical Design**; item parked for review. the criterion cannot be met as written\n\n<!-- factory-journal:factory-worker -->"}
 = rule DELETE /repos/{repo}/issues/{#1}/labels/worker:ghost-act 200 -
 = rule POST /repos/{repo}/issues/{#1}/labels 200 {"labels":["worker:carol"]}

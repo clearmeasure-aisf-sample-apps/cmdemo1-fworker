@@ -1,6 +1,6 @@
 # suite: promote
 # scenario: promote: a gate that fails while the Sign-off waits makes the gateway abort it; a 403 of the interruption names the permission
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.7.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 + rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.7.1","SpaceIdOrName":"Spaces-355"}
 + rule POST /octopus/api/Spaces-355/interruptions/Interruptions-{n}/submit 200 {"Instructions":null,"Notes":"Aborted by the factory worker gateway: the tdd app answered Unhealthy on /_healthcheck/detailed","Result":"Abort"}

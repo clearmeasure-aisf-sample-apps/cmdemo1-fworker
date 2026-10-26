@@ -1,6 +1,6 @@
 # suite: manager
 # scenario: act: the supervisor drains and resumes a name, the operator's drain wins, release-owner lets the owner go, restart-session ends the session through its end marker, and the hourly limit holds
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/issues/{#1}/labels 200 {"labels":["hold:owner"]}
 = harness DELETE /repos/{repo}/issues/{#1}/labels/hold:owner 200 -
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}

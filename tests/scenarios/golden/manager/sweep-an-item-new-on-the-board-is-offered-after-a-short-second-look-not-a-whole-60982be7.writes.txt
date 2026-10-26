@@ -1,4 +1,4 @@
 # suite: manager
 # scenario: sweep: an item new on the board is offered after a short second look, not a whole sweep interval later [full]
-# runs: 3
+# runs: 4
 + rule STATE first-pickup v1 #{#1}

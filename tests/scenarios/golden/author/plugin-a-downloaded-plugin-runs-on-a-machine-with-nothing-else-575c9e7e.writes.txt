@@ -1,3 +1,3 @@
 # suite: author
 # scenario: plugin: a downloaded plugin runs on a machine with nothing else [full]
-# runs: 3
+# runs: 4

@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: the owner's later draft on its own branch (not stacked, the older pull request closed) is the item's current pull request: marked ready, never the closed one, and the item moves on [full]
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/old-{#1}","title":"Later (#{#1})"}
 = harness PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/later-{#1}","title":"Later again (#{#1})"}

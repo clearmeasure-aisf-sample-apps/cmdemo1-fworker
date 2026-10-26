@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: the gateway owns Development's end: a task that ends after pushing (no pr_open, no item_complete, even a reported failure) has its draft taken over by the branch of its artifacts; the item waits for its checks in the gateway and moves on when they are green; no second Development task
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/settle-{#1}","title":"Add Settle"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 + gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}

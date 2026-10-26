@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a follow-up session that succeeds and pushes without connecting is judged by its run and its push: no failure, the item is settled; its prompt asks to connect first [full]
-# runs: 3
+# runs: 4
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/unreg-{#1}","title":"[WIP] Unreg"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 + gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}

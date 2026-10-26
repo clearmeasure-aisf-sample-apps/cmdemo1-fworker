@@ -1,3 +1,3 @@
 # suite: mcp
 # scenario: mcp: the owner (admin token) lists the owner read tools; a missing, forged or roleless credential is refused before the server
-# runs: 3
+# runs: 4

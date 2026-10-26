@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: a pin that waits too long falls back to another worker and is journalled
-# runs: 3
+# runs: 4
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **fb1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|fb1 -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the pinned worker **ghost1** could not take the item for {dur} (pinned-unavailable): the pin is set aside and it is offered to **fb1**. A new worker label pins it again.\n\n<!-- plant event=pin-fallback key=pinfb|a-{id}|ghost1 -->"}
 + rule STATE factory-worker v1 #{#1}
