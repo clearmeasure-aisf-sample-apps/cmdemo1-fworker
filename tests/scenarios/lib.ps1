@@ -312,16 +312,16 @@ function Read-WritesSections([string]$Path, [switch]$Later) {
     $cause = [System.Collections.Generic.List[string]]::new()
     $background = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $tail = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $later = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $laterLines = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $other = [System.Collections.Generic.List[string]]::new()
     foreach ($l in Read-WritesLines $Path) {
         if ($l.StartsWith('= ')) { $cause.Add($l.Substring(2)) } elseif ($l.StartsWith('+ ')) { [void]$background.Add($l.Substring(2)) } elseif ($l.StartsWith('~ ')) { [void]$tail.Add($l.Substring(2)) } else { $other.Add($l) }
     }
     if ($Later -and $Path.EndsWith('.writes.txt')) {
         $lp = $Path.Substring(0, $Path.Length - '.writes.txt'.Length) + '.later.txt'
-        if (Test-Path -LiteralPath $lp) { foreach ($l in Read-WritesLines $lp) { if ($l.StartsWith('~ ')) { [void]$later.Add($l.Substring(2)) } } }
+        if (Test-Path -LiteralPath $lp) { foreach ($l in Read-WritesLines $lp) { if ($l.StartsWith('~ ')) { [void]$laterLines.Add($l.Substring(2)) } } }
     }
-    return @{ cause = $cause; background = $background; tail = $tail; later = $later; other = $other }
+    return @{ cause = $cause; background = $background; tail = $tail; later = $laterLines; other = $other }
 }
 # The object of a caused write: the first item or pull request number of its line ({#k} or {#prk}), '*' for a line that names none. The caused
 # writes are compared as one sequence per object: the writes on one item keep their order, while how the writes on two items interleave (a verb
