@@ -264,6 +264,8 @@ if (-not $env:TEST_PORT_BASE) { $env:TEST_PORT_BASE = "$(6100 + 100 * $slot)" }
 Set-TestPorts ([int]$env:TEST_PORT_BASE)
 # Less CPU per dotnet process (the fake, the gateway, every pwsh): no profile-guided tiering, no background GC thread. About 10% of the CPU of a suite, and CPU is what parallel suites compete for.
 if (-not $env:DOTNET_TieredPGO) { $env:DOTNET_TieredPGO = '0' }; if (-not $env:DOTNET_gcConcurrent) { $env:DOTNET_gcConcurrent = '0' }
+# No pwsh of the suite reads or writes a .NET multicore-JIT startup profile in the suite's HOME: a corrupt one makes every later pwsh exit 139 (issue 375).
+if (-not $env:DOTNET_MultiCoreJitMinNumCpus) { $env:DOTNET_MultiCoreJitMinNumCpus = '65535' }
 $label = if ($Suite) { $Suite } else { 'all' }
 $script:SuiteRoot = Join-Path ([IO.Path]::GetTempPath()) "factory-suite-$label-$([guid]::NewGuid().ToString('N').Substring(0,6))"
 foreach ($d in 'home', 'tmp') { New-Item -ItemType Directory -Force -Path (Join-Path $script:SuiteRoot $d) | Out-Null }
