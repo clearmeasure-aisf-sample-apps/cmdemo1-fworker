@@ -1,0 +1,39 @@
+{
+  "tracker": "github-projects-v2",
+  "repo": "clearmeasure-aisf-sample-apps/cmdemo1-fworker",
+  "project": { "owner": "clearmeasure-aisf-sample-apps", "ownerType": "organization", "number": 687 },
+  "columns": {
+    "Todo": "backlog",
+    "Technical Design": "design",
+    "Development": "implement",
+    "Functional Testing": "verify",
+    "Done": "terminal"
+  },
+  "doneForNowColumn": "Done",
+  "privateBuild": "dotnet build tests/FakeGitHub -c Release -nodeReuse:false -p:UseSharedCompilation=false && dotnet build gateway -c Release -nodeReuse:false -p:UseSharedCompilation=false",
+  "unitTests": "dotnet test of every test project under tests/ that is a .csproj (none before stage C task C0)",
+  "acceptanceGate": "Tier 1 and the smoke test run in the pull request's CI (tests.yml); verified through the check-runs API. Subagents cannot run pwsh in their worktrees, and Tier 1 allows one run per machine.",
+  "mergeMethod": "squash",
+  "autoMerge": true,
+  "prePushGate": "merge-master-into-branch",
+  "issueClosePolicy": "close-on-merge-stay-closed",
+  "branchPrefix": "cm-ai-ops-bot/",
+  "subagents": { "default": "opus", "implement": "opus", "complex": "opus", "mechanical": "opus", "reviewer": "opus" },
+  "subagentIsolation": "worktree-per-subagent",
+  "subagentPerColumn": true,
+  "columnProgression": "one-column-at-a-time",
+  "maxConcurrentItems": 3,
+  "preCommitReview": "a reviewer subagent reviews the staged change before every commit",
+  "plan": "docs/design/fworker-wolverine-implementation.md",
+  "boardIds": {
+    "projectId": "PVT_kwDOD_ESUc4BovF-",
+    "statusFieldId": "PVTSSF_lADOD_ESUc4BovF-zhnNxz0",
+    "statusOptions": {
+      "Todo": "7ae6e6a7",
+      "Technical Design": "07d34f38",
+      "Development": "e5ff3ac6",
+      "Functional Testing": "fe3e4773",
+      "Done": "9eb5b0ec"
+    }
+  }
+}
