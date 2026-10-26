@@ -210,8 +210,8 @@ jobs:
           retention-days: 7
 
       # The logs hold the fixtures of the tests only (the suites know no real credential). run-all.ps1 keeps the work directory of a failed
-      # suite only: its gateway logs (gateway.out/err, and those of a restarted gateway) and, for the octopus suite, the PowerShell cache of
-      # its HOME (issue 375: sweeps that fail with exit 139 across gateway restarts).
+      # suite only: its gateway logs (gateway.out/err, and those of a restarted gateway) and the PowerShell cache of its HOME (issue 375:
+      # every new pwsh of a suite exits 139 across gateway restarts; seen in the octopus, owner and copilot suites).
       - name: Keep the logs of a failed run
         if: failure()
         uses: actions/upload-artifact@v7
@@ -223,7 +223,7 @@ jobs:
             ${{ runner.temp }}/suite-logs/*.result.json
             ${{ runner.temp }}/suite-logs/work-*/**/gateway*.out
             ${{ runner.temp }}/suite-logs/work-*/**/gateway*.err
-            ${{ runner.temp }}/suite-logs/work-octopus*/*/home/.cache/powershell/
+            ${{ runner.temp }}/suite-logs/work-*/*/home/.cache/powershell/
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

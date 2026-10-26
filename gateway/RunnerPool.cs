@@ -88,6 +88,7 @@ sealed class RunnerPool
             var mark = "fw-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12));
             var psi = new ProcessStartInfo("pwsh") { RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardInputEncoding = new UTF8Encoding(false), StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
             foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-File", host, entry, mark }) psi.ArgumentList.Add(a);
+            RunnerEnv.Apply(psi);
             var p = Process.Start(psi)!;
             w = new Worker { P = p, Mark = mark + " " };
             all[p.Id] = w;
