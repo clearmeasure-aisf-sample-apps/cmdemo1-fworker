@@ -13,25 +13,30 @@ sealed class GatewayAuthMiddleware(RequestDelegate next, GatewayOptions gateway,
     readonly string apiToken = gateway.ApiToken;
     readonly string tokenSecret = gateway.TokenSecret;
 
+    // Every path test here ignores case, as routing does (issue 409): a test that minded case let /API/v1/... pass unauthenticated to the /api/v1
+    // handler, and a bypass that minded case would refuse what its endpoint accepts. A case variant of a path is answered as the path itself.
+    static bool Is(string path, string route) => string.Equals(path, route, StringComparison.OrdinalIgnoreCase);
+    static bool Under(string path, string prefix) => path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+
     public async Task InvokeAsync(HttpContext ctx)
     {
         var port = ctx.Connection.LocalPort;
         var path = ctx.Request.Path.Value ?? "";
-        if (port == hookPort && hookPort != apiPort && !(path == "/webhooks/github" && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
+        if (port == hookPort && hookPort != apiPort && !(Is(path, "/webhooks/github") && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
         // a process that a newer one superseded (Leader.cs) serves nothing any more but its status to the operator: calls and new streams are answered
         // 503 gateway-replaced, so the client tries again and reaches the new process; a webhook too (the new process's sweep catches up)
-        if (leader.Replaced && (path == "/webhooks/github" || path.StartsWith("/qc/") || ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) || (path.StartsWith("/api/") && !(path is "/api/v1/status" or "/api/v1/dashboard" && Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
+        if (leader.Replaced && (Is(path, "/webhooks/github") || Under(path, "/qc/") || ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) || (Under(path, "/api/") && !((Is(path, "/api/v1/status") || Is(path, "/api/v1/dashboard")) && Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
         {
             ctx.Response.StatusCode = 503;
             await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "gateway-replaced", reason = "this gateway process was replaced by a newer one; try again", retryAfterSeconds = 5, exit = 20 });
             return;
         }
         // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
-        if (port == apiPort && path is "/api/v1/runtime/redeem" or "/api/v1/copilot/exchange") { publicBase.NoteBase(ctx); await next(ctx); return; }
+        if (port == apiPort && (Is(path, "/api/v1/runtime/redeem") || Is(path, "/api/v1/copilot/exchange"))) { publicBase.NoteBase(ctx); await next(ctx); return; }
         // the Octopus reconcile runbook's calls carry the host token, checked by the endpoints themselves (never a gateway credential)
-        if (port == apiPort && path is "/api/v1/runtime/octopus/desired" or "/api/v1/runtime/octopus/report") { await next(ctx); return; }
+        if (port == apiPort && (Is(path, "/api/v1/runtime/octopus/desired") || Is(path, "/api/v1/runtime/octopus/report"))) { await next(ctx); return; }
         var isMcp = port == apiPort && ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
-        if (port == apiPort && (path.StartsWith("/api/") || isMcp))
+        if (port == apiPort && (Under(path, "/api/") || isMcp))
         {
             var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
             if (p?.Kind != "admin" && !revocationService.IsLoaded)

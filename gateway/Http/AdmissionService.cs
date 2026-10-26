@@ -14,10 +14,10 @@ sealed class AdmissionService(GatewayOptions gateway, MessagingSettings messagin
         // replaced or never-registered supervisor name is never heard.
         if (messaging.Enabled && ownerMode && (p.Kind == "worker" || (p.Kind == "manager" && plant.ActiveSupervisor().Name == p.Name) || (p.Kind == "item" && p.Role is "owner" or "inspector"))) plant.Touch(p.Name);
         // the operator session (Operator.cs): heard while it holds the slot; and, for its quiet-plant check, every verb call of an item token is
-        // counted from its arrival to its answer
+        // counted from its arrival to its answer (the prefix ignores case, as routing does: /API/v1/verbs/x reaches the same verb, issue 409)
         if (p.Kind == "operator") plant.OperatorHeard(p.Name);
         if (p.Kind == "keeper") plant.KeeperHeard(p.Name);
-        if (messaging.OperatorEnabled && p.Kind == "item" && path.StartsWith("/api/v1/verbs/"))
+        if (messaging.OperatorEnabled && p.Kind == "item" && path.StartsWith("/api/v1/verbs/", StringComparison.OrdinalIgnoreCase))
         {
             var flightVerb = path["/api/v1/verbs/".Length..];
             var flight = plant.VerbStarted(p.Name, p.Item, flightVerb.All(ch => char.IsAsciiLetterLower(ch) || ch == '-') ? flightVerb : "");

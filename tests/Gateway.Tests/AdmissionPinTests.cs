@@ -163,6 +163,41 @@ public sealed class AdmissionPinTests(AdmissionGateway gw) : IClassFixture<Admis
         Assert.Equal(200, (await call).Status);
         Assert.False(MidVerb(await Reasons(), "ip-owner", 9, "get-item"));
     }
+
+    // issue 409: a case variant of an /api path is admitted as the path itself (presence, the operator heard, the verb in flight)
+    [Fact]
+    public async Task CaseVariant_OverHttp_IsAdmittedAsTheLowerCasePath()
+    {
+        if (!StubPwsh.Supported) return;
+        // presence: a worker's and an owner's call stamp them, a QC item token's does not
+        var asked = new (string Name, string Token, bool Heard)[]
+        {
+            ("cv-worker", Auth.WorkerToken(Secret, "cv-worker"), true),
+            ("cv-owner", Auth.MintItemToken(Secret, 4, "owner", "a1", "cv-owner", TimeSpan.FromHours(1)), true),
+            ("cv-qc", Auth.MintItemToken(Secret, 4, "qc", "a3", "cv-qc", TimeSpan.FromHours(1)), false),
+        };
+        foreach (var x in asked) Assert.Equal(403, (await gw.Host.SendAsync("GET", "/API/v1/status", Api, x.Token)).Status);
+        var peers = await Peers();
+        foreach (var x in asked) Assert.True(Lists(peers, x.Name) == x.Heard, $"{x.Name}: heard {Lists(peers, x.Name)}, wanted {x.Heard}");
+
+        // the operator session holding the slot: heard
+        var t0 = await OperatorHeard();
+        await Task.Delay(30);
+        Assert.Equal(403, (await gw.Host.SendAsync("GET", "/Api/V1/Dashboard", Api, Auth.OperatorToken(Secret, "operator-session", 1))).Status);
+        Assert.True(await OperatorHeard() > t0);
+
+        // an item token's verb in flight, from arrival to answer
+        var hold = Path.Combine(gw.Env.Dir, "hold");
+        File.WriteAllText(hold, "");
+        var call = gw.Host.SendAsync("POST", "/API/V1/Verbs/get-item", Api, Auth.MintItemToken(Secret, 8, "owner", "a8", "cv-flight", TimeSpan.FromHours(1)), "{\"item\":8}", 60);
+        var sw = Stopwatch.StartNew();
+        while (!MidVerb(await Reasons(), "cv-flight", 8, "get-item") && sw.Elapsed < TimeSpan.FromSeconds(15)) await Task.Delay(50);
+        Assert.True(MidVerb(await Reasons(), "cv-flight", 8, "get-item"));
+        Assert.False(call.IsCompleted);
+        File.Delete(hold);
+        Assert.Equal(200, (await call).Status);
+        Assert.False(MidVerb(await Reasons(), "cv-flight", 8, "get-item"));
+    }
 }
 
 /// <summary>
