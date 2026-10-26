@@ -115,7 +115,7 @@ function Get-BoardList {
     $q = @'
 query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(number:$n){ items(first:100, after:$after){ pageInfo{ hasNextPage endCursor }
   nodes{ id fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
-    content{ ... on Issue{ number state title body labels(first:30){ nodes{ name } } } } } } } } }
+    content{ ... on Issue{ number state title body repository{ nameWithOwner } labels(first:30){ nodes{ name } } } } } } } } }
 '@
     $after = $null; $out = @()
     do {
@@ -123,6 +123,10 @@ query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(numbe
         $items = $d.organization.projectV2.items
         foreach ($n in $items.nodes) {
             if (-not $n.content -or -not $n.content.PSObject.Properties['number']) { continue }
+            # a card of another repository linked to the board: its number is not an issue of this repository, so it is never seen here
+            # (a card without a repository is dropped as well)
+            $repo1 = if ($n.content.PSObject.Properties['repository'] -and $n.content.repository) { "$($n.content.repository.nameWithOwner)" } else { '' }
+            if ($repo1 -ine "$($c.owner)/$($c.repo)") { continue }
             $labels1 = @($n.content.labels.nodes | ForEach-Object { $_.name })
             if (-not (Test-ItemInScope $labels1)) { continue }   # another environment's card (or an unlabelled one with scoping on): not seen here
             $out += @{ cardId = $n.id; number = [int]$n.content.number; open = ($n.content.state -eq 'OPEN'); title = $n.content.title
