@@ -6,7 +6,7 @@ using System.Text.Json.Nodes;
 //   AddGatewayCore           EventHub, the GitHub budget, the Runner, the transcript store and its service
 //   AddGatewayLeadership     the leader lease, the plant snapshot, LeadershipService (C4d)
 //   AddGatewayIdentity       revocations, runtime nonces, RevocationService (C4a)
-//   AddGatewayRuntimes       the runtime adapters and managers; their settings      -> C5b: RuntimeRegistry and the prompt builders
+//   AddGatewayRuntimes       the prompt files, the prompt builders, RuntimeRegistry (the runtime adapters and managers) and their settings (C5b)
 //   AddGatewayPlant          the plant's settings, IPlantHooks, Plant, Messenger, QcHub, BaseWatch, the operator's releases (C4b)
 //   AddGatewayBackground     every hosted service, in start order                   -> C5c: CopilotCiReleaseService, CloudOwnerWatch;
 //                                                                                       C5d: ManagerCopilotService, McpSessionSweeper
@@ -94,33 +94,40 @@ static class GatewayServiceCollectionExtensions
         return services;
     }
 
-    // The runtime adapters (gateway/Runtimes/, cloud-worker-runtimes.md 4) and their settings. Each adapter is on only in owner mode with a token
-    // secret and the runtime switched on in the configuration; one start-up line each says whether it is. C5b turns this into RuntimeRegistry.
+    // The runtime adapters (gateway/Runtimes/, cloud-worker-runtimes.md 4), their settings, and the prompts the Cursor and Copilot adapters send.
+    // Each adapter is on only in owner mode with a token secret and the runtime switched on in the configuration; one start-up line each says
+    // whether it is. RuntimeRegistry holds them all (C5b).
     public static IServiceCollection AddGatewayRuntimes(this IServiceCollection services, GatewayComposition c)
     {
         var gw = c.Gateway; var ownerMode = gw.OwnerMode; var tokenSecret = gw.TokenSecret; var scriptsDir = gw.ScriptsDir;
         var revocations = c.Revocations; var runtimeNonces = c.RuntimeNonces;
+        // the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5), loaded once and registered first: the prompt builders render the
+        // bootstrap prompts from them. Loading writes nothing; Program.cs writes their errors where it loaded them before C5b (a broken one keeps /ready at 503)
+        var prompts = new PromptStore(Environment.GetEnvironmentVariable("FACTORY_PROMPTS") ?? Path.Combine(scriptsDir, "..", "..", "prompts"));
+        services.AddSingleton(prompts);
         var runtimeSettings = RuntimeSettings.Load(scriptsDir);
         var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new RuntimeManager(runtimeSettings, new CaeJobRuntime(runtimeSettings.CaeJob), runtimeNonces) : null;
         // the api mode, v1 Cursor Cloud Agents (gateway/Runtimes/CursorCloudRuntime.cs, agents-roles-launch.md 10): api.cursor.enabled and a key (CURSOR_API_KEY)
-        // and the gateway's public URL; the bootstrap prompt is read from prompts/ (Program.cs sets the prompt function once the prompts are loaded)
+        // and the gateway's public URL; the bootstrap prompt is read from prompts/ (CursorPromptBuilder, gateway/Templates/RuntimePrompts.cs)
         var cursorSettings = CursorCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
-        GatewayRuntimes? set = null;
-        var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, (item, phase, why) => set!.CursorPrompt(item, phase, why)) : null;
+        var cursorPrompts = new CursorPromptBuilder(prompts);
+        var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, cursorPrompts) : null;
         var cursorManager = cursorRuntime != null
             ? new RuntimeManager(runtimeSettings, cursorRuntime, runtimeNonces,
-                cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", Auth.Environment, expires, item, "", GatewayRuntimes.PhaseSlug(phase)), revocations.Of(name))))
+                cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", Auth.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
             : null;
         // the Copilot cloud agent (gateway/Runtimes/CopilotCloudRuntime.cs, docs/design/copilot-cloud-agent.md): api.copilot.enabled, a token
         // (COPILOT_TASKS_TOKEN) and the gateway's public URL; the task's prompt carries a one-time code for the worker's r1 (copilotCodes)
         var copilotSettings = CopilotCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
         var copilotCiRelease = new CopilotCiRelease { RefusedRetry = TimeSpan.FromSeconds(Math.Max(10, 5 * copilotSettings.CiReleaseSeconds)) };   // the CI release of the Copilot agent's held workflow runs (gateway/Runtimes/CopilotCiRelease.cs)
         var copilotCodes = new CopilotCodes();
+        var copilotPrompts = new CopilotPromptBuilder(prompts, copilotSettings);
+        var itemPr = new ItemPrLookup(c.Runner);
         var copilotRuntime = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
-            ? new CopilotCloudRuntime(copilotSettings, copilotCodes, (item, phase, code, pr, why) => set!.CopilotPrompt(item, phase, code, pr, why), itemPr: (item, ct) => set!.CopilotItemPr(item, ct)) : null;
+            ? new CopilotCloudRuntime(copilotSettings, copilotCodes, copilotPrompts, itemPr: itemPr) : null;
         var copilotManager = copilotRuntime != null
             ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
-                copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", GatewayRuntimes.PhaseSlug(phase)), revocations.Of(name))))
+                copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
             : null;
         // the Octopus runbook runtime (gateway/Runtimes/OctopusRunbookRuntime.cs, docs/design/octopus-runbook-runtime.md): runtimes.octopus.enabled and the
         // key of the service account that may run the runbooks of that one project (OCTOPUS_RUNBOOK_API_KEY); off without the key
@@ -129,7 +136,7 @@ static class GatewayServiceCollectionExtensions
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "octopus", ["enabled"] = octopusManager != null, ["configured"] = runtimeSettings.Octopus.Enabled, ["auth"] = runtimeSettings.Octopus.Auth, ["key"] = runtimeSettings.Octopus.ApiKey != "", ["hostToken"] = runtimeSettings.Octopus.HostToken != "" }.ToJsonString());
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
-        set = new GatewayRuntimes
+        var registry = new RuntimeRegistry
         {
             CaeJob = runtimeManager, CursorRuntime = cursorRuntime, Cursor = cursorManager, CopilotRuntime = copilotRuntime, Copilot = copilotManager,
             OctopusRuntime = octopusRuntime, Octopus = octopusManager, CopilotCiRelease = copilotCiRelease, CopilotCodes = copilotCodes,
@@ -137,7 +144,11 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(runtimeSettings);
         services.AddSingleton(cursorSettings);
         services.AddSingleton(copilotSettings);
-        c.Runtimes = set;
+        services.AddSingleton<ICursorPromptBuilder>(cursorPrompts);
+        services.AddSingleton<ICopilotPromptBuilder>(copilotPrompts);
+        services.AddSingleton<IItemPrLookup>(itemPr);
+        services.AddSingleton(registry);
+        c.Runtimes = registry;
         return services;
     }
 

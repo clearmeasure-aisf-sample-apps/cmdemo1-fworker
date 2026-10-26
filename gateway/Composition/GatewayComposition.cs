@@ -3,8 +3,9 @@
 // steps fill it in the order Program.cs calls them (GatewayServiceCollectionExtensions.cs). Each object is made exactly where Program.cs made it
 // before C5a, so the start-up lines and file reads keep their order.
 //
-// It shrinks as stage C goes on: what a step registers as a service leaves it once nothing outside the container reads it (C5b: the runtimes
-// become RuntimeRegistry; C6: the middleware takes its collaborators by injection; C7: the handlers move into endpoint modules).
+// It shrinks as stage C goes on: what a step registers as a service leaves it once nothing outside the container reads it (C6: the middleware
+// takes its collaborators by injection; C7: the handlers move into endpoint modules). The runtimes are RuntimeRegistry since C5b; it stays here
+// while AddGatewayPlant and AddGatewayBackground read it at registration.
 sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance, TimingOptions timing, RevocationOptions revocation, QcSettings qc,
     MessagingSettings messaging, KeeperSettings keeper, Func<string> linkBase)
 {
@@ -35,7 +36,7 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
     public RuntimeNonces RuntimeNonces { get; set; } = null!;
 
     // AddGatewayRuntimes
-    public GatewayRuntimes Runtimes { get; set; } = null!;
+    public RuntimeRegistry Runtimes { get; set; } = null!;
 
     // AddGatewayBackground
     public int SweepMinSeconds { get; set; }

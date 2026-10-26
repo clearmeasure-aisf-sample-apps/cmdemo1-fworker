@@ -16,5 +16,7 @@
     <!-- the dashboard page and its connect-prompt generator, put together by Templates/DashboardPage.cs, served at /dashboard -->
     <EmbeddedResource Include="Templates/dashboard.html" LogicalName="dashboard.html" />
     <EmbeddedResource Include="Templates/connect-prompt.js" LogicalName="connect-prompt.js" />
+    <!-- the text of the Cursor and Copilot runtimes' prompts, put together by Templates/RuntimePrompts.cs -->
+    <EmbeddedResource Include="Templates/runtime-prompts.txt" LogicalName="runtime-prompts.txt" />
   </ItemGroup>
 </Project>
