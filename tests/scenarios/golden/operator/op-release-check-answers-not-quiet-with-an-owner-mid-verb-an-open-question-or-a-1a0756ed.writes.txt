@@ -1,5 +1,5 @@
 # suite: operator
 # scenario: op: release-check answers not quiet with an owner mid-verb, an open question or a pending offer, with the reasons, and quiet otherwise
-# runs: 4
+# runs: 5
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
 rule STATE factory-worker v1 #{#2}

@@ -1,6 +1,6 @@
 # suite: manager
 # scenario: mgr: the supervisor reads items and PR checks, and writes nothing
-# runs: 4
+# runs: 5
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
 rule STATE factory-worker v1 #{#1}

@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: the default runtime takes an unlabelled code item to Development with a pull request by Copilot; pr_open takes over its draft on the copilot/ branch; Functional Testing starts from that branch
-# runs: 4
+# runs: 5
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7674 sha256:ee077a9a \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

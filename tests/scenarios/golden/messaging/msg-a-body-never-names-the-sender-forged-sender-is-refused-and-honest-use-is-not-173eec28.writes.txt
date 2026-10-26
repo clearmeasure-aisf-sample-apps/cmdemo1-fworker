@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: a body never names the sender: forged-sender is refused, and honest use is not
-# runs: 4
+# runs: 5

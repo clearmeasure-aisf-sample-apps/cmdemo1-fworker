@@ -1,6 +1,6 @@
 # suite: manager
 # scenario: mgr: the plant data follows the sweep and the verbs: waiting code, column and lease, activity per item, refusals, and an owner the sweep stops listing
-# runs: 4
+# runs: 5
 harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}

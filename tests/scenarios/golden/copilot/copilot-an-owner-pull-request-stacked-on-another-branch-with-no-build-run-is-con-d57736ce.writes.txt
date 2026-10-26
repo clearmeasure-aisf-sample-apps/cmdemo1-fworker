@@ -1,7 +1,6 @@
 # suite: copilot
 # scenario: copilot: an owner pull request stacked on another branch with no Build run is consolidated onto master and its CI started; it moves on, not parked stuck [full]
-# runs: 4
-gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6644 sha256:30a59bdb \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
+# runs: 5
 gateway POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:7672 sha256:94f60790 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 harness POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"the owner task"}
@@ -26,3 +25,4 @@ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-w
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: The item's pull request is now #{#3}, the open pull request of the owner task's branch `copilot/stk-{#1}` (the recorded #{#2} is closed or superseded).\n\n<!-- factory-journal:factory-worker -->"}
 rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"Superseded by #{#3}, the pull request of #{#1} now: it holds this branch's commits and the owner task's work. Closed by the factory worker gateway."}
 rule STATE factory-worker v1 #{#1}
+? gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6644 sha256:30a59bdb \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}

@@ -1,6 +1,6 @@
 # suite: qc-gate
 # scenario: qc: gate an Auto Merge label added to an item with a live environment tears the environment down [full]
-# runs: 4
+# runs: 5
 harness POST /repos/{repo}/issues/{#1}/labels 200 {"labels":["Auto Merge"]}
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -

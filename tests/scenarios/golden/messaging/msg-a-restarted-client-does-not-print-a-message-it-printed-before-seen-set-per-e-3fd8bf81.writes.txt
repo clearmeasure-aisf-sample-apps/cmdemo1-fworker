@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: a restarted client does not print a message it printed before (seen set per epoch)
-# runs: 4
+# runs: 5

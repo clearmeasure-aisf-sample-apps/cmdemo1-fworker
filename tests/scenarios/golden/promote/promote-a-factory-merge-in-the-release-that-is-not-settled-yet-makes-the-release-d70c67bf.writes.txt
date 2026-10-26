@@ -1,6 +1,6 @@
 # suite: promote
 # scenario: promote: a factory merge in the release that is not settled yet makes the release wait, then it is promoted
-# runs: 4
+# runs: 5
 harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-candidate\",\"docs_only\":true,\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#pr1}\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#pr1}\",\"processed\":true}}\n```\n"}
 harness POST /repos/{repo}/issues/{#2}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#2}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.14.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 harness STATE factory-worker v1 #{#1}

@@ -1,6 +1,6 @@
 # suite: manager
 # scenario: lease: the client accepts an owner offer itself (acceptedBy client); the session never starts, so after the lease the item is taken back and offered again in resume mode
-# runs: 4
+# runs: 5
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **alice** accepted (accepted by its client; the session starts on it next): it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: alice accepted by its client but did not start within the lease; offered again; offering to the next worker.\n\n<!-- plant event=reassigned key=back|{#1}|{n} -->"}

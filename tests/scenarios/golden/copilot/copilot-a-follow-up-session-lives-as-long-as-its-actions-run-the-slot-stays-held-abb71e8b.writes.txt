@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a follow-up session lives as long as its Actions run: the slot stays held while the run runs, and a run that succeeds without a push brings one follow-up that is told to push [full]
-# runs: 4
+# runs: 5
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7672 sha256:4ae3106f \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7853 sha256:62169d9f \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}

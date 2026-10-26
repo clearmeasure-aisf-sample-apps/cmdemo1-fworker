@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: base update: an item whose PASS verdict waits for its merge gets no trigger [full]
-# runs: 4
+# runs: 5
 harness STATE factory-worker v1 #{#1}
 rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n- change as described.\n"}
 rule PATCH /repos/{repo}/issues/{#3} 200 {"body":"x\n\n## Technical Design\n\n- change as described.\n"}

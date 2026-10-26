@@ -1,6 +1,6 @@
 # suite: auto
 # scenario: ci rule: a failed acceptance shard is re-run once; the green re-run completes the column without a fix-forward round
-# runs: 4
+# runs: 5
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}

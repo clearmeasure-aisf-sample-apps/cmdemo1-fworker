@@ -1,6 +1,6 @@
 # suite: auto
 # scenario: metrics: a merged item has its column times, merge and done; the answer survives a restart; operator token only
-# runs: 4
+# runs: 5
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"Add docs/m.md\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
 rule PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed","state_reason":"completed"}

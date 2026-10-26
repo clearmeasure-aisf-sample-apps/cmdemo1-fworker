@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: CI release: the gateway re-runs a held (action_required) workflow run of the item's copilot/ pull request head with its App, once; a head mismatch and another env's item are skipped; a 403 is surfaced as an owner action
-# runs: 4
+# runs: 5
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"copilot/ci-{#1}","create_pull_request":false,"prompt":"{len:6817 sha256:6de8e396 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 harness PATCH /repos/{repo}/issues/{#3} 200 {"state":"closed"}

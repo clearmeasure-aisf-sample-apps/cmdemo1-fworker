@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: a pinned item gets its worker's free slot first, and keeps it while it waits for that worker (issue 46)
-# runs: 4
+# runs: 5
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
 rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **pin-r** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|pin-r -->"}
 rule STATE factory-worker v1 #{#1}

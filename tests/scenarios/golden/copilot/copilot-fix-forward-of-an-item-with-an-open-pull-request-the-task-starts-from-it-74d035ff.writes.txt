@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: fix-forward of an item with an open pull request: the task starts from its branch, pr_open makes the task's draft the item's pull request, closes the superseded one and its branch, and closes extra drafts; no duplicates (Functional Testing from that branch: the scenario above)
-# runs: 4
+# runs: 5
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8219 sha256:c4776b5c \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

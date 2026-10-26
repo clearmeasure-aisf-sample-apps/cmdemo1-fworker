@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a Copilot pull request goes from a PASS to the gateway's merge; GitHub's refusal of a stacked pull request (403, use the asynchronous endpoint) is merged through merge-async
-# runs: 4
+# runs: 5
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7674 sha256:db98e5a8 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

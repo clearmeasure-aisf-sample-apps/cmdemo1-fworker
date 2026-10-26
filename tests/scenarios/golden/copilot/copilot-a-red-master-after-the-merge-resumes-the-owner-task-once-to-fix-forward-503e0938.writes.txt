@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a red master after the merge resumes the owner task once to fix forward; the owner is done only once master is green and the change is in production [full]
-# runs: 4
+# runs: 5
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:4c23e87d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"@copilot Follow-up session of the task that owns #{#1}: master is red after PR #{#2} was merged as {sha} (failed: Build result). Fix forward: make a new branch from master, fix the failing checks, run the tests, push and open ONE pull request against master titled \"Fix master after #{#2} (#{#1})\". Never wait for CI; end the session after opening it."}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

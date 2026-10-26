@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: an item an earlier gateway ran one task per phase for adopts the task whose branch its pull request is on and resumes it there; no new task, no stacked draft [full]
-# runs: 4
+# runs: 5
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7672 sha256:eedf2489 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 harness POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"an earlier gateway's task"}

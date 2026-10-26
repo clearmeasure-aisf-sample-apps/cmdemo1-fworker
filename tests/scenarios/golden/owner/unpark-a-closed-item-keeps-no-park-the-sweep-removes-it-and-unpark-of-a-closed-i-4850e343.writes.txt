@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: unpark: a closed item keeps no park: the sweep removes it, and unpark of a closed item removes only the park
-# runs: 4
+# runs: 5
 harness DELETE /repos/{repo}/issues/{#1}/labels/factory worker 200 -
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}

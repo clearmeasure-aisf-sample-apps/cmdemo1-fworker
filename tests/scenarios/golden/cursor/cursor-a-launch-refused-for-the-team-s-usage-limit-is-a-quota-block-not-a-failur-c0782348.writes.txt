@@ -1,6 +1,6 @@
 # suite: cursor
 # scenario: cursor: a launch refused for the team's usage limit is a quota block, not a failure: the item waits, starts pause, the owner action shows, and the probe after quotaRetryMinutes clears it
-# runs: 4
+# runs: 5
 gateway POST /v1/agents 201 {"autoCreatePR":false,"mcpServers":[{"headers":{"Authorization":"Bearer {token}"},"name":"fworker","type":"http","url":"http://gw.test/mcp"}],"model":{"id":"auto-smart","params":[{"id":"optimize_for","value":"cost"}]},"name":"fworker-tdd-i5-cur-{session}","prompt":{"text":"{len:3812 sha256:e2e0ccbc \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"},"repos":[{"startingRef":"master","url":"https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders"}]}
 gateway POST /v1/agents 400 {"autoCreatePR":false,"mcpServers":[{"headers":{"Authorization":"Bearer {token}"},"name":"fworker","type":"http","url":"http://gw.test/mcp"}],"model":{"id":"auto-smart","params":[{"id":"optimize_for","value":"cost"}]},"name":"fworker-tdd-i5-cur-{session}","prompt":{"text":"{len:3812 sha256:e2e0ccbc \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"},"repos":[{"startingRef":"master","url":"https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders"}]}
 gateway POST /v1/agents/{agent}/runs/{run}/cancel 200 -

@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: the Release Queue is reported when it ages or grows, each release is announced to the operator once, and a promotion request is only recorded
-# runs: 4
+# runs: 5

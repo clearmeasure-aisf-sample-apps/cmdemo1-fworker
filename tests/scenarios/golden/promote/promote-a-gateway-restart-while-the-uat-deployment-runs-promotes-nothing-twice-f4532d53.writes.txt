@@ -1,6 +1,6 @@
 # suite: promote
 # scenario: promote: a gateway restart while the uat deployment runs promotes nothing twice
-# runs: 4
+# runs: 5
 harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.9.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["prod"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.9.1","SpaceIdOrName":"Spaces-355"}
 rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.9.1","SpaceIdOrName":"Spaces-355"}

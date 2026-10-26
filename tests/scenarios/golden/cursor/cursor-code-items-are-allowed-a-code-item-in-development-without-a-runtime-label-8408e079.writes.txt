@@ -1,6 +1,6 @@
 # suite: cursor
 # scenario: cursor: code items are allowed: a code item in Development without a runtime: label is routed to cursor-cloud by default and gets an agent
-# runs: 4
+# runs: 5
 gateway POST /v1/agents 201 {"autoCreatePR":false,"mcpServers":[{"headers":{"Authorization":"Bearer {token}"},"name":"fworker","type":"http","url":"http://gw.test/mcp"}],"model":{"id":"auto-smart","params":[{"id":"optimize_for","value":"cost"}]},"name":"fworker-tdd-i2-cur-{session}","prompt":{"text":"{len:3802 sha256:a32078ac \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"},"repos":[{"startingRef":"master","url":"https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders"}]}
 gateway POST /v1/agents/{agent}/runs/{run}/cancel 200 -
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

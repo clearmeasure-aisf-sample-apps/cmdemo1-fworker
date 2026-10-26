@@ -1,6 +1,6 @@
 # suite: runtime
 # scenario: runtime: session.end maps to the execution exit: the worker ends, the execution succeeds and the runtime forgets it
-# runs: 4
+# runs: 5
 gateway POST /subscriptions/s1/resourceGroups/rg-test/providers/Microsoft.App/jobs/caj-test/start 202 {"containers":[{"env":[{"name":"CLAUDE_CODE_USE_FOUNDRY","value":"1"},{"name":"FWORKER_NONCE","value":"{token}"},{"name":"FWORKER_NAME","value":"cae-{session}"},{"name":"FWORKER_ITEM","value":"{#1}"},{"name":"FWORKER_PHASE","value":"Technical Design"},{"name":"FWORKER_MODEL_PROFILE","value":""},{"name":"FWORKER_RUNTIME","value":"cae-job"},{"name":"FWORKER_GATEWAY_URL","value":"http://ca-test-fworker"},{"name":"FWRUNNER_AGENT","value":"codex"}],"image":"fake.azurecr.io/fwrunner:1","name":"fwrunner","resources":{"cpu":4,"memory":"8Gi"}}]}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 harness POST /repos/{repo}/issues/{#1}/labels 200 {"labels":["hold:owner"]}
