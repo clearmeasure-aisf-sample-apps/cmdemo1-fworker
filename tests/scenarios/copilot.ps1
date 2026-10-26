@@ -27,10 +27,21 @@ function Cop-Quiet {
     $st = @{ last = -1; since = Get-Date }
     [void](Wait-Until -Seconds 40 { $c = @((Cop-State).tasks).Count; if ($c -ne $st.last) { $st.last = $c; $st.since = Get-Date }; ((Get-Date) - $st.since).TotalSeconds -ge 4 })
 }
+# every execution end the runtime recorded (status 'last') has run to its last step, the revoke (RevokeOnEnd; a failed one is logged too). The end
+# counts an execution out of 'running' at its start, but its claim release and revoke are rule-script calls that the runtime's poll loop awaits:
+# until they are done no other execution's end is read, so a scenario that starts meanwhile sees its own session end late (#376)
+function Cop-EndsSettled {
+    $names = @(@((Cop-Status).last) | Where-Object { $_ } | ForEach-Object { "$($_.worker)" } | Where-Object { $_ })
+    if ($names.Count -eq 0) { return $true }
+    $lines = @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch '"revoke' | ForEach-Object { "$($_.Line)" })
+    foreach ($w in $names) { if (-not @($lines | Where-Object { $_.Contains("`"revoke`":`"$w`"") -or ($_.Contains('"runtime":"revoke-failed"') -and $_.Contains("`"worker`":`"$w`"")) }).Count) { return $false } }
+    return $true
+}
 function Cop-Cleanup([int[]]$Items) {
     foreach ($n in $Items) { if ($n) { [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json') } }
     foreach ($t in @((Cop-State).tasks | Where-Object { $_.state -in 'queued', 'in_progress' })) { [void](Fake 'copilot-task' @{ id = $t.id; state = 'cancelled' }) }
     [void](Wait-Until -Seconds 20 { (Cop-Status).running -eq 0 })
+    [void](Wait-Until -Seconds 60 { Cop-EndsSettled })
     [void](Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/runtimes/copilot-cloud/reset" -Method POST -Headers @{ Authorization = 'Bearer test-token' })
 }
 
@@ -52,6 +63,10 @@ function Cop-OpenPr([int]$Item, [string]$Head) { Invoke-RestMethod "http://127.0
 function Cop-FakePr([int]$Num) { @((Fake 'state').prs | Where-Object { $_.number -eq $Num })[0] }
 function Cop-DevTasks([int]$Item) { , @((Cop-Tasks $Item) | Where-Object { "$($_.body.prompt)" -match 'phase development' }) }
 function Cop-Comments([int]$Item, [string]$Like) { , @((Get-FakeIssue $Item).comments | Where-Object { "$($_.body)" -like $Like }) }
+# the item's owner in the plant, '' when it has none (a strict-mode read of a missing key throws instead of failing the check)
+function Cop-Owner([int]$Item) { $o = (Get-Plant).plant.owners; if ($null -eq $o) { return '' }; $p = $o.PSObject.Properties["$Item"]; if ($p) { "$($p.Value)" } else { '' } }
+# the runtime's deadline lines (FACTORY_COPILOT_MAX_MINUTES) logged for a task
+function Cop-DeadlineLines([string]$Task) { , @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "`"runtime`":`"copilot-deadline`"" | Where-Object { "$_" -match [regex]::Escape($Task) }) }
 
 $CopilotScenarios = [ordered]@{
 
@@ -226,6 +241,10 @@ $CopilotScenarios = [ordered]@{
         $b = "copilot/thing-fix-$n"
         [void](Fake 'push-branch' @{ branch = $b; files = @('src/App/Thing.cs', 'src/UnitTests/ThingTests.cs') })
         $d2 = Draft $b $a "Fixes the failing check of #$($d1.number)."
+        # the gateway's own resolution (item-pr, as the owner watch, the settle and the sweep run it) adopts the stacked successor before pr_open:
+        # the order CI hit now and then (pr_open then takes its same-branch return), made to happen on every run
+        function ItemPr { Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/verbs/item-pr" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -ContentType 'application/json' -Body (@{ item = $n } | ConvertTo-Json) -SkipHttpErrorCheck }
+        Check 'the gateway''s resolution adopts the stacked draft before pr_open' (Wait-Until -Seconds 30 { $ip = ItemPr; $null -ne $ip -and $null -ne $ip.PSObject.Properties['number'] -and [int]$ip.number -eq [int]$d2.number }) (ItemPr | ConvertTo-Json -Compress -Depth 4)
         $r2 = OpenPr $b
         Check 'pr_open with the task''s branch makes its draft the item''s pull request' ($r2.ok -and $r2.pullRequest.number -eq $d2.number -and $r2.pullRequest.branch -eq $b) ($r2 | ConvertTo-Json -Compress -Depth 4)
         $p2 = FakePr $d2.number; $p1 = FakePr $d1.number
@@ -247,6 +266,31 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'fault' @{ match = "compare/.*\.\.\.$([regex]::Escape($x))$"; status = 200; body = '{"status":"diverged","ahead_by":1,"behind_by":1}' })
         $r4 = OpenPr $x
         Check 'a branch without the item''s pull request''s commits is refused, nothing is opened or closed' ($r4.code -eq 'not-on-item-branch' -and @((Fake 'state').prs).Count -eq $before -and (FakePr $d2.number).open) ($r4 | ConvertTo-Json -Compress)
+    } finally { Cop-Cleanup @($n) }
+}
+
+# The scenario above makes the gateway's resolution adopt the stacked draft before pr_open. Here pr_open comes first, always: the task's new
+# draft targets master, so the resolution (which follows drafts stacked on the owner's branch) cannot find it, and pr_open takes it over.
+'copilot: pr_open takes over a task''s new draft on master that names the item''s pull request: the draft is the item''s pull request, titled for the item, and the old one is superseded with the fix [full]' = {
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Copilot pr_open first' 'Change src/App/First.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
+        Check 'a Development task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
+        $a = "copilot/first-$n"
+        [void](Fake 'push-branch' @{ branch = $a; files = @('src/App/First.cs') })
+        $d1 = Cop-Draft $a 'master'
+        $r1 = Cop-OpenPr $n $a
+        Check 'pr_open takes over the first draft' ($r1.ok -and $r1.pullRequest.number -eq $d1.number) ($r1 | ConvertTo-Json -Compress -Depth 4)
+        $b = "copilot/first-fix-$n"
+        [void](Fake 'push-branch' @{ branch = $b; files = @('src/App/First.cs', 'src/UnitTests/FirstTests.cs') })
+        $d2 = Cop-Draft $b 'master' '[WIP] Thing' "Fixes the failing check of #$($d1.number)."
+        $r2 = Cop-OpenPr $n $b
+        Check 'pr_open with the task''s new branch makes its draft the item''s pull request' ($r2.ok -and $r2.pullRequest.number -eq $d2.number -and $r2.pullRequest.branch -eq $b) ($r2 | ConvertTo-Json -Compress -Depth 4)
+        $p2 = Cop-FakePr $d2.number; $p1 = Cop-FakePr $d1.number
+        Check 'the new pull request is on master and ready, its title naming the item' ($p2.open -and $p2.base -eq 'master' -and -not $p2.draft -and "$($p2.title)" -match "(^|[^0-9])#$n([^0-9]|$)") ($p2 | ConvertTo-Json -Compress -Depth 3)
+        Check 'pr_open supersedes the old pull request: closed with the comment naming the new one and the fix' (-not $p1.open -and -not $p1.merged -and @($p1.comments | Where-Object { "$($_.body)" -match "Superseded by #$($d2.number), the pull request of #$n now: it holds this branch's commits and the fix\." }).Count -eq 1) ($p1 | ConvertTo-Json -Compress -Depth 3)
+        Check 'and its branch is deleted' (@((Fake 'state').deletedRefs) -contains "heads/$a") ((Fake 'state').deletedRefs | ConvertTo-Json -Compress)
+        Check 'the state records the new pull request' (Wait-Until -Seconds 10 { $sx = Get-ItemState $n; [int]$sx.pr.number -eq [int]$d2.number -and "$($sx.pr.branch)" -eq $b }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
     } finally { Cop-Cleanup @($n) }
 }
 
@@ -329,6 +373,10 @@ $CopilotScenarios = [ordered]@{
         Check 'pr_open records the copilot/ pull request' ($r.ok -and $r.pullRequest.number -eq $d.number) ($r | ConvertTo-Json -Compress -Depth 4)
         $run = Fake 'held-run' @{ branch = $br }
         Check 'the held run of the routed item is released' (Wait-Until -Seconds 60 { @((Fake 'held-runs').runs | Where-Object { $_.id -eq $run.id -and $_.reruns -eq 1 }).Count -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
+        # the routine release is recorded in the item's state, not as a comment: the journal verb holds the item lock only once (#376: it locked
+        # the item a second time, waited 45 s for itself, recorded nothing and held the item's lock so long that a later scenario's session end
+        # was not seen in time)
+        Check 'the release is recorded in the item''s state (journal.ciReleased)' (Wait-Until -Seconds 20 { $s0 = Get-ItemState $n; $js = if ($s0 -and $s0.ContainsKey('journal')) { $s0.journal } else { $null }; $js -and $js.ContainsKey('ciReleased') -and @($js.ciReleased | Where-Object { "$_" -match "released workflow run $($run.id) of PR #$($d.number)" }).Count -eq 1 }) ((Get-ItemState $n).journal | ConvertTo-Json -Compress -Depth 4)
     } finally { Cop-Cleanup @($n) }
 }
 
@@ -587,7 +635,9 @@ $CopilotScenarios = [ordered]@{
 'copilot: a running owner session silent past the item check keeps its lease (its runtime''s deadline bounds it); after its session ends unfinished the same task is resumed on its pull request [full]' = {
     $n = 0
     # this scenario alone runs with a short item check (0.1 + 0.05 min): the gateway is restarted with it, and again without it at the end
-    $env:FACTORY_TIMING_staleItemMinutes = '0.1'; $env:FACTORY_TIMING_staleConfirmMinutes = '0.05'; $env:FACTORY_COPILOT_MAX_MINUTES = '0.25'; Restart-Gateway
+    # the deadline (counted from the task's creation, before the accept) must end the session after the 12 s quiet window that starts at the accept:
+    # 0.5 min leaves about 15 s for the task, the fake calls and the accept; 0.25 min left about 3 s and lost the race on a loaded runner
+    $env:FACTORY_TIMING_staleItemMinutes = '0.1'; $env:FACTORY_TIMING_staleConfirmMinutes = '0.05'; $env:FACTORY_COPILOT_MAX_MINUTES = '0.5'; Restart-Gateway
     try {
         $n = New-Item-Fake 'Copilot quiet owner' 'Change src/App/Quiet.cs.' @('factory worker', 'Auto Merge', 'env:tdd') 'Development'
         Check 'a task is created' (Wait-Until -Seconds 30 { (Cop-DevTasks $n).Count -gt 0 })
@@ -597,12 +647,16 @@ $CopilotScenarios = [ordered]@{
         $d = Cop-Draft $br 'master' '[WIP] Quiet'
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'in_progress'; headRef = $br })
         $w = Cop-Accept $t $n
-        $own = "$((Get-Plant).plant.owners."$n")"
-        Check 'the session owns the item' ($own -like "cop-$n-*") $own
+        $own = Cop-Owner $n
+        Check 'the session owns the item' ($own -like "cop-$n-*") ((Get-Plant).plant.owners | ConvertTo-Json -Compress)
         # silent (no verb) for longer than staleItemMinutes + staleConfirmMinutes (0.1 + 0.05 min in this suite), its execution running
         Start-Sleep -Seconds 12
-        Check 'it still owns the item: no item check takes a running Copilot session''s lease' ("$((Get-Plant).plant.owners."$n")" -eq $own -and (Cop-Comments $n '*did not answer the check*').Count -eq 0) (Cop-Brief $n)
-        # its deadline (FACTORY_COPILOT_MAX_MINUTES 0.25 for this scenario) ends the session unfinished: the item is offered again and the SAME task resumed
+        # the precondition of the lease check: the session's execution is still running and its deadline has not ended it yet
+        $st = Cop-Status
+        Check 'its execution is still running at the item check (the deadline has not ended it)' (@($st.executions | Where-Object { $_.item -eq $n -and $_.execution -eq $t.id }).Count -eq 1 -and (Cop-DeadlineLines $t.id).Count -eq 0) (@{ executions = $st.executions; deadline = @((Cop-DeadlineLines $t.id) | ForEach-Object { "$_" }) } | ConvertTo-Json -Compress -Depth 5)
+        $now = Cop-Owner $n
+        Check 'it still owns the item: no item check takes a running Copilot session''s lease' ($now -eq $own -and (Cop-Comments $n '*did not answer the check*').Count -eq 0) "owner '$now' (was '$own'); owners $((Get-Plant).plant.owners | ConvertTo-Json -Compress); $(Cop-Brief $n)"
+        # its deadline (FACTORY_COPILOT_MAX_MINUTES 0.5 for this scenario) ends the session unfinished: the item is offered again and the SAME task resumed
         Check 'the next session is a follow-up of the same task on its pull request, not a new task' (Wait-Until -Seconds 60 { @((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and $_.via -eq 'comment' -and $_.pr -eq $d.number }).Count -ge 1 }) ((Cop-State).tasks | ConvertTo-Json -Compress -Depth 4)
         Check 'still one task for the item' (@((Cop-Tasks $n) | Select-Object -ExpandProperty task -Unique).Count -eq 1)
     } finally { Cop-Cleanup @($n); $env:FACTORY_TIMING_staleItemMinutes = '600'; Remove-Item Env:FACTORY_TIMING_staleConfirmMinutes -ErrorAction SilentlyContinue; Remove-Item Env:FACTORY_COPILOT_MAX_MINUTES -ErrorAction SilentlyContinue; Restart-Gateway }
@@ -761,6 +815,9 @@ $CopilotScenarios = [ordered]@{
         Check 'the successor is retargeted to master' (Wait-Until -Seconds 90 { (Cop-FakePr $b.number).base -eq 'master' }) ((Cop-FakePr $b.number) | ConvertTo-Json -Compress -Depth 3)
         Check 'the old pull request is superseded' (Wait-Until -Seconds 30 { -not (Cop-FakePr $a.number).open }) (Cop-Brief $n)
         Check 'the owner follows the successor''s branch and pull request' (Wait-Until -Seconds 30 { $sx = Get-ItemState $n; $sx.copilot_task.branch -eq $bb -and $sx.pr.number -eq $b.number }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 5)
+        # the resolution writes the title before it records the successor: the CI release (routeAll) finds the item from it
+        $bt = "$((Cop-FakePr $b.number).title)"
+        Check 'its title names the item, the [WIP] dropped' ($bt -match "(^|[^0-9])#$n([^0-9]|$)" -and $bt -notmatch '^\s*\[WIP\]') $bt
         Check 'the item moves on' (Wait-Until -Seconds 90 { (Get-FakeIssue $n).column -eq 'Functional Testing' }) "$((Get-FakeIssue $n).column) $(Cop-Brief $n)"
     } finally { Cop-Cleanup @($n) }
 }

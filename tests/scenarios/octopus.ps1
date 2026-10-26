@@ -371,9 +371,17 @@ $OctopusScenarios = [ordered]@{
         Set-ItemState $n { param($st) $st.journal.count = 40 }
         $before = @((Get-FakeIssue $n).comments).Count
         Oct-Machines @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machines-2'; name = 'host-b' }, @{ id = 'Machines-6'; name = 'host-c' })   # a free host for the next start
+        # the gateway starts nothing on a host it has not heard from since its start (the previous scenario's restart; Oct-Cleanup reports host-a
+        # and host-b only): host-c reports, so the free host exists. Not Oct-Up: an empty report of the first session's host would end that session
+        $rc = Oct-Report 'host-c' @()
         $x = Rt-Api POST '/api/v1/_test/octopus-provision' @{ item = $n; phase = 'Technical Design'; role = '' }
-        $na2 = "$($x.body.name)"
-        Check 'the start of a new session is still posted, with its session link' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=launched ' -and $_.body.Contains("/sessions/$na2)") }).Count -eq 1 }) "$na2 $(@((Get-FakeIssue $n).comments | Select-Object -Last 2 | ForEach-Object { $_.body }) -join ' | ')"
+        $xb = $x.body
+        $na2 = if ($null -ne $xb -and $xb.PSObject.Properties['name']) { "$($xb.name)" } else { '' }
+        $xexec = if ($null -ne $xb -and $xb.PSObject.Properties['execution']) { "$($xb.execution)" } else { '' }
+        # tells a start that never happened (no capacity, or ended while it started: no line is written then) from a line not saved in time
+        Check 'the second session is provisioned: the start answered ok with an execution' ($x.status -eq 200 -and $null -ne $xb -and $null -ne $xb.PSObject.Properties['ok'] -and $xb.ok -eq $true -and $na2 -ne '' -and $xexec -ne '') "$($x | ConvertTo-Json -Compress -Depth 4) || host-c report: $($rc | ConvertTo-Json -Compress -Depth 4)"
+        Check 'and a second Start worker run exists for the item, for that session' (@((Oct-Runs 'Start worker' $n) | Where-Object { "$($_.values.Name)" -eq $na2 }).Count -eq 1 -and (Oct-Runs 'Start worker' $n).Count -ge 2) ((Oct-Runs 'Start worker' $n) | ConvertTo-Json -Compress -Depth 5)
+        Check 'the start of a new session is still posted, with its session link' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=launched ' -and $_.body.Contains("/sessions/$na2)") }).Count -eq 1 }) "$na2 $(@((Get-FakeIssue $n).comments | Select-Object -Last 2 | ForEach-Object { $_.body }) -join ' | ') || provision: $($x | ConvertTo-Json -Compress -Depth 4) || runs: $((Oct-Runs 'Start worker' $n) | ConvertTo-Json -Compress -Depth 5) || gateway log: $(if ($na2) { @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch $na2 | Select-Object -Last 20 | ForEach-Object { $_.Line.Substring(0, [Math]::Min(300, $_.Line.Length)) }) -join ' | ' } else { '(no session name)' })"
         Check 'and no "journal full" note instead of it' (@((Get-FakeIssue $n).comments | Select-Object -Skip $before | Where-Object { $_.body -match 'journal full' }).Count -eq 0)
     } finally { Oct-Cleanup @($n) }
 }

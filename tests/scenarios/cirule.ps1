@@ -79,7 +79,11 @@ $CiRuleScenarios['ci rule: a failure master has too costs no round; it is report
     Check 'the gateway merges master into the branch' (Wait-Until -Seconds 60 { (Ci-Comments $i.n '*passes Acceptance Tests `[shard 3/6`] again: the gateway merged master into the branch*').Count -eq 1 }) (((Get-FakeIssue $i.n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(160, $_.body.Length)) }) -join ' | ')
     Check 'the new head is green and the column completes' (Wait-Until -Seconds 60 { (Get-FakeIssue $i.n).column -eq 'Functional Testing' }) "column $((Get-FakeIssue $i.n).column)"
     Check 'the head changed (the branch was updated)' ((Get-Head $i.pr) -ne $i.sha)
-    Check 'still no fix-forward round, and the defect is cleared with the green head' (-not (Ci-State $i.n).Contains('fix_forward_rounds') -and -not (Ci-State $i.n).Contains('master_defect'))
+    # the column exit moves the card first and saves the state after it (Finish-ColumnExit): that save also drops awaiting_checks, so the state
+    # read below is the one saved with the green head, not the one before it. Only Development's wait counts: a wait of a later column is not it
+    [void](Wait-Until -Seconds 30 { $sw = Ci-State $i.n; -not ($sw.Contains('awaiting_checks') -and "$($sw['awaiting_checks']['column'])" -eq 'Development') })
+    $st = Ci-State $i.n
+    Check 'still no fix-forward round, and the defect is cleared with the green head' (-not $st.Contains('fix_forward_rounds') -and -not $st.Contains('master_defect')) ($st | ConvertTo-Json -Compress -Depth 5)
 }
 
 $CiRuleScenarios['ci rule: a park that expires, and one an operator releases, start the demotions from 0 [full]'] = {

@@ -2116,6 +2116,64 @@ $MessagingScenarios['msg: a QC job whose item token is missing spawns nothing an
     Stop-Process -Id $c.proc.Id -Force
 }
 
+# The client saves an item token while a session's verb reads it (lease suite, 2026-10-23..26: the read of a token file that existed but was
+# still empty threw). One process saves the token 500 times with Save-ItemToken, another reads it with Select-ItemToken all the while.
+$MessagingScenarios['msg: an item token saved while a session reads it is never read empty or partial, and its file is always mode 600'] = {
+    $lib = Join-Path $script:Root 'plugin/scripts/lib'
+    $dir = Join-Path $script:Work 'tokens-atomic'; $mark = Join-Path $script:Work 'tokens-atomic-mark'
+    foreach ($d in $dir, $mark) { if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }; New-Item -ItemType Directory -Force -Path $d | Out-Null }
+    $writer = @'
+param([string]$Lib, [string]$Dir, [string]$Mark, [int]$Count)
+$ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest
+$env:FACTORY_TOKEN_DIR = $Dir
+. (Join-Path $Lib 'Paths.ps1'); . (Join-Path $Lib 'Client.Own.ps1')
+Save-ItemToken 9771 'owner' 'tok-0'
+$ready = Join-Path $Mark 'reader.ready'; $t0 = Get-Date
+while (-not (Test-Path -LiteralPath $ready) -and ((Get-Date) - $t0).TotalSeconds -lt 60) { Start-Sleep -Milliseconds 20 }
+for ($i = 1; $i -le $Count; $i++) { Save-ItemToken 9771 'owner' "tok-$i" }
+Set-Content -LiteralPath (Join-Path $Mark 'writer.done') -Value 'done'
+'@
+    $reader = @'
+param([string]$Lib, [string]$Dir, [string]$Mark, [string]$Out)
+$ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest
+$env:FACTORY_TOKEN_DIR = $Dir
+. (Join-Path $Lib 'Paths.ps1'); . (Join-Path $Lib 'Client.Own.ps1')
+$f = Join-Path $Dir '9771.owner'; $done = Join-Path $Mark 'writer.done'
+$r = [ordered]@{ reads = 0; bad = 0; errors = 0; modeChecks = 0; badModes = 0; first = '' }
+$posix = $IsLinux -or $IsMacOS
+# the writer's first save, before the loop: a token that does not exist yet is the configured credential, no race
+$t0 = Get-Date
+while (-not (Test-Path -LiteralPath $f) -and ((Get-Date) - $t0).TotalSeconds -lt 60) { Start-Sleep -Milliseconds 20 }
+Set-Content -LiteralPath (Join-Path $Mark 'reader.ready') -Value 'ready'
+$t0 = Get-Date
+while (-not (Test-Path -LiteralPath $done) -and ((Get-Date) - $t0).TotalSeconds -lt 120) {
+    try {
+        $t = Select-ItemToken @{ token = 'cfg' } 9771 'owner'
+        $r.reads++
+        if ("$t" -notmatch '^tok-\d+$') { $r.bad++; if (-not $r.first) { $r.first = "read '$t'" } }
+        if ($posix) { $m = [int][IO.File]::GetUnixFileMode($f); $r.modeChecks++; if ($m -ne 384) { $r.badModes++; if (-not $r.first) { $r.first = "mode $([Convert]::ToString($m, 8))" } } }
+    } catch { $r.errors++; if (-not $r.first) { $r.first = "$_" } }
+}
+$r | ConvertTo-Json -Compress | Set-Content -LiteralPath $Out
+'@
+    $ws = TmpFile 'token-writer.ps1' $writer; $rs = TmpFile 'token-reader.ps1' $reader; $out = Join-Path $script:Work 'token-reader.json'
+    if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Force }
+    $pw = $null; $pr = $null
+    try {
+        $pw = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', $ws, $lib, $dir, $mark, '500') -PassThru -RedirectStandardOutput (Join-Path $script:Work 'token-writer.out') -RedirectStandardError (Join-Path $script:Work 'token-writer.err')
+        $pr = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', $rs, $lib, $dir, $mark, $out) -PassThru -RedirectStandardOutput (Join-Path $script:Work 'token-reader.out') -RedirectStandardError (Join-Path $script:Work 'token-reader.err')
+        [void]$pw.Handle; [void]$pr.Handle   # keeps the handles, so ExitCode is known after the exit
+        $ended = $pw.WaitForExit(180000) -and $pr.WaitForExit(180000)
+        $errs = "$(Get-Content -Raw -ErrorAction SilentlyContinue (Join-Path $script:Work 'token-writer.err')) $(Get-Content -Raw -ErrorAction SilentlyContinue (Join-Path $script:Work 'token-reader.err'))"
+        Check 'the writer saves 500 tokens and the reader reads alongside it' ($ended -and $pw.ExitCode -eq 0 -and $pr.ExitCode -eq 0 -and (Test-Path -LiteralPath $out) -and (Test-Path -LiteralPath (Join-Path $mark 'writer.done')) -and "$(Get-Content -Raw -LiteralPath (Join-Path $dir '9771.owner'))" -eq 'tok-500') "ended $ended; exit $(if ($ended) { "$($pw.ExitCode) $($pr.ExitCode)" }); $errs"
+        $r = if (Test-Path -LiteralPath $out) { Get-Content -Raw -LiteralPath $out | ConvertFrom-Json -AsHashtable } else { @{ reads = 0; bad = 0; errors = 0; modeChecks = 0; badModes = 0; first = 'no result' } }
+        Check 'the reader read the token while it was saved, many times' ([int]$r.reads -ge 20) ($r | ConvertTo-Json -Compress)
+        Check 'a session reading the token while the client saves it never gets an empty or partial token and never throws' ([int]$r.bad -eq 0 -and [int]$r.errors -eq 0) ($r | ConvertTo-Json -Compress)
+        Check 'the token file has mode 600 at every read' ((-not ($IsLinux -or $IsMacOS)) -or ([int]$r.modeChecks -eq [int]$r.reads -and [int]$r.reads -gt 0 -and [int]$r.badModes -eq 0)) ($r | ConvertTo-Json -Compress)
+        Check 'no temporary file is left in the token directory' (@(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -ne '9771.owner' }).Count -eq 0) (@(Get-ChildItem -LiteralPath $dir -File | ForEach-Object { $_.Name }) -join ', ')
+    } finally { foreach ($p in $pw, $pr) { if ($p -and -not $p.HasExited) { try { $p.Kill($true) } catch { } } } }
+}
+
 $ManagerScenarios['mgr: questions leave as one batch per window, wait while a batch is unanswered, and split at batchMax'] = {
     Msg-OnGateway $script:MgrFast {
         param($g)
