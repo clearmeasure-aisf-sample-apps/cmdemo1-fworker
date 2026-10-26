@@ -23,7 +23,6 @@ var webhookSecret = gw.WebhookSecret;
 // every event stream writes a `: ping` comment at this interval, busy or idle: a proxy or the platform's ingress that sees no byte for a while
 // closes the connection, and a client then sees a drop it did not cause (enhancement 11). Clients ignore comment lines.
 var ssePingSeconds = gw.SsePingSeconds;
-var sweepSeconds = gw.SweepSeconds;
 var ownerMode = gw.OwnerMode;
 var environmentName = gw.EnvironmentName;
 var publicUrl = gw.PublicUrl;
@@ -66,7 +65,8 @@ builder.Services
     .AddGatewayPlant(composition)
     .AddGatewayBackground(composition)
     .AddGatewayMcp()
-    .AddGatewayHttp(publicBase);
+    .AddGatewayHttp(publicBase)
+    .AddGatewayEndpoints(composition);
 var app = builder.Build();
 // the stopping callbacks in their order (transcript flush, "stopping" line, hand-over) and the plant's wait for the snapshot
 app.UseGatewayLifetime();
@@ -76,7 +76,6 @@ app.UseGatewayLifetime();
 var hub = app.Services.GetRequiredService<EventHub>();
 var runner = app.Services.GetRequiredService<Runner>();
 var plant = app.Services.GetRequiredService<Plant>();
-var snapshots = app.Services.GetRequiredService<ISnapshotCoordinator>();
 var qc = app.Services.GetRequiredService<QcHub>();
 var messenger = app.Services.GetRequiredService<Messenger>();
 var baseWatch = app.Services.GetRequiredService<BaseWatch>();
@@ -92,7 +91,6 @@ var runtimeManager = runtimes.CaeJob;
 var cursorRuntime = runtimes.CursorRuntime;
 var cursorManager = runtimes.Cursor;
 var copilotSettings = app.Services.GetRequiredService<CopilotCloudSettings>();
-var copilotCiRelease = runtimes.CopilotCiRelease;
 var copilotCodes = runtimes.CopilotCodes;
 var copilotRuntime = runtimes.CopilotRuntime;
 var copilotManager = runtimes.Copilot;
@@ -101,19 +99,6 @@ var octopusManager = runtimes.Octopus;
 ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), resolved below; null where it is not enabled
 
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
-var started = DateTime.UtcNow;
-string PluginRoot() => Path.GetFullPath(Path.Combine(scriptsDir, ".."));
-IEnumerable<string> PluginFiles(string root) => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-    .Where(f => { var r = Path.GetRelativePath(root, f).Replace('\\', '/'); return r != ".plugin-version" && r != ".plugin-managed" && !r.Contains("/bin/") && !r.Contains("/obj/"); })
-    .OrderBy(f => f, StringComparer.Ordinal);
-string? pluginHashCache = null;
-string PluginHash()
-{
-    if (pluginHashCache != null) return pluginHashCache;
-    var root = PluginRoot(); var sb = new StringBuilder();
-    foreach (var f in PluginFiles(root)) sb.Append(Path.GetRelativePath(root, f).Replace('\\', '/')).Append('\n').Append(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))).Append('\n');
-    return pluginHashCache = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).ToLowerInvariant();
-}
 
 // The caller of a request (gateway/Http/CallerContext.cs, task C6): who it is, whom it acts as, its session's link. The handlers below keep these
 // names until C7 moves them into endpoint modules.
@@ -126,53 +111,13 @@ string By(HttpContext c) => CallerContext.Of(c).By;
 app.UseGatewayPipeline();
 
 if (ownerMode) qc.Map(app);
-app.MapGet("/health", () => Results.Text("ok"));
-// liveness for the kit's hourly Health report (it asks every app for /alive, then /): the process answers, nothing else is checked
-app.MapGet("/alive", () => Results.Text("ok"));
-// readiness: the revoked credentials are read (at once where there is nothing to read), so a session credential is answered without waiting
-// (503 says what the start waits for, how many reads have failed and since when: {"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."})
 // the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5): loaded once (AddGatewayRuntimes); a broken one keeps /ready at 503
 var prompts = app.Services.GetRequiredService<PromptStore>();
 foreach (var pe in prompts.Errors) Console.Error.WriteLine($"prompts: {pe}");
-app.MapGet("/ready", () => leader.Replaced ? Results.Json(new { ready = false, waitingFor = "nothing", replaced = true, reason = "a newer gateway process holds the lease" }, statusCode: 503)
-    : prompts.Errors.Count > 0 ? Results.Json(new { ready = false, waitingFor = "prompts", errors = prompts.Errors }, statusCode: 503)
-    : revocationService.IsLoaded ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = revocationService.FailedAttempts, since = revocationService.Since.ToString("o") }, statusCode: 503));
-app.MapGet("/", () => Results.Redirect("/dashboard"));
+// the endpoint modules (gateway/Endpoints/, C7a): health, /_build, status and the dashboard's JSON, metrics, the dashboard page, the plugin, the
+// operator's release checks; their guards are endpoint filters (gateway/Http/Filters/)
+app.MapGatewayEndpoints();
 WorkerSessions? mcpSessionsRef = null;
-var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
-// commit: the source revision built into the informational version ("<version>+<sha>"), a full 40-hex commit or null; a hint for
-// tools that compare releases (the Octopus release stays the authority: a reused pull request image carries the commit its pull
-// request build was given, not master's)
-var buildCommit = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion is { } iv && iv.Split('+') is [_, var rev] && System.Text.RegularExpressions.Regex.IsMatch(rev, "^[0-9a-f]{40}$") ? rev : null;
-app.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = buildVersion, commit = buildCommit, pluginHash = PluginHash(), promptsHash = prompts.Hash, started, runtime = Environment.Version.ToString(), ownerMode, environment = environmentName }));
-app.MapGet("/api/v1/status", (HttpContext c) =>
-{
-    if (Admitted(c).Kind != "admin") return Results.StatusCode(403);
-    var o = new JsonObject { ["started"] = started, ["sweepSeconds"] = sweepSeconds, ["ownerMode"] = ownerMode, ["subscribers"] = hub.SubscriberCount, ["lastEventId"] = hub.LastId,
-        ["pendingOffers"] = hub.PendingCount, ["lastSweep"] = hub.LastSweep, ["plant"] = plant.Status() };
-    // the messaging and manager blocks (worker-messaging.md 8) only while either feature is on; a default deployment answers exactly as before
-    if (messaging.On) foreach (var kv in MessagingBlocks(false).ToList()) o[kv.Key] = kv.Value?.DeepClone();
-    if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
-    if (keeper.Enabled) o["keeper"] = plant.KeeperStatus();
-    if (plant.ReplenishStatus() is { } rps) o["replenish"] = rps;
-    if (ownerMode) o["baseUpdate"] = baseWatch.Status();
-    if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
-    if (ownerMode) o["hosts"] = plant.HostStatus();
-    if (ownerMode) o["runtimes"] = RuntimesBlock();
-    if (ownerMode) o["lease"] = plant.LeaseStatus();
-    if (ownerMode && messaging.ManagerEnabled) o["managerActions"] = plant.ManagerActionsStatus(false);
-    if (ownerMode) o["plantSnapshot"] = snapshots.Status();
-    if (ownerMode) o["leader"] = leader.Status();
-    // the rule scripts running and waiting, the processes and memory (gateway/RunnerGate.cs, issue 89)
-    o["runner"] = runner.Status();
-    // the GitHub budget and the sweep's passes (issue 92)
-    o["github"] = githubBudget.Status();
-    o["sweep"] = hub.SweepStatus(sweepMinSeconds);
-    // the session transcripts: sessions held, how many have lines not yet saved to GitHub, saves and failures
-    o["transcripts"] = transcripts.Status();
-    if (ownerMode) o["revocations"] = revocationService.Status();
-    return Results.Text(o.ToJsonString(), "application/json");
-});
 // the switch of the gateway's own back-merges (baseUpdate.autoUpdateBranch) at run time, operator token only; until the next restart
 app.MapPost("/api/v1/base-update", (HttpContext c) =>
 {
@@ -181,123 +126,6 @@ app.MapPost("/api/v1/base-update", (HttpContext c) =>
     return Results.Text(baseWatch.Status().ToJsonString(), "application/json");
 });
 
-// Cycle-time metrics (enhancement 13), operator token and the active operator session (read-only): computed by the rule script `metrics` from the
-// items' journal comments and state comments on GitHub, so they survive a restart. since: an ISO date or 30m, 24h, 7d (default 7d, at most 90d);
-// max: items read, newest first (default 100, at most 300); fresh=1 skips the cache. One computation reads every item's comments: answers are cached
-// per since|max for metricsCacheSeconds and computed one at a time. A failed computation (any exit but 0 and 2, a timeout included) is cached too,
-// for metricsFailSeconds, for every caller except the operator token's fresh=1: a caller that retries cannot make the gateway read GitHub again and
-// again. The operator session may ask only since=24h or 7d (none is read as 7d, the script's default), with no max and no fresh: its answers come
-// from two cache entries, so it causes at most one computation per entry in 120 s while they succeed, and one in 30 s while they fail.
-var metricsCache = new Dictionary<string, (DateTime At, int Code, string Json)>();
-var metricsGate = new SemaphoreSlim(1, 1);
-const int metricsCacheSeconds = 120, metricsFailSeconds = 30;
-static bool MetricsFresh((DateTime At, int Code, string Json) e) => (DateTime.UtcNow - e.At).TotalSeconds < (e.Code is 0 or 2 ? metricsCacheSeconds : metricsFailSeconds);
-static int MetricsStatus(int code) => code == 0 ? 200 : code == 2 ? 400 : code == 20 ? 503 : 502;
-app.MapGet("/api/v1/metrics", async (HttpContext c) =>
-{
-    // the operator, and the active supervisor for its daily summary (docs/design/plant-manager.md 10e): a step of its hourly budget, like a read verb
-    var mw = Admitted(c);
-    if (mw.Kind == "manager")
-    {
-        if (!ownerMode || !messaging.ManagerEnabled || plant.ActiveSupervisor().Name != mw.Name) return Fail(403, "not-supervisor", "this credential is not the active supervisor: register with subscribe --own --supervisor first", 30);
-        // the supervisor reads the cached answers of two windows only: it never forces a recomputation over every item's comments
-        if (c.Request.Query["fresh"].ToString() == "1" || c.Request.Query["max"].ToString() != "" || c.Request.Query["since"].ToString() is not ("" or "24h" or "7d"))
-            return Fail(400, "usage", "the supervisor reads since=24h or since=7d (no fresh, no max)", 2);
-        if (plant.SupervisorStep(false) is { Ok: false } noStep) return Results.Json(new { ok = false, code = "step-budget", reason = "the supervisor's step budget of this hour is spent; keep waiting for events and do not work around it", retryAfterSeconds = noStep.RetryAfter, exit = 20 }, statusCode: 429);
-    }
-    else if (mw.Kind == "keeper")
-    {   // the backlog keeper: the cached answers of two windows (the median time in Development, for the oversized-item policy)
-        if (!ownerMode || plant.ActiveKeeper() != mw.Name) return Fail(403, "not-keeper", "this credential is not the active backlog keeper: register with subscribe --own --keeper first", 30);
-        if (c.Request.Query["fresh"].ToString() == "1" || c.Request.Query["max"].ToString() != "" || c.Request.Query["since"].ToString() is not ("" or "24h" or "7d"))
-            return Fail(400, "usage", "the backlog keeper reads since=24h or since=7d (no fresh, no max)", 2);
-    }
-    else if (mw.Kind != "admin") return Results.StatusCode(403);
-    var since = c.Request.Query["since"].ToString().Trim(); var maxText = c.Request.Query["max"].ToString().Trim();
-    if (OperatorActive(c))
-    {
-        if (since is not ("" or "24h" or "7d") || maxText != "" || c.Request.Query.ContainsKey("fresh"))
-            return Results.Json(new { ok = false, code = "usage", reason = "the operator session reads the metrics with since=24h or 7d (or none), no max and no fresh: answers come from a 120 s cache and a miss computes them", exit = 2 }, statusCode: 400);
-        if (since == "") since = "7d";   // the script's default: one cache entry for both spellings
-    }
-    if (since.Length > 40 || maxText.Length > 4 || (maxText != "" && !int.TryParse(maxText, out _))) return Results.Json(new { ok = false, code = "usage", reason = "since is an ISO date or 30m, 24h, 7d; max a number", exit = 2 }, statusCode: 400);
-    var key = since + "|" + maxText;
-    var fresh = c.Request.Query["fresh"].ToString() == "1";
-    // a cached answer does not wait behind a computation that is running
-    lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit0) && MetricsFresh(hit0)) return Results.Text(hit0.Json, "application/json", Encoding.UTF8, MetricsStatus(hit0.Code));
-    await metricsGate.WaitAsync(c.RequestAborted);
-    try
-    {
-        lock (metricsCache) if (!fresh && metricsCache.TryGetValue(key, out var hit) && MetricsFresh(hit)) return Results.Text(hit.Json, "application/json", Encoding.UTF8, MetricsStatus(hit.Code));
-        var args = new JsonObject(); if (since != "") args["since"] = since; if (maxText != "") args["max"] = int.Parse(maxText);
-        var (code, output) = await runner.RunAsync("metrics", args.ToJsonString(), TimeSpan.FromMinutes(3));
-        lock (metricsCache)
-        {
-            foreach (var k in metricsCache.Where(kv => !MetricsFresh(kv.Value)).Select(kv => kv.Key).ToList()) metricsCache.Remove(k);
-            // a failed fresh=1 of the operator token never replaces a good entry
-            if (!fresh || code is 0 or 2 || !metricsCache.ContainsKey(key)) metricsCache[key] = (DateTime.UtcNow, code, output);
-        }
-        return Results.Text(output, "application/json", Encoding.UTF8, MetricsStatus(code));
-    }
-    finally { metricsGate.Release(); }
-});
-
-app.MapGet("/dashboard", () => Results.Text(DashboardPage.Html, "text/html; charset=utf-8"));
-// The plugin (skills, agents, scripts) as a tar.gz for a worker that cannot reach the source: a hand-made cloud session pulls exactly the
-// version this gateway runs. Needs a worker credential, the supervisor's credential (its connect prompt downloads the same plugin: the scripts and
-// the factory-supervisor skill) or the operator token; nothing outside the plugin directory is included. The archive
-// carries .plugin-version (content hash) and .plugin-managed (marks a downloaded copy, the only kind `factory.ps1 plugin-sync` ever updates).
-app.MapGet("/api/v1/plugin", (HttpContext c) =>
-{
-    var who = Who(c);
-    if (who.Kind is not ("admin" or "worker" or "manager" or "operator" or "keeper")) return Results.StatusCode(403);
-    var root = PluginRoot();
-    if (!Directory.Exists(root) || !File.Exists(Path.Combine(root, "scripts", "factory.ps1"))) return Results.NotFound();
-    var ms = new MemoryStream();
-    using (var gz = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
-    using (var tw = new System.Formats.Tar.TarWriter(gz, leaveOpen: false))
-    {
-        foreach (var f in PluginFiles(root))
-            tw.WriteEntry(f, Path.GetRelativePath(root, f).Replace('\\', '/'));
-        void Add(string name, string text) => tw.WriteEntry(new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, name) { DataStream = new MemoryStream(Encoding.UTF8.GetBytes(text)) });
-        Add(".plugin-version", JsonSerializer.Serialize(new { hash = PluginHash(), gatewayVersion = buildVersion }));
-        Add(".plugin-managed", $"downloaded from this gateway on {DateTime.UtcNow:o}; factory.ps1 plugin-sync may replace it\n");
-    }
-    ms.Position = 0;
-    return Results.File(ms, "application/gzip", "factory-worker-plugin.tar.gz");
-});
-
-// The messaging and manager blocks of /status and of the dashboard JSON (worker-messaging.md 7, 8): the plant's states and counts with the
-// Messenger's counters. /status carries counts and states only; the dashboard adds the last digest and the decision log for the operator's page.
-// The operator SESSION credential is admitted only at the endpoints that call Admitted or OperatorActive (gateway/Http/CallerContext.cs says how).
-JsonObject MessagingBlocks(bool dashboard)
-{
-    var b = plant.MessagingStatus(dashboard); messenger.AddCounters((JsonObject)b["messaging"]!);
-    // the on-demand manager (ManagerCopilot.cs): present while its task runs, with the launch counts and the task's link
-    if (managerCopilot != null && b["manager"] is JsonObject mb)
-    {
-        var mc = managerCopilot.Status(); mb["copilot"] = mc;
-        if (mc["present"]?.GetValue<bool>() == true) mb["present"] = true;
-    }
-    return b;
-}
-app.MapGet("/api/v1/dashboard", (HttpContext c) =>
-{
-    if (Who(c).Kind != "admin") return Results.StatusCode(403);
-    var o = new JsonObject { ["environment"] = environmentName, ["ownerMode"] = ownerMode, ["url"] = publicUrl != "" ? publicUrl : $"http://{c.Request.Host}", ["started"] = started,
-        ["lastSweep"] = hub.LastSweep, ["plant"] = plant.Status() };
-    if (messaging.On) foreach (var kv in MessagingBlocks(true).ToList()) o[kv.Key] = kv.Value?.DeepClone();
-    if (messaging.OperatorEnabled) o["operator"] = plant.OperatorStatus();
-    if (keeper.Enabled) o["keeper"] = plant.KeeperStatus();
-    if (plant.ReplenishStatus() is { } rps) o["replenish"] = rps;
-    if (ownerMode) o["baseUpdate"] = baseWatch.Status();
-    if (ownerMode) o["releaseQueue"] = plant.ReleaseQueueStatus();
-    if (ownerMode) o["hosts"] = plant.HostStatus();
-    if (ownerMode) o["lease"] = plant.LeaseStatus();
-    if (ownerMode && (runtimeManager != null || cursorManager != null || copilotManager != null || octopusManager != null)) o["runtimes"] = RuntimesBlock();
-    if (ownerMode) o["plantSnapshot"] = snapshots.Status();
-    if (ownerMode) o["leader"] = leader.Status();
-    return Results.Text(o.ToJsonString(), "application/json");
-});
 // POST /release-queue/promotion-request { "release": "1.2.3" } (enhancement 9): the dashboard's button. Operator token only. It records the request
 // and announces it on the operator stream; it never promotes: uat and prod belong to the owner and the cmdemo1 session.
 app.MapPost("/api/v1/release-queue/promotion-request", async (HttpContext c) =>
@@ -361,25 +189,6 @@ app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) 
     _ = Task.Run(() => mcpSessionsRef?.End(name, "revoked") ?? Task.CompletedTask);
     return Results.Json(new { ok = true, name, generation = gen, streamClosed = closed, exit = 0 });
 });
-// both adapters in one block: the cae-job block as before (or {enabled:false}), and cursor-cloud beside it when it is on
-JsonObject RuntimesBlock()
-{
-    var o = runtimeManager?.Status() ?? new JsonObject { ["enabled"] = false };
-    if (cursorManager?.Status()["cursor-cloud"] is { } cb) o["cursor-cloud"] = cb.DeepClone();
-    if (octopusManager?.Status()["octopus"] is JsonObject ob && octopusRuntime != null)
-    {
-        var oc = (JsonObject)ob.DeepClone();
-        foreach (var (k, v) in octopusRuntime.Status()) oc[k] = v?.DeepClone();
-        o["octopus"] = oc;
-    }
-    if (copilotManager?.Status()["copilot-cloud"] is JsonObject pb)
-    {
-        var pc = (JsonObject)pb.DeepClone();
-        pc["ciRelease"] = copilotCiRelease.Status(copilotSettings.CiRelease, copilotSettings.CiReleaseSeconds);
-        o["copilot-cloud"] = pc;
-    }
-    return o;
-}
 // The operator marks a runtime healthy again after it was marked unhealthy (cloud-worker-runtimes.md 2.11): operator token only.
 app.MapPost("/api/v1/runtimes/{kind}/reset", (string kind, HttpContext c) =>
 {
@@ -1153,12 +962,9 @@ app.MapPost("/api/v1/presence", async (HttpContext ctx) =>
 
 // ---- messages (worker-messaging.md 3.1 to 3.7): send, state, inbox, acknowledgement, and the operator's traffic log. They are not /verbs: a worker
 // credential may not call verbs, and a message never travels the path that decides items. The sender is the credential, never the body (4.2). ----
-IResult? MessagingOff()
-{
-    if (!ownerMode) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
-    if (!messaging.Enabled) return Fail(403, "messaging-disabled", "peer messaging is not enabled on this gateway (messaging.enabled)", 30);
-    return null;
-}
+// the guard texts live once in gateway/Http/Filters/GatewayGuards.cs; until C7b and C7c move these routes into modules, whose guards are then the
+// MessagingOn and SupervisorOn filters
+IResult? MessagingOff() => GatewayGuards.MessagingOff(ownerMode, messaging);
 static IResult AsResult(MsgResult r) => Results.Text(r.Body.ToJsonString(), "application/json", Encoding.UTF8, r.Status);
 // Who has an inbox, and so may read it, acknowledge it and ask for the state of what it sent: a worker, the item token of an owner or an inspector,
 // the supervisor. A name outside both lists has none; a QC item token never does (4.1).
@@ -1255,11 +1061,7 @@ app.MapGet("/api/v1/inbox", async (HttpContext ctx) =>
 });
 
 // ---- questions (worker-messaging.md 3.1, 3.8): the supervisor's own queue and the operator's view of it, and the operator's answer -----------------
-IResult? SupervisorOff()
-{
-    if (MessagingOff() is { } off) return off;
-    return messaging.ManagerEnabled ? null : Fail(403, "manager-disabled", "the supervisor is not enabled on this gateway (manager.enabled)", 30);
-}
+IResult? SupervisorOff() => GatewayGuards.SupervisorOff(ownerMode, messaging);
 app.MapGet("/api/v1/questions", (HttpContext ctx) =>
 {
     if (SupervisorOff() is { } off) return off;
@@ -1334,55 +1136,6 @@ app.MapPost("/api/v1/messaging/{action}", (string action, HttpContext ctx) =>
     var changed = plant.SetMessagingEnabled(action == "enable");
     if (changed) Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["message"] = action == "enable" ? "messaging-enabled" : "messaging-disabled", ["by"] = "operator" }.ToJsonString());
     return Results.Json(new { ok = true, enabled = messaging.Enabled, changed, exit = 0 });
-});
-
-// ---- the operator session's two enforced checks (Operator.cs, docs/design/operator-session.md). The release records are refs in GitHub, written
-// by the rule scripts; they are read once at start (gateway/Operator/OperatorReleaseLoader.cs), and until that read succeeded the check answers
-// 503 (it never answers "allowed" on a count it does not know). -----------------------------------------------------------------------------
-var releaseLoader = app.Services.GetRequiredService<IOperatorReleaseLoader>();
-var releaseGate = new SemaphoreSlim(1, 1);
-IResult? OperatorOff(HttpContext ctx)
-{
-    if (!messaging.OperatorEnabled) return Fail(403, "operator-disabled", "the operator session is not enabled on this gateway (operator.enabled)", 30);
-    if (MessagingOff() is { } off) return off;
-    if (Admitted(ctx).Kind != "admin") return Fail(403, "forbidden", "this check belongs to the active operator session and the operator", 30);
-    if (!releaseLoader.IsLoaded) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the recorded releases; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
-    return null;
-}
-// GET /operator/release-check: 200 when the plant is quiet and the day's limit is not reached; otherwise 409 not-quiet (with every reason) or daily-limit.
-app.MapGet("/api/v1/operator/release-check", (HttpContext ctx) =>
-{
-    if (OperatorOff(ctx) is { } off) return off;
-    var r = plant.ReleaseCheck();
-    return Results.Text(r.ToJsonString(), "application/json", Encoding.UTF8, r["ok"]!.GetValue<bool>() ? 200 : 409);
-});
-// POST /operator/record-release { "pr": N, "version": "1.0.N" }: one self-merged release, counted against operator.maxSelfMergesPerDay. A release
-// is always recorded, also beyond the limit (the record is the truth; the next release-check refuses). Idempotent per pull request.
-app.MapPost("/api/v1/operator/record-release", async (HttpContext ctx) =>
-{
-    if (OperatorOff(ctx) is { } off) return off;
-    if (revocationService.Off) return Fail(403, "releases-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot record a release", 30);
-    var (text, tooLarge) = await ReadBody(ctx, 4096);
-    JsonObject body; try { body = tooLarge ? new JsonObject() : Messenger.ParseObject(text); } catch { body = new JsonObject(); }
-    if (!(body["pr"] is JsonValue pv && pv.TryGetValue<int>(out var pr) && pr >= 1 && pr <= 999_999_999) || body["version"]?.ToString() is not { } version || !Plant.ValidVersion(version) || body.Count != 2)
-        return Fail(400, "usage", "the body is { \"pr\": <pull request number>, \"version\": \"<the version /_build shows, digits and dots>\" }", 2);
-    var now = DateTime.UtcNow;
-    // its own gate (a flood of records must never delay a revoke) and a cap on the writes of one day
-    await releaseGate.WaitAsync();
-    try
-    {
-        if (!plant.HasRelease(pr))
-        {
-            if (plant.ReleaseRecordsToday() >= Plant.ReleaseWritesPerDay) return Results.Json(new { ok = false, code = "record-limit", reason = $"{Plant.ReleaseWritesPerDay} releases are recorded today; no more are written", retryAfterSeconds = 3600, exit = 20 }, statusCode: 429);
-            var (code, _) = await runner.RunAsync("operator-release", new JsonObject { ["day"] = OperatorReleaseLoader.Day(now), ["pr"] = pr, ["version"] = version }.ToJsonString(), TimeSpan.FromSeconds(120));
-            if (code != 0) return Results.Json(new { ok = false, code = "not-recorded", reason = "the release could not be written to GitHub, so it is not counted; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
-            plant.AddRelease(now, pr, version);
-            Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["operatorRelease"] = pr, ["version"] = version, ["by"] = By(ctx) }.ToJsonString());
-        }
-    }
-    finally { releaseGate.Release(); }
-    var st = plant.OperatorStatus();
-    return Results.Json(new { ok = true, pr, version, releasesToday = st["releasesToday"]!.GetValue<int>(), limit = st["limit"]!.GetValue<int>(), exit = 0 });
 });
 
 // Test seam of the Tier 1 suites (messaging.testHooks, operator token only): puts a message into a name's inbox, or a trigger into its Buffer,
