@@ -19,13 +19,18 @@ to put into the design now."
 | cmdemo1-aisf | master | Build result, secret-scan | cmdemo1-aisf | yes |
 | cmdemo1-fworker | master | Build result, secret-scan | cmdemo1-fworker (cmdemo1-fworker-runtime is a runbook project, not a deployable) | yes |
 | cmdemo1-system | main | env-checks | cmdemo1-system | yes |
-| cmdemo1-scorecard | main | none | cmdemo1-scorecard (disabled) | no |
+| cmdemo1-scorecard | main | none | cmdemo1-scorecard (disabled) | yes (since 2026-10-26) |
 | cmdemo1-scorecard-site | gh-pages | none | cmdemo1-scorecard-space | no |
-| cmdemo1-video | main | none | none | no |
+| cmdemo1-video | main | none | none | yes (since 2026-10-26) |
 
 - **Octopus:** all projects are in Spaces-355 and share tdd, uat and prod. cmdemo1-system's `system.json` already lists the system's
   `deployables[]` (repository, healthPath, buildPath, pipelineSignOff, database).
-- **The board:** board 679 is linked to six repositories, but all 253 of its cards today are cmdemo1-workorders issues.
+- **The board:** board 679 was linked to six repositories, and since 2026-10-26 to eight (scorecard and video added by the cmdemo1
+  session); all 253 of its cards on 2026-10-25 were cmdemo1-workorders issues.
+- **Credentials (the owner's request to the cmdemo1 session, 2026-10-26):** the 16 factory labels exist on every repository; the Cursor
+  App and the operator's token reach every repository; installing the three factory Apps (author, reviewer, testperson) on the other
+  repositories and widening Copilot's token and settings wait for the owner in the browser; webhooks on the other repositories stay off
+  until the gateway's ingress handles them (W4).
 - **The gateway is single-repository in more places than one:**
   - the REST calls (about 130) go through `Get-RepoPath` (`plugin/scripts/lib/Core.ps1:50`);
   - these read `owner` and `repo` themselves:
@@ -88,7 +93,7 @@ behaves exactly like today.
 | **H8 Runtime capabilities** | runtimes and Tentacle hosts advertise toolchain labels (Tentacle tags next to `fworker-host`; cloud agents per repository's setup) | R7 |
 | **H9 Policy per repository and per deployable** | registry fields mapped from today's keys: `policy.autoMerge` from `mergePolicy` and `autoMergeLabel`; `policy.ownerReviewPaths` from `inspector.protectedPaths`; per deployable `autoPromote[env]` from `delivery.autoPromote`, its evidence (`octopus.health.<env>.*`, smoke) and its **promoter** (the gateway, or cmdemo1-system's `ui-auto-promote` for cmdemo1-fworker). The Auto Merge and Hold labels stay inputs | R5 (delivery), R6 (merge) |
 | **H10 Per-repository facts** | docs-only paths, protected paths, required checks, build workflow name, and the delivery-speed keys (`merge.strategy`, the merge queue with its `merge_group` and "switch together", `mergeQueueDepth`, `overlapIgnore`) live in registry entries when each is created. The migration-number rule belongs to the **database** (`system.json`'s database package), not the repository | R0, R5, R7, wherever each is created |
-| **H11 Board** | `Get-BoardList` and the `projects_v2_item` resolution read `repository.nameWithOwner` and drop cards of other repositories in v1 (no change today: every card is home); R4's reconciler keys cards by repository | R0/R1, R4 |
+| **H11 Board** | `Get-BoardList` and the `projects_v2_item` resolution read `repository.nameWithOwner` and drop cards of other repositories in v1 (shipped ahead of stage C as defect C-1: board 679 links eight repositories and the factory labels exist on all of them, so without it a scorecard or video card would be read as home #N); R4's reconciler keys cards by repository | C-1, R4 |
 | **H12 Tests** | `tests/FakeGitHub` (single-repository today, `Program.cs:446`) gains a second repository in R1, and Tier 1 asserts **isolation**: a second repository's webhook is dropped and its card ignored; `Depends on other#N` is not read as home #N; the same number in both repositories does not collide. v2's workflow tests cover a second repository from R6 | R1, R6 |
 
 Also, inside the same phases:
@@ -121,4 +126,4 @@ auto-merge any change to it, whatever the policy it reads says (a rule in the ga
 - **The `system.json` fields** for policy, toolchain and WIP limit: their schema belongs to the kit (Platform Hub) and to cmdemo1-system
   (the cmdemo1 session); the gateway's loader reads them as optional, defaulting to today's behaviour.
 - **The gateway's read access to cmdemo1-system:** one of the factory's Apps installed there with contents read, or a read token.
-- Whether the scorecard, scorecard-site and video repositories join the board.
+- Whether cmdemo1-scorecard-site (a Pages site with issues off) joins the board.

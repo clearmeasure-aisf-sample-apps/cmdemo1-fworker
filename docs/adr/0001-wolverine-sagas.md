@@ -47,7 +47,10 @@ taken is decision 1 of the plan's section 7.
    - GitHub as a versioned projection and as input, not as the store.
    Declared deviations while both engines run (plan rule 10): Solo mode on the lease holder until R9, the session mailbox only at R9,
    and v1's own side effects through the outbox in R3.
-3. **The path** is the strangler plan in `fworker-wolverine-refactor.md`. The old engine (v1) and Wolverine (v2) run in one gateway
+3. **First, stage C** (`gateway-composition.md`): `Program.cs` becomes a composition root (behaviour-neutral steps), and that
+   release is stabilised (two measured batches, promotion to uat and prod, two quiet weeks) **before the enhancement plan starts**
+   (owner, 2026-10-26). The sequence of work, with its parallel lanes, is `fworker-wolverine-implementation.md`.
+4. **The path** is the strangler plan in `fworker-wolverine-refactor.md`. The old engine (v1) and Wolverine (v2) run in one gateway
    process behind six seams (verb router, command port, event ingress, item state store, timers, loopback), in ten phases, each with a
    gate:
    - R0 prerequisites and safety;
@@ -60,7 +63,7 @@ taken is decision 1 of the plan's section 7.
    - R7 the feature plan;
    - R8 incidents;
    - R9 retiring v1.
-4. **Release stability rules** (plan section 2):
+5. **Release stability rules** (plan section 2):
    - Tier 1 is the black-box contract, with a golden-write harness.
    - Every change goes in branch by abstraction.
    - Each capability has a flag in `instance.json`, defaulting to v1.
@@ -70,10 +73,10 @@ taken is decision 1 of the plan's section 7.
    - One owner per item (the `engine:v2` label, checked at every v1 path) and per shared capability.
    - Agents get compatible answers.
    - Until R9 there is one acting Wolverine node: Solo mode on the lease holder.
-5. **The tdd gateway does all v2 work.** It is the only acting gateway and delivers the app to tdd, uat and prod. The uat and prod
+6. **The tdd gateway does all v2 work.** It is the only acting gateway and delivers the app to tdd, uat and prod. The uat and prod
    gateways must start and stay ready with every capability on v1 and no database.
 
-6. **Forward compatible with a system-level gateway** (`docs/design/system-gateway.md`, the owner's decisions of 2026-10-25): one
+7. **Forward compatible with a system-level gateway** (`docs/design/system-gateway.md`, the owner's decisions of 2026-10-25): one
    acting gateway per system working items in any of the system's repositories; one repository per item, its issue living there;
    policy per repository and per deployable; toolchains matched by capability; `Depends on` across repositories gating delivery per
    environment; one queue with per-repository WIP limits. v1 stays home-repository-only; v2 is repository-aware from its first line.

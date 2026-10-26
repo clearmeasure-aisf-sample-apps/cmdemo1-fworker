@@ -38,7 +38,7 @@ and uses Wolverine directly: the gateway has no messaging seam to keep and no do
 ## 2. Rules that keep every release stable
 
 1. **Tier 1 is the contract.** The scenario suites drive the gateway only from outside, so they stay valid while the inside changes.
-   Every pull request keeps them green; a phase adds scenarios, never weakens one. From R0 a **golden-write harness** records the fake
+   Every pull request keeps them green; a phase adds scenarios, never weakens one. From stage C (task C0 of the implementation plan) a **golden-write harness** records the fake
    GitHub's writes per scenario (times, ids, session links normalized), so a seam can be shown to change nothing.
 2. **Branch by abstraction.** A seam first goes in front of v1 with v1 behind it, then v2 is added behind it, switched on, and v1 is
    removed only at the end.
@@ -111,16 +111,20 @@ from wherever it was written, in the history.
 
 ## 5. Phases
 
+**Before R0: stage C** (`gateway-composition.md`, owner's decision of 2026-10-26). `Program.cs` becomes a composition root,
+behaviour-neutral step by step, and is stabilised before R0 starts. The seams of R1 are then built in the modules and services stage C
+creates.
+
 ![Phases](diagrams/fwr-phases.svg)
 
-Sizes are rough (S about a week of one session, M two, L three or more).
+Sizes are relative; the implementation plan's calendar gives weeks (for example R0 about 4, R4 about 2.5).
 
 ### R0. Prerequisites and safety (M)
 
 - **Prerequisites** (owner and system):
   - cmdemo1-aisf stops acting on board 679 (a kit watcher change through Platform Hub);
-  - the acting gateway keeps at least one replica (cmdemo1's `containerapps.bicep`; tdd scales to zero today), needed before R5's
-    timers;
+  - the acting gateway keeps at least one replica (cmdemo1's `containerapps.bicep`; tdd scales to zero today), needed before R4's recurring jobs (the board reconciler) and R5's timers, by W4 in the
+    implementation plan;
   - draft PR #253 merged.
 - **v1 safety fixes**, each behind its own flag: `delivery-speed.md` 18.1.1 (lease checks inside running sweeps, `Plan` and
   `Provision`), 18.1.3 (budgets into the item state), 18.1.4 (the day budget), the `rev` check of 18.1.2.
@@ -130,13 +134,13 @@ Sizes are rough (S about a week of one session, M two, L three or more).
     (Verbs.Sweep.ps1:687-697); 5.1 as a whole ships with section 5 in R7.
 - **Flow metrics** as `delivery-speed.md` 13 and 18.2 define them: one timestamp per stage in the state comment, not read from the
   capped journal.
-- **The golden-write harness** for Tier 1 (rule 1).
+- The golden baseline re-recorded at R0's gate.
 - These are deliberate behaviour changes, measured on a tdd batch.
 - **Gate:** Tier 1 green; a tdd batch no slower than the 2026-10-25 baseline.
 
 ### R1. Structure and seams, all routed to v1 (M; no behaviour change)
 
-- The projects of section 3 (names of the host kept); `Fworker.Domain` gets its first ports (ranking, recovery table, journal text)
+- The projects of section 3 (names of the host kept); `Fworker.Domain` gets its first ports (ranking, journal text; the recovery table is lane D's D5)
   with parity tests that run the rule scripts' pure functions on the same inputs.
 - S1 to S6, each with only its v1 implementation; rule-script answers return their posted journal lines.
 - The verb inventory of R9 is written here, with an owner for each of the 73 verbs.
@@ -304,7 +308,7 @@ as in `wolverine-factory.md` 2, so the saga rows follow the board.
 
 The owner wants the gateway to work items in any of the system's repositories later (`system-gateway.md`). v1 stays
 home-repository-only until R9 and v2 is repository-aware from its first line; the hooks H1 to H12 are built inside these phases:
-- R0: the `Depends on` parser and the board reading ignore other repositories;
+- the board reading (shipped early as defect C-1) and R0: the `Depends on` parser ignore other repositories;
 - R1: the system catalog, the `ItemId` contract, the token's repository claim, and the isolation scenarios with a second repository;
 - R2: qualified ids in the schema and partition keys;
 - R3 and R4: integrations per repository, budgets per credential, a secret per hook source, business-key deduplication;
