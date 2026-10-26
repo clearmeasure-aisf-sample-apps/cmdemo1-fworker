@@ -308,6 +308,34 @@ $Scenarios = [ordered]@{
     Check 'once, and nothing moves it' (@((Get-FakeIssue $m).comments | Where-Object { $_.body -match 'plant event=flagged' }).Count -eq 1 -and (Get-FakeIssue $m).column -eq 'Release Queue')
 }
 
+# A card of another repository linked to the board (issue 269): its number is not an issue of this repository. The sweep never lists it, writes
+# nothing on the issue of that number and never moves its card; a projects_v2_item webhook about it makes no event, one about a home card does.
+'board: a card of another repository linked to the board is never seen: no sweep entry, no comment, no column event' = {
+    $f = (Fake 'issue' @{ title = 'Foreign'; body = 'x'; labels = @(@($L) + @($script:DefaultEnvLabel | Where-Object { $_ })); column = 'Technical Design'; repo = 'clearmeasure-aisf-sample-apps/other-repo' }).number
+    $n = New-Item-Fake 'Home' 'x' $L
+    $sw = F 'w1' @('sync-board'); $swj = $sw | ConvertTo-Json -Depth 12 -Compress
+    Check 'the sweep sees the home card' (($swj -match "`"item`":$n[,}]") -or (@(Pv $sw 'unconfirmed') -contains $n)) $swj
+    # the sweep names an item as "item":N in its entries, as a bare number in its lists and as a key of its maps
+    $named = $swj -match "`"item`":$f[,}]"
+    foreach ($k in 'unconfirmed', 'settling', 'holds', 'unparked') { if (@(Pv $sw $k) -contains $f) { $named = $true } }
+    foreach ($k in 'owners', 'pins', 'priorities') { $mp = Pv $sw $k; if ($mp -is [System.Collections.IDictionary] -and $mp.Contains("$f")) { $named = $true } }
+    Check 'the sweep never names the card of the other repository' (-not $named) $swj
+    Start-Sleep -Seconds 6
+    $fi = Get-FakeIssue $f
+    Check 'after several sweeps: no comment on the issue of the other repository' (@($fi.comments | Where-Object { $_ }).Count -eq 0) ($fi.comments | ConvertTo-Json -Compress -Depth 4)
+    Check 'and its card was never moved' ($fi.column -eq 'Technical Design') "column $($fi.column)"
+    $hook = {
+        param([int]$Num, [string]$Delivery)
+        $body = @{ event = 'projects_v2_item'; delivery = $Delivery; payload = @{ action = 'edited'; projects_v2_item = @{ content_node_id = "I_$Num" }; changes = @{ field_value = @{ field_name = 'Status'; to = @{ name = 'Development' } } } } }
+        $r = Invoke-WebRequest -Uri "$(Get-GatewayBase)/api/v1/verbs/ingest-event" -Method POST -Body ($body | ConvertTo-Json -Compress -Depth 10) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck -TimeoutSec 120
+        try { return ("$($r.Content)" | ConvertFrom-Json -AsHashtable) } catch { return @{ ok = $false; code = "http-$([int]$r.StatusCode)" } }
+    }
+    $ev = & $hook $f 'd-foreign'
+    Check 'a projects_v2_item webhook about the card of the other repository makes no event' ($ev.ok -and @($ev.events | Where-Object { $_ }).Count -eq 0) ($ev | ConvertTo-Json -Compress -Depth 6)
+    $evH = & $hook $n 'd-home'
+    Check 'the same webhook about the home card makes its item.column_changed' ($evH.ok -and @($evH.events | Where-Object { $_ -and $_.event -eq 'item.column_changed' -and $_.item -eq $n -and $_.column -eq 'Development' }).Count -eq 1) ($evH | ConvertTo-Json -Compress -Depth 6)
+}
+
 'code change: release candidate, Release Queue, production, Done [full]' = {
     Fake 'config' @{ prodDelaySeconds = 6 } | Out-Null
     $n = New-Item-Fake 'Code' 'x' $L; Do-TechnicalDesign $n 'w1' $false

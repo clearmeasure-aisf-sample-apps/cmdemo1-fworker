@@ -44,7 +44,7 @@ else {
 $items = Get-Content -Raw (Join-Path $PSScriptRoot 'created.json') | ConvertFrom-Json
 $numbers = @($items | ForEach-Object { [int]$_.issue })
 $t0 = Get-Date; $seen = @{}; $timeline = @()
-function Get-Board { (gh api graphql -f query='query{organization(login:"clearmeasure-aisf-sample-apps"){projectV2(number:679){items(first:100){nodes{fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}} content{... on Issue{number state}}}}}}}' --jq '.data.organization.projectV2.items.nodes[]|select(.content.number!=null)|"\(.content.number)|\(.fieldValueByName.name)|\(.content.state)"') }
+function Get-Board { (gh api graphql -f query='query{organization(login:"clearmeasure-aisf-sample-apps"){projectV2(number:679){items(first:100){nodes{fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name}} content{... on Issue{number state repository{nameWithOwner}}}}}}}}' --jq ('.data.organization.projectV2.items.nodes[]|select(.content.number!=null and (.content.repository.nameWithOwner|ascii_downcase)=="' + $repo.ToLowerInvariant() + '")|"\(.content.number)|\(.fieldValueByName.name)|\(.content.state)"')) }   # the board links several repositories: only this repository's cards (#373)
 try {
     while (((Get-Date) - $t0).TotalHours -lt $TimeoutHours) {
         $now = Get-Board | ForEach-Object { $p = $_ -split '\|'; @{ n = [int]$p[0]; col = $p[1]; state = $p[2] } } | Where-Object { $numbers -contains $_.n }
