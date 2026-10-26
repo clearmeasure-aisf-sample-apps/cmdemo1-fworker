@@ -91,6 +91,8 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(sp => new RevocationService(revocationOptions, gw.OwnerMode, gw.TokenSecret, messaging.TestHooks, revocationsNeeded,
             revocations, sp.GetRequiredService<Runner>().RunAsync, runtimeNonces, sp.GetRequiredService<Plant>().Revoke));
         services.AddSingleton<IRevocationService>(sp => sp.GetRequiredService<RevocationService>());
+        // the generations themselves, for the authentication middleware (gateway/Http/GatewayAuthMiddleware.cs, C6); the same instance the service raises
+        services.AddSingleton(revocations);
         c.Revocations = revocations; c.RuntimeNonces = runtimeNonces;
         return services;
     }

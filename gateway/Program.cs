@@ -49,18 +49,13 @@ Auth.Keeper = keeper;
 if (keeper.Enabled) messaging.Reserved.UnionWith(keeper.Names);
 
 var builder = WebApplication.CreateBuilder(args);
-var apiPort = gw.ApiPort;
-var hookPort = gw.HookPort;
-// Container mode (FACTORY_SINGLE_PORT): one listener for the API and the webhook (GatewayHostingExtensions); the middleware tells them apart by path
-var singlePort = gw.SinglePort;
-if (singlePort > 0) { apiPort = singlePort; hookPort = singlePort; }
 // the gateway's own address for the links it writes into the journal: FACTORY_PUBLIC_URL, else the address the operator or a container last used
-string seenBase = "";
-string LinkBase() => publicUrl != "" ? publicUrl.TrimEnd('/') : Volatile.Read(ref seenBase);
+// (gateway/Http/PublicBase.cs, noted by the authentication middleware)
+var publicBase = new PublicBase(publicUrl);
 
 // The composition (gateway/Composition/, gateway-composition.md 3 B): the host, then one registration method per area, in the order the objects
 // were made before C5a (GatewayServiceCollectionExtensions.cs says what each holds and which later task changes it).
-var composition = new GatewayComposition(gw, instanceConfig, timing, revocationOptions, qcSettings, messaging, keeper, LinkBase);
+var composition = new GatewayComposition(gw, instanceConfig, timing, revocationOptions, qcSettings, messaging, keeper, publicBase.LinkBase);
 builder.AddGatewayHosting(composition);
 builder.Services
     .AddGatewayConfiguration(composition)
@@ -70,13 +65,14 @@ builder.Services
     .AddGatewayRuntimes(composition)
     .AddGatewayPlant(composition)
     .AddGatewayBackground(composition)
-    .AddGatewayMcp();
+    .AddGatewayMcp()
+    .AddGatewayHttp(publicBase);
 var app = builder.Build();
 // the stopping callbacks in their order (transcript flush, "stopping" line, hand-over) and the plant's wait for the snapshot
 app.UseGatewayLifetime();
 
 // What the handlers below still capture, until C6 and C7 move them into services and endpoint modules: the container's singletons, and what
-// the composition made outside it (the revocations and nonces until C6).
+// the composition made outside it (the revocation generations and the nonces, read by handlers until C7).
 var hub = app.Services.GetRequiredService<EventHub>();
 var runner = app.Services.GetRequiredService<Runner>();
 var plant = app.Services.GetRequiredService<Plant>();
@@ -104,7 +100,6 @@ var octopusRuntime = runtimes.OctopusRuntime;
 var octopusManager = runtimes.Octopus;
 ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), resolved below; null where it is not enabled
 
-if (qcSettings.TrustProxy) app.UseForwardedHeaders();
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
 var started = DateTime.UtcNow;
 string PluginRoot() => Path.GetFullPath(Path.Combine(scriptsDir, ".."));
@@ -120,114 +115,15 @@ string PluginHash()
     return pluginHashCache = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()))).ToLowerInvariant();
 }
 
-Principal Who(HttpContext c) => (Principal)c.Items["principal"]!;
-// {name, url} of the AI session behind a session credential, null for the operator, the gateway itself and a click. octopus and cae-job: the
-// gateway's transcript page; cursor-cloud and copilot-cloud: the agent's or task's page; the on-demand manager: its Copilot session; a connected
-// session: the transcript page when this gateway holds one, else the name only (url "")
-JsonObject? SessionLinkOf(Principal p)
-{
-    if (p.Kind is not ("item" or "worker" or "role" or "manager" or "keeper") || !TranscriptStore.ValidName(p.Name)) return null;
-    var kind = plant.RuntimeKindOf(p.Name); if (kind == "") kind = p.Runtime;
-    var lb = LinkBase();
-    var page = lb != "" ? $"{lb}/sessions/{Uri.EscapeDataString(p.Name)}" : "";
-    var url = kind switch
-    {
-        "octopus" or "cae-job" => page,
-        "cursor-cloud" or "copilot-cloud" => plant.RuntimeUrlOf(p.Name),
-        _ => p.Kind == "manager" && managerCopilot?.SessionUrl(p.Name) is { Length: > 0 } mu ? mu : transcripts.Has(p.Name) ? page : ""
-    };
-    if (url != "" && !(url.StartsWith("https://", StringComparison.Ordinal) || url.StartsWith("http://", StringComparison.Ordinal)) || url.Contains('?') || url.Contains('#') || url.Any(char.IsWhiteSpace)) url = "";
-    return new JsonObject { ["name"] = p.Name, ["url"] = url };
-}
+// The caller of a request (gateway/Http/CallerContext.cs, task C6): who it is, whom it acts as, its session's link. The handlers below keep these
+// names until C7 moves them into endpoint modules.
+Principal Who(HttpContext c) => CallerContext.Of(c).Who;
+bool OperatorActive(HttpContext c) => CallerContext.Of(c).OperatorActive;
+Principal Admitted(HttpContext c) => CallerContext.Of(c).Admitted;
+string By(HttpContext c) => CallerContext.Of(c).By;
 
-// Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless FACTORY_TEST_CAUSE_HEADER=1: a request's X-Fake-Cause is held
-// while the request is served, so every rule-script run started meanwhile carries it (TestCause.cs); cleared at the end of the request
-if (TestCause.On)
-    app.Use(async (ctx, next) =>
-    {
-        var cause = ctx.Request.Headers["X-Fake-Cause"].ToString();
-        if (cause.Length == 0) { await next(); return; }
-        var box = TestCause.Begin(cause);
-        try { await next(); }
-        finally { TestCause.End(box); }
-    });
-
-app.Use(async (ctx, next) =>
-{
-    var port = ctx.Connection.LocalPort;
-    var path = ctx.Request.Path.Value ?? "";
-    if (port == hookPort && hookPort != apiPort && !(path == "/webhooks/github" && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
-    // a process that a newer one superseded (Leader.cs) serves nothing any more but its status to the operator: calls and new streams are answered
-    // 503 gateway-replaced, so the client tries again and reaches the new process; a webhook too (the new process's sweep catches up)
-    if (leader.Replaced && (path == "/webhooks/github" || path.StartsWith("/qc/") || ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) || (path.StartsWith("/api/") && !(path is "/api/v1/status" or "/api/v1/dashboard" && Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
-    {
-        ctx.Response.StatusCode = 503;
-        await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "gateway-replaced", reason = "this gateway process was replaced by a newer one; try again", retryAfterSeconds = 5, exit = 20 });
-        return;
-    }
-    // the redemption of a runtime worker's nonce carries no credential: the nonce is the credential, checked by the endpoint itself
-    if (port == apiPort && path is "/api/v1/runtime/redeem" or "/api/v1/copilot/exchange") { NoteBase(ctx); await next(); return; }
-    // the Octopus reconcile runbook's calls carry the host token, checked by the endpoints themselves (never a gateway credential)
-    if (port == apiPort && path is "/api/v1/runtime/octopus/desired" or "/api/v1/runtime/octopus/report") { await next(); return; }
-    var isMcp = port == apiPort && ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
-    if (port == apiPort && (path.StartsWith("/api/") || isMcp))
-    {
-        var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
-        if (p?.Kind != "admin" && !revocationService.IsLoaded)
-        {
-            await Task.WhenAny(revocationService.Loaded, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
-            if (!revocationService.IsLoaded) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }); return; }
-            p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
-        }
-        if (p == null) { await Refuse(ctx, 401, "unauthorized", "missing, malformed, forged or expired credential"); return; }
-        ctx.Items["principal"] = p;
-        if (p.Kind == "admin") NoteBase(ctx);
-        // /mcp (gateway/Mcp/): a credential whose kind plays no role there is refused before the MCP server reads the request; the tools admit
-        // themselves (Admit, through InProcess) when they call their endpoint
-        if (isMcp)
-        {
-            if (RoleTools.RoleOf(p) == "") { await Refuse(ctx, 403, "forbidden", "this credential plays no role at /mcp"); return; }
-            ctx.User = new System.Security.Claims.ClaimsPrincipal(new GatewayIdentity(p));
-            await next(); return;
-        }
-        await Admit(p, path, next);
-        return;
-    }
-    await next();
-});
-
-// the scheme and host a caller reached this gateway on (behind the platform's ingress: X-Forwarded-Proto), for LinkBase
-void NoteBase(HttpContext c)
-{
-    if (publicUrl != "" || !c.Request.Host.HasValue) return;
-    var fp = c.Request.Headers["X-Forwarded-Proto"].ToString();
-    var proto = fp is "https" or "http" ? fp : c.Request.Scheme;
-    Volatile.Write(ref seenBase, $"{proto}://{c.Request.Host.Value}");
-}
-
-// The per-principal work of an admitted /api request: the middleware above runs it, and so does an MCP tool's in-process call of an endpoint
-// (gateway/Mcp/InProcess.cs), so a tool counts exactly as the HTTP call it stands for.
-async Task Admit(Principal p, string path, Func<Task> next)
-{
-    // presence (worker-messaging.md 2.2, 4.6): every request of a session's own credential is proof of life; a stream write is not. The
-    // credentials that are the session itself are listed: a worker, the supervisor, and the item tokens of an owner or an inspector. A QC item
-    // token is pull request code's credential and never stamps presence, nor does any role this list does not name.
-    // A supervisor credential stamps only while its name holds the slot (4.6: exactly one is active; registration stamps by itself), so a
-    // replaced or never-registered supervisor name is never heard.
-    if (messaging.Enabled && ownerMode && (p.Kind == "worker" || (p.Kind == "manager" && plant.ActiveSupervisor().Name == p.Name) || (p.Kind == "item" && p.Role is "owner" or "inspector"))) plant.Touch(p.Name);
-    // the operator session (Operator.cs): heard while it holds the slot; and, for its quiet-plant check, every verb call of an item token is
-    // counted from its arrival to its answer
-    if (p.Kind == "operator") plant.OperatorHeard(p.Name);
-    if (p.Kind == "keeper") plant.KeeperHeard(p.Name);
-    if (messaging.OperatorEnabled && p.Kind == "item" && path.StartsWith("/api/v1/verbs/"))
-    {
-        var flightVerb = path["/api/v1/verbs/".Length..];
-        var flight = plant.VerbStarted(p.Name, p.Item, flightVerb.All(ch => char.IsAsciiLetterLower(ch) || ch == '-') ? flightVerb : "");
-        try { await next(); } finally { plant.VerbEnded(flight); }
-        return;
-    }
-    await next();
-}
+// the forwarded headers of a trusted proxy, the test-only cause of a request, then the authentication and admission (gateway/Http/, task C6)
+app.UseGatewayPipeline();
 
 if (ownerMode) qc.Map(app);
 app.MapGet("/health", () => Results.Text("ok"));
@@ -372,15 +268,7 @@ app.MapGet("/api/v1/plugin", (HttpContext c) =>
 
 // The messaging and manager blocks of /status and of the dashboard JSON (worker-messaging.md 7, 8): the plant's states and counts with the
 // Messenger's counters. /status carries counts and states only; the dashboard adds the last digest and the decision log for the operator's page.
-// The operator SESSION credential (o1., Auth.cs) is admitted at exactly the endpoints that call Admitted or OperatorActive, and nowhere else: there it
-// acts as the operator does (its notes are operator notes). It must hold the operator slot, and messaging must be switched on. Since 2026-10-14 that
-// includes a worker's capacity, drain and resume (POST /workers/{name}/...) and the read-only cycle-time metrics. Everywhere else its kind is
-// "operator", which no endpoint accepts: it cannot mint or revoke a credential, switch messaging, read the dashboard JSON or call a verb.
-bool OperatorActive(HttpContext c) => Who(c) is { Kind: "operator" } w && ownerMode && messaging.OperatorEnabled && messaging.Enabled && plant.ActiveOperator() == w.Name;
-// The principal it acts as carries the session's NAME: the admin token's has none. What the session sends is stamped with that name and the kind
-// "operator-session" (Messaging.cs), never as the person's "operator"; log lines name it too (By).
-Principal Admitted(HttpContext c) => OperatorActive(c) ? new Principal("admin", Who(c).Name) : Who(c);
-string By(HttpContext c) => Who(c) is { Kind: "operator" } w ? w.Name : "operator";
+// The operator SESSION credential is admitted only at the endpoints that call Admitted or OperatorActive (gateway/Http/CallerContext.cs says how).
 JsonObject MessagingBlocks(bool dashboard)
 {
     var b = plant.MessagingStatus(dashboard); messenger.AddCounters((JsonObject)b["messaging"]!);
@@ -746,7 +634,7 @@ app.MapPost("/api/v1/verbs/{verb}", async (string verb, HttpContext ctx) =>
     // the AI session that calls (a worker, role, manager or keeper credential): the rule scripts end every comment they write for it with a link
     // to that session (Board.ps1 Add-Comment). Never a token: the page of the gateway, or the runtime's own page of the agent or task.
     authorized.Remove("_session");
-    if (SessionLinkOf(who) is { } sl) authorized["_session"] = sl;
+    if (CallerContext.Of(ctx).SessionLinkOf(who) is { } sl) authorized["_session"] = sl;
     var (code, output) = await runner.RunAsync(verb, authorized.ToJsonString(), timeout);
     if (mgrTicket != null)
     {   // the plant's part of an item action of the plant manager, after its rule script changed the item (Manager.cs)
@@ -1797,7 +1685,7 @@ mcpSessions.OnEnded = async (name, reason) =>
 // text reads the prompt files from the container (registered by AddGatewayRuntimes since C5b).
 managerCopilot = app.Services.GetService<ManagerCopilot>();
 // the tools call the endpoints in process, found through the container's EndpointDataSource (gateway/Mcp/InProcess.cs)
-GatewayMcp.Tools = new McpTools(new InProcess(app.Services.GetRequiredService<EndpointDataSource>(), app.Services, Admit), mcpSessions, t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
+GatewayMcp.Tools = new McpTools(new InProcess(app.Services.GetRequiredService<EndpointDataSource>(), app.Services, app.Services.GetRequiredService<AdmissionService>().Admit), mcpSessions, t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
 {
     if (messaging.Enabled && ownerMode) plant.Touch(name);
     if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }
