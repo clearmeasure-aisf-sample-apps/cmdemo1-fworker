@@ -200,6 +200,9 @@ function F([string]$Holder, [string[]]$FactoryArgs) {
     if ($script:GoldenOpen -and -not $skip -and $script:CauseNonce) { $script:CauseSeq++; $id = "$($script:CauseNonce).$($script:CauseSeq)" }
     return Invoke-F $Holder $FactoryArgs -Cause $id
 }
+# The cause id the next tagged call of F will carry ('' when the record is closed or the fake records nothing), for a fake control that waits for
+# that call (owner: /_fake/pr checksUntilCause, the session's merge call in the pass-merge race).
+function Get-NextCauseId { if ($script:GoldenOpen -and $script:CauseNonce) { return "$($script:CauseNonce).$($script:CauseSeq + 1)" }; return '' }
 # -Cause: the call's cause id (F), passed to the client as FACTORY_TEST_CAUSE of that call only: in the runner host's call environment, or set
 # around the spawned pwsh and removed right after it
 function Invoke-F([string]$Holder, [string[]]$FactoryArgs, [string]$Cause = '') {

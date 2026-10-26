@@ -74,7 +74,7 @@ app.Run(async ctx =>
         // (GraphQL answers 200 with an error of type RATE_LIMITED, REST 403)
         if (rate is { Remaining: <= 0, Resource: "graphql" }) res = (200, "{\"errors\":[{\"type\":\"RATE_LIMITED\",\"message\":\"API rate limit exceeded for installation ID 7.\"}]}");
         else if (rate is { Remaining: <= 0 }) res = (403, "{\"message\":\"API rate limit exceeded for installation ID 7. If you reach out to GitHub Support for help, please include the request ID.\",\"documentation_url\":\"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting\"}");
-        else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.ApiVersionHeader = ctx.Request.Headers["X-GitHub-Api-Version"].ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString() is { Length: > 0 } az ? az : ctx.Request.Headers["X-Octopus-ApiKey"].ToString() is { Length: > 0 } ok ? "Octopus " + ok : ""); etag = world.Etag; }
+        else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.RequestCause = ctx.Request.Headers["X-Fake-Cause"].ToString(); world.ApiVersionHeader = ctx.Request.Headers["X-GitHub-Api-Version"].ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString() is { Length: > 0 } az ? az : ctx.Request.Headers["X-Octopus-ApiKey"].ToString() is { Length: > 0 } ok ? "Octopus " + ok : ""); etag = world.Etag; }
         if (recWrite) world.Recorder!.Record(method, path, ctx.Request.QueryString.Value ?? "", res.Item1, ctx.Request.Headers.UserAgent.ToString(), recBody, recField, ctx.Request.Headers["X-Fake-Cause"].ToString());
     }
     if (rate is { } rl)
@@ -95,7 +95,7 @@ app.Run();
 sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow;
     public string? Repo; }   // Repo: owner/name of another repository whose issue is linked to the board; null: the configured repository
 sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
-sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public string Base = "master"; public List<Comment> Comments = new(); public bool Dispatched; }
+sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public string Base = "master"; public List<Comment> Comments = new(); public bool Dispatched; public string? ChecksUntilCause; }
 sealed record Redirect(string To);
 sealed record PlainText(string Text);
 // App "github-actions": the check run is a job of a workflow run (its id is the job id), with steps, a log and the artifacts of the run.
@@ -393,6 +393,8 @@ sealed class World
     readonly Dictionary<string, (string Message, string Tree, List<string> Parents)> commits = new();
     // a conditional read (If-None-Match of the request) and the ETag of the answer, for the one ref by its path (as GitHub: 304 when unchanged)
     public string IfNoneMatch = ""; public string? Etag;
+    // the request's X-Fake-Cause (the golden writes' cause id, README of tests/scenarios/golden): read by /_fake/pr checksUntilCause
+    public string RequestCause = "";
     readonly Dictionary<string, (string Sha, List<string> Files, List<JsonObject> Objs)> branches = new();
     long nextReview = 1;
     readonly Dictionary<string, (string Profile, double Delay)> branchProfile = new();
@@ -678,7 +680,12 @@ sealed class World
         }
         if ((m = Regex.Match(path, $"^{root}/commits/([0-9a-f]+)/check-runs$")).Success)
         {
-            var sha = m.Groups[1].Value; var list = checks.TryGetValue(sha, out var l) ? l : new();
+            var sha = m.Groups[1].Value;
+            // /_fake/pr checksUntilCause: the first read that carries the cause id finishes the held checks
+            foreach (var hp in prs.Values)
+                if (hp.ChecksUntilCause is { } hc && hp.Sha == sha && RequestCause.Length > 0 && (RequestCause == hc || RequestCause.StartsWith(hc + ".", StringComparison.Ordinal)))
+                { hp.ChecksUntilCause = null; hp.DelaySeconds = 0; ApplyProfile(hp, hp.Sha); }
+            var list = checks.TryGetValue(sha, out var l) ? l : new();
             foreach (var c in list) if (c.CompleteAt is { } at && DateTime.UtcNow >= at) { c.Status = "completed"; c.CompleteAt = null; }
             return (200, J(("check_runs", new JsonArray(list.Select(c => (JsonNode)J(("id", c.Id), ("name", c.Name), ("status", c.Status), ("conclusion", c.Conclusion), ("started_at", c.Started.ToString("o")),
                 ("completed_at", c.Status == "completed" ? c.Started.AddSeconds(30).ToString("o") : null), ("details_url", c.App == "github-actions" ? $"https://fake/actions/runs/{c.RunId}/job/{c.Id}" : $"https://fake/checks/{c.Id}"),
@@ -1261,6 +1268,10 @@ sealed class World
                 if (b["conflict"] != null) pr.Conflict = b["conflict"]!.GetValue<bool>();
                 if (b["mergeableNullReads"] != null) pr.MergeableNullReads = b["mergeableNullReads"]!.GetValue<int>();
                 if (b["delaySeconds"] != null) { pr.DelaySeconds = b["delaySeconds"]!.GetValue<double>(); ApplyProfile(pr, pr.Sha); }
+                // checksUntilCause: the checks of the head run (as delaySeconds 3600) until a read of them carries that cause id (X-Fake-Cause, the id
+                // or <id>.<n>); that read finishes them and is answered with them finished. A test control: the session's own call (the owner suite's
+                // pass-merge race, issue #395) is the first to see them green, inside its verb, without a clock. "" ends it.
+                if (b["checksUntilCause"] != null) { var hc = b["checksUntilCause"]!.ToString(); pr.ChecksUntilCause = hc.Length > 0 ? hc : null; pr.DelaySeconds = hc.Length > 0 ? 3600 : 0; ApplyProfile(pr, pr.Sha); }
                 return (200, J(("ok", true)));
             }
             case "master-merge":

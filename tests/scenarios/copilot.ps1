@@ -108,6 +108,16 @@ $CopilotScenarios = [ordered]@{
         Check 'the accepted comment links the Copilot session' (Wait-Until -Seconds 20 { (Cop-Comments $n "*cop-$n-* accepted*Copilot session: $link*").Count -eq 1 }) (((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n---`n")
         Check 'no comment carries a token' (-not ((((Get-FakeIssue $n).comments | ForEach-Object { $_.body }) -join "`n") -match 'r1\.|b1\.|c1\.|fake-copilot'))
         Check 'and revokes its r1' (Wait-Until -Seconds 30 { (Mcp 'tools/list' @{} $r1).status -eq 401 })
+        # (issue #395) the end offers the open item to the next worker, and the runtime launches a second execution for it at the next plan: wait for
+        # it, then end it while the item is still open, so the plant still holds its offer when the end is read. That end takes the offer back and
+        # releases the claim (claim-item release: a DELETE of the ref the first end already removed, 422). Left to Cop-Cleanup, whether the second
+        # execution existed before the close, and whether a sweep dropped the closed item's offer before the end was read, were timing.
+        $x2 = @{ e = $null }
+        Check 'the ended session''s item is offered again: the runtime launches a second execution' (Wait-Until -Seconds 30 { $x2.e = @((Cop-Status).executions) | Where-Object { $_ -and $_.item -eq $n -and $_.execution -and $_.execution -ne $t.id } | Select-Object -First 1; $null -ne $x2.e }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
+        if ($x2.e) {
+            [void](Fake 'copilot-task' @{ id = "$($x2.e.execution)"; state = 'cancelled' })
+            Check 'the second execution, stopped while it holds the offer, ends and the runtime has run its end (claim released, revoked)' (Wait-Until -Seconds 60 { @((Cop-Status).last | Where-Object { $_.worker -eq $x2.e.worker }).Count -eq 1 -and (Cop-EndsSettled) }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
+        }
     } finally { Cop-Cleanup @($n) }
 }
 

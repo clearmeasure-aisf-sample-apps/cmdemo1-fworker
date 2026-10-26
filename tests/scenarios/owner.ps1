@@ -793,15 +793,23 @@ $OwnerScenarios['pass-merge: a push after the verdict voids it: not merged, the 
     Check 'not merged, and the reason names the change after the verdict, once' (-not (Get-FakePr $x.pr).merged -and $why -eq 1) "merged=$((Get-FakePr $x.pr).merged) comments=$why"
 }
 
+# The race with its winner fixed (issue #395): which side merged followed the clock (the session's call 7 s after the PASS, or the sweep once the
+# 8 s grace was over), so the merge and its comment were caused writes in one run and background writes in the next. Both sides merge under the
+# item lock and only on green checks. Here the checks of the head run until a read of them carries the session's call's cause id
+# (/_fake/pr checksUntilCause): that read happens inside the session's merge verb, which holds the item lock, so the session sees them green and
+# merges before the sweep can take the item. A sweep that takes the item first, once the grace is over, finds them still running and only waits
+# (checks-pending). A sweep after the merge must not merge again. (Without a cause id, golden mode off, the checks are simply finished.)
 $OwnerScenarios['pass-merge: the session''s merge call racing the sweep merges once [full]'] = {
     $x = Pm-ToValidation
-    Fake 'pr' @{ number = $x.pr; delaySeconds = 6 } | Out-Null
+    Fake 'pr' @{ number = $x.pr; delaySeconds = 3600 } | Out-Null     # the checks run while the PASS is recorded
     $v = Pm-QuietPass $x; CheckExit 'the PASS verdict' $v 0
-    Start-Sleep -Seconds 7     # the grace is nearly over: the sweep and the session's call meet while the checks finish
+    $cause = Get-NextCauseId
+    if ($cause) { Fake 'pr' @{ number = $x.pr; checksUntilCause = $cause } | Out-Null } else { Fake 'pr' @{ number = $x.pr; delaySeconds = 0 } | Out-Null }
     $m = F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
-    Check 'the session''s merge: merged or already-merged' ($m.exit -eq 0 -and $m.outcome -in 'merged', 'already-merged') ($m | ConvertTo-Json -Compress -Depth 4)
-    Start-Sleep -Seconds 6
-    Check 'merged once' ((Get-FakePr $x.pr).merged -and (Pm-MergeComments $x.n $x.pr) -eq 1) "$(Pm-MergeComments $x.n $x.pr)"
+    Check 'the session''s merge call merges' ($m.exit -eq 0 -and $m.outcome -eq 'merged') ($m | ConvertTo-Json -Compress -Depth 4)
+    Wait-Sweeps -Count 1
+    $gw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match "the gateway squash-merged PR #$($x.pr) " }).Count
+    Check 'merged once, by the session, also after a sweep' ((Get-FakePr $x.pr).merged -and (Pm-MergeComments $x.n $x.pr) -eq 1 -and $gw -eq 0) "comments=$(Pm-MergeComments $x.n $x.pr) gateway=$gw"
 }
 
 $OwnerScenarios['pass-merge: a pull request merged by a person settles the item from Development and from a PASS parked for a person'] = {
@@ -1200,6 +1208,9 @@ $OwnerScenarios['owner: auto-unpark: master-broken is lifted only once the check
     $ms = (Get-ItemState $k).merge
     Check "the item is judged on master's green head, not its merge commit" ($ms.judge_sha -eq $mm.sha -and $null -ne $ms.awaiting) ($ms | ConvertTo-Json -Compress)
     Check 'journalled as unparked by the sweep' ((Get-SweepUnparks $k) -eq 1)
+    # (issue #395) the unpark only puts the wait back to master-green (Verbs.Sweep.ps1 goes on past the settle step); the next sweep's settle step
+    # judges that head and journals "master is GREEN". The scenario ended before it, so the next scenario's reset often removed the item first.
+    Check 'the next sweep finds the judged head green: master GREEN journalled, waiting for the release candidate' (Wait-Until -Seconds 40 { "$((Get-ItemState $k).merge.awaiting)" -eq 'release-candidate' -and @((Get-FakeIssue $k).comments | Where-Object { "$($_.body)" -match 'master is GREEN at' -and "$($_.body)" -match 'factory-journal:' }).Count -eq 1 }) ((Get-ItemState $k).merge | ConvertTo-Json -Compress)
 }
 
 # The board guard: an open issue with the factory label that has no card is put on the board in the intake column by the sweep, journalled once, and
