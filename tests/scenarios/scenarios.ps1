@@ -84,7 +84,7 @@ $Scenarios = [ordered]@{
     Invoke-RestMethod "$repo/issues/$c" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
     $ref = "refs/factory/$inst/claims/$c"
     # the lock a verb would hold (the rule scripts' item lock file), taken before the ref exists: no sweep can reap the ref before the lock is held
-    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$c.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    $lock = Lock-ItemFile $c
     try {
         Gh-As 'fake-operator' 'git/refs' @{ ref = $ref; sha = ('0' * 40) } | Out-Null
         # two full sweeps after the ref, each with a reap that meets the lock; with the 45 s wait the first of them alone outlasted this
@@ -105,7 +105,7 @@ $Scenarios = [ordered]@{
     $n = New-Item-Fake 'Merged by a person, busy' 'x' $L
     Do-TechnicalDesign $n
     $pr = Do-Development $n
-    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$n.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    $lock = Lock-ItemFile $n
     try {
         Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
         $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -121,7 +121,7 @@ $Scenarios = [ordered]@{
     $n = New-Item-Fake 'Closed with a park, busy' 'x' $L
     $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
     $now = (Get-Date).ToUniversalTime()
-    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$n.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    $lock = Lock-ItemFile $n
     try {
         # the park and the close come after the lock is held: no sweep can remove the park before
         Set-ItemState $n { param($st) $st.park = @{ reason = 'stuck'; at = $now.ToString('o'); until = $now.AddHours(2).ToString('o') } }
@@ -139,7 +139,7 @@ $Scenarios = [ordered]@{
     $n = New-Item-Fake 'Expired park, busy' 'x' $L
     $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
     $now = (Get-Date).ToUniversalTime()
-    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$n.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    $lock = Lock-ItemFile $n
     try {
         # a park that has ended, with the demotions that parked it (the claim stays live: nothing offers the item meanwhile)
         Set-ItemState $n { param($st) $st.park = @{ reason = 'verdict-failed'; at = $now.AddHours(-3).ToString('o'); until = $now.AddMinutes(-1).ToString('o') }; $st.demotions = 3 }
@@ -158,7 +158,7 @@ $Scenarios = [ordered]@{
     $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
     [void](Fake 'move' @{ number = $n; column = 'Functional Testing' })
     $now = (Get-Date).ToUniversalTime()
-    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$n.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    $lock = Lock-ItemFile $n
     try {
         # an owner's live claim on a PASS that waits on a hold (a park) for longer than idleReleaseMinutes (60)
         Set-ItemState $n { param($st) $st.claim.owner = $true; $st.claim.column = 'Functional Testing'; $st.verdict = @{ passed = $true; processed = $false; pr = 0; at = $now.AddHours(-3).ToString('o') }; $st.park = @{ reason = 'pass-without-auto-merge'; at = $now.AddHours(-3).ToString('o'); until = $now.AddHours(2).ToString('o') } }
