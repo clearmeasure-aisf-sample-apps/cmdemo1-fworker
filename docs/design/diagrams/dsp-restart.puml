@@ -1,0 +1,34 @@
+@startuml dsp-restart
+skinparam dpi 150
+title Delivery speed: a gateway release (the newest process acts; new steps in bold)
+
+participant "Old gateway\n(Acting, epoch e)" as OLD
+participant "New gateway" as NEW
+database "GitHub\nlease ref, plant snapshot ref,\nitem state comments, board, PRs,\nmerge queue" as GH
+participant "Octopus\ntask history, deployments,\nSign-offs, runbooks" as OCT
+participant "Tentacle hosts\nand worker containers" as H
+
+== the platform starts the new revision ==
+NEW -> GH : take the lease at once: epoch e+1 (compare-and-swap)
+NEW -> NEW : Starting: serves verbs, webhooks, host reports;\nno plan, no start, no merge, no promotion;\nwaits up to 90 s for the final snapshot
+
+== the old process sees epoch e+1 (within 15 s) ==
+OLD -> OLD : stop starting passes\n<b>+ await the running sync-board at most 45 s, then kill it;</b>\n<b>every mutating step already checks the epoch</b>
+OLD -> GH : final plant snapshot (existing)\n<b>+ slot ledger, footprints, host-full blocks, runtime health</b>
+OLD -> H : end streams (stream.replaced); answer 503 gateway-replaced
+note over H : worker containers keep running;\ntheir streams reconnect to the new process
+
+== the new process acts ==
+NEW -> GH : restore the snapshot
+NEW -> NEW : Acting
+NEW -> OCT : rebuild runtime records from the task history (existing)\n<b>+ day budget: every Start and overflow run since 00:00 UTC, host-full ones excepted</b>
+NEW -> OCT : <b>run Reconcile hosts once (retry once; else the scheduled run)</b>
+H -> NEW : <b>host reports: containers + metrics</b>
+NEW -> NEW : <b>ledger = snapshot + task history, corrected by the reports;</b>\n<b>sessions that ended during the handover are freed here</b>
+NEW -> GH : first sweep: board, claims, item state comments\n(<b>holds, durable budgets, merge entries, evidence, flow times</b>)
+NEW -> OCT : <b>deployments, Sign-offs and smoke tasks read back;</b>\n<b>due timers recomputed from their finish times</b>
+NEW -> NEW : <b>first plan pass; triggers queued while Starting run now</b>
+
+== a holder with no successor (scale-in) ==
+OLD -> GH : at SIGTERM: final snapshot, release the lease (existing)
+@enduml
