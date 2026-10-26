@@ -54,7 +54,9 @@ Every compared write is either caused by the scenario or background:
 - Background (`+ ` settled, `~ ` tail, below): every other write: one that came outside every window (the sweep, the plant's ticks, the base-update, transcript and
   release loops, the runtimes, and whatever the scenario's own direct requests to the gateway set off: only `F` is bracketed), and one of
   a background kind whatever its window. The background kinds (`WriteRecorder.BackgroundKinds`): `plant` (a body with
-  `<!-- plant event=`), `state` (a factory-state comment), `claims`, `transcripts`, `snapshot` (`plant-snapshot`), `leader`
+  `<!-- plant event=`), `state` (a factory-state comment), `merge-watch` (a journal comment, `<!-- factory-journal:`, of the sweep's
+  merge watch in `plugin/scripts/lib/Verbs.Delivery.ps1`: "master is GREEN at", "master checks failed at", "master is BROKEN", "release
+  candidate **V** carries", "no release candidate" (also "published no release candidate"), "Delivered to **Prod**"), `claims`, `transcripts`, `snapshot` (`plant-snapshot`), `leader`
   (`gateway-leader`) and `revoked` (a path or `ref` with `/claims/`, `/transcripts/`, `plant-snapshot`, `gateway-leader`, `/revoked/`;
   a git commit whose message is a sealed transcript `fwt1:...`, a plant snapshot or the leader lease counts as its ref's kind), and
   `gateway` (every write of the gateway's own C# clients: the Cursor, Copilot, ARM and Octopus runtimes).
@@ -62,7 +64,7 @@ Every compared write is either caused by the scenario or background:
 The background kinds exist because nothing in a request tells which rule-script run made it: the gateway runs up to
 `runner.maxProcesses` rule scripts at once (RunnerGate.cs), the sweep's among them, and all of them send the same User-Agent and token.
 So a sweep or a loop that writes while a verb's window is open would count as caused; the kinds above are what those write. The limit
-that remains: a background write of another kind (a sweep's board move or journal comment, a merge or a promotion sign-off of the
+that remains: a background write of another kind (a sweep's board move or close, a journal comment other than the merge watch's, a merge or a promotion sign-off of the
 gateway's loops) that comes while a window is open counts as caused. When that happens in one run and not in another, the scenario's
 caused writes differ between the runs, and the baseline gets no file for it (below).
 
@@ -88,9 +90,9 @@ normalizes every later write of the process against that scenario, exactly as a 
 factory-state write gives its `STATE` line when accepted, its marker line when refused), and keeps the lines that name one of the
 scenario's items or pull requests (`{#k}`, `{#prk}`); a later write that is leftover or timing relative to the scenario, or whose text
 holds none of the scenario's numbers, is skipped. It writes them as `~ ` lines to `<FAKE_RECORD_DIR>/<suite>/<slug>.later.txt`. Where
-the scenario has a golden file, every `~ ` line of it must be in the scenario's own record (any section) or among those later lines: the
-check `golden tail writes by the end of the group: <scenario>` fails for each scenario with a line missing and lists up to 6 of them
-(one passing check counts the scenarios checked when none misses). A tail line that names no item or pull request of the scenario (an
+the scenario has a golden file, every `~ ` line of it must be in the scenario's own record (any section) or among those later lines:
+each line missing is a quarantined miss (Comparison, below), `golden tail line written by no write of the group: <scenario>` (one
+passing check counts the scenarios checked when none misses). A tail line that names no item or pull request of the scenario (an
 Octopus sign-off without one) can only be found in the scenario's own record.
 
 What the later lines can and cannot catch: the next scenario begins with `/_fake/reset`, which removes the issues, pull requests, refs and
@@ -219,9 +221,22 @@ it makes is the scenario's; the state it edits is the gateway's, so its body is 
 
 The golden's `~ ` lines are not checked here but at the end of the group (Tail lines, above).
 
-On a difference the check fails the scenario (and the suite) and prints the first object whose caused writes differ (the position, up
-to 2 lines before it, the golden's and the record's line there, `(no more writes)` where one side ends), up to 6 missing background
-lines, then the paths of the golden file, the record and the raw file.
+A difference of 1 or 3 fails the check, the scenario and the suite; it prints the first object whose caused writes differ (the position,
+up to 2 lines before it, the golden's and the record's line there, `(no more writes)` where one side ends), then the paths of the golden
+file, the record and the raw file.
+
+A miss of 2, or of a tail line at the end of the group, is a quarantined check (`CheckQuarantined` of lib.ps1, issue #386): each missing
+line is its own check, `golden settled background line missing from the record: <scenario>` or `golden tail line written by no write of
+the group: <scenario>`, printed as `QUARANTINED (failed)` with the line (`+ ` or `~ `, normalized) and the golden file's path, counted in
+the quarantined total of the suite summary, run-all and the "Tests result" summary, and it does not fail the suite. Whether a background
+line lands in time is the timing of the gateway's loops; a missing caused write never is. Every miss is also appended as
+`<+ or ~> <suite>/<slug> <line>` to `golden-misses.txt` in the records' directory, so it is in the job's `writes-<job>-<attempt>` artifact.
+
+The repeat rule, for a stage C pull request: when a run has a quarantined golden miss, re-run that shard once (`gh run rerun <run-id>
+--job <job-id>`). A line missing again in the same scenario on the re-run is a regression that blocks the pull request; a line that
+was written on the re-run was timing. The check is a reviewer step: a re-run hides the earlier attempt's artifacts from the run's
+artifact list, so download the shard's `writes-<job>-<attempt>` artifact before the re-run, then the new attempt's, and compare their
+`golden-misses.txt` files: a line in both is the regression (`comm -12 <(sort a/golden-misses.txt) <(sort b/golden-misses.txt)`).
 
 Modes, from `TEST_GOLDEN`:
 

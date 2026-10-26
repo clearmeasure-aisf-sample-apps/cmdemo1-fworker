@@ -32,9 +32,14 @@ sealed class WriteRecorder
 
     // The kinds of write that are always background, also inside a cause window: what the gateway's own loops write (the plant's journal lines,
     // factory-state comments, claim refs, transcripts, the plant snapshot, the leader lease, revocation refs, and every write of the gateway's
-    // own C# clients: the Cursor, Copilot, ARM and Octopus runtimes). A sweep or loop that runs while a verb of the harness runs writes them
-    // too, and nothing in a request tells the two apart (Kind).
-    public static readonly HashSet<string> BackgroundKinds = new(StringComparer.Ordinal) { "plant", "state", "claims", "transcripts", "snapshot", "leader", "revoked", "gateway" };
+    // own C# clients: the Cursor, Copilot, ARM and Octopus runtimes), and the journal lines of the sweep's merge watch (Verbs.Delivery.ps1:
+    // master green, failed or broken, the release candidate, delivered to prod), which come whenever the sweep next looks at a merged item.
+    // A sweep or loop that runs while a verb of the harness runs writes them too, and nothing in a request tells the two apart (Kind).
+    public static readonly HashSet<string> BackgroundKinds = new(StringComparer.Ordinal) { "plant", "state", "merge-watch", "claims", "transcripts", "snapshot", "leader", "revoked", "gateway" };
+    // the merge watch's journal lines (Add-Comment in plugin/scripts/lib/Verbs.Delivery.ps1), told by their text: "no release candidate" covers
+    // "published no release candidate", "still no release candidate" and "but no release candidate carrying it"
+    static readonly string[] MergeWatchTexts = { "master is GREEN at ", "master is BROKEN", "master checks failed at ", "no release candidate", "Delivered to **Prod**" };
+    static readonly Regex ReleaseCandidateCarries = new(@"release candidate \*\*[^*\n]+\*\* carries `", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     // when the last write of any kind came (Quiet): the harness closes a record only once the gateway's tail work has gone quiet
     long lastWriteTick = Environment.TickCount64;
@@ -185,6 +190,7 @@ sealed class WriteRecorder
             var raw = RawText(e.Body);
             if (raw.Contains("<!-- plant event=", StringComparison.Ordinal)) return "plant";
             if (state != null || raw.Contains("<!-- factory-state:", StringComparison.Ordinal)) return "state";
+            if (raw.Contains("<!-- factory-journal:", StringComparison.Ordinal) && (MergeWatchTexts.Any(t => raw.Contains(t, StringComparison.Ordinal)) || ReleaseCandidateCarries.IsMatch(raw))) return "merge-watch";
             var refName = e.Body is JsonObject o && o["ref"] is JsonValue rv && rv.GetValueKind() == JsonValueKind.String ? rv.GetValue<string>() : "";
             var t = e.Path + " " + refName;
             if (t.Contains("/claims/", StringComparison.Ordinal)) return "claims";

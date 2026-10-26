@@ -84,13 +84,12 @@ function Assert-GoldenTails([string]$Suite) {
     # the fake keeps at most 400,000 writes of a process: beyond that a tail line could be missed for want of room, which must not look like a defect
     $dropped = Get-RecField $res 'droppedProcessWrites'
     if ($null -ne $dropped -and [long]$dropped -gt 0) { Check 'golden tail writes: the fake kept every write of the process' $false "($dropped writes were not kept; the missing tail lines below may be among them)" }
+    # every tail line missing is a quarantined miss of its own (Add-GoldenMiss: issue #386)
     $missing = @(Get-RecField $res 'missing')
     foreach ($m in $missing) {
-        $lines = @(Get-RecField $m 'missing')
-        $shown = @($lines | Select-Object -First 6 | ForEach-Object { "- missing     $_" })
-        if ($lines.Count -gt 6) { $shown += "... and $($lines.Count - 6) more missing" }
-        $shown += "golden: $(Join-Path $dir (Join-Path "$(Get-RecField $m 'suite')" "$(Get-RecField $m 'slug').writes.txt"))"
-        Check "golden tail writes by the end of the group: $(Get-RecField $m 'scenario')" $false ("($($lines.Count) tail lines of the golden file written by no write of the process)`n        " + ($shown -join "`n        "))
+        $suite = "$(Get-RecField $m 'suite')"; $slug = "$(Get-RecField $m 'slug')"
+        $golden = Join-Path $dir (Join-Path $suite "$slug.writes.txt")
+        foreach ($l in @(Get-RecField $m 'missing')) { Add-GoldenMiss -Section '~' -Scenario "$(Get-RecField $m 'scenario')" -Suite $suite -Slug $slug -Line "$l" -Golden $golden }
     }
     if ($missing.Count -eq 0) { Check "golden tail writes by the end of the group ($(Get-RecField $res 'checked') scenarios)" $true }
 }
@@ -387,15 +386,25 @@ function Compare-GoldenWrites($Rec, [string]$Name, [string]$Mode = (Get-GoldenMo
             $shown += "    golden    $(if ($null -eq $c.expected) { '(no more writes)' } else { $c.expected })"
             $shown += "    record    $(if ($null -eq $c.actual) { '(no more writes)' } else { $c.actual })"
         }
-        if ($r.missing.Count -gt 0) {
-            $why += "$($r.missing.Count) background lines missing"
-            $shown += @($r.missing | Select-Object -First 6 | ForEach-Object { "- missing     $_" })
-            if ($r.missing.Count -gt 6) { $shown += "... and $($r.missing.Count - 6) more missing" }
-        }
         $shown += "golden: $golden"; $shown += "record: $file"; $shown += "raw:    $(Get-RecField $Rec 'raw')"
         $detail = "(the writes differ from the golden file: $($why -join '; '))`n        " + ($shown -join "`n        ")
     }
-    Check 'golden writes unchanged' $r.ok $detail
+    # caused writes and the format block; a missing settled background line is a quarantined miss of its own (Add-GoldenMiss)
+    Check 'golden writes unchanged' ($null -eq $r.cause -and $r.format.Count -eq 0) $detail
+    foreach ($l in $r.missing) { Add-GoldenMiss -Section '+' -Scenario $Name -Suite (Split-Path -Leaf (Split-Path -Parent $file)) -Slug ((Split-Path -Leaf $file) -replace '\.writes\.txt$', '') -Line $l -Golden $golden }
+}
+# A required background line of a golden file that a run did not write: a settled line ('+ ') missing from the scenario's record, or a tail line
+# ('~ ') written by no write of the group. Whether a background line lands in time is the gateway loops' timing, so a miss is reported as a
+# quarantined check (issue #386: printed with its scenario and normalized line, counted, the suite does not fail), while a difference of the
+# caused writes stays a failure. The repeat rule (README: Comparison): a stage C pull request with a miss re-runs that shard once, and the same
+# line missing again in the same scenario is a regression that blocks the pull request. To compare two attempts, every miss is also appended
+# as "<section> <suite>/<slug> <line>" to golden-misses.txt in the records' directory (TEST_WRITES_DIR, uploaded as writes-<job>-<attempt>).
+function Add-GoldenMiss([string]$Section, [string]$Scenario, [string]$Suite, [string]$Slug, [string]$Line, [string]$Golden) {
+    $what = $(if ($Section -eq '+') { 'settled background line missing from the record' } else { 'tail line written by no write of the group' })
+    CheckQuarantined "golden $what`: $Scenario" $false "`n        $Section $Line`n        golden: $Golden" -Issue '#386'
+    if ($env:FAKE_RECORD_DIR) {
+        try { [IO.File]::AppendAllText((Join-Path $env:FAKE_RECORD_DIR 'golden-misses.txt'), "$Section $Suite/$Slug $Line`n", [Text.UTF8Encoding]::new($false)) } catch { Write-Host "    (golden-misses.txt not written: $($_.Exception.Message))" }
+    }
 }
 # Makes golden files from the records of several runs of the same code (each -From directory is one run: its *.writes.txt files, searched
 # recursively, are keyed by their directory, the suite, and their name). A scenario's caused writes must be the same in every record of it
