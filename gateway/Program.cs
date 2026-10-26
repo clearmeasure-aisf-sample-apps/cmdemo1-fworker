@@ -112,6 +112,10 @@ builder.Services.AddSingleton(sp => new RevocationService(revocationOptions, own
     revocations, sp.GetRequiredService<Runner>().RunAsync, runtimeNonces, sp.GetRequiredService<Plant>().Revoke));
 builder.Services.AddSingleton<IRevocationService>(sp => sp.GetRequiredService<RevocationService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RevocationService>());
+// the operator session's recorded releases (gateway/Operator/OperatorReleaseLoader.cs): read once at start, after the revocations' read has started
+builder.Services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, revocationOptions.SkipRevocations, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));
+builder.Services.AddSingleton<IOperatorReleaseLoader>(sp => sp.GetRequiredService<OperatorReleaseLoader>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OperatorReleaseLoader>());
 // the transcripts' save loop (TranscriptService) starts after the revocation read
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TranscriptService>());
 // the runtime adapter (gateway/Runtimes/, cloud-worker-runtimes.md 4): only in owner mode with a token secret and a runtime switched on in the configuration
@@ -415,8 +419,6 @@ string PluginHash()
 // Revocations (gateway/Identity/RevocationService.cs, Auth.cs): resolved here, where the start used to set them up, so their start-up lines and the
 // check of the test switch keep their place; the read of the generations starts with the host. Until it succeeds no session credential is accepted.
 var revocationService = app.Services.GetRequiredService<RevocationService>();
-// FACTORY_TEST_SKIP_REVOCATIONS=1: read by the operator releases below
-var revocationsOff = revocationOptions.SkipRevocations;
 
 // the leader lease starts once the revoked credentials are read (above): see the leader section near the top
 if (leaderOn)
@@ -1786,38 +1788,16 @@ app.MapPost("/api/v1/messaging/{action}", (string action, HttpContext ctx) =>
 });
 
 // ---- the operator session's two enforced checks (Operator.cs, docs/design/operator-session.md). The release records are refs in GitHub, written
-// by the rule scripts, because the restart that a release causes would otherwise empty the count; they are read once at start, and until that
-// read succeeded the check answers 503 (it never answers "allowed" on a count it does not know). ---------------------------------------------
-var releasesLoaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+// by the rule scripts; they are read once at start (gateway/Operator/OperatorReleaseLoader.cs), and until that read succeeded the check answers
+// 503 (it never answers "allowed" on a count it does not know). -----------------------------------------------------------------------------
+var releaseLoader = app.Services.GetRequiredService<IOperatorReleaseLoader>();
 var releaseGate = new SemaphoreSlim(1, 1);
-static string ReleaseDay(DateTime d) => d.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-if (!messaging.OperatorEnabled || revocationsOff) releasesLoaded.SetResult();
-else _ = Task.Run(async () =>
-{
-    while (true)
-    {
-        try
-        {
-            var day = DateTime.UtcNow;
-            var (code, output) = await runner.RunAsync("operator-releases", new JsonObject { ["day"] = ReleaseDay(day) }.ToJsonString(), TimeSpan.FromSeconds(120));
-            if (code == 0 && JsonNode.Parse(output)?["releases"] is JsonArray list)
-            {
-                foreach (var r in list)
-                    if (r?["pr"] is JsonValue pv && pv.TryGetValue<int>(out var pr) && pr > 0 && r["version"]?.ToString() is { } ver && Plant.ValidVersion(ver)) plant.AddRelease(day, pr, ver);
-                releasesLoaded.SetResult(); return;
-            }
-            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"operatorReleases\":\"not-loaded\",\"exit\":{code}}}");
-        }
-        catch (Exception e) { Console.Error.WriteLine($"operator releases: {e.Message}"); }
-        await Task.Delay(TimeSpan.FromSeconds(5));
-    }
-});
 IResult? OperatorOff(HttpContext ctx)
 {
     if (!messaging.OperatorEnabled) return Fail(403, "operator-disabled", "the operator session is not enabled on this gateway (operator.enabled)", 30);
     if (MessagingOff() is { } off) return off;
     if (Admitted(ctx).Kind != "admin") return Fail(403, "forbidden", "this check belongs to the active operator session and the operator", 30);
-    if (!releasesLoaded.Task.IsCompleted) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the recorded releases; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
+    if (!releaseLoader.IsLoaded) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the recorded releases; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
     return null;
 }
 // GET /operator/release-check: 200 when the plant is quiet and the day's limit is not reached; otherwise 409 not-quiet (with every reason) or daily-limit.
@@ -1832,7 +1812,7 @@ app.MapGet("/api/v1/operator/release-check", (HttpContext ctx) =>
 app.MapPost("/api/v1/operator/record-release", async (HttpContext ctx) =>
 {
     if (OperatorOff(ctx) is { } off) return off;
-    if (revocationsOff) return Fail(403, "releases-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot record a release", 30);
+    if (revocationService.Off) return Fail(403, "releases-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot record a release", 30);
     var (text, tooLarge) = await ReadBody(ctx, 4096);
     JsonObject body; try { body = tooLarge ? new JsonObject() : Messenger.ParseObject(text); } catch { body = new JsonObject(); }
     if (!(body["pr"] is JsonValue pv && pv.TryGetValue<int>(out var pr) && pr >= 1 && pr <= 999_999_999) || body["version"]?.ToString() is not { } version || !Plant.ValidVersion(version) || body.Count != 2)
@@ -1845,7 +1825,7 @@ app.MapPost("/api/v1/operator/record-release", async (HttpContext ctx) =>
         if (!plant.HasRelease(pr))
         {
             if (plant.ReleaseRecordsToday() >= Plant.ReleaseWritesPerDay) return Results.Json(new { ok = false, code = "record-limit", reason = $"{Plant.ReleaseWritesPerDay} releases are recorded today; no more are written", retryAfterSeconds = 3600, exit = 20 }, statusCode: 429);
-            var (code, _) = await runner.RunAsync("operator-release", new JsonObject { ["day"] = ReleaseDay(now), ["pr"] = pr, ["version"] = version }.ToJsonString(), TimeSpan.FromSeconds(120));
+            var (code, _) = await runner.RunAsync("operator-release", new JsonObject { ["day"] = OperatorReleaseLoader.Day(now), ["pr"] = pr, ["version"] = version }.ToJsonString(), TimeSpan.FromSeconds(120));
             if (code != 0) return Results.Json(new { ok = false, code = "not-recorded", reason = "the release could not be written to GitHub, so it is not counted; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
             plant.AddRelease(now, pr, version);
             Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["operatorRelease"] = pr, ["version"] = version, ["by"] = By(ctx) }.ToJsonString());
