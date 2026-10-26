@@ -33,7 +33,7 @@ public sealed class RuntimePromptTests
         Assert.Equal(new[]
         {
             "copilot-connect", "copilot-followup-development", "copilot-followup-first", "copilot-followup-functional-testing", "copilot-followup-head",
-            "copilot-followup-other", "copilot-pr-development", "copilot-pr-other", "cursor-followup", "cursor-followup-development", "cursor-work-item", "what-changed",
+            "copilot-followup-other", "copilot-pr-development", "copilot-pr-other", "cursor-followup", "cursor-followup-development", "cursor-work-item", "master-fix", "what-changed",
         }, names);
     }
 

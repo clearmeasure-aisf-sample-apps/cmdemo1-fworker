@@ -174,8 +174,20 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
     public string? QuotaBlocked() { lock (tasks) return quotaRetryAt is { } r && DateTime.UtcNow < r ? "quota-exhausted" : null; }
     public JsonObject QuotaJson() { lock (tasks) { var o = new JsonObject { ["exhausted"] = quotaSince != null, ["since"] = quotaSince?.ToString("o"), ["retryAt"] = quotaRetryAt?.ToString("o"), ["message"] = quotaMessage }; if (quotaSince != null) o["ownerAction"] = QuotaOwnerAction; return o; } }
 
-    public CopilotCloudRuntime(CopilotCloudSettings cfg, CopilotCodes codes, ICopilotPromptBuilder prompt, HttpClient? http = null, IItemPrLookup? itemPr = null)
-    { this.cfg = cfg; this.codes = codes; this.prompt = prompt; this.itemPr = itemPr; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
+    // owners and settle (C5c, gateway/Runtimes/Owner*.cs): the owner record and the settle through the rule scripts; without them the functions
+    // above stay unset, as they were before Program.cs set them
+    public CopilotCloudRuntime(CopilotCloudSettings cfg, CopilotCodes codes, ICopilotPromptBuilder prompt, HttpClient? http = null, IItemPrLookup? itemPr = null,
+        CopilotOwnerVerbs? owners = null, CopilotSettleClient? settle = null)
+    {
+        this.cfg = cfg; this.codes = codes; this.prompt = prompt; this.itemPr = itemPr; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+        if (settle != null) Settle = (item, stage, head, _) => settle.Settle(item, stage, head);
+        if (owners != null)
+        {
+            LoadOwner = (item, _) => owners.Load(item, cursor: false);
+            SaveOwner = async o => await owners.Save(o, "copilot-cloud");
+            WhyResume = (item, _) => owners.WhyResume(item);
+        }
+    }
 
     public string Kind => "copilot-cloud";
     public int MaxConcurrent => cfg.MaxConcurrent;

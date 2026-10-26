@@ -37,6 +37,9 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
 
     // AddGatewayRuntimes
     public RuntimeRegistry Runtimes { get; set; } = null!;
+    // the cloud runtimes' settings: AddGatewayBackground registers the CI release and the owner watches by them (C5c)
+    public CopilotCloudSettings CopilotSettings { get; set; } = null!;
+    public CursorCloudSettings CursorSettings { get; set; } = null!;
 
     // AddGatewayBackground
     public int SweepMinSeconds { get; set; }

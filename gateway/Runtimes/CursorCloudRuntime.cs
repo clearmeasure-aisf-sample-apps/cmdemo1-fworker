@@ -101,8 +101,18 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
     // agent names carry the environment, so a key shared by two gateways never lets one delete the other's agents
     string Prefix => $"fworker-{cfg.Environment}-";
 
-    public CursorCloudRuntime(CursorCloudSettings cfg, ICursorPromptBuilder prompt, HttpClient? http = null)
-    { this.cfg = cfg; this.prompt = prompt; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
+    // owners and settle (C5c, gateway/Runtimes/Owner*.cs): the same owner record as Copilot's (runtime cursor-cloud) and the same settle
+    public CursorCloudRuntime(CursorCloudSettings cfg, ICursorPromptBuilder prompt, HttpClient? http = null, CopilotOwnerVerbs? owners = null, CopilotSettleClient? settle = null)
+    {
+        this.cfg = cfg; this.prompt = prompt; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+        if (settle != null) Settle = (item, stage, head, _) => settle.Settle(item, stage, head);
+        if (owners != null)
+        {
+            LoadOwner = (item, _) => owners.Load(item, cursor: true);
+            SaveOwner = async o => await owners.Save(o, "cursor-cloud");
+            WhyResume = (item, _) => owners.WhyResume(item);
+        }
+    }
 
     public string Kind => "cursor-cloud";
 

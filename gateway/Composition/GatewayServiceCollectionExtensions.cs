@@ -8,8 +8,9 @@ using System.Text.Json.Nodes;
 //   AddGatewayIdentity       revocations, runtime nonces, RevocationService (C4a)
 //   AddGatewayRuntimes       the prompt files, the prompt builders, RuntimeRegistry (the runtime adapters and managers) and their settings (C5b)
 //   AddGatewayPlant          the plant's settings, IPlantHooks, Plant, Messenger, QcHub, BaseWatch, the operator's releases (C4b)
-//   AddGatewayBackground     every hosted service, in start order; last the on-demand manager (its settings, ManagerCopilot and
-//                            ManagerCopilotService, C5d) and McpSessionSweeper (C5d)  -> C5c: CopilotCiReleaseService, CloudOwnerWatch
+//   AddGatewayBackground     every hosted service, in start order; after the plant ticker the CI release (CopilotCiReleaseService) and one
+//                            owner watch per cloud runtime (CloudOwnerWatch, C5c), last the on-demand manager (its settings, ManagerCopilot and
+//                            ManagerCopilotService, C5d) and McpSessionSweeper (C5d)
 //   AddGatewayMcp            the MCP server at /mcp
 //
 // Rules that keep the start what it was before C5a, and that a later step keeps:
@@ -111,7 +112,11 @@ static class GatewayServiceCollectionExtensions
         // and the gateway's public URL; the bootstrap prompt is read from prompts/ (CursorPromptBuilder, gateway/Templates/RuntimePrompts.cs)
         var cursorSettings = CursorCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
         var cursorPrompts = new CursorPromptBuilder(prompts);
-        var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, cursorPrompts) : null;
+        // the owner record of the task that owns an item (rule verb copilot-owner) and the settle (rule verb copilot-settle), shared by both cloud
+        // runtimes as constructor parameters (C5c, gateway/Runtimes/Owner*.cs)
+        var ownerVerbs = new CopilotOwnerVerbs(c.Runner.RunAsync);
+        var settleClient = new CopilotSettleClient(c.Runner.RunAsync);
+        var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, cursorPrompts, owners: ownerVerbs, settle: settleClient) : null;
         var cursorManager = cursorRuntime != null
             ? new RuntimeManager(runtimeSettings, cursorRuntime, runtimeNonces,
                 cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", Auth.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
@@ -124,7 +129,7 @@ static class GatewayServiceCollectionExtensions
         var copilotPrompts = new CopilotPromptBuilder(prompts, copilotSettings);
         var itemPr = new ItemPrLookup(c.Runner);
         var copilotRuntime = ownerMode && tokenSecret.Length > 0 && copilotSettings.On
-            ? new CopilotCloudRuntime(copilotSettings, copilotCodes, copilotPrompts, itemPr: itemPr) : null;
+            ? new CopilotCloudRuntime(copilotSettings, copilotCodes, copilotPrompts, itemPr: itemPr, owners: ownerVerbs, settle: settleClient) : null;
         var copilotManager = copilotRuntime != null
             ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
                 copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
@@ -133,6 +138,22 @@ static class GatewayServiceCollectionExtensions
         // key of the service account that may run the runbooks of that one project (OCTOPUS_RUNBOOK_API_KEY); off without the key
         var octopusRuntime = ownerMode && tokenSecret.Length > 0 && runtimeSettings.Octopus.On ? new OctopusRunbookRuntime(runtimeSettings.Octopus) : null;
         var octopusManager = octopusRuntime != null ? new RuntimeManager(runtimeSettings, octopusRuntime, runtimeNonces, runtimeSettings.Octopus.Limits(octopusRuntime.Blocked)) : null;
+        // what the managers read of their runtime's owners: the settle at a run's end (Development only; Copilot's head is the branch its task
+        // reported, Cursor sends none), the owned items and the quota for the status, the quota block for a start
+        if (copilotRuntime != null && copilotManager != null)
+        {
+            copilotManager.Ending = e => settleClient.Ending(e, copilotRuntime.HeadOf);
+            copilotManager.Owned = copilotRuntime.OwnedJson;
+            copilotManager.Quota = copilotRuntime.QuotaJson;
+            copilotSettings.QuotaBlock = copilotRuntime.QuotaBlocked;
+        }
+        if (cursorRuntime != null && cursorManager != null)
+        {
+            cursorManager.Ending = e => settleClient.Ending(e, null);
+            cursorManager.Owned = cursorRuntime.OwnedJson;
+            cursorManager.Quota = cursorRuntime.QuotaJson;
+            cursorSettings.QuotaBlock = cursorRuntime.QuotaBlocked;
+        }
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "octopus", ["enabled"] = octopusManager != null, ["configured"] = runtimeSettings.Octopus.Enabled, ["auth"] = runtimeSettings.Octopus.Auth, ["key"] = runtimeSettings.Octopus.ApiKey != "", ["hostToken"] = runtimeSettings.Octopus.HostToken != "" }.ToJsonString());
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "copilot-cloud", ["enabled"] = copilotManager != null, ["configured"] = copilotSettings.Enabled, ["token"] = copilotSettings.Token != "", ["gatewayUrl"] = copilotSettings.GatewayUrl != "" }.ToJsonString());
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
@@ -147,8 +168,10 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton<ICursorPromptBuilder>(cursorPrompts);
         services.AddSingleton<ICopilotPromptBuilder>(copilotPrompts);
         services.AddSingleton<IItemPrLookup>(itemPr);
+        services.AddSingleton(ownerVerbs);
+        services.AddSingleton(settleClient);
         services.AddSingleton(registry);
-        c.Runtimes = registry;
+        c.Runtimes = registry; c.CopilotSettings = copilotSettings; c.CursorSettings = cursorSettings;
         return services;
     }
 
@@ -178,6 +201,9 @@ static class GatewayServiceCollectionExtensions
             }, timing.AckSeconds, gw.OwnerMode ? sp.GetRequiredService<IPlantHooks>() : null)
             { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = instance.OneItemPerSession,
                 PassUnmergedDigestMinutes = timing.PassUnmergedDigestMinutes, OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = leaseSettings, IntakeColumn = instance.IntakeColumn, Hosts = hostSettings, MgrActions = managerActionSettings, Keeper = keeper, Runtimes = rts.CaeJob, Cursor = rts.Cursor, Copilot = rts.Copilot, Octopus = rts.Octopus,
+                // the items the cloud runtimes' tasks own, and their part of the plant snapshot (C5c: set here, where Program.cs set them after Build())
+                CopilotOwns = rts.CopilotRuntime != null ? rts.CopilotRuntime.Owns : null, CopilotOwnersSnapshot = rts.CopilotRuntime != null ? rts.CopilotRuntime.OwnedJson : null, CopilotOwnersRestore = rts.CopilotRuntime != null ? rts.CopilotRuntime.Restore : null,
+                CursorOwns = rts.CursorRuntime != null ? rts.CursorRuntime.Owns : null, CursorOwnersSnapshot = rts.CursorRuntime != null ? rts.CursorRuntime.OwnedJson : null, CursorOwnersRestore = rts.CursorRuntime != null ? rts.CursorRuntime.Restore : null,
                 SessionPage = (kind, name) => kind is "octopus" or "cae-job" && linkBase() is { Length: > 0 } lb ? $"{lb}/sessions/{Uri.EscapeDataString(name)}" : "" };
         });
         services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
@@ -230,10 +256,41 @@ static class GatewayServiceCollectionExtensions
         });
         services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct });
         c.SweepMinSeconds = sweepMinSeconds;
+        // C5c: the loops Program.cs started after Build(), in that order: the Copilot CI release, the Copilot owner watch, the Cursor owner watch
+        services.AddGatewayCloudOwners(c);
         // C5d: the two loops Program.cs started last, after Build(), in that order: the on-demand manager's tick, then the MCP session sweep
         services.AddGatewayManagerCopilot(c);
         services.AddHostedService(sp => new McpSessionSweeper(() => c.McpSessions, McpSessionSweeper.DefaultInterval));
         return services;
+    }
+
+    // The CI release and the owner watches of the cloud runtimes (gateway/Runtimes/Owner*.cs, task C5c), where Program.cs started them: the CI release
+    // where the Copilot runtime is on and api.copilot.ciRelease; one CloudOwnerWatch per cloud runtime that is on. The Copilot watch's registration
+    // also sets the Copilot credit guard (OverBudget), which parks through the plant; the host makes every hosted service before it starts any.
+    static void AddGatewayCloudOwners(this IServiceCollection services, GatewayComposition c)
+    {
+        var rts = c.Runtimes; var copilotSettings = c.CopilotSettings; var cursorSettings = c.CursorSettings;
+        var copilotRuntime = rts.CopilotRuntime; var copilotManager = rts.Copilot; var cursorRuntime = rts.CursorRuntime; var cursorManager = rts.Cursor;
+        if (copilotManager != null && copilotSettings.CiRelease)
+            services.AddHostedService(sp => new CopilotCiReleaseService(rts.CopilotCiRelease, copilotManager, copilotRuntime, sp.GetRequiredService<Plant>(), sp.GetRequiredService<Runner>(),
+                sp.GetRequiredService<ILeadership>(), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds)));
+        // two registrations of one implementation type: AddSingleton<IHostedService> adds each (AddHostedService would keep only the first, as with RuntimeLoop)
+        if (copilotRuntime != null && copilotManager != null)
+            services.AddSingleton<IHostedService>(sp =>
+            {
+                var plant = sp.GetRequiredService<Plant>(); var runner = sp.GetRequiredService<Runner>();
+                copilotRuntime.OverBudget = async (item, phase, credits) =>
+                {
+                    var (code, _) = await runner.RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "credit-guard", ["phase"] = phase, ["by"] = $"the Copilot credit guard: one task reported {credits:0} ai_credits, over api.copilot.maxCreditsPerTask {copilotSettings.MaxCreditsPerTask:0}" }.ToJsonString(), TimeSpan.FromSeconds(120));
+                    if (code != 0) throw new InvalidOperationException($"park-item answered exit {code}");
+                    plant.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "credit-guard" });
+                };
+                return new CloudOwnerWatch(copilotRuntime, copilotManager, sp.GetRequiredService<CopilotOwnerVerbs>(), sp.GetRequiredService<ILeadership>(),
+                    sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, new CloudOwnerWatchOptions { IntervalSeconds = copilotSettings.CiReleaseSeconds, MasterFixer = copilotRuntime });
+            });
+        if (cursorRuntime != null && cursorManager != null)
+            services.AddSingleton<IHostedService>(sp => new CloudOwnerWatch(cursorRuntime, cursorManager, sp.GetRequiredService<CopilotOwnerVerbs>(), sp.GetRequiredService<ILeadership>(),
+                sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, new CloudOwnerWatchOptions { IntervalSeconds = cursorSettings.OwnerWatchSeconds }));
     }
 
     // The plant manager on demand (gateway/Runtimes/ManagerCopilot.cs, api.copilot.manager): its settings always, the manager and its tick
