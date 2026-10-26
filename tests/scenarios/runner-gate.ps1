@@ -101,7 +101,7 @@ $RunnerGateScenarios['runner gate: a rule script shares no .NET startup profile;
         Wait-Sweeps -Count 3 -MinSeconds 16
         $lease = Qc-Server 'leader-lease' @{ action = 'check'; holder = 'rg-375'; ttl_seconds = 60; version = 'test' }
         Check 'rule scripts ran in the window' ((Rg-Total) -gt $mark -and $lease.ok -eq $true -and $lease.exit -eq 0) "starts $((Rg-Total) - $mark), lease $($lease | ConvertTo-Json -Compress -Depth 4)"
-        Check 'no pwsh of the suite wrote a .NET startup profile in its HOME' ((Rg-Profiles).Count -eq 0) "$dir : $((Rg-Profiles) -join ', ')"
+        Check 'no pwsh of the suite wrote a .NET startup profile in its HOME' (@(Rg-Profiles).Count -eq 0) "$dir : $((Rg-Profiles) -join ', ')"
         # (b) the gateway's own part: a gateway whose environment does not have the knob still starts its rule scripts with it
         Remove-Item (Join-Path $dir 'StartupProfileData-*') -Force -ErrorAction SilentlyContinue
         [Environment]::SetEnvironmentVariable($knob, $null)
@@ -110,7 +110,7 @@ $RunnerGateScenarios['runner gate: a rule script shares no .NET startup profile;
         $mark = Rg-Total
         Wait-Sweeps -Count 3 -MinSeconds 16
         Check 'a gateway started without the knob: its rule scripts ran' ((Rg-Total) -gt $mark) "starts $((Rg-Total) - $mark)"
-        Check 'and wrote no .NET startup profile' ((Rg-Profiles).Count -eq 0) "$dir : $((Rg-Profiles) -join ', ')"
+        Check 'and wrote no .NET startup profile' (@(Rg-Profiles).Count -eq 0) "$dir : $((Rg-Profiles) -join ', ')"
         # (c) a corrupt profile in HOME, against the same gateway: a synthetic header (record and version fields shaped like those .NET 10 writes,
         # then zeros; 64 bytes) and 64 KiB of 0xFF
         $hdr = [Convert]::FromHexString('4000000166000000000000000d000000110500000e000000' + ('00' * 40))
