@@ -1477,7 +1477,7 @@ $OwnerScenarios['intake: a free slot and an empty Technical Design pull the top 
         Check 'a free slot pulls the top item that may come: moved to Technical Design and offered' (Wait-Until -Seconds 60 { (& $col $a) -eq 'Technical Design' -and (Get-Assigned 'in1' $a).Count -gt 0 }) "a: $(& $col $a)"
         Check 'the held, the pinned and the waiting item stay in Todo' ((& $col $held) -eq 'Todo' -and (& $col $pinned) -eq 'Todo' -and (& $col $waits) -eq 'Todo')
         Check 'the journal says why it was pulled' (@((Get-FakeIssue $a).comments | Where-Object { $_.body -like '*pulled from **Todo** into*plant event=pulled*' }).Count -eq 1)
-        Wait-Sweeps -Count 2 -MinSeconds 6     # the full sweeps that would pull
+        Start-Sleep -Seconds 6     # (not Wait-Sweeps: in1 must still accept inside its 8 s accept window below)
         Check 'while it waits for its session nothing more is pulled' ((& $col $b) -eq 'Todo')
         $r = Fo 'in1' @('accept', '--item', $a, '--assignment', (Get-Assigned 'in1' $a)[-1].assignment); CheckExit 'in1 accepts it' $r 0
         Start-OwnerClient 'in2' 'persistent-local' '--capacity 1 --no-auto-accept'
