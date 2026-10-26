@@ -1,0 +1,92 @@
+using System.Diagnostics;
+using System.Text.Json.Nodes;
+
+// The leader lease's start, the hand-over and the stop (Leader.cs, issue 94; gateway-composition.md 3 E). Moved out of Program.cs unchanged (C4d).
+// GatewayLeader holds the lease and its loop; SnapshotCoordinator holds the plant snapshot; this service decides when each runs:
+// - at the host's start: without the lease, the one read of the snapshot (and the process acts at once); with it, once the revoked credentials are
+//   read, the lease is taken, the plant restored from the predecessor, the lease confirmed, then the lease's loop and the snapshot of every change;
+// - when a newer process takes the lease (superseded): the final snapshot, then the streams end with stream.replaced;
+// - when a standby takes the lease again: the restore from the releaser's snapshot;
+// - at the stop (ApplicationStopping, RegisterStopping): the hand-over, or without the lease the write of the plant.
+// Nothing here is stopped with the host: the loops end at ApplicationStopping, as before.
+sealed class LeadershipService : IHostedService
+{
+    readonly GatewayLeader leader;
+    readonly SnapshotCoordinator snapshots;
+    readonly IRevocationService revocations;
+    readonly IHostApplicationLifetime lifetime;
+    int stoppingRegistered;
+
+    public LeadershipService(GatewayLeader leader, SnapshotCoordinator snapshots, IRevocationService revocations, Plant plant, IHostApplicationLifetime lifetime)
+    {
+        this.leader = leader; this.snapshots = snapshots; this.revocations = revocations; this.lifetime = lifetime;
+        if (!leader.On) return;
+        snapshots.MarkLeader();
+        // superseded: nothing acts any more (the sweeper and the ticks ask MayAct); the final snapshot, then the streams end with stream.replaced
+        leader.OnSuperseded = async cur =>
+        {
+            var saved = snapshots.On && snapshots.Restored.IsCompleted && await snapshots.SaveAsync(true, TimeSpan.FromSeconds(30));
+            var n = plant.HandOver("a newer gateway process took over the plant; connect again");
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "handed-over", ["epoch"] = leader.Epoch, ["finalSnapshot"] = saved, ["streamsEnded"] = n, ["to"] = cur?["holder"]?.DeepClone() }.ToJsonString());
+        };
+        // a standby that takes the lease again restores from the releaser's snapshot and writes one of its own epoch at once
+        leader.OnReacquired = async pred => { await snapshots.RestoreFromPredecessorAsync(pred, "reacquired"); snapshots.ResetCadence(); };
+    }
+
+    // The one ApplicationStopping callback of the lease and the snapshot. Program.cs calls this after the transcripts' final flush is registered:
+    // callbacks run last-registered first, so the hand-over runs before the flush. Once, however often it is called.
+    public void RegisterStopping()
+    {
+        if (Interlocked.Exchange(ref stoppingRegistered, 1) != 0) return;
+        if (snapshots.On && !leader.On) lifetime.ApplicationStopping.Register(snapshots.SaveAtStop);
+        // At SIGTERM the holder hands over: nothing acts, the final snapshot (only of a plant that was restored: one stopped during its start has
+        // nothing of its own), then the lease is released naming whose snapshot holds the plant. Bounded by the platform's grace (30 s).
+        if (leader.On) lifetime.ApplicationStopping.Register(() =>
+        {
+            try
+            {
+                var was = leader.BeginStop();
+                if (was is not (GatewayLeader.Role.Acting or GatewayLeader.Role.Starting))
+                {   // superseded: its final snapshot was written when it stood down; one still being written is given its time
+                    snapshots.WaitForWrite(TimeSpan.FromSeconds(10));
+                    Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"{was.ToString().ToLowerInvariant()}\"}}"); return;
+                }
+                var sw = Stopwatch.StartNew();
+                if (was == GatewayLeader.Role.Acting && snapshots.On && snapshots.Restored.IsCompleted) snapshots.SaveAsync(true, TimeSpan.FromSeconds(12)).GetAwaiter().GetResult();
+                leader.ReleaseAsync(snapshots.HeldEpoch, TimeSpan.FromSeconds(Math.Max(5, 22 - sw.Elapsed.TotalSeconds))).GetAwaiter().GetResult();
+            }
+            catch (Exception e) { try { Console.Error.WriteLine($"leader stop: {e.Message}"); } catch { } }
+        });
+    }
+
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (!leader.On)
+        {
+            if (snapshots.On) _ = Task.Run(snapshots.LoadOnceAsync);
+            leader.StartActing();
+            return Task.CompletedTask;
+        }
+        _ = Task.Run(async () =>
+        {
+            var ct = lifetime.ApplicationStopping;
+            try
+            {
+                // not before this process can serve sessions: a start that never gets ready (the revoked credentials unreadable) must not take the
+                // plant from a healthy predecessor
+                await revocations.Loaded.WaitAsync(ct);
+                var pred = await leader.AcquireAsync(ct);
+                await snapshots.RestoreFromPredecessorAsync(pred, "start");
+                // superseded while it restored (two starts close together): it stands by instead of acting
+                if (await leader.ConfirmAsync()) leader.StartActing();
+                _ = Task.Run(() => leader.LoopAsync(ct));
+                if (snapshots.On) _ = Task.Run(() => snapshots.LoopAsync(ct));
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception e) { Console.Error.WriteLine($"leader start: {e.Message}"); }
+        });
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+}
