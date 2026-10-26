@@ -873,9 +873,13 @@ function Verb_ingest_event($a) {
         }
         'projects_v2_item' {
             if ("$($p.action)" -eq 'edited' -and (Test-Has $p 'changes') -and $p.changes.field_value.field_name -eq 'Status') {
-                $q = 'query($id:ID!){ node(id:$id){ ... on Issue{ number labels(first:30){ nodes{ name } } } } }'
+                $q = 'query($id:ID!){ node(id:$id){ ... on Issue{ number repository{ nameWithOwner } labels(first:30){ nodes{ name } } } } }'
                 $d = Invoke-GhGraphQL $q @{ id = $p.projects_v2_item.content_node_id }
-                if ($d.node -and (Test-NameIn $c.label @($d.node.labels.nodes | ForEach-Object { $_.name })) -and (Test-ItemInScope @($d.node.labels.nodes | ForEach-Object { $_.name }))) {
+                # the org-level webhook carries no repository: an issue of another repository linked to the board (or a draft or pull request, or
+                # no node) makes no event
+                $mine1 = $d.node -and $d.node.PSObject.Properties['repository'] -and $d.node.repository -and ("$($d.node.repository.nameWithOwner)" -ieq "$($c.owner)/$($c.repo)")
+                if ($mine1) { $lb = @($d.node.labels.nodes | ForEach-Object { $_.name }) }
+                if ($mine1 -and (Test-NameIn $c.label $lb) -and (Test-ItemInScope $lb)) {
                     $out += New-Event 'item.column_changed' ([int]$d.node.number) "$($p.changes.field_value.to.name)" $delivery
                 }
             }
