@@ -1,0 +1,41 @@
+@startuml fwr-projects
+skinparam dpi 150
+skinparam componentStyle rectangle
+title fworker refactor: target projects (dependencies point inward)
+
+package "src/" {
+  [Fworker.Contracts\nmessages and ids\nstable MessageIdentity names] as C
+  [Fworker.Domain\npure rules ported from the rule scripts:\nranking, admission, recovery table, evidence,\nrelease choice, content gate, journal text] as D
+  [Fworker.Persistence\nEF Core DbContext: saga rows, item history,\ncorrelation map, open-instance index,\nsession mailbox, projection versions; migrations] as P
+  [Fworker.Integrations\nGitHub and Octopus clients, runtimes (Runtimes/*),\nerror classification, rate limits,\nintegration command handlers] as I
+  [Fworker.Workflows\nWorkItemSaga (plans), CapacityScheduler,\nMergeTrain, DeliveryTrain, IncidentSaga,\nreconcilers] as W
+}
+package "gateway/ (host)" {
+  [Gateway.csproj (assembly FactoryWorker.Gateway)\nAPI, MCP, verb router, webhooks, dashboard,\nWolverine wiring;\nv1 until retired: Plant, Messaging, Qc,\nLeader, PlantSnapshot, RunnerPool] as G
+}
+package "plugin/ (compatible answers; skills branch on the answer)" {
+  [Client.*.ps1, skills, launcher,\nMCP tool contract] as PL
+}
+package "tests/" {
+  [Fworker.Domain.Tests\nunit + parity with the rule scripts] as TD
+  [Fworker.Workflow.Tests\nWolverine tracked sessions,\nSQL Server container] as TW
+  [scenarios (Tier 1)\nblack-box contract, green in every PR] as TS
+  [FakeGitHub\n+ merge groups,\nfake Octopus events] as FG
+}
+
+D --> C
+P --> C
+I --> C
+I --> P
+W --> D
+W --> C
+W --> P
+G --> W
+G --> I
+G --> P
+TD --> D
+TW --> W
+TS --> G
+TS --> FG
+PL ..> G : HTTP / MCP (contract kept)
+@enduml
