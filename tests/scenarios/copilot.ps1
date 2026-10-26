@@ -27,10 +27,21 @@ function Cop-Quiet {
     $st = @{ last = -1; since = Get-Date }
     [void](Wait-Until -Seconds 40 { $c = @((Cop-State).tasks).Count; if ($c -ne $st.last) { $st.last = $c; $st.since = Get-Date }; ((Get-Date) - $st.since).TotalSeconds -ge 4 })
 }
+# every execution end the runtime recorded (status 'last') has run to its last step, the revoke (RevokeOnEnd; a failed one is logged too). The end
+# counts an execution out of 'running' at its start, but its claim release and revoke are rule-script calls that the runtime's poll loop awaits:
+# until they are done no other execution's end is read, so a scenario that starts meanwhile sees its own session end late (#376)
+function Cop-EndsSettled {
+    $names = @(@((Cop-Status).last) | Where-Object { $_ } | ForEach-Object { "$($_.worker)" } | Where-Object { $_ })
+    if ($names.Count -eq 0) { return $true }
+    $lines = @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch '"revoke' | ForEach-Object { "$($_.Line)" })
+    foreach ($w in $names) { if (-not @($lines | Where-Object { $_.Contains("`"revoke`":`"$w`"") -or ($_.Contains('"runtime":"revoke-failed"') -and $_.Contains("`"worker`":`"$w`"")) }).Count) { return $false } }
+    return $true
+}
 function Cop-Cleanup([int[]]$Items) {
     foreach ($n in $Items) { if ($n) { [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json') } }
     foreach ($t in @((Cop-State).tasks | Where-Object { $_.state -in 'queued', 'in_progress' })) { [void](Fake 'copilot-task' @{ id = $t.id; state = 'cancelled' }) }
     [void](Wait-Until -Seconds 20 { (Cop-Status).running -eq 0 })
+    [void](Wait-Until -Seconds 60 { Cop-EndsSettled })
     [void](Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/runtimes/copilot-cloud/reset" -Method POST -Headers @{ Authorization = 'Bearer test-token' })
 }
 
@@ -362,6 +373,10 @@ $CopilotScenarios = [ordered]@{
         Check 'pr_open records the copilot/ pull request' ($r.ok -and $r.pullRequest.number -eq $d.number) ($r | ConvertTo-Json -Compress -Depth 4)
         $run = Fake 'held-run' @{ branch = $br }
         Check 'the held run of the routed item is released' (Wait-Until -Seconds 60 { @((Fake 'held-runs').runs | Where-Object { $_.id -eq $run.id -and $_.reruns -eq 1 }).Count -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
+        # the routine release is recorded in the item's state, not as a comment: the journal verb holds the item lock only once (#376: it locked
+        # the item a second time, waited 45 s for itself, recorded nothing and held the item's lock so long that a later scenario's session end
+        # was not seen in time)
+        Check 'the release is recorded in the item''s state (journal.ciReleased)' (Wait-Until -Seconds 20 { $s0 = Get-ItemState $n; $js = if ($s0 -and $s0.ContainsKey('journal')) { $s0.journal } else { $null }; $js -and $js.ContainsKey('ciReleased') -and @($js.ciReleased | Where-Object { "$_" -match "released workflow run $($run.id) of PR #$($d.number)" }).Count -eq 1 }) ((Get-ItemState $n).journal | ConvertTo-Json -Compress -Depth 4)
     } finally { Cop-Cleanup @($n) }
 }
 

@@ -230,10 +230,14 @@ function Verb_journal($a) {
         return @{ ok = $true; id = $n; posted = $posted }
     }
     $key = if (Test-Has $a 'key') { "$($a.key)" } else { [string](Get-UtcNow).Ticks }
-    # a routine release is machine-read state only (journal.ciReleased, last 20): no issue comment
+    # a routine release is machine-read state only (journal.ciReleased, last 20): no issue comment. The read and the save run under the item lock
+    # factory.ps1 already holds for this verb ('journal' is not in $NoLockVerbs). A second Use-ItemLock here opened the same lock file again in the
+    # same process, and on Linux that conflicts with the first open: every routine release waited the full 45 s, was refused item-busy and was
+    # never recorded. For those 45 s the item's lock was held, so a claim-item --release of the item (RuntimeManager.End) waited too and with it
+    # the runtime's poll loop: no other execution's end was seen meanwhile (#376).
     if ($ev -eq 'ci-released') {
         $f.item = $n; $line = Limit-JournalLine (Protect-JournalText (Get-JournalText $ev $f))
-        $rec = Use-ItemLock $n {
+        $rec = & {
             $st = Get-State $n; $s = $st.state
             if (-not (Test-Has $s 'journal')) { $s.journal = @{ keys = @(); count = 0 } }
             $k = "$ev|$key"
