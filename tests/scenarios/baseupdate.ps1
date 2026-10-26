@@ -104,6 +104,10 @@ $BaseUpdateScenarios = [ordered]@{
     $m = Fake 'master-merge' @{ files = @('docs/elsewhere.md') }
     $got = Wait-Until -Seconds 30 { (Bu-Events 'bm1' $a.item).Count -gt 0 }
     Check 'base.updated arrives from the sweep' ($got -and (Bu-Events 'bm1' $a.item)[0].via -eq 'sweep-confirmed' -and (Bu-Events 'bm1' $a.item)[0].sha -eq $m.sha) ((Bu-Events 'bm1' $a.item) | ConvertTo-Json -Compress)
+    # (issue #400) the gateway routes the event first and only then starts the journal run (BaseUpdate.Run, fire and forget), so the event always
+    # comes before the journal line; when that run outlasted Wait-RecordSettled's quiet window the record closed without it and the next
+    # scenario's reset removed the item. Waited for, so the line lands in this scenario's own record every time
+    Check 'journal: base-updated on the item' (Wait-Until -Seconds 20 { Bu-Journal $a.item 'base-updated' })
 }
 
 'base update: a clean pull request that is only behind is updated by the gateway when the owner does not act [full]' = {

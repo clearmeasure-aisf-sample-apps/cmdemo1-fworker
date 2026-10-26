@@ -292,6 +292,11 @@ $PromoteScenarios = [ordered]@{
     Start-Sleep -Seconds 6
     Check 'the older one is never deployed to uat (no aborted deployment)' (@(Pm-Dep '3.19.1' 'uat').Count -eq 0) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
     Check 'the older release''s item is carried: journaled as promoted with the newer release' (Wait-Until -Seconds 20 { @(@(Pm-Events $a.n 'promoted') | Where-Object { $_.body -match 'release 3\.19\.2 to \*\*uat\*\*' }).Count -eq 1 }) (Pm-Brief $a.n)
+    # (issue #400) the promote-b shape of #395, longer: after the uat Sign-off, later sweeps journal on both items that the release waits for prod,
+    # then promote it to prod, then answer the prod Sign-off. The body ended before those sweeps, so the lines were tail writes that missed this
+    # scenario's record and were found only among the group's later writes, while no reset came first. Waited for, to the last of them
+    $prodSigned = { param($n) @(@(Pm-Events $n 'promotion-signoff') | Where-Object { $_.body -match 'release 3\.19\.2 to \*\*prod\*\*' }).Count -ge 1 }
+    Check 'then it goes on to prod, and the prod Sign-off is answered Proceed and journaled on both items' (Wait-Until -Seconds 60 { @(Pm-Dep '3.19.2' 'prod').Count -eq 1 -and @(Pm-Dep '3.19.2' 'prod')[0].result -eq 'Proceed' -and (& $prodSigned $a.n) -and (& $prodSigned $b.n) }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
 }
 
 
