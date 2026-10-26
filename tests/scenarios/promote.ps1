@@ -250,6 +250,10 @@ $PromoteScenarios = [ordered]@{
 'promote: a waiting reason (a merge in the release not settled) leaves the Sign-off pending; settled, it proceeds' = {
     $d = Pm-DoneItem
     $i = Pm-Created '3.18.1'
+    # #d is an item of the release, so the gateway journals on it too and saves its state (the health wait, promoted, then the refused
+    # Sign-off). An edit made between such a read and save was lost: #d stayed settled, no wait was ever journaled, and the Sign-off was answered
+    # Proceed. The edit waits for the refusal on #d, the last of those saves (its key dedups the repeats).
+    [void](Wait-Until -Seconds 60 { @(@(Pm-Events $d.n 'promotion-waiting') | Where-Object { $_.body -match 'missing permission InterruptionSubmit' }).Count -ge 1 })
     Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
     # the answer is allowed again only once the gateway has journaled the wait (a sweep that read #d's state before the edit would answer Proceed)
     Check 'the Sign-off wait is explained' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'Sign-off of task .* waits: .*not settled yet' }).Count -eq 1 }) (Pm-Brief $i.n)
@@ -275,6 +279,10 @@ $PromoteScenarios = [ordered]@{
 'promote: a Sign-off that waits on a reason that never clears is aborted after signoffWaitHours (0.03 h in the suite), once [full]' = {
     $d = Pm-DoneItem
     $i = Pm-Created '3.20.1'
+    # #d is an item of the release, so the gateway journals on it too and saves its state (the health wait, promoted, then the refused
+    # Sign-off). An edit made between such a read and save was lost: #d stayed settled, no wait was ever journaled, and the Sign-off was answered
+    # Proceed. The edit waits for the refusal on #d, the last of those saves (its key dedups the repeats).
+    [void](Wait-Until -Seconds 60 { @(@(Pm-Events $d.n 'promotion-waiting') | Where-Object { $_.body -match 'missing permission InterruptionSubmit' }).Count -ge 1 })
     Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
     # The Sign-off may be answered only once the gateway has seen the unsettled merge: a sweep that read #d's state before the edit and reached the
     # Sign-off after the answer was allowed again answered it Proceed (the deployments went on to prod). The wait is journaled without answering,
