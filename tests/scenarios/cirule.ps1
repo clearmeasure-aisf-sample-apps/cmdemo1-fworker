@@ -72,7 +72,7 @@ $CiRuleScenarios['ci rule: a failure master has too costs no round; it is report
     $st = Ci-State $i.n
     Check 'no fix-forward round, no demotion; the state names the defect' (-not $st.Contains('fix_forward_rounds') -and -not $st.Contains('demotions') -and $st.Contains('master_defect') -and @($st['master_defect']['checks']) -contains $shard) ($st | ConvertTo-Json -Compress -Depth 5)
     Check 'the item still waits in Development (no REJECTED comment)' ((Get-FakeIssue $i.n).column -eq 'Development' -and (Ci-Comments $i.n '*REJECTED*').Count -eq 0)
-    Start-Sleep -Seconds 8
+    Wait-Sweeps -Count 2 -MinSeconds 8     # the sweep looks again
     Check 'reported once, though the sweep looked again' ((Ci-Comments $i.n '*a defect of master, not of this change*').Count -eq 1)
     # master is fixed: its newest commit passes the shard again
     Fake 'base-history' @{ name = $shard; conclusions = @('success', 'failure', 'success') } | Out-Null
