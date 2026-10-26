@@ -4,7 +4,8 @@ namespace Gateway.Tests;
 /// A stand-in for the rule scripts: an executable /bin/sh script named <c>pwsh</c>, first on the PATH, so the gateway's Runner
 /// (<c>pwsh -NoProfile -NonInteractive -File &lt;entry&gt; --server &lt;verb&gt;</c>) reaches it instead of PowerShell. Each call appends
 /// <c>&lt;ns-time&gt;\t&lt;verb&gt;\t&lt;action&gt;\t&lt;final&gt;</c> to the log (action: the first "action" of the input, final: whether the
-/// input holds "final":true) and answers a fixed JSON. transcript-save fails until the file <c>transcript-ok</c> exists in the stub's directory.
+/// input holds "final":true) and answers a fixed JSON. transcript-save fails until the file <c>transcript-ok</c> exists in the stub's directory;
+/// item-pr answers the file <c>item-pr.json</c> there when it exists, with the exit code in <c>item-pr.exit</c>.
 /// Linux and macOS only.
 /// </summary>
 public static class StubPwsh
@@ -25,6 +26,9 @@ public static class StubPwsh
           plant-snapshot-load|plant-snapshot-await) echo '{"ok":true,"found":false}' ;;
           transcript-save)
             if [ -e "$FWTEST_DIR/transcript-ok" ]; then echo '{"ok":true}'; else echo '{"ok":false,"code":"stub-not-yet"}'; exit 1; fi ;;
+          item-pr)
+            if [ -e "$FWTEST_DIR/item-pr.json" ]; then cat "$FWTEST_DIR/item-pr.json"; else echo '{"ok":true}'; fi
+            if [ -e "$FWTEST_DIR/item-pr.exit" ]; then exit "$(cat "$FWTEST_DIR/item-pr.exit")"; fi ;;
           *) echo '{"ok":true}' ;;
         esac
         exit 0

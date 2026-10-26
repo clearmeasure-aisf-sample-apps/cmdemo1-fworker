@@ -20,4 +20,8 @@
   <ItemGroup>
     <ProjectReference Include="../../gateway/Gateway.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- texts recorded from master that a refactoring must reproduce byte for byte (RuntimePromptTests) -->
+    <None Include="Pins/*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

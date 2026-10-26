@@ -1,10 +1,7 @@
-// The runtime adapters and their managers as AddGatewayRuntimes makes them (null: that runtime is off in this process), and the prompt functions
-// the Cursor and Copilot adapters call. The prompts are loaded after Build(), so Program.cs sets the functions there; until then each answers
-// what Program.cs's late-bound locals answered (an empty prompt, no pull request).
-//
-// C5b replaces this with RuntimeRegistry (all configured managers, by kind) and the prompt builders as services (ICursorPromptBuilder,
-// ICopilotPromptBuilder, IItemPrLookup), which removes the settable functions.
-sealed class GatewayRuntimes
+// The runtimes of this process (task C5b, docs/design/gateway-composition.md 3 B): every configured manager by kind, and the adapters behind them
+// (null: that runtime is off here). AddGatewayRuntimes makes it once and registers it as a singleton; the plant, the RuntimeLoops and the routes
+// read it. The prompts the Cursor and Copilot adapters send are services of their own (Templates/RuntimePrompts.cs), given to their constructors.
+sealed class RuntimeRegistry
 {
     public RuntimeManager? CaeJob { get; init; }
     public CursorCloudRuntime? CursorRuntime { get; init; }
@@ -17,12 +14,18 @@ sealed class GatewayRuntimes
     public required CopilotCiRelease CopilotCiRelease { get; init; }
     public required CopilotCodes CopilotCodes { get; init; }
 
-    public Func<int, string, string?, string> CursorPrompt { get; set; } = (_, _, _) => "";
-    public Func<int, string, string, ItemPr?, string?, string> CopilotPrompt { get; set; } = (_, _, _, _, _) => "";
-    public Func<int, CancellationToken, Task<ItemPr?>> CopilotItemPr { get; set; } = (_, _) => Task.FromResult<ItemPr?>(null);
-
     // every manager that is on, in the order their RuntimeLoops are registered
     public IEnumerable<RuntimeManager> Managers => new[] { CaeJob, Cursor, Copilot, Octopus }.OfType<RuntimeManager>();
+
+    // the manager of a runtime kind as the API names it (POST /api/v1/runtimes/{kind}/reset), null when that runtime is off or there is no such kind
+    public RuntimeManager? ByKind(string kind) => kind switch
+    {
+        "cae-job" => CaeJob,
+        "cursor-cloud" => Cursor,
+        "copilot-cloud" => Copilot,
+        "octopus" => Octopus,
+        _ => null,
+    };
 
     // a column's phase as a token claim and a prompt line ("Functional Testing" -> "functional-testing")
     public static string PhaseSlug(string column) => column.Trim().ToLowerInvariant().Replace(' ', '-');

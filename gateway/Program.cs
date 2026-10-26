@@ -76,7 +76,7 @@ var app = builder.Build();
 app.UseGatewayLifetime();
 
 // What the handlers below still capture, until C6 and C7 move them into services and endpoint modules: the container's singletons, and what
-// the composition made outside it (the runtimes until C5b, the revocations and nonces until C6).
+// the composition made outside it (the revocations and nonces until C6).
 var hub = app.Services.GetRequiredService<EventHub>();
 var runner = app.Services.GetRequiredService<Runner>();
 var plant = app.Services.GetRequiredService<Plant>();
@@ -91,7 +91,7 @@ var leader = composition.Leader;
 var revocations = composition.Revocations;
 var runtimeNonces = composition.RuntimeNonces;
 var sweepMinSeconds = composition.SweepMinSeconds;
-var runtimes = composition.Runtimes;
+var runtimes = app.Services.GetRequiredService<RuntimeRegistry>();
 var runtimeManager = runtimes.CaeJob;
 var cursorSettings = app.Services.GetRequiredService<CursorCloudSettings>();
 var cursorRuntime = runtimes.CursorRuntime;
@@ -104,8 +104,6 @@ var copilotManager = runtimes.Copilot;
 var octopusRuntime = runtimes.OctopusRuntime;
 var octopusManager = runtimes.Octopus;
 ManagerCopilot? managerCopilot = null;   // the plant manager on demand (gateway/Runtimes/ManagerCopilot.cs), resolved below; null where it is not enabled
-static bool IsDev(string column) => column.Trim().Equals("Development", StringComparison.OrdinalIgnoreCase);
-static string PhaseSlug(string column) => GatewayRuntimes.PhaseSlug(column);
 
 if (qcSettings.TrustProxy) app.UseForwardedHeaders();
 var seenDeliveries = new ConcurrentDictionary<string, DateTime>();
@@ -238,8 +236,8 @@ app.MapGet("/health", () => Results.Text("ok"));
 app.MapGet("/alive", () => Results.Text("ok"));
 // readiness: the revoked credentials are read (at once where there is nothing to read), so a session credential is answered without waiting
 // (503 says what the start waits for, how many reads have failed and since when: {"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."})
-// the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5): loaded once; a broken one keeps /ready at 503
-var prompts = new PromptStore(Environment.GetEnvironmentVariable("FACTORY_PROMPTS") ?? Path.Combine(scriptsDir, "..", "..", "prompts"));
+// the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5): loaded once (AddGatewayRuntimes); a broken one keeps /ready at 503
+var prompts = app.Services.GetRequiredService<PromptStore>();
 foreach (var pe in prompts.Errors) Console.Error.WriteLine($"prompts: {pe}");
 app.MapGet("/ready", () => leader.Replaced ? Results.Json(new { ready = false, waitingFor = "nothing", replaced = true, reason = "a newer gateway process holds the lease" }, statusCode: 503)
     : prompts.Errors.Count > 0 ? Results.Json(new { ready = false, waitingFor = "prompts", errors = prompts.Errors }, statusCode: 503)
@@ -499,7 +497,7 @@ JsonObject RuntimesBlock()
 app.MapPost("/api/v1/runtimes/{kind}/reset", (string kind, HttpContext c) =>
 {
     if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator resets a runtime", 30);
-    var rk = kind == "cae-job" ? runtimeManager : kind == "cursor-cloud" ? cursorManager : kind == "copilot-cloud" ? copilotManager : kind == "octopus" ? octopusManager : null;
+    var rk = runtimes.ByKind(kind);
     if (rk == null) return Fail(404, "no-runtime", "no such runtime is switched on", 12);
     rk.ResetHealth();
     return Results.Json(new { ok = true, runtime = kind, exit = 0 });
@@ -1793,13 +1791,6 @@ mcpSessions.OnEnded = async (name, reason) =>
     if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) await cursorManager.Deprovision(name, reason);
     if (copilotManager != null && copilotManager.IsRuntimeWorker(name)) await copilotManager.Deprovision(name, reason);
 };
-runtimes.CopilotItemPr = async (item, ct) =>
-{
-    var (rc, output) = await app.Services.GetRequiredService<Runner>().RunAsync("item-pr", new JsonObject { ["item"] = item }.ToJsonString(), TimeSpan.FromSeconds(60));
-    if (rc != 0) return null;
-    var j = JsonNode.Parse(output);
-    return j?["found"]?.GetValue<bool>() == true && j["branch"]?.ToString() is { Length: > 0 } b && int.TryParse(j["number"]?.ToString(), out var num) ? new ItemPr(num, b) : null;
-};
 // the CI release: every api.copilot.ciReleaseSeconds, by the acting gateway, while the Copilot mode is on (docs/design/copilot-cloud-agent.md)
 if (copilotManager != null && copilotSettings.CiRelease) _ = Task.Run(async () =>
 {
@@ -1948,58 +1939,14 @@ if (cursorRuntime != null && cursorManager != null)
 }
 // The plant manager on demand (api.copilot.manager, docs/design/agents-roles-launch.md): registered where it is enabled and ticked by
 // ManagerCopilotService (AddGatewayBackground); resolved here, where it was made before C5d, so its start-up line keeps its place. Its bootstrap
-// text reads the prompt files, handed over until C5b registers them.
-composition.Prompts = prompts;
+// text reads the prompt files from the container (registered by AddGatewayRuntimes since C5b).
 managerCopilot = app.Services.GetService<ManagerCopilot>();
-runtimes.CopilotPrompt = (item, phase, code, pr, why) =>
-{
-    // a follow-up session of the owner task (why != null): terse, self-contained (phase, item, pull request, what changed), so its correctness does
-    // not depend on Copilot's memory of the earlier sessions; then the same connect lines as a first session
-    if (why != null && pr != null)
-    {
-        // a comment session reads the comment as a request to address: the registration comes FIRST, before any reading or change (a follow-up
-        // that never connected did its work unseen, or none, and was counted as failed: #415, #416 on 2026-10-21)
-        var first = $"FIRST, before you read or change anything: call fworker_connect with code {code} and gateway {copilotSettings.GatewayUrl}, then next_event (wait_seconds 30) until item.assigned for #{item} arrives, then item_accept for #{item}. " +
-            "Without that the gateway cannot see this session: its work is not recorded and the session counts as failed. Only then do the step below.\n";
-        var f = first + $"Follow-up session of the task that owns #{item}: phase {phase}. Work on PR #{pr.Number}, branch {pr.Branch} (this session runs on it). If `git branch --show-current` shows a different, newer copilot/ branch of this same task, that branch is the item's pull request now (Development: call pr_open with it as head; other phases: work on it); never report FAILURE for that. " +
-            "You own #{item} until it is merged and master is green, but THIS session does only this phase step and then ends: never poll or wait for CI; the gateway watches it and resumes you.\n";
-        f = f.Replace("{item}", item.ToString());
-        if (why.Trim() != "") f += $"What changed: {why.Trim()}\n";
-        f += IsDev(phase) ? $"Fix it on this branch. Before the push run the private build (pwsh ./PrivateBuild.ps1) and the acceptance tests (pwsh ./AcceptanceTests.ps1); push (plain push) only when both pass (a failing test outside your change that also fails at origin/master, or a full acceptance run that fails only outside your change's area or does not finish in 20 min while the private build and the acceptance tests of your area pass, does not block: push and name it in item_complete), else fix and rerun. Push as soon as the gate allows. Then pr_open with head {pr.Branch}, item_complete with both results, session_end.\n"
-            : phase.Trim().Equals("Functional Testing", StringComparison.OrdinalIgnoreCase) ? $"Verify PR #{pr.Number} against the item's criteria; change nothing; record the review and the verdict, then session_end.\n"
-            : "Do this phase's step only, then session_end.\n";
-        var bpf = prompts.ByPath("bootstrap/copilot.md");
-        var steps = bpf == null ? "" : prompts.Render(bpf, "copilot-cloud-agent")["text"]!.ToString();
-        return f + "\n" + steps + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
-    }
-    var bp = prompts.ByPath("bootstrap/copilot.md");
-    var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
-    // an item with its open pull request: the task starts from that branch (CopilotCloudRuntime.BaseRef), and the fix goes to that pull request
-    if (pr != null) text += $"\nThis item's pull request: #{pr.Number}, branch {pr.Branch}. This task starts from that branch; Copilot gives the task its own branch made from it. " +
-        (IsDev(phase) ? $"Fix #{pr.Number}: read why once (pr_checks for the failed job's log, item_get for the review), change the code on the branch this task runs on, which already holds #{pr.Number}'s commits, push, and pass THAT branch as `head` to pr_open, then item_complete and session_end. The gateway makes your task's pull request the item's, closes #{pr.Number} as superseded and waits for the checks itself. Do not start over from master and open nothing else. If the branch you run on is a newer branch of this same task than #{pr.Number}'s, it is the item's pull request: call pr_open with it as head, do not fail.\n"
-            : $"Verify #{pr.Number}; change nothing.\n");
-    // one Copilot MCP configuration serves every environment: the prompt names this gateway (fworker-mcp accepts only the three gateway hosts)
-    return text + $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
-};
-runtimes.CursorPrompt = (item, phase, why) =>
-{
-    var bp = prompts.ByPath("bootstrap/api.md");
-    var text = bp == null ? "" : prompts.Render(bp, "cursor-cloud-agent")["text"]!.ToString();
-    var tail = $"\nThis session's work item: #{item}, phase {PhaseSlug(phase)} (column {phase}).\n";
-    if (why == null) return text + tail;
-    // a follow-up run of the owner agent: terse and self-contained (phase, item, what changed); the rules are repeated, its MCP server has a new r1
-    var f = $"Follow-up run: you still own #{item}. Its next phase is {phase}. The fworker MCP server has a fresh credential for this run: call next_event until item.assigned for #{item} arrives, then item_accept, before anything else. " +
-        "Do only this phase, then session_end; never poll or wait for CI: the gateway watches it and starts your next run.\n";
-    if (why.Trim() != "") f += $"What changed: {why.Trim()}\n";
-    if (IsDev(phase)) f += $"Fix it on factory-worker/{item}-development (fetch it first: git fetch origin; git checkout factory-worker/{item}-development; git pull). Run the private build and the acceptance tests before the push, as the rules below say; then pr_open with that branch, item_complete, session_end.\n";
-    return f + "\n" + text + tail;
-};
 // the tools call the endpoints in process, found through the container's EndpointDataSource (gateway/Mcp/InProcess.cs)
 GatewayMcp.Tools = new McpTools(new InProcess(app.Services.GetRequiredService<EndpointDataSource>(), app.Services, Admit), mcpSessions, t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
 {
     if (messaging.Enabled && ownerMode) plant.Touch(name);
     if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }
 }) { Prompts = prompts, ManagerLive = n => managerCopilot?.Live(n) == true, ManagerEnd = (n, why) => managerCopilot?.End(n, why) ?? Task.CompletedTask };
-// swept every 30 s by McpSessionSweeper (AddGatewayBackground), handed over until C5b registers the worker sessions
+// swept every 30 s by McpSessionSweeper (AddGatewayBackground), handed over until a later step registers the worker sessions
 composition.McpSessions = mcpSessions;
 app.Run();

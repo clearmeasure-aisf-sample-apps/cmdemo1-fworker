@@ -7,7 +7,7 @@ sealed class McpSessionSweeper : BackgroundService
     readonly Func<WorkerSessions?> sessions;
     public TimeSpan Interval { get; }
 
-    // sessions: the worker sessions the MCP tools use. Read at each pass: until C5b registers WorkerSessions in the container, Program.cs makes
+    // sessions: the worker sessions the MCP tools use. Read at each pass: until a later step registers WorkerSessions in the container, Program.cs makes
     // them after Build() and hands them over through the composition (GatewayComposition.McpSessions); a pass before that sweeps nothing.
     public McpSessionSweeper(Func<WorkerSessions?> sessions, TimeSpan interval) { this.sessions = sessions; Interval = interval; }
 

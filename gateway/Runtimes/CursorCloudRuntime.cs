@@ -87,7 +87,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
 
     readonly CursorCloudSettings cfg;
     readonly HttpClient http;
-    readonly Func<int, string, string?, string> prompt;   // item, phase, why (null: a new agent; else a follow-up run, with what changed) -> the text
+    readonly ICursorPromptBuilder prompt;   // item, phase, why (null: a new agent; else a follow-up run, with what changed) -> the text
     readonly Dictionary<int, CopilotOwner> owners = new();
     // the durable record of the owner (rule verb copilot-owner, runtime cursor-cloud): load (null: none), save
     public Func<int, CancellationToken, Task<CopilotOwner?>>? LoadOwner { get; set; }
@@ -101,7 +101,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
     // agent names carry the environment, so a key shared by two gateways never lets one delete the other's agents
     string Prefix => $"fworker-{cfg.Environment}-";
 
-    public CursorCloudRuntime(CursorCloudSettings cfg, Func<int, string, string?, string> prompt, HttpClient? http = null)
+    public CursorCloudRuntime(CursorCloudSettings cfg, ICursorPromptBuilder prompt, HttpClient? http = null)
     { this.cfg = cfg; this.prompt = prompt; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
 
     public string Kind => "cursor-cloud";
@@ -229,7 +229,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
     public JsonObject LaunchBody(ProvisionRequest r) => new()
     {
         ["name"] = Prefix + "i" + r.Item + "-" + r.WorkerName,
-        ["prompt"] = new JsonObject { ["text"] = prompt(r.Item, r.Phase, null) },
+        ["prompt"] = new JsonObject { ["text"] = prompt.Build(r.Item, r.Phase, null) },
         ["repos"] = new JsonArray(new JsonObject { ["url"] = cfg.Repository, ["startingRef"] = StartingRef(r.Item, r.Phase) }),
         ["autoCreatePR"] = false,
         ["mcpServers"] = new JsonArray(new JsonObject
@@ -286,7 +286,7 @@ sealed class CursorCloudRuntime : IWorkerRuntime, IRuntimeDetail, IItemOwners
     async Task<ProvisionResult?> FollowUp(CopilotOwner own, ProvisionRequest r, CancellationToken ct)
     {
         var why = ""; if (WhyResume != null) { try { why = await WhyResume(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"cursor: why of #{r.Item}: {e.GetType().Name}"); } }
-        var body = new JsonObject { ["prompt"] = new JsonObject { ["text"] = prompt(r.Item, r.Phase, why) }, ["mcpServers"] = Mcp(r.Nonce) };
+        var body = new JsonObject { ["prompt"] = new JsonObject { ["text"] = prompt.Build(r.Item, r.Phase, why) }, ["mcpServers"] = Mcp(r.Nonce) };
         int s; JsonNode? j; string text;
         try { (s, j, text) = await SendText(HttpMethod.Post, $"/v1/agents/{Uri.EscapeDataString(own.TaskId)}/runs", body, ct); }
         catch (Exception e) { return new(false, "", "followup-" + e.GetType().Name); }

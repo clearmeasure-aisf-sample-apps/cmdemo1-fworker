@@ -151,8 +151,8 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
     readonly HttpClient http;
     readonly CopilotCodes codes;
     // item, phase, one-time code, the item's open pull request, why (null: a new task; else a follow-up session, with what changed) -> the prompt
-    readonly Func<int, string, string, ItemPr?, string?, string> prompt;
-    readonly Func<int, CancellationToken, Task<ItemPr?>>? itemPr;   // the item's open pull request (number, head branch), null when it has none
+    readonly ICopilotPromptBuilder prompt;
+    readonly IItemPrLookup? itemPr;   // the item's open pull request (number, head branch), null when it has none
     readonly Dictionary<string, Task_> tasks = new(StringComparer.Ordinal);   // by worker name
     readonly Dictionary<int, CopilotOwner> owners = new();
     // The gateway owns the completion of Development (rule verb copilot-settle): (item, stage launch | end, the task's branch) -> its action:
@@ -174,7 +174,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
     public string? QuotaBlocked() { lock (tasks) return quotaRetryAt is { } r && DateTime.UtcNow < r ? "quota-exhausted" : null; }
     public JsonObject QuotaJson() { lock (tasks) { var o = new JsonObject { ["exhausted"] = quotaSince != null, ["since"] = quotaSince?.ToString("o"), ["retryAt"] = quotaRetryAt?.ToString("o"), ["message"] = quotaMessage }; if (quotaSince != null) o["ownerAction"] = QuotaOwnerAction; return o; } }
 
-    public CopilotCloudRuntime(CopilotCloudSettings cfg, CopilotCodes codes, Func<int, string, string, ItemPr?, string?, string> prompt, HttpClient? http = null, Func<int, CancellationToken, Task<ItemPr?>>? itemPr = null)
+    public CopilotCloudRuntime(CopilotCloudSettings cfg, CopilotCodes codes, ICopilotPromptBuilder prompt, HttpClient? http = null, IItemPrLookup? itemPr = null)
     { this.cfg = cfg; this.codes = codes; this.prompt = prompt; this.itemPr = itemPr; this.http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(60) }; }
 
     public string Kind => "copilot-cloud";
@@ -259,7 +259,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
     // its pull request asks for none: it changes nothing).
     public JsonObject TaskBody(ProvisionRequest r, string code, ItemPr? pr = null)
     {
-        var o = new JsonObject { ["prompt"] = prompt(r.Item, r.Phase, code, pr, null), ["base_ref"] = BaseRef(r.Item, r.Phase, pr), ["create_pull_request"] = !(pr != null && !IsDevelopment(r.Phase)) };
+        var o = new JsonObject { ["prompt"] = prompt.Build(r.Item, r.Phase, code, pr, null), ["base_ref"] = BaseRef(r.Item, r.Phase, pr), ["create_pull_request"] = !(pr != null && !IsDevelopment(r.Phase)) };
         if (cfg.Model != "") o["model"] = cfg.Model;
         return o;
     }
@@ -282,7 +282,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
         async Task<ItemPr?> ReadPr()
         {
             if (itemPr == null || IsTechnicalDesign(r.Phase)) return null;
-            try { return await itemPr(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); return null; }
+            try { return await itemPr.FindAsync(r.Item, ct); } catch (Exception e) { Console.Error.WriteLine($"copilot: pull request of #{r.Item}: {e.GetType().Name}"); return null; }
         }
         var prTask = ReadPr(); var ownTask = Owner(r.Item, ct);
         var pr = await prTask; var own = await ownTask;
@@ -307,7 +307,7 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
                 // the previous follow-up's run succeeded without a push: this one is told to push first (once: a second idle one parks the item)
                 bool nudged; lock (tasks) nudged = nudge.Remove(r.Item);
                 if (nudged) why = $"Your previous session ended without pushing anything to {tpr.Branch}. Push your committed work now (plain push); if nothing is committed, do the step and push it. " + why;
-                var res = await Resume(own, r.WorkerName, r.Item, r.Phase, target, prompt(r.Item, r.Phase, code, tpr, why), ct, tpr.Branch);
+                var res = await Resume(own, r.WorkerName, r.Item, r.Phase, target, prompt.Build(r.Item, r.Phase, code, tpr, why), ct, tpr.Branch);
                 if (!res.Ok) codes.Forget(r.WorkerName);
                 return res;
             }
