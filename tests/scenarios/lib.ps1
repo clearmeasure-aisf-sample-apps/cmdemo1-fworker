@@ -548,6 +548,13 @@ function Get-ItemState([int]$Item) {
     $sc = @((Get-FakeIssue $Item).comments | Where-Object { $_.body -like '<!-- factory-state:*' })[0]
     [regex]::Match($sc.body, '(?s)```json\s*(.*?)\s*```').Groups[1].Value | ConvertFrom-Json -AsHashtable
 }
+# Holds the rule scripts' item lock (Use-ItemLock, plugin/scripts/lib/Core.ps1) the way a verb does: the item's lock file in the gateway's state
+# directory, opened exclusively; the caller disposes it. The directory is created first: a scenario that runs first in its group can come before
+# anything has written there (issue 405: "Could not find a part of the path" on item-1.lock).
+function Lock-ItemFile([int]$Item) {
+    [void][IO.Directory]::CreateDirectory($env:FACTORY_STATE_DIR)
+    return [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$Item.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+}
 function Expire-Claim([int]$Item, [string]$TakenBack = '') {
     Set-ItemState $Item { param($st) $st.claim.lease_until = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o'); if ($TakenBack) { $st.claim.taken_back = $TakenBack } }
 }
