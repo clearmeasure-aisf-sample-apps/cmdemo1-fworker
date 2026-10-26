@@ -179,6 +179,8 @@ function Invoke-AwaitingChecksLocked([int]$n) {
 # A pull request of the item was merged outside the merge verb (a person pressed the button): the item is settled from wherever it was. Under the
 # item lock on a fresh read (the sweep holds no lock, and the merge verb may have recorded the same merge a moment ago): the merge is recorded once,
 # the verdict is closed, and whatever held the item (claim, park, handoff, a wait for checks, an inspector lease) ends. Returns whether it recorded.
+# Issue 405: the lock is taken without waiting (a busy one is item-busy, which the sweep reports as a skip). The holder is the merge verb recording
+# the same merge or another verb of the item; the next sweep finds the same merged pull request, or the merge the holder recorded.
 function Invoke-MergePickup([int]$n, $pr) {
     return Use-ItemLock $n {
         $f = Get-State $n; $fs = $f.state
@@ -189,7 +191,7 @@ function Invoke-MergePickup([int]$n, $pr) {
             foreach ($k in 'claim', 'park', 'handoff', 'awaiting_checks', 'bot') { $fs.Remove($k) }
             Save-State $n $f; Remove-ClaimRef $n; $true
         }
-    }
+    } 0
 }
 
 # ---- orphan claim refs (issue 47) --------------------------------------------------------------------------------------
@@ -264,6 +266,8 @@ function Invoke-RearmSettle([int]$n, [string]$Why) {
 
 # Issue 82: removes the park of a closed item under the item lock, on a fresh read, and journals it. Returns the park's code, or $null when there
 # was none any more or the item is open again (reopened meanwhile: its park is a person's to release).
+# Issue 405: without waiting for the lock (a busy one is item-busy, a skip of the sweep): the park of a closed item holds nothing, and the next sweep
+# removes it on a fresh read.
 function Clear-ClosedPark([int]$n) {
     Use-ItemLock $n {
         $info = Get-ItemInfo $n; if ($info.open) { return $null }
@@ -274,12 +278,15 @@ function Clear-ClosedPark([int]$n) {
         [void](Add-Journal $n $f 'unparked' @{ column = "$($info.column)"; code = $code; by = 'the sweep'; reason = 'the item is closed'; closed = $true } "closed|$($park.at)")
         Save-State $n $f
         return $code
-    }
+    } 0
 }
 
 # Issue 94: an owner's claim whose lease ran out while no gateway was up (between the predecessor's last renewal, or its release, and this gateway's
 # first sweep) is renewed instead of being offered again as a relaunch: nothing could renew it then. Under the item lock on a fresh read, only a
 # claim that was not taken back and whose lease ended inside the gap. Returns the holder, or $null.
+# Issue 405: this one keeps Use-ItemLock's wait. The gateway hands the gap to one sweep only (gateway/Sweeper.cs, given again only when sync-board
+# fails), so a renewal skipped for a busy lock would be lost and the next sweep would offer the claim as a relaunch, which is what issue 94 prevents.
+# It runs once per gateway start, for owners' claims that ran out inside the gap, and the holder then is mostly the owner's own verb.
 function Invoke-GapRenew([int]$n, $Gap) {
     Use-ItemLock $n {
         $f = Get-State $n; $fs = $f.state
@@ -298,6 +305,8 @@ function Invoke-GapRenew([int]$n, $Gap) {
 # Issue 102: a park that ended by expiry gives the item a fresh start. Its fix-forward rounds and demotions are counted from 0 again (they parked it,
 # or they would park it again at the first red), and the expired park leaves the state; a journal line says so. Not the gateway's own wait for
 # checks (development:awaiting-checks): that one is not a person's park. Under the item lock on a fresh read. Returns the park code, or $null.
+# Issue 405: without waiting for the lock (a busy one is item-busy). The sweep then skips the item for this sweep, after it has listed its owner, so
+# the item is never offered with the counts of the expired park; the next sweep resets it on a fresh read.
 function Reset-ExpiredPark([int]$n) {
     Use-ItemLock $n {
         $f = Get-State $n; $fs = $f.state
@@ -309,7 +318,7 @@ function Reset-ExpiredPark([int]$n) {
         [void](Add-Journal $n $f 'unparked' @{ column = "$($info.column)"; code = $code; by = 'expiry'; reason = "the park ended at $($park.until)"; reset = $true } "expired|$($park.at)")
         Save-State $n $f
         return $code
-    }
+    } 0
 }
 
 # Auto-unpark: a park whose cause has cleared is lifted by the sweep, so nobody has to watch for it (the overnight runs of 2026-10-14 needed a person
@@ -496,10 +505,6 @@ function Verb_sync_board($a) {
             $isAi = Test-NameIn $col $c.columns.ai; $isHold = Test-NameIn $col $c.columns.hold
             if (-not $isAi -and -not $isHold) { $seen.Remove("$n"); continue }
             $st = Get-State $n; $s = $st.state
-            if ($it.open -and -not $dry -and (Test-Has $s 'park') -and -not (Get-Park $s) -and ((Test-Has $s 'fix_forward_rounds') -or (Test-Has $s 'demotions') -or (Test-Has $s 'master_defect'))) {
-                $xp = Reset-ExpiredPark $n
-                if ($xp) { $actions += @{ item = $n; action = 'park-expired'; code = $xp; reset = $true }; $unparked += $n; $st = Get-State $n; $s = $st.state }
-            }
             $pin = @($it.labels | Where-Object { $_ -like 'worker:*' } | Select-Object -First 1)
             if ($pin.Count -gt 0) { $pins["$n"] = ([string]$pin[0]).Substring(7) }
             $prio = Get-ItemPriority $it.labels; if ($prio) { $priorities["$n"] = $prio }
@@ -518,7 +523,11 @@ function Verb_sync_board($a) {
                     if ($w) { $actions += @{ item = $n; action = 'settle-rearmed'; awaiting = $w }; $settling += $n; continue }
                 }
                 # issue 82: a closed item whose flow has ended keeps no park (280 stayed parked master-broken after it was closed)
-                if ((Test-Has $s 'park') -and -not $dry) { $r = Clear-ClosedPark $n; if ($r) { $actions += @{ item = $n; action = 'park-cleared'; reason = 'item-closed'; code = $r }; $unparked += $n } }
+                if ((Test-Has $s 'park') -and -not $dry) {
+                    $r = $null
+                    try { $r = Clear-ClosedPark $n } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; $actions += @{ item = $n; action = 'skip'; reason = 'park-clear: item-busy' } }
+                    if ($r) { $actions += @{ item = $n; action = 'park-cleared'; reason = 'item-closed'; code = $r }; $unparked += $n }
+                }
                 continue
             }
             # a closed item outside Functional Testing and the hold columns is followed no further, as before (only its park was of interest)
@@ -533,6 +542,14 @@ function Verb_sync_board($a) {
             if ((Test-OwnedClaim $s) -and (Test-ClaimLive $s)) {
                 $owners["$n"] = "$($s.claim.holder)"
                 $owned["$n"] = @{ holder = "$($s.claim.holder)"; column = $col; lease_until = $s.claim.lease_until; heartbeat = $(if (Test-Has $s.claim 'heartbeat') { $s.claim.heartbeat } else { $null }); parked = [bool](Get-Park $s) }
+            }
+            # issue 102: an expired park with counts resets them. After the owner is listed (issue 405): a busy lock skips the item for this sweep, and
+            # its live owner stays in owned (an expired park is no park to Get-Park, so the entry above is the same before and after the reset).
+            if ($it.open -and -not $dry -and (Test-Has $s 'park') -and -not (Get-Park $s) -and ((Test-Has $s 'fix_forward_rounds') -or (Test-Has $s 'demotions') -or (Test-Has $s 'master_defect'))) {
+                $xp = $null; $busy = $false
+                try { $xp = Reset-ExpiredPark $n } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; $busy = $true }
+                if ($busy) { $actions += @{ item = $n; action = 'skip'; reason = 'park-reset: item-busy' }; continue }
+                if ($xp) { $actions += @{ item = $n; action = 'park-expired'; code = $xp; reset = $true }; $unparked += $n; $st = Get-State $n; $s = $st.state }
             }
             if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) {
                 # (an item that waits for a person, master red or no release candidate for a day, keeps no owner: issue 114)
@@ -589,7 +606,10 @@ function Verb_sync_board($a) {
             if ($ownPr -gt 0 -and ($unprocessedPass -or -not (Test-Has $s 'merge'))) { $pr = try { Get-Pr $ownPr } catch { $null } }
             if ($pr -and $pr.merged -and ($unprocessedPass -or (Test-PrBelongs $pr $n))) {
                 if ($dry) { continue }
-                if (-not (Invoke-MergePickup $n $pr)) { continue }
+                # (a busy lock skips the item for this sweep: it is not offered, and the next sweep picks the merge up)
+                $mp = $false
+                try { $mp = Invoke-MergePickup $n $pr } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; $actions += @{ item = $n; action = 'skip'; reason = 'merge-pickup: item-busy' } }
+                if (-not $mp) { continue }
                 # the flow after a merge starts from the validation column (settle moves the card on from there)
                 if ((Get-ColumnIndex $col) -ge 0 -and (Get-ColumnIndex $col) -lt (Get-ColumnIndex $c.columns.validation)) { Move-Card (Get-ItemInfo $n) $c.columns.validation }
                 Add-Comment $n "PR #$($pr.number) was merged as ``$($pr.merge_commit_sha.Substring(0,7))``$(if (-not $unprocessedPass) { ' by a person' }); watching master CI, then the release candidate."
@@ -621,13 +641,17 @@ function Verb_sync_board($a) {
                     elseif ((Test-OwnedClaim $s) -and ((Get-UtcNow) - (ConvertFrom-Iso $held.at)).TotalMinutes -gt [double]$c.idleReleaseMinutes -and -not $dry) {
                         # an owner waiting out a hold for too long gives the item up; the next trigger assigns it again
                         $holderName = "$($s.claim.holder)"
-                        # (under the item lock on a fresh read, as above; given up only if the same owner still waits on the same hold)
-                        $did = Use-ItemLock $n {
-                            $f = Get-State $n; $fs = $f.state; $fh = Get-Park $fs
-                            if ((Test-OwnedClaim $fs) -and "$($fs.claim.holder)" -eq $holderName -and $fh -and "$($fh.at)" -eq "$($held.at)") {
-                                $fs.Remove('claim'); [void](Add-Journal $n $f 'released' @{ worker = $holderName; reason = "idle for more than $($c.idleReleaseMinutes) min on a hold" } "idle|$($held.at)"); Save-State $n $f; Remove-ClaimRef $n; $true
-                            } else { $false }
-                        }
+                        # (under the item lock on a fresh read, as above; given up only if the same owner still waits on the same hold). Issue 405: without
+                        # waiting for the lock. A verb of the item holds it (then the owner is not idle); the next sweep judges the hold again.
+                        $did = $false
+                        try {
+                            $did = Use-ItemLock $n {
+                                $f = Get-State $n; $fs = $f.state; $fh = Get-Park $fs
+                                if ((Test-OwnedClaim $fs) -and "$($fs.claim.holder)" -eq $holderName -and $fh -and "$($fh.at)" -eq "$($held.at)") {
+                                    $fs.Remove('claim'); [void](Add-Journal $n $f 'released' @{ worker = $holderName; reason = "idle for more than $($c.idleReleaseMinutes) min on a hold" } "idle|$($held.at)"); Save-State $n $f; Remove-ClaimRef $n; $true
+                                } else { $false }
+                            } 0
+                        } catch [FactoryReject] { if ($_.Exception.Code -ne 'item-busy') { throw }; $actions += @{ item = $n; action = 'skip'; reason = 'idle-release: item-busy' } }
                         if (-not $did) { continue }
                         $actions += @{ item = $n; action = 'owner-released-idle'; worker = $holderName }
                         $owned.Remove("$n")

@@ -96,6 +96,82 @@ $Scenarios = [ordered]@{
     Check 'once the lock is free a later sweep removes the ref' (Wait-Until -Seconds 30 { $ref -notin (& $refs) }) ((& $refs) -join ',')
 }
 
+# Issue 405: the other sweep steps that act on one item under its lock take it without waiting too: the pick-up of a merge a person made, the removal
+# of a closed item's park, the reset of an expired park, and an idle owner giving up an item on a hold. Each waited 45 s for a lock a verb held and so
+# stalled the whole sweep. In each scenario the harness holds the item lock (the rule scripts' item lock file) before the item is ready for the step:
+# two full sweeps finish within 30 s (with the 45 s wait the first one that met the lock alone outlasted that) and leave the work; once the lock is
+# free a later sweep does it, and journals it once.
+'merge pickup: a busy item lock does not stall the sweep; a later sweep records the merge a person made once the lock is free (issue 405) [full]' = {
+    $n = New-Item-Fake 'Merged by a person, busy' 'x' $L
+    Do-TechnicalDesign $n
+    $pr = Do-Development $n
+    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$n.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    try {
+        Fake 'pr' @{ number = $pr; merged = $true } | Out-Null
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
+        Check 'the sweeps go on while the item lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'and leave the merge for a later sweep' (-not (Get-ItemState $n).ContainsKey('merge')) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+    } finally { $lock.Dispose() }
+    Check 'once the lock is free a later sweep records the merge by a person' (Wait-Until -Seconds 40 { $st = Get-ItemState $n; $st.ContainsKey('merge') -and [int]$st.merge.pr -eq $pr -and "$($st.merge.by)" -eq 'person' -and -not $st.ContainsKey('claim') }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+    Check 'and journals it once' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "PR #$pr was merged as .* by a person" }).Count -eq 1 })
+}
+
+'closed park: a busy item lock does not stall the sweep; a later sweep removes the park of the closed item once the lock is free (issue 405) [full]' = {
+    $n = New-Item-Fake 'Closed with a park, busy' 'x' $L
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
+    $now = (Get-Date).ToUniversalTime()
+    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$n.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    try {
+        # the park and the close come after the lock is held: no sweep can remove the park before
+        Set-ItemState $n { param($st) $st.park = @{ reason = 'stuck'; at = $now.ToString('o'); until = $now.AddHours(2).ToString('o') } }
+        Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
+        Check 'the sweeps go on while the item lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'and leave the park for a later sweep' ((Get-ItemState $n).ContainsKey('park')) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+    } finally { $lock.Dispose() }
+    Check 'once the lock is free a later sweep removes the park' (Wait-Until -Seconds 30 { -not (Get-ItemState $n).ContainsKey('park') }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+    Check 'and journals it once, as removed by the sweep because the item is closed' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'plant event=unparked' -and "$($_.body)" -like '*by the sweep*' -and "$($_.body)" -like '*The item is closed*' }).Count -eq 1 })
+}
+
+'expired park: a busy item lock does not stall the sweep; a later sweep resets the expired park and its counts once the lock is free (issue 405) [full]' = {
+    $n = New-Item-Fake 'Expired park, busy' 'x' $L
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
+    $now = (Get-Date).ToUniversalTime()
+    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$n.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    try {
+        # a park that has ended, with the demotions that parked it (the claim stays live: nothing offers the item meanwhile)
+        Set-ItemState $n { param($st) $st.park = @{ reason = 'verdict-failed'; at = $now.AddHours(-3).ToString('o'); until = $now.AddMinutes(-1).ToString('o') }; $st.demotions = 3 }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
+        Check 'the sweeps go on while the item lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'and leave the expired park and its counts for a later sweep' ((Get-ItemState $n).ContainsKey('park') -and [int](Get-ItemState $n).demotions -eq 3) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+    } finally { $lock.Dispose() }
+    Check 'once the lock is free a later sweep removes the park and the demotions' (Wait-Until -Seconds 30 { $st = Get-ItemState $n; -not $st.ContainsKey('park') -and -not $st.ContainsKey('demotions') }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+    Check 'and journals it once, as an expiry' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'plant event=unparked' -and "$($_.body)" -like '*expired*' }).Count -eq 1 })
+    Check 'the claim was left alone' ((Get-ItemState $n).ContainsKey('claim')) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+}
+
+'idle owner on a hold: a busy item lock does not stall the sweep; a later sweep releases the idle owner once the lock is free (issue 405) [full]' = {
+    $n = New-Item-Fake 'Idle owner on a hold, busy' 'x' $L
+    $r = F 'w1' @('claim-item', '--item', $n, '--column', 'Technical Design'); CheckExit 'claim' $r 0
+    [void](Fake 'move' @{ number = $n; column = 'Functional Testing' })
+    $now = (Get-Date).ToUniversalTime()
+    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$n.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    try {
+        # an owner's live claim on a PASS that waits on a hold (a park) for longer than idleReleaseMinutes (60)
+        Set-ItemState $n { param($st) $st.claim.owner = $true; $st.claim.column = 'Functional Testing'; $st.verdict = @{ passed = $true; processed = $false; pr = 0; at = $now.AddHours(-3).ToString('o') }; $st.park = @{ reason = 'pass-without-auto-merge'; at = $now.AddHours(-3).ToString('o'); until = $now.AddHours(2).ToString('o') } }
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
+        Check 'the sweeps go on while the item lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'and leave the owner its claim for a later sweep' ((Get-ItemState $n).ContainsKey('claim')) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+    } finally { $lock.Dispose() }
+    Check 'once the lock is free a later sweep releases the idle owner' (Wait-Until -Seconds 30 { -not (Get-ItemState $n).ContainsKey('claim') }) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+    Check 'and journals it once' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'plant event=released' -and "$($_.body)" -like '*idle for more than*' }).Count -eq 1 })
+    Check 'the hold stays' ((Get-ItemState $n).ContainsKey('park')) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
+}
+
 # Enhancement 13: cycle times come from the item's journal and state comments on GitHub, so a restarted gateway answers the same.
 'metrics: a merged item has its column times, merge and done; the answer survives a restart; operator token only' = {
     $n = New-Item-Fake 'Metrics item' 'Add docs/m.md' $L
