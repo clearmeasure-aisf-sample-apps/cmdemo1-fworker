@@ -7,16 +7,21 @@ using Microsoft.AspNetCore.Routing;
 // applied by the Admit function the gateway passes in, the same one its middleware runs.
 sealed class InProcess
 {
-    readonly IEndpointRouteBuilder routes;
+    readonly Func<IEnumerable<Endpoint>> endpoints;
     readonly IServiceProvider services;
     readonly Func<Principal, string, Func<Task>, Task> admit;
     Dictionary<(string Method, string Pattern), RouteEndpoint>? map;
 
-    public InProcess(IEndpointRouteBuilder routes, Func<Principal, string, Func<Task>, Task> admit) { this.routes = routes; services = routes.ServiceProvider; this.admit = admit; }
+    // The gateway's: the container's EndpointDataSource, the composite of every data source the app maps (the same endpoints, in the same order,
+    // as the WebApplication's DataSources), so InProcess needs nothing that exists only after Build(). Read at the first call, once the routes are mapped.
+    public InProcess(EndpointDataSource endpoints, IServiceProvider services, Func<Principal, string, Func<Task>, Task> admit) { this.endpoints = () => endpoints.Endpoints; this.services = services; this.admit = admit; }
+
+    // Over any route builder (the tests' own endpoint view): its data sources, in order.
+    public InProcess(IEndpointRouteBuilder routes, Func<Principal, string, Func<Task>, Task> admit) { endpoints = () => routes.DataSources.SelectMany(s => s.Endpoints); services = routes.ServiceProvider; this.admit = admit; }
 
     RouteEndpoint? Find(string method, string pattern)
     {
-        map ??= routes.DataSources.SelectMany(s => s.Endpoints).OfType<RouteEndpoint>()
+        map ??= endpoints().OfType<RouteEndpoint>()
             .SelectMany(e => (e.Metadata.GetMetadata<IHttpMethodMetadata>()?.HttpMethods ?? new[] { "GET" }).Select(m => (Key: (m, e.RoutePattern.RawText ?? ""), E: e)))
             .GroupBy(x => x.Key).ToDictionary(g => g.Key, g => g.First().E);
         return map.TryGetValue((method, pattern), out var ep) ? ep : null;
