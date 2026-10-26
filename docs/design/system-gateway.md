@@ -56,18 +56,19 @@ to put into the design now."
 1. **One repository per work item.** A change that spans repositories becomes linked items joined by `Depends on`, written in the full
    form `owner/repo#N` (a bare `#N` means the item's own repository).
 2. **The issue lives in the repository it changes.** The issue's repository is the target; the item id is `owner/repo#N`.
-3. **Per-repository policy:** what may happen unattended (auto-merge, paths that need the owner). Refined here: auto-promotion and
-   evidence are set per **deployable**, since a repository can have several deployables or none. For example, cmdemo1-system and cmdemo1-fworker stop for the owner's review while the app repositories run
-   autonomously.
+3. **Per-repository policy:** what may happen unattended (auto-merge, paths that need the owner). Refined here: auto-promotion
+   and evidence are set per **deployable**, since a repository can have several deployables or none. For example, cmdemo1-system
+   and cmdemo1-fworker stop for the owner's review while the app repositories run autonomously.
 4. **One acting gateway per system.** Each system has its own gateway, database, board and credentials; ids carry the repository, not a
    system. As today, the system's tdd gateway acts and its uat and prod gateways stay inert (`fworker-wolverine-refactor.md` 6).
 5. **Toolchains matched by capability.** A repository's registry entry names the toolchain it needs; runtimes and Tentacle hosts
    advertise what they provide; the scheduler offers an item only to a worker that has it.
 6. **`Depends on` across repositories gates delivery per environment.** The dependent item may start at once, but its release is not
    promoted to an environment until the item it depends on is deployed there. A `Depends on` within one repository keeps today's start
-   gate (not offered until the other is closed, in Release Queue or Done). This split is how the decision is read here; the owner
-   confirms it.
+   gate (not offered until the other is closed, in Release Queue or Done). The owner confirmed this split on 2026-10-25.
 7. **One system-wide queue with per-repository WIP limits.**
+8. **The system catalog comes from cmdemo1-system's `system.json`** (decided 2026-10-25): one source of truth for the system's
+   repositories and deployables; the policy, toolchain and WIP fields are added there.
 
 ## 3. What ADR 0001's refactoring builds now
 
@@ -78,7 +79,7 @@ behaves exactly like today.
 | Hook | Now | Phase |
 |---|---|---|
 | **H1 Qualified ids, in v2** | one `ItemId` type in `Fworker.Contracts` (parse and format; owner and repo lowercased, GitHub being case-insensitive); the saga id is `ItemId` plus generation; pull request `owner/repo!N` internally, `owner/repo#N` in every text people read (GitHub links it); branch `owner/repo:branch`; commit `owner/repo@sha`; release `deployable@version`. Used in message contracts, saga ids, correlation map, history, open-instance index, projection versions and Wolverine partition keys. v1's journal ledger keys (per issue) stay as they are. Qualified ids are added **beside** the numeric `item` in verb answers, `/api/v1/status`, metrics and dashboard JSON, never replacing it | R1 (contracts), R2 (schema) |
-| **H2 System catalog** | an `ISystemCatalog` interface with one loader. It reads `repositories[]` and `deployables[]` using `system.json`'s field names, plus `home` (the repository of the factory's own refs), `board` (`{owner, number}`), and the cloud runtimes' repository. v1's keys read `repositories[0]`; `Get-RepoPath` is unchanged | R1 |
+| **H2 System catalog** | an `ISystemCatalog` interface whose loader reads cmdemo1-system's `system.json` through the GitHub API (decision 8): `deployables[]` as they are, plus the fields the gateway needs per repository and deployable, `home` (the repository of the factory's own refs) and `board` (`{owner, number}`). It is validated, re-read every few minutes (and on a push to cmdemo1-system once R4's ingress handles that repository's events before v1's other-repository filter, `Verbs.Sweep.ps1:851`), and the **last good copy** is kept: the image's `instance.json` single-repository entry until R2 and wherever no database is configured (the inert uat and prod gateways), the database otherwise. So an unreachable or invalid `system.json` never stops the gateway. **Exactly like today:** v1's rule scripts keep reading `instance.json` until R9; a field `system.json` lacks falls back to `instance.json`; the loader reports any mismatch on the home entry (today `system.json` has ui's `healthPath` `/_healthcheck` where `octopus.healthPath` is `/_healthcheck/detailed`, and names the deployable `ui`, from which the Octopus project `cmdemo1-ui` is derived) instead of changing behaviour; `Get-RepoPath` is unchanged | R1 (loader with fallback), R2 (last good copy in the database), R4 (re-read on push) |
 | **H3 Coordinator keys** | `MergeTrainSaga` per repository; `DeliveryTrainSaga` per deployable and environment; `CapacityScheduler` one per system; the file-overlap hold keyed by (repository, path); `IncidentSaga` per (deployable, environment), holding only that deployable's train | R5 to R8 |
 | **H4 Intake and admission** | a per-repository WIP limit as an **intake** rule, beside today's `intake.wipLimit` (R6 touches intake), unset by default; the `toolchain` admission rule in the scheduler | R6 (WIP), R7 (toolchain) |
 | **H5 Dependencies across repositories** | v1's `Depends on` parser (`'#(\d{1,7})\b'`, `Verbs.Sweep.ps1:419`) and the keeper's cycle check (`Verbs.Keeper.ps1:220-228`) read `owner/other#12` as the home repository's #12: fixed in R0 to treat a qualified ref to another repository as "not this repository's item". `ItemMerged` (R5) carries the item's qualified dependencies; a durable **delivered-to table** (item, environment, release), kept from `DeliveredTo` and `Undelivered`, answers the DeliveryTrain's `dependencies-delivered(env)` evidence slot (events only trigger a re-check). A dependency that settles without a release (docs-only, or a repository with no deployable) counts as delivered when merged | R0 (parser), R5 (slot, table), R7 (rule on) |
@@ -100,8 +101,7 @@ Also, inside the same phases:
 
 ## 4. Later, when the enhancement is built
 
-Adding a repository is **a gateway release**: the registry lives in the image (and `deploy.overrides.json` is owner-protected). It also
-needs:
+Adding a repository is **a change to cmdemo1-system's `system.json`** (a pull request there), not a gateway release. It also needs:
 - webhooks for the repository (organization or App);
 - the three factory Apps (author, reviewer, testperson) installed on it;
 - for each of its deployables, a promoter role grant for the gateway's account plus `pipelineSignOff` in cmdemo1-system's `system.json`;
@@ -112,10 +112,13 @@ needs:
 **The gateway working on its own repository** (cmdemo1-fworker): its delivery restarts the gateway; with durable sagas that is safe, and
 its policy asks for the owner's review (decision 3).
 
+**The gateway never raises its own autonomy.** `system.json` holds the gateway's policy (`autoMerge`, `ownerReviewPaths`), and the gateway
+will work items in cmdemo1-system. So `system.json` is an owner-review path in cmdemo1-system's policy, and the gateway refuses to
+auto-merge any change to it, whatever the policy it reads says (a rule in the gateway's code, not in the catalog).
+
 ## 5. Not decided yet
 
-- **The registry's source:** `instance.json` or cmdemo1-system's `system.json`, which already lists the deployables. H2 builds the
-  catalog behind an interface with `system.json`'s field names, so this is a loader choice, recorded in the plan's section 7 and the
-  ADR's open decisions.
-- **Decision 6's split** between same-repository and cross-repository `Depends on` (section 2) needs the owner's confirmation.
+- **The `system.json` fields** for policy, toolchain and WIP limit: their schema belongs to the kit (Platform Hub) and to cmdemo1-system
+  (the cmdemo1 session); the gateway's loader reads them as optional, defaulting to today's behaviour.
+- **The gateway's read access to cmdemo1-system:** one of the factory's Apps installed there with contents read, or a read token.
 - Whether the scorecard, scorecard-site and video repositories join the board.

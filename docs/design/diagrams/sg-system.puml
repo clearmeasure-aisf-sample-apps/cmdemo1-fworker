@@ -6,7 +6,7 @@ title System-level gateway (future): one acting gateway per system, one reposito
 
 Person(owner, "Owner", "files issues in the repository they change; reviews where a repository's policy asks")
 System_Boundary(gw, "fworker gateway of cmdemo1 (the acting one, tdd)") {
-  Container(reg, "System catalog", "ISystemCatalog (system.json field names)", "repositories: branch, checks, build, merge strategy, docs and protected paths, toolchain, WIP limit, policy; deployables: Octopus project, environments, health, evidence, promoter, database; home; board")
+  Container(reg, "System catalog", "ISystemCatalog, read from cmdemo1-system system.json (last good copy kept)", "repositories: branch, checks, build, merge strategy, docs and protected paths, toolchain, WIP limit, policy; deployables: Octopus project, environments, health, evidence, promoter, database; home; board")
   Container(ingress, "Event ingress", "S3", "org or App webhooks; business-key dedup; correlation to ItemId")
   Container(intake, "Intake", "rules", "per-repository WIP limit")
   Container(sched, "CapacityScheduler", "one per system", "one ranked queue; admission: Depends on (same repository), overlap (repo, path), toolchain match, budgets")
