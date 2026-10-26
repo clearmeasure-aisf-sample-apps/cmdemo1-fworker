@@ -198,6 +198,10 @@ function Invoke-MergePickup([int]$n, $pr) {
 # refs and, under the item lock on a fresh read of the state, removes a ref that has no live claim: at once when the item is closed or gone, and
 # when it is open once the ref has been seen without a claim for longer than a lease. When it was first seen so is kept in the state directory: a
 # restart starts the wait again, which only delays the removal (an accept takes such a ref over anyway, Verb_claim_item).
+# Issue 400: the reap takes the item lock without waiting. With the default wait (45 s) one lock held by a verb stalled the whole sweep, once per
+# such ref. Skipping is safe: the reap only removes a ref that has no live claim, so leaving it to a later sweep changes nothing meanwhile (a closed
+# item's ref is inert, an accept takes an open item's orphan over), and the holder may be the verb that makes the claim live or removes the ref
+# itself. A skipped ref keeps the time it was first seen without a claim, so a skip does not restart the wait for an open item's orphan.
 function Get-ClaimOrphanFile { Join-Path (Get-StateDir) 'claim-orphans.json' }
 
 function Get-ClaimRefItems {
@@ -234,10 +238,13 @@ function Invoke-ClaimRefReap($List) {
                 if ($st -and (Test-ClaimLive $st.state)) { return 'live' }
                 if (-not $open -or $aged) { Remove-ClaimRef $n; return 'removed' }
                 return 'orphan'
-            }
+            } 0
             if ($res -eq 'removed') { $acts += @{ item = $n; action = 'claim-ref-removed'; reason = $(if (-not $open) { 'item-closed' } else { 'orphan' }) } }
             elseif ($res -eq 'orphan') { $keep["$n"] = ConvertTo-Iso $since; $acts += @{ item = $n; action = 'orphan-claim'; since = $keep["$n"] } }
-        } catch [FactoryReject] { $acts += @{ item = $n; action = 'skip'; reason = "claim-ref-reap: $($_.Exception.Code)" } }
+        } catch [FactoryReject] {
+            if ($first.ContainsKey("$n")) { $keep["$n"] = $first["$n"] }
+            $acts += @{ item = $n; action = 'skip'; reason = "claim-ref-reap: $($_.Exception.Code)" }
+        }
     }
     $keep | ConvertTo-Json -Depth 3 | Set-Content $f
     return , @($acts)

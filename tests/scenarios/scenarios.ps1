@@ -74,6 +74,28 @@ $Scenarios = [ordered]@{
     Check 'the young orphan of an open item and the live claim are kept' ("refs/factory/$inst/claims/$o" -in $now -and "refs/factory/$inst/claims/$n" -in $now) ($now -join ',')
 }
 
+# Issue 400: the reap takes the item lock without waiting. It waited 45 s (Use-ItemLock's default) for a lock a verb held, and so stalled the whole
+# sweep. The harness holds the lock of a closed item with a claim ref: the sweeps go on and leave the ref; once the lock is free a later one removes it.
+'orphan claim refs: a busy item lock does not stall the sweep; a later sweep removes the ref once the lock is free (issue 400) [full]' = {
+    $inst = "$((Get-Content -Raw (Join-Path $script:Work 'instance.test.json') | ConvertFrom-Json).name)"
+    $repo = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+    $refs = { @((Invoke-RestMethod "$repo/git/matching-refs/factory/$inst/claims/" -Headers @{ Authorization = 'Bearer fake-operator' }) | ForEach-Object { $_ } | ForEach-Object { "$($_.ref)" }) }
+    $c = New-Item-Fake 'Closed with a ref, busy' 'x' $L
+    Invoke-RestMethod "$repo/issues/$c" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ state = 'closed' } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
+    $ref = "refs/factory/$inst/claims/$c"
+    # the lock a verb would hold (the rule scripts' item lock file), taken before the ref exists: no sweep can reap the ref before the lock is held
+    $lock = [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$c.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
+    try {
+        Gh-As 'fake-operator' 'git/refs' @{ ref = $ref; sha = ('0' * 40) } | Out-Null
+        # two full sweeps after the ref, each with a reap that meets the lock; with the 45 s wait the first of them alone outlasted this
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
+        Check 'the sweeps go on while the item lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'and leave the ref of the busy item for a later sweep' ($ref -in (& $refs)) ((& $refs) -join ',')
+    } finally { $lock.Dispose() }
+    Check 'once the lock is free a later sweep removes the ref' (Wait-Until -Seconds 30 { $ref -notin (& $refs) }) ((& $refs) -join ',')
+}
+
 # Enhancement 13: cycle times come from the item's journal and state comments on GitHub, so a restarted gateway answers the same.
 'metrics: a merged item has its column times, merge and done; the answer survives a restart; operator token only' = {
     $n = New-Item-Fake 'Metrics item' 'Add docs/m.md' $L
