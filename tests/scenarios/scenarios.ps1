@@ -675,9 +675,13 @@ $QueueScenarios = [ordered]@{
     CheckExit 'A completes' (Do-DevComplete $a) 0
     CheckExit 'B completes (master has no 040 yet)' (Do-DevComplete $b) 0
     CheckExit 'B PASS' (Do-Verdict $b $pb) 0
-    # A lands on master outside the factory's merge (as a person's merge would), so it holds no place in the merge queue: in the merge-queue suite
-    # B then reaches the migration guard instead of waiting for A's release candidate
+    # A lands on master outside the factory's merge (as a person's merge would). The sweep picks that merge up (Invoke-MergePickup), and A then
+    # holds a place in the merge queue (merge.awaiting master-green, then release-candidate) until a release candidate carries it. B's merge used
+    # to race that sweep: when the sweep came first, B was refused with merge-queue (waiting for A) instead of reaching the migration guard. So A's
+    # merge is built into a release, as on the real system, and B merges once A has left the queue (the card moved on to the Release Queue).
     [void](Fake 'master-merge' @{ number = $pa }); Check 'A merged and takes 040' ((Get-FakePr $pa).merged)
+    [void](Fake 'octo-release' @{ version = '2.9.0'; sha = (Get-FakePr $pa).mergeSha })
+    [void](Wait-Until -Seconds 120 { (Get-FakeIssue $a).column -in 'Release Queue', 'Done' })
     $m = F 'w1' @('merge', '--item', $b, '--pr', $pb); CheckExit 'B is refused at merge' $m 10 'migration-number-taken'
     Check 'the refusal names both scripts and 041' ("$($m.reason)" -like '*040_AddAccessNotesToWorkOrder.sql*' -and "$($m.reason)" -like '*040_AddFloorToWorkOrder.sql*' -and "$($m.reason)" -like '*041*') "$($m.reason)"
     Check 'B is not merged' (-not (Get-FakePr $pb).merged)

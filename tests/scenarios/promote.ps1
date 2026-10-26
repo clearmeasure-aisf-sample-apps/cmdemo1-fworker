@@ -71,10 +71,16 @@ $PromoteScenarios = [ordered]@{
 }
 
 'promote: an item merged without a PASS verdict holds the whole release back, explained once on each item' = {
-    $a = Pm-Item '3.2.1'
+    # The release is made once both items are in the Release Queue. Made with the first item, a sweep between the two Pm-Item calls judged the
+    # release with that item alone and journaled the tdd health settle time on it: two waiting comments on it, the first not naming the other item.
+    $a = Pm-Item '3.2.1' -NoRelease
     $b = Pm-Item '3.2.1' -NoRelease -NoPass
+    # two full sweeps that read the board with both items before the release exists: none still holds a read with item a alone
+    $f0 = [long](Get-Plant).sweep.full
+    [void](Wait-Until -Seconds 40 { [long](Get-Plant).sweep.full -ge $f0 + 2 })
+    [void](Fake 'octo-release' @{ version = '3.2.1'; sha = $a.sha; tdd = 'Success' })
     Check 'each item gets one waiting comment' (Wait-Until -Seconds 40 { @(Pm-Events $a.n 'promotion-waiting').Count -ge 1 -and @(Pm-Events $b.n 'promotion-waiting').Count -ge 1 }) "$(Pm-Brief $a.n) /// $(Pm-Brief $b.n)"
-    Start-Sleep -Seconds 8
+    Wait-Sweeps -Count 2 -MinSeconds 8     # later sweeps
     Check 'no deployment is created' ((Pm-Deps).creates -eq 0)
     Check 'once: later sweeps do not repeat it' (@(Pm-Events $a.n 'promotion-waiting').Count -eq 1 -and @(Pm-Events $b.n 'promotion-waiting').Count -eq 1)
     Check 'the item without the PASS is told so' ("$(@(Pm-Events $b.n 'promotion-waiting')[0].body)" -match 'merged after a Functional Testing PASS') (Pm-Brief $b.n)
@@ -244,9 +250,17 @@ $PromoteScenarios = [ordered]@{
 'promote: a waiting reason (a merge in the release not settled) leaves the Sign-off pending; settled, it proceeds' = {
     $d = Pm-DoneItem
     $i = Pm-Created '3.18.1'
+    # #d is an item of the release, so the gateway journals on it too and saves its state (the health wait, promoted, then the refused
+    # Sign-off). An edit made between such a read and save was lost: #d stayed settled, no wait was ever journaled, and the Sign-off was answered
+    # Proceed. The edit waits for the refusal on #d, the last of those saves (its key dedups the repeats).
+    [void](Wait-Until -Seconds 60 { @(@(Pm-Events $d.n 'promotion-waiting') | Where-Object { $_.body -match 'missing permission InterruptionSubmit' }).Count -ge 1 })
     Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
-    [void](Fake 'octo-forbid' @{})
+    # the answer is allowed again only once the gateway has journaled the wait (a sweep that read #d's state before the edit would answer Proceed)
     Check 'the Sign-off wait is explained' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'Sign-off of task .* waits: .*not settled yet' }).Count -eq 1 }) (Pm-Brief $i.n)
+    $f0 = [long](Get-Plant).sweep.full
+    [void](Fake 'octo-forbid' @{})
+    # the pending check covers two full sweeps in which answering is allowed again
+    [void](Wait-Until -Seconds 40 { [long](Get-Plant).sweep.full -ge $f0 + 2 })
     Check 'and it stays pending' (@(Pm-Dep '3.18.1' 'uat')[0].pending) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
     Set-ItemState $d.n { param($st) $st.merge.awaiting = $null; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o') }
     Check 'settled: Proceed' (Wait-Until -Seconds 40 { @(Pm-Dep '3.18.1' 'uat')[0].result -eq 'Proceed' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
@@ -265,9 +279,16 @@ $PromoteScenarios = [ordered]@{
 'promote: a Sign-off that waits on a reason that never clears is aborted after signoffWaitHours (0.03 h in the suite), once [full]' = {
     $d = Pm-DoneItem
     $i = Pm-Created '3.20.1'
+    # #d is an item of the release, so the gateway journals on it too and saves its state (the health wait, promoted, then the refused
+    # Sign-off). An edit made between such a read and save was lost: #d stayed settled, no wait was ever journaled, and the Sign-off was answered
+    # Proceed. The edit waits for the refusal on #d, the last of those saves (its key dedups the repeats).
+    [void](Wait-Until -Seconds 60 { @(@(Pm-Events $d.n 'promotion-waiting') | Where-Object { $_.body -match 'missing permission InterruptionSubmit' }).Count -ge 1 })
     Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
-    [void](Fake 'octo-forbid' @{})
+    # The Sign-off may be answered only once the gateway has seen the unsettled merge: a sweep that read #d's state before the edit and reached the
+    # Sign-off after the answer was allowed again answered it Proceed (the deployments went on to prod). The wait is journaled without answering,
+    # so the answer stays refused until the gateway has said that it waits.
     Check 'the Sign-off waits first' (Wait-Until -Seconds 120 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'Sign-off of task .* waits' }).Count -ge 1 }) (Pm-Brief $i.n)
+    [void](Fake 'octo-forbid' @{})
     Check 'since when is recorded on the item' (Wait-Until -Seconds 120 { $u = (Get-ItemState $i.n).merge.promoted.uat; "$(if ($u -is [System.Collections.IDictionary]) { $u['signoff_wait_since'] } elseif ($u -and $u.PSObject.Properties['signoff_wait_since']) { $u.signoff_wait_since })" -ne '' }) ((Get-ItemState $i.n) | ConvertTo-Json -Compress -Depth 6)
     Check 'after the limit it is aborted' (Wait-Until -Seconds 480 { @(Pm-Dep '3.20.1' 'uat')[0].result -eq 'Abort' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
     Check 'journaled once with the wait and the reason' (Wait-Until -Seconds 20 { @(@(Pm-Events $i.n 'promotion-signoff') | Where-Object { $_.body -match 'Abort' -and $_.body -match 'waited .* h at the Sign-off .*not settled yet' }).Count -eq 1 }) (Pm-Brief $i.n)

@@ -378,3 +378,24 @@ function Get-ItemState([int]$Item) {
 function Expire-Claim([int]$Item, [string]$TakenBack = '') {
     Set-ItemState $Item { param($st) $st.claim.lease_until = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o'); if ($TakenBack) { $st.claim.taken_back = $TakenBack } }
 }
+
+# Waits until -Count full sweeps of the gateway have started after the call and their sync-board has returned: its lastSweep (/api/v1/status) moves
+# -Count + 1 times (the first move may end a sweep that was already running when the call came). The gateway sets lastSweep when sync-board returns,
+# before it applies that sweep's plan (offers, drops), so the wait goes on 1 s after the last move it saw for that step to finish. It waits at least
+# -MinSeconds in all as well, so a fixed sleep it replaces is never made shorter. When the moves do not come within -Seconds more it throws: the
+# scenario fails with the message, it never goes on as if they ran. A gateway that restarts meanwhile (lastSweep empty again) starts the count over.
+function Wait-Sweeps([int]$Count = 1, [double]$MinSeconds = 0, [int]$Seconds = 120, [string]$Base = '') {
+    if (-not $Base) { $Base = Get-GatewayBase }
+    $read = { try { $v = (Invoke-RestMethod "$Base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 5).lastSweep; if ($v -is [datetime]) { "$($v.Ticks)" } else { "$v" } } catch { $null } }
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $last = & $read; $moves = 0
+    while ($moves -le $Count) {
+        if ($sw.Elapsed.TotalSeconds -gt $MinSeconds + $Seconds) { throw "Wait-Sweeps: lastSweep of the gateway at $Base moved $moves of $($Count + 1) times in $([int]$sw.Elapsed.TotalSeconds) s (wanted $Count sweeps after the call)" }
+        Start-Sleep -Milliseconds 250
+        $now = & $read
+        if ($null -eq $now) { continue }
+        if ($null -eq $last -or $now -eq '') { $last = $now; if ($now -eq '') { $moves = 0 }; continue }
+        if ($now -ne $last) { $moves++; $last = $now }
+    }
+    Start-Sleep -Milliseconds 1000   # (the plan of the last sweep is applied after its lastSweep moved)
+    $rest = $MinSeconds - $sw.Elapsed.TotalSeconds; if ($rest -gt 0) { Start-Sleep -Milliseconds ([int][math]::Ceiling($rest * 1000)) }
+}

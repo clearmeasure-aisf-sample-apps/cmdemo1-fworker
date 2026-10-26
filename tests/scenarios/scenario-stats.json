@@ -3,492 +3,967 @@
     "qc: gate a stale environment is torn down after timing.qcGraceMinutes unless a Reset comes first": {
       "tier": "full",
       "checks": 34,
-      "seconds": 88.4
+      "seconds": 218.9
     }
   },
   "qc-gate-lifetime": {
     "qc: gate an environment is torn down at the lifetime cap even when it is in use": {
       "tier": "full",
       "checks": 18,
-      "seconds": 36.6
+      "seconds": 76.2
     }
   },
   "qc-gate-idle": {
     "qc: gate an idle environment is torn down after timing.qcIdleMinutes, and a touch restarts the idle timer": {
       "tier": "full",
       "checks": 23,
-      "seconds": 47.2
+      "seconds": 126.5
     }
   },
   "qc-gate-waiting": {
     "qc: gate a Start that finds no worker journals qc-waiting after the delay and then once per repeat interval": {
       "tier": "full",
       "checks": 18,
-      "seconds": 51.0
+      "seconds": 134.2
     }
   },
   "auto": {
     "red CI blocks, pending CI is accepted then advanced by the sweep": {
       "tier": "full",
       "checks": 10,
-      "seconds": 30.6
+      "seconds": 38.5
     },
     "gates refuse what they should": {
       "tier": "full",
       "checks": 17,
-      "seconds": 26.4
+      "seconds": 53.5
     },
     "verdict gates and demotion": {
       "tier": "fast",
       "checks": 13,
-      "seconds": 19.8
+      "seconds": 38.4
     },
     "happy-docs-only (auto policy)": {
       "tier": "fast",
       "checks": 18,
-      "seconds": 19.8
+      "seconds": 46.4
     },
     "docs-only change finishes even when no release run ever appears": {
       "tier": "full",
       "checks": 9,
-      "seconds": 23.5
+      "seconds": 41.9
     },
     "master red once: failed jobs are re-run, then the item proceeds": {
       "tier": "full",
       "checks": 10,
-      "seconds": 23.5
+      "seconds": 42.0
     },
     "model ladder: loops escalate the tier, never back down": {
       "tier": "full",
       "checks": 19,
-      "seconds": 32.7
+      "seconds": 68.2
     },
     "code change: release candidate, Release Queue, production, Done": {
       "tier": "full",
-      "checks": 13,
-      "seconds": 23.0
+      "checks": 14,
+      "seconds": 27.5
     },
     "testing profile: the cheapest model, pinned even when the item loops": {
       "tier": "full",
       "checks": 6,
-      "seconds": 14.2
+      "seconds": 31.8
     },
     "merge conflict demotes": {
       "tier": "full",
       "checks": 10,
-      "seconds": 14.2
+      "seconds": 32.7
     },
     "merge ladder: out-of-date branch is updated and merged": {
       "tier": "full",
       "checks": 10,
-      "seconds": 35.1
+      "seconds": 54.8
     },
     "video label: PASS without an MP4 is downgraded": {
       "tier": "full",
       "checks": 8,
-      "seconds": 15.8
+      "seconds": 31.7
     },
     "docs-only mismatch: a docs PR without the marker is refused": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 10.2
+      "seconds": 21.1
     },
     "docs-only fast path: one design review round, a second only for a finding that quotes the item": {
       "tier": "fast",
       "checks": 22,
-      "seconds": 27.7
+      "seconds": 37.7
     },
     "docs-only fast path: the build is not owed only with the marker and documentation files; Functional Testing reads the diff": {
       "tier": "fast",
       "checks": 43,
-      "seconds": 74.9
+      "seconds": 171.9
+    },
+    "relaunch budget: session take-backs do not spend it, their own limit parks with session-relaunch-budget, and the park codes say why": {
+      "tier": "fast",
+      "checks": 14,
+      "seconds": 66.0
+    },
+    "video label: publish-demo creates the release, a second publish replaces the MP4, and the PASS stands": {
+      "tier": "fast",
+      "checks": 23,
+      "seconds": 51.6
+    },
+    "pr-checks: a missing GitHub permission is a clear code in the answer, never an error of the verb": {
+      "tier": "full",
+      "checks": 14,
+      "seconds": 24.5
+    },
+    "ci rule: a failed acceptance shard is re-run once; the green re-run completes the column without a fix-forward round": {
+      "tier": "fast",
+      "checks": 13,
+      "seconds": 27.0
+    },
+    "ci rule: a park that expires, and one an operator releases, start the demotions from 0": {
+      "tier": "full",
+      "checks": 41,
+      "seconds": 128.6
+    },
+    "metrics: a merged item has its column times, merge and done; the answer survives a restart; operator token only": {
+      "tier": "fast",
+      "checks": 23,
+      "seconds": 53.2
+    },
+    "code change, master red once: the skipped release check of the first attempt is no docs-only path; the item waits for its release": {
+      "tier": "full",
+      "checks": 12,
+      "seconds": 30.9
+    },
+    "pr-checks: a failed Actions job returns its failed step, the end of its log and the error lines, cleaned and redacted": {
+      "tier": "fast",
+      "checks": 26,
+      "seconds": 19.6
+    },
+    "pr-checks: an oversize log is cut and says so; the whole log is read in pages and saved to a file": {
+      "tier": "full",
+      "checks": 17,
+      "seconds": 32.6
+    },
+    "ci rule: a check that is not a gate failing alone leaves the head green; the column completes": {
+      "tier": "fast",
+      "checks": 9,
+      "seconds": 14.7
+    },
+    "ci rule: a failure master has too costs no round; it is reported once, and when master passes again the gateway updates the branch and the new head completes the column": {
+      "tier": "fast",
+      "checks": 15,
+      "seconds": 35.5
+    },
+    "orphan claim refs: an accept takes one over, the sweep removes those of closed items and keeps a young one (issue 47)": {
+      "tier": "fast",
+      "checks": 5,
+      "seconds": 11.9
+    },
+    "master red after the re-run: the item is parked master-broken once the new attempt failed": {
+      "tier": "full",
+      "checks": 11,
+      "seconds": 45.2
+    },
+    "master-green ignores the checks of the workflows a Build starts: a failed architecture check parks nothing": {
+      "tier": "full",
+      "checks": 11,
+      "seconds": 37.3
+    },
+    "escalate earlier: the same criterion cited twice parks the item with a question; timing criteria are flagged at Technical Design": {
+      "tier": "fast",
+      "checks": 31,
+      "seconds": 79.2
+    },
+    "push gate: one failed check that the base branch fails too is rerun once by the gateway, and not counted": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 26.5
+    },
+    "pr-checks: the baseline tells a check the base branch already fails from one this change broke": {
+      "tier": "fast",
+      "checks": 10,
+      "seconds": 18.8
+    },
+    "pr-checks: the artifacts of a failed run are listed, and a text file of one is returned; binary and oversize ones are listed only": {
+      "tier": "full",
+      "checks": 16,
+      "seconds": 34.0
+    },
+    "master flaky: a shard fails while the Build runs; the failed jobs are re-run once the run completes and the item proceeds": {
+      "tier": "full",
+      "checks": 12,
+      "seconds": 50.4
+    },
+    "settle and checks under the item lock: a wait for checks moves no card that left Development, and a Release Queue card without a merge record is flagged once": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 33.1
+    },
+    "board: a card of another repository linked to the board is never seen: no sweep entry, no comment, no column event": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 11.5
+    },
+    "push gate: after red checks on 2 heads, open-pr and update-pr wait for a private-build attestation": {
+      "tier": "fast",
+      "checks": 21,
+      "seconds": 53.7
+    },
+    "pr-checks: a Qodana-like check returns its annotations, split into those on the change and those elsewhere": {
+      "tier": "fast",
+      "checks": 13,
+      "seconds": 26.0
+    },
+    "pr-checks: when the detail cannot be read (GitHub fails or does not answer), the status and the exit code are what they always were": {
+      "tier": "full",
+      "checks": 21,
+      "seconds": 67.5
+    },
+    "ci rule: a red of the change's own is re-run once, then it is a fix-forward round that says so": {
+      "tier": "full",
+      "checks": 10,
+      "seconds": 19.9
     }
   },
   "qc-proxy": {
     "qc: behind a known proxy the right-most hop is the client, and the left hops cannot be chosen by the client": {
       "tier": "full",
       "checks": 11,
-      "seconds": 26.9
+      "seconds": 40.7
     },
     "qc: a second click from another address reuses the environment and records no person": {
       "tier": "full",
       "checks": 13,
-      "seconds": 23.5
+      "seconds": 27.2
     }
   },
   "peer-approved": {
     "inspector requests changes: the item goes back to Development": {
       "tier": "full",
       "checks": 11,
-      "seconds": 18.2
+      "seconds": 63.4
     },
     "a push after approval invalidates it": {
       "tier": "full",
       "checks": 9,
-      "seconds": 16.3
+      "seconds": 59.2
     },
     "inspector approves, a different identity from the author; merge needs it": {
       "tier": "full",
       "checks": 17,
-      "seconds": 25.5
+      "seconds": 82.3
     },
     "the approver may not be the author": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 15.8
+      "seconds": 54.9
     },
     "text addressed to the reviewer, and a secret in the diff, are mandatory escalations": {
       "tier": "full",
       "checks": 18,
-      "seconds": 31.6
+      "seconds": 96.9
     },
     "a PASS verdict whose pull request is closed without merging is void: the sweep demotes the item": {
       "tier": "full",
       "checks": 9,
-      "seconds": 17.9
+      "seconds": 54.0
     },
     "mandatory escalation: the inspector cannot approve, the hold needs a named person": {
       "tier": "full",
       "checks": 19,
-      "seconds": 28.9
+      "seconds": 91.5
     }
   },
   "merge-queue": {
     "merge queue: a second merge waits until the first has its release candidate": {
       "tier": "fast",
       "checks": 19,
-      "seconds": 43.2
+      "seconds": 73.3
     },
     "merge queue: a documentation-only change neither waits in the queue nor holds a place in it": {
       "tier": "full",
       "checks": 24,
-      "seconds": 47.2
+      "seconds": 76.8
+    },
+    "migration number: two pull requests that took the same number race, and the second is refused at merge": {
+      "tier": "fast",
+      "checks": 20,
+      "seconds": 35.5
+    },
+    "migration number: a script numbered as one on master is refused at complete, and the renumbered one passes": {
+      "tier": "fast",
+      "checks": 9,
+      "seconds": 18.3
     }
   },
   "owner": {
     "owner: dashboard: a credential issued from the page connects a hand-made cloud session that then shows up": {
       "tier": "full",
-      "checks": 7,
-      "seconds": 0.9
+      "checks": 8,
+      "seconds": 1.9
     },
     "owner: a draining worker receives nothing new": {
       "tier": "full",
       "checks": 3,
-      "seconds": 2.7
+      "seconds": 3.3
     },
     "owner: a worker:<name> label pins the item": {
       "tier": "full",
       "checks": 2,
-      "seconds": 2.4
+      "seconds": 2.0
     },
     "owner: tokens are scoped to one item, one role, one purpose": {
       "tier": "full",
       "checks": 6,
-      "seconds": 7.8
+      "seconds": 10.5
     },
     "owner: registration, directed assignment, token handling and the journal": {
       "tier": "fast",
       "checks": 12,
-      "seconds": 7.9
+      "seconds": 18.9
     },
     "owner: an assignment nobody accepts is offered to the next worker": {
       "tier": "full",
       "checks": 4,
-      "seconds": 9.2
+      "seconds": 15.9
     },
     "owner: the owner continues from Technical Design into Development without a new assignment": {
       "tier": "full",
       "checks": 9,
-      "seconds": 17.4
+      "seconds": 24.4
     },
     "owner: a refused credential is visible on the event stream, not only on stderr": {
       "tier": "full",
       "checks": 3,
-      "seconds": 0.8
+      "seconds": 0.9
     },
     "owner: the operator sets a worker capacity, a worker cannot, and it survives a reconnect": {
       "tier": "full",
       "checks": 5,
-      "seconds": 1.7
+      "seconds": 3.5
     },
     "msg: messaging and the supervisor are off by default": {
       "tier": "fast",
       "checks": 58,
-      "seconds": 32.8
+      "seconds": 52.0
     },
     "owner: a pinned item is only ever offered to its worker: after a missed accept, while it is at capacity, and while it is offline": {
       "tier": "fast",
       "checks": 13,
-      "seconds": 39.1
+      "seconds": 67.6
     },
     "runner: a second run is refused while one is active, a short disk is refused, -Force overrides, and pwsh exit 139 is reported as a crash": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 3.9
+      "seconds": 4.9
     },
     "owner: an item that waits for its pinned worker has matched first, once however many sweeps pass, and offered after it when the worker comes": {
       "tier": "fast",
       "checks": 5,
-      "seconds": 13.1
+      "seconds": 23.6
     },
     "owner: with a slow GitHub the journal of an item still reads matched, offered, assigned, and the offer is not held back by it": {
       "tier": "full",
       "checks": 2,
-      "seconds": 27.6
+      "seconds": 33.9
     },
     "owner: an accept that waited for a slow journal does not let its offer lapse: the item is not offered again while it is being accepted": {
       "tier": "full",
       "checks": 4,
       "seconds": 34.7
+    },
+    "metrics: an accepted owner item has its match-to-accept time from the journal": {
+      "tier": "fast",
+      "checks": 4,
+      "seconds": 9.1
+    },
+    "owner: the owner publishes the demo video with its item token; another item and a worker credential are refused": {
+      "tier": "full",
+      "checks": 6,
+      "seconds": 11.4
+    },
+    "owner: update-pr replaces the body of the item's own open pull request, and of no other": {
+      "tier": "full",
+      "checks": 25,
+      "seconds": 37.0
+    },
+    "owner: a pinned item gets its worker's free slot first, and keeps it while it waits for that worker (issue 46)": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 33.0
+    },
+    "owner: sessions of one host share its limit of owned items and its build slot; a low-effort session gets capacity 1": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 37.3
+    },
+    "owner: a build slot is freed when its work ends: the item released, the session disconnected for good, the name revoked": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 29.0
+    },
+    "owner: private-build builds a worktree under the host's build slot with SQLite and the dotnet path, writes the log and gives the slot back": {
+      "tier": "fast",
+      "checks": 15,
+      "seconds": 15.1
+    },
+    "owner: with a slow journal an accept does not wait for it and its offer does not lapse; the journal reads matched, offered, assigned": {
+      "tier": "full",
+      "checks": 4,
+      "seconds": 66.5
+    },
+    "docs-only: the body marker of an item without the state field counts only for items created before the cutoff": {
+      "tier": "full",
+      "checks": 3,
+      "seconds": 1.8
+    },
+    "pass-merge: a PASS on an Auto Merge item with green checks is merged by the verdict call itself; the session's merge call answers already-merged": {
+      "tier": "fast",
+      "checks": 13,
+      "seconds": 23.1
+    },
+    "pass-merge: a PASS nobody merged (the session stopped after the verdict) is merged by the sweep after the grace, with no call": {
+      "tier": "fast",
+      "checks": 11,
+      "seconds": 30.4
+    },
+    "pass-merge: a PASS recorded just before the gateway restarts is merged after the restart": {
+      "tier": "full",
+      "checks": 10,
+      "seconds": 29.8
+    },
+    "pass-merge: checks still running at the verdict: the answer is waiting, the item is not offered to anyone, and it is merged when they go green": {
+      "tier": "fast",
+      "checks": 14,
+      "seconds": 45.5
+    },
+    "pass-merge: a pull request that cannot be merged takes the existing demote path once, and the sweep does not loop": {
+      "tier": "fast",
+      "checks": 11,
+      "seconds": 32.9
+    },
+    "pass-merge: an item without the Auto Merge label, or a verdict under another merge policy, is not merged by the gateway": {
+      "tier": "fast",
+      "checks": 18,
+      "seconds": 53.5
+    },
+    "pass-merge: a push after the verdict voids it: not merged, the item goes back to Development": {
+      "tier": "fast",
+      "checks": 10,
+      "seconds": 22.6
+    },
+    "pass-merge: the session's merge call racing the sweep merges once": {
+      "tier": "full",
+      "checks": 10,
+      "seconds": 36.6
+    },
+    "pass-merge: a pull request merged by a person settles the item from Development and from a PASS parked for a person": {
+      "tier": "fast",
+      "checks": 18,
+      "seconds": 36.6
+    },
+    "offers: a late accept of a withdrawn offer is refused (stale-assignment) and never takes a worker over its capacity": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 20.6
+    },
+    "offers: a session that let two offers in a row lapse is not offered more until it calls a verb, and the status shows the cool-down": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 26.6
+    },
+    "pass-merge: a branch behind its base is brought up to date by the gateway, its merge commit is verified and merged": {
+      "tier": "fast",
+      "checks": 10,
+      "seconds": 23.6
+    },
+    "pass-merge: a push that lands while the gateway's update of the branch is still pending is not merged: demoted (stale-head)": {
+      "tier": "fast",
+      "checks": 11,
+      "seconds": 30.9
+    },
+    "pass-merge: a PASS for a head other than the current one is refused, and a verdict without a head is never merged by the gateway": {
+      "tier": "fast",
+      "checks": 19,
+      "seconds": 40.8
+    },
+    "pass-merge: a hand-made two-parent merge pushed by a worker while the gateway's update is pending is not merged: demoted (stale-head)": {
+      "tier": "fast",
+      "checks": 10,
+      "seconds": 29.2
+    },
+    "owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it": {
+      "tier": "full",
+      "checks": 13,
+      "seconds": 43.1
+    },
+    "owner: one item per session: a session that held an item is offered no second one; the next session of the name is, and the status counts items per session": {
+      "tier": "fast",
+      "checks": 14,
+      "seconds": 45.2
+    },
+    "owner: one item per session: a spent session that owns nothing is told session.end and its client writes the launcher marker": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 34.3
+    },
+    "owner: a stale accepted assignment is dropped by the sweep and the spent session is told session.end": {
+      "tier": "full",
+      "checks": 10,
+      "seconds": 91.4
+    },
+    "owner: a hold:owner label holds the item for a person: no offer, the open one dropped, claim-item refused; offered again without it": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 22.0
+    },
+    "owner: the owner is released at item.merged, its session is told session.end, and the gateway settles the item to Done": {
+      "tier": "fast",
+      "checks": 17,
+      "seconds": 28.1
+    },
+    "owner: a pin that waits too long falls back to another worker and is journalled": {
+      "tier": "fast",
+      "checks": 4,
+      "seconds": 22.6
+    },
+    "owner: auto-unpark: a red-shard park is lifted once the pull request is green on a newer head, not on the head it judged": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 42.8
+    },
+    "owner: auto-unpark: a park of session trouble is lifted once a worker session is free, and the item is offered to it": {
+      "tier": "fast",
+      "checks": 5,
+      "seconds": 21.2
+    },
+    "owner: auto-unpark: master-broken is lifted only once the checks that failed passed on master, then judged on that head": {
+      "tier": "fast",
+      "checks": 5,
+      "seconds": 18.4
+    },
+    "owner: board guard: a labelled issue missing from the board is added in Technical Design and offered": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 12.8
+    },
+    "owner: an item waits for the items it depends on and is offered once they are closed": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 13.7
+    },
+    "owner: launcher watchdog: a spent session still idle after session.end is told session.restart and the client writes the reason": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 47.5
+    },
+    "owner: launcher watchdog: stream silence, unsent input, screen silence while owning and a gateway reason each restart the session": {
+      "tier": "fast",
+      "checks": 14,
+      "seconds": 138.8
+    },
+    "owner: an operator drain holds across a new session of the name until the operator resumes it": {
+      "tier": "fast",
+      "checks": 8,
+      "seconds": 13.8
+    },
+    "owner: a new session of an owner is resent its accepted item; an item whose owner was dropped is not": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 16.1
+    },
+    "unpark: a closed item keeps no park: the sweep removes it, and unpark of a closed item removes only the park": {
+      "tier": "fast",
+      "checks": 10,
+      "seconds": 29.1
+    },
+    "unpark: the operator releases a park early with a reason; the next sweep offers the item again in its column": {
+      "tier": "fast",
+      "checks": 16,
+      "seconds": 14.5
+    },
+    "intake: a free slot and an empty Technical Design pull the top Todo item that is not held, pinned or waiting, up to the WIP limit": {
+      "tier": "full",
+      "checks": 8,
+      "seconds": 98.4
+    },
+    "owner: stream sidecar: the launcher runs the session's stream into events.log, tells the session so, restarts a dead sidecar and stops it with the session": {
+      "tier": "full",
+      "checks": 16,
+      "seconds": 38.4
+    },
+    "settle: a merged item whose master Build stays red keeps its settle state, is never offered, and goes on when a later master commit that contains it is green": {
+      "tier": "full",
+      "checks": 16,
+      "seconds": 50.6
+    },
+    "settle: a stranded merged item is re-armed by the sweep and settled; a finished one is settled again through resettle": {
+      "tier": "full",
+      "checks": 18,
+      "seconds": 47.1
+    },
+    "migration number: the gateway does not merge a PASS whose DbUp number was taken on master meanwhile": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 17.2
+    },
+    "owner: pr-checks with an item token reads the checks of that item's own pull request and of no other": {
+      "tier": "full",
+      "checks": 22,
+      "seconds": 27.6
+    },
+    "ci rule (gateway merge): a PASS whose head is red on a defect of master waits without a demotion, and is merged once master is fixed": {
+      "tier": "full",
+      "checks": 14,
+      "seconds": 33.7
+    },
+    "ci rule (gateway merge): a PASS whose head is red for a reason of its own is re-run once, then demoted as before": {
+      "tier": "full",
+      "checks": 11,
+      "seconds": 22.9
+    },
+    "sweep throttle: one full sweep per sweepMinSeconds; a trigger of an item between them gets an incremental pass of that item only": {
+      "tier": "full",
+      "checks": 9,
+      "seconds": 37.6
+    },
+    "github budget: built from the rate-limit headers; below the reserve only essential verbs run, the sweep skips its extra reads; a 403 is a rate limit only when GitHub says so": {
+      "tier": "full",
+      "checks": 14,
+      "seconds": 17.0
+    },
+    "base update: a verdict recorded between the trigger and the delayed update stops the gateway's update": {
+      "tier": "full",
+      "checks": 7,
+      "seconds": 42.5
+    },
+    "base update: a merge to master tells the other owners of open branches with the overlapping files, not the merged pull request's own worker": {
+      "tier": "fast",
+      "checks": 24,
+      "seconds": 51.1
+    },
+    "base update: three merges in a burst give one trigger with the latest master": {
+      "tier": "full",
+      "checks": 8,
+      "seconds": 27.8
+    },
+    "base update: without the webhook the sweep sees master move and triggers": {
+      "tier": "full",
+      "checks": 6,
+      "seconds": 20.4
+    },
+    "base update: a clean pull request that is only behind is updated by the gateway when the owner does not act": {
+      "tier": "full",
+      "checks": 10,
+      "seconds": 30.6
+    },
+    "base update: a pull request in conflict with master is left to its owner": {
+      "tier": "full",
+      "checks": 8,
+      "seconds": 34.2
+    },
+    "base update: with autoUpdateBranch off the gateway updates nothing": {
+      "tier": "full",
+      "checks": 8,
+      "seconds": 33.7
+    },
+    "base update: an item whose PASS verdict waits for its merge gets no trigger": {
+      "tier": "full",
+      "checks": 12,
+      "seconds": 32.5
+    },
+    "base update: a session that reconnects is replayed the latest base.updated only": {
+      "tier": "full",
+      "checks": 7,
+      "seconds": 37.4
+    },
+    "base update (conflict mode): master moves; a clean branch that is behind is left alone, and the owner of a conflicting one is told once, reason conflict": {
+      "tier": "fast",
+      "checks": 18,
+      "seconds": 54.1
+    },
+    "base update (conflict mode): right before the gateway merges a PASS, a branch behind master is brought up to date once, and the new head is merged": {
+      "tier": "full",
+      "checks": 13,
+      "seconds": 48.0
+    },
+    "runner gate: at most runner.maxProcesses rule scripts at once; a freed slot goes to the sweep first, the journal last; a verb that waits too long is runner-busy": {
+      "tier": "full",
+      "checks": 13,
+      "seconds": 39.1
+    },
+    "leader: the lease is a compare-and-swap with a growing epoch; a superseded holder can neither renew nor release; a final snapshot never overwrites a later epoch": {
+      "tier": "fast",
+      "checks": 11,
+      "seconds": 12.8
+    },
+    "leader: two gateways overlap: the newer takes the lease, the older stops acting, writes its final snapshot and hands its streams over; the newer restores it before its first sweep": {
+      "tier": "full",
+      "checks": 15,
+      "seconds": 34.3
+    },
+    "leader: a graceful stop releases the lease; the next start restores at once and renews a claim that ran out while no gateway was up": {
+      "tier": "full",
+      "checks": 8,
+      "seconds": 49.7
+    },
+    "journal fold: repeated matched, waiting and reassigned lines edit one comment per kind; another line ends the fold; folds do not count against the cap": {
+      "tier": "fast",
+      "checks": 26,
+      "seconds": 16.4
     }
   },
   "qc-worker": {
     "qc: worker stop kills the application and the watcher and removes everything": {
       "tier": "full",
       "checks": 19,
-      "seconds": 29.6
+      "seconds": 41.8
     },
     "qc: worker a different sha is refused and nothing is left behind": {
       "tier": "full",
       "checks": 19,
-      "seconds": 25.0
+      "seconds": 35.0
     },
     "qc: worker build failure and build timeout are reported with the log tail": {
       "tier": "full",
       "checks": 28,
-      "seconds": 50.5
+      "seconds": 70.7
     },
     "qc: worker teardown from the gateway stops the application and removes the directory": {
       "tier": "full",
       "checks": 18,
-      "seconds": 26.9
+      "seconds": 40.6
     },
     "qc: worker the watcher reports a killed application and exits": {
       "tier": "full",
       "checks": 18,
-      "seconds": 34.9
+      "seconds": 73.8
     },
     "qc: worker runs a pull request end to end and the gateway marks it ready": {
       "tier": "fast",
       "checks": 38,
-      "seconds": 42.4
+      "seconds": 61.8
     },
     "qc: worker a reset supersedes the old environment and its watcher stops it": {
       "tier": "full",
       "checks": 21,
-      "seconds": 40.1
+      "seconds": 57.8
     },
     "qc: worker re-reports the URL after a gateway restart": {
       "tier": "full",
       "checks": 14,
-      "seconds": 37.9
+      "seconds": 46.5
     },
     "qc: worker the scrubbed environment drops credentials even when the profile asks for them": {
       "tier": "full",
       "checks": 16,
-      "seconds": 30.7
+      "seconds": 39.7
     },
     "qc: worker spawn mode starts a headless QC session for the job and fails the job when it ends early": {
       "tier": "full",
       "checks": 17,
-      "seconds": 25.9
+      "seconds": 38.1
     },
     "qc: worker a loopback or missing address is never reported as the URL": {
       "tier": "full",
       "checks": 28,
-      "seconds": 57.7
+      "seconds": 70.0
     },
     "qc: worker a second environment while at capacity waits for the first to stop": {
       "tier": "full",
       "checks": 23,
-      "seconds": 52.3
+      "seconds": 63.9
     },
     "qc: worker port clash picks the next port and three clashes fail with port-busy": {
       "tier": "full",
       "checks": 37,
-      "seconds": 74.0
+      "seconds": 107.7
     }
   },
   "qc": {
     "qc: eligible item gets one offer comment on the PR and on the item, and no job": {
       "tier": "full",
       "checks": 20,
-      "seconds": 13.7
+      "seconds": 43.6
     },
     "qc: auto-merge, docs-only and fork items get no offer": {
       "tier": "full",
       "checks": 33,
-      "seconds": 10.9
+      "seconds": 53.1
     },
     "qc: a GET of the link has no side effect": {
       "tier": "full",
       "checks": 18,
-      "seconds": 2.8
+      "seconds": 5.9
     },
     "qc: Start is required before any job exists": {
       "tier": "full",
       "checks": 21,
-      "seconds": 12.5
+      "seconds": 52.6
     },
     "qc: forged links are refused with 403": {
       "tier": "full",
       "checks": 23,
-      "seconds": 2.2
+      "seconds": 5.2
     },
     "qc: an expired link is refused with 410": {
       "tier": "full",
       "checks": 12,
-      "seconds": 2.1
+      "seconds": 4.9
     },
     "qc: a stale link offers the current link and queues nothing": {
       "tier": "full",
       "checks": 18,
-      "seconds": 4.4
+      "seconds": 6.7
     },
     "qc: cross-origin and malformed posts are refused": {
       "tier": "full",
       "checks": 27,
-      "seconds": 6.7
+      "seconds": 11.7
     },
     "qc: /qc is not served on the webhook port": {
       "tier": "full",
       "checks": 14,
-      "seconds": 2.5
+      "seconds": 3.7
     },
     "qc: happy path from Start to ready and on to teardown, with the link, the journal and the checks on the stored state": {
       "tier": "fast",
       "checks": 34,
-      "seconds": 3.3
+      "seconds": 43.1
     },
     "qc: clicking twice reuses the environment": {
       "tier": "full",
       "checks": 16,
-      "seconds": 5.0
+      "seconds": 6.6
     },
     "qc: two simultaneous Starts make one record and one job": {
       "tier": "full",
       "checks": 12,
-      "seconds": 4.6
+      "seconds": 7.2
     },
     "qc: a QC accept and a refused release leave the owner of the item alone": {
       "tier": "full",
       "checks": 19,
-      "seconds": 10.6
+      "seconds": 12.8
     },
     "qc: a started QC assignment survives the next sweeps": {
       "tier": "full",
       "checks": 15,
-      "seconds": 23.4
+      "seconds": 26.3
     },
     "qc: hostile text cannot corrupt the state comment or the pages": {
       "tier": "full",
       "checks": 24,
-      "seconds": 3.5
+      "seconds": 7.6
     },
     "qc: URL rules: loopback, userinfo, scheme and the declared address": {
       "tier": "full",
       "checks": 23,
-      "seconds": 4.0
+      "seconds": 7.7
     },
     "qc: a private address is accepted when the worker declared it, and the unverified path": {
       "tier": "full",
       "checks": 40,
-      "seconds": 12.2
+      "seconds": 22.8
     },
     "qc: reset makes a new attempt, a new assignment and kills the old token": {
       "tier": "full",
       "checks": 20,
-      "seconds": 4.5
+      "seconds": 5.8
     },
     "qc: teardown asks the worker to stop and ends when it confirms": {
       "tier": "full",
       "checks": 19,
-      "seconds": 4.5
+      "seconds": 7.9
     },
     "qc: a QC token can do nothing but its own job": {
       "tier": "full",
       "checks": 33,
-      "seconds": 5.4
+      "seconds": 13.6
     },
     "qc: heartbeats and status polls write nothing to GitHub and do not lose fields": {
       "tier": "full",
       "checks": 17,
-      "seconds": 10.2
+      "seconds": 19.8
     },
     "qc: a new head marks the environment stale and rebuilds nothing": {
       "tier": "full",
       "checks": 16,
-      "seconds": 10.7
+      "seconds": 14.7
     },
     "qc: a closed pull request tears the environment down": {
       "tier": "full",
       "checks": 14,
-      "seconds": 4.7
+      "seconds": 7.6
     },
     "qc: webhooks for pull requests and reviews become events": {
       "tier": "full",
       "checks": 11,
-      "seconds": 3.9
+      "seconds": 5.5
     },
     "qc: restart while the environment is ready recovers it": {
       "tier": "full",
       "checks": 29,
-      "seconds": 19.0
+      "seconds": 27.0
     },
     "qc: a Start that found no worker keeps its place across a restart": {
       "tier": "full",
       "checks": 12,
-      "seconds": 8.8
+      "seconds": 13.7
     },
     "qc: configuration guards": {
       "tier": "full",
       "checks": 6,
-      "seconds": 3.4
+      "seconds": 5.8
     },
     "qc: capacity, memory and worker choice": {
       "tier": "full",
       "checks": 34,
-      "seconds": 13.0
+      "seconds": 23.1
     },
     "qc: dashboard data calls need the operator token and the page stays anonymous": {
       "tier": "fast",
-      "checks": 23,
-      "seconds": 2.8
+      "checks": 26,
+      "seconds": 6.0
     },
     "qc: dashboard list shows available, ready, failed and stale rows": {
       "tier": "full",
       "checks": 43,
-      "seconds": 13.4
+      "seconds": 21.5
     },
     "qc: dashboard escapes hostile titles, reasons, authors, urls and addresses": {
       "tier": "full",
       "checks": 17,
-      "seconds": 4.0
+      "seconds": 8.7
     },
     "qc: dashboard Start, Reset and Tear down use the operator token and record the operator": {
       "tier": "full",
       "checks": 19,
-      "seconds": 3.7
+      "seconds": 5.9
     },
     "qc: dashboard Start by the operator is the only way past a trust confirmation": {
       "tier": "full",
       "checks": 14,
-      "seconds": 2.0
+      "seconds": 3.6
     },
     "qc: dashboard Reassign moves the assignment and mints a new assignment id": {
       "tier": "full",
       "checks": 31,
-      "seconds": 10.0
+      "seconds": 15.6
     },
     "qc: dashboard qc-touch extends the lease only in memory": {
       "tier": "full",
       "checks": 21,
-      "seconds": 6.3
+      "seconds": 12.4
     },
     "qc: dashboard worker rows carry the QC column from the registration fields": {
       "tier": "full",
       "checks": 16,
-      "seconds": 4.4
+      "seconds": 7.5
     },
     "qc: dashboard connect prompt generator has the QC environment setup box and flags": {
       "tier": "fast",
@@ -498,239 +973,249 @@
     "qc: gate under the auto policy nothing changed: the label is required and QC is not a gate": {
       "tier": "full",
       "checks": 21,
-      "seconds": 4.0
+      "seconds": 6.4
     },
     "qc: runner pool a pooled call returns the exit code, stdout and stderr of a process call": {
       "tier": "fast",
       "checks": 18,
-      "seconds": 4.7
+      "seconds": 5.2
     },
     "qc: runner pool no state of a call reaches the next call": {
       "tier": "fast",
       "checks": 9,
-      "seconds": 1.4
+      "seconds": 3.0
     },
     "qc: runner pool a killed worker is replaced and calls keep working": {
       "tier": "fast",
       "checks": 9,
-      "seconds": 6.0
+      "seconds": 7.0
     },
     "qc: runner pool the gateway answers the same with and without the pool": {
       "tier": "fast",
       "checks": 12,
-      "seconds": 5.9
+      "seconds": 8.3
     },
     "qc: runner pool a call that does not finish in time fails as a process call does, and its worker is replaced": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 8.5
+      "seconds": 9.8
+    },
+    "qc: dashboard connects from a #token= fragment and removes it from the address bar": {
+      "tier": "fast",
+      "checks": 2,
+      "seconds": 0.0
     }
   },
   "qc-gate": {
     "qc: gate a reset keeps the record of the run for the same head": {
       "tier": "full",
       "checks": 14,
-      "seconds": 27.9
+      "seconds": 58.9
     },
     "qc: gate a person's approval wakes the owner with qc.approved (webhook and sweep), a dismissal clears it, and the retried merge succeeds": {
       "tier": "full",
       "checks": 45,
-      "seconds": 64.7
+      "seconds": 158.2
     },
     "qc: gate a push to a new head needs a new QC run and a new approval": {
       "tier": "full",
       "checks": 28,
-      "seconds": 43.7
+      "seconds": 101.9
     },
     "qc: gate the requirements can be switched off in the configuration": {
       "tier": "full",
       "checks": 21,
-      "seconds": 32.6
+      "seconds": 85.6
     },
     "qc: gate Auto Merge items are unaffected under peer-approved": {
       "tier": "full",
       "checks": 12,
-      "seconds": 15.5
+      "seconds": 56.6
     },
     "qc: gate a non-auto-merge PASS stays on the approval path; merge needs a QC run, then a person, then merges": {
       "tier": "fast",
       "checks": 26,
-      "seconds": 37.6
+      "seconds": 102.6
     },
     "qc: gate documentation-only items are exempt from the QC run but not from the approval": {
       "tier": "full",
       "checks": 12,
-      "seconds": 18.5
+      "seconds": 48.6
     },
     "qc: gate an Auto Merge label added to an item with a live environment tears the environment down": {
       "tier": "full",
       "checks": 22,
-      "seconds": 42.3
+      "seconds": 65.4
+    },
+    "qc: gate a sweep that is still writing the QC offer does not undo an approval recorded meanwhile": {
+      "tier": "full",
+      "checks": 13,
+      "seconds": 59.5
     }
   },
   "author": {
     "author app: the gateway acts as the App, mints once, caches the token and never needs GH_TOKEN": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 3.4
+      "seconds": 12.9
     },
     "author app: state written by an earlier identity is adopted, then continued in the App's own comment": {
       "tier": "full",
       "checks": 5,
-      "seconds": 3.8
+      "seconds": 15.8
     },
     "plugin: a downloaded copy follows the gateway and a working copy is never touched": {
       "tier": "full",
-      "checks": 8,
-      "seconds": 1.7
+      "checks": 11,
+      "seconds": 8.4
     },
     "plugin: the package names no maintainer path and no preinstalled tool": {
       "tier": "fast",
       "checks": 2,
-      "seconds": 0.2
+      "seconds": 0.4
     },
     "plugin: a downloaded plugin runs on a machine with nothing else": {
       "tier": "full",
       "checks": 4,
-      "seconds": 1.8
+      "seconds": 6.9
     }
   },
   "qc-rate": {
     "qc: the 11th click from one address in an hour is rate limited, and a spoofed X-Forwarded-For does not bypass it": {
       "tier": "full",
       "checks": 15,
-      "seconds": 25.6
+      "seconds": 38.6
     }
   },
   "qc-gate-lease": {
     "qc: gate a lost lease relaunches the environment on another worker, up to timing.qcMaxRelaunches, then fails no-worker": {
       "tier": "full",
       "checks": 31,
-      "seconds": 61.7
+      "seconds": 201.4
     }
   },
   "qc-gate-race": {
     "qc: gate a teardown racing a sweep never brings the assignment back and capacity is freed (repeated)": {
       "tier": "full",
       "checks": 45,
-      "seconds": 110.6
+      "seconds": 285.3
     }
   },
   "messaging": {
     "msg: the gateway refuses messaging without owner mode": {
       "tier": "fast",
       "checks": 2,
-      "seconds": 0.5
+      "seconds": 3.7
     },
     "msg: the supervisor needs messaging and refuses to start without it": {
       "tier": "fast",
       "checks": 2,
-      "seconds": 0.4
+      "seconds": 2.6
     },
     "msg: messaging warns that a scale-to-zero environment holds messages": {
       "tier": "fast",
       "checks": 1,
-      "seconds": 0.0
+      "seconds": 0.3
     },
     "msg: reserved names are refused in any case, at every entry point": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 0.7
+      "seconds": 8.7
     },
     "msg: registration values outside the list are refused before anything is recorded": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 0.0
+      "seconds": 1.8
     },
     "msg: a worker token reaches only its own stream, and a forged one is refused": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 0.5
+      "seconds": 10.5
     },
     "msg: every stream event id is <epoch>.<seq>, and a cursor of this epoch replays only newer events, merged by seq": {
       "tier": "fast",
       "checks": 9,
-      "seconds": 2.2
+      "seconds": 3.9
     },
     "msg: no cursor, a bare number or another epoch replays every undelivered message and the whole buffer": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 16.2
+      "seconds": 23.0
     },
     "msg: sends racing reconnects lose nothing and repeat nothing": {
       "tier": "fast",
       "checks": 5,
-      "seconds": 8.8
+      "seconds": 8.6
     },
     "msg: a second client with the same name replaces the first, which exits 40 instead of reconnecting": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 7.8
+      "seconds": 14.7
     },
     "msg: the client stops on a refusal instead of retrying": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 1.3
+      "seconds": 15.2
     },
     "msg: presence is a heartbeat of the session's own credential": {
       "tier": "fast",
       "checks": 11,
-      "seconds": 7.7
+      "seconds": 11.3
     },
     "msg: a restarted client does not print a message it printed before (seen set per epoch)": {
       "tier": "fast",
       "checks": 5,
-      "seconds": 2.9
+      "seconds": 5.0
     },
     "msg: a replayed item.assigned is printed but neither saves a token nor spawns a worker": {
       "tier": "fast",
       "checks": 6,
-      "seconds": 4.5
+      "seconds": 6.6
     },
     "msg: the seen set of one name never touches another name that shares its prefix": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 1.2
+      "seconds": 4.2
     },
     "msg: requests of a name outside allowedWorkers leave no presence entry": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 0.4
+      "seconds": 1.0
     },
     "msg: a stale numeric or old-epoch Last-Event-ID after a gateway restart still delivers": {
       "tier": "full",
       "checks": 5,
-      "seconds": 6.6
+      "seconds": 8.8
     },
     "msg: send reaches only the recipient, and the sender sees each state": {
       "tier": "fast",
       "checks": 13,
-      "seconds": 5.6
+      "seconds": 11.0
     },
     "msg: a poll-only session receives without a stream, is woken at once, and is not assigned work": {
       "tier": "fast",
       "checks": 13,
-      "seconds": 7.0
+      "seconds": 9.8
     },
     "msg: a body never names the sender: forged-sender is refused, and honest use is not": {
       "tier": "fast",
       "checks": 11,
-      "seconds": 0.1
+      "seconds": 3.7
     },
     "msg: the wrong credential, the wrong name or the wrong fields are refused": {
       "tier": "fast",
       "checks": 41,
-      "seconds": 0.5
+      "seconds": 1.3
     },
     "msg: a text over a size limit is refused and nothing is stored": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 0.0
+      "seconds": 1.9
     },
     "msg: text that looks like a credential is refused, and ordinary words about tokens pass": {
       "tier": "fast",
       "checks": 24,
-      "seconds": 0.1
+      "seconds": 0.2
     },
     "msg: a retry with the same clientId delivers once, per sender": {
       "tier": "fast",
@@ -740,62 +1225,62 @@
     "msg: the operator writes to a worker, and a worker sees it as the operator": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 0.8
+      "seconds": 4.2
     },
     "msg: replay of undelivered messages, delivered versus handled, and idempotent acknowledgement": {
       "tier": "fast",
       "checks": 20,
-      "seconds": 5.8
+      "seconds": 17.4
     },
     "msg: a cursor of this epoch delivers only the newer messages of a real send": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 2.5
+      "seconds": 7.2
     },
     "msg: wait-event --messages returns a trigger and a message together, and times out with neither": {
       "tier": "fast",
       "checks": 10,
-      "seconds": 8.4
+      "seconds": 11.5
     },
     "msg: a send wakes every poller of the recipient at once": {
       "tier": "fast",
       "checks": 5,
-      "seconds": 2.4
+      "seconds": 3.6
     },
     "msg: injected text stays inside the text of one envelope line": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 2.3
+      "seconds": 2.8
     },
     "msg: the strip set is applied to every printed field": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 1.2
+      "seconds": 2.1
     },
     "msg: a text aimed at the model is flagged and withheld, and read with inbox --id": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 1.0
+      "seconds": 1.7
     },
     "msg: a message never changes an item, an assignment or the verb count": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 7.5
+      "seconds": 8.1
     },
     "msg: the traffic log and the refusal ring are the operator's, and hold the text only of what was accepted": {
       "tier": "fast",
       "checks": 10,
-      "seconds": 0.0
+      "seconds": 0.1
     },
     "msg: a muted or closed session is told, and still receives what it may": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 0.0
+      "seconds": 0.1
     },
     "msg: the credential carries presence only when it is the session itself": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 0.0
+      "seconds": 0.1
     },
     "msg: the test seam refuses a body over 64 KB": {
       "tier": "fast",
@@ -805,37 +1290,37 @@
     "msg: limits from the config, a burst, the minute, a pair, and expiry": {
       "tier": "full",
       "checks": 13,
-      "seconds": 33.3
+      "seconds": 37.9
     },
     "msg: queue caps count undelivered peer notes only, and an operator note is exempt": {
       "tier": "full",
       "checks": 8,
-      "seconds": 2.5
+      "seconds": 5.4
     },
     "msg: 200 real sends racing 20 reconnects lose nothing and repeat nothing": {
       "tier": "full",
       "checks": 5,
-      "seconds": 9.1
+      "seconds": 12.9
     },
     "msg: the inbox, the acknowledgement, the state and the verbs refuse the wrong caller and the wrong arguments": {
       "tier": "fast",
       "checks": 29,
-      "seconds": 0.5
+      "seconds": 6.1
     },
     "msg: a message already printed is not printed again, and its lost acknowledgement is repeated": {
       "tier": "fast",
       "checks": 5,
-      "seconds": 1.3
+      "seconds": 2.9
     },
     "msg: no message text is in any gateway log or any item comment": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 3.2
+      "seconds": 3.6
     },
     "msg: a gateway restart voids the inbox cursor, and a long poll rides it out": {
       "tier": "full",
       "checks": 7,
-      "seconds": 18.6
+      "seconds": 20.5
     },
     "msg: a long text is shown to 1,000 characters, and the whole of it is read with inbox --id": {
       "tier": "fast",
@@ -845,42 +1330,42 @@
     "msg: the presence verb sets the summary, once in ten seconds, and refuses a credential in it": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 0.2
+      "seconds": 1.9
     },
     "msg: the heartbeat is not starved by spawn watchers, restarts when its job ended, and a queued job is not duplicated": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 5.1
+      "seconds": 6.4
     },
     "msg: FACTORY_HEARTBEAT_SECONDS=0 is floored to one second": {
       "tier": "fast",
       "checks": 1,
-      "seconds": 5.1
+      "seconds": 6.1
     },
     "msg: the peer list shows the sessions a worker may see, with nothing of addresses, tokens or ids": {
       "tier": "fast",
-      "checks": 25,
-      "seconds": 3.5
+      "checks": 26,
+      "seconds": 8.9
     },
     "msg: a broadcast reaches every allowed peer except the sender, in part where a recipient refuses": {
       "tier": "fast",
       "checks": 18,
-      "seconds": 3.0
+      "seconds": 5.1
     },
     "msg: the owner and the inspector of one item cannot message each other, and a broadcast skips the other": {
       "tier": "fast",
       "checks": 11,
-      "seconds": 0.9
+      "seconds": 3.6
     },
     "msg: an item thread reaches the QC worker of the owner's item and never the inspector": {
       "tier": "fast",
       "checks": 14,
-      "seconds": 0.3
+      "seconds": 5.1
     },
     "msg: headless inspector and QC processes get the item token, never the worker credential": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 4.5
+      "seconds": 7.7
     },
     "msg: a body with a duplicate key is a usage refusal, never a server error": {
       "tier": "fast",
@@ -890,12 +1375,12 @@
     "msg: wait-event --messages drops a stale cursor, and exits 21 when all it got was printed before": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 1.7
+      "seconds": 3.2
     },
     "msg: a held questions lock does not swallow a message that was recorded as seen": {
       "tier": "fast",
       "checks": 1,
-      "seconds": 10.2
+      "seconds": 10.3
     },
     "msg: the question endpoints answer manager-disabled while the supervisor is off": {
       "tier": "fast",
@@ -905,284 +1390,309 @@
     "msg: online, away and offline follow the configured windows": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 24.8
+      "seconds": 25.1
     },
     "msg: a QC job whose item token is missing spawns nothing and says so": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 4.2
+      "seconds": 6.2
     },
     "msg: the operator sets a session's messaging mode, a session cannot set its own, and the operator sees sessions that are on no list": {
       "tier": "fast",
       "checks": 14,
-      "seconds": 0.5
+      "seconds": 1.9
     },
     "msg: the operator switches messaging off and on while sessions run: they are told once, the heartbeat stops and starts, inboxes are discarded": {
       "tier": "fast",
       "checks": 20,
-      "seconds": 12.6
+      "seconds": 13.9
     },
     "msg: the status counts messages by state and refusals by code, and carries none of their text": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 0.0
+      "seconds": 2.3
     },
     "msg: spawned owner, inspector and QC processes never have FACTORY_SUPERVISOR_TOKEN in their environment": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 2.9
+      "seconds": 8.3
     },
     "msg: a worker spawned from the broadcast stream never has FACTORY_SUPERVISOR_TOKEN in its environment": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 5.8
+      "seconds": 7.0
     },
     "msg: a session whose client stopped is away, then offline, and online again when it is back": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 22.4
+      "seconds": 24.2
     },
     "msg: a thousand refused notes of one noisy sender do not push another sender's refusal out of the ring": {
       "tier": "fast",
       "checks": 6,
-      "seconds": 0.4
+      "seconds": 1.3
+    },
+    "msg: every event stream writes a ping comment at the configured interval, and the client shows none of them": {
+      "tier": "fast",
+      "checks": 4,
+      "seconds": 30.3
+    },
+    "msg: every stream line fits 500 characters: a long note arrives cut with read, inbox --id prints it whole, and an inbox answer stops before 24,000 characters": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 2.1
+    },
+    "msg: a long text arrives cut to fit the stream line, and the whole of it is read with inbox --id": {
+      "tier": "fast",
+      "checks": 5,
+      "seconds": 2.1
+    },
+    "msg: a new session leaves out the replayed history of items its name no longer owns, and a reconnect does not repeat an unchanged peers.snapshot": {
+      "tier": "full",
+      "checks": 7,
+      "seconds": 11.6
+    },
+    "msg: the client reports a lost stream only after 2 failed reconnects": {
+      "tier": "fast",
+      "checks": 2,
+      "seconds": 7.7
     }
   },
   "manager": {
     "mgr: the supervisor name is reserved for the supervisor credential": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 0.1
+      "seconds": 0.7
     },
     "mgr: a supervisor token is checked against its name, its generation and its MAC": {
       "tier": "fast",
       "checks": 5,
-      "seconds": 0.0
+      "seconds": 0.6
     },
     "mgr: the supervisor token opens no worker stream and no trigger wait, and downloads the plugin": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 0.0
+      "seconds": 0.6
     },
     "mgr: the supervisor reads items and PR checks, and writes nothing": {
       "tier": "fast",
       "checks": 14,
-      "seconds": 4.1
+      "seconds": 15.1
     },
     "mgr: only the operator issues a supervisor credential, and only for an allowed name": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 4.0
+      "seconds": 17.1
     },
     "mgr: the supervisor registers in its own slot with its declared model, never as a worker": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 2.6
+      "seconds": 12.4
     },
     "mgr: another supervisor name is refused while the first is heard, and the same name replaces its stream": {
       "tier": "fast",
       "checks": 5,
-      "seconds": 0.0
+      "seconds": 1.4
     },
     "mgr: worker-token --role manager needs messaging on, and an absent tokenGeneration is 1": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 2.1
+      "seconds": 4.0
     },
     "mgr: manager.allowedAskers names nobody unless it is listed": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 0.5
+      "seconds": 0.8
     },
     "mgr: an idle heartbeating supervisor is not taken over; a silent one is, after mgrTakeoverSeconds": {
       "tier": "full",
       "checks": 4,
-      "seconds": 26.1
+      "seconds": 26.4
     },
     "mgr: ask records the question, says at once that no supervisor is there, and does not wait": {
       "tier": "fast",
       "checks": 6,
-      "seconds": 1.3
+      "seconds": 20.5
     },
     "mgr: ask --wait returns the answer as an envelope, once, and closes the question": {
       "tier": "fast",
       "checks": 11,
-      "seconds": 2.8
+      "seconds": 5.3
     },
     "mgr: ask --wait that gets no answer ends pending, and the operator can answer instead": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 4.6
+      "seconds": 10.4
     },
     "mgr: three open questions at most, one per item, six an hour": {
       "tier": "fast",
       "checks": 6,
-      "seconds": 0.5
+      "seconds": 1.0
     },
     "mgr: a question by the wrong credential, to the wrong size or with a secret is refused": {
       "tier": "fast",
       "checks": 13,
-      "seconds": 0.6
+      "seconds": 2.6
     },
     "mgr: the state of a message is its sender's: unknown, someone else's, and an earlier run's": {
       "tier": "fast",
       "checks": 10,
-      "seconds": 0.9
+      "seconds": 18.9
     },
     "mgr: the supervisor's only note target is the operator, it reads its own inbox, and cannot see the log": {
       "tier": "fast",
       "checks": 9,
-      "seconds": 0.0
+      "seconds": 0.9
     },
     "mgr: a verb-only supervisor is not shown as present, and asks find none": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 1.2
+      "seconds": 3.0
     },
     "mgr: open questions are asked once more after a gateway restart, by the stream and by the poll": {
       "tier": "full",
       "checks": 10,
-      "seconds": 6.5
+      "seconds": 9.1
     },
     "mgr: an ask --wait interrupted by a restart asks again once and returns the answer": {
       "tier": "full",
       "checks": 7,
-      "seconds": 21.3
+      "seconds": 22.1
     },
     "mgr: a muted session may still ask, a session that is off may not": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 0.0
+      "seconds": 0.6
     },
     "mgr: workers are told once when the supervisor joins, again when its model changes, and when it has left": {
       "tier": "fast",
       "checks": 15,
-      "seconds": 15.3
+      "seconds": 15.9
     },
     "mgr: questions leave as one batch per window, wait while a batch is unanswered, and split at batchMax": {
       "tier": "fast",
       "checks": 14,
-      "seconds": 22.2
+      "seconds": 28.4
     },
     "mgr: questions asked before the supervisor connects arrive on connect, and a supervisor that starts again gets the open ones, split at batchMax": {
       "tier": "fast",
       "checks": 9,
-      "seconds": 4.4
+      "seconds": 14.3
     },
     "mgr: the first answer wins between the operator and the supervisor, and a wrong answer or caller is refused": {
       "tier": "fast",
       "checks": 25,
-      "seconds": 0.9
+      "seconds": 1.1
     },
     "mgr: a directive reaches one worker, an announcement every worker session once, and the supervisor's sends have their own limit": {
       "tier": "fast",
       "checks": 22,
-      "seconds": 7.5
+      "seconds": 16.7
     },
     "mgr: an unanswered question turns late, escalates once with one journal comment on an item its asker owns, and is moot when the asker loses the item": {
       "tier": "fast",
       "checks": 18,
-      "seconds": 20.8
+      "seconds": 25.4
     },
     "mgr: the escalation comment waits out a busy item lock and is posted when the lock frees": {
       "tier": "full",
       "checks": 3,
-      "seconds": 63.4
+      "seconds": 63.8
     },
     "mgr: a spent delivery budget stops the batches and tells the askers supervisor-budget": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 11.3
+      "seconds": 13.4
     },
     "mgr: text that comes from a message enters an item only as a marked block, which get-item labels and inspect-facts leaves out": {
       "tier": "fast",
       "checks": 29,
-      "seconds": 3.2
+      "seconds": 7.6
     },
     "mgr: the plant data follows the sweep and the verbs: waiting code, column and lease, activity per item, refusals, and an owner the sweep stops listing": {
       "tier": "fast",
       "checks": 17,
-      "seconds": 18.2
+      "seconds": 19.5
     },
     "mgr: a supervisor that was replaced by another name is refused, and its successor gets the open questions whatever cursor it sends": {
       "tier": "fast",
       "checks": 6,
-      "seconds": 11.3
+      "seconds": 11.6
     },
     "mgr: an owner is dropped only after the grace and two sweeps in a row that omit it; a settling or unread item keeps its owner": {
       "tier": "fast",
       "checks": 6,
-      "seconds": 5.6
+      "seconds": 7.2
     },
     "mgr: an idle plant sends no patrol; a stall is reported once per bucket and per item, a known wait is none, and activity clears it": {
       "tier": "fast",
       "checks": 15,
-      "seconds": 50.5
+      "seconds": 53.5
     },
     "mgr: an acknowledged patrol is muted, an unacknowledged one is repeated once, and a baseline is sent only when something needs a decision, once": {
       "tier": "fast",
       "checks": 25,
-      "seconds": 39.3
+      "seconds": 40.4
     },
     "mgr: the digest reports a disconnected owner, a late question, waiting, refusals and parks with gateway values only, flags what is new, and stays under its cap": {
       "tier": "fast",
       "checks": 15,
-      "seconds": 22.3
+      "seconds": 21.6
     },
     "mgr: questions cannot use the patrols' reserve, a spent budget drops patrols until the operator grants more, and the supervisor's steps are capped": {
       "tier": "fast",
       "checks": 20,
-      "seconds": 25.4
+      "seconds": 26.5
     },
     "mgr: a weak or undeclared model is flagged to the operator and the workers, and refused only when the gateway enforces it": {
       "tier": "fast",
       "checks": 11,
-      "seconds": 0.6
+      "seconds": 0.8
     },
     "mgr: a new owner does not inherit a sweep that missed the previous owner": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 4.6
+      "seconds": 4.7
     },
     "mgr: the day keeps the patrols' reserve too: questions stop 24 reserved deliveries short of the day's budget": {
       "tier": "fast",
       "checks": 2,
-      "seconds": 30.2
+      "seconds": 30.7
     },
     "mgr: the supervisor client runs the routine end to end: a batch as one envelope, one batch answer, a patrol, a note to the operator, one directive and the acknowledgement": {
       "tier": "fast",
       "checks": 60,
-      "seconds": 25.9
+      "seconds": 32.9
     },
     "mgr: the supervisor client reads items with its own credential, is refused every other verb in the gateway's words, and gets the plugin its prompt downloads": {
       "tier": "fast",
       "checks": 15,
-      "seconds": 1.5
+      "seconds": 3.9
     },
     "mgr: a supervisor credential that does not hold the slot is not heard: no presence, no inbox, no acknowledgement": {
       "tier": "fast",
       "checks": 6,
-      "seconds": 0.6
+      "seconds": 0.7
     },
     "mgr: a patrol delivered first does not use up the questions' share of the day": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 8.2
+      "seconds": 8.3
     },
     "mgr: switching messaging on after a long switch-off reports no owner as disconnected whose stream stayed open": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 21.7
+      "seconds": 21.9
     },
     "mgr: the dashboard shows sessions with the pinned supervisor, questions with an answer box, the traffic and the cost, and no session's text ever becomes markup": {
       "tier": "fast",
-      "checks": 31,
-      "seconds": 9.1
+      "checks": 37,
+      "seconds": 27.0
     },
     "mgr: the connect prompts: the worker prompt gains the messaging rule only where messaging is on, and the supervisor prompt declares the model and never polls": {
       "tier": "fast",
       "checks": 10,
-      "seconds": 0.2
+      "seconds": 0.5
     },
     "mgr: the worker connect prompt with messaging off is byte for byte the one main produces, and gen-connect-prompt.sh still renders it": {
       "seconds": 2.5,
@@ -1197,104 +1707,244 @@
     "mgr: a session started with both FACTORY_TOKEN and FACTORY_SUPERVISOR_TOKEN is warned once at its start, and neither token is printed": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 1.7
+      "seconds": 3.6
     },
     "mgr: the supervisor credential is read from the keyring when the variable is not set": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 1.2
+      "seconds": 3.3
     },
     "mgr: a supervisor that only polls stays present, and one that stops is absent": {
       "tier": "fast",
       "checks": 4,
-      "seconds": 15.4
+      "seconds": 15.6
     },
     "mgr: no note, thread post or broadcast among workers ever reaches the supervisor": {
       "tier": "fast",
       "checks": 5,
-      "seconds": 4.6
+      "seconds": 4.7
     },
     "mgr: an answer, a directive and an operator note reach a session whose inbox is full of peer notes": {
       "tier": "fast",
       "checks": 7,
-      "seconds": 3.2
+      "seconds": 7.5
     },
     "mgr: an answer and a directive that say merge, approve and move to Done change nothing of the item, and the owner's merge is still refused by its gate": {
       "tier": "fast",
       "checks": 8,
-      "seconds": 14.7
+      "seconds": 25.9
     },
     "mgr: ten workers asking at their limit cost the supervisor the hour's budget and no more: ten question batches, two patrols, sixty steps": {
       "tier": "fast",
       "checks": 13,
-      "seconds": 34.3
+      "seconds": 35.6
     },
     "plant: an offer waits 120 seconds for its accept by default, and FACTORY_TIMING_assignAckSeconds overrides it": {
       "tier": "fast",
       "checks": 3,
-      "seconds": 2.0
+      "seconds": 2.7
     },
     "revoke: the operator revokes a name: every credential of it is refused, its stream ends, a new credential works, and a restart keeps it": {
       "tier": "fast",
-      "checks": 28,
-      "seconds": 15.5
+      "checks": 34,
+      "seconds": 42.8
     },
     "mgr: the worker connect prompt with messaging off is the one main produces plus the stream note, and gen-connect-prompt.sh still renders it": {
       "tier": "fast",
-      "checks": 31,
-      "seconds": 0.9
+      "checks": 32,
+      "seconds": 1.8
     },
     "mgr: an operator note reaches the supervisor as operator.note: queued until it connects, outside both budgets, and from the operator only": {
       "tier": "fast",
       "checks": 13,
-      "seconds": 7.2
+      "seconds": 7.4
     },
     "mgr: the operator's note to all reaches every worker and the supervisor once, and their replies come back with in_reply_to and are marked read": {
       "tier": "fast",
       "checks": 17,
-      "seconds": 4.4
+      "seconds": 6.4
     },
     "mgr: the dashboard has a Message control on every session row and the supervisor row, Message all, and an operator inbox with a reply box; hostile text never becomes markup": {
       "tier": "fast",
       "checks": 21,
-      "seconds": 20.5
+      "seconds": 23.0
+    },
+    "revoke: more revocation refs than one page on a GitHub that does not page: the reader ends and the gateway becomes ready": {
+      "tier": "fast",
+      "checks": 4,
+      "seconds": 6.1
+    },
+    "lease: the stream client sends the work it sees on its machine (a progress file, a changed worktree) with the heartbeat; an item.check is answered by the client itself": {
+      "tier": "full",
+      "checks": 10,
+      "seconds": 87.9
+    },
+    "act: the supervisor drains and resumes a name, the operator's drain wins, release-owner lets the owner go, restart-session ends the session through its end marker, and the hourly limit holds": {
+      "tier": "fast",
+      "checks": 19,
+      "seconds": 16.2
+    },
+    "keeper: replenish creates one docs-only item per Done item on the board in Technical Design, never above targetOpen or maxPerDay, and shows its counts in /status": {
+      "tier": "fast",
+      "checks": 10,
+      "seconds": 36.8
+    },
+    "sweep: an item new on the board is offered after a short second look, not a whole sweep interval later": {
+      "tier": "full",
+      "checks": 3,
+      "seconds": 19.4
+    },
+    "lease: the client accepts an owner offer itself (acceptedBy client); the session never starts, so after the lease the item is taken back and offered again in resume mode": {
+      "tier": "fast",
+      "checks": 9,
+      "seconds": 25.0
+    },
+    "lease: an owner whose complete answered continue and that calls nothing more for the item within continueMinutes is taken back at once (issue 76); one that goes on keeps it": {
+      "tier": "fast",
+      "checks": 11,
+      "seconds": 33.9
+    },
+    "keeper: split-item creates ordered children and closes the parent; create-item pins the next free worker at top priority; link-dependency; the day's limit; a thin backlog sends backlog-low": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 12.7
+    },
+    "mgr: a spent delivery budget drops the patrol of a reported condition until the operator grants more, a restart is reported, and with messaging off none of it exists": {
+      "tier": "fast",
+      "checks": 9,
+      "seconds": 14.5
+    },
+    "start: while GitHub does not answer the revocation read /ready is 503 with the reason, /health is 200 and no credential is accepted; when it answers the gateway is ready": {
+      "tier": "full",
+      "checks": 8,
+      "seconds": 51.8
+    },
+    "mgr: pr-checks gives the supervisor the detail and the baseline of any pull request; the flags it may not send are dropped": {
+      "tier": "full",
+      "checks": 5,
+      "seconds": 2.3
+    },
+    "lease: items taken back from a session count as misses and the client's accept is no answer; after two in a row the session is blocked until it calls a verb of its own": {
+      "tier": "fast",
+      "checks": 12,
+      "seconds": 34.8
+    },
+    "mgr: a session that asks the same question a third time is told session.restart": {
+      "tier": "fast",
+      "checks": 4,
+      "seconds": 20.1
+    },
+    "mgr: the digest reports the last review round, exhausted rounds, a worker's note to the operator, failed verbs and a refused merge, as codes and numbers only, once and once more when they persist": {
+      "tier": "fast",
+      "checks": 19,
+      "seconds": 22.8
+    },
+    "start: with owner sessions off or no GitHub identity the gateway is ready at once, /status names the reason and revoke is refused": {
+      "tier": "fast",
+      "checks": 15,
+      "seconds": 10.5
+    },
+    "mgr: the same question about the same item within the hour is relayed once; the repeat answers with the first question": {
+      "tier": "fast",
+      "checks": 8,
+      "seconds": 4.8
+    },
+    "lease: progress counts only within progressMaxMinutes of the session's own last verb; after it the check stands and the item is taken back": {
+      "tier": "full",
+      "checks": 4,
+      "seconds": 54.9
+    },
+    "mgr: an owned item without a verb is item-quiet once per bucket; a QC wait, a held item, a pinned item nobody owns and an owner that calls verbs are none": {
+      "tier": "fast",
+      "checks": 8,
+      "seconds": 27.4
+    },
+    "mgr: the same supervisor joining a restarted gateway is not printed again by a stream client": {
+      "tier": "full",
+      "checks": 5,
+      "seconds": 9.5
+    },
+    "mgr: what the patrol reported survives a restart: with the plant snapshot restored, a condition that persists is not new again": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 4.1
+    },
+    "lease: local progress sent with the heartbeat keeps a busy owner without verbs; once it stops the item gets item.check, and newer progress answers it": {
+      "tier": "fast",
+      "checks": 10,
+      "seconds": 80.3
+    },
+    "act: the plan offers a top item before a high one before the rest, after the pins; the day's summary is due once and metrics and act-log answer the supervisor only": {
+      "tier": "fast",
+      "checks": 15,
+      "seconds": 14.7
+    },
+    "mgr: a real sweep keeps the owner of an item it could not read, and drops the owner it no longer lists, that of a settling item too": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 20.8
+    },
+    "mgr: the Release Queue is reported when it ages or grows, each release is announced to the operator once, and a promotion request is only recorded": {
+      "tier": "fast",
+      "checks": 19,
+      "seconds": 11.3
+    },
+    "lease: a verb and a heartbeat that names the item renew its lease; a quiet owner gets item.check, and an item whose check nobody answers is taken back": {
+      "tier": "fast",
+      "checks": 11,
+      "seconds": 55.3
+    },
+    "act: the supervisor unparks, pins and prioritizes an item, each journaled with its policy; the fourth action of a day, hold:owner, advise mode and the never-verbs are refused": {
+      "tier": "fast",
+      "checks": 34,
+      "seconds": 6.9
+    },
+    "act: unpark refuses the parks only a person ends, requeue refuses an owned or parked item, and rerun-failed re-runs the failed jobs of the head once": {
+      "tier": "fast",
+      "checks": 25,
+      "seconds": 7.5
+    },
+    "keeper: a worker-failure park sends the keeper a job; it amends a timing criterion keeping the original, with a follow-up and the park released; protected and held items are refused": {
+      "tier": "fast",
+      "checks": 22,
+      "seconds": 11.8
     }
   },
   "mcp": {
     "mcp: the legacy kinds map to role principals: the admin token is the owner, a worker credential a seat; /status shows mode and role": {
-      "checks": 2,
       "tier": "fast",
-      "seconds": 3.6
+      "checks": 2,
+      "seconds": 5.6
     },
     "mcp: the owner (admin token) lists the owner read tools; a missing, forged or roleless credential is refused before the server": {
-      "checks": 4,
       "tier": "fast",
-      "seconds": 0.7
+      "checks": 4,
+      "seconds": 3.1
     },
     "mcp: owner read tools answer what the /api/v1 endpoints answer; refusals keep the endpoint's code": {
-      "checks": 9,
       "tier": "fast",
-      "seconds": 5.4
+      "checks": 9,
+      "seconds": 11.2
     },
     "mcp: a legacy item token is accepted at /mcp as the worker role; a seat r1 and a w1 have no tools": {
-      "checks": 6,
       "tier": "fast",
-      "seconds": 5.8
+      "checks": 6,
+      "seconds": 7.4
     },
     "mcp: a worker r1 registers at its first call, gets its offer by next_event without the item token, accepts and works its item through the verbs": {
-      "checks": 22,
       "tier": "fast",
-      "seconds": 8.1
+      "checks": 22,
+      "seconds": 8.5
     },
     "mcp: an r1 round trip: minted, verified for its role, expired, revoked by generation, another environment and another kind's MAC refused": {
-      "checks": 13,
       "tier": "fast",
-      "seconds": 5.1
+      "checks": 13,
+      "seconds": 5.7
     },
     "mcp: get_prompt serves the prompt of the session's role and phase, with the common rules and its agent's section; /_build reports promptsHash": {
-      "checks": 8,
       "tier": "fast",
-      "seconds": 0.1
+      "checks": 8,
+      "seconds": 0.0
     }
   },
   "cursor": {
@@ -1317,85 +1967,110 @@
       "checks": 2,
       "tier": "fast",
       "seconds": 7.0
+    },
+    "cursor: an item labelled runtime:cursor-cloud launches one agent with the bootstrap prompt, the repository at master and the gateway's /mcp with an r1; the agent works the item by MCP; session_end ends the run and keeps the agent as the item's owner": {
+      "tier": "fast",
+      "checks": 31,
+      "seconds": 44.7
+    },
+    "cursor: code items are allowed: a code item in Development without a runtime: label is routed to cursor-cloud by default and gets an agent": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 32.3
+    },
+    "cursor: one agent owns the item to production: Development and Functional Testing are follow-up runs of the same agent, the gateway settles Development from its pull request, and the owner is done (the agent kept, never deleted) only after the merge, a green master and the production delivery": {
+      "tier": "fast",
+      "checks": 17,
+      "seconds": 128.7
+    },
+    "cursor: a launch refused for the team's usage limit is a quota block, not a failure: the item waits, starts pause, the owner action shows, and the probe after quotaRetryMinutes clears it": {
+      "tier": "fast",
+      "checks": 4,
+      "seconds": 32.3
+    },
+    "cursor: an agent that ends by itself is kept as the owner and its item taken back; a restarted gateway deletes no agent and keeps the owner agent": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 17.3
     }
   },
   "envscope": {
     "env label: two gateways on one board each act only on items of their own env: label; unlabelled and doubly labelled items are nobody's": {
-      "checks": 21,
       "tier": "fast",
-      "seconds": 30.0
+      "checks": 21,
+      "seconds": 51.1
     }
   },
   "operator": {
     "op: a failure report of the owner arrives as parked with its reason and the column it was called for, not as a completed column": {
-      "checks": 4,
       "tier": "fast",
-      "seconds": 2.8
+      "checks": 4,
+      "seconds": 3.1
     },
     "op: revoke kills the operator credential: its stream ends, the old credential is unknown, and a new one works": {
-      "checks": 7,
       "tier": "fast",
-      "seconds": 2.8
+      "checks": 7,
+      "seconds": 1.6
     },
     "op: release-check answers not quiet with an owner mid-verb, an open question or a pending offer, with the reasons, and quiet otherwise": {
-      "checks": 8,
       "tier": "fast",
-      "seconds": 9.8
+      "checks": 8,
+      "seconds": 6.0
     },
     "op: with operator.enabled false every operator call is refused, the status has no operator block, and without messaging the gateway does not start": {
-      "checks": 6,
       "tier": "fast",
-      "seconds": 2.9
+      "checks": 6,
+      "seconds": 1.8
     },
     "op: every endpoint outside its list refuses the operator credential: mint, revoke, the messaging switch, verbs and the test seams": {
-      "checks": 4,
       "tier": "fast",
+      "checks": 4,
       "seconds": 0.1
     },
     "op: the worker and supervisor prompts are unchanged, the operator prompt clones the product and names its skill, the page shows the operator, and gen-connect-prompt.sh writes the prompt": {
-      "checks": 8,
       "tier": "fast",
-      "seconds": 1.6
+      "checks": 8,
+      "seconds": 2.5
     },
     "op: it sends a note to a worker, to the supervisor and to all, reads the log and the questions, answers, sets a mode and grants budget; the real client does the same": {
-      "checks": 21,
       "tier": "fast",
-      "seconds": 7.0
+      "checks": 21,
+      "seconds": 14.6
     },
     "op: a worker or supervisor credential, and an operator credential that does not hold the slot, cannot use the operator endpoints": {
-      "checks": 5,
       "tier": "fast",
+      "checks": 5,
       "seconds": 0.0
     },
     "op: it drains and resumes a worker name as the operator does, the drain holds across a new session of the name, it sets a capacity and reads the metrics; nobody else gets these": {
-      "checks": 22,
       "tier": "fast",
-      "seconds": 16.3
+      "checks": 22,
+      "seconds": 23.2
     },
     "op: it registers and holds the one slot, a second name is refused and takes over after the window, and the model check is reported": {
-      "checks": 9,
       "tier": "fast",
-      "seconds": 6.5
+      "checks": 9,
+      "seconds": 6.3
     },
     "op: record-release counts a self-merged release once, the count survives a gateway restart, and at the limit the next check is refused": {
-      "checks": 9,
       "tier": "fast",
-      "seconds": 67.7
+      "checks": 9,
+      "seconds": 75.0
     },
     "op: a worker's and the supervisor's notes to the operator and a plant event for each item milestone arrive on its stream, with codes and never free text": {
-      "checks": 10,
       "tier": "fast",
-      "seconds": 4.6
+      "checks": 10,
+      "seconds": 4.7
     },
     "op: the operator credential is minted only by the admin token, for an allowed name, and a forged one is refused": {
-      "checks": 7,
       "tier": "fast",
-      "seconds": 2.2
+      "checks": 7,
+      "seconds": 4.7
     },
     "op: its note waits in a worker's inbox like the operator's: queued while the worker is away, read, acknowledged, quoted with --from-message, once per worker for a note to all, and as an answer": {
-      "checks": 14,
       "tier": "fast",
-      "seconds": 14.6
+      "checks": 14,
+      "seconds": 19.7
     }
   },
   "copilot": {
@@ -1405,29 +2080,29 @@
       "seconds": 16.5
     },
     "copilot: the default runtime takes an unlabelled code item to Development with a pull request by Copilot; pr_open takes over its draft on the copilot/ branch; Functional Testing starts from that branch": {
-      "checks": 12,
       "tier": "fast",
-      "seconds": 17.1
+      "checks": 13,
+      "seconds": 25.1
     },
     "copilot: Development tasks that end their session without finishing the phase are launched at most api.copilot.maxLaunchesPerPhase (3) times in a row, then the item is parked, not relaunched": {
-      "checks": 11,
       "tier": "fast",
-      "seconds": 34.1
+      "checks": 11,
+      "seconds": 46.9
     },
     "copilot: fworker-mcp accepts only the three factory gateways (https, no path) or its configured URL, each with its own bootstrap token": {
-      "checks": 9,
       "tier": "fast",
-      "seconds": 0.3
+      "checks": 9,
+      "seconds": 0.6
     },
     "copilot: an item labelled runtime:copilot-cloud creates one agent task with the phase prompt and a one-time code; the code and the bootstrap token give the r1 once; session_end ends the task and revokes it": {
-      "checks": 18,
       "tier": "fast",
-      "seconds": 11.7
+      "checks": 23,
+      "seconds": 14.8
     },
     "copilot: fworker-mcp, the stdio proxy the gateway serves, connects with the code and the bootstrap token and proxies the phase's tools": {
-      "checks": 11,
       "tier": "fast",
-      "seconds": 15.1
+      "checks": 11,
+      "seconds": 12.5
     },
     "copilot: a task that ends by itself ends its worker and reports its premium requests; a failed create frees the slot; a task past api.copilot.maxMinutes fails and its code dies": {
       "checks": 7,
@@ -1435,143 +2110,376 @@
       "seconds": 36.1
     },
     "copilot: CI release: the gateway re-runs a held (action_required) workflow run of the item's copilot/ pull request head with its App, once; a head mismatch and another env's item are skipped; a 403 is surfaced as an owner action": {
-      "checks": 12,
       "tier": "fast",
-      "seconds": 86.5
+      "checks": 14,
+      "seconds": 94.9
     },
     "copilot: CI release: passes run with no candidate item; an unlabelled item routed to copilot-cloud by runtimes.routing has its held run released": {
-      "checks": 3,
       "tier": "fast",
-      "seconds": 18.2
+      "checks": 3,
+      "seconds": 21.4
     },
     "copilot: the gateway owns Development's end: a task that ends after pushing (no pr_open, no item_complete, even a reported failure) has its draft taken over by the branch of its artifacts; the item waits for its checks in the gateway and moves on when they are green; no second Development task": {
-      "checks": 8,
       "tier": "fast",
-      "seconds": 13.8
+      "checks": 8,
+      "seconds": 30.9
     },
     "copilot: the credit guard ends a task over api.copilot.maxCreditsPerTask and parks its item credit-guard; after an unpark, an item whose pull request already carries the change starts no new Development task: it waits for its checks": {
-      "checks": 9,
       "tier": "fast",
-      "seconds": 20.6
+      "checks": 9,
+      "seconds": 21.5
     },
     "copilot: a fix-forward draft that GitHub will not retarget (part of a stack, 422) is closed and the item's pull request is opened on its branch, superseding the old one": {
-      "checks": 6,
       "tier": "fast",
-      "seconds": 9.4
+      "checks": 6,
+      "seconds": 10.1
     },
     "copilot: a Copilot pull request goes from a PASS to the gateway's merge; GitHub's refusal of a stacked pull request (403, use the asynchronous endpoint) is merged through merge-async": {
-      "checks": 7,
       "tier": "fast",
-      "seconds": 12.9
+      "checks": 7,
+      "seconds": 61.3
     },
     "copilot: one task owns the item end to end: Technical Design opens the draft, Development and Functional Testing are follow-up sessions of the same task on that pull request, no other worker is offered the item, the draft is marked ready, and the owner is done only after the merge, a green master and the production delivery": {
-      "checks": 22,
       "tier": "full",
-      "seconds": 62.6
+      "checks": 22,
+      "seconds": 47.2
     },
     "copilot: an FT FAIL sends the item back to Development as a follow-up session of the owner task, naming the findings": {
-      "checks": 7,
       "tier": "full",
-      "seconds": 20.2
+      "checks": 7,
+      "seconds": 36.2
     },
     "copilot: a red master after the merge resumes the owner task once to fix forward; the owner is done only once master is green and the change is in production": {
-      "checks": 8,
       "tier": "full",
-      "seconds": 59.2
+      "checks": 8,
+      "seconds": 58.9
     },
     "copilot: an item an earlier gateway ran one task per phase for adopts the task whose branch its pull request is on and resumes it there; no new task, no stacked draft": {
-      "checks": 4,
       "tier": "full",
-      "seconds": 7.4
+      "checks": 4,
+      "seconds": 10.5
     },
     "copilot: a running owner session silent past the item check keeps its lease (its runtime's deadline bounds it); after its session ends unfinished the same task is resumed on its pull request": {
-      "checks": 5,
       "tier": "full",
-      "seconds": 31.0
+      "checks": 5,
+      "seconds": 34.2
     },
     "copilot: a session refused for the seat's quota stops starts and resumes without counting against the item, shows the owner action, and the next start after quotaRetryMinutes probes and clears it": {
-      "checks": 7,
       "tier": "full",
-      "seconds": 34.7
+      "checks": 7,
+      "seconds": 40.2
+    },
+    "copilot: a follow-up's own draft stacked on the item's pull request (\"merges into #N\") becomes the owner's current branch: retargeted to master, the old pull request superseded, and the item moves on": {
+      "tier": "full",
+      "checks": 4,
+      "seconds": 7.4
+    },
+    "copilot: pr_open takes a follow-up's draft that names the item's pull request (\"merges into #N\"): a pull request number is no other item": {
+      "tier": "full",
+      "checks": 4,
+      "seconds": 13.0
+    },
+    "copilot: a recorded pull request that was closed (a migration, a takeover) is replaced by the open pull request of the owner task's branch; the wait for checks follows it and the item moves on, not parked stuck": {
+      "tier": "full",
+      "checks": 4,
+      "seconds": 22.1
+    },
+    "copilot: an owner pull request stacked on another branch with no Build run is consolidated onto master and its CI started; it moves on, not parked stuck": {
+      "tier": "full",
+      "checks": 7,
+      "seconds": 35.6
+    },
+    "copilot: a follow-up session that succeeds and pushes without connecting is judged by its run and its push: no failure, the item is settled; its prompt asks to connect first": {
+      "tier": "full",
+      "checks": 9,
+      "seconds": 55.9
+    },
+    "copilot: a task that ends by itself ends its worker and reports its premium requests; a failed create frees the slot": {
+      "tier": "fast",
+      "checks": 5,
+      "seconds": 24.5
+    },
+    "copilot: a follow-up session lives as long as its Actions run: the slot stays held while the run runs, and a run that succeeds without a push brings one follow-up that is told to push": {
+      "tier": "full",
+      "checks": 6,
+      "seconds": 38.6
+    },
+    "copilot: the owner's later draft on its own branch (not stacked, the older pull request closed) is the item's current pull request: marked ready, never the closed one, and the item moves on": {
+      "tier": "full",
+      "checks": 3,
+      "seconds": 27.3
     }
   },
   "runtime": {
     "runtime: session.end maps to the execution exit: the worker ends, the execution succeeds and the runtime forgets it": {
-      "checks": 6,
       "tier": "fast",
-      "seconds": 14.3
+      "checks": 6,
+      "seconds": 10.5
     },
     "runtime: a gateway restart re-lists the running executions and starts no second one for their items": {
-      "checks": 6,
       "tier": "fast",
-      "seconds": 21.5
+      "checks": 6,
+      "seconds": 21.8
     },
     "runtime: a per-worker ack window; an offer a runtime worker lets lapse stops its execution, one that never registers is stopped, and the second failure parks runtime-failed": {
-      "checks": 12,
       "tier": "fast",
-      "seconds": 47.5
+      "checks": 12,
+      "seconds": 50.9
     },
     "runtime: a w2 expires with the execution": {
-      "checks": 4,
       "tier": "fast",
-      "seconds": 8.1
+      "checks": 4,
+      "seconds": 7.5
     },
     "runtime: git-credential mints a one-repository contents-write token for the owner of a runtime worker, and for nobody else": {
-      "checks": 14,
       "tier": "fast",
-      "seconds": 33.7
+      "checks": 14,
+      "seconds": 30.4
     },
     "runtime: the runtime of a registration comes from the credential: a w1 cannot claim one, a w2 registers with its own": {
-      "checks": 3,
       "tier": "fast",
-      "seconds": 3.5
+      "checks": 3,
+      "seconds": 7.6
     },
     "runtime: a nonce is redeemed once for a w2 bound to its name and runtime; a second redemption and an unknown nonce are refused": {
-      "checks": 10,
       "tier": "fast",
-      "seconds": 2.5
+      "checks": 10,
+      "seconds": 3.0
     },
     "runtime: a failed execution: its item is taken back, its claim ends and a new execution is started": {
-      "checks": 11,
       "tier": "fast",
-      "seconds": 14.9
+      "checks": 11,
+      "seconds": 14.0
     },
     "runtime: the daily budget stops new executions; the item waits with runtime-budget": {
-      "checks": 4,
       "tier": "fast",
-      "seconds": 17.5
+      "checks": 4,
+      "seconds": 18.7
     },
     "runtime: an item labelled runtime:cae-job starts one execution with the job container and its values; the worker redeems, registers and is offered the item with the runtime window": {
-      "checks": 16,
       "tier": "fast",
-      "seconds": 9.3
+      "checks": 16,
+      "seconds": 11.9
     },
     "runtime: outside tdd the baked caeJob is off; the FACTORY_RUNTIME_ variables switch it on with a job and an identity": {
-      "checks": 5,
       "tier": "fast",
-      "seconds": 14.4
+      "checks": 5,
+      "seconds": 17.2
     }
   },
   "copilot-manager": {
     "copilot manager: with nothing pending after the cooldown there is no second launch": {
-      "checks": 2,
       "tier": "fast",
-      "seconds": 20.0
+      "checks": 2,
+      "seconds": 20.4
     },
     "copilot manager: a late question launches one task with the manager prompt; its token reaches the manager tools only; session_end clears present": {
-      "checks": 32,
       "tier": "fast",
-      "seconds": 20.8
+      "checks": 32,
+      "seconds": 16.5
     },
     "copilot manager: nothing pending launches nothing": {
-      "checks": 2,
       "tier": "fast",
-      "seconds": 12.1
+      "checks": 2,
+      "seconds": 12.5
     },
     "copilot manager: the cooldown holds a new question back; the second and third tasks launch after it; a task that ends by itself clears present; the daily cap holds the fourth": {
-      "checks": 12,
       "tier": "fast",
-      "seconds": 56.4
+      "checks": 12,
+      "seconds": 55.0
+    }
+  },
+  "copilot-deadline": {
+    "copilot: a task past api.copilot.maxMinutes fails and its code dies": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 27.2
+    }
+  },
+  "cursor-deadline": {
+    "cursor: a failed launch frees the slot and the item gets a new agent; an agent past api.cursor.maxMinutes is cancelled and deleted": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 43.9
+    }
+  },
+  "octopus": {
+    "octopus: auth apiKey: without a configured auth and with OCTOPUS_RUNBOOK_API_KEY set the key is sent, no token exchange is made": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 4.4
+    },
+    "octopus: auth oidc: the Entra token is exchanged at /token/v1 for the service account; the access token is cached; a 401 renews it once": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 40.2
+    },
+    "octopus: auth oidc: a short-lived access token is exchanged again before it expires": {
+      "tier": "fast",
+      "checks": 1,
+      "seconds": 8.6
+    },
+    "octopus: provision picks a healthy fworker-host with capacity and runs Start worker there with the prompted variables; the worker redeems and is offered; no capacity left refuses and the item waits": {
+      "tier": "fast",
+      "checks": 18,
+      "seconds": 20.9
+    },
+    "octopus: the reconcile endpoints take the host token only; desired names the host's workers; an exited container ends its execution and the item is planned again, a container gone from the host is Stopped": {
+      "tier": "fast",
+      "checks": 14,
+      "seconds": 17.9
+    },
+    "octopus: the stop of a worker runs Stop worker on the machine it was started on; desired no longer names it": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 6.2
+    },
+    "octopus: overflow runs a held Start worker (overflow) only for an explicit allowed role, capped at overflowMax; an own-item worker never overflows; its stop cancels the task": {
+      "tier": "fast",
+      "checks": 10,
+      "seconds": 19.1
+    },
+    "octopus: a coding role never overflows, whatever overflowRoles says": {
+      "tier": "fast",
+      "checks": 1,
+      "seconds": 3.9
+    },
+    "octopus: desired and report answer 404 for a host that is not a target": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 0.0
+    },
+    "octopus: a gateway restart rebuilds the running workers from the project's tasks; no second run for their items; desired still names them": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 15.8
+    },
+    "octopus: after a restart the running containers the hosts report are all adopted, also beyond perHostCapacity; desired names them, the reconcile keeps them, List shows them": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 4.4
+    },
+    "octopus: session transcript: the container posts its lines with its w2, the start comment links the gateway's session page and the Octopus task, the page needs the operator token, the transcript survives a gateway restart": {
+      "tier": "fast",
+      "checks": 18,
+      "seconds": 10.6
+    },
+    "octopus: journal order: a worker that accepts before the offered and launched lines are posted still reads offered, launched, assigned": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 11.2
+    },
+    "octopus: session transcript: the start comment of a new session is posted even when the item's journal is full": {
+      "tier": "fast",
+      "checks": 4,
+      "seconds": 6.5
+    }
+  },
+  "promote": {
+    "promote: every gate met: the release goes to uat, its Sign-off is answered, then to prod, each deployment created once, and the item is delivered": {
+      "tier": "fast",
+      "checks": 8,
+      "seconds": 47.1
+    },
+    "promote: an item merged without a PASS verdict holds the whole release back, explained once on each item": {
+      "tier": "fast",
+      "checks": 6,
+      "seconds": 15.1
+    },
+    "promote: a video item waits for its demo video; once it is published the release is promoted": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 10.9
+    },
+    "promote: no Auto Merge label, or a Hold label, keeps the release waiting": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 4.0
+    },
+    "promote: a failed tdd deployment, then an unhealthy tdd app, keep the release from uat": {
+      "tier": "fast",
+      "checks": 5,
+      "seconds": 24.1
+    },
+    "promote: the tdd app running another version keeps the release from uat": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 12.1
+    },
+    "promote: a 403 of the deployment create waits and names the missing permission, once": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 20.1
+    },
+    "promote: a gate that fails while the Sign-off waits makes the gateway abort it; a 403 of the interruption names the permission": {
+      "tier": "fast",
+      "checks": 7,
+      "seconds": 19.7
+    },
+    "promote: a Sign-off of a deployment the gateway did not create is left alone": {
+      "tier": "fast",
+      "checks": 2,
+      "seconds": 8.0
+    },
+    "promote: a gateway restart while the uat deployment runs promotes nothing twice": {
+      "tier": "fast",
+      "checks": 5,
+      "seconds": 32.0
+    },
+    "promote: release N waits on an unqualified item; N+1, whose own item qualifies, carries that change and is not promoted either": {
+      "tier": "fast",
+      "checks": 2,
+      "seconds": 8.0
+    },
+    "promote: a master commit in the release that is no queued item's merge commit keeps the release waiting, naming the commit": {
+      "tier": "fast",
+      "checks": 2,
+      "seconds": 8.0
+    },
+    "promote: when the commit running in the target is not known, the release waits (fail closed)": {
+      "tier": "fast",
+      "checks": 2,
+      "seconds": 8.0
+    },
+    "promote: a docs-only item in Done whose gateway merge after a PASS is in the release counts as factory work: the release is promoted": {
+      "tier": "fast",
+      "checks": 2,
+      "seconds": 10.1
+    },
+    "promote: a factory merge in the release that is not settled yet makes the release wait, then it is promoted": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 11.7
+    },
+    "promote: the health reads are kept in the item state, and a Sign-off after a gateway restart proceeds while tdd is Healthy": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 14.0
+    },
+    "promote: a newer release running in tdd does not abort the Sign-off of the uat deployment": {
+      "tier": "fast",
+      "checks": 2,
+      "seconds": 12.1
+    },
+    "promote: a Hold label put on an item while the Sign-off waits aborts it": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 12.1
+    },
+    "promote: a waiting reason (a merge in the release not settled) leaves the Sign-off pending; settled, it proceeds": {
+      "tier": "fast",
+      "checks": 4,
+      "seconds": 15.7
+    },
+    "promote: with a newer release already in tdd, the older one is not deployed to uat; the newer one carries its items": {
+      "tier": "fast",
+      "checks": 3,
+      "seconds": 14.1
+    },
+    "promote: a Sign-off that waits on a reason that never clears is aborted after signoffWaitHours (0.03 h in the suite), once": {
+      "tier": "full",
+      "checks": 5,
+      "seconds": 190.5
     }
   }
 }

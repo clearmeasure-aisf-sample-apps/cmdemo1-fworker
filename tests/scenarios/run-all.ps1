@@ -8,6 +8,10 @@
 #   -Tier full            everything
 #   Longest suite first, from suite-times.json (last known seconds per tier; rewritten at the end of every run). One line per suite as it finishes, a combined summary, exit 1 if anything failed.
 #   A full run (no -Only) also rewrites scenario-stats.json (seconds and checks per scenario), which is where the "checks skipped" figure of a fast run comes from.
+#   -Suites takes suite names and shards of a suite: name@g/n runs group g (from 0) of n (run.ps1 -Groups n -Group g, in the group's own port range
+#   10000 + 1000 * slot + 100 * g, its result in name-gG.result.json), name@all/n runs all n groups through one run.ps1 that starts them (as qc runs
+#   by itself). A suite is listed once: whole, as @all/n, or as shards of one n. The summary adds the shards of a suite up into its line; only a suite
+#   run whole in one process (no shard, no @all) rewrites its time in suite-times.json.
 param([ValidateSet('fast', 'full')][string] $Tier = 'fast', [int] $Parallel = 4, [string[]] $Suites = @(), [string] $Only = '', [switch] $NoBuild, [switch] $KeepWork, [string] $LogDir = '', [int] $MinAvailableMb = 1500, [int] $MinFreeDiskMb = 2048, [switch] $Force)
 $Suites = @($Suites | ForEach-Object { $_ -split ',' } | Where-Object { $_ })   # pwsh -File passes "a,b" as one string
 $ErrorActionPreference = 'Stop'
@@ -35,13 +39,35 @@ $names = @($scen | ForEach-Object { $_.suite } | Select-Object -Unique)
 if ($names.Count -eq 0) { throw 'run.ps1 -ListScenarios listed no scenarios' }
 $timesAll = @{}; if (Test-Path $timesFile) { $timesAll = Get-Content -Raw $timesFile | ConvertFrom-Json -AsHashtable }
 $known = @{}; if ($timesAll.ContainsKey($Tier)) { foreach ($e in $timesAll[$Tier].GetEnumerator()) { $known[$e.Key] = [double]$e.Value } }
-$todo = @($names | Where-Object { -not $Suites.Count -or $Suites -contains $_ })
-if ($Suites.Count -and $todo.Count -ne $Suites.Count) { throw "unknown suite in -Suites; known: $($names -join ', ')" }
+# the jobs: one per suite, or one per shard (label = the suite's name, or name-gG for group G); a plain name runs the suite in one process (-Groups 1)
+$todo = @()
+foreach ($spec in $(if ($Suites.Count) { $Suites } else { $names })) {
+    $m = [regex]::Match($spec, '^(?<s>[^@]+?)(@(?<g>all|\d+)/(?<n>\d+))?$')
+    if (-not $m.Success -or $names -notcontains $m.Groups['s'].Value) { throw "unknown suite in -Suites: '$spec'; known: $($names -join ', ') (a shard of one: name@g/n or name@all/n)" }
+    $sn = $m.Groups['s'].Value
+    if (-not $m.Groups['n'].Success) { $todo += @{ label = $sn; suite = $sn; groups = 1; group = -1 }; continue }
+    $gn = [int]$m.Groups['n'].Value
+    if ($gn -lt 1 -or $gn -gt 10) { throw "-Suites ${spec}: n is 1 to 10 (run.ps1 -Groups)" }
+    if ($m.Groups['g'].Value -eq 'all') { $todo += @{ label = $sn; suite = $sn; groups = $gn; group = -1 }; continue }
+    $gg = [int]$m.Groups['g'].Value
+    if ($gg -ge $gn) { throw "-Suites ${spec}: g is 0 to n-1 (groups are numbered from 0)" }
+    $todo += @{ label = "$sn-g$gg"; suite = $sn; groups = $gn; group = $gg }
+}
+foreach ($sn in @($todo | ForEach-Object { $_.suite } | Select-Object -Unique)) {
+    $same = @($todo | Where-Object { $_.suite -eq $sn })
+    if ($same.Count -gt 1 -and (@($same | Where-Object { $_.group -lt 0 }).Count -or @($same | ForEach-Object { $_.groups } | Select-Object -Unique).Count -gt 1 -or @($same | ForEach-Object { $_.group } | Select-Object -Unique).Count -ne $same.Count)) {
+        throw "-Suites: $sn is listed more than once (list it whole, as $sn@all/n, or as shards $sn@g/n of one n with each g once)"
+    }
+}
+# the port slot of each suite (run.ps1 -ListSuites, in slot order): a shard's port range is 10000 + 1000 * slot + 100 * group, as run.ps1 gives its groups
+$slots = @(); if (@($todo | Where-Object { $_.group -ge 0 }).Count) { $slots = @(& pwsh -NoProfile -File (Join-Path $here 'run.ps1') -ListSuites | Where-Object { $_ }) }
 # scenarios this run leaves out: the full-tier ones (only when -Tier fast), and the suites that have nothing left to run are not started at all
-$leftOut = @(); if ($Tier -eq 'fast') { $leftOut = @($scen | Where-Object { $_.tier -eq 'full' -and $todo -contains $_.suite -and (-not $Only -or $_.name -match $Only) }) }
-if ($Tier -eq 'fast' -and -not $Only) { $todo = @($todo | Where-Object { $sn = $_; @($scen | Where-Object { $_.suite -eq $sn -and $_.tier -eq 'fast' }).Count -gt 0 }) }
-# longest first; a suite without a known duration goes first (it could be the long one)
-$queue = [System.Collections.Generic.List[string]]::new(); foreach ($n in ($todo | Sort-Object { if ($known.ContainsKey($_)) { -$known[$_] } else { -1e9 } })) { $queue.Add($n) }
+$todoSuites = @($todo | ForEach-Object { $_.suite } | Select-Object -Unique)
+$leftOut = @(); if ($Tier -eq 'fast') { $leftOut = @($scen | Where-Object { $_.tier -eq 'full' -and $todoSuites -contains $_.suite -and (-not $Only -or $_.name -match $Only) }) }
+if ($Tier -eq 'fast' -and -not $Only) { $todo = @($todo | Where-Object { $sn = $_.suite; @($scen | Where-Object { $_.suite -eq $sn -and $_.tier -eq 'fast' }).Count -gt 0 }) }
+# longest first (a shard as its share of the suite's time); a suite without a known duration goes first (it could be the long one)
+$queue = [System.Collections.Generic.List[object]]::new(); foreach ($j in ($todo | Sort-Object { $d = $(if ($_.group -ge 0) { $_.groups } else { 1 }); if ($known.ContainsKey($_.suite)) { -$known[$_.suite] / $d } else { -1e9 } })) { $queue.Add($j) }
+$jobOf = @{}; foreach ($j in $todo) { $jobOf[$j.label] = $j }
 
 function Get-StatKey([string]$Name) { $Name -replace '\s\[full\]\s*$', '' }   # the tier tag is not part of a scenario's identity
 function Get-MemAvailableMb { try { [int]((Select-String -Path /proc/meminfo -Pattern '^MemAvailable:\s+(\d+)').Matches[0].Groups[1].Value) / 1024 } catch { 99999 } }
@@ -53,18 +79,20 @@ function Stop-Tree([int]$ProcId) {
 $running = @{}      # name -> @{ proc; sw; result; log; work }
 $results = [ordered]@{}
 $minAvail = Get-MemAvailableMb; $startAvail = $minAvail; $peakRunning = 0
-Write-Host "run-all: tier $Tier, $($todo.Count) suites, $Parallel at a time, logs in $LogDir, memory available $([int]$startAvail) MB"
+$jobsText = $(if (@($todo | Where-Object { $_.groups -gt 1 }).Count) { "$(@($todo | ForEach-Object { $_.suite } | Select-Object -Unique).Count) suites in $($todo.Count) jobs" } else { "$($todo.Count) suites" })
+Write-Host "run-all: tier $Tier, $jobsText, $Parallel at a time, logs in $LogDir, memory available $([int]$startAvail) MB"
 try {
     while ($queue.Count -gt 0 -or $running.Count -gt 0) {
         $avail = Get-MemAvailableMb; if ($avail -lt $minAvail) { $minAvail = $avail }
         # start the next suite while there is a free slot (and memory: a suite is ~0.5 GB)
         while ($queue.Count -gt 0 -and $running.Count -lt $Parallel -and ($running.Count -eq 0 -or ((Get-MemAvailableMb) -ge $MinAvailableMb -and (Get-TempFreeDiskMb) -ge $MinFreeDiskMb))) {
-            $name = $queue[0]; $queue.RemoveAt(0)
+            $job = $queue[0]; $queue.RemoveAt(0); $name = $job.label
             $work = Join-Path $LogDir "work-$name"; New-Item -ItemType Directory -Force -Path $work | Out-Null
             $resultFile = Join-Path $LogDir "$name.result.json"; $log = Join-Path $LogDir "$name.log"
-            $args2 = @('-NoProfile', '-File', (Join-Path $here 'run.ps1'), '-Suite', $name, '-Tier', $Tier, '-Groups', 1, '-NoBuild', '-ResultFile', $resultFile); if ($Only) { $args2 += @('-Only', $Only) }
-            $oldTmp = $env:TMPDIR; $env:TMPDIR = $work; Remove-Item Env:TEST_PORT_BASE -ErrorAction SilentlyContinue
-            try { $p = Start-Process pwsh -ArgumentList $args2 -PassThru -RedirectStandardOutput $log -RedirectStandardError (Join-Path $LogDir "$name.err") } finally { $env:TMPDIR = $oldTmp }
+            $args2 = @('-NoProfile', '-File', (Join-Path $here 'run.ps1'), '-Suite', $job.suite, '-Tier', $Tier, '-Groups', $job.groups, '-NoBuild', '-ResultFile', $resultFile); if ($job.group -ge 0) { $args2 += @('-Group', $job.group) }; if ($Only) { $args2 += @('-Only', $Only) }
+            $shardBase = ''; if ($job.group -ge 0) { $slot = $slots.IndexOf($job.suite); if ($slot -lt 0) { throw "run.ps1 -ListSuites does not list $($job.suite)" }; $shardBase = "$(10000 + 1000 * $slot + 100 * $job.group)" }
+            $oldTmp = $env:TMPDIR; $env:TMPDIR = $work; Remove-Item Env:TEST_PORT_BASE -ErrorAction SilentlyContinue; if ($shardBase) { $env:TEST_PORT_BASE = $shardBase }
+            try { $p = Start-Process pwsh -ArgumentList $args2 -PassThru -RedirectStandardOutput $log -RedirectStandardError (Join-Path $LogDir "$name.err") } finally { $env:TMPDIR = $oldTmp; Remove-Item Env:TEST_PORT_BASE -ErrorAction SilentlyContinue }
             $running[$name] = @{ proc = $p; sw = [Diagnostics.Stopwatch]::StartNew(); result = $resultFile; log = $log; work = $work }
             if ($running.Count -gt $peakRunning) { $peakRunning = $running.Count }
         }
@@ -74,7 +102,7 @@ try {
             if (-not $r.proc.HasExited) { continue }
             $secs = [math]::Round($r.sw.Elapsed.TotalSeconds, 1)
             $res = if (Test-Path $r.result) { Get-Content -Raw $r.result | ConvertFrom-Json -AsHashtable } else { $null }
-            if (-not $res) { $res = [ordered]@{ suite = $name; checks = 0; failed = 1; failures = @("${name}: the suite process ended without a result (exit $($r.proc.ExitCode)); see $($r.log)"); seconds = $secs; verbCalls = 0; verbSeconds = 0; gatewayVerbLines = 0 } }
+            if (-not $res) { $res = [ordered]@{ suite = $jobOf[$name].suite; checks = 0; failed = 1; failures = @("${name}: the suite process ended without a result (exit $($r.proc.ExitCode)); see $($r.log)"); seconds = $secs; verbCalls = 0; verbSeconds = 0; gatewayVerbLines = 0 } }
             $results[$name] = $res; $running.Remove($name)
             $perVerb = if ($res.verbCalls -gt 0) { '{0:N2}s/verb' -f ($res.verbSeconds / $res.verbCalls) } else { '-' }
             Write-Host ("  {0,-4} {1,-18} checks {2,4}  failed {3,2}  {4,6:N0}s  verbs {5,4} ({6})" -f $(if ($res.failed -eq 0) { 'done' } else { 'FAIL' }), $name, $res.checks, $res.failed, $res.seconds, $res.verbCalls, $perVerb)
@@ -91,7 +119,13 @@ $sumSecs = 0.0; $checks = 0; $failed = 0; $verbs = 0; $verbSecs = 0.0
 foreach ($n in $results.Keys) { $x = $results[$n]; $sumSecs += $x.seconds; $checks += $x.checks; $failed += $x.failed; $verbs += $x.verbCalls; $verbSecs += $x.verbSeconds }
 Write-Host ""
 Write-Host ("{0,-18} {1,5} {2,7} {3,7} {4,8} {5,7} {6,9}" -f 'suite', 'scen.', 'checks', 'failed', 'seconds', 'verbs', 's/verb')
-foreach ($n in $names) { if (-not $results.Contains($n)) { continue }; $x = $results[$n]; Write-Host ("{0,-18} {1,5} {2,7} {3,7} {4,8:N0} {5,7} {6,9}" -f $n, @($x.scenarios).Count, $x.checks, $x.failed, $x.seconds, $x.verbCalls, $(if ($x.verbCalls -gt 0) { '{0:N2}' -f ($x.verbSeconds / $x.verbCalls) } else { '-' })) }
+# one line per suite: the jobs of a sharded suite are added up into it (scenarios, checks, failures, seconds of all its shards, verbs)
+foreach ($n in $names) {
+    $parts = @($results.Keys | Where-Object { $jobOf[$_].suite -eq $n }); if (-not $parts.Count) { continue }
+    $x = [ordered]@{ scen = 0; checks = 0; failed = 0; seconds = 0.0; verbCalls = 0; verbSeconds = 0.0 }
+    foreach ($p0 in $parts) { $y = $results[$p0]; $x.scen += @($y.scenarios).Count; $x.checks += $y.checks; $x.failed += $y.failed; $x.seconds += $y.seconds; $x.verbCalls += $y.verbCalls; $x.verbSeconds += $y.verbSeconds }
+    Write-Host ("{0,-18} {1,5} {2,7} {3,7} {4,8:N0} {5,7} {6,9}" -f $n, $x.scen, $x.checks, $x.failed, $x.seconds, $x.verbCalls, $(if ($x.verbCalls -gt 0) { '{0:N2}' -f ($x.verbSeconds / $x.verbCalls) } else { '-' }))
+}
 Write-Host ("total: {0} checks, {1} failed; wall-clock {2:N0}s, serial-equivalent (sum of suites) {3:N0}s, speed-up {4:N1}x; {5} verb calls, {6:N2}s per call" -f $checks, $failed, $wall.Elapsed.TotalSeconds, $sumSecs, $(if ($wall.Elapsed.TotalSeconds -gt 0) { $sumSecs / $wall.Elapsed.TotalSeconds } else { 0 }), $verbs, $(if ($verbs) { $verbSecs / $verbs } else { 0 }))
 # CPU actually used by this run's processes (waited-for children and their descendants: /proc/self/stat cutime+cstime): the share of the wall-clock that other users of the machine cannot distort
 $cpuSec = 0.0; try { $st = (Get-Content -Raw /proc/self/stat); $f = ($st.Substring($st.LastIndexOf(')') + 2)) -split ' '; $cpuSec = ([double]$f[13] + [double]$f[14]) / 100.0 } catch { }
@@ -114,7 +148,7 @@ Write-Host "slowest scenarios:"; foreach ($sc in ($allRun | Sort-Object { -[doub
 # ---- remember the durations (clean suites only, a failed or cut-short one says nothing about its length) ----------------------------
 if (-not $Only) {
     $mine = @{}; if ($timesAll.ContainsKey($Tier)) { foreach ($e in $timesAll[$Tier].GetEnumerator()) { $mine[$e.Key] = $e.Value } }
-    foreach ($n in $results.Keys) { if ($results[$n].failed -eq 0) { $mine[$n] = [math]::Round($results[$n].seconds, 0) } }
+    foreach ($n in $results.Keys) { if ($results[$n].failed -eq 0 -and $jobOf[$n].groups -eq 1) { $mine[$n] = [math]::Round($results[$n].seconds, 0) } }   # (a shard or a split run is not the suite's time in one process)
     $ordered = [ordered]@{}; foreach ($n in $names) { if ($mine.ContainsKey($n)) { $ordered[$n] = $mine[$n] } }
     $out = [ordered]@{}; foreach ($t in 'fast', 'full') { if ($t -eq $Tier) { $out[$t] = $ordered } elseif ($timesAll.ContainsKey($t)) { $out[$t] = $timesAll[$t] } }
     $out["wall-$Tier"] = [math]::Round($wall.Elapsed.TotalSeconds, 0)

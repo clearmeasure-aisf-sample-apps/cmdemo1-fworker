@@ -116,9 +116,13 @@ $CopilotScenarios = [ordered]@{
             @{ jsonrpc = '2.0'; id = 7; method = 'tools/call'; params = @{ name = 'fworker_call'; arguments = @{ name = 'get_prompt'; arguments = @{} } } }
         ) | ForEach-Object { $_ | ConvertTo-Json -Depth 8 -Compress }
         $in = Join-Path $script:Work 'fworker-mcp.in'
-        # one line at a time, a pause after each, as an agent calls: the connect must be done before the calls after it
-        $script_ = ($lines | ForEach-Object { "printf '%s\n' '$($_.Replace("'", "'\''"))'; sleep 1" }) -join '; '
-        [IO.File]::WriteAllText($in, "( $script_ ) | node '$js'")
+        $outFile = Join-Path $script:Work 'fworker-mcp.out'; [IO.File]::WriteAllText($outFile, '')
+        # one line at a time, a pause after each, as an agent calls: the connect must be done before the calls after it. The proxy answers each
+        # line as it comes (tools/list from what it holds now), so the line after fworker_connect (id 4) is sent once the connect has answered,
+        # not after a fixed second: under load the exchange and the upstream tools/list took longer, and tools/list (id 5) still saw the old list.
+        $afterConnect = "n=0; until grep -q '`"id`":4[,}]' '$outFile' || [ `$n -ge 600 ]; do sleep 0.1; n=`$((n+1)); done"
+        $script_ = (@(for ($k = 0; $k -lt $lines.Count; $k++) { "printf '%s\n' '$($lines[$k].Replace("'", "'\''"))'; $(if ($k -eq 3) { $afterConnect } else { 'sleep 1' })" })) -join '; '
+        [IO.File]::WriteAllText($in, "( $script_ ) | node '$js' | tee '$outFile'")
         $oldG = $env:FWORKER_GATEWAY_URL; $oldB = $env:FWORKER_BOOTSTRAP_TOKEN
         try {
             $env:FWORKER_GATEWAY_URL = "http://127.0.0.1:$($script:ApiPort)"; $env:FWORKER_BOOTSTRAP_TOKEN = Cop-Bootstrap
