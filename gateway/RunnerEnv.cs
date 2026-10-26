@@ -10,7 +10,8 @@ static class RunnerEnv
     /// <summary>The .NET runtime setting that turns multicore JIT off when the machine has fewer processors than its value.</summary>
     public const string Knob = "DOTNET_MultiCoreJitMinNumCpus";
 
-    /// <summary>The value of <see cref="Knob"/> that no machine reaches: multicore JIT is off, no startup profile is read or written.</summary>
+    /// <summary>The value of <see cref="Knob"/> that no machine reaches: the runtime reads it as hex (0x65535, 415029), which exceeds any processor
+    /// count, so multicore JIT is off and no startup profile is read or written.</summary>
     public const string Off = "65535";
 
     /// <summary>Turns multicore JIT off for the process of <paramref name="psi"/>, unless the gateway's own environment already sets <see cref="Knob"/>.</summary>
