@@ -2255,7 +2255,7 @@ $ManagerScenarios['mgr: a directive reaches one worker, an announcement every wo
     Msg-OnGateway (Msg-Merge $script:MgrFast @{ FACTORY_CONFIG = $cfg; FACTORY_TIMING_supervisorPer10Min = '12' }) {
         param($g)
         $m1 = Msg-Supervisor; $sup = Mgr-Open
-        $alice = Msg-Client 'alice' 's5-dir'; $bob = Msg-Client 'bob' 's5-dir'
+        $alice = Msg-Client 'alice' 's5-dir'; $bob = Msg-Client 'bob' 's5-dir'; $carol = $null; $carol2 = $null
         try {
             Check 'alice and bob register' ((Msg-WaitEvent $alice 'worker.registered') -and (Msg-WaitEvent $bob 'worker.registered'))
             [void](Msg-F 'carol' @('presence'))     # heard, with no stream open
@@ -2312,7 +2312,11 @@ $ManagerScenarios['mgr: a directive reaches one worker, an announcement every wo
             Check 'the supervisor''s own limit of directives and announcements in 10 minutes: rate-limited, exit 20, with retryAfterSeconds' ($sent -eq 12 -and $over.status -eq 429 -and $over.code -eq 'rate-limited' -and $over.exit -eq 20 -and $over.retryAfterSeconds -ge 1) "$sent sent; $($over | ConvertTo-Json -Compress -Depth 6)"
             $log = Mgr-Log $g
             Check 'the gateway log has the sends and none of their text' ($log -match '"type":"directive"' -and $log -match '"type":"announcement"' -and $log -notmatch 'Gateway restarts' -and $log -notmatch 'Hold the change') ''
-        } finally { Msg-Close $sup; foreach ($p in $alice, $bob) { try { Stop-Process -Id $p.proc.Id -Force } catch { } } }
+        } finally {
+            # carol's clients too: a client left running reconnects by itself to the next scenario's second gateway (the same port) and, as an
+            # allowed worker, takes the offers that scenario makes to its own sessions
+            Msg-Close $sup; Mgr-Stop @($alice, $bob, $carol, $carol2)
+        }
     }
 }
 
