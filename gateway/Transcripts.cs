@@ -229,13 +229,34 @@ sealed class TranscriptStore
         }
     }
 
-    public async Task Loop(Func<bool> mayAct, CancellationToken ct)
+}
+
+// The transcript store's save loop and its final flush (C4c, gateway-composition.md E). The loop saves every Tick what changed, only while this
+// process may act; it ends at ApplicationStopping (as the Task.Run it replaces did), so it never writes beside the final flush. The final flush is
+// an ApplicationStopping callback, not StopAsync: StopAsync runs after Kestrel's drain, and the callbacks run last-registered first, so the
+// flush must be registered before the leader's hand-over (Program.cs calls RegisterFinalFlush right after Build) to run after it. Both fit the
+// platform's 30 s grace (StopOrderTests).
+sealed class TranscriptService(TranscriptStore store, ILeadership leadership, IHostApplicationLifetime lifetime) : BackgroundService
+{
+    internal TimeSpan Tick { get; init; } = TimeSpan.FromSeconds(10);
+    int flushRegistered;
+
+    // the final flush at the stop: every changed session, 15 s for the saves, 20 s at most for the callback; once, however often it is called
+    public void RegisterFinalFlush()
     {
+        if (Interlocked.Exchange(ref flushRegistered, 1) != 0) return;
+        lifetime.ApplicationStopping.Register(() => { try { store.Flush(true, TimeSpan.FromSeconds(15)).Wait(TimeSpan.FromSeconds(20)); } catch { } });
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, lifetime.ApplicationStopping);
+        var ct = stop.Token;
         while (!ct.IsCancellationRequested)
         {
-            try { await Task.Delay(TimeSpan.FromSeconds(10), ct); } catch (OperationCanceledException) { break; }
+            try { await Task.Delay(Tick, ct); } catch (OperationCanceledException) { break; }
             // only the acting process writes (two processes during a hand-over would write the same refs); a standby holds what it was sent
-            try { if (mayAct()) await Flush(false, TimeSpan.FromSeconds(120)); } catch (Exception e) { Console.Error.WriteLine($"transcripts: {e.GetType().Name}"); }
+            try { if (leadership.MayAct) await store.Flush(false, TimeSpan.FromSeconds(120)); } catch (Exception e) { Console.Error.WriteLine($"transcripts: {e.GetType().Name}"); }
         }
     }
 }
