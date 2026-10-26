@@ -3891,7 +3891,7 @@ $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one 
     Check 'and with messaging on it is another text (the hash can tell)' ($on -match '^[0-9a-f]{64}$' -and $on -ne $main.cloud.sha) $on
 
     # docs/deploy/gen-connect-prompt.sh: its node block, run as the script runs it, on stub answers of the three gateway calls. Once on the page this
-    # gateway serves, once on gateway/Program.cs itself (the script's RENDER_SOURCE path). No gateway is called. For each gateway state the file must
+    # gateway serves, once on the source, gateway/Templates put together as the gateway does (the script's RENDER_SOURCE path). No gateway is called. For each gateway state the file must
     # be what the dashboard's button builds from the same state: messaging off (main's prompt), messaging and the supervisor on, and the supervisor's own.
     $sh = Get-Content -Raw (Join-Path $script:Root 'docs/deploy/gen-connect-prompt.sh')
     $m = [regex]::Match($sh, "(?s)node -e '\r?\n(.*?)\r?\n'\r?\nchmod")
@@ -3910,7 +3910,7 @@ $ManagerScenarios['mgr: the worker connect prompt with messaging off is the one 
         foreach ($case in $cases.Keys) {
             $c = $cases[$case]
             $t = Join-Path $script:Work "gen-prompt-$src-$($case -replace '[^a-z]', '')"; New-Item -ItemType Directory -Force -Path $t | Out-Null
-            if ($src -eq 'page') { Set-Content (Join-Path $t 'dashboard.html') (Msg-Page) -NoNewline } else { Copy-Item (Join-Path $script:Root 'gateway/Program.cs') (Join-Path $t 'dashboard.html') }
+            if ($src -eq 'page') { Set-Content (Join-Path $t 'dashboard.html') (Msg-Page) -NoNewline } else { $tp = Join-Path $script:Root 'gateway/Templates'; Set-Content (Join-Path $t 'dashboard.html') ((Get-Content -Raw (Join-Path $tp 'dashboard.html')).Replace("/*connect-prompt*/`n", (Get-Content -Raw (Join-Path $tp 'connect-prompt.js')))) -NoNewline }
             Set-Content (Join-Path $t 'cred.json') "{`"ok`":true,`"token`":`"$($c.cred)`"}"
             Set-Content (Join-Path $t 'info.json') $c.info
             Set-Content (Join-Path $t 'qc.json') '{"ok":true,"repo_url":"https://github.com/o/r"}'
