@@ -1,6 +1,6 @@
 # suite: octopus
 # scenario: octopus: overflow runs a held Start worker (overflow) only for an explicit allowed role, capped at overflowMax; an own-item worker never overflows; its stop cancels the task
-# runs: 5
+# runs: 3
 ~ gateway POST /api/Spaces-355/runbook-runs/create/v1 201 {"EnvironmentNames":["tdd"],"ProjectName":"cmdemo1-fworker-runtime","RunbookName":"Start worker (overflow)","SpaceIdOrName":"Spaces-355","SpecificMachineNames":[],"Variables":{"Fworker.Agent":"codex","Fworker.Item":"{#far}","Fworker.Mode":"held","Fworker.ModelProfile":"","Fworker.Name":"oct-{session}","Fworker.Nonce":"{token}","Fworker.Phase":"Technical Design"}}
 ~ gateway POST /api/tasks/ServerTasks-{n}/cancel 200 -
 ~ rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}

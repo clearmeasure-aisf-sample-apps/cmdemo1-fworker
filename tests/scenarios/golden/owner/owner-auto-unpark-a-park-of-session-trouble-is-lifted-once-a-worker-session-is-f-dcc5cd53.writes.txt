@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: auto-unpark: a park of session trouble is lifted once a worker session is free, and the item is offered to it
-# runs: 5
+# runs: 3
 = harness STATE factory-worker v1 #{#1}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 + rule STATE factory-worker v1 #{#1}

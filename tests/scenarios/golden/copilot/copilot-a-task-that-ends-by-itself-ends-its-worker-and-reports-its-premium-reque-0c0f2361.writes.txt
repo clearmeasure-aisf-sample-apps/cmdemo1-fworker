@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a task that ends by itself ends its worker and reports its premium requests; a failed create frees the slot
-# runs: 5
+# runs: 3
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 = harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}
 + gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:0ad4ce6a \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}

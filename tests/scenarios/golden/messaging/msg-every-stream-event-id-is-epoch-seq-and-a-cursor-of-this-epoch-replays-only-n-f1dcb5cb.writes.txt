@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: every stream event id is <epoch>.<seq>, and a cursor of this epoch replays only newer events, merged by seq
-# runs: 5
+# runs: 3

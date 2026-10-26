@@ -1,6 +1,6 @@
 # suite: promote
 # scenario: promote: a docs-only item in Done whose gateway merge after a PASS is in the release counts as factory work: the release is promoted
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":null,\"docs_only\":true,\"done_at\":\"{time}\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#pr1}\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#pr1}\",\"processed\":true}}\n```\n"}
 = harness POST /repos/{repo}/issues/{#2}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#2}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.13.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 ~ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.13.1","SpaceIdOrName":"Spaces-355"}

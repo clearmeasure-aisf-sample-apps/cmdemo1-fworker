@@ -1,6 +1,6 @@
 # suite: manager
 # scenario: keeper: replenish creates one docs-only item per Done item on the board in Technical Design, never above targetOpen or maxPerDay, and shows its counts in /status
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":null,\"done_at\":\"{time}\",\"merged_at\":\"{time}\",\"sha\":\"{sha}\"}}\n```\n"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 = harness POST /repos/{repo}/issues/{#3}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#3}\",\"merge\":{\"awaiting\":null,\"done_at\":\"{time}\",\"merged_at\":\"{time}\",\"sha\":\"{sha}\"}}\n```\n"}

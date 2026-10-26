@@ -1,6 +1,6 @@
 # suite: qc-gate
 # scenario: qc: gate an Auto Merge label added to an item with a live environment tears the environment down [full]
-# runs: 5
+# runs: 3
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
@@ -28,4 +28,9 @@
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
 + rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
 + rule STATE factory-worker v1 #{#1}
+~ rule PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed","state_reason":"completed"}
+~ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Done","p":"PVT_fake"}}
+~ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Release_Queue","p":"PVT_fake"}}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: Delivered to **Prod** - moved to **Done**. Release 2.4.100. Production: https://ca-cmdemo1-prod-ui-bhj5.happyisland-{sha}.southcentralus.azurecontainerapps.io\n\n<!-- factory-journal:factory-worker -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: release candidate **2.4.100** carries `{sha}` - waiting in **Release Queue** for the production deployment.\n\n<!-- factory-journal:factory-worker -->"}

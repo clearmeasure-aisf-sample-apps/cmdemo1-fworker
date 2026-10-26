@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a recorded pull request that was closed (a migration, a takeover) is replaced by the open pull request of the owner task's branch; the wait for checks follows it and the item moves on, not parked stuck [full]
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/old-{#1}","title":"Old (#{#1})"}
 = harness PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/cur-{#1}","title":"Cur (#{#1})"}

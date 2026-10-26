@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: questions cannot use the patrols' reserve, a spent budget drops patrols until the operator grants more, and the supervisor's steps are capped
-# runs: 5
+# runs: 3

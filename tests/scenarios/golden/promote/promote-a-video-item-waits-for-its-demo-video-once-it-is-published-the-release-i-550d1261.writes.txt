@@ -1,12 +1,9 @@
 # suite: promote
 # scenario: promote: a video item waits for its demo video; once it is published the release is promoted
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.3.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 ~ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.3.1","SpaceIdOrName":"Spaces-355"}
-~ rule POST /octopus/api/Spaces-355/interruptions/Interruptions-{n}/submit 200 {"Instructions":null,"Notes":"Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md).","Result":"Proceed"}
-~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: answered the Sign-off of the deployment of release 3.3.1 to **uat** (Octopus task `ServerTasks-{n}`): **Proceed**.\n\n<!-- plant event=promotion-signoff key=3.3.1|uat|ServerTasks-{n}|Proceed -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.3.1 to **uat** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.3.1|uat -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:403 sha256:28194003 \"\uD83C\uDFED Plant manager: release 3.3.1 waits for the automatic promotion to **uat**: #{…\"}"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:465 sha256:29f3bb98 \"\uD83C\uDFED Plant manager: release 3.3.1 waits for the automatic promotion to **uat**: th…\"}"}
-~ rule PUT /octopus/api/Spaces-355/interruptions/Interruptions-{n}/responsible 200 {}
 ~ rule STATE factory-worker v1 #{#1}

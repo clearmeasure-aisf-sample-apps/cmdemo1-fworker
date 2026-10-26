@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: with a slow GitHub the journal of an item still reads matched, offered, assigned, and the offer is not held back by it [full]
-# runs: 5
+# runs: 3
 ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
 ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}

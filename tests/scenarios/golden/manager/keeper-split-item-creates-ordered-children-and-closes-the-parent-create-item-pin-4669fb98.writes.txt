@@ -1,6 +1,6 @@
 # suite: manager
 # scenario: keeper: split-item creates ordered children and closes the parent; create-item pins the next free worker at top priority; link-dependency; the day's limit; a thin backlog sends backlog-low
-# runs: 5
+# runs: 3
 = rule POST /repos/{repo}/issues 201 {"body":"From the design section 1.\n\n- the table has a new nullable column\n\nSplit from #{#1} by the backlog keeper (part 1 of 2).\n","labels":["factory worker","Auto Merge"],"title":"Add the column (expand)"}
 = rule POST /graphql addProjectV2ItemById 200 {"query":"mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }","variables":{"c":"I_{#2}","p":"PVT_fake"}}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#2}","o":"opt_Technical_Design","p":"PVT_fake"}}

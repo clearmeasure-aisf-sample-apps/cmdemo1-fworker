@@ -1,9 +1,10 @@
 # suite: mcp
 # scenario: mcp: a worker r1 registers at its first call, gets its offer by next_event without the item token, accepts and works its item through the verbs
-# runs: 5
+# runs: 3
 ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **mcpwork1** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **mcpwork1** (cursor-cloud); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|mcpwork1 -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: completion for **Technical Design** rejected: missing required section `## Technical Design` (no body append landed after dispatch: dispatched={time} last_append=none). A fresh append is needed.\n\n<!-- factory-journal:factory-worker -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: completion for **Technical Design** rejected: missing required section `## Technical Design` (no body append landed after dispatch: dispatched={time} last_append=none). A fresh append is needed.\n\nAI session: mcpwork1\n\n<!-- factory-journal:factory-worker -->"}
 ~ rule STATE factory-worker v1 #{#1}
+~ rule STATE factory-worker v1 #{#2}

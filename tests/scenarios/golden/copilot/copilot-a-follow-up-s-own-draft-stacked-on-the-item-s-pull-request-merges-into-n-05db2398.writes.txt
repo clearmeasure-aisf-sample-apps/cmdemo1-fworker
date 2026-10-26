@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a follow-up's own draft stacked on the item's pull request ("merges into #N") becomes the owner's current branch: retargeted to master, the old pull request superseded, and the item moves on [full]
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/first-{#1}","title":"Succ (#{#1})"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/first-{#1}","body":"Thanks for the feedback on #{#2}. I've created this new PR, which merges into #{#2}.","draft":true,"head":"copilot/succ-{#1}","title":"[WIP] Succ"}
 = harness POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"the owner task"}

@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: leader: a graceful stop releases the lease; the next start restores at once and renews a claim that ran out while no gateway was up [full]
-# runs: 5
+# runs: 3
 ~ rule PATCH /repos/{repo}/git/refs/factory/factory-worker/gateway-leader 200 {"force":false,"sha":"{sha}"}
 ~ rule PATCH /repos/{repo}/git/refs/factory/factory-worker/plant-snapshot 200 {"force":true,"sha":"{sha}"}
 ~ rule PATCH /repos/{repo}/git/refs/factory/factory-worker/plant-snapshot 422 {"force":true,"sha":"{sha}"}

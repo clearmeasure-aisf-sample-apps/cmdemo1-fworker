@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: the default runtime takes an unlabelled code item to Development with a pull request by Copilot; pr_open takes over its draft on the copilot/ branch; Functional Testing starts from that branch
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/thing-{#1}","title":"[WIP] Thing"}
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/other-{#1}","title":"Fix #{#far}"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

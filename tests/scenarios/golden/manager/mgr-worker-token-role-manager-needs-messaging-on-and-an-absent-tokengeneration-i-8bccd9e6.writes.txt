@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: worker-token --role manager needs messaging on, and an absent tokenGeneration is 1
-# runs: 5
+# runs: 3

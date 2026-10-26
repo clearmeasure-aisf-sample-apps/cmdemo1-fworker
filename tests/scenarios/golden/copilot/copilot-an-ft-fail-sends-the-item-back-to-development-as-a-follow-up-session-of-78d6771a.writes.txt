@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: an FT FAIL sends the item back to Development as a follow-up session of the owner task, naming the findings [full]
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/ft-{#1}","title":"[WIP] Ft"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 + gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}

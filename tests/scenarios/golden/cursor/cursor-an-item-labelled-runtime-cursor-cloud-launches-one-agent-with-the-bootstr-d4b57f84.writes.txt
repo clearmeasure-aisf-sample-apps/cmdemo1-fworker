@@ -1,6 +1,6 @@
 # suite: cursor
 # scenario: cursor: an item labelled runtime:cursor-cloud launches one agent with the bootstrap prompt, the repository at master and the gateway's /mcp with an r1; the agent works the item by MCP; session_end ends the run and keeps the agent as the item's owner
-# runs: 5
+# runs: 3
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 + gateway POST /v1/agents 201 {"autoCreatePR":false,"mcpServers":[{"headers":{"Authorization":"Bearer {token}"},"name":"fworker","type":"http","url":"http://gw.test/mcp"}],"model":{"id":"auto-smart","params":[{"id":"optimize_for","value":"cost"}]},"name":"fworker-tdd-i1-cur-{session}","prompt":{"text":"{len:3812 sha256:e2e0ccbc \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"},"repos":[{"startingRef":"master","url":"https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders"}]}
 + gateway POST /v1/agents/{agent}/runs 201 {"mcpServers":[{"headers":{"Authorization":"Bearer {token}"},"name":"fworker","type":"http","url":"http://gw.test/mcp"}],"prompt":{"text":"{len:4154 sha256:9541874f \"Follow-up run: you still own #{#1}. Its next phase is Technical Design. The fwor…\"}"}}

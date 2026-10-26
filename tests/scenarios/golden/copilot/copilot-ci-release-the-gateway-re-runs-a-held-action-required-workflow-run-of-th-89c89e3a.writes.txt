@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: CI release: the gateway re-runs a held (action_required) workflow run of the item's copilot/ pull request head with its App, once; a head mismatch and another env's item are skipped; a 403 is surfaced as an owner action
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/ci-{#1}","title":"[WIP] Ci"}
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","head":"copilot/uat-{#3}","title":"Fix #{#3}"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

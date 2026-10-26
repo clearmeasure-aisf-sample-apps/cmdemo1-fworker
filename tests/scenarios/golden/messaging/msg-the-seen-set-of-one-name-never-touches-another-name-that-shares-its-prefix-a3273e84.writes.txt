@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: the seen set of one name never touches another name that shares its prefix
-# runs: 5
+# runs: 3

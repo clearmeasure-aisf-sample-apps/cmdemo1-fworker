@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: the supervisor's only note target is the operator, it reads its own inbox, and cannot see the log
-# runs: 5
+# runs: 3

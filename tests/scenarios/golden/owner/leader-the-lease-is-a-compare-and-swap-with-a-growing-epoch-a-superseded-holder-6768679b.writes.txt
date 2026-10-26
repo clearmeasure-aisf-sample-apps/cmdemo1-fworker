@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: leader: the lease is a compare-and-swap with a growing epoch; a superseded holder can neither renew nor release; a final snapshot never overwrites a later epoch
-# runs: 5
+# runs: 3
 = harness POST /repos/{repo}/git/commits 201 {"message":"{\"epoch\":3,\"holder\":\"gw-late\",\"kind\":\"gateway-leader\"}","parents":["{sha}"],"tree":"{sha}"}
 = harness PATCH /repos/{repo}/git/refs/factory/factory-worker/gateway-leader 422 {"force":false,"sha":"{sha}"}
 + rule PATCH /repos/{repo}/git/refs/factory/factory-worker/gateway-leader 200 {"force":false,"sha":"{sha}"}

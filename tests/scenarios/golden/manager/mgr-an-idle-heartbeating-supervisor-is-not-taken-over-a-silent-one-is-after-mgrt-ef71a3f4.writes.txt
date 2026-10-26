@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: an idle heartbeating supervisor is not taken over; a silent one is, after mgrTakeoverSeconds [full]
-# runs: 5
+# runs: 3
