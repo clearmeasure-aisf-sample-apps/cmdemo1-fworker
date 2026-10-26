@@ -40,7 +40,7 @@ sealed class LeaderSettings
     }
 }
 
-sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version)
+sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : ILeadership
 {
     public enum Role { Off, Starting, Acting, Superseded, Stopping }
     readonly object gate = new();
