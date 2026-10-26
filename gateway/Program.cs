@@ -105,6 +105,11 @@ if (!snapshotOn) plantRestored.SetResult();
 var snapshotState = new JsonObject { ["enabled"] = snapshotOn, ["maxAgeMinutes"] = snapshotMaxAge };
 var revocations = new Revocations();
 var runtimeNonces = new RuntimeNonces();   // the one-time nonces of runtime workers (Auth.cs, cloud-worker-runtimes.md 2.6)
+// the revoked credentials (gateway/Identity/RevocationService.cs): the read at start and the revocation; its read starts with the host, before the other hosted services
+builder.Services.AddSingleton(sp => new RevocationService(revocationOptions, ownerMode, tokenSecret, messaging.TestHooks, instanceConfig.OwnerSessions || messaging.On || messaging.OperatorEnabled,
+    revocations, sp.GetRequiredService<Runner>().RunAsync, runtimeNonces, sp.GetRequiredService<Plant>().Revoke));
+builder.Services.AddSingleton<IRevocationService>(sp => sp.GetRequiredService<RevocationService>());
+builder.Services.AddHostedService(sp => sp.GetRequiredService<RevocationService>());
 // the runtime adapter (gateway/Runtimes/, cloud-worker-runtimes.md 4): only in owner mode with a token secret and a runtime switched on in the configuration
 var runtimeSettings = RuntimeSettings.Load(scriptsDir);
 var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new RuntimeManager(runtimeSettings, new CaeJobRuntime(runtimeSettings.CaeJob), runtimeNonces) : null;
@@ -403,60 +408,11 @@ string PluginHash()
 }
 
 
-// Revocations (Auth.cs): the generations are read from GitHub once at start. An attempt has a time limit; a failed or timed-out attempt is tried
-// again after a growing pause (5 s doubling to 60 s), for as long as it takes. Until the read succeeds no worker, supervisor or item credential is
-// accepted (never fail open: a restart must not let a revoked credential back in): a request waits up to 20 s for the read and is then answered 503.
-// The operator token does not wait. A start that cannot read is never silent: /ready says what it waits for, and once the attempts have failed for
-// the alarm time one error line names the read. /health stays 200 throughout.
-var revocationsLoaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-var revokeGate = new SemaphoreSlim(1, 1);
-// FACTORY_TEST_SKIP_REVOCATIONS=1 (the scenario suites' second gateways, whose GitHub is a port nothing listens on): nothing is read, and revoke is refused.
+// Revocations (gateway/Identity/RevocationService.cs, Auth.cs): resolved here, where the start used to set them up, so their start-up lines and the
+// check of the test switch keep their place; the read of the generations starts with the host. Until it succeeds no session credential is accepted.
+var revocationService = app.Services.GetRequiredService<RevocationService>();
+// FACTORY_TEST_SKIP_REVOCATIONS=1: read by the operator releases below
 var revocationsOff = revocationOptions.SkipRevocations;
-if (revocationsOff && !messaging.TestHooks) throw new InvalidOperationException("FACTORY_TEST_SKIP_REVOCATIONS is for test gateways only: it needs messaging.testHooks in the configuration");
-if (revocationsOff && ownerMode) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"off\",\"warning\":\"FACTORY_TEST_SKIP_REVOCATIONS is set: revoked credentials are not read and cannot be revoked\"}}");
-// FACTORY_REVOCATIONS_ATTEMPT_SECONDS (45): the time limit of one read. FACTORY_REVOCATIONS_ALARM_SECONDS (180): failing for this long logs the error line.
-var revAttemptLimit = TimeSpan.FromSeconds(revocationOptions.AttemptSeconds);
-var revAlarmAfter = TimeSpan.FromSeconds(revocationOptions.AlarmSeconds);
-var revSince = DateTime.UtcNow; var revAttempts = 0;   // failed or timed-out attempts so far (read by /ready)
-// Nothing to read: owner sessions, messaging, the supervisor and the operator are all off in the configuration (no session credential is issued), or the gateway
-// has no GitHub identity (no App key, or no GH_TOKEN; the vault placeholder 'unset' counts as none). Such a gateway becomes ready at once instead of
-// retrying a read that can never succeed; /api/v1/status names the reason under "revocations", and revoke is refused. A configured identity whose
-// read fails (a wrong key, a GitHub error) still keeps the gateway un-ready: that is never failed open.
-var revSkipReason = !ownerMode ? "" : !instanceConfig.OwnerSessions && !messaging.On && !messaging.OperatorEnabled ? "owner-sessions-off" : !revocationOptions.GitHubConfigured ? "github-not-configured" : "";
-if (revSkipReason != "") Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"skipped\",\"reason\":\"{revSkipReason}\",\"warning\":\"revoked credentials are not read and cannot be revoked\"}}");
-if (!ownerMode || tokenSecret.Length == 0 || revocationsOff || revSkipReason != "") revocationsLoaded.SetResult();
-else _ = Task.Run(async () =>
-{
-    var alarmed = false; var pause = 5.0;
-    while (true)
-    {
-        var why = "";
-        try
-        {
-            // a read that timed out gets longer the next time (the limit, then twice, then at most 120 s): a slow GitHub must not keep every attempt just short
-            var limit = TimeSpan.FromSeconds(Math.Min(120, revAttemptLimit.TotalSeconds * Math.Min(3, 1 + Volatile.Read(ref revAttempts))));
-            var (code, output) = await runner.RunAsync("revocations", "{}", limit);
-            if (code == 0 && JsonNode.Parse(output)?["revoked"] is JsonObject list)
-            {
-                foreach (var kv in list) if (Auth.ValidName(kv.Key) && kv.Value is JsonValue gv && gv.TryGetValue<int>(out var g) && g > 0) revocations.Raise(kv.Key, g);
-                if (Volatile.Read(ref revAttempts) > 0) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"loaded\",\"afterFailedAttempts\":{Volatile.Read(ref revAttempts)},\"since\":\"{revSince:o}\"}}");
-                revocationsLoaded.SetResult(); return;
-            }
-            string? rc = null; try { rc = JsonNode.Parse(output)?["code"]?.ToString(); } catch { }
-            why = rc == "timeout" ? $"no answer within {revAttemptLimit.TotalSeconds:0} s" : $"exit {code}";
-            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"not-loaded\",\"exit\":{code},\"attempt\":{Volatile.Read(ref revAttempts) + 1}}}");
-        }
-        catch (Exception e) { why = e.GetType().Name; Console.Error.WriteLine($"revocations: {e.Message}"); }
-        var n = Interlocked.Increment(ref revAttempts);
-        if (!alarmed && DateTime.UtcNow - revSince >= revAlarmAfter)
-        {
-            alarmed = true;   // once: the line an operator searches for
-            Console.WriteLine(JsonSerializer.Serialize(new { at = DateTime.UtcNow.ToString("o"), level = "error", gateway = "not-ready", waitingFor = "revocations", attempts = n, since = revSince.ToString("o"), last = why,
-                reason = "the read of the revoked credentials at start keeps failing or timing out (rule script 'revocations': GET git/matching-refs of the work-orders repository); /ready stays 503 and no session credential is accepted until it succeeds; the gateway keeps retrying" }));
-        }
-        await Task.Delay(TimeSpan.FromSeconds(pause)); pause = Math.Min(60, pause * 2);
-    }
-});
 
 // the leader lease starts once the revoked credentials are read (above): see the leader section near the top
 if (leaderOn)
@@ -467,7 +423,7 @@ if (leaderOn)
         {
             // not before this process can serve sessions: a start that never gets ready (the revoked credentials unreadable) must not take the
             // plant from a healthy predecessor
-            await revocationsLoaded.Task.WaitAsync(app.Lifetime.ApplicationStopping);
+            await revocationService.Loaded.WaitAsync(app.Lifetime.ApplicationStopping);
             var pred = await leader.AcquireAsync(app.Lifetime.ApplicationStopping);
             await RestoreFromPredecessor(pred, "start");
             // superseded while it restored (two starts close together): it stands by instead of acting
@@ -538,10 +494,10 @@ app.Use(async (ctx, next) =>
     if (port == apiPort && (path.StartsWith("/api/") || isMcp))
     {
         var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
-        if (p?.Kind != "admin" && !revocationsLoaded.Task.IsCompleted)
+        if (p?.Kind != "admin" && !revocationService.IsLoaded)
         {
-            await Task.WhenAny(revocationsLoaded.Task, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
-            if (!revocationsLoaded.Task.IsCompleted) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }); return; }
+            await Task.WhenAny(revocationService.Loaded, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
+            if (!revocationService.IsLoaded) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }); return; }
             p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
         }
         if (p == null) { await Refuse(ctx, 401, "unauthorized", "missing, malformed, forged or expired credential"); return; }
@@ -605,7 +561,7 @@ var prompts = new PromptStore(Environment.GetEnvironmentVariable("FACTORY_PROMPT
 foreach (var pe in prompts.Errors) Console.Error.WriteLine($"prompts: {pe}");
 app.MapGet("/ready", () => leader.Replaced ? Results.Json(new { ready = false, waitingFor = "nothing", replaced = true, reason = "a newer gateway process holds the lease" }, statusCode: 503)
     : prompts.Errors.Count > 0 ? Results.Json(new { ready = false, waitingFor = "prompts", errors = prompts.Errors }, statusCode: 503)
-    : revocationsLoaded.Task.IsCompleted ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = Volatile.Read(ref revAttempts), since = revSince.ToString("o") }, statusCode: 503));
+    : revocationService.IsLoaded ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = revocationService.FailedAttempts, since = revocationService.Since.ToString("o") }, statusCode: 503));
 app.MapGet("/", () => Results.Redirect("/dashboard"));
 WorkerSessions? mcpSessionsRef = null;
 var buildVersion = (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0";
@@ -639,9 +595,7 @@ app.MapGet("/api/v1/status", (HttpContext c) =>
     o["sweep"] = hub.SweepStatus(sweepMinSeconds);
     // the session transcripts: sessions held, how many have lines not yet saved to GitHub, saves and failures
     o["transcripts"] = transcripts.Status();
-    if (ownerMode) o["revocations"] = revSkipReason != "" ? new JsonObject { ["state"] = "skipped", ["reason"] = revSkipReason }
-        : revocationsOff ? new JsonObject { ["state"] = "off", ["reason"] = "test-switch" }
-        : new JsonObject { ["state"] = revocationsLoaded.Task.IsCompleted ? "loaded" : "loading", ["failedAttempts"] = Volatile.Read(ref revAttempts) };
+    if (ownerMode) o["revocations"] = revocationService.Status();
     return Results.Text(o.ToJsonString(), "application/json");
 });
 // the switch of the gateway's own back-merges (baseUpdate.autoUpdateBranch) at run time, operator token only; until the next restart
@@ -827,10 +781,10 @@ app.MapPost("/api/v1/workers/{name}/revoke", async (string name, HttpContext c) 
     if (Who(c).Kind != "admin") return Fail(403, "forbidden", "only the operator revokes a name's credentials", 30);
     if (!ownerMode || tokenSecret.Length == 0) return Fail(403, "not-owner-mode", "the gateway is not running in owner mode", 30);
     if (!Auth.ValidName(name)) return Fail(400, "usage", "the name may use letters, digits, - and _ only (40 at most)", 2);
-    if (revocationsOff) return Fail(403, "revocations-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot revoke", 30);
-    if (revSkipReason != "") return Fail(409, "revocations-unavailable", $"revocations are not read on this gateway ({revSkipReason}): it cannot revoke", 30);
-    if (!revocationsLoaded.Task.IsCompleted) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
-    var (rok, gen, closed) = await RevokeName(name, "operator");
+    if (revocationService.Off) return Fail(403, "revocations-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot revoke", 30);
+    if (revocationService.SkipReason != "") return Fail(409, "revocations-unavailable", $"revocations are not read on this gateway ({revocationService.SkipReason}): it cannot revoke", 30);
+    if (!revocationService.IsLoaded) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
+    var (rok, gen, closed) = await revocationService.RevokeAsync(name, "operator");
     if (!rok) return Results.Json(new { ok = false, code = "not-recorded", reason = "the revocation could not be written to GitHub, so nothing was revoked; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
     // the execution of a runtime worker is stopped with its name (cloud-worker-runtimes.md 5)
     if (runtimeManager != null && runtimeManager.IsRuntimeWorker(name)) _ = Task.Run(() => runtimeManager.Deprovision(name, "revoked"));
@@ -868,28 +822,11 @@ app.MapPost("/api/v1/runtimes/{kind}/reset", (string kind, HttpContext c) =>
     rk.ResetHealth();
     return Results.Json(new { ok = true, runtime = kind, exit = 0 });
 });
-// The revocation itself: the new generation is written to GitHub, then raised here; the name's open stream and pending nonces end with it.
-async Task<(bool Ok, int Generation, bool Closed)> RevokeName(string name, string by)
-{
-    if (revocationsOff || revSkipReason != "" || !revocationsLoaded.Task.IsCompleted) return (false, 0, false);
-    await revokeGate.WaitAsync();
-    try
-    {
-        var next = revocations.Of(name) + 1;
-        var (code, _) = await runner.RunAsync("revoke-worker", new JsonObject { ["name"] = name, ["generation"] = next }.ToJsonString(), TimeSpan.FromSeconds(120));
-        if (code != 0) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"failed\":{code}}}"); return (false, 0, false); }
-        revocations.Raise(name, next);
-        runtimeNonces.Forget(name);   // a nonce of the name not yet redeemed is spent with it
-        var closed = plant.Revoke(name);
-        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revoke\":\"{name}\",\"generation\":{next},\"streamClosed\":{(closed ? "true" : "false")},\"by\":\"{by}\"}}");
-        return (true, next, closed);
-    }
-    finally { revokeGate.Release(); }
-}
-if (runtimeManager != null) runtimeManager.Revoke = async n => { await RevokeName(n, "runtime"); };
-if (cursorManager != null) cursorManager.Revoke = async n => { await RevokeName(n, "runtime"); };
-if (copilotManager != null) copilotManager.Revoke = async n => { copilotCodes.Forget(n); await RevokeName(n, "runtime"); };
-if (octopusManager != null) octopusManager.Revoke = async n => { await RevokeName(n, "runtime"); };
+// the revocation itself is RevocationService.RevokeAsync: a runtime revokes a failed execution's name through it
+if (runtimeManager != null) runtimeManager.Revoke = async n => { await revocationService.RevokeAsync(n, "runtime"); };
+if (cursorManager != null) cursorManager.Revoke = async n => { await revocationService.RevokeAsync(n, "runtime"); };
+if (copilotManager != null) copilotManager.Revoke = async n => { copilotCodes.Forget(n); await revocationService.RevokeAsync(n, "runtime"); };
+if (octopusManager != null) octopusManager.Revoke = async n => { await revocationService.RevokeAsync(n, "runtime"); };
 // The reconcile loop of the Octopus runbook runtime (docs/design/octopus-runbook-runtime.md 6): the scheduled runbook "Reconcile hosts" asks, per host,
 // which workers should run there and reports the fw-* containers it found. Authenticated by the host token (FACTORY_OCTOPUS_HOST_TOKEN, compared in
 // constant time) only: never the operator token, never a worker credential. The answers name workers, never a credential.
@@ -1247,10 +1184,10 @@ app.MapGet("/sessions/{name}", (string name) => TranscriptStore.ValidName(name) 
 
 app.MapPost("/api/v1/runtime/redeem", async (HttpContext ctx) =>
 {
-    if (!revocationsLoaded.Task.IsCompleted)
+    if (!revocationService.IsLoaded)
     {
-        await Task.WhenAny(revocationsLoaded.Task, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
-        if (!revocationsLoaded.Task.IsCompleted) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
+        await Task.WhenAny(revocationService.Loaded, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
+        if (!revocationService.IsLoaded) return Results.Json(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }, statusCode: 503);
     }
     string text; using (var rd = new StreamReader(ctx.Request.Body)) text = await rd.ReadToEndAsync();
     if (text.Length > 1000) return Results.Json(new { ok = false, code = "usage", reason = "the body is {\"nonce\": \"...\"}", exit = 2 }, statusCode: 400);
@@ -2362,7 +2299,7 @@ if (copilotRuntime != null && ownerMode && messaging.ManagerEnabled && messaging
             var text = bp == null ? "" : prompts.Render(bp, "copilot-cloud-agent")["text"]!.ToString();
             return text + $"\nYour gateway URL for fworker_connect: {copilotSettings.GatewayUrl}\nYour one-time code for fworker_connect: {code}\n";
         },
-        async name => { await RevokeName(name, "runtime"); });
+        async name => { await revocationService.RevokeAsync(name, "runtime"); });
     Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-config", ["enabled"] = mgrCopSettings.Enabled, ["maxPerDay"] = mgrCopSettings.MaxPerDay, ["cooldownMinutes"] = mgrCopSettings.CooldownMinutes, ["maxMinutes"] = mgrCopSettings.MaxMinutes }.ToJsonString());
     _ = Task.Run(async () =>
     {
