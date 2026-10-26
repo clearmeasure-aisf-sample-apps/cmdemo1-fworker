@@ -215,7 +215,7 @@ if ($ListScenarios) {
     exit 0
 }
 if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
-    # Group port ranges lie above every suite slot (6100 + 100 * slot, up to 7899): 10000 + 1000 * slot + 100 * group. TEST_PORT_BASE moves the first group; TEST_FAKE_PORT and TEST_API_PORT name one port each, so they cannot apply to several groups and are not passed on.
+    # Group port ranges lie above every suite slot (6100 + 100 * slot, up to 8999): 10000 + 1000 * slot + 100 * group. TEST_PORT_BASE moves the first group; TEST_FAKE_PORT and TEST_API_PORT name one port each, so they cannot apply to several groups and are not passed on.
     $base0 = $(if ($env:TEST_PORT_BASE) { [int]$env:TEST_PORT_BASE } else { 10000 + 1000 * @($SuiteDefs | ForEach-Object { $_.Name }).IndexOf($Suite) })
     $gDir = Join-Path ([IO.Path]::GetTempPath()) "factory-groups-$([guid]::NewGuid().ToString('N').Substring(0,6))"; New-Item -ItemType Directory -Force -Path $gDir | Out-Null
     $swAll = [Diagnostics.Stopwatch]::StartNew(); $kids = @(); $tot = 0; $fails = @(); $sc = @(); $skip = [ordered]@{}; $vc = 0; $vs = 0.0; $gv = 0; $cc = 0; $bad = $false; $quar = @()
