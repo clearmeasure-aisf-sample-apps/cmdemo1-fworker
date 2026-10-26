@@ -1,0 +1,19 @@
+# suite: promote
+# scenario: promote: with a newer release already in tdd, the older one is not deployed to uat; the newer one carries its items
+# runs: 3
+= harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.19.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#2}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#2}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.19.2\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
++ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.19.2","SpaceIdOrName":"Spaces-355"}
++ rule POST /octopus/api/Spaces-355/interruptions/Interruptions-{n}/submit 200 {"Instructions":null,"Notes":"Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md).","Result":"Proceed"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: answered the Sign-off of the deployment of release 3.19.2 to **uat** (Octopus task `ServerTasks-{n}`): **Proceed**.\n\n<!-- plant event=promotion-signoff key=3.19.2|uat|ServerTasks-{n}|Proceed -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.19.2 to **uat** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.19.2|uat -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: release 3.19.1 waits for the automatic promotion to **uat**: the tdd app does not run release 3.19.1 yet (/_build: 3.19.2). The item stays in the Release Queue; the gateway looks again at every sweep.\n\n<!-- plant event=promotion-waiting key=3.19.1|uat|the tdd app does not run release 3.19.1 yet (/_build: 3.19.2) -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:467 sha256:7b58e45e \"\uD83C\uDFED Plant manager: release 3.19.2 waits for the automatic promotion to **uat**: t…\"}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:469 sha256:59859679 \"\uD83C\uDFED Plant manager: release 3.19.2 waits for the automatic promotion to **prod**: …\"}"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: answered the Sign-off of the deployment of release 3.19.2 to **uat** (Octopus task `ServerTasks-{n}`): **Proceed**.\n\n<!-- plant event=promotion-signoff key=3.19.2|uat|ServerTasks-{n}|Proceed -->"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.19.2 to **uat** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.19.2|uat -->"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:467 sha256:7b58e45e \"\uD83C\uDFED Plant manager: release 3.19.2 waits for the automatic promotion to **uat**: t…\"}"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:469 sha256:59859679 \"\uD83C\uDFED Plant manager: release 3.19.2 waits for the automatic promotion to **prod**: …\"}"}
++ rule PUT /octopus/api/Spaces-355/interruptions/Interruptions-{n}/responsible 200 {}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#2}

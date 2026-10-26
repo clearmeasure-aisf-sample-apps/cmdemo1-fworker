@@ -1,0 +1,3 @@
+# suite: auto
+# scenario: board: a card of another repository linked to the board is never seen: no sweep entry, no comment, no column event
+# runs: 3

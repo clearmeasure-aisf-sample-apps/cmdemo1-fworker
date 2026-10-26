@@ -1,0 +1,3 @@
+# suite: owner
+# scenario: owner: the operator sets a worker capacity, a worker cannot, and it survives a reconnect [full]
+# runs: 3

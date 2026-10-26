@@ -1,0 +1,12 @@
+# suite: octopus
+# scenario: octopus: session transcript: the start comment of a new session is posted even when the item's journal is full
+# runs: 3
+= harness STATE factory-worker v1 #{#1}
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
++ gateway POST /api/Spaces-355/runbook-runs/create/v1 201 {"EnvironmentNames":["tdd"],"ProjectName":"cmdemo1-fworker-runtime","RunbookName":"Start worker","SpaceIdOrName":"Spaces-355","SpecificMachineNames":["host-a"],"Variables":{"Fworker.Agent":"codex","Fworker.Item":"{#1}","Fworker.Mode":"detached","Fworker.ModelProfile":"","Fworker.Name":"oct-{session}","Fworker.Nonce":"{token}","Fworker.Phase":"Technical Design"}}
++ gateway POST /api/Spaces-355/runbook-runs/create/v1 201 {"EnvironmentNames":["tdd"],"ProjectName":"cmdemo1-fworker-runtime","RunbookName":"Start worker","SpaceIdOrName":"Spaces-355","SpecificMachineNames":["host-b"],"Variables":{"Fworker.Agent":"codex","Fworker.Item":"{#1}","Fworker.Mode":"detached","Fworker.ModelProfile":"","Fworker.Name":"oct-{session}","Fworker.Nonce":"{token}","Fworker.Phase":"Technical Design"}}
++ rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: octopus started **oct-{session}** for **Technical Design** (task `ServerTasks-{n}`). [session]({session-link}) ([Octopus task](http://127.0.0.1:{port}/app#/Spaces-355/tasks/ServerTasks-{n}))\n\n<!-- plant event=launched key=rtl|oct-{session}|ServerTasks-{n} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **oct-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|oct-{session} -->"}
++ rule STATE factory-worker v1 #{#1}

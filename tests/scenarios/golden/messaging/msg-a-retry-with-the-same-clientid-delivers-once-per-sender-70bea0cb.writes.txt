@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: a retry with the same clientId delivers once, per sender
+# runs: 3

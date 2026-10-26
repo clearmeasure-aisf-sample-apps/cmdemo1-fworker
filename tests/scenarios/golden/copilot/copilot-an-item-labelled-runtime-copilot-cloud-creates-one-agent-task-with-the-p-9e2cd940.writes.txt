@@ -1,0 +1,15 @@
+# suite: copilot
+# scenario: copilot: an item labelled runtime:copilot-cloud creates one agent task with the phase prompt and a one-time code; the code and the bootstrap token give the r1 once; session_end ends the task and revokes it
+# runs: 3
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:4c23e87d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **cop-{session}** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}. Copilot session: {agent-url}\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Technical Design** (task `{task}`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cop-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cop-{session} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (stopped:session-end); offering to the next worker. Copilot session: {agent-url}\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **Owner:** Copilot task [{task}]({agent-url}) owns #{#1} from Technical Design until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item.\n\n<!-- factory-journal:factory-worker -->"}
++ rule STATE factory-worker v1 #{#1}

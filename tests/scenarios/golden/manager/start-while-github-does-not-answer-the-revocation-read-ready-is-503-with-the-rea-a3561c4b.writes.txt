@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: start: while GitHub does not answer the revocation read /ready is 503 with the reason, /health is 200 and no credential is accepted; when it answers the gateway is ready [full]
+# runs: 3

@@ -1,0 +1,16 @@
+# suite: cursor-deadline
+# scenario: cursor: a failed launch frees the slot and the item gets a new agent; an agent past api.cursor.maxMinutes is cancelled and deleted
+# runs: 3
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
++ gateway POST /v1/agents 201 {"autoCreatePR":false,"mcpServers":[{"headers":{"Authorization":"Bearer {token}"},"name":"fworker","type":"http","url":"http://gw.test/mcp"}],"model":{"id":"auto-smart","params":[{"id":"optimize_for","value":"cost"}]},"name":"fworker-tdd-i1-cur-{session}","prompt":{"text":"{len:3812 sha256:e2e0ccbc \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"},"repos":[{"startingRef":"master","url":"https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders"}]}
++ gateway POST /v1/agents 400 {"autoCreatePR":false,"mcpServers":[{"headers":{"Authorization":"Bearer {token}"},"name":"fworker","type":"http","url":"http://gw.test/mcp"}],"model":{"id":"auto-smart","params":[{"id":"optimize_for","value":"cost"}]},"name":"fworker-tdd-i1-cur-{session}","prompt":{"text":"{len:3812 sha256:e2e0ccbc \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"},"repos":[{"startingRef":"master","url":"https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders"}]}
++ gateway POST /v1/agents/{agent}/runs/{run}/cancel 200 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cur-{session}/1","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: cursor-cloud started **cur-{session}** for **Technical Design** (task `{agent}`). Cursor session: {agent-url}\n\n<!-- plant event=launched key=rtl|cur-{session}|{agent} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cur-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cur-{session} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `runtime-failed` removed by the sweep: the item is closed. The item is closed: nothing is offered.\n\n<!-- plant event=unparked key=closed|{time} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: parked\n\n<!-- plant event=parked key={time} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cur-{session} ended (start-failed); offering to the next worker.\n\n<!-- plant event=reassigned key=rtend|a-{id}|cur-{session} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **Owner:** Cursor agent [{agent}]({agent-url}) owns #{#1} from Technical Design until the change is in production. Between phases the gateway holds the item for this agent and continues it with a follow-up run; no other worker is offered the item.\n\n<!-- factory-journal:factory-worker -->"}
++ rule STATE factory-worker v1 #{#1}

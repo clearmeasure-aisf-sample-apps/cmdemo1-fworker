@@ -1,0 +1,19 @@
+# suite: manager
+# scenario: mgr: text that comes from a message enters an item only as a marked block, which get-item labels and inspect-facts leaves out
+# runs: 3
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation verdict for **Functional Testing**: PASS - Both criteria met.\n\n<!-- factory-journal:factory-worker -->"}
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"{len:670 sha256:f2ad3148 \"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the ite…\"}"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: <!-- aisf:assumption source=m-{sha}-{n} from=alice -->\n> Assumed that AC 5 governs.\n<!-- /aisf:assumption -->\n\nAI session: alice\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: <!-- aisf:assumption source=m-{sha}-{n} from=operator in_reply_to=m-{sha}-{n} -->\n> Decision taken from the answer: AC 5 governs.\n<!-- /aisf:assumption -->\n\nAI session: alice\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: <!-- aisf:assumption source=m-{sha}-{n} from=operator in_reply_to=m-{sha}-{n} -->\n> Second note from the same answer.\n<!-- /aisf:assumption -->\n\nAI session: alice\n\n<!-- factory-journal:factory-worker -->"}
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"body":"{len:757 sha256:1ea0a37a \"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the ite…\"}"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: PR #{#2} has a PASS verdict and is not merged yet: its required checks are still running (`checks-pending`). The gateway merges it by itself when that clears; no session has to call anything.\n\n<!-- plant event=merge-waiting key={time}|checks-pending -->"}
++ rule STATE factory-worker v1 #{#1}

@@ -1,0 +1,18 @@
+# suite: owner
+# scenario: owner: a pinned item is only ever offered to its worker: after a missed accept, while it is at capacity, and while it is offline
+# runs: 3
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#4}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **pin-a** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **pin-a** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|pin-a -->"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: dave did not confirm within {dur}; offering to the next worker.\n\n<!-- plant event=reassigned key=ack|a-{id}|dave -->"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cap1** (claude-cloud); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cap1 -->"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **dave** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|dave -->"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **pin-b** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|pin-b -->"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **pin-c** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|pin-c -->"}
++ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"\uD83C\uDFED Plant manager: **pin-c** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
++ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **pin-c** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|pin-c -->"}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#2}
++ rule STATE factory-worker v1 #{#3}
++ rule STATE factory-worker v1 #{#4}

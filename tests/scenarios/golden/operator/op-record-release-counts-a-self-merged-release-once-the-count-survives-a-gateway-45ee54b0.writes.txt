@@ -1,0 +1,6 @@
+# suite: operator
+# scenario: op: record-release counts a self-merged release once, the count survives a gateway restart, and at the limit the next check is refused
+# runs: 3
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/operator-release/{n}/101/1.0.40","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/operator-release/{n}/102/1.0.41","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/operator-release/{n}/103/1.0.42","sha":"{sha}"}

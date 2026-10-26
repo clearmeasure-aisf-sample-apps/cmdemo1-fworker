@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: ask --wait that gets no answer ends pending, and the operator can answer instead
+# runs: 3

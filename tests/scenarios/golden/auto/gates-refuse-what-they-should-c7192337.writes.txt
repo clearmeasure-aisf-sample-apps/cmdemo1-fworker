@@ -1,0 +1,9 @@
+# suite: auto
+# scenario: gates refuse what they should [full]
+# runs: 3
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: completion for **Technical Design** rejected: missing required section `## Technical Design` (no body append landed after dispatch: dispatched={time} last_append=none). A fresh append is needed.\n\n<!-- factory-journal:factory-worker -->"}
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n- x\n"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: worker reported **FAILURE** for **Technical Design**; item parked for review. giving up\n\n<!-- factory-journal:factory-worker -->"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule STATE factory-worker v1 #{#1}

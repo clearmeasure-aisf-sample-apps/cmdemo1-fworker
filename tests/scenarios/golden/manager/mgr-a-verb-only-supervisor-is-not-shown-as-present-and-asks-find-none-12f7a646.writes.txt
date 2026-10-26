@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: a verb-only supervisor is not shown as present, and asks find none
+# runs: 3

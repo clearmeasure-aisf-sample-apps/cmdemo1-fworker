@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: the dashboard has a Message control on every session row and the supervisor row, Message all, and an operator inbox with a reply box; hostile text never becomes markup
+# runs: 3

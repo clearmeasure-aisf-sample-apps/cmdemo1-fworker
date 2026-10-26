@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: the dashboard shows sessions with the pinned supervisor, questions with an answer box, the traffic and the cost, and no session's text ever becomes markup
+# runs: 3

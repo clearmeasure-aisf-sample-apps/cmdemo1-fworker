@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: a directive reaches one worker, an announcement every worker session once, and the supervisor's sends have their own limit
+# runs: 3

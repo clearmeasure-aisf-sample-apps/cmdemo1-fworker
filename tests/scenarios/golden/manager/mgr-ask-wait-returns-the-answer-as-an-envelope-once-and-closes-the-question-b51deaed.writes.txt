@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: ask --wait returns the answer as an envelope, once, and closes the question
+# runs: 3

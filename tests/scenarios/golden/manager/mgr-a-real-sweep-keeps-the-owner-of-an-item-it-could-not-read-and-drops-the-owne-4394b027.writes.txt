@@ -1,0 +1,5 @@
+# suite: manager
+# scenario: mgr: a real sweep keeps the owner of an item it could not read, and drops the owner it no longer lists, that of a settling item too
+# runs: 3
+= harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:sweep-two v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"master-green\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"sha\":\"{sha}\"},\"schema\":1}\n```\n"}
++ rule STATE sweep-two v1 #{#3}

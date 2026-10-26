@@ -1,0 +1,7 @@
+# suite: manager
+# scenario: lease: the stream client sends the work it sees on its machine (a progress file, a changed worktree) with the heartbeat; an item.check is answered by the client itself [full]
+# runs: 3
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **alice** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **alice** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|alice -->"}
++ rule STATE factory-worker v1 #{#1}

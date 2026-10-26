@@ -1,0 +1,20 @@
+# suite: owner
+# scenario: unpark: a closed item keeps no park: the sweep removes it, and unpark of a closed item removes only the park
+# runs: 3
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: worker reported **FAILURE** for **Technical Design**; item parked for review. cannot be met as written\n\nAI session: cpk\n\n<!-- factory-journal:factory-worker -->"}
+= harness DELETE /repos/{repo}/issues/{#1}/labels/factory worker 200 -
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
+= rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83E\uDD16 factory-worker: worker reported **FAILURE** for **Technical Design**; item parked for review. cannot be met as written\n\nAI session: cpk\n\n<!-- factory-journal:factory-worker -->"}
+= harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#2} 204 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **cpk** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cpk** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cpk -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `worker-failure` removed by the operator: the item was closed by a person. The item is closed: nothing is offered.\n\n<!-- plant event=unparked key={time} -->"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: **cpk** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cpk** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cpk -->"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `worker-failure` removed by the sweep: the item is closed. The item is closed: nothing is offered.\n\n<!-- plant event=unparked key=closed|{time} -->"}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#2}

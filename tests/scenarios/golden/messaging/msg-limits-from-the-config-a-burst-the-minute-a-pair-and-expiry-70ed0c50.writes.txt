@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: limits from the config, a burst, the minute, a pair, and expiry [full]
+# runs: 3

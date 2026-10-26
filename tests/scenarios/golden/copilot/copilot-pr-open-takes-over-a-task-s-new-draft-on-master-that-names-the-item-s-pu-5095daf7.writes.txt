@@ -1,0 +1,19 @@
+# suite: copilot
+# scenario: copilot: pr_open takes over a task's new draft on master that names the item's pull request: the draft is the item's pull request, titled for the item, and the old one is superseded with the fix [full]
+# runs: 3
+= harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/first-{#1}","title":"[WIP] Thing"}
+= harness POST /repos/{repo}/pulls 201 {"base":"master","body":"Fixes the failing check of #{#2}.","draft":true,"head":"copilot/first-fix-{#1}","title":"[WIP] Thing"}
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ rule DELETE /repos/{repo}/git/refs/heads/copilot/first-{#1} 204 -
++ rule PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
++ rule PATCH /repos/{repo}/pulls/{#2} 200 {"title":"Thing (#{#1})"}
++ rule PATCH /repos/{repo}/pulls/{#3} 200 {"title":"Thing (#{#1})"}
++ rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#2}"}}
++ rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#3}"}}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Development** (task `{task}`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cop-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cop-{session} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **Owner:** Copilot task [{task}]({agent-url}) owns #{#1} from Development until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item.\n\n<!-- factory-journal:factory-worker -->"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"Superseded by #{#3}, the pull request of #{#1} now: it holds this branch's commits and the fix. Closed by the factory worker gateway."}
++ rule STATE factory-worker v1 #{#1}

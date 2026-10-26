@@ -1,0 +1,10 @@
+# suite: promote
+# scenario: promote: a 403 of the deployment create waits and names the missing permission, once
+# runs: 3
+= harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.6.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
++ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.6.1","SpaceIdOrName":"Spaces-355"}
++ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 403 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.6.1","SpaceIdOrName":"Spaces-355"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.6.1 to **uat** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.6.1|uat -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:465 sha256:06629d20 \"\uD83C\uDFED Plant manager: release 3.6.1 waits for the automatic promotion to **uat**: th…\"}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:485 sha256:cff914e7 \"\uD83C\uDFED Plant manager: release 3.6.1 waits for the automatic promotion to **uat**: Oc…\"}"}
++ rule STATE factory-worker v1 #{#1}

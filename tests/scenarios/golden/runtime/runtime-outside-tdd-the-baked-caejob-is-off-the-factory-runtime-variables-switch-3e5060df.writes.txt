@@ -1,0 +1,8 @@
+# suite: runtime
+# scenario: runtime: outside tdd the baked caeJob is off; the FACTORY_RUNTIME_ variables switch it on with a job and an identity
+# runs: 3
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
++ gateway POST /subscriptions/s1/resourceGroups/rg-test/providers/Microsoft.App/jobs/caj-test/start 202 {"containers":[{"env":[{"name":"CLAUDE_CODE_USE_FOUNDRY","value":"1"},{"name":"FWORKER_NONCE","value":"{token}"},{"name":"FWORKER_NAME","value":"cae-{session}"},{"name":"FWORKER_ITEM","value":"{#1}"},{"name":"FWORKER_PHASE","value":"Technical Design"},{"name":"FWORKER_MODEL_PROFILE","value":""},{"name":"FWORKER_RUNTIME","value":"cae-job"},{"name":"FWORKER_GATEWAY_URL","value":"http://ca-uat-fworker"},{"name":"FWRUNNER_AGENT","value":"codex"}],"image":"fake.azurecr.io/fwrunner:1","name":"fwrunner","resources":{"cpu":4,"memory":"8Gi"}}]}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cae-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cae-{session} -->"}
++ rule STATE factory-worker v1 #{#1}
