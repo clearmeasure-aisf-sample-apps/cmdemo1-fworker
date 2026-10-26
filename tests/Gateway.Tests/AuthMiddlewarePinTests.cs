@@ -83,16 +83,20 @@ public sealed class AuthMiddlewareOrderTests(TwoPortGateway gw) : IClassFixture<
     }
 
     /// <summary>
-    /// Today's answer to an /api route asked with another case: the middleware's test is the ordinal prefix "/api/", routing is case-insensitive,
-    /// so the handler runs with no principal and fails (500). Pinned as it is, a known defect (filed as a follow-up of task C6); the move must
-    /// not change it, and its fix changes this test.
+    /// An /api route asked with another case is authenticated like the route itself (issue 409): routing ignores case, so the middleware does
+    /// too. Before the fix the middleware's test was the ordinal prefix "/api/" and the handler ran with no principal (500).
+    /// CaseVariantPathTests compares every guard's variants with their lower-case form for every caller kind.
     /// </summary>
     [Fact]
-    public async Task ApiPathInAnotherCase_SkipsTheMiddleware_AsOnMaster()
+    public async Task ApiPathInAnotherCase_IsAuthenticated_LikeTheLowerCasePath()
     {
         if (!StubPwsh.Supported) return;
-        Assert.Equal(500, (await AuthPins.Raw(gw.Host, "GET", "/API/v1/status", Api, null)).Status);
-        Assert.Equal(500, (await AuthPins.Raw(gw.Host, "GET", "/Api/v1/plugin", Api, AuthPins.Bearer("nope"))).Status);
+        foreach (var (p, auth) in new (string, string?)[] { ("/API/v1/status", null), ("/Api/v1/plugin", AuthPins.Bearer("nope")), ("/aPI/V1/STATUS", null) })
+        {
+            var a = await AuthPins.Raw(gw.Host, "GET", p, Api, auth);
+            Assert.True(a.Status == 401 && a.Body == Unauthorized, $"{p}: {a.Status} {a.Body}");
+        }
+        Assert.Equal(200, (await AuthPins.Raw(gw.Host, "GET", "/API/v1/status", Api, Admin)).Status);
     }
 }
 
