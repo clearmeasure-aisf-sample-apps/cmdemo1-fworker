@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: an ask --wait interrupted by a restart asks again once and returns the answer [full]
-# runs: 5

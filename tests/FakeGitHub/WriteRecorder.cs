@@ -7,7 +7,9 @@ using System.Text.RegularExpressions;
 
 // The golden-write recorder of Tier 1 (docs: tests/scenarios/golden/README.md). With FAKE_RECORD_DIR set, every write that reaches the fake
 // (POST, PUT, PATCH, DELETE and GraphQL mutations; not /_fake/*, not the credential mints) is kept for the open scenario, and
-// /_fake/scenario-end writes it normalized to <dir>/<suite>/<slug>.writes.txt (the sorted, distinct lines) and raw to <slug>.raw.jsonl.
+// /_fake/scenario-end writes it normalized to <dir>/<suite>/<slug>.writes.txt and raw to <slug>.raw.jsonl. The file has two sections: "= "
+// the writes the scenario caused (the harness's own, and those inside a cause window of /_fake/cause that are not of a background kind), in
+// order, and "+ " the background writes, the sorted distinct lines.
 // Recording only observes: the fake answers every request exactly as it does without it. Every member is called under the fake's one lock.
 sealed class WriteRecorder
 {
@@ -15,7 +17,8 @@ sealed class WriteRecorder
     // readable lines: no \u escapes for quotes, angle brackets and the like (the files are compared as text, never parsed by a browser)
     static readonly JsonSerializerOptions Plain = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
-    sealed record Entry(long Seq, long Ms, string Method, string Path, string Query, int Status, string Source, JsonNode? Body, string? Field);
+    // Window: whether a cause window of the harness was open when the write came (Cause)
+    sealed record Entry(long Seq, long Ms, string Method, string Path, string Query, int Status, string Source, JsonNode? Body, string? Field, bool Window);
 
     readonly string dir;
     readonly List<Entry> entries = new();
@@ -23,6 +26,14 @@ sealed class WriteRecorder
     Dictionary<string, long> bases = new();
     string? suite, scenario, slug;
     long seq;
+    // the cause windows: how many requests of the harness to the gateway are open now (a count, so overlapping requests nest), and how many opened
+    int depth; long windows;
+
+    // The kinds of write that are always background, also inside a cause window: what the gateway's own loops write (the plant's journal lines,
+    // factory-state comments, claim refs, transcripts, the plant snapshot, the leader lease, revocation refs, and every write of the gateway's
+    // own C# clients: the Cursor, Copilot, ARM and Octopus runtimes). A sweep or loop that runs while a verb of the harness runs writes them
+    // too, and nothing in a request tells the two apart (Kind).
+    public static readonly HashSet<string> BackgroundKinds = new(StringComparer.Ordinal) { "plant", "state", "claims", "transcripts", "snapshot", "leader", "revoked", "gateway" };
 
     /// <summary>Writes made while no scenario was open (between scenarios, or before the first): counted, not kept.</summary>
     public long Unlabelled { get; private set; }
@@ -56,7 +67,52 @@ sealed class WriteRecorder
     public void Record(string method, string path, string query, int status, string userAgent, JsonNode? body, string? field)
     {
         if (scenario == null) { Unlabelled++; return; }
-        entries.Add(new Entry(++seq, clock.ElapsedMilliseconds, method, path, query, status, SourceOf(userAgent), body, field));
+        entries.Add(new Entry(++seq, clock.ElapsedMilliseconds, method, path, query, status, SourceOf(userAgent), body, field, depth > 0));
+    }
+
+    /// <summary>/_fake/cause { open: true | false }: a request of the harness to the gateway begins or ends. A close without an open is ignored.</summary>
+    public JsonObject Cause(JsonNode? b)
+    {
+        bool open; try { open = b?["open"] is JsonValue v && v.GetValueKind() == JsonValueKind.True; } catch { open = false; }
+        if (scenario != null)
+        {
+            if (open) { depth++; windows++; }
+            else if (depth > 0) depth--;
+        }
+        return new JsonObject { ["ok"] = true, ["recording"] = true, ["open"] = scenario != null, ["depth"] = depth };
+    }
+
+    /// <summary>The kind of a write: one of <see cref="BackgroundKinds"/>, "commit" (another git commit) or "verb" (any other write).
+    /// <paramref name="state"/>: its factory-state comment (Normalizer.StateOf), or null.</summary>
+    static string Kind(Entry e, string? state)
+    {
+        try
+        {
+            var raw = RawText(e.Body);
+            if (raw.Contains("<!-- plant event=", StringComparison.Ordinal)) return "plant";
+            if (state != null || raw.Contains("<!-- factory-state:", StringComparison.Ordinal)) return "state";
+            var refName = e.Body is JsonObject o && o["ref"] is JsonValue rv && rv.GetValueKind() == JsonValueKind.String ? rv.GetValue<string>() : "";
+            var t = e.Path + " " + refName;
+            if (t.Contains("/claims/", StringComparison.Ordinal)) return "claims";
+            if (t.Contains("/transcripts/", StringComparison.Ordinal)) return "transcripts";
+            if (t.Contains("plant-snapshot", StringComparison.Ordinal)) return "snapshot";
+            if (t.Contains("gateway-leader", StringComparison.Ordinal)) return "leader";
+            if (t.Contains("/revoked/", StringComparison.Ordinal)) return "revoked";
+            // every write of the gateway's own C# clients is background, its commits too: only rule-script writes can be caused
+            if (e.Source == "gateway") return "gateway";
+            if (e.Path.EndsWith("/git/commits", StringComparison.Ordinal))
+            {
+                // the commit of a sealed transcript (fwt1:...), of a plant snapshot, of the leader lease
+                var m = e.Body is JsonObject c && c["message"] is JsonValue mv && mv.GetValueKind() == JsonValueKind.String ? mv.GetValue<string>() : "";
+                if (m.StartsWith("fwt1:", StringComparison.Ordinal)) return "transcripts";
+                if (m.Contains("\"assignments\"", StringComparison.Ordinal) && m.Contains("\"owners\"", StringComparison.Ordinal)) return "snapshot";
+                if (m.Contains("\"gateway-leader\"", StringComparison.Ordinal)) return "leader";
+                return "commit";
+            }
+            if (e.Source == "gateway") return "gateway";
+            return "verb";
+        }
+        catch { return "verb"; }
     }
 
     public JsonObject Begin(JsonNode? b, Dictionary<string, long> worldBases)
@@ -67,7 +123,7 @@ sealed class WriteRecorder
         if (suite == "") suite = "unnamed";
         if (slug == "") slug = "scenario-" + Hash8(scenario);
         bases = new Dictionary<string, long>(worldBases);
-        entries.Clear(); seq = 0; clock.Restart();
+        entries.Clear(); seq = 0; depth = 0; windows = 0; clock.Restart();
         return new JsonObject { ["ok"] = true, ["recording"] = true };
     }
 
@@ -80,6 +136,8 @@ sealed class WriteRecorder
         Normalizer norm;
         try { norm = new Normalizer(bases, ends, entries.Select(e => e.Path + " " + RawText(e.Body))); }
         catch { norm = new Normalizer(bases, ends, Array.Empty<string>()); }
+        // (a) the writes the scenario caused, in the order they came; (b) the background writes, a set (README: Format)
+        var cause = new List<string>();
         var lines = new SortedSet<string>(StringComparer.Ordinal);
         var raw = new StringBuilder();
         int kept = 0, leftover = 0, timing = 0, errors = 0;
@@ -105,7 +163,7 @@ sealed class WriteRecorder
         for (var i = 0; i < entries.Count; i++)
         {
             var e = entries[i];
-            string line; bool add = true, left = leftOf[i], timed = timedOf[i];
+            string line; bool add = true, failed = false, left = leftOf[i], timed = timedOf[i];
             try
             {
                 var path = norm.Path(e.Path, e.Query);
@@ -119,12 +177,27 @@ sealed class WriteRecorder
                 // session's transcript come and go with the sweep's, the plant's and the transcript loop's timing: kept raw, counted, not compared)
             }
             // one write the normalization cannot read (a regex timeout, an odd body) is one line of its own, never the loss of the record
-            catch (Exception ex) { line = $"{e.Source} {e.Method} {{normalize-error}} {ex.GetType().Name}"; add = true; left = false; timed = false; errors++; }
-            if (left) leftover++; else if (timed) timing++; else { kept++; if (add) lines.Add(line); }
+            catch (Exception ex) { line = $"{e.Source} {e.Method} {{normalize-error}} {ex.GetType().Name}"; add = true; failed = true; left = false; timed = false; errors++; }
+            // cause or background: a write of the harness is always the scenario's; any other is the scenario's when it came inside a cause window
+            // and is not of a background kind
+            var kind = Kind(e, state[i]);
+            string cls;
+            if (left) { leftover++; cls = "leftover"; }
+            else if (timed) { timing++; cls = "timing"; }
+            else if (e.Source == "harness")
+            {
+                kept++; cls = "cause";
+                // the harness's own state writes are compared one by one (how many it makes is the scenario's), each without its body (the state
+                // it edits is the gateway's, whose content follows the timing); a refused one keeps its marker line
+                if (state[i] != null && e.Status < 300 && !failed) line = $"{e.Source} STATE {state[i]}";
+                cause.Add(line);
+            }
+            else if (e.Window && !BackgroundKinds.Contains(kind)) { kept++; cls = "cause"; cause.Add(line); }
+            else { kept++; cls = "background"; if (add) lines.Add(line); }
             raw.Append(new JsonObject
             {
                 ["seq"] = e.Seq, ["ms"] = e.Ms, ["method"] = e.Method, ["path"] = e.Path, ["query"] = e.Query, ["status"] = e.Status, ["source"] = e.Source,
-                ["field"] = e.Field, ["body"] = e.Body?.DeepClone(), ["leftover"] = left, ["timing"] = timed, ["line"] = line
+                ["field"] = e.Field, ["body"] = e.Body?.DeepClone(), ["leftover"] = left, ["timing"] = timed, ["window"] = e.Window, ["kind"] = kind, ["class"] = cls, ["line"] = line
             }.ToJsonString(Plain)).Append('\n');
         }
         var sd = Path.Combine(dir, suite!);
@@ -136,18 +209,21 @@ sealed class WriteRecorder
             .Append("# bases: ").Append(string.Join(' ', bases.OrderBy(b => b.Key, StringComparer.Ordinal).Select(b => b.Key + "=" + b.Value))).Append('\n');
         if (ends != null) text.Append("# ends: ").Append(string.Join(' ', ends.OrderBy(b => b.Key, StringComparer.Ordinal).Select(b => b.Key + "=" + b.Value))).Append('\n');
         if (errors > 0) text.Append("# normalize-errors: ").Append(errors).Append('\n');
-        foreach (var l in lines) text.Append(l).Append('\n');
+        text.Append("# windows: ").Append(windows).Append('\n').Append("# cause: ").Append(cause.Count).Append('\n').Append("# background: ").Append(lines.Count).Append('\n');
+        // "= " the caused writes in the order they came, "+ " the distinct background lines, sorted (ordinal)
+        foreach (var l in cause) text.Append("= ").Append(l).Append('\n');
+        foreach (var l in lines) text.Append("+ ").Append(l).Append('\n');
         var utf8 = new UTF8Encoding(false);
         File.WriteAllText(file, text.ToString(), utf8);
         File.WriteAllText(rawFile, raw.ToString(), utf8);
-        scenario = null; suite = null; slug = null; entries.Clear();
-        return (200, new JsonObject { ["ok"] = true, ["file"] = file, ["raw"] = rawFile, ["writes"] = kept, ["leftover"] = leftover, ["timing"] = timing, ["lines"] = lines.Count });
+        scenario = null; suite = null; slug = null; entries.Clear(); depth = 0;
+        return (200, new JsonObject { ["ok"] = true, ["file"] = file, ["raw"] = rawFile, ["writes"] = kept, ["leftover"] = leftover, ["timing"] = timing, ["cause"] = cause.Count, ["background"] = lines.Count, ["windows"] = windows });
     }
 
     public JsonObject Open() => new()
     {
         ["open"] = scenario != null, ["suite"] = suite, ["scenario"] = scenario, ["unlabelledWrites"] = Unlabelled,
-        ["writes"] = new JsonArray(entries.Select(e => (JsonNode)new JsonObject { ["seq"] = e.Seq, ["ms"] = e.Ms, ["method"] = e.Method, ["path"] = e.Path, ["query"] = e.Query, ["status"] = e.Status, ["source"] = e.Source, ["field"] = e.Field, ["body"] = e.Body?.DeepClone() }).ToArray())
+        ["writes"] = new JsonArray(entries.Select(e => (JsonNode)new JsonObject { ["seq"] = e.Seq, ["ms"] = e.Ms, ["method"] = e.Method, ["path"] = e.Path, ["query"] = e.Query, ["status"] = e.Status, ["source"] = e.Source, ["field"] = e.Field, ["window"] = e.Window, ["body"] = e.Body?.DeepClone() }).ToArray()), ["causeDepth"] = depth
     };
 
     static string RawText(JsonNode? body) { try { return body?.ToJsonString(Plain) ?? ""; } catch { return ""; } }

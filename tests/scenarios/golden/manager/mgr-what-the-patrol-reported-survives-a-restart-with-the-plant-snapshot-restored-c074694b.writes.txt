@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: what the patrol reported survives a restart: with the plant snapshot restored, a condition that persists is not new again
-# runs: 5

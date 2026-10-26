@@ -1,4 +1,0 @@
-# suite: messaging
-# scenario: msg: a worker spawned from the broadcast stream never has FACTORY_SUPERVISOR_TOKEN in its environment
-# runs: 5
-rule STATE broadcast-two v1 #{#1}

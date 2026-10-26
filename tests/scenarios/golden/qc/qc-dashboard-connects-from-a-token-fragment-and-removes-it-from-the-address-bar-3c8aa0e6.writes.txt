@@ -1,3 +1,0 @@
-# suite: qc
-# scenario: qc: dashboard connects from a #token= fragment and removes it from the address bar
-# runs: 5

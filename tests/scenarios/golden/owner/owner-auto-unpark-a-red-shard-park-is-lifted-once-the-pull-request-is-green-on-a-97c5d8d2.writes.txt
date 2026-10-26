@@ -1,8 +1,0 @@
-# suite: owner
-# scenario: owner: auto-unpark: a red-shard park is lifted once the pull request is green on a newer head, not on the head it judged
-# runs: 5
-harness STATE factory-worker v1 #{#1}
-rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
-rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `fix-forward-exhausted` released early by the sweep: PR #{#2} is green on a newer head {sha} (automatic lift 1 of at most 3). The next sweep takes it up again in **Development**.\n\n<!-- plant event=unparked key=auto|{time} -->"}
-rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
-rule STATE factory-worker v1 #{#1}

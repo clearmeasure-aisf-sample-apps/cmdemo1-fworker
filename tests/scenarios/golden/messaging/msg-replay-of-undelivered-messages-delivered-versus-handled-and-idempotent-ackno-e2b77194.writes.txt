@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: replay of undelivered messages, delivered versus handled, and idempotent acknowledgement
-# runs: 5

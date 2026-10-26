@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: 200 real sends racing 20 reconnects lose nothing and repeat nothing [full]
-# runs: 5

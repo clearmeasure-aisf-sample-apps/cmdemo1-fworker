@@ -10,10 +10,8 @@ writes as they are; a difference fails the scenario.
 `Get-ScenarioSlug` of `tests/scenarios/lib.ps1`: the scenario's name without its ` [full]` tag (so a change of tier keeps the file),
 lowercase, every run of other characters one `-`, at most 80 characters, then `-` and the first 8 hex digits of the SHA-256 of that name.
 
-A scenario without a file here is recorded only, never compared. The baseline was made from four CI runs of the same product code: two
-of the 34-shard grouping and two of the grouping before it (a scenario whose own code changed in between from the two runs of the 34-shard
-grouping only). A line of every run is required; a line of only some runs is optional (`? `): a write whose presence follows the timing
-(a journal line the gateway posts just before or after the scenario ends, a second offer, which of two items lapses first).
+A scenario without a file here is recorded only, never compared. The baseline is made from two runs or more of the same product code
+(below): a scenario whose caused writes (below) differ between the runs gets no file.
 
 ## What is recorded
 
@@ -33,28 +31,62 @@ records nothing. Recording never changes an answer of the fake.
 has let the gateway finish one more sweep (at most 5 s, then 1 s; nothing when the gateway is down or never swept), so a tail write the
 scenario set off lands in the record however fast the runner was. The end writes
 `<FAKE_RECORD_DIR>/<suite>/<slug>.writes.txt` (normalized, compared) and `<slug>.raw.jsonl` (every write as sent, for reading a
-difference). `GET /_fake/writes` shows the open record, and `unlabelledWrites`: the writes made while no scenario was open, counted and
-dropped (`/_fake/state` is unchanged by the recorder).
+difference). `GET /_fake/writes` shows the open record (each write with `window`, and `causeDepth`), and `unlabelledWrites`: the writes
+made while no scenario was open, counted and dropped (`/_fake/state` is unchanged by the recorder).
+
+### Caused and background writes
+
+Every compared write is either caused by the scenario or background:
+
+- Cause windows: while a scenario's record is open, `F` (lib.ps1, the scripted worker's call of the real client) brackets each call with
+  `POST /_fake/cause {"open":true}` before it and `{"open":false}` after it has returned (also when it throws). The fake counts the open
+  windows (nested calls nest; a close without an open is ignored; scenario-begin and scenario-end set the count to 0) and marks each write
+  with whether a window was open when it came. Not bracketed (`$script:CauseSkipVerbs`): the client verbs that only wait or stream
+  (`subscribe`, `wait-event`, `wait-for-checks`), whose window would stay open for as long as they wait, and those that only read
+  (`inbox`, `message-status`, `presence`, `get-item`, `peers`, `model-for`, `model-tier`, `questions`, `qc-list`, `pr-checks`,
+  `inspect-facts`, `plant-digest`), which scenarios poll: a window that opens while the scenario writes nothing only lets a background
+  write count as caused. A write one of them makes is background.
+- Caused (`= `): every harness write, and a `rule` write that came inside a window and is not of a background kind. A verb's rule script
+  runs and ends inside its window (the gateway answers the client only when the script has ended), so everything it writes is caused.
+- Background (`+ `): every other write: one that came outside every window (the sweep, the plant's ticks, the base-update, transcript and
+  release loops, the runtimes, and whatever the scenario's own direct requests to the gateway set off: only `F` is bracketed), and one of
+  a background kind whatever its window. The background kinds (`WriteRecorder.BackgroundKinds`): `plant` (a body with
+  `<!-- plant event=`), `state` (a factory-state comment), `claims`, `transcripts`, `snapshot` (`plant-snapshot`), `leader`
+  (`gateway-leader`) and `revoked` (a path or `ref` with `/claims/`, `/transcripts/`, `plant-snapshot`, `gateway-leader`, `/revoked/`;
+  a git commit whose message is a sealed transcript `fwt1:...`, a plant snapshot or the leader lease counts as its ref's kind), and
+  `gateway` (every write of the gateway's own C# clients: the Cursor, Copilot, ARM and Octopus runtimes).
+
+The background kinds exist because nothing in a request tells which rule-script run made it: the gateway runs up to
+`runner.maxProcesses` rule scripts at once (RunnerGate.cs), the sweep's among them, and all of them send the same User-Agent and token.
+So a sweep or a loop that writes while a verb's window is open would count as caused; the kinds above are what those write. The limit
+that remains: a background write of another kind (a sweep's board move or journal comment, a merge or a promotion sign-off of the
+gateway's loops) that comes while a window is open counts as caused. When that happens in one run and not in another, the scenario's
+caused writes differ between the runs, and the baseline gets no file for it (below).
+
+`raw.jsonl` keeps for each write `window` (a window was open), `kind` (a background kind, `commit` or `verb`) and `class` (`cause`,
+`background`, `leftover` or `timing`).
 
 ## Format and normalization
 
 Header lines start with `# ` and are never compared: `suite`, `scenario`, `runs` (golden files); `writes` (the writes compared),
 `leftover`, `timing` (the writes left out, below), `bases` and `ends` (the fake's counters at the scenario's start and at its end,
-`number=` of `bases` being the first item number the scenario can create; for reading a record offline) and `normalize-errors` (below,
-only when there was one) in records. Every other line is one write:
+`number=` of `bases` being the first item number the scenario can create; for reading a record offline), `normalize-errors` (below,
+only when there was one), `windows` (how many cause windows opened), `cause` and `background` (the number of lines of each section) in
+records. Every other line is one write in one of two sections:
+
+```
+= <line>      a caused write: every one, in the order the fake answered them
++ <line>      a background line: the distinct lines, sorted (ordinal)
+```
+
+A `<line>` is
 
 ```
 <source> <METHOD> <normalized path>[ <graphql mutation field>] <status> <normalized body as compact JSON, or ->
 ```
 
-or, for an item's factory-state comment, one line for all its accepted writes (below):
-
-```
-<source> STATE <kind> #{#k}
-```
-
-The file holds the sorted (ordinal), distinct lines: a set. The order of the writes and how often one repeats are not compared, because the
-sweep, the plant ticks, the base-update loop and the transcript loop make both depend on timing.
+or, for an accepted write (status below 300) of an item's factory-state comment, `<source> STATE <kind> #{#k}` without the body (below).
+The `= ` lines come first, then the `+ ` lines.
 
 A path first has `/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders` replaced by `/repos/{repo}` and review, check, job, run,
 artifact, release and asset ids replaced by `{id}`; its query string is dropped (except `name=` of an upload). Then the path and every JSON
@@ -120,19 +152,32 @@ Writes that are kept in the raw file but not compared:
   session's transcript ref (`refs/factory/<instance>/transcripts/...`; the ref's creation and the transcript commits are compared).
   Whether the sweep sees an item in a column before the scenario ends, how often a line repeats and how often the transcript loop flushes
   depend on the sweep's, the plant's and that loop's timing. Every other plant journal line (offered, assigned, launched, reassigned,
-  released, qc-..., promoted, ...) is compared.
+  released, qc-..., promoted, ...) is compared, as a background line.
 
 Factory-state comments: the gateway writes an item's state comment once and then rewrites it many times; how many snapshots there are,
-and so whether the last one is the comment's POST or a later PATCH, depends on timing. The accepted writes (status below 300) of one
-(source, item) state comment therefore give a single `STATE` line, without a body: the last snapshot is not compared either, because
-where the background loops have got to when the scenario ends is timing too (the raw file has every snapshot). A refused write (status 300 or more) keeps its own line, with the body `{"body":"{factory-state <kind> #{#k}}"}`.
+and so whether the last one is the comment's POST or a later PATCH, depends on timing. They are background (kind `state`): the accepted
+writes (status below 300) of one (source, item) state comment give a single `+ <source> STATE <kind> #{#k}` line, without a body: the
+last snapshot is not compared either, because where the background loops have got to when the scenario ends is timing too (the raw file
+has every snapshot). A refused write (status 300 or more) keeps its own line, with the body `{"body":"{factory-state <kind> #{#k}}"}`.
+The harness's own state writes (`Set-ItemState`) are caused: each accepted one is its own `= harness STATE <kind> #{#k}` line (how many
+it makes is the scenario's; the state it edits is the gateway's, so its body is not compared), a refused one its marker line.
 
 ## Comparison
 
-`Compare-GoldenWrites` (lib.ps1), after each scenario, when `tests/scenarios/golden/<suite>/<slug>.writes.txt` exists. A golden line
-without a prefix is required; a line starting `? ` is optional. The scenario passes the check `golden writes unchanged` when the record
-holds every required line and no line that is neither required nor optional. On a difference the check fails the scenario (and the
-suite) and prints up to 10 lines `- missing` / `+ unexpected`, then the paths of the golden file, the record and the raw file.
+`Compare-GoldenWrites` (lib.ps1), after each scenario, when `tests/scenarios/golden/<suite>/<slug>.writes.txt` exists
+(`Compare-WritesFiles` does the comparison). The scenario passes the check `golden writes unchanged` when:
+
+1. Caused writes: the record's `= ` lines are the golden file's exactly, as sequences per object. A line's object is its first
+   `{#k}` or `{#prk}` (an item or pull request of the scenario), `*` for a line that names none; for every object, the record's lines of
+   that object must be the golden's lines of that object, the same lines in the same order and as many. How the writes on two objects
+   interleave is not compared (a verb on `{#1}` and an answer on its pull request `{#2}` can race).
+2. Background writes: every `+ ` line of the golden file is a `+ ` line of the record. Background lines the golden file does not hold
+   are no difference: what else the gateway's loops wrote before the scenario ended is timing.
+3. Both files hold only `= ` and `+ ` lines besides the headers (a golden file of an older format fails the check: record again).
+
+On a difference the check fails the scenario (and the suite) and prints the first object whose caused writes differ (the position, up
+to 2 lines before it, the golden's and the record's line there, `(no more writes)` where one side ends), up to 6 missing background
+lines, then the paths of the golden file, the record and the raw file.
 
 Modes, from `TEST_GOLDEN`:
 
@@ -140,15 +185,17 @@ Modes, from `TEST_GOLDEN`:
 |---|---|---|
 | unset or `compare` (CI) | yes | where a golden file exists |
 | `record` | yes | never |
-| `off` | no (`FAKE_RECORD_DIR` is not set) | never |
+| `off` | no (`FAKE_RECORD_DIR` is not set; no cause windows) | never |
 
 Records go to `TEST_WRITES_DIR` when it is set (CI: `$RUNNER_TEMP/writes`), else to `writes/` in the suite's work directory.
 
 ## Recording a new baseline from CI
 
-The writes of the same code differ a little between runs (background loops), so a baseline is made from two runs or more: a line of
-every run is required, a line of only some runs optional. The numbers do not depend on how the scenarios are grouped into jobs (above),
-so runs of different groupings can be merged.
+A baseline is made from two runs or more of the same code. For each scenario: its caused writes must be the same in every run (compared
+as above); then the golden file gets them in the order of the first run, and the background lines of every run (the intersection). A
+scenario whose caused writes differ between the runs is reported unstable and gets no golden file (an existing one in the output
+directory is removed), so it is recorded only until it is made stable. The numbers do not depend on how the scenarios are grouped into
+jobs (above), so runs of different groupings can be merged.
 
 1. Push the change. Every Tier 1 job uploads its records as the artifact `writes-<job>-<attempt>` (always, passed or failed).
 2. Re-run all jobs once for a second attempt: `gh run rerun <run-id>`.
@@ -162,9 +209,11 @@ so runs of different groupings can be merged.
    ```
    pwsh -NoProfile -c ". tests/scenarios/lib.ps1; Merge-GoldenWrites -From /tmp/writes-1,/tmp/writes-2 -Out tests/scenarios/golden"
    ```
+   For a full re-baseline, remove the old golden files first (`git rm -q 'tests/scenarios/golden/*/*.writes.txt'`), so that a scenario
+   left out or unstable keeps none.
 5. Commit the golden files. The next CI run compares, and must be green on unchanged code.
 
 A pull request that changes writes on purpose records again the same way and commits the golden diff for review.
 
-Removing a scenario's golden file makes it record-only again: the escape for a scenario whose writes cannot be made stable. The removal
-is visible in the pull request's diff.
+Removing a scenario's golden file makes it record-only again: the escape for a scenario whose caused writes cannot be made stable. The
+removal is visible in the pull request's diff.

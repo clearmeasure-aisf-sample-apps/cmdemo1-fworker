@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: FACTORY_HEARTBEAT_SECONDS=0 is floored to one second
-# runs: 5

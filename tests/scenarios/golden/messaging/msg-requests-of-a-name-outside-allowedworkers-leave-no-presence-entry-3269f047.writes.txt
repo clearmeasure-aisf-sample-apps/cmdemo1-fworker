@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: requests of a name outside allowedWorkers leave no presence entry
-# runs: 5

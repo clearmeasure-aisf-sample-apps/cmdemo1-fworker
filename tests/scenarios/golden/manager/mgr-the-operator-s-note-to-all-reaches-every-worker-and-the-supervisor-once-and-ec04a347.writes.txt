@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: the operator's note to all reaches every worker and the supervisor once, and their replies come back with in_reply_to and are marked read
-# runs: 5

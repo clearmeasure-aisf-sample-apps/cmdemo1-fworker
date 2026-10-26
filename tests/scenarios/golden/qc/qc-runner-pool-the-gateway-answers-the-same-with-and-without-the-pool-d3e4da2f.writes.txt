@@ -1,3 +1,0 @@
-# suite: qc
-# scenario: qc: runner pool the gateway answers the same with and without the pool
-# runs: 5

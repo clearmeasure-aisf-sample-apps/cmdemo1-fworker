@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: a supervisor that was replaced by another name is refused, and its successor gets the open questions whatever cursor it sends
-# runs: 5

@@ -1,3 +1,0 @@
-# suite: octopus
-# scenario: octopus: a coding role never overflows, whatever overflowRoles says
-# runs: 5

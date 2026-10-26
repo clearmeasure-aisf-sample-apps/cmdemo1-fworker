@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: a supervisor that only polls stays present, and one that stops is absent
-# runs: 5

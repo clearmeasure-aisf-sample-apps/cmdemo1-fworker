@@ -450,7 +450,8 @@ sealed class World
 
     public (int, object?) Handle(string method, string path, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b, string auth = "")
     {
-        log.Add($"{method} {path}");
+        // the golden writes' cause windows are the harness's bookkeeping, not a request of the product: not in the log (README, golden writes)
+        if (path != "/_fake/cause") log.Add($"{method} {path}");
         if (path.StartsWith("/_fake/")) return Control(method, path[7..], q, b);
         foreach (var f in faults.ToList())
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
@@ -1202,6 +1203,9 @@ sealed class World
             // the counters at both (Bases()) tell the numbers the scenario's own writes handed out from those of earlier scenarios and the harness
             case "scenario-begin": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Begin(b, Bases()));
             case "scenario-end": return Recorder == null ? (200, J(("ok", true), ("recording", false))) : Recorder.End(Bases());
+            // cause { open: true | false }: the harness brackets each request of its own to the gateway (lib.ps1, F), so that a write made while one
+            // is open can be told as caused by the scenario from the background work of the gateway (tests/scenarios/golden/README.md)
+            case "cause": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Cause(b));
             case "writes": return (200, Recorder == null ? J(("recording", false)) : Recorder.Open());
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();

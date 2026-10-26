@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a body with a duplicate key is a usage refusal, never a server error
-# runs: 5

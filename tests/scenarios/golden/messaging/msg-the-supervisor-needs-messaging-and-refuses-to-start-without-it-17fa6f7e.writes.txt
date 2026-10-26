@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: the supervisor needs messaging and refuses to start without it
-# runs: 5

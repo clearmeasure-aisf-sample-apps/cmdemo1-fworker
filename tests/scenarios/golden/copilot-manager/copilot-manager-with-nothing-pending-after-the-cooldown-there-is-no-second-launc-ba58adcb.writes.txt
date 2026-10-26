@@ -1,4 +1,0 @@
-# suite: copilot-manager
-# scenario: copilot manager: with nothing pending after the cooldown there is no second launch
-# runs: 5
-rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}

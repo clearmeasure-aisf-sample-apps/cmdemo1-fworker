@@ -1,7 +1,0 @@
-# suite: owner
-# scenario: metrics: an accepted owner item has its match-to-accept time from the journal
-# runs: 5
-rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
-rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **met-a** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
-rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **met-a** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|met-a -->"}
-rule STATE factory-worker v1 #{#1}

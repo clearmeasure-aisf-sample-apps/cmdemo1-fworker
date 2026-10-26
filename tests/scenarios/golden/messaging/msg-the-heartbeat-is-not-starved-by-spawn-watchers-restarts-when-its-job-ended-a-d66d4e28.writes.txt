@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: the heartbeat is not starved by spawn watchers, restarts when its job ended, and a queued job is not duplicated
-# runs: 5

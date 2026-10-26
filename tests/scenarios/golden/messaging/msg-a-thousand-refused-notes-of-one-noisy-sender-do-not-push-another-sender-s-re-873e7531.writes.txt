@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a thousand refused notes of one noisy sender do not push another sender's refusal out of the ring
-# runs: 5

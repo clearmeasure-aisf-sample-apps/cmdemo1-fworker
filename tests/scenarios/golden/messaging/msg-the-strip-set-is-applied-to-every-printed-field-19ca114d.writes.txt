@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: the strip set is applied to every printed field
-# runs: 5

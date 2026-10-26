@@ -1,3 +1,0 @@
-# suite: copilot-manager
-# scenario: copilot manager: nothing pending launches nothing
-# runs: 5

@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: reserved names are refused in any case, at every entry point
-# runs: 5

@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: switching messaging on after a long switch-off reports no owner as disconnected whose stream stayed open
-# runs: 5

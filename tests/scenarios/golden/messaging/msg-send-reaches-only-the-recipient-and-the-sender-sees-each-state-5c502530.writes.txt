@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: send reaches only the recipient, and the sender sees each state
-# runs: 5

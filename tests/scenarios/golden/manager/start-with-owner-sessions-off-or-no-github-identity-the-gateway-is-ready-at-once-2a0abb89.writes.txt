@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: start: with owner sessions off or no GitHub identity the gateway is ready at once, /status names the reason and revoke is refused
-# runs: 5

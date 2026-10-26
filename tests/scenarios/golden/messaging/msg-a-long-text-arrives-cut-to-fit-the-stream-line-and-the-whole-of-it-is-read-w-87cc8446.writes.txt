@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a long text arrives cut to fit the stream line, and the whole of it is read with inbox --id
-# runs: 5

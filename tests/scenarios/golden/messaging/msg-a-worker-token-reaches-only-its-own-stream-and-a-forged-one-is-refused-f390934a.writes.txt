@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a worker token reaches only its own stream, and a forged one is refused
-# runs: 5

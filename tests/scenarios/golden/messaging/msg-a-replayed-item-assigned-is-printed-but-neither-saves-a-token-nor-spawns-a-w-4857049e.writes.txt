@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a replayed item.assigned is printed but neither saves a token nor spawns a worker
-# runs: 5

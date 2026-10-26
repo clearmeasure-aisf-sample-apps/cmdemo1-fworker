@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: the traffic log and the refusal ring are the operator's, and hold the text only of what was accepted
-# runs: 5

@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: registration values outside the list are refused before anything is recorded
-# runs: 5

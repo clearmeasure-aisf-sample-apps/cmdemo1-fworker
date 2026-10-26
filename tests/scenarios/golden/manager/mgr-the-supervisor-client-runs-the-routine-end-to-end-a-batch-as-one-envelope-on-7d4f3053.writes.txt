@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: the supervisor client runs the routine end to end: a batch as one envelope, one batch answer, a patrol, a note to the operator, one directive and the acknowledgement
-# runs: 5

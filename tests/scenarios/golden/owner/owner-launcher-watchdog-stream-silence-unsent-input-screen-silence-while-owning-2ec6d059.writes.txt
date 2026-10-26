@@ -1,3 +1,0 @@
-# suite: owner
-# scenario: owner: launcher watchdog: stream silence, unsent input, screen silence while owning and a gateway reason each restart the session
-# runs: 5

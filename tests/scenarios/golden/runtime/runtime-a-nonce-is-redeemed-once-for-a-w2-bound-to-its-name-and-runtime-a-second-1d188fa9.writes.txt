@@ -1,3 +1,0 @@
-# suite: runtime
-# scenario: runtime: a nonce is redeemed once for a w2 bound to its name and runtime; a second redemption and an unknown nonce are refused
-# runs: 5

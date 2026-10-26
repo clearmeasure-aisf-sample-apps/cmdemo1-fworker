@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: messaging warns that a scale-to-zero environment holds messages
-# runs: 5

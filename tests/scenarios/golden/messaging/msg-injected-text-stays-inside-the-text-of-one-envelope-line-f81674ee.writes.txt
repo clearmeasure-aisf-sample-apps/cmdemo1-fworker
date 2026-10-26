@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: injected text stays inside the text of one envelope line
-# runs: 5
