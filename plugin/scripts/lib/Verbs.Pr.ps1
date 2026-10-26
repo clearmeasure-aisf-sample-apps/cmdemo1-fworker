@@ -89,6 +89,23 @@ function Verb_update_pr($a) {
     return @{ ok = $true; id = $n; updated = $true; pullRequest = @{ number = $own.number; url = $own.html_url; head_sha = $own.head.sha; branch = $own.head.ref } }
 }
 
+# The item's pull request names #N in its title: the CI release finds a held run's item from it in routeAll mode (Verb_ci_release), and
+# Test-PrBelongs reads it. Every path that adopts a Copilot pull request for the item calls this (Use-CopilotDraft, Resolve-OwnerPr, open-pr on
+# the recorded branch), so the order in which they run does not matter: a title that names #N is left as it is (no write). Without $Title the
+# pull request's own title is kept, a leading [WIP] dropped, and ' (#N)' appended; when that title names another number ("Follow-up for #470")
+# the item goes first ('#N: ...'), because the CI release takes the first #number of the title. -Soft (the open-pr return and the gateway's
+# own resolution, which must reach its state save): nothing throws, a refused write leaves the pull request as it was and the next call tries
+# again. Returns the pull request as it is afterwards.
+function Set-PrItemTitle($pr, [int]$n, [string]$Title = '', [switch]$Soft) {
+    if (-not $pr -or "$($pr.title)" -match "(^|[^0-9])#$n([^0-9]|$)") { return $pr }
+    if (-not $Title) { $t = ("$($pr.title)" -replace '^\s*\[WIP\]\s*', '').Trim(); $Title = if (-not $t) { "#$n" } elseif ($t -match '#\d') { "#${n}: $t" } else { "$t (#$n)" } }
+    elseif ($Title -notmatch "(^|[^0-9])#$n([^0-9]|$)") { $Title = "$Title (#$n)" }
+    try { [void](Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ title = $Title }) } catch { if ($Soft) { return $pr }; throw }
+    if (-not $Soft) { return (Get-Pr ([int]$pr.number)) }
+    # the write is done: a failed re-read returns the pull request as read before, with its new title
+    try { return (Get-Pr ([int]$pr.number)) } catch { try { $pr.title = $Title } catch { }; return $pr }
+}
+
 # The draft pull request the Copilot cloud agent opened on its branch: taken over for the item (title names #N, marked ready for review, recorded
 # in the state as the item's pull request). $null when there is none.
 function Use-CopilotDraft([int]$n, [string]$Head, [string]$Title, [int]$Superseding = 0) {
@@ -111,7 +128,7 @@ function Use-CopilotDraft([int]$n, [string]$Head, [string]$Title, [int]$Supersed
             return $null
         }
     }
-    if ("$($pr.title)" -notmatch "(^|[^0-9])#$n([^0-9]|$)") { Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/pulls/$($pr.number)" -Body @{ title = $Title } | Out-Null }
+    [void](Set-PrItemTitle $pr $n $Title)
     if ($pr.draft) { [void](Invoke-GhGraphQL 'mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }' @{ id = "$($pr.node_id)" }) }
     $st = Get-State $n; $st.state.pr = @{ number = $pr.number; branch = $Head; url = $pr.html_url }; Save-State $n $st
     return (Get-Pr ([int]$pr.number))
@@ -424,6 +441,9 @@ function Resolve-OwnerPr([int]$n) {
     }
     if ((Test-Has $s 'awaiting_checks') -and [int]$s.awaiting_checks.pr -ne [int]$pr.number) { $s.awaiting_checks.pr = [int]$pr.number; $s.awaiting_checks.sha = "$($pr.head.sha)"; $s.awaiting_checks.since = ConvertTo-Iso (Get-UtcNow); $o.changed = $true }
     if ([int]$s.copilot_task.pr -ne [int]$pr.number) { $s.copilot_task.pr = [int]$pr.number; $o.changed = $true }
+    # a recorded owner pull request (a successor adopted here included) or one retargeted to the default branch names the item in its title, as
+    # Use-CopilotDraft names it: this resolution may adopt a stacked successor before open-pr runs, and open-pr then takes its same-branch return
+    if ($rec -gt 0 -or $o.retargeted) { $pr = Set-PrItemTitle $pr $n -Soft; $o.pr = $pr }
     # a recorded owner pull request (a successor adopted after Development included) is never left a draft
     if ($rec -gt 0 -and $pr.draft) { $pr = Set-PrReady $pr; $o.pr = $pr }
     if ($o.changed) {
@@ -472,6 +492,8 @@ function Verb_open_pr($a) {
     if ($existing -and $existing.head.ref -eq $head) {
         if ($copilotHead) { Close-StrayCopilotDrafts $n @($head) ([int]$existing.number) }
         Assert-PushGate $n $info $gs "$($existing.head.sha)" $existing.number
+        # the gateway's own resolution (Resolve-OwnerPr) may have adopted this branch's pull request before this call: it still names the item
+        if ($copilotHead) { $existing = Set-PrItemTitle $existing $n $title -Soft }
         $bo = Get-BuildOwed $info $existing.number $gs
         return @{ ok = $true; id = $n; created = $false; pullRequest = @{ number = $existing.number; url = $existing.html_url; head_sha = $existing.head.sha; branch = $head }; build_owed = $bo.build_owed; build_reason = $bo.build_reason }
     }

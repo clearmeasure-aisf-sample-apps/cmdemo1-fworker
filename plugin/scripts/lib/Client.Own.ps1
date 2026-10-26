@@ -6,10 +6,25 @@ if (-not (Get-Command Get-WorkerDir -ErrorAction SilentlyContinue)) { function G
 
 function Get-TokenDir { Get-FwSubDir 'tokens' $env:FACTORY_TOKEN_DIR }
 
+# Atomic: the token is written to a temporary file in the same directory, given mode 600, then renamed over the token file. A reader (the
+# session's verbs through Select-ItemToken, the client's own check answer) sees no file or the whole token, never an empty one or one with the
+# default mode: Set-Content on the token file itself created it empty first, and a read in that moment threw (lease suite, 2026-10-23..26).
 function Save-ItemToken([int]$Item, [string]$Role, [string]$Token) {
     $f = Join-Path (Get-TokenDir) "$Item.$Role"
-    Set-Content -LiteralPath $f -Value $Token -NoNewline
-    if ($IsLinux -or $IsMacOS) { chmod 600 $f }
+    $tmp = "$f.$PID.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    try {
+        # created with mode 600 (Linux, macOS): never readable by others, not even before a chmod; UTF-8 without BOM, as Set-Content wrote it
+        $o = [IO.FileStreamOptions]::new(); $o.Mode = [IO.FileMode]::CreateNew; $o.Access = [IO.FileAccess]::Write
+        if ($IsLinux -or $IsMacOS) { $o.UnixCreateMode = [IO.UnixFileMode]'UserRead, UserWrite' }
+        $fs = [IO.FileStream]::new($tmp, $o)
+        try { $b = [Text.UTF8Encoding]::new($false).GetBytes($Token); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
+        # Windows refuses to replace a file another process has open (a sharing violation or access denied, never a partial file): try again briefly
+        for ($i = 0; ; $i++) {
+            try { [IO.File]::Move($tmp, $f, $true); break }
+            catch [System.IO.IOException] { if ($IsLinux -or $IsMacOS -or $i -ge 20) { throw }; Start-Sleep -Milliseconds 25 }
+            catch [System.UnauthorizedAccessException] { if ($IsLinux -or $IsMacOS -or $i -ge 20) { throw }; Start-Sleep -Milliseconds 25 }
+        }
+    } finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }
 }
 
 # The token for one call: the item's own token when this session holds one, else the configured credential.
