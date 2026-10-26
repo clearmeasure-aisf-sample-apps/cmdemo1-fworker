@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: one task owns the item end to end: Technical Design opens the draft, Development and Functional Testing are follow-up sessions of the same task on that pull request, no other worker is offered the item, the draft is marked ready, and the owner is done only after the merge, a green master and the production delivery [full]
-# runs: 3
+# runs: 4
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:4c23e87d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7672 sha256:183aea01 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8143 sha256:35f9058d \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}

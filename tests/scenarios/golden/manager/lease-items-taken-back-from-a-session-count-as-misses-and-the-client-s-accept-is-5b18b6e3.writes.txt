@@ -1,12 +1,12 @@
 # suite: manager
 # scenario: lease: items taken back from a session count as misses and the client's accept is no answer; after two in a row the session is blocked until it calls a verb of its own
-# runs: 2
+# runs: 4
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **alice** accepted (accepted by its client; the session starts on it next): it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **alice** accepted (accepted by its client; the session starts on it next): it owns this item from **Technical Design** until it is merged (attempt 1, mode resume). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
-rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: alice accepted by its client but did not start within the lease; offered again; alice missed 2 items in a row (an item taken back among them) and is offered nothing until it calls a verb of its own; offering to the next worker.\n\n<!-- plant event=reassigned key=back|11|{n} -->"}
-rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: alice accepted by its client but did not start within the lease; offered again; offering to the next worker.\n\n<!-- plant event=reassigned key=back|11|{n} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: alice accepted by its client but did not start within the lease; offered again; alice missed 2 items in a row (an item taken back among them) and is offered nothing until it calls a verb of its own; offering to the next worker.\n\n<!-- plant event=reassigned key=back|{#1}|{n} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: alice accepted by its client but did not start within the lease; offered again; offering to the next worker.\n\n<!-- plant event=reassigned key=back|{#1}|{n} -->"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **alice** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|alice -->"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the gateway ended the lease of **alice** (client-accepted-not-started); the item is offered again in resume mode.\n\n<!-- plant event=lease-expired key=exp|{n} -->"}
 rule STATE factory-worker v1 #{#1}

@@ -1,0 +1,5 @@
+# suite: messaging
+# scenario: msg: no message text is in any gateway log or any item comment
+# runs: 4
+rule STATE factory-worker v1 #{#1}
+? rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **ivan** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|ivan -->"}

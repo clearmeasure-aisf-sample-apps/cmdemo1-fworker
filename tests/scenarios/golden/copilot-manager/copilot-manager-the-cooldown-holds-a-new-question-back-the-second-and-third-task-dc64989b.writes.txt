@@ -1,5 +1,5 @@
 # suite: copilot-manager
 # scenario: copilot manager: the cooldown holds a new question back; the second and third tasks launch after it; a task that ends by itself clears present; the daily cap holds the fourth
-# runs: 3
+# runs: 4
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":false,"prompt":"{len:750 sha256:54efeb35 \"You are the factory's plant manager for ONE short patrol in clearmeasure-aisf-sa…\"}"}
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/mgr-cop-{session}/1","sha":"{sha}"}

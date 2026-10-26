@@ -1,6 +1,6 @@
 # suite: qc-gate
 # scenario: qc: gate a reset keeps the record of the run for the same head [full]
-# runs: 2
+# runs: 4
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 rule PATCH /repos/{repo}/issues/comments/{c} 200 {"body":"QC environment for PR #{#2} at head {sha} runs on **qw1**'s computer (reachable only from networks that can reach it): [QC page](http://127.0.0.1:{port}/qc/{#2}?t=q1.{token})\nThis environment was requested and runs on that worker.\n<!-- qc link pr={#2} sha={sha} exp={n} -->"}
 rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}

@@ -1,5 +1,5 @@
 # suite: qc
 # scenario: qc: runner pool a killed worker is replaced and calls keep working
-# runs: 2
+# runs: 4
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 rule STATE factory-worker v1 #{#1}

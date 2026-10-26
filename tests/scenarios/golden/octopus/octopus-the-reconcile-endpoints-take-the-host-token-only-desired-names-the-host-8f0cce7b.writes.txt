@@ -1,13 +1,14 @@
 # suite: octopus
 # scenario: octopus: the reconcile endpoints take the host token only; desired names the host's workers; an exited container ends its execution and the item is planned again, a container gone from the host is Stopped
-# runs: 3
+# runs: 2
 gateway POST /api/Spaces-355/runbook-runs/create/v1 201 {"EnvironmentNames":["tdd"],"ProjectName":"cmdemo1-fworker-runtime","RunbookName":"Start worker","SpaceIdOrName":"Spaces-355","SpecificMachineNames":["host-a"],"Variables":{"Fworker.Agent":"codex","Fworker.Item":"{#1}","Fworker.Mode":"detached","Fworker.ModelProfile":"","Fworker.Name":"oct-{session}","Fworker.Nonce":"{token}","Fworker.Phase":"Technical Design"}}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
-rule PATCH /repos/{repo}/git/refs/factory/factory-worker/transcripts/{n}/oct-{session} 422 {"force":true,"sha":"{sha}"}
 rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: octopus started **oct-{session}** for **Technical Design** (task `ServerTasks-{n}`). [session]({session-link}) ([Octopus task](http://127.0.0.1:{port}/app#/Spaces-355/tasks/ServerTasks-{n}))\n\n<!-- plant event=launched key=rtl|oct-{session}|ServerTasks-{n} -->"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **oct-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|oct-{session} -->"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of oct-{session} ended (succeeded); offering to the next worker. [session](http://127.0.0.1:{port}/app#/Spaces-355/tasks/ServerTasks-{n})\n\n<!-- plant event=reassigned key=rtend|a-{id}|oct-{session} -->"}
 rule STATE factory-worker v1 #{#1}
+? rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `runtime-failed` removed by the sweep: the item is closed. The item is closed: nothing is offered.\n\n<!-- plant event=unparked key=closed|{time} -->"}
+? rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: parked\n\n<!-- plant event=parked key={time} -->"}

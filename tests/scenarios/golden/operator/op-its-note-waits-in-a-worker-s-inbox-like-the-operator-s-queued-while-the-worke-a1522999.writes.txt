@@ -1,4 +1,4 @@
 # suite: operator
 # scenario: op: its note waits in a worker's inbox like the operator's: queued while the worker is away, read, acknowledged, quoted with --from-message, once per worker for a note to all, and as an answer
-# runs: 3
+# runs: 4
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: <!-- aisf:assumption source=m-{sha}-{n} from=operator-session -->\n> Assumed from the operator session: the restart is at 15:00.\n<!-- /aisf:assumption -->\n\nAI session: alice\n\n<!-- factory-journal:factory-worker -->"}

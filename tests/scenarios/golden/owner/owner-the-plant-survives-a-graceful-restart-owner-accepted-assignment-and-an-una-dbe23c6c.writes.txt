@@ -1,9 +1,9 @@
 # suite: owner
 # scenario: owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]
-# runs: 2
+# runs: 4
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/plant-snapshot 204 -
 rule PATCH /repos/{repo}/git/refs/factory/factory-worker/plant-snapshot 422 {"force":true,"sha":"{sha}"}
-rule POST /repos/{repo}/git/commits 201 {"message":"{len:670 sha256:f938161b \"{\"v\":1,\"at\":\"{time}\",\"assignments\":[{\"id\":\"a-{id}\",\"item\":{#1},\"kind\":\"own-item\"…\"}","parents":[],"tree":"{sha}"}
+rule POST /repos/{repo}/git/commits 201 {"message":"{plant-snapshot epoch:- final:-}","parents":[],"tree":"{sha}"}
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/plant-snapshot","sha":"{sha}"}

@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: spawned owner, inspector and QC processes never have FACTORY_SUPERVISOR_TOKEN in their environment
-# runs: 2
+# runs: 4

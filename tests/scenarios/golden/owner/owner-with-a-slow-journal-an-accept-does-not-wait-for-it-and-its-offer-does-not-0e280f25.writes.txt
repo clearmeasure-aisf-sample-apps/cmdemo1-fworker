@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: with a slow journal an accept does not wait for it and its offer does not lapse; the journal reads matched, offered, assigned [full]
-# runs: 2
+# runs: 4
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **slow-k** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **slow-k** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|slow-k -->"}

@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: settle: a stranded merged item is re-armed by the sweep and settled; a finished one is settled again through resettle [full]
-# runs: 2
+# runs: 4
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"open"}
 harness POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"f","i":"card_{#1}","o":"opt_Release_Queue","p":"p"}}

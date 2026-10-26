@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: the owner publishes the demo video with its item token; another item and a worker credential are refused [full]
-# runs: 2
+# runs: 4
 rule POST /_uploads/repos/{repo}/releases/{id}/assets?name=demo-{#1}.mp4 201 {"len":"{n}"}
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **vida** accepted: it owns this item from **Functional Testing** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}

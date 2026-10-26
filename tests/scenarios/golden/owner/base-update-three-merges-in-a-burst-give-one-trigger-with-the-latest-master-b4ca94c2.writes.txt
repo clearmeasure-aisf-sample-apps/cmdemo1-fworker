@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: base update: three merges in a burst give one trigger with the latest master [full]
-# runs: 2
+# runs: 4
 rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n- change as described.\n"}
 rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}

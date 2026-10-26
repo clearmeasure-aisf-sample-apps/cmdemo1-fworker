@@ -1,0 +1,16 @@
+# suite: copilot
+# scenario: copilot: a recorded pull request that was closed (a migration, a takeover) is replaced by the open pull request of the owner task's branch; the wait for checks follows it and the item moves on, not parked stuck [full]
+# runs: 4
+harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
+harness PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
+harness POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"the owner task"}
+harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:442 sha256:13724521 \"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"awaiting_checks\":{\"col…\"}"}
+harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/cur-{#1}","title":"Cur (#{#1})"}
+harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/old-{#1}","title":"Old (#{#1})"}
+rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
+rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#3}"}}
+rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#3} checks are green; development complete. test\n\n<!-- factory-journal:factory-worker -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: The item's pull request is now #{#3}, the open pull request of the owner task's branch `copilot/cur-{#1}` (the recorded #{#2} is closed or superseded).\n\n<!-- factory-journal:factory-worker -->"}
+rule STATE factory-worker v1 #{#1}
+? rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}

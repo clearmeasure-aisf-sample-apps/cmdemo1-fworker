@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: an item labelled runtime:copilot-cloud creates one agent task with the phase prompt and a one-time code; the code and the bootstrap token give the r1 once; session_end ends the task and revokes it
-# runs: 3
+# runs: 4
 gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:4c23e87d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -

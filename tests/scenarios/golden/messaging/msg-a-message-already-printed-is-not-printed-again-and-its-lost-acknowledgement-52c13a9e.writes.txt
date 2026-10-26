@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: a message already printed is not printed again, and its lost acknowledgement is repeated
-# runs: 2
+# runs: 4

@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: a send wakes every poller of the recipient at once
-# runs: 2
+# runs: 4

@@ -1198,9 +1198,10 @@ sealed class World
                 e.Status = b!["status"]!.ToString(); if (e.Status is not ("Running" or "Processing")) e.End = DateTime.UtcNow;
                 return (200, J(("ok", true), ("name", e.Name)));
             }
-            // the golden-write record of one scenario (WriteRecorder.cs): begin { suite, scenario, scenarioSlug } after the reset, end {} after the body
+            // the golden-write record of one scenario (WriteRecorder.cs): begin { suite, scenario, scenarioSlug } after the reset, end {} after the body;
+            // the counters at both (Bases()) tell the numbers the scenario's own writes handed out from those of earlier scenarios and the harness
             case "scenario-begin": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Begin(b, Bases()));
-            case "scenario-end": return Recorder == null ? (200, J(("ok", true), ("recording", false))) : Recorder.End();
+            case "scenario-end": return Recorder == null ? (200, J(("ok", true), ("recording", false))) : Recorder.End(Bases());
             case "writes": return (200, Recorder == null ? J(("recording", false)) : Recorder.Open());
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();

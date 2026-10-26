@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: a muted session may still ask, a session that is off may not
-# runs: 2
+# runs: 4

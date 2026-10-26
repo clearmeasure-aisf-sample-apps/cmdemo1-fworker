@@ -1,6 +1,6 @@
 # suite: qc-gate
 # scenario: qc: gate a push to a new head needs a new QC run and a new approval [full]
-# runs: 2
+# runs: 4
 harness POST /repos/{repo}/pulls/{#2}/reviews 200 {"commit_id":"{sha}","event":"APPROVE"}
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
@@ -31,3 +31,4 @@ rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}"
 rule POST /repos/{repo}/pulls/{#2}/reviews 200 {"body":"Factory inspector approval of {sha}.\n\nRead the diff against the item.\nINSPECTOR: APPROVE","commit_id":"{sha}","event":"APPROVE"}
 rule PUT /repos/{repo}/pulls/{#2}/merge 200 {"merge_method":"squash","sha":"{sha}"}
 rule STATE factory-worker v1 #{#1}
+? rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}

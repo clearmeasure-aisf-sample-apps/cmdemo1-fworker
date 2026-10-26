@@ -1,0 +1,13 @@
+# suite: copilot
+# scenario: copilot: an item an earlier gateway ran one task per phase for adopts the task whose branch its pull request is on and resumes it there; no new task, no stacked draft [full]
+# runs: 4
+gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7672 sha256:eedf2489 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
+harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
+harness POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"an earlier gateway's task"}
+harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"pr\":{\"branch\":\"copilot/mig-{#1}\",\"number\":\"{#2}\"}}\n```\n"}
+harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/mig-{#1}","title":"Mig (#{#1})"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cop-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cop-{session} -->"}
+rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **Owner:** Copilot task [{task}]({agent-url}) owns #{#1} from Functional Testing until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item.\n\n<!-- factory-journal:factory-worker -->"}
+rule STATE factory-worker v1 #{#1}
+? rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}
+? rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Functional Testing** (task `{task}#1`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task}#1 -->"}

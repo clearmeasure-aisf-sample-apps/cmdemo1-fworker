@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: intake: a free slot and an empty Technical Design pull the top Todo item that is not held, pinned or waiting, up to the WIP limit [full]
-# runs: 2
+# runs: 4
 rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#5}","o":"opt_Technical_Design","p":"PVT_fake"}}
 rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#6}","o":"opt_Technical_Design","p":"PVT_fake"}}
 rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#5}","sha":"{sha}"}

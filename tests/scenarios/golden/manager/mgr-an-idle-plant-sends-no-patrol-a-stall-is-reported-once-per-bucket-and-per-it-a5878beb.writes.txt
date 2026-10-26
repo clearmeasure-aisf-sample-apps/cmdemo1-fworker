@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: an idle plant sends no patrol; a stall is reported once per bucket and per item, a known wait is none, and activity clears it
-# runs: 2
+# runs: 4

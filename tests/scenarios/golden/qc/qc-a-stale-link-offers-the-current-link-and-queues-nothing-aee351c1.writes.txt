@@ -1,6 +1,6 @@
 # suite: qc
 # scenario: qc: a stale link offers the current link and queues nothing [full]
-# runs: 2
+# runs: 4
 rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 rule PATCH /repos/{repo}/issues/comments/{c} 200 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
 rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
