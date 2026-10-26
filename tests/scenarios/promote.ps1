@@ -46,6 +46,10 @@ function Pm-DoneItem([string]$Awaiting = '') {
 function Pm-Deps { Fake 'octo-deps' }
 function Pm-Dep([string]$Ver, [string]$EnvName) { @((Pm-Deps).deployments | Where-Object { $_.release -eq $Ver -and $_.env -eq $EnvName }) }
 function Pm-Events([int]$n, [string]$Event) { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match "plant event=$Event " }) }
+# The Sign-off of the release's uat deployment answered Proceed by the gateway and journaled on $n: a later sweep answers it (responsible, submit,
+# then the journal line), so a scenario that ends at the deployment's creation waits for it, and those writes land in its own record every time,
+# not only when a sweep happens to come before the record closes (issue #386)
+function Pm-SignedOff([string]$Ver, [int]$n) { Wait-Until -Seconds 40 { @(Pm-Dep $Ver 'uat')[0].result -eq 'Proceed' -and @(Pm-Events $n 'promotion-signoff').Count -ge 1 } }
 function Pm-Brief([int]$n) { (@((Get-FakeIssue $n).comments | ForEach-Object { ("$($_.body)" -replace '\s+', ' ').Substring(0, [Math]::Min(220, ("$($_.body)" -replace '\s+', ' ').Length)) }) -join ' | ') }
 
 function Pm-Created([string]$Ver) {
@@ -94,6 +98,7 @@ $PromoteScenarios = [ordered]@{
     Check 'no deployment meanwhile' ((Pm-Deps).creates -eq 0)
     [void](Fake 'gh-demo' @{ item = $i.n })
     Check 'with the video published it goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.3.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
+    Check 'and its Sign-off is answered Proceed by the gateway and journaled' (Pm-SignedOff '3.3.1' $i.n) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
 }
 
 'promote: no Auto Merge label, or a Hold label, keeps the release waiting' = {
@@ -118,6 +123,7 @@ $PromoteScenarios = [ordered]@{
     # a slow CI machine can take more than one sweep to notice the new deployment, and can journal the reason again: at least one, within 90 s
     Check 'first it waits for two Healthy reads apart, the later after the settle time' (Wait-Until -Seconds 90 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'not been Healthy long enough' }).Count -ge 1 }) (Pm-Brief $i.n)
     Check 'then it goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.5.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
+    Check 'and its Sign-off is answered Proceed by the gateway and journaled' (Pm-SignedOff '3.5.1' $i.n) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
 }
 
 'promote: the tdd app running another version keeps the release from uat' = {
@@ -139,7 +145,7 @@ $PromoteScenarios = [ordered]@{
     Check 'granted: it goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.6.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
     # a later sweep answers the deployment's Sign-off (responsible, submit, then the journal line): waited for, so those writes land in this
     # scenario's own record every time and not only when a sweep happens to come before the record closes (issue #386)
-    Check 'and its Sign-off is answered Proceed by the gateway, journaled once' (Wait-Until -Seconds 40 { @(Pm-Dep '3.6.1' 'uat')[0].result -eq 'Proceed' -and @(Pm-Events $i.n 'promotion-signoff').Count -eq 1 }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    Check 'and its Sign-off is answered Proceed by the gateway and journaled' (Wait-Until -Seconds 40 { @(Pm-Dep '3.6.1' 'uat')[0].result -eq 'Proceed' -and @(Pm-Events $i.n 'promotion-signoff').Count -ge 1 }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
 }
 
 'promote: a gate that fails while the Sign-off waits makes the gateway abort it; a 403 of the interruption names the permission' = {
@@ -213,6 +219,7 @@ $PromoteScenarios = [ordered]@{
     $i = Pm-Item '3.13.1'
     Check 'the release goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.13.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
     Check 'no stranger commit was named' (@(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'not the merge commit' }).Count -eq 0) (Pm-Brief $i.n)
+    Check 'and its Sign-off is answered Proceed by the gateway and journaled' (Pm-SignedOff '3.13.1' $i.n) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
 }
 
 'promote: a factory merge in the release that is not settled yet makes the release wait, then it is promoted' = {
@@ -220,7 +227,7 @@ $PromoteScenarios = [ordered]@{
     $i = Pm-Item '3.14.1'
     Check 'the release waits, naming the unsettled merge' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match "#$($d.n)'s merge \($($d.sha.Substring(0,7))\) is not settled yet \(awaiting release-candidate\)" }).Count -eq 1 }) (Pm-Brief $i.n)
     Check 'no deployment meanwhile' ((Pm-Deps).creates -eq 0)
-    Wait-SweepGap -MaxAge 1.0   # (the edit in the gap after a sweep: none reads #d's state before it and saves it after)
+    Wait-SweepGap -Fresh 1.0   # (the edit in the gap after a sweep: none reads #d's state before it and saves it after)
     Set-ItemState $d.n { param($st) $st.merge.awaiting = $null; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o') }
     Check 'settled: the release goes to uat' (Wait-Until -Seconds 40 { @(Pm-Dep '3.14.1' 'uat').Count -eq 1 }) (Pm-Brief $i.n)
 }
@@ -258,6 +265,7 @@ $PromoteScenarios = [ordered]@{
     # Sign-off). An edit made between such a read and save was lost: #d stayed settled, no wait was ever journaled, and the Sign-off was answered
     # Proceed. The edit waits for the refusal on #d, the last of those saves (its key dedups the repeats).
     [void](Wait-Until -Seconds 60 { @(@(Pm-Events $d.n 'promotion-waiting') | Where-Object { $_.body -match 'missing permission InterruptionSubmit' }).Count -ge 1 })
+    Wait-SweepGap -Fresh 1.0   # (the edit in the gap after a sweep: none reads #d's state before it and saves it after)
     Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
     # the answer is allowed again only once the gateway has journaled the wait (a sweep that read #d's state before the edit would answer Proceed)
     Check 'the Sign-off wait is explained' (Wait-Until -Seconds 40 { @(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -match 'Sign-off of task .* waits: .*not settled yet' }).Count -eq 1 }) (Pm-Brief $i.n)
@@ -266,7 +274,7 @@ $PromoteScenarios = [ordered]@{
     # the pending check covers two full sweeps in which answering is allowed again
     [void](Wait-Until -Seconds 40 { [long](Get-Plant).sweep.full -ge $f0 + 2 })
     Check 'and it stays pending' (@(Pm-Dep '3.18.1' 'uat')[0].pending) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
-    Wait-SweepGap -MaxAge 1.0
+    Wait-SweepGap -Fresh 1.0
     Set-ItemState $d.n { param($st) $st.merge.awaiting = $null; $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o') }
     Check 'settled: Proceed' (Wait-Until -Seconds 40 { @(Pm-Dep '3.18.1' 'uat')[0].result -eq 'Proceed' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
 }
@@ -288,7 +296,7 @@ $PromoteScenarios = [ordered]@{
     # Sign-off). An edit made between such a read and save was lost: #d stayed settled, no wait was ever journaled, and the Sign-off was answered
     # Proceed. The edit waits for the refusal on #d, the last of those saves (its key dedups the repeats).
     [void](Wait-Until -Seconds 60 { @(@(Pm-Events $d.n 'promotion-waiting') | Where-Object { $_.body -match 'missing permission InterruptionSubmit' }).Count -ge 1 })
-    Wait-SweepGap -MaxAge 1.0   # (the edit in the gap after a sweep: none reads #d's state before it and saves it after)
+    Wait-SweepGap -Fresh 1.0   # (the edit in the gap after a sweep: none reads #d's state before it and saves it after)
     Set-ItemState $d.n { param($st) $st.merge.awaiting = 'release-candidate'; $st.merge.Remove('done_at') }
     # The Sign-off may be answered only once the gateway has seen the unsettled merge: a sweep that read #d's state before the edit and reached the
     # Sign-off after the answer was allowed again answered it Proceed (the deployments went on to prod). The wait is journaled without answering,

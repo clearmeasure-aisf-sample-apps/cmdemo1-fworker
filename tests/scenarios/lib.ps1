@@ -453,24 +453,34 @@ function Wait-RecordSettled {
 }
 # Before a scenario's /_fake/reset: the reset must not land while the gateway's sweep is reading the items it removes. A sweep that is settling an
 # item the scenario before merged (its release candidate, its delivery) then finds the card or the Octopus task gone and logs a sweep error, which
-# the suite's invariant counts (issue #386: seen on item 25 of the auto suite). After every sweep the loop waits 2 s before the next one
-# (gateway/Sweeper.cs), so the reset goes in that gap: at once when the last full sweep ended less than 1.5 s ago, else after the sweep that runs
-# now has ended (lastSweep moves), at most 5 s. No wait without a gateway, or when its last sweep is more than 8 s old (a suite whose sweep
-# interval is long: no sweep is due), or when it never swept. A scenario that edits an item's state which the sweep also saves (Set-ItemState)
-# makes the edit in the same gap, so no sweep reads the state before the edit and saves it after (-MaxAge: how recent the last sweep must be).
-function Wait-SweepGap([double]$MaxAge = 1.5) {
+# the suite's invariant counts (issue #386: seen on item 25 of the auto suite). A sweep is running when the runner's latest start of sync-board
+# (/api/v1/status runner.recent) is later than lastSweep, the end of the last full sweep: then the reset waits until that sweep has ended
+# (polled every 100 ms, at most 5 s). A sweep that starts after the reset reads the new world, so no wait is needed when none runs; nor without
+# a gateway, before its first sweep, or when none of the runner's last 30 starts was a sweep.
+# A scenario that edits an item's state which every sweep reads and saves (Set-ItemState) needs more: no sweep may start between its read and
+# its save around the edit. -Fresh N also waits until the last full sweep ended less than N seconds ago (after a sweep the loop waits 2 s before
+# the next one, gateway/Sweeper.cs), so the edit goes early into that gap.
+function ConvertTo-UtcTime($v) {
+    if ($v -is [datetime]) { if ($v.Kind -eq [DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($v, [DateTimeKind]::Utc) }; return $v.ToUniversalTime() }
+    if ("$v") { try { return [datetimeoffset]::Parse("$v", [Globalization.CultureInfo]::InvariantCulture).UtcDateTime } catch { return $null } }
+    return $null
+}
+function Wait-SweepGap([double]$Fresh = 0) {
     $base = try { Get-GatewayBase } catch { $null }
     if (-not $base) { return }
-    $read = { try { $v = (Invoke-RestMethod "$base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2).lastSweep; if ($v -is [datetime]) { $v.ToUniversalTime() } elseif ("$v") { [datetime]::Parse("$v").ToUniversalTime() } else { $null } } catch { $null } }
-    $first = & $read
-    if ($null -eq $first) { return }
-    $age = ([datetime]::UtcNow - $first).TotalSeconds
-    if ($age -lt $MaxAge -or $age -gt 8) { return }
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    while ($sw.ElapsedMilliseconds -lt 5000) {
+    while ($true) {
+        $s = try { Invoke-RestMethod "$base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2 } catch { $null }
+        if ($null -eq $s) { return }
+        $last = ConvertTo-UtcTime $s.lastSweep
+        if ($null -eq $last) { return }
+        $runner = $s.PSObject.Properties['runner']; $recent = $(if ($runner -and $runner.Value.PSObject.Properties['recent']) { @($runner.Value.recent) } else { @() })
+        $starts = @($recent | Where-Object { $_ -and $_.verb -eq 'sync-board' } | ForEach-Object { ConvertTo-UtcTime $_.at } | Where-Object { $null -ne $_ })
+        $running = $starts.Count -gt 0 -and @($starts | Sort-Object)[-1] -gt $last
+        $stale = $Fresh -gt 0 -and ([datetime]::UtcNow - $last).TotalSeconds -ge $Fresh
+        if (-not $running -and -not $stale) { return }
+        if ($sw.ElapsedMilliseconds -ge 5000) { return }
         Start-Sleep -Milliseconds 100
-        $now = & $read
-        if ($null -eq $now -or $now -ne $first) { return }
     }
 }
 function Run-Scenario([string]$Name, [scriptblock]$Body) {
