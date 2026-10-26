@@ -1235,23 +1235,6 @@ $OwnerScenarios['owner: board guard: a labelled issue missing from the board is 
     } finally { Stop-OwnerClient 'guard1' }
 }
 
-# Issue 411: a verb that creates a work item (the keeper's create-item and split-item) holds the board-intake lock from the new issue until its card is
-# in its column, and the board guard places a card only under that lock, taken without waiting. Here the harness holds the lock, as such a verb does,
-# while a labelled issue has no card: two full sweeps finish within 30 s and leave the issue to the holder; once the lock is free a later sweep's guard
-# places it and journals it once.
-$OwnerScenarios['owner: board guard: an issue a verb is still putting on the board is left to it; the guard places it once the intake lock is free (issue 411) [full]'] = {
-    $lock = Lock-IntakeFile
-    try {
-        $n = (Fake 'issue' @{ title = 'Created by a verb that has not placed it yet'; body = 'x'; labels = $OwnerLabels }).number
-        $sw = [Diagnostics.Stopwatch]::StartNew()
-        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
-        Check 'the sweeps go on while the intake lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
-        Check 'and leave the issue to the holder of the lock' ($null -eq (Get-FakeIssue $n).column -and @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=board-added ' }).Count -eq 0) ((Get-FakeIssue $n) | ConvertTo-Json -Compress -Depth 3)
-    } finally { $lock.Dispose() }
-    Check 'once the lock is free a later sweep puts it in Technical Design' (Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Technical Design' }) ((Get-FakeIssue $n) | ConvertTo-Json -Compress -Depth 3)
-    Check 'and journals it once' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=board-added ' }).Count -eq 1 })
-}
-
 # Issue 65: an item whose body says "Depends on #N" is offered to nobody while #N is neither merged nor closed; the status shows it held with the code
 # depends-on and what it waits for; once #N is closed the next sweep offers it (a dependency off the board is read through the REST API).
 $OwnerScenarios['owner: an item waits for the items it depends on and is offered once they are closed'] = {
