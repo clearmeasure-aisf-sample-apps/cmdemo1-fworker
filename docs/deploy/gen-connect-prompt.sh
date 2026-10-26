@@ -28,8 +28,9 @@ if [ -z "$TOK" ]; then TOK=$(secret-tool lookup service factory-worker kind "fwo
 [ -n "$TOK" ] || { echo "no operator token: set FACTORY_OPERATOR_TOKEN or store it in the keyring" >&2; exit 2; }
 mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"; T=$(mktemp -d -p "${XDG_CACHE_HOME:-$HOME/.cache}"); trap 'rm -rf "$T"' EXIT
 auth() { curl -fsS -H @<(printf 'Authorization: Bearer %s' "$TOK") "$@"; }
-# RENDER_SOURCE=<path to gateway/Program.cs> renders with the generator of a source tree that is not deployed yet
-if [ -n "${RENDER_SOURCE:-}" ]; then cp "$RENDER_SOURCE" "$T/dashboard.html"; else curl -fsS "$URL/dashboard" -o "$T/dashboard.html"; fi
+# RENDER_SOURCE=<path to gateway/Templates> renders with the generator of a source tree that is not deployed yet: the page as the gateway puts it
+# together (gateway/Templates/DashboardPage.cs), dashboard.html with its line /*connect-prompt*/ replaced by connect-prompt.js
+if [ -n "${RENDER_SOURCE:-}" ]; then node -e 'const fs=require("fs"),d=process.argv[1],p=fs.readFileSync(d+"/dashboard.html","utf8");fs.writeFileSync(process.argv[2],p.replace("/*connect-prompt*/\n",()=>fs.readFileSync(d+"/connect-prompt.js","utf8")))' "$RENDER_SOURCE" "$T/dashboard.html"; else curl -fsS "$URL/dashboard" -o "$T/dashboard.html"; fi
 SUP=0; if [ "$TYPE" = supervisor ]; then SUP=1; fi; if [ "$TYPE" = operator ]; then SUP=2; fi
 if [ "$SUP" = 2 ]; then auth -X POST "$URL/api/v1/workers/$NAME/credential?role=operator" -o "$T/cred.json"; elif [ "$SUP" = 1 ]; then auth -X POST "$URL/api/v1/workers/$NAME/credential?role=manager" -o "$T/cred.json"; else auth -X POST "$URL/api/v1/workers/$NAME/credential" -o "$T/cred.json"; fi
 auth "$URL/api/v1/dashboard" -o "$T/info.json"
@@ -41,7 +42,7 @@ if(!m){console.error("no render block in the dashboard");process.exit(1)}
 const info=JSON.parse(rd("info.json")),cred=JSON.parse(rd("cred.json")),qc=JSON.parse(rd("qc.json"));
 const f=new Function(m[1]+"\nreturn buildPrompt;");
 if(!cred.token){console.error("the gateway issued no credential");process.exit(1)}
-// the argument objects of the two dashboard buttons (gateway/Program.cs, DashboardPage: mk and mksup)
+// the argument objects of the two dashboard buttons (gateway/Templates/dashboard.html: mk and mksup)
 const on=!!(info.messaging&&info.messaging.enabled);
 const arg=e.SUP==="2"?{env:info.environment,url:info.url,token:cred.token,name:e.NAME,operator:true}:e.SUP==="1"?{env:info.environment,url:info.url,token:cred.token,name:e.NAME,supervisor:true}
 :{env:info.environment,url:info.url,token:cred.token,name:e.NAME,type:e.TYPE,cap:e.CAP,repo:qc.repo_url||"",qcProfile:"",qcAddress:"",qcCapacity:"",messaging:on,asking:!!(on&&info.manager&&info.manager.enabled)};
