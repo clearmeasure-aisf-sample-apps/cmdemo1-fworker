@@ -793,23 +793,23 @@ $OwnerScenarios['pass-merge: a push after the verdict voids it: not merged, the 
     Check 'not merged, and the reason names the change after the verdict, once' (-not (Get-FakePr $x.pr).merged -and $why -eq 1) "merged=$((Get-FakePr $x.pr).merged) comments=$why"
 }
 
-# The race in a fixed order (issue #395): which side merged followed the clock (the session's call or the sweep after the grace), so the merge and
-# its comment were caused writes in one run and background in the next. Both sides merge under the item lock. Here the session's merge call takes
-# the lock first and holds it while the checks of the head still run (it polls them); the sweep, once the grace is over, tries the item and finds
-# it busy (/status pass-unmerged item-busy: the two really met); only then do the checks finish, and the session's call merges. A sweep after the
-# merge must not merge again.
+# The race with its winner fixed (issue #395): which side merged followed the clock (the session's call 7 s after the PASS, or the sweep once the
+# 8 s grace was over), so the merge and its comment were caused writes in one run and background writes in the next. Both sides merge under the
+# item lock and only on green checks. Here the checks of the head run until a read of them carries the session's call's cause id
+# (/_fake/pr checksUntilCause): that read happens inside the session's merge verb, which holds the item lock, so the session sees them green and
+# merges before the sweep can take the item. A sweep that takes the item first, once the grace is over, finds them still running and only waits
+# (checks-pending). A sweep after the merge must not merge again. (Without a cause id, golden mode off, the checks are simply finished.)
 $OwnerScenarios['pass-merge: the session''s merge call racing the sweep merges once [full]'] = {
     $x = Pm-ToValidation
-    Fake 'pr' @{ number = $x.pr; delaySeconds = 3600 } | Out-Null     # the checks run until the scenario lets them finish
+    Fake 'pr' @{ number = $x.pr; delaySeconds = 3600 } | Out-Null     # the checks run while the PASS is recorded
     $v = Pm-QuietPass $x; CheckExit 'the PASS verdict' $v 0
-    $call = Start-FAsync 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
-    $busy = Wait-Until -Seconds 60 { @((Get-Plant).plant.passUnmerged | Where-Object { $_.item -eq $x.n -and $_.code -eq 'item-busy' }).Count -eq 1 }
-    Check 'the sweep tries the item while the session''s call holds it: pass-unmerged item-busy' $busy ((Get-Plant).plant.passUnmerged | ConvertTo-Json -Compress)
-    Fake 'pr' @{ number = $x.pr; delaySeconds = 0 } | Out-Null        # the checks finish
-    $m = Receive-FAsync $call
+    $cause = Get-NextCauseId
+    if ($cause) { Fake 'pr' @{ number = $x.pr; checksUntilCause = $cause } | Out-Null } else { Fake 'pr' @{ number = $x.pr; delaySeconds = 0 } | Out-Null }
+    $m = F 'w1' @('merge', '--item', $x.n, '--pr', $x.pr)
     Check 'the session''s merge call merges' ($m.exit -eq 0 -and $m.outcome -eq 'merged') ($m | ConvertTo-Json -Compress -Depth 4)
     Wait-Sweeps -Count 1
-    Check 'merged once, also after a sweep' ((Get-FakePr $x.pr).merged -and (Pm-MergeComments $x.n $x.pr) -eq 1) "$(Pm-MergeComments $x.n $x.pr)"
+    $gw = @((Get-FakeIssue $x.n).comments | Where-Object { "$($_.body)" -match "the gateway squash-merged PR #$($x.pr) " }).Count
+    Check 'merged once, by the session, also after a sweep' ((Get-FakePr $x.pr).merged -and (Pm-MergeComments $x.n $x.pr) -eq 1 -and $gw -eq 0) "comments=$(Pm-MergeComments $x.n $x.pr) gateway=$gw"
 }
 
 $OwnerScenarios['pass-merge: a pull request merged by a person settles the item from Development and from a PASS parked for a person'] = {

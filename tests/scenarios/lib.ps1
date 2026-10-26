@@ -200,27 +200,9 @@ function F([string]$Holder, [string[]]$FactoryArgs) {
     if ($script:GoldenOpen -and -not $skip -and $script:CauseNonce) { $script:CauseSeq++; $id = "$($script:CauseNonce).$($script:CauseSeq)" }
     return Invoke-F $Holder $FactoryArgs -Cause $id
 }
-# F started in the background, for a scenario that acts while the call runs (owner: the session's merge call that holds the item lock while the
-# sweep tries the item). A pwsh process of its own, so the call's holder and cause id are in that process's environment only, never in this one's;
-# the id is counted as F counts it. Receive-FAsync waits for the call and answers as F does.
-function Start-FAsync([string]$Holder, [string[]]$FactoryArgs) {
-    $id = ''
-    if ($script:GoldenOpen -and $script:CauseNonce -and $FactoryArgs.Count -gt 0 -and $FactoryArgs[0] -notin $script:CauseSkipVerbs) { $script:CauseSeq++; $id = "$($script:CauseNonce).$($script:CauseSeq)" }
-    $psi = [Diagnostics.ProcessStartInfo]::new('pwsh')
-    foreach ($a in @('-NoProfile', '-File', (Join-Path $script:Root 'plugin/scripts/factory.ps1')) + @($FactoryArgs)) { $psi.ArgumentList.Add("$a") }
-    $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.WorkingDirectory = (Get-Location).ProviderPath
-    $psi.Environment['FACTORY_HOLDER'] = $Holder
-    if ($id) { $psi.Environment['FACTORY_TEST_CAUSE'] = $id } else { [void]$psi.Environment.Remove('FACTORY_TEST_CAUSE') }
-    $p = [Diagnostics.Process]::Start($psi)
-    return @{ proc = $p; out = $p.StandardOutput.ReadToEndAsync(); err = $p.StandardError.ReadToEndAsync(); verb = "$($FactoryArgs[0])"; sw = [Diagnostics.Stopwatch]::StartNew() }
-}
-function Receive-FAsync($Call, [int]$Seconds = 300) {
-    if (-not $Call.proc.WaitForExit($Seconds * 1000)) { try { $Call.proc.Kill($true) } catch { }; return @{ ok = $false; exit = -1; raw = "the background call '$($Call.verb)' did not end within $Seconds s" } }
-    $code = $Call.proc.ExitCode; $text = ("$($Call.out.Result)" -replace "`r`n", "`n").TrimEnd("`n")
-    $script:VerbCalls++; $script:VerbSeconds += $Call.sw.Elapsed.TotalSeconds
-    if ($code -eq 139) { $script:ClientCrashes++; return @{ ok = $false; exit = 139; code = 'client-crashed'; reason = 'PWSH EXIT 139 (SEGMENTATION FAULT) OF THE CLIENT PROCESS: machine load or the runtime, not a product answer; run the scenario again'; raw = "$text$($Call.err.Result)" } }
-    try { $j = $text | ConvertFrom-Json -AsHashtable; if (-not $j.ContainsKey('exit')) { $j.exit = $code }; return $j } catch { return @{ ok = $false; exit = $code; raw = "$text$($Call.err.Result)" } }
-}
+# The cause id the next tagged call of F will carry ('' when the record is closed or the fake records nothing), for a fake control that waits for
+# that call (owner: /_fake/pr checksUntilCause, the session's merge call in the pass-merge race).
+function Get-NextCauseId { if ($script:GoldenOpen -and $script:CauseNonce) { return "$($script:CauseNonce).$($script:CauseSeq + 1)" }; return '' }
 # -Cause: the call's cause id (F), passed to the client as FACTORY_TEST_CAUSE of that call only: in the runner host's call environment, or set
 # around the spawned pwsh and removed right after it
 function Invoke-F([string]$Holder, [string[]]$FactoryArgs, [string]$Cause = '') {
