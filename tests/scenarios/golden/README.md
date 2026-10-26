@@ -29,7 +29,9 @@ records nothing. Recording never changes an answer of the fake.
   itself, `Gh-As`, `Set-ItemState`) or `gateway` (no User-Agent: the gateway's own C# clients). Harness writes are kept: they are the
   scenario's inputs.
 
-`Run-Scenario` calls `/_fake/scenario-begin` right after `/_fake/reset` and `/_fake/scenario-end` after the body. The end writes
+`Run-Scenario` calls `/_fake/scenario-begin` right after `/_fake/reset` and `/_fake/scenario-end` after the body, once `Wait-RecordSettled`
+has let the gateway finish one more sweep (at most 5 s, then 1 s; nothing when the gateway is down or never swept), so a tail write the
+scenario set off lands in the record however fast the runner was. The end writes
 `<FAKE_RECORD_DIR>/<suite>/<slug>.writes.txt` (normalized, compared) and `<slug>.raw.jsonl` (every write as sent, for reading a
 difference). `GET /_fake/writes` shows the open record, and `unlabelledWrites`: the writes made while no scenario was open, counted and
 dropped (`/_fake/state` is unchanged by the recorder).

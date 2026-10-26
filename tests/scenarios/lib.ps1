@@ -320,6 +320,23 @@ function Merge-GoldenWrites([string[]]$From, [string]$Out = (Join-Path $script:R
     }
     Write-Host "merged $merged scenarios from $($runs.Count) runs into $Out; $left left out"
 }
+# Before a scenario's record is closed: the gateway's background work the scenario set off (the sweep's journal lines, plant offers and
+# reassignments, runtime ends) is let finish one more sweep, so whether such a tail write lands in the record does not depend on how fast the
+# runner was. Bounded: nothing when the gateway is down or never swept, at most 5 s for a sweep that does not come, then 1 s for its plan.
+function Wait-RecordSettled {
+    $base = try { Get-GatewayBase } catch { $null }
+    if (-not $base) { return }
+    $read = { try { $v = (Invoke-RestMethod "$base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2).lastSweep; if ($v -is [datetime]) { "$($v.Ticks)" } else { "$v" } } catch { $null } }
+    $first = & $read
+    if ($null -eq $first -or $first -eq '') { return }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 5) {
+        Start-Sleep -Milliseconds 250
+        $now = & $read
+        if ($null -eq $now) { return }
+        if ($now -ne $first) { Start-Sleep -Milliseconds 1000; return }
+    }
+}
 function Run-Scenario([string]$Name, [scriptblock]$Body) {
     $script:Current = $Name; Write-Host "  $Name"
     $tmStart = [Diagnostics.Stopwatch]::StartNew(); $tmChecks = $script:Checks; $tmFailed = $script:Failures.Count
@@ -337,6 +354,7 @@ function Run-Scenario([string]$Name, [scriptblock]$Body) {
     finally {
         if ($goldenMode -ne 'off') {
             $goldenRec = $null
+            try { Wait-RecordSettled } catch { }
             try { $goldenRec = Fake 'scenario-end' @{} } catch { Check 'golden writes recorded' $false "(the fake did not end the record: $($_.Exception.Message))" }
             if ($null -ne $goldenRec) { try { Compare-GoldenWrites $goldenRec $Name $goldenMode } catch { Check 'golden writes recorded' $false "(the record could not be compared: $($_.Exception.Message))" } }
         }
