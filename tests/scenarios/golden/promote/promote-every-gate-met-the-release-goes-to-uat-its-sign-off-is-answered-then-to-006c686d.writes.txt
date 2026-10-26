@@ -1,18 +1,18 @@
 # suite: promote
 # scenario: promote: every gate met: the release goes to uat, its Sign-off is answered, then to prod, each deployment created once, and the item is delivered
-# runs: 4
+# runs: 5
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.1.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
-+ rule PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed","state_reason":"completed"}
-+ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Done","p":"PVT_fake"}}
-+ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["prod"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.1.1","SpaceIdOrName":"Spaces-355"}
-+ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.1.1","SpaceIdOrName":"Spaces-355"}
-+ rule POST /octopus/api/Spaces-355/interruptions/Interruptions-{n}/submit 200 {"Instructions":null,"Notes":"Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md).","Result":"Proceed"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: answered the Sign-off of the deployment of release 3.1.1 to **prod** (Octopus task `ServerTasks-{n}`): **Proceed**.\n\n<!-- plant event=promotion-signoff key=3.1.1|prod|ServerTasks-{n}|Proceed -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: answered the Sign-off of the deployment of release 3.1.1 to **uat** (Octopus task `ServerTasks-{n}`): **Proceed**.\n\n<!-- plant event=promotion-signoff key=3.1.1|uat|ServerTasks-{n}|Proceed -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.1.1 to **prod** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.1.1|prod -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.1.1 to **uat** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.1.1|uat -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: Delivered to **Prod** - moved to **Done**. Release 3.1.1. Production: https://ca-cmdemo1-prod-ui.example\n\n<!-- factory-journal:factory-worker -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:465 sha256:ce83e670 \"\uD83C\uDFED Plant manager: release 3.1.1 waits for the automatic promotion to **uat**: th…\"}"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:467 sha256:c5a449e8 \"\uD83C\uDFED Plant manager: release 3.1.1 waits for the automatic promotion to **prod**: t…\"}"}
-+ rule PUT /octopus/api/Spaces-355/interruptions/Interruptions-{n}/responsible 200 {}
-+ rule STATE factory-worker v1 #{#1}
+~ rule PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed","state_reason":"completed"}
+~ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Done","p":"PVT_fake"}}
+~ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["prod"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.1.1","SpaceIdOrName":"Spaces-355"}
+~ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.1.1","SpaceIdOrName":"Spaces-355"}
+~ rule POST /octopus/api/Spaces-355/interruptions/Interruptions-{n}/submit 200 {"Instructions":null,"Notes":"Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md).","Result":"Proceed"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: answered the Sign-off of the deployment of release 3.1.1 to **prod** (Octopus task `ServerTasks-{n}`): **Proceed**.\n\n<!-- plant event=promotion-signoff key=3.1.1|prod|ServerTasks-{n}|Proceed -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: answered the Sign-off of the deployment of release 3.1.1 to **uat** (Octopus task `ServerTasks-{n}`): **Proceed**.\n\n<!-- plant event=promotion-signoff key=3.1.1|uat|ServerTasks-{n}|Proceed -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.1.1 to **prod** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.1.1|prod -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.1.1 to **uat** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.1.1|uat -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: Delivered to **Prod** - moved to **Done**. Release 3.1.1. Production: https://ca-cmdemo1-prod-ui.example\n\n<!-- factory-journal:factory-worker -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:465 sha256:ce83e670 \"\uD83C\uDFED Plant manager: release 3.1.1 waits for the automatic promotion to **uat**: th…\"}"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:467 sha256:c5a449e8 \"\uD83C\uDFED Plant manager: release 3.1.1 waits for the automatic promotion to **prod**: t…\"}"}
+~ rule PUT /octopus/api/Spaces-355/interruptions/Interruptions-{n}/responsible 200 {}
+~ rule STATE factory-worker v1 #{#1}

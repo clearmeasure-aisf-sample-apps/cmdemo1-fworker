@@ -1,4 +1,4 @@
 # suite: mcp
 # scenario: mcp: an r1 round trip: minted, verified for its role, expired, revoked by generation, another environment and another kind's MAC refused
-# runs: 4
-+ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/r1rev/1","sha":"{sha}"}
+# runs: 5
+~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/r1rev/1","sha":"{sha}"}

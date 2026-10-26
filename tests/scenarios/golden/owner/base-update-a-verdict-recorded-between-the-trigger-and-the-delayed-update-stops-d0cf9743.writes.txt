@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: base update: a verdict recorded between the trigger and the delayed update stops the gateway's update [full]
-# runs: 4
+# runs: 5
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n- change as described.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\nAI session: bm1\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
@@ -8,6 +8,6 @@
 = harness STATE factory-worker v1 #{#1}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **bm1** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: master moved to `{sha}`; told the owner (**bm1**) to merge master into the branch now: 1 commit(s) behind.\n\n<!-- plant event=base-updated key=bu|{sha} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **bm1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|bm1 -->"}
 + rule STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: master moved to `{sha}`; told the owner (**bm1**) to merge master into the branch now: 1 commit(s) behind.\n\n<!-- plant event=base-updated key=bu|{sha} -->"}

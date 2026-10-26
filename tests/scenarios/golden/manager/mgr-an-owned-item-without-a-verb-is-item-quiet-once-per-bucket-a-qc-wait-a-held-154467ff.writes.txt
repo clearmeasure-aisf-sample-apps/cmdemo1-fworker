@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: an owned item without a verb is item-quiet once per bucket; a QC wait, a held item, a pinned item nobody owns and an owner that calls verbs are none
-# runs: 4
+# runs: 5

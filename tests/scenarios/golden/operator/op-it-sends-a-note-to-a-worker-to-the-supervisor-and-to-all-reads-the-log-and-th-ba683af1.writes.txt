@@ -1,3 +1,3 @@
 # suite: operator
 # scenario: op: it sends a note to a worker, to the supervisor and to all, reads the log and the questions, answers, sets a mode and grants budget; the real client does the same
-# runs: 4
+# runs: 5

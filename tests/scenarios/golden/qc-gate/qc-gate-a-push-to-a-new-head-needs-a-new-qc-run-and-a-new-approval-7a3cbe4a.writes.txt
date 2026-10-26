@@ -1,6 +1,6 @@
 # suite: qc-gate
 # scenario: qc: gate a push to a new head needs a new QC run and a new approval [full]
-# runs: 4
+# runs: 5
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
@@ -33,7 +33,7 @@
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: a person asked for a QC environment for PR #{#2} at head {sha} (attempt 1).\n\n<!-- plant event=qc-requested key={#2}|{sha}|1 -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **qw1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|qw1 -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: hold cleared: factory-worker-testperson[bot] approved `{sha}`. The merge may proceed.\n\n<!-- factory-journal:factory-worker -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
 + rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
 + rule STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}

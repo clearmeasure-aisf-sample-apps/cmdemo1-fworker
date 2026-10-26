@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: fix-forward of an item with an open pull request: the task starts from its branch, pr_open makes the task's draft the item's pull request, closes the superseded one and its branch, and closes extra drafts; no duplicates (Functional Testing from that branch: the scenario above)
-# runs: 4
+# runs: 5
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/thing-{#1}","title":"[WIP] Thing"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/thing-{#1}","body":"Fixes the failing check of #{#2}.","draft":true,"head":"copilot/thing-fix-{#1}","title":"[WIP] Thing"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/thing-fix-{#1}","body":"x","draft":true,"head":"copilot/thing-extra-{#1}","title":"[WIP] Thing"}

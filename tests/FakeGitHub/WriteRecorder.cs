@@ -7,9 +7,10 @@ using System.Text.RegularExpressions;
 
 // The golden-write recorder of Tier 1 (docs: tests/scenarios/golden/README.md). With FAKE_RECORD_DIR set, every write that reaches the fake
 // (POST, PUT, PATCH, DELETE and GraphQL mutations; not /_fake/*, not the credential mints) is kept for the open scenario, and
-// /_fake/scenario-end writes it normalized to <dir>/<suite>/<slug>.writes.txt and raw to <slug>.raw.jsonl. The file has two sections: "= "
+// /_fake/scenario-end writes it normalized to <dir>/<suite>/<slug>.writes.txt and raw to <slug>.raw.jsonl. The file has three sections: "= "
 // the writes the scenario caused (the harness's own, and those inside a cause window of /_fake/cause that are not of a background kind), in
-// order, and "+ " the background writes, the sorted distinct lines.
+// order; "+ " the settled background lines (first written at or before the last caused write) and "~ " the tail ones, sorted and distinct.
+// /_fake/group-check (at the end of the process) normalizes every later write against each closed scenario: <slug>.later.txt.
 // Recording only observes: the fake answers every request exactly as it does without it. Every member is called under the fake's one lock.
 sealed class WriteRecorder
 {
@@ -35,7 +36,13 @@ sealed class WriteRecorder
     // too, and nothing in a request tells the two apart (Kind).
     public static readonly HashSet<string> BackgroundKinds = new(StringComparer.Ordinal) { "plant", "state", "claims", "transcripts", "snapshot", "leader", "revoked", "gateway" };
 
-    /// <summary>Writes made while no scenario was open (between scenarios, or before the first): counted, not kept.</summary>
+    // when the last write of any kind came (Quiet): the harness closes a record only once the gateway's tail work has gone quiet
+    long lastWriteTick = Environment.TickCount64;
+
+    /// <summary>How long ago (ms) the fake recorded its last write: the harness waits for quiet before it closes a record (lib.ps1 Wait-RecordSettled).</summary>
+    public JsonObject Quiet() => new() { ["ok"] = true, ["recording"] = true, ["sinceLastWriteMs"] = Environment.TickCount64 - lastWriteTick };
+
+    /// <summary>Writes made while no scenario was open (between scenarios, or before the first): counted, in no record (GroupCheck reads them).</summary>
     public long Unlabelled { get; private set; }
 
     public WriteRecorder(string dir) { this.dir = Path.GetFullPath(dir); }
@@ -64,10 +71,97 @@ sealed class WriteRecorder
     public static string SourceOf(string userAgent) =>
         userAgent.StartsWith("factory-worker-gateway", StringComparison.Ordinal) ? "rule" : userAgent.Contains("PowerShell", StringComparison.Ordinal) ? "harness" : "gateway";
 
-    public void Record(string method, string path, string query, int status, string userAgent, JsonNode? body, string? field)
+    /// <summary>Keeps one write. <paramref name="ms"/>: the time since the scenario's begin, for a replay of a raw record (null: the clock).</summary>
+    public void Record(string method, string path, string query, int status, string userAgent, JsonNode? body, string? field, long? ms = null)
     {
+        var e = new Entry(scenario == null ? 0 : ++seq, ms ?? clock.ElapsedMilliseconds, method, path, query, status, SourceOf(userAgent), body, field, depth > 0);
+        // (the timing writes, which are never compared, do not keep a scenario from going quiet)
+        if (!Normalizer.IsTimingJournal(body) && !Normalizer.IsTimingWrite(method, path)) lastWriteTick = Environment.TickCount64;
+        // every write of the process, also one made while no scenario is open, for the group check of the tail lines (GroupCheck)
+        if (all.Count < MaxProcessWrites) all.Add(e); else droppedProcessWrites++;
         if (scenario == null) { Unlabelled++; return; }
-        entries.Add(new Entry(++seq, clock.ElapsedMilliseconds, method, path, query, status, SourceOf(userAgent), body, field, depth > 0));
+        entries.Add(e);
+    }
+
+    // ---- The group check of the tail lines (README: Tail lines). A tail line of a scenario need not land in its own record, but it must be
+    // written by the end of the fake process (a suite's or a group's run), after a final settle. Each closed scenario keeps its normalizer, its
+    // own lines and where the process's writes stood at its end; GroupCheck normalizes every later write against it.
+    sealed record Closed(string Suite, string Slug, string Scenario, Normalizer Norm, int From, HashSet<string> Own);
+    const int MaxProcessWrites = 400_000;
+    readonly List<Entry> all = new();
+    readonly List<Closed> closed = new();
+    long droppedProcessWrites;
+    static readonly Regex Number = new("\\d+", RegexOptions.None, TimeSpan.FromSeconds(1));
+    static readonly Regex ObjectToken = new("\\{#(?:pr\\d+|\\d+)\\}", RegexOptions.None, TimeSpan.FromSeconds(1));
+
+    /// <summary>The writes of the process after <paramref name="c"/> ended that name one of its items or pull requests, as lines normalized
+    /// against it (its counters, its deployment ranks): the same line a write of the scenario itself gives, a factory-state write as its
+    /// STATE line (accepted) or marker line (refused). Leftover and timing writes (relative to it) and lines that name none of its objects
+    /// are left out.</summary>
+    SortedSet<string> LaterLines(Closed c, List<long[]> numbers)
+    {
+        var set = new SortedSet<string>(StringComparer.Ordinal);
+        for (var i = c.From; i < all.Count; i++)
+        {
+            var e = all[i];
+            try
+            {
+                // only a write whose text holds a number of the scenario's ranges can name one of its objects (cheap, before the normalization)
+                if (!numbers[i].Any(c.Norm.Names)) continue;
+                if (Normalizer.IsTimingJournal(e.Body) || Normalizer.IsTimingWrite(e.Method, e.Path)) continue;
+                var path = c.Norm.Path(e.Path, e.Query);
+                var st = c.Norm.StateOf(e.Body);
+                if (path.Contains("{#old}", StringComparison.Ordinal) || st != null && st.Contains("{#old}", StringComparison.Ordinal)) continue;
+                var head = $"{e.Source} {e.Method} {path}{(e.Field != null ? " " + e.Field : "")} {e.Status} ";
+                string line;
+                if (st == null) line = head + (e.Body == null ? "-" : c.Norm.Body(e.Body).ToJsonString(Plain));
+                else if (e.Status >= 300) line = head + new JsonObject { ["body"] = "{factory-state " + st + "}" }.ToJsonString(Plain);
+                else line = $"{e.Source} STATE {st}";
+                if (ObjectToken.IsMatch(line)) set.Add(line);
+            }
+            catch { }
+        }
+        return set;
+    }
+
+    /// <summary>/_fake/group-check { goldenDir }: at the end of a group, for every scenario this process closed, writes the lines of the later
+    /// writes (LaterLines) to &lt;dir&gt;/&lt;suite&gt;/&lt;slug&gt;.later.txt, and, where goldenDir has its golden file, lists the golden's
+    /// tail lines ('~ ') that are neither in the scenario's own record nor among those later lines.</summary>
+    public JsonObject GroupCheck(JsonNode? b)
+    {
+        string goldenDir; try { goldenDir = b?["goldenDir"]?.ToString() ?? ""; } catch { goldenDir = ""; }
+        var missing = new JsonArray(); int checkedCount = 0;
+        // the numbers in each write's path and body, read once for all the scenarios
+        var numbers = all.Select(e =>
+        {
+            try { return Number.Matches(e.Path + " " + e.Query + " " + RawText(e.Body)).Where(m => m.Length < 10).Select(m => long.Parse(m.Value)).Distinct().ToArray(); }
+            catch { return Array.Empty<long>(); }
+        }).ToList();
+        foreach (var c in closed)
+        {
+            SortedSet<string> later;
+            try { later = LaterLines(c, numbers); } catch { later = new SortedSet<string>(StringComparer.Ordinal); }
+            try
+            {
+                var sd = Path.Combine(dir, c.Suite); Directory.CreateDirectory(sd);
+                var text = new StringBuilder();
+                text.Append("# suite: ").Append(c.Suite).Append('\n').Append("# scenario: ").Append(OneLine(c.Scenario)).Append('\n')
+                    .Append("# later writes of the process, normalized against this scenario: ").Append(later.Count).Append('\n');
+                foreach (var l in later) text.Append("~ ").Append(l).Append('\n');
+                File.WriteAllText(Path.Combine(sd, c.Slug + ".later.txt"), text.ToString(), new UTF8Encoding(false));
+            }
+            catch { }
+            if (goldenDir == "") continue;
+            var golden = Path.Combine(goldenDir, c.Suite, c.Slug + ".writes.txt");
+            List<string> tails;
+            try { if (!File.Exists(golden)) continue; tails = File.ReadAllLines(golden, new UTF8Encoding(false)).Where(l => l.StartsWith("~ ", StringComparison.Ordinal)).Select(l => l[2..]).ToList(); }
+            catch { continue; }
+            if (tails.Count == 0) continue;
+            checkedCount++;
+            var miss = tails.Where(l => !c.Own.Contains(l) && !later.Contains(l)).Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList();
+            if (miss.Count > 0) missing.Add(new JsonObject { ["suite"] = c.Suite, ["slug"] = c.Slug, ["scenario"] = c.Scenario, ["missing"] = new JsonArray(miss.Select(l => (JsonNode)JsonValue.Create(l)!).ToArray()) });
+        }
+        return new JsonObject { ["ok"] = true, ["recording"] = true, ["scenarios"] = closed.Count, ["checked"] = checkedCount, ["missing"] = missing, ["processWrites"] = all.Count, ["droppedProcessWrites"] = droppedProcessWrites };
     }
 
     /// <summary>/_fake/cause { open: true | false }: a request of the harness to the gateway begins or ends. A close without an open is ignored.</summary>
@@ -139,6 +233,12 @@ sealed class WriteRecorder
         // (a) the writes the scenario caused, in the order they came; (b) the background writes, a set (README: Format)
         var cause = new List<string>();
         var lines = new SortedSet<string>(StringComparer.Ordinal);
+        // when each background line was first written (ms): a line is settled when that is at or before the last caused write, tail after it.
+        // A STATE line stands for every accepted background write of its (source, state comment): its first is the earliest of them.
+        var firstMs = new Dictionary<string, long>(StringComparer.Ordinal);
+        var stateFirst = new Dictionary<string, long>(StringComparer.Ordinal);
+        var stateLines = new Dictionary<string, string>(StringComparer.Ordinal);
+        long lastCause = long.MinValue;
         var raw = new StringBuilder();
         int kept = 0, leftover = 0, timing = 0, errors = 0;
         // A factory-state comment is created once and then rewritten many times, and how many snapshots there are (and so whether the last
@@ -190,10 +290,20 @@ sealed class WriteRecorder
                 // the harness's own state writes are compared one by one (how many it makes is the scenario's), each without its body (the state
                 // it edits is the gateway's, whose content follows the timing); a refused one keeps its marker line
                 if (state[i] != null && e.Status < 300 && !failed) line = $"{e.Source} STATE {state[i]}";
-                cause.Add(line);
+                cause.Add(line); lastCause = Math.Max(lastCause, e.Ms);
             }
-            else if (e.Window && !BackgroundKinds.Contains(kind)) { kept++; cls = "cause"; cause.Add(line); }
-            else { kept++; cls = "background"; if (add) lines.Add(line); }
+            else if (e.Window && !BackgroundKinds.Contains(kind)) { kept++; cls = "cause"; cause.Add(line); lastCause = Math.Max(lastCause, e.Ms); }
+            else
+            {
+                kept++; cls = "background";
+                if (state[i] != null && e.Status < 300 && !failed)
+                {
+                    var sk = e.Source + " " + state[i];
+                    stateFirst[sk] = stateFirst.TryGetValue(sk, out var sf) ? Math.Min(sf, e.Ms) : e.Ms;
+                    if (add) stateLines[line] = sk;
+                }
+                if (add) { lines.Add(line); firstMs[line] = firstMs.TryGetValue(line, out var fm) ? Math.Min(fm, e.Ms) : e.Ms; }
+            }
             raw.Append(new JsonObject
             {
                 ["seq"] = e.Seq, ["ms"] = e.Ms, ["method"] = e.Method, ["path"] = e.Path, ["query"] = e.Query, ["status"] = e.Status, ["source"] = e.Source,
@@ -209,15 +319,26 @@ sealed class WriteRecorder
             .Append("# bases: ").Append(string.Join(' ', bases.OrderBy(b => b.Key, StringComparer.Ordinal).Select(b => b.Key + "=" + b.Value))).Append('\n');
         if (ends != null) text.Append("# ends: ").Append(string.Join(' ', ends.OrderBy(b => b.Key, StringComparer.Ordinal).Select(b => b.Key + "=" + b.Value))).Append('\n');
         if (errors > 0) text.Append("# normalize-errors: ").Append(errors).Append('\n');
-        text.Append("# windows: ").Append(windows).Append('\n').Append("# cause: ").Append(cause.Count).Append('\n').Append("# background: ").Append(lines.Count).Append('\n');
-        // "= " the caused writes in the order they came, "+ " the distinct background lines, sorted (ordinal)
+        // settled: the line's first write came at or before the last caused write (its ms); tail: after it, or no write was caused at all
+        var settled = new List<string>(); var tail = new List<string>();
+        foreach (var l in lines)
+        {
+            var first = stateLines.TryGetValue(l, out var sk) && stateFirst.TryGetValue(sk, out var sf) ? sf : firstMs.TryGetValue(l, out var fm) ? fm : long.MaxValue;
+            (first <= lastCause ? settled : tail).Add(l);
+        }
+        text.Append("# windows: ").Append(windows).Append('\n').Append("# cause: ").Append(cause.Count).Append('\n').Append("# background: ").Append(settled.Count).Append('\n')
+            .Append("# tail: ").Append(tail.Count).Append('\n');
+        // "= " the caused writes in the order they came, "+ " the settled background lines, "~ " the tail ones (both distinct, sorted ordinal)
         foreach (var l in cause) text.Append("= ").Append(l).Append('\n');
-        foreach (var l in lines) text.Append("+ ").Append(l).Append('\n');
+        foreach (var l in settled) text.Append("+ ").Append(l).Append('\n');
+        foreach (var l in tail) text.Append("~ ").Append(l).Append('\n');
         var utf8 = new UTF8Encoding(false);
         File.WriteAllText(file, text.ToString(), utf8);
         File.WriteAllText(rawFile, raw.ToString(), utf8);
+        var own = new HashSet<string>(cause, StringComparer.Ordinal); own.UnionWith(lines);
+        closed.Add(new Closed(suite!, slug!, scenario!, norm, all.Count, own));
         scenario = null; suite = null; slug = null; entries.Clear(); depth = 0;
-        return (200, new JsonObject { ["ok"] = true, ["file"] = file, ["raw"] = rawFile, ["writes"] = kept, ["leftover"] = leftover, ["timing"] = timing, ["cause"] = cause.Count, ["background"] = lines.Count, ["windows"] = windows });
+        return (200, new JsonObject { ["ok"] = true, ["file"] = file, ["raw"] = rawFile, ["writes"] = kept, ["leftover"] = leftover, ["timing"] = timing, ["cause"] = cause.Count, ["background"] = settled.Count, ["tail"] = tail.Count, ["windows"] = windows });
     }
 
     public JsonObject Open() => new()
@@ -260,6 +381,9 @@ sealed class WriteRecorder
         static readonly Regex PrNamed = new("(?:/pulls?/|\\bPR_|\\bPR #)(\\d+)\\b", RegexOptions.None, T);
 
         readonly long nb, ne, pb, pe, ob;
+
+        /// <summary>Whether <paramref name="n"/> is one of the scenario's own item numbers or a pull request it seeded (Rel: {#k}, {#prk}).</summary>
+        public bool Names(long n) => n >= nb && n < ne || n >= pb && n < pe;
         readonly Regex? hosts;
         readonly Dictionary<long, string> deployments = new();
         readonly HashSet<long> prNamed = new();

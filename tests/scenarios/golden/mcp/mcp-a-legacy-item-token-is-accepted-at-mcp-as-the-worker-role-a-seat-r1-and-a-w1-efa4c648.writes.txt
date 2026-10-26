@@ -1,5 +1,5 @@
 # suite: mcp
 # scenario: mcp: a legacy item token is accepted at /mcp as the worker role; a seat r1 and a w1 have no tools
-# runs: 4
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **mcpleg1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|mcpleg1 -->"}
-+ rule STATE factory-worker v1 #{#1}
+# runs: 5
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **mcpleg1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|mcpleg1 -->"}
+~ rule STATE factory-worker v1 #{#1}

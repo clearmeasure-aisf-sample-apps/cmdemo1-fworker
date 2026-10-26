@@ -1,6 +1,6 @@
 # suite: auto
 # scenario: code change, master red once: the skipped release check of the first attempt is no docs-only path; the item waits for its release [full]
-# runs: 4
+# runs: 5
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
@@ -11,10 +11,10 @@
 = rule PUT /repos/{repo}/pulls/{#2}/merge 200 {"merge_method":"squash","sha":"{sha}"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation PASSED and 'Auto Merge' present - squash-merged PR #{#2} as `{sha}`; watching master CI, then the release candidate.\n\n<!-- factory-journal:factory-worker -->"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
-+ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Release_Queue","p":"PVT_fake"}}
-+ rule POST /repos/{repo}/actions/runs/{id}/rerun-failed-jobs 201 -
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master checks failed at `{sha}` (Build result, Integration Build (SQL container)) - not known to be flaky; re-running the failed jobs once (workflow run {n}), then judging the new attempt.\n\n<!-- factory-journal:factory-worker -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: release candidate **2.4.100** carries `{sha}` - waiting in **Release Queue** for the production deployment.\n\n<!-- factory-journal:factory-worker -->"}
 + rule STATE factory-worker v1 #{#1}
+~ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Release_Queue","p":"PVT_fake"}}
+~ rule POST /repos/{repo}/actions/runs/{id}/rerun-failed-jobs 201 -
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master checks failed at `{sha}` (Build result, Integration Build (SQL container)) - not known to be flaky; re-running the failed jobs once (workflow run {n}), then judging the new attempt.\n\n<!-- factory-journal:factory-worker -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: release candidate **2.4.100** carries `{sha}` - waiting in **Release Queue** for the production deployment.\n\n<!-- factory-journal:factory-worker -->"}

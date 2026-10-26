@@ -451,7 +451,7 @@ sealed class World
     public (int, object?) Handle(string method, string path, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b, string auth = "")
     {
         // the golden writes' cause windows are the harness's bookkeeping, not a request of the product: not in the log (README, golden writes)
-        if (path != "/_fake/cause") log.Add($"{method} {path}");
+        if (path is not ("/_fake/cause" or "/_fake/group-check" or "/_fake/quiet")) log.Add($"{method} {path}");
         if (path.StartsWith("/_fake/")) return Control(method, path[7..], q, b);
         foreach (var f in faults.ToList())
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
@@ -1206,6 +1206,10 @@ sealed class World
             // cause { open: true | false }: the harness brackets each request of its own to the gateway (lib.ps1, F), so that a write made while one
             // is open can be told as caused by the scenario from the background work of the gateway (tests/scenarios/golden/README.md)
             case "cause": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Cause(b));
+            // group-check { goldenDir }: at the end of a group (lib.ps1), the tail lines of every scenario of this process against the later writes
+            case "group-check": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.GroupCheck(b));
+            // quiet: how long ago the last write came, so the harness can close a record once the gateway's tail work has gone quiet
+            case "quiet": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Quiet());
             case "writes": return (200, Recorder == null ? J(("recording", false)) : Recorder.Open());
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();

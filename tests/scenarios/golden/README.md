@@ -28,11 +28,14 @@ records nothing. Recording never changes an answer of the fake.
   scenario's inputs.
 
 `Run-Scenario` calls `/_fake/scenario-begin` right after `/_fake/reset` and `/_fake/scenario-end` after the body, once `Wait-RecordSettled`
-has let the gateway finish one more sweep (at most 5 s, then 1 s; nothing when the gateway is down or never swept), so a tail write the
-scenario set off lands in the record however fast the runner was. The end writes
+has let the gateway's tail work go quiet: it closes the record once a sweep has finished since the body (the gateway's `lastSweep` moved;
+not waited for when the gateway is down or never swept) and `/_fake/quiet` says no compared write has come for 2.2 s (the timing writes do
+not count), at most 5 s after the body in all. So a tail write the scenario set off lands in the record however fast the runner was. The
+end writes
 `<FAKE_RECORD_DIR>/<suite>/<slug>.writes.txt` (normalized, compared) and `<slug>.raw.jsonl` (every write as sent, for reading a
 difference). `GET /_fake/writes` shows the open record (each write with `window`, and `causeDepth`), and `unlabelledWrites`: the writes
-made while no scenario was open, counted and dropped (`/_fake/state` is unchanged by the recorder).
+made while no scenario was open, counted (they are in no record, but the group check below reads them; `/_fake/state` is unchanged by the
+recorder).
 
 ### Caused and background writes
 
@@ -48,7 +51,7 @@ Every compared write is either caused by the scenario or background:
   write count as caused. A write one of them makes is background.
 - Caused (`= `): every harness write, and a `rule` write that came inside a window and is not of a background kind. A verb's rule script
   runs and ends inside its window (the gateway answers the client only when the script has ended), so everything it writes is caused.
-- Background (`+ `): every other write: one that came outside every window (the sweep, the plant's ticks, the base-update, transcript and
+- Background (`+ ` settled, `~ ` tail, below): every other write: one that came outside every window (the sweep, the plant's ticks, the base-update, transcript and
   release loops, the runtimes, and whatever the scenario's own direct requests to the gateway set off: only `F` is bracketed), and one of
   a background kind whatever its window. The background kinds (`WriteRecorder.BackgroundKinds`): `plant` (a body with
   `<!-- plant event=`), `state` (a factory-state comment), `claims`, `transcripts`, `snapshot` (`plant-snapshot`), `leader`
@@ -63,6 +66,42 @@ that remains: a background write of another kind (a sweep's board move or journa
 gateway's loops) that comes while a window is open counts as caused. When that happens in one run and not in another, the scenario's
 caused writes differ between the runs, and the baseline gets no file for it (below).
 
+### Settled and tail lines
+
+A background line is settled when its first write in the scenario came at or before the scenario's last caused write (the largest `ms`
+of a write of class `cause`), and tail otherwise; when the scenario caused no write, every background line is tail. A line written more
+than once counts by its first write, so a line settled by one write and tail by another is settled. A `STATE` line (below) stands for
+every accepted background write of its (source, state comment): its first write is the earliest of those. A settled line was written
+while the scenario was still acting, so it lands in the scenario's own record in every run; a tail line is written after the scenario's
+last action (a late promotion sign-off, a plant `launched` or `offered` line, a claim's DELETE, "master is GREEN", a QC comment rewrite),
+and whether it comes before the record closes is timing.
+
+### Tail lines: the group check
+
+A tail line need not land in its own scenario's record, but it must be written by the end of the fake process (one suite's run, or one
+group's), after a final settle. The fake keeps every write of the process, also those made while no scenario was open, and for each
+closed scenario its normalizer (its counters and deployment ranks), its own lines and where the process's writes stood at its end.
+
+`Assert-NoServerErrors` (lib.ps1, at the end of every suite or group process) calls `Assert-GoldenTails`: `Wait-RecordSettled`, then
+`POST /_fake/group-check {"goldenDir": ...}` (the golden directory in compare mode, else empty). For every closed scenario the fake
+normalizes every later write of the process against that scenario, exactly as a write of the scenario itself (its items stay `{#k}`; a
+factory-state write gives its `STATE` line when accepted, its marker line when refused), and keeps the lines that name one of the
+scenario's items or pull requests (`{#k}`, `{#prk}`); a later write that is leftover or timing relative to the scenario, or whose text
+holds none of the scenario's numbers, is skipped. It writes them as `~ ` lines to `<FAKE_RECORD_DIR>/<suite>/<slug>.later.txt`. Where
+the scenario has a golden file, every `~ ` line of it must be in the scenario's own record (any section) or among those later lines: the
+check `golden tail writes by the end of the group: <scenario>` fails for each scenario with a line missing and lists up to 6 of them
+(one passing check counts the scenarios checked when none misses). A tail line that names no item or pull request of the scenario (an
+Octopus sign-off without one) can only be found in the scenario's own record.
+
+What the later lines can and cannot catch: the next scenario begins with `/_fake/reset`, which removes the issues, pull requests, refs and
+releases of the scenario before. A tail write that misses its own record therefore usually comes after that reset: a write to a removed
+item is refused (its line has another status, `404`, and does not match the golden's), and often the gateway does not make it at all,
+because it finds the item gone. So in practice a scenario's `~ ` lines are found in its own record (which `Wait-RecordSettled` makes the
+common case) or, for the last scenario of a process, among its later lines. Two smaller limits: deployment ranks and the pull-request
+names of a `pr` key come from the scenario's own writes, so a deployment or pull request named only by a later write stays raw
+(`Deployments-NNN`, `{#old}`) in the later lines and does not match; and when the process wrote more than the fake keeps (400,000 writes),
+the check `golden tail writes: the fake kept every write of the process` fails and says how many were not kept.
+
 `raw.jsonl` keeps for each write `window` (a window was open), `kind` (a background kind, `commit` or `verb`) and `class` (`cause`,
 `background`, `leftover` or `timing`).
 
@@ -71,12 +110,13 @@ caused writes differ between the runs, and the baseline gets no file for it (bel
 Header lines start with `# ` and are never compared: `suite`, `scenario`, `runs` (golden files); `writes` (the writes compared),
 `leftover`, `timing` (the writes left out, below), `bases` and `ends` (the fake's counters at the scenario's start and at its end,
 `number=` of `bases` being the first item number the scenario can create; for reading a record offline), `normalize-errors` (below,
-only when there was one), `windows` (how many cause windows opened), `cause` and `background` (the number of lines of each section) in
-records. Every other line is one write in one of two sections:
+only when there was one), `windows` (how many cause windows opened), `cause`, `background` and `tail` (the number of `= `, `+ ` and
+`~ ` lines) in records. Every other line is one write in one of three sections:
 
 ```
 = <line>      a caused write: every one, in the order the fake answered them
-+ <line>      a background line: the distinct lines, sorted (ordinal)
++ <line>      a settled background line: the distinct lines, sorted (ordinal)
+~ <line>      a tail background line: the distinct lines, sorted (ordinal)
 ```
 
 A `<line>` is
@@ -86,7 +126,9 @@ A `<line>` is
 ```
 
 or, for an accepted write (status below 300) of an item's factory-state comment, `<source> STATE <kind> #{#k}` without the body (below).
-The `= ` lines come first, then the `+ ` lines.
+The `= ` lines come first, then the `+ ` lines, then the `~ ` lines. In a golden file, `+ ` lines must be in the scenario's own record
+and `~ ` lines by the end of the group (Comparison). A golden file never has a line of another prefix (`? ` and unprefixed lines are
+of older formats).
 
 A path first has `/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders` replaced by `/repos/{repo}` and review, check, job, run,
 artifact, release and asset ids replaced by `{id}`; its query string is dropped (except `name=` of an upload). Then the path and every JSON
@@ -156,7 +198,7 @@ Writes that are kept in the raw file but not compared:
 
 Factory-state comments: the gateway writes an item's state comment once and then rewrites it many times; how many snapshots there are,
 and so whether the last one is the comment's POST or a later PATCH, depends on timing. They are background (kind `state`): the accepted
-writes (status below 300) of one (source, item) state comment give a single `+ <source> STATE <kind> #{#k}` line, without a body: the
+writes (status below 300) of one (source, item) state comment give a single `<source> STATE <kind> #{#k}` background line, without a body: the
 last snapshot is not compared either, because where the background loops have got to when the scenario ends is timing too (the raw file
 has every snapshot). A refused write (status 300 or more) keeps its own line, with the body `{"body":"{factory-state <kind> #{#k}}"}`.
 The harness's own state writes (`Set-ItemState`) are caused: each accepted one is its own `= harness STATE <kind> #{#k}` line (how many
@@ -171,9 +213,11 @@ it makes is the scenario's; the state it edits is the gateway's, so its body is 
    `{#k}` or `{#prk}` (an item or pull request of the scenario), `*` for a line that names none; for every object, the record's lines of
    that object must be the golden's lines of that object, the same lines in the same order and as many. How the writes on two objects
    interleave is not compared (a verb on `{#1}` and an answer on its pull request `{#2}` can race).
-2. Background writes: every `+ ` line of the golden file is a `+ ` line of the record. Background lines the golden file does not hold
-   are no difference: what else the gateway's loops wrote before the scenario ended is timing.
-3. Both files hold only `= ` and `+ ` lines besides the headers (a golden file of an older format fails the check: record again).
+2. Settled background writes: every `+ ` line of the golden file is a `+ ` or `~ ` line of the record. Background lines the golden file
+   does not hold are no difference: what else the gateway's loops wrote before the scenario ended is timing.
+3. Both files hold only `= `, `+ ` and `~ ` lines besides the headers (a golden file of an older format fails the check: record again).
+
+The golden's `~ ` lines are not checked here but at the end of the group (Tail lines, above).
 
 On a difference the check fails the scenario (and the suite) and prints the first object whose caused writes differ (the position, up
 to 2 lines before it, the golden's and the record's line there, `(no more writes)` where one side ends), up to 6 missing background
@@ -192,12 +236,16 @@ Records go to `TEST_WRITES_DIR` when it is set (CI: `$RUNNER_TEMP/writes`), else
 ## Recording a new baseline from CI
 
 A baseline is made from two runs or more of the same code. For each scenario: its caused writes must be the same in every run (compared
-as above); then the golden file gets them in the order of the first run, and the background lines of every run (the intersection). A
+as above); then the golden file gets them in the order of the first run; as `+ ` the lines settled in every run (the intersection of
+the records' `+ ` sets); and as `~ ` the lines of every run's group set (its record's `+ ` and `~ ` lines and its `<slug>.later.txt`
+lines; the intersection) that are neither `+ ` nor `= ` lines. A line that is settled in some runs and tail in others is then a `~ `
+line, guarded at the end of the group; a background line that is missing from some run's group set is not guarded at all. A
 scenario whose caused writes differ between the runs is reported unstable and gets no golden file (an existing one in the output
 directory is removed), so it is recorded only until it is made stable. The numbers do not depend on how the scenarios are grouped into
 jobs (above), so runs of different groupings can be merged.
 
-1. Push the change. Every Tier 1 job uploads its records as the artifact `writes-<job>-<attempt>` (always, passed or failed).
+1. Push the change. Every Tier 1 job uploads its records (`*.writes.txt`, `*.raw.jsonl`, `*.later.txt`) as the artifact
+   `writes-<job>-<attempt>` (always, passed or failed).
 2. Re-run all jobs once for a second attempt: `gh run rerun <run-id>`.
 3. Download both attempts, one directory per attempt:
    ```

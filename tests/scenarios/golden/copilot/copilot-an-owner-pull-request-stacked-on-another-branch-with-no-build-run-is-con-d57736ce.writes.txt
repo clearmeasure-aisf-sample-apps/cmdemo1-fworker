@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: an owner pull request stacked on another branch with no Build run is consolidated onto master and its CI started; it moves on, not parked stuck [full]
-# runs: 4
+# runs: 5
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/base-{#1}","title":"Base (#{#1})"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/base-{#1}","body":"x","draft":true,"head":"copilot/stk-{#1}","title":"Stacked (#{#1})"}
 = harness POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"the owner task"}

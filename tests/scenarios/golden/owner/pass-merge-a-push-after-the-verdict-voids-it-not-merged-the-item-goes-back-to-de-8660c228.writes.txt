@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: pass-merge: a push after the verdict voids it: not merged, the item goes back to Development
-# runs: 4
+# runs: 5
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
@@ -9,8 +9,7 @@
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation verdict for **Functional Testing**: PASS - Both criteria met.\n\n<!-- factory-journal:factory-worker -->"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
-+ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: PR #{#2} has a PASS verdict and is not merged yet: its required checks are still running (`checks-pending`). The gateway merges it by itself when that clears; no session has to call anything.\n\n<!-- plant event=merge-waiting key={time}|checks-pending -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: merge failed: the branch of PR #{#2} changed after the validation verdict (head now {sha}, verdict for {sha}); the PASS verdict no longer applies - demoting to **Development** (round-trip 1 of 2).\n\n<!-- factory-journal:factory-worker -->"}
 + rule STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: PR #{#2} has a PASS verdict and is not merged yet: its required checks are still running (`checks-pending`). The gateway merges it by itself when that clears; no session has to call anything.\n\n<!-- plant event=merge-waiting key={time}|checks-pending -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: merge failed: the branch of PR #{#2} changed after the validation verdict (head now {sha}, verdict for {sha}); the PASS verdict no longer applies - demoting to **Development** (round-trip 1 of 2).\n\n<!-- factory-journal:factory-worker -->"}

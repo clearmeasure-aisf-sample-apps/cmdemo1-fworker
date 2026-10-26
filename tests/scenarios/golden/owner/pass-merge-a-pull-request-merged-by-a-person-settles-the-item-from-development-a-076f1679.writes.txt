@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: pass-merge: a pull request merged by a person settles the item from Development and from a PASS parked for a person
-# runs: 4
+# runs: 5
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
@@ -15,11 +15,11 @@
 = rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation PASSED - awaiting human merge (no 'Auto Merge' label; the worker will not merge).\n\n<!-- factory-journal:factory-worker -->"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#3} 204 -
-+ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#3} 422 -
 + rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#2} was merged as `{sha}` by a person; watching master CI, then the release candidate.\n\n<!-- factory-journal:factory-worker -->"}
-+ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#4} was merged as `{sha}` by a person; watching master CI, then the release candidate.\n\n<!-- factory-journal:factory-worker -->"}
 + rule STATE factory-worker v1 #{#1}
 + rule STATE factory-worker v1 #{#3}
+~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#3} 422 -
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#4} was merged as `{sha}` by a person; watching master CI, then the release candidate.\n\n<!-- factory-journal:factory-worker -->"}

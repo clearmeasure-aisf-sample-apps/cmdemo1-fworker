@@ -1,15 +1,15 @@
 # suite: octopus
 # scenario: octopus: journal order: a worker that accepts before the offered and launched lines are posted still reads offered, launched, assigned
-# runs: 4
+# runs: 5
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 + gateway POST /api/Spaces-355/runbook-runs/create/v1 201 {"EnvironmentNames":["tdd"],"ProjectName":"cmdemo1-fworker-runtime","RunbookName":"Start worker","SpaceIdOrName":"Spaces-355","SpecificMachineNames":["host-a"],"Variables":{"Fworker.Agent":"codex","Fworker.Item":"{#1}","Fworker.Mode":"detached","Fworker.ModelProfile":"","Fworker.Name":"oct-{session}","Fworker.Nonce":"{token}","Fworker.Phase":"Technical Design"}}
-+ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 + rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
-+ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/oct-{session}/1","sha":"{sha}"}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **oct-{session}** [session](http://127.0.0.1:{port}/app#/Spaces-355/tasks/ServerTasks-{n}) accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: octopus started **oct-{session}** for **Technical Design** (task `ServerTasks-{n}`). [session]({session-link}) ([Octopus task](http://127.0.0.1:{port}/app#/Spaces-355/tasks/ServerTasks-{n}))\n\n<!-- plant event=launched key=rtl|oct-{session}|ServerTasks-{n} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **oct-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|oct-{session} -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of oct-{session} ended (stopped); offering to the next worker. [session](http://127.0.0.1:{port}/app#/Spaces-355/tasks/ServerTasks-{n})\n\n<!-- plant event=reassigned key=rtend|a-{id}|oct-{session} -->"}
 + rule STATE factory-worker v1 #{#1}
+~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/oct-{session}/1","sha":"{sha}"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of oct-{session} ended (stopped); offering to the next worker. [session](http://127.0.0.1:{port}/app#/Spaces-355/tasks/ServerTasks-{n})\n\n<!-- plant event=reassigned key=rtend|a-{id}|oct-{session} -->"}

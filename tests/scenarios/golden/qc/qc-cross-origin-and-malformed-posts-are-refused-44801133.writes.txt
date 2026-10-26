@@ -1,6 +1,6 @@
 # suite: qc
 # scenario: qc: cross-origin and malformed posts are refused [full]
-# runs: 4
+# runs: 5
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
@@ -24,8 +24,8 @@
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: a QC environment is offered for PR #{#2} at head {sha}; nothing runs until a person presses Start.\n\n<!-- plant event=qc-offered key={#2}|{sha} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
 + rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
-+ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: a QC environment is offered for PR #{#4} at head {sha}; nothing runs until a person presses Start.\n\n<!-- plant event=qc-offered key={#4}|{sha} -->"}
-+ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:416 sha256:f387b4ef \"QC environment available for PR #{#4} at head {sha}: [Start the QC environment](…\"}"}
-+ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"{len:416 sha256:f387b4ef \"QC environment available for PR #{#4} at head {sha}: [Start the QC environment](…\"}"}
 + rule STATE factory-worker v1 #{#1}
 + rule STATE factory-worker v1 #{#3}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: a QC environment is offered for PR #{#4} at head {sha}; nothing runs until a person presses Start.\n\n<!-- plant event=qc-offered key={#4}|{sha} -->"}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:416 sha256:f387b4ef \"QC environment available for PR #{#4} at head {sha}: [Start the QC environment](…\"}"}
+~ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"{len:416 sha256:f387b4ef \"QC environment available for PR #{#4} at head {sha}: [Start the QC environment](…\"}"}

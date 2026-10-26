@@ -1,4 +1,4 @@
 # suite: qc
 # scenario: qc: runner pool no state of a call reaches the next call
-# runs: 4
-+ rule STATE factory-worker v1 #{#1}
+# runs: 5
+~ rule STATE factory-worker v1 #{#1}

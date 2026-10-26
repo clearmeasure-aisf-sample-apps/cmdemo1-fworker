@@ -1,6 +1,6 @@
 # suite: octopus
 # scenario: octopus: the reconcile endpoints take the host token only; desired names the host's workers; an exited container ends its execution and the item is planned again, a container gone from the host is Stopped
-# runs: 4
+# runs: 5
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 + gateway POST /api/Spaces-355/runbook-runs/create/v1 201 {"EnvironmentNames":["tdd"],"ProjectName":"cmdemo1-fworker-runtime","RunbookName":"Start worker","SpaceIdOrName":"Spaces-355","SpecificMachineNames":["host-a"],"Variables":{"Fworker.Agent":"codex","Fworker.Item":"{#1}","Fworker.Mode":"detached","Fworker.ModelProfile":"","Fworker.Name":"oct-{session}","Fworker.Nonce":"{token}","Fworker.Phase":"Technical Design"}}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -

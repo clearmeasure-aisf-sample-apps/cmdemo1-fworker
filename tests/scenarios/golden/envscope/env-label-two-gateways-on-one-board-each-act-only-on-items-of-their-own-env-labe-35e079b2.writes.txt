@@ -1,15 +1,15 @@
 # suite: envscope
 # scenario: env label: two gateways on one board each act only on items of their own env: label; unlabelled and doubly labelled items are nobody's
-# runs: 4
-+ rule POST /graphql addProjectV2ItemById 200 {"query":"mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }","variables":{"c":"I_{#5}","p":"PVT_fake"}}
-+ rule POST /graphql addProjectV2ItemById 200 {"query":"mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }","variables":{"c":"I_{#6}","p":"PVT_fake"}}
-+ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#5}","o":"opt_Technical_Design","p":"PVT_fake"}}
-+ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#6}","o":"opt_Technical_Design","p":"PVT_fake"}}
-+ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
-+ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
-+ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"\uD83C\uDFED Plant manager: the item has the factory label but had no column on the board: the sweep put it in Technical Design, where it is offered like any new item.\n\n<!-- plant event=board-added key={#5} -->"}
-+ rule POST /repos/{repo}/issues/{#6}/comments 201 {"body":"\uD83C\uDFED Plant manager: the item has the factory label but had no column on the board: the sweep put it in Technical Design, where it is offered like any new item.\n\n<!-- plant event=board-added key={#6} -->"}
-+ rule STATE factory-worker v1 #{#1}
-+ rule STATE factory-worker v1 #{#2}
-+ rule STATE factory-worker v1 #{#5}
-+ rule STATE factory-worker v1 #{#6}
+# runs: 5
+~ rule POST /graphql addProjectV2ItemById 200 {"query":"mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }","variables":{"c":"I_{#5}","p":"PVT_fake"}}
+~ rule POST /graphql addProjectV2ItemById 200 {"query":"mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }","variables":{"c":"I_{#6}","p":"PVT_fake"}}
+~ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#5}","o":"opt_Technical_Design","p":"PVT_fake"}}
+~ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#6}","o":"opt_Technical_Design","p":"PVT_fake"}}
+~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
+~ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"\uD83C\uDFED Plant manager: the item has the factory label but had no column on the board: the sweep put it in Technical Design, where it is offered like any new item.\n\n<!-- plant event=board-added key={#5} -->"}
+~ rule POST /repos/{repo}/issues/{#6}/comments 201 {"body":"\uD83C\uDFED Plant manager: the item has the factory label but had no column on the board: the sweep put it in Technical Design, where it is offered like any new item.\n\n<!-- plant event=board-added key={#6} -->"}
+~ rule STATE factory-worker v1 #{#1}
+~ rule STATE factory-worker v1 #{#2}
+~ rule STATE factory-worker v1 #{#5}
+~ rule STATE factory-worker v1 #{#6}

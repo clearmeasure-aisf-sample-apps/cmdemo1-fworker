@@ -65,6 +65,34 @@ function Assert-NoServerErrors([string]$Suite) {
     foreach ($f in @(Get-ChildItem -Path $script:Work -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'gateway*.out' -or $_.Name -like 'gateway*.err' })) { $bad += @(Select-String -Path $f.FullName -Pattern 'sweepError|internal error|"sweep":"error"|"sweep":"failed"' | ForEach-Object { $_.Line.Substring(0, [Math]::Min(220, $_.Line.Length)) }) }
     $script:Current = "$Suite invariants"
     Check 'no sweep or internal errors in the gateway log' ($bad.Count -eq 0) ($bad | Select-Object -First 3 | Out-String)
+    Assert-GoldenTails $Suite
+}
+# At the end of a suite's or group's process (Assert-NoServerErrors): after a final settle, the fake's group check normalizes every write the
+# process made after each scenario against that scenario and writes <slug>.later.txt next to its record; in compare mode every tail line
+# ('~ ') of a scenario's golden file must be in its own record or among those later lines (tests/scenarios/golden/README.md: Tail lines).
+# One failing check per scenario with lines missing.
+function Assert-GoldenTails([string]$Suite) {
+    $mode = Get-GoldenMode
+    if ($mode -eq 'off') { return }
+    try { Wait-RecordSettled } catch { }
+    $dir = $(if ($mode -eq 'compare') { Join-Path $script:Root 'tests/scenarios/golden' } else { '' })
+    $script:Current = "$Suite golden tails"
+    $res = $null
+    try { $res = Fake 'group-check' @{ goldenDir = $dir } }
+    catch { Check 'golden tail writes by the end of the group' $false "(the fake did not answer the group check: $($_.Exception.Message))"; return }
+    if ((Get-RecField $res 'recording') -eq $false -or $mode -ne 'compare') { return }
+    # the fake keeps at most 400,000 writes of a process: beyond that a tail line could be missed for want of room, which must not look like a defect
+    $dropped = Get-RecField $res 'droppedProcessWrites'
+    if ($null -ne $dropped -and [long]$dropped -gt 0) { Check 'golden tail writes: the fake kept every write of the process' $false "($dropped writes were not kept; the missing tail lines below may be among them)" }
+    $missing = @(Get-RecField $res 'missing')
+    foreach ($m in $missing) {
+        $lines = @(Get-RecField $m 'missing')
+        $shown = @($lines | Select-Object -First 6 | ForEach-Object { "- missing     $_" })
+        if ($lines.Count -gt 6) { $shown += "... and $($lines.Count - 6) more missing" }
+        $shown += "golden: $(Join-Path $dir (Join-Path "$(Get-RecField $m 'suite')" "$(Get-RecField $m 'slug').writes.txt"))"
+        Check "golden tail writes by the end of the group: $(Get-RecField $m 'scenario')" $false ("($($lines.Count) tail lines of the golden file written by no write of the process)`n        " + ($shown -join "`n        "))
+    }
+    if ($missing.Count -eq 0) { Check "golden tail writes by the end of the group ($(Get-RecField $res 'checked') scenarios)" $true }
 }
 # Stops the suite's gateway and starts it again with the same environment: a new process, so a new epoch and empty memory. Its logs go to
 # gateway-xxxx.out and gateway-restarted.err, which Assert-NoServerErrors reads as well.
@@ -277,16 +305,23 @@ function Get-ScenarioSlug([string]$Name) {
 function Get-RecField($Object, [string]$Key) { if ($null -eq $Object) { return $null }; $p = $Object.PSObject.Properties[$Key]; if ($p) { return $p.Value }; return $null }
 # The write lines of a record or a golden file: every line but the empty ones and the '# ' header lines.
 function Read-WritesLines([string]$Path) { @([IO.File]::ReadAllLines($Path, [Text.UTF8Encoding]::new($false)) | Where-Object { $_ -ne '' -and -not $_.StartsWith('# ') }) }
-# The two sections of a record or a golden file: cause (the '= ' lines, in their order), background (the '+ ' lines, a set) and other (any
-# line with neither prefix: a file of the format before the sections, which can be compared with nothing).
-function Read-WritesSections([string]$Path) {
+# The sections of a record or a golden file: cause (the '= ' lines, in their order), background (the '+ ' lines: settled, a set), tail (the
+# '~ ' lines, a set) and other (any line with no prefix: a file of an older format, which can be compared with nothing). With -Later, the
+# '~ ' lines of the record's <slug>.later.txt (the fake's group check) are read as later.
+function Read-WritesSections([string]$Path, [switch]$Later) {
     $cause = [System.Collections.Generic.List[string]]::new()
     $background = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $tail = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $later = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $other = [System.Collections.Generic.List[string]]::new()
     foreach ($l in Read-WritesLines $Path) {
-        if ($l.StartsWith('= ')) { $cause.Add($l.Substring(2)) } elseif ($l.StartsWith('+ ')) { [void]$background.Add($l.Substring(2)) } else { $other.Add($l) }
+        if ($l.StartsWith('= ')) { $cause.Add($l.Substring(2)) } elseif ($l.StartsWith('+ ')) { [void]$background.Add($l.Substring(2)) } elseif ($l.StartsWith('~ ')) { [void]$tail.Add($l.Substring(2)) } else { $other.Add($l) }
     }
-    return @{ cause = $cause; background = $background; other = $other }
+    if ($Later -and $Path.EndsWith('.writes.txt')) {
+        $lp = $Path.Substring(0, $Path.Length - '.writes.txt'.Length) + '.later.txt'
+        if (Test-Path -LiteralPath $lp) { foreach ($l in Read-WritesLines $lp) { if ($l.StartsWith('~ ')) { [void]$later.Add($l.Substring(2)) } } }
+    }
+    return @{ cause = $cause; background = $background; tail = $tail; later = $later; other = $other }
 }
 # The object of a caused write: the first item or pull request number of its line ({#k} or {#prk}), '*' for a line that names none. The caused
 # writes are compared as one sequence per object: the writes on one item keep their order, while how the writes on two items interleave (a verb
@@ -320,12 +355,13 @@ function Compare-CauseLines($Expected, $Actual) {
     return $first
 }
 # A record against a golden file: (a) the caused writes ('= ') must be the golden's exactly, in the golden's order per object (Get-WriteObject);
-# (b) every background line of the golden ('+ ') must be in the record's background lines. Background lines the golden does not name are not
-# a difference: what else the gateway's loops wrote before the scenario ended is timing.
+# (b) every settled background line of the golden ('+ ') must be among the record's background lines, settled or tail ('+ ' or '~ '). The
+# golden's tail lines ('~ ') are checked at the end of the group (Assert-GoldenTails), not here. Background lines the golden does not name
+# are not a difference: what else the gateway's loops wrote before the scenario ended is timing.
 function Compare-WritesFiles([string]$Golden, [string]$Record) {
     $g = Read-WritesSections $Golden; $r = Read-WritesSections $Record
     $cause = Compare-CauseLines $g.cause $r.cause
-    $missing = @($g.background | Where-Object { -not $r.background.Contains($_) } | Sort-Object -CaseSensitive)
+    $missing = @($g.background | Where-Object { -not $r.background.Contains($_) -and -not $r.tail.Contains($_) } | Sort-Object -CaseSensitive)
     $format = @($g.other) + @($r.other)
     return @{ ok = ($null -eq $cause -and $missing.Count -eq 0 -and $format.Count -eq 0); cause = $cause; missing = $missing; format = $format }
 }
@@ -342,7 +378,7 @@ function Compare-GoldenWrites($Rec, [string]$Name, [string]$Mode = (Get-GoldenMo
     $detail = ''
     if (-not $r.ok) {
         $shown = @(); $why = @()
-        if ($r.format.Count -gt 0) { $why += "$($r.format.Count) lines without '= ' or '+ '"; $shown += @($r.format | Select-Object -First 2 | ForEach-Object { "? no section  $_" }) }
+        if ($r.format.Count -gt 0) { $why += "$($r.format.Count) lines without '= ', '+ ' or '~ '"; $shown += @($r.format | Select-Object -First 2 | ForEach-Object { "? no section  $_" }) }
         if ($null -ne $r.cause) {
             $c = $r.cause
             $why += "the caused writes differ on $($c.objects) object(s)"
@@ -364,8 +400,9 @@ function Compare-GoldenWrites($Rec, [string]$Name, [string]$Mode = (Get-GoldenMo
 # Makes golden files from the records of several runs of the same code (each -From directory is one run: its *.writes.txt files, searched
 # recursively, are keyed by their directory, the suite, and their name). A scenario's caused writes must be the same in every record of it
 # (Compare-CauseLines): then the golden file gets them in the order of the first run's record; else the scenario is reported unstable, gets no
-# golden file, and a golden file it had in -Out is removed (it is recorded only, until it is made stable). Its background lines are those of
-# every record (the intersection). A scenario missing from a run is reported and left out. Run it as
+# golden file, and a golden file it had in -Out is removed (it is recorded only, until it is made stable). Its settled lines ('+ ') are those
+# settled in every record (the intersection); its tail lines ('~ ') those that every record's group set holds (its '+ ' and '~ ' lines and
+# the '~ ' lines of its <slug>.later.txt) and that are neither '+ ' nor '= ' lines. A scenario missing from a run is reported and left out. Run it as
 #   pwsh -NoProfile -c ". tests/scenarios/lib.ps1; Merge-GoldenWrites -From a,b -Out tests/scenarios/golden"
 function Merge-GoldenWrites([string[]]$From, [string]$Out = (Join-Path $script:Root 'tests/scenarios/golden')) {
     $dirs = @($From | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
@@ -378,7 +415,7 @@ function Merge-GoldenWrites([string[]]$From, [string]$Out = (Join-Path $script:R
         foreach ($f in @(Get-ChildItem -LiteralPath $d -Recurse -File -Filter '*.writes.txt' | Sort-Object FullName)) {
             $key = "$($f.Directory.Name)/$($f.Name)"
             if (-not $map.ContainsKey($key)) { $map[$key] = [System.Collections.Generic.List[hashtable]]::new() }
-            $map[$key].Add((Read-WritesSections $f.FullName))
+            $map[$key].Add((Read-WritesSections $f.FullName -Later))
             if (-not $headers.ContainsKey($key)) { $headers[$key] = @([IO.File]::ReadAllLines($f.FullName, [Text.UTF8Encoding]::new($false)) | Where-Object { $_ -like '# suite: *' -or $_ -like '# scenario: *' }) }
         }
         $runs.Add($map)
@@ -392,7 +429,7 @@ function Merge-GoldenWrites([string[]]$From, [string]$Out = (Join-Path $script:R
         foreach ($m in $runs) { foreach ($x in $m[$key]) { $recs.Add($x) } }
         $path = Join-Path $Out $key
         $bad = @($recs | Where-Object { $_.other.Count -gt 0 })
-        if ($bad.Count -gt 0) { Write-Host "  left out: $key (a record has lines without '= ' or '+ ': not the format of this recorder)"; $left++; continue }
+        if ($bad.Count -gt 0) { Write-Host "  left out: $key (a record has lines without '= ', '+ ' or '~ ': not the format of this recorder)"; $left++; continue }
         $diff = $null
         for ($i = 1; $i -lt $recs.Count -and $null -eq $diff; $i++) { $diff = Compare-CauseLines $recs[0].cause $recs[$i].cause }
         if ($null -ne $diff) {
@@ -402,30 +439,44 @@ function Merge-GoldenWrites([string[]]$From, [string]$Out = (Join-Path $script:R
             continue
         }
         $background = [System.Collections.Generic.HashSet[string]]::new($recs[0].background, [StringComparer]::Ordinal)
-        for ($i = 1; $i -lt $recs.Count; $i++) { $background.IntersectWith($recs[$i].background) }
+        $group = $null
+        foreach ($x in $recs) {
+            $gs = [System.Collections.Generic.HashSet[string]]::new($x.background, [StringComparer]::Ordinal); $gs.UnionWith($x.tail); $gs.UnionWith($x.later)
+            $background.IntersectWith($x.background)
+            if ($null -eq $group) { $group = $gs } else { $group.IntersectWith($gs) }
+        }
+        $group.ExceptWith($background); $group.ExceptWith($recs[0].cause)
         $bl = [System.Collections.Generic.List[string]]::new($background); $bl.Sort([StringComparer]::Ordinal)
-        $text = @($headers[$key]) + "# runs: $($recs.Count)" + @($recs[0].cause | ForEach-Object { "= $_" }) + @($bl | ForEach-Object { "+ $_" })
+        $tl = [System.Collections.Generic.List[string]]::new($group); $tl.Sort([StringComparer]::Ordinal)
+        $text = @($headers[$key]) + "# runs: $($recs.Count)" + @($recs[0].cause | ForEach-Object { "= $_" }) + @($bl | ForEach-Object { "+ $_" }) + @($tl | ForEach-Object { "~ $_" })
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
         [IO.File]::WriteAllText($path, (($text -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
         $merged++
     }
     Write-Host "merged $merged scenarios from $($runs.Count) runs into $Out; $unstable unstable (no golden file), $left left out"
 }
-# Before a scenario's record is closed: the gateway's background work the scenario set off (the sweep's journal lines, plant offers and
-# reassignments, runtime ends) is let finish one more sweep, so whether such a tail write lands in the record does not depend on how fast the
-# runner was. Bounded: nothing when the gateway is down or never swept, at most 5 s for a sweep that does not come, then 1 s for its plan.
+# Before a scenario's record is closed (and before the group check): the gateway's background work the scenario set off (the sweep's journal
+# lines, plant offers and reassignments, runtime ends, promotion sign-offs) is let finish, so whether such a tail write lands in the record
+# does not depend on how fast the runner was. The record closes when both hold: a sweep has finished since the body ended (the gateway's
+# lastSweep moved; not waited for when the gateway is down or never swept) and the fake has seen no compared write for 2.2 s (a sweep only
+# starts in an interval; its rule script writes later). At most 5 s after the body in all: a gateway that writes on every sweep is not waited out.
 function Wait-RecordSettled {
-    $base = try { Get-GatewayBase } catch { $null }
-    if (-not $base) { return }
-    $read = { try { $v = (Invoke-RestMethod "$base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2).lastSweep; if ($v -is [datetime]) { "$($v.Ticks)" } else { "$v" } } catch { $null } }
-    $first = & $read
-    if ($null -eq $first -or $first -eq '') { return }
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    while ($sw.Elapsed.TotalSeconds -lt 5) {
-        Start-Sleep -Milliseconds 250
-        $now = & $read
-        if ($null -eq $now) { return }
-        if ($now -ne $first) { Start-Sleep -Milliseconds 1000; return }
+    $base = try { Get-GatewayBase } catch { $null }
+    $read = { if (-not $base) { return $null }; try { $v = (Invoke-RestMethod "$base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 2).lastSweep; if ($v -is [datetime]) { "$($v.Ticks)" } else { "$v" } } catch { $null } }
+    $first = & $read
+    $swept = ($null -eq $first -or $first -eq '')   # no sweep to wait for
+    while ($sw.ElapsedMilliseconds -lt 5000) {
+        if (-not $swept) { $now = & $read; if ($null -eq $now -or $now -ne $first) { $swept = $true } }
+        $q = $null
+        try { $q = Fake 'quiet' @{} } catch { return }
+        $since = Get-RecField $q 'sinceLastWriteMs'
+        if ($null -eq $since) { return }
+        if ($swept -and [double]$since -ge 2200) { return }
+        $left = 5000 - $sw.ElapsedMilliseconds
+        if ($left -le 0) { return }
+        $wait = $(if ($swept) { [math]::Min(2250 - [double]$since, 1000) } else { 250 })
+        Start-Sleep -Milliseconds ([int][math]::Max(50, [math]::Min($wait, $left)))
     }
 }
 function Run-Scenario([string]$Name, [scriptblock]$Body) {
