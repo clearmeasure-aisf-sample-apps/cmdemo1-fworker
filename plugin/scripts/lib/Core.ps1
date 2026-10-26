@@ -6,6 +6,11 @@ $script:AsToken = $null
 # The rate limit GitHub reported in this process, per resource (core, graphql): the latest answer's numbers. The server wrapper (factory.ps1) hands
 # them to the gateway in the field _github of its answer; the gateway keeps the shared budget (gateway/GitHubBudget.cs, issue 92).
 $script:GhRate = @{}
+# Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless the gateway runs with FACTORY_TEST_CAUSE_HEADER=1: the cause
+# id of the harness's call this rule-script run serves (factory.ps1 --server sets $script:FactoryCause from the "_cause" field the gateway adds),
+# sent as X-Fake-Cause with every write so the fake tells the writes the call caused from background work. $null when none, and when this file
+# was loaded without factory.ps1 (the smoke test): the read never fails under StrictMode.
+function Get-FactoryCause { $c = Get-Variable -Name FactoryCause -Scope Script -ValueOnly -ErrorAction SilentlyContinue; if ($c) { return "$c" }; return $null }
 
 class FactoryReject : System.Exception {
     [int]$Exit
@@ -67,6 +72,7 @@ function Invoke-GhRaw {
     $uri = if ($Path -match '^https?://') { $Path } else { "$base/$($Path.TrimStart('/'))" }
     $h = @{ Authorization = "Bearer $tok"; Accept = $Accept; 'X-GitHub-Api-Version' = '2022-11-28'; 'User-Agent' = 'factory-worker-gateway' }
     foreach ($k in $Headers.Keys) { if ($k -notin 'Authorization', 'Accept') { $h[$k] = $Headers[$k] } }   # (-Headers: a conditional read, If-None-Match)
+    $cause = Get-FactoryCause; if ($cause) { $h['X-Fake-Cause'] = $cause }   # (test-only: the golden writes' cause id, above)
     $params = @{ Uri = $uri; Method = $Method; Headers = $h; SkipHttpErrorCheck = $true; StatusCodeVariable = 'sc'; ResponseHeadersVariable = 'rh' }
     if ($null -ne $Body) { $params.Body = ($Body | ConvertTo-Json -Depth 20 -Compress); $params.ContentType = 'application/json' }
     if ($OutFile) { $params.OutFile = $OutFile }

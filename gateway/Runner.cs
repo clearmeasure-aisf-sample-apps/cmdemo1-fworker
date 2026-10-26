@@ -28,6 +28,8 @@ sealed class Runner(string entry)
 
     async Task<(int Code, string Output)> RunProcessAsync(string verb, string stdin, TimeSpan timeout)
     {
+        // test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless FACTORY_TEST_CAUSE_HEADER=1: the serving request's cause id as "_cause"
+        stdin = TestCause.Inject(stdin);
         var queuedAt = DateTime.UtcNow;
         using var slot = await limiter.EnterAsync(verb, RunnerGate.MaxWait(RunnerGate.ClassOf(verb), timeout));
         if (slot is null)

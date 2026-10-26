@@ -8,4 +8,3 @@
 + rule STATE factory-worker v1 #{#1}
 ~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `worker-failure` released early by the operator: the owner relaxed the criterion. The next sweep takes it up again in **Technical Design**.\n\n<!-- plant event=unparked key={time} -->"}
-~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: una did not confirm within {dur}; offering to the next worker.\n\n<!-- plant event=reassigned key=ack|a-{id}|una -->"}
