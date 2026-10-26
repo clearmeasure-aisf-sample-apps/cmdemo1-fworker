@@ -13,7 +13,9 @@ function Invoke-OctoPost([string]$Path, $Body, [string]$Method = 'POST') {
     $o = (Get-Cfg).octopus
     $uri = "$($o.url.TrimEnd('/'))/$($Path.TrimStart('/'))"
     $json = if ($null -eq $Body) { '{}' } else { $Body | ConvertTo-Json -Depth 6 -Compress }
-    try { $res = Invoke-WebRequest -Uri $uri -Method $Method -Headers @{ 'X-Octopus-ApiKey' = $key; 'User-Agent' = 'factory-worker-gateway' } -ContentType 'application/json' -Body $json -SkipHttpErrorCheck -TimeoutSec 30 }
+    $h = @{ 'X-Octopus-ApiKey' = $key; 'User-Agent' = 'factory-worker-gateway' }
+    $cause = Get-FactoryCause; if ($cause) { $h['X-Fake-Cause'] = $cause }   # (test-only: the golden writes' cause id, lib/Core.ps1 Get-FactoryCause)
+    try { $res = Invoke-WebRequest -Uri $uri -Method $Method -Headers $h -ContentType 'application/json' -Body $json -SkipHttpErrorCheck -TimeoutSec 30 }
     catch { return @{ status = 0; body = $null } }
     $b = try { "$($res.Content)" | ConvertFrom-Json } catch { $null }
     return @{ status = [int]$res.StatusCode; body = $b }

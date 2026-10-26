@@ -14,4 +14,3 @@
 + rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: parked\n\n<!-- plant event=parked key={time} -->"}
 + rule STATE factory-worker v1 #{#1}
 + rule STATE factory-worker v1 #{#2}
-~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `runtime-failed` removed by the sweep: the item is closed. The item is closed: nothing is offered.\n\n<!-- plant event=unparked key=closed|{time} -->"}

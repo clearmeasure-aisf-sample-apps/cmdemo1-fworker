@@ -80,7 +80,7 @@ function Invoke-KeeperVerb([string]$Verb, $a, $cfg) {
     foreach ($k in 'body', 'replacement', 'reason') {
         if ($body.Contains($k)) { . (Join-Path $PSScriptRoot 'Client.Messages.ps1'); if (Test-LooksSecret "$($body[$k])") { Write-Out @{ ok = $false; code = 'secret-in-message'; reason = "the $k looks like a credential or token; nothing was sent" } 10 } }
     }
-    $p = @{ Uri = "$($cfg.url)/api/v1/verbs/$Verb"; Method = 'POST'; Headers = @{ Authorization = "Bearer $(Get-KeeperCredential)" }; SkipHttpErrorCheck = $true; TimeoutSec = 170
+    $p = @{ Uri = "$($cfg.url)/api/v1/verbs/$Verb"; Method = 'POST'; Headers = (@{ Authorization = "Bearer $(Get-KeeperCredential)" } + (Get-FwCauseHeaders)); SkipHttpErrorCheck = $true; TimeoutSec = 170
         Body = ($body | ConvertTo-Json -Depth 8 -Compress); ContentType = 'application/json; charset=utf-8' }
     try { $resp = Invoke-WebRequest @p } catch { Write-Out @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15 } 20 }
     $text = $resp.Content; if ($text -is [byte[]]) { $text = [Text.Encoding]::UTF8.GetString($text) }
@@ -90,3 +90,7 @@ function Invoke-KeeperVerb([string]$Verb, $a, $cfg) {
     $code = if ($j.ContainsKey('exit')) { [int]$j.exit } elseif ($sc -lt 300) { 0 } elseif ($sc -in 401, 403) { 30 } else { 20 }
     [Console]::Out.WriteLine("$text".Trim()); exit $code
 }
+
+# Test-only (Tier 1 golden writes): factory.ps1 client mode defines Get-FwCauseHeaders (the X-Fake-Cause of a harness's call). This file is also
+# loaded on its own (tests, tools); then no call carries a cause id and no header is sent.
+if (-not (Get-Command -Name Get-FwCauseHeaders -CommandType Function -ErrorAction SilentlyContinue)) { function Get-FwCauseHeaders { return @{} } }

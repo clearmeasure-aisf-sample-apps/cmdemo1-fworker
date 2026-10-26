@@ -337,7 +337,9 @@ $Scenarios = [ordered]@{
 }
 
 'code change: release candidate, Release Queue, production, Done [full]' = {
-    Fake 'config' @{ prodDelaySeconds = 6 } | Out-Null
+    # the production deployment is held until the scenario has looked at the Release Queue (deliver-prod below): with a timed delay, whether
+    # its own sync-board found the item delivered (and moved it to Done) depended on the clock, and so did its caused writes (issue #386)
+    Fake 'config' @{ prodDelaySeconds = 3600 } | Out-Null
     $n = New-Item-Fake 'Code' 'x' $L; Do-TechnicalDesign $n 'w1' $false
     $pr = Do-Development $n @('src/App/Thing.cs')
     $r = Do-DevComplete $n; CheckExit 'development complete' $r 0
@@ -347,9 +349,9 @@ $Scenarios = [ordered]@{
     Check 'waits in Release Queue (hold column)' $q "column $((Get-FakeIssue $n).column)"
     $sw = F 'w1' @('sync-board')
     $rq = @(@($sw['release_queue']) | Where-Object { $_ -and $_['item'] -eq $n }) | Select-Object -First 1
-    if (@(@($sw['actions']) | Where-Object { $_ -and $_['item'] -eq $n -and $_['result'] -and $_['result']['outcome'] -eq 'done' }).Count -eq 0) {
-        Check 'the sweep lists it in release_queue with its release and since when (the digest''s Release Queue age)' ($rq -and "$($rq['release'])" -match '^\d' -and $null -ne $rq['since']) ($sw | ConvertTo-Json -Compress -Depth 4)
-    }
+    Check 'not done while production is not delivered' (@(@($sw['actions']) | Where-Object { $_ -and $_['item'] -eq $n -and $_['result'] -and $_['result']['outcome'] -eq 'done' }).Count -eq 0) ($sw | ConvertTo-Json -Compress -Depth 4)
+    Check 'the sweep lists it in release_queue with its release and since when (the digest''s Release Queue age)' ($rq -and "$($rq['release'])" -match '^\d' -and $null -ne $rq['since']) ($sw | ConvertTo-Json -Compress -Depth 4)
+    Check 'the production deployment is let through' ((Fake 'deliver-prod' @{}).released -ge 1)
     $d = Wait-Until -Seconds 60 { (Get-FakeIssue $n).column -eq 'Done' }
     Check 'Done only after the production deployment succeeded' $d "column $((Get-FakeIssue $n).column)"
     Check 'issue closed' (-not (Get-FakeIssue $n).open)

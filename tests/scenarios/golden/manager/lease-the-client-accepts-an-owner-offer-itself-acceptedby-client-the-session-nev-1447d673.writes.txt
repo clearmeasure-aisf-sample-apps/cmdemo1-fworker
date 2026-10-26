@@ -5,5 +5,6 @@
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **alice** accepted (accepted by its client; the session starts on it next): it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: alice accepted by its client but did not start within the lease; offered again; offering to the next worker.\n\n<!-- plant event=reassigned key=back|{#1}|{n} -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **alice** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|alice -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **bob** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|bob -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the gateway ended the lease of **alice** (client-accepted-not-started); the item is offered again in resume mode.\n\n<!-- plant event=lease-expired key=exp|{n} -->"}
 ~ rule STATE factory-worker v1 #{#1}

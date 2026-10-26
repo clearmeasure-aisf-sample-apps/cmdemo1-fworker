@@ -20,7 +20,7 @@
 # One POST to the gateway with the call's credential; the answer as a hashtable that always has ok, code and exit.
 function Invoke-BuildCall($Cfg, [string]$Token, [string]$Path, $Body, [int]$TimeoutSec = 30) {
     try {
-        $resp = Invoke-WebRequest -Uri "$($Cfg.url)$Path" -Method POST -Body ($Body | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = "Bearer $Token" } -SkipHttpErrorCheck -TimeoutSec $TimeoutSec
+        $resp = Invoke-WebRequest -Uri "$($Cfg.url)$Path" -Method POST -Body ($Body | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers (@{ Authorization = "Bearer $Token" } + (Get-FwCauseHeaders)) -SkipHttpErrorCheck -TimeoutSec $TimeoutSec
     } catch { return @{ ok = $false; code = 'gateway-unreachable'; reason = $_.Exception.Message; retryAfterSeconds = 15; exit = 20 } }
     $j = $null; try { $j = $resp.Content | ConvertFrom-Json -AsHashtable } catch { }
     if ($j -isnot [System.Collections.IDictionary]) { return @{ ok = $false; code = 'gateway-error'; reason = "HTTP $([int]$resp.StatusCode)"; exit = $(if ([int]$resp.StatusCode -in 401, 403) { 30 } else { 20 }) } }
@@ -144,3 +144,7 @@ function Invoke-PrivateBuild($a, $Cfg, [string]$Token, [string]$ScriptsDir) {
     }
     Write-Out $res 0
 }
+
+# Test-only (Tier 1 golden writes): factory.ps1 client mode defines Get-FwCauseHeaders (the X-Fake-Cause of a harness's call). This file is also
+# loaded on its own (tests, tools); then no call carries a cause id and no header is sent.
+if (-not (Get-Command -Name Get-FwCauseHeaders -CommandType Function -ErrorAction SilentlyContinue)) { function Get-FwCauseHeaders { return @{} } }

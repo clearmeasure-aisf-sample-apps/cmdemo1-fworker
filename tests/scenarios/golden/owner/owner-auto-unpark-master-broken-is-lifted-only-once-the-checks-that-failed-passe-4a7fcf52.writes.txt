@@ -7,3 +7,4 @@
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the settle step of this merged item is re-armed by the sweep (awaiting `master-broken`): merged with no settle step. The gateway carries it on; it is not offered to a worker.\n\n<!-- plant event=settle-rearmed key=rearm|{sha}|{time} -->"}
 + rule STATE factory-worker v1 #{#1}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `master-broken` released early by the sweep: master is green again at {sha}, with Build result passing (automatic lift 1 of at most 3). The item waits for master green again, then for its release candidate.\n\n<!-- plant event=unparked key=auto|{time} -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}

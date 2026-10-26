@@ -21,6 +21,7 @@
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}
 + rule STATE factory-worker v1 #{#1}
 + rule STATE factory-worker v1 #{#3}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}
 ~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation PASSED and 'Auto Merge' present - the gateway squash-merged PR #{#4} as `{sha}`; watching master CI, then the release candidate.\n\n<!-- factory-journal:factory-worker -->"}
 ~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation verdict for **Functional Testing**: PASS - ok\n\n<!-- factory-journal:factory-worker -->"}
 ~ rule PUT /repos/{repo}/pulls/{#4}/merge 200 {"merge_method":"squash","sha":"{sha}"}

@@ -48,7 +48,6 @@
 + rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **qwl** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|qwl -->"}
 + rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:416 sha256:f387b4ef \"QC environment available for PR #{#4} at head {sha}: [Start the QC environment](…\"}"}
 + rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"{len:416 sha256:f387b4ef \"QC environment available for PR #{#4} at head {sha}: [Start the QC environment](…\"}"}
-+ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **qwl** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|qwl -->"}
 + rule STATE factory-worker v1 #{#1}
 + rule STATE factory-worker v1 #{#3}
 + rule STATE factory-worker v1 #{#5}
@@ -58,5 +57,6 @@
 ~ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"\uD83C\uDFED Plant manager: QC environment for PR #{#6} torn down (person).\n\n<!-- plant event=qc-torn-down key={#6}|{sha}|1 -->"}
 ~ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"\uD83C\uDFED Plant manager: a QC environment is offered for PR #{#6} at head {sha}; nothing runs until a person presses Start.\n\n<!-- plant event=qc-offered key={#6}|{sha} -->"}
 ~ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"\uD83C\uDFED Plant manager: a person asked for a QC environment for PR #{#6} at head {sha} (attempt 1).\n\n<!-- plant event=qc-requested key={#6}|{sha}|1 -->"}
+~ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **qwl** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|qwl -->"}
 ~ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"{len:416 sha256:b5808495 \"QC environment available for PR #{#6} at head {sha}: [Start the QC environment](…\"}"}
 ~ rule POST /repos/{repo}/issues/{#6}/comments 201 {"body":"{len:416 sha256:b5808495 \"QC environment available for PR #{#6} at head {sha}: [Start the QC environment](…\"}"}
