@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: a new owner does not inherit a sweep that missed the previous owner
+# runs: 3

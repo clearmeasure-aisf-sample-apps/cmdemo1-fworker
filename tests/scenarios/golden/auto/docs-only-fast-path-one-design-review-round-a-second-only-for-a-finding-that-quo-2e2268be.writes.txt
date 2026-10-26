@@ -1,0 +1,18 @@
+# suite: auto
+# scenario: docs-only fast path: one design review round, a second only for a finding that quotes the item
+# runs: 3
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"Acceptance criteria:\n- The README names the health check route /_healthcheck.\n\n## Technical Design\n\nFiles: README.md\n<!-- aisf:docs-only -->\n- add one sentence under the heading Health.\n"}
+= rule PATCH /repos/{repo}/issues/{#2} 200 {"body":"Acceptance criteria:\n- The guide says \"Ready\" in bold.\n\n## Technical Design\n\nFiles: docs/guide.md\n<!-- aisf:docs-only -->\n- edit the guide.\n"}
+= rule PATCH /repos/{repo}/issues/{#3} 200 {"body":"Acceptance criteria:\n- The README names the health check route /_healthcheck.\n\n## Technical Design\n\nFiles: src/a.cs\n- change the handler.\n"}
+= rule PATCH /repos/{repo}/issues/{#4} 200 {"body":"Acceptance criteria:\n- The README names the health check route /_healthcheck.\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#4}","o":"opt_Development","p":"PVT_fake"}}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#4}","sha":"{sha}"}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#2}
++ rule STATE factory-worker v1 #{#3}
++ rule STATE factory-worker v1 #{#4}
+~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#4} 204 -

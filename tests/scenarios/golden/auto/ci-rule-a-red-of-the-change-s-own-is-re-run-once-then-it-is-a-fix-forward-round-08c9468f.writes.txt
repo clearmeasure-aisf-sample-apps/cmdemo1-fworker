@@ -1,0 +1,13 @@
+# suite: auto
+# scenario: ci rule: a red of the change's own is re-run once, then it is a fix-forward round that says so [full]
+# runs: 3
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
+= rule POST /repos/{repo}/actions/runs/{id}/rerun-failed-jobs 201 -
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#2} checks failed and the gateway applies the CI rule (rerun: checks other than the gates failed (Integration Build (SQLite))); it decides when that is over; the gateway is watching them and will advance the item when green. The worker's job here is done.\n\n<!-- factory-journal:factory-worker -->"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REJECTED a Development completion - PR #{#2} checks are 'failure' (Build result, Integration Build (SQLite); still red after one re-run of the failed jobs). Re-dispatching Development to fix forward (round 1).\n\n<!-- factory-journal:factory-worker -->"}

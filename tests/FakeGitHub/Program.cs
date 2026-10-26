@@ -44,11 +44,19 @@ app.Run(async ctx =>
     {
         int uw; lock (gate) { uw = world.LatencyFor(method, path, ""); } if (uw > 0) await Task.Delay(uw);
         long len = 0; var buf = new byte[65536]; int k; while ((k = await ctx.Request.Body.ReadAsync(buf)) > 0) len += k;
-        (int, string) up; lock (gate) { up = world.UploadAsset(path, query["name"].ToString(), ctx.Request.ContentType ?? "", len, port); }
+        (int, string) up; lock (gate) { up = world.UploadAsset(path, query["name"].ToString(), ctx.Request.ContentType ?? "", len, port); world.Recorder?.Record(method, path, ctx.Request.QueryString.Value ?? "", up.Item1, ctx.Request.Headers.UserAgent.ToString(), new JsonObject { ["len"] = len }, null); }
         ctx.Response.StatusCode = up.Item1; ctx.Response.ContentType = "application/json"; await ctx.Response.WriteAsync(up.Item2); return;
     }
     string body; using (var rd = new StreamReader(ctx.Request.Body)) body = await rd.ReadToEndAsync();
     JsonNode? json = null; try { if (body.Length > 0) json = JsonNode.Parse(body); } catch { }
+    // the golden-write recorder (WriteRecorder.cs, FAKE_RECORD_DIR): a copy of the write as sent, kept with its status; it never changes the answer
+    string? recField = null; JsonNode? recBody = null;
+    var recWrite = world.Recorder != null && WriteRecorder.IsWrite(method, path, json, out recField);
+    if (recWrite)
+    {
+        try { recBody = json?.DeepClone() ?? (body.Length > 0 ? JsonValue.Create(body) : null); }
+        catch { recBody = JsonValue.Create(body); }   // the recorder must never turn an answer into a 500
+    }
     (int, object?) res;
     // /_fake/latency: the answer to a matching request is held back, as a slow GitHub would (the test control itself is never slowed)
     int wait; lock (gate) { wait = world.LatencyFor(method, path, body); }
@@ -64,6 +72,7 @@ app.Run(async ctx =>
         if (rate is { Remaining: <= 0, Resource: "graphql" }) res = (200, "{\"errors\":[{\"type\":\"RATE_LIMITED\",\"message\":\"API rate limit exceeded for installation ID 7.\"}]}");
         else if (rate is { Remaining: <= 0 }) res = (403, "{\"message\":\"API rate limit exceeded for installation ID 7. If you reach out to GitHub Support for help, please include the request ID.\",\"documentation_url\":\"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting\"}");
         else { world.IfNoneMatch = ctx.Request.Headers.IfNoneMatch.ToString(); world.ApiVersionHeader = ctx.Request.Headers["X-GitHub-Api-Version"].ToString(); world.Etag = null; res = world.Handle(method, path, query, json, ctx.Request.Headers.Authorization.ToString() is { Length: > 0 } az ? az : ctx.Request.Headers["X-Octopus-ApiKey"].ToString() is { Length: > 0 } ok ? "Octopus " + ok : ""); etag = world.Etag; }
+        if (recWrite) world.Recorder!.Record(method, path, ctx.Request.QueryString.Value ?? "", res.Item1, ctx.Request.Headers.UserAgent.ToString(), recBody, recField);
     }
     if (rate is { } rl)
     {
@@ -406,6 +415,13 @@ sealed class World
     readonly List<HeldRun> heldRuns = new(); int heldReruns;
     long nextRun = 1000; readonly Dictionary<long, int> runAttempts = new(); readonly Dictionary<long, string> pendingRelease = new(); int rerunRefusals, reruns; string releaseMode = "auto"; string docsRelease = "skipped"; bool masterHold; string? masterArchitecture;
     long counter = 0; int appMints; readonly List<string> scopedMints = new();
+    // the golden-write recorder (null unless FAKE_RECORD_DIR is set) and the counters a scenario's numbers are made relative to (never reset)
+    public readonly WriteRecorder? Recorder = WriteRecorder.FromEnvironment();
+    public Dictionary<string, long> Bases() => new()
+    {
+        ["number"] = nextNumber, ["pr"] = nextPr, ["comment"] = nextComment, ["check"] = nextCheck, ["review"] = nextReview, ["run"] = nextRun, ["artifact"] = nextArtifact,
+        ["cursor"] = cursorSeq + 1, ["copilot"] = copilotSeq + 1, ["arm"] = armSeq + 1, ["octo"] = octoSeq + 1
+    };
 
     static string Sha(string seed) => Convert.ToHexString(System.Security.Cryptography.SHA1.HashData(System.Text.Encoding.UTF8.GetBytes(seed))).ToLowerInvariant();
     string NewSha() => Sha("c" + (++counter) + DateTime.UtcNow.Ticks);
@@ -434,7 +450,8 @@ sealed class World
 
     public (int, object?) Handle(string method, string path, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b, string auth = "")
     {
-        log.Add($"{method} {path}");
+        // the golden writes' cause windows are the harness's bookkeeping, not a request of the product: not in the log (README, golden writes)
+        if (path is not ("/_fake/cause" or "/_fake/group-check" or "/_fake/quiet")) log.Add($"{method} {path}");
         if (path.StartsWith("/_fake/")) return Control(method, path[7..], q, b);
         foreach (var f in faults.ToList())
             if (f.Remaining > 0 && f.Match.IsMatch($"{method} {path}")) { f.Remaining--; return (f.Status, f.Body); }
@@ -1182,6 +1199,18 @@ sealed class World
                 e.Status = b!["status"]!.ToString(); if (e.Status is not ("Running" or "Processing")) e.End = DateTime.UtcNow;
                 return (200, J(("ok", true), ("name", e.Name)));
             }
+            // the golden-write record of one scenario (WriteRecorder.cs): begin { suite, scenario, scenarioSlug } after the reset, end {} after the body;
+            // the counters at both (Bases()) tell the numbers the scenario's own writes handed out from those of earlier scenarios and the harness
+            case "scenario-begin": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Begin(b, Bases()));
+            case "scenario-end": return Recorder == null ? (200, J(("ok", true), ("recording", false))) : Recorder.End(Bases());
+            // cause { open: true | false }: the harness brackets each request of its own to the gateway (lib.ps1, F), so that a write made while one
+            // is open can be told as caused by the scenario from the background work of the gateway (tests/scenarios/golden/README.md)
+            case "cause": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Cause(b));
+            // group-check { goldenDir }: at the end of a group (lib.ps1), the tail lines of every scenario of this process against the later writes
+            case "group-check": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.GroupCheck(b));
+            // quiet: how long ago the last write came, so the harness can close a record once the gateway's tail work has gone quiet
+            case "quiet": return (200, Recorder == null ? J(("ok", true), ("recording", false)) : Recorder.Quiet());
+            case "writes": return (200, Recorder == null ? J(("recording", false)) : Recorder.Open());
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();
                 artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); dispatches.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); octoDeps.Clear(); octoForbidCreate = ""; octoForbidInterruption = ""; octoSignOff = true; octoCreates = 0; appBuild = ""; promoteHistory.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();

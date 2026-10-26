@@ -1,0 +1,3 @@
+# suite: owner
+# scenario: github budget: built from the rate-limit headers; below the reserve only essential verbs run, the sweep skips its extra reads; a 403 is a rate limit only when GitHub says so [full]
+# runs: 3

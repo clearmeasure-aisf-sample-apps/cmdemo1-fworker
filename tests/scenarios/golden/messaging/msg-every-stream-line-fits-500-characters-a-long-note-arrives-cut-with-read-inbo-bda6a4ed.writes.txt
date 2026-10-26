@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: every stream line fits 500 characters: a long note arrives cut with read, inbox --id prints it whole, and an inbox answer stops before 24,000 characters
+# runs: 3

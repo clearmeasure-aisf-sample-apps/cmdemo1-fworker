@@ -1,0 +1,27 @@
+# suite: copilot
+# scenario: copilot: an owner pull request stacked on another branch with no Build run is consolidated onto master and its CI started; it moves on, not parked stuck [full]
+# runs: 3
+= harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/base-{#1}","title":"Base (#{#1})"}
+= harness POST /repos/{repo}/pulls 201 {"base":"copilot/base-{#1}","body":"x","draft":true,"head":"copilot/stk-{#1}","title":"Stacked (#{#1})"}
+= harness POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"the owner task"}
+= harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"copilot_task\":{\"branch\":\"copilot/stk-{#1}\",\"id\":\"{task}\",\"phase\":\"Development\",\"pr\":\"{#2}\",\"previous\":[],\"since\":\"{time}\",\"url\":\"\"},\"item\":\"{#1}\",\"pr\":{\"branch\":\"copilot/base-{#1}\",\"number\":\"{#2}\"}}\n```\n"}
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
++ rule DELETE /repos/{repo}/git/refs/heads/copilot/base-{#1} 204 -
++ rule PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
++ rule PATCH /repos/{repo}/pulls/{#3} 200 {"base":"master"}
++ rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#3}"}}
++ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
++ rule POST /repos/{repo}/actions/workflows/build.yml/dispatches 204 {"ref":"copilot/stk-{#1}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cop-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cop-{session} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (settled); offering to the next worker.\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: Development is done pending checks: it already has its pull request with changes; no new Development task is started, and PR #{#3} carries the change (head `{sha}`). The gateway waits for its checks and moves the item on when they are green; red checks go back to Development to fix forward.\n\n<!-- factory-journal:factory-worker -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#3} checks are green; development complete. Completed by the gateway: it already has its pull request with changes; no new Development task is started.\n\n<!-- factory-journal:factory-worker -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#3} has no Build result run for its head `{sha}` after {dur}: no CI started for it (not a hung run). The gateway started build.yml on `copilot/stk-{#1}` and waits again.\n\n<!-- factory-journal:factory-worker -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#3}, the pull request of the owner task's branch `copilot/stk-{#1}`, was stacked on `master` (#{#2}); the gateway retargeted it to **master**, where CI runs.\n\n<!-- factory-journal:factory-worker -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: The item's pull request is now #{#3}, the open pull request of the owner task's branch `copilot/stk-{#1}` (the recorded #{#2} is closed or superseded).\n\n<!-- factory-journal:factory-worker -->"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"Superseded by #{#3}, the pull request of #{#1} now: it holds this branch's commits and the owner task's work. Closed by the factory worker gateway."}
++ rule STATE factory-worker v1 #{#1}
+~ gateway POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:7672 sha256:94f60790 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Functional Testing** (task `{task}#1`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task}#1 -->"}

@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: no cursor, a bare number or another epoch replays every undelivered message and the whole buffer
+# runs: 3

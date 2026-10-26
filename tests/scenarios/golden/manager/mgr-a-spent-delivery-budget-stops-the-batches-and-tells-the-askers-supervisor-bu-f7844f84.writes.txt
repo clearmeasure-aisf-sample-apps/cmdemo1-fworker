@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: a spent delivery budget stops the batches and tells the askers supervisor-budget
+# runs: 3

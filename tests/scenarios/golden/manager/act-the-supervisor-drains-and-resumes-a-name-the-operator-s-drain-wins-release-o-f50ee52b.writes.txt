@@ -1,0 +1,11 @@
+# suite: manager
+# scenario: act: the supervisor drains and resumes a name, the operator's drain wins, release-owner lets the owner go, restart-session ends the session through its end marker, and the hourly limit holds
+# runs: 3
+= harness POST /repos/{repo}/issues/{#1}/labels 200 {"labels":["hold:owner"]}
+= harness DELETE /repos/{repo}/issues/{#1}/labels/hold:owner 200 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **bob** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **bob** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|bob -->"}
++ rule STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the plant manager (**supervisor**) ended the lease of **bob**; the item is offered again in resume mode, under policy `stalled-owner`.\n\n<!-- plant event=manager-action key=release-owner|{n} -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the plant manager released bob from this item (Manager.cs); offered again; offering to the next worker.\n\n<!-- plant event=reassigned key=back|{#1}|{n} -->"}

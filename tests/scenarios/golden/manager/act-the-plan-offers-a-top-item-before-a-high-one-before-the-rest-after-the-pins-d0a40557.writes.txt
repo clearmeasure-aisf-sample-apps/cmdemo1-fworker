@@ -1,0 +1,6 @@
+# suite: manager
+# scenario: act: the plan offers a top item before a high one before the rest, after the pins; the day's summary is due once and metrics and act-log answer the supervisor only
+# runs: 3
+~ rule STATE factory-worker v1 #{#1}
+~ rule STATE factory-worker v1 #{#2}
+~ rule STATE factory-worker v1 #{#3}

@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: workers are told once when the supervisor joins, again when its model changes, and when it has left
+# runs: 3

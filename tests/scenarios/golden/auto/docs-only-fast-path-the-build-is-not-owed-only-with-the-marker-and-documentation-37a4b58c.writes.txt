@@ -1,0 +1,55 @@
+# suite: auto
+# scenario: docs-only fast path: the build is not owed only with the marker and documentation files; Functional Testing reads the diff
+# runs: 3
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+= rule PATCH /repos/{repo}/issues/{#3} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#3}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#3}","draft":false,"head":"factory-worker/{#3}-development","title":"Trial {#3} (#{#3})"}
+= rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#3}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+= rule PATCH /repos/{repo}/issues/{#5} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#5}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#5}","draft":false,"head":"factory-worker/{#5}-development","title":"Trial {#5} (#{#5})"}
+= rule PATCH /repos/{repo}/issues/{#7} 200 {"body":"Please change src/a.cs.\n<!-- aisf:docs-only -->\nAcceptance criteria:\n- the handler changes.\n\n## Technical Design\n\nFiles: docs/a.md\n- change it.\n"}
+= rule POST /repos/{repo}/issues/{#7}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#7}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#7}","draft":false,"head":"factory-worker/{#7}-development","title":"Trial {#7} (#{#7})"}
+= rule PATCH /repos/{repo}/issues/{#9} 200 {"body":"## Technical Design\n<!-- aisf:docs-only -->\n- typed by the author.\n\nFiles: docs/a.md\n- change it.\n"}
+= rule POST /repos/{repo}/issues/{#9}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#9}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#9}","draft":false,"head":"factory-worker/{#9}-development","title":"Trial {#9} (#{#9})"}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#11}","draft":false,"head":"factory-worker/{#11}-development","title":"Trial {#11} (#{#11})"}
+= rule POST /repos/{repo}/issues/{#11}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#11}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+= rule PATCH /repos/{repo}/issues/{#13} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#13}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#13}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#13}","draft":false,"head":"factory-worker/{#13}-development","title":"Trial {#13} (#{#13})"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#11} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#13} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#3} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#5} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#7} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#9} 204 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#11}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#13}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#5}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#7}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#9}","sha":"{sha}"}
++ rule STATE factory-worker v1 #{#11}
++ rule STATE factory-worker v1 #{#13}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#3}
++ rule STATE factory-worker v1 #{#5}
++ rule STATE factory-worker v1 #{#7}
++ rule STATE factory-worker v1 #{#9}

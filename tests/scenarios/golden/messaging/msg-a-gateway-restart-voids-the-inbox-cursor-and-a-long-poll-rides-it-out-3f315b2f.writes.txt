@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: a gateway restart voids the inbox cursor, and a long poll rides it out [full]
+# runs: 3

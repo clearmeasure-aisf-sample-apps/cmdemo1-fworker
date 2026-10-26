@@ -1,0 +1,13 @@
+# suite: promote
+# scenario: promote: a Hold label put on an item while the Sign-off waits aborts it
+# runs: 3
+= harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.17.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#1}/labels 200 {"labels":["Hold"]}
++ rule POST /octopus/api/Spaces-355/deployments/create/untenanted/v1 201 {"EnvironmentNames":["uat"],"ProjectName":"cmdemo1-ui","ReleaseVersion":"3.17.1","SpaceIdOrName":"Spaces-355"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: promoted release 3.17.1 to **uat** (Octopus task `ServerTasks-{n}`); the gateway follows the deployment and answers its Sign-off.\n\n<!-- plant event=promoted key=3.17.1|uat -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:467 sha256:0bfde041 \"\uD83C\uDFED Plant manager: release 3.17.1 waits for the automatic promotion to **uat**: t…\"}"}
++ rule STATE factory-worker v1 #{#1}
+~ rule POST /octopus/api/Spaces-355/interruptions/Interruptions-{n}/submit 200 {"Instructions":null,"Notes":"Aborted by the factory worker gateway: #{#1} carries the 'Hold' label","Result":"Abort"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: answered the Sign-off of the deployment of release 3.17.1 to **uat** (Octopus task `ServerTasks-{n}`): **Abort** (#{#1} carries the 'Hold' label).\n\n<!-- plant event=promotion-signoff key=3.17.1|uat|ServerTasks-{n}|Abort -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:527 sha256:f40aea7e \"\uD83C\uDFED Plant manager: release 3.17.1 waits for the automatic promotion to **uat**: i…\"}"}
+~ rule PUT /octopus/api/Spaces-355/interruptions/Interruptions-{n}/responsible 200 {}

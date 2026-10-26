@@ -1,0 +1,3 @@
+# suite: messaging
+# scenario: msg: the owner and the inspector of one item cannot message each other, and a broadcast skips the other
+# runs: 3
