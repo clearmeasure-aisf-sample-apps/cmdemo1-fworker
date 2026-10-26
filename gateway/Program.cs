@@ -6,107 +6,39 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
+using static HttpResultsX;
 
 // The gateway: receives GitHub webhooks, holds every GitHub and Octopus secret, runs the rule scripts (pwsh factory.ps1 --server <verb>), runs the sweep,
 // and in owner mode acts as the plant manager: a registry of worker sessions, directed assignment of jobs to them, per-item role-scoped tokens, and
 // routing of triggers to the session that owns the item. Two listeners: the webhook port serves only the webhook route (this is the port a tunnel
 // exposes); the API port serves the authenticated API and never leaves the machine.
 
-var scriptsDir = Environment.GetEnvironmentVariable("FACTORY_PLUGIN_SCRIPTS") ?? throw new InvalidOperationException("FACTORY_PLUGIN_SCRIPTS is not set");
-var entry = Path.Combine(scriptsDir, "factory.ps1");
-var apiToken = Environment.GetEnvironmentVariable("FACTORY_DEV_TOKEN") ?? throw new InvalidOperationException("FACTORY_DEV_TOKEN is not set");
-var webhookSecret = Environment.GetEnvironmentVariable("FACTORY_WEBHOOK_SECRET") ?? throw new InvalidOperationException("FACTORY_WEBHOOK_SECRET is not set");
+// The configuration (gateway/Configuration/): the environment variables, then the gateway's own reads of the configuration file, each read once.
+// The same names, defaults and precedence as before; the locals keep their names so the rest of this file reads them as it did.
+var gw = GatewayOptions.FromEnvironment(Environment.GetEnvironmentVariable);
+var scriptsDir = gw.ScriptsDir;
+var entry = gw.Entry;
+var apiToken = gw.ApiToken;
+var webhookSecret = gw.WebhookSecret;
 // every event stream writes a `: ping` comment at this interval, busy or idle: a proxy or the platform's ingress that sees no byte for a while
 // closes the connection, and a client then sees a drop it did not cause (enhancement 11). Clients ignore comment lines.
-var ssePingSeconds = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SSE_PING_SECONDS"), out var sps) && sps > 0 ? sps : 25;
-var sweepSeconds = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_SECONDS"), out var ss) ? ss : 180;
-var ownerMode = Environment.GetEnvironmentVariable("FACTORY_OWNER_MODE") == "1";
-var environmentName = Environment.GetEnvironmentVariable("FACTORY_ENVIRONMENT") ?? "tdd";
-var publicUrl = Environment.GetEnvironmentVariable("FACTORY_PUBLIC_URL") ?? "";
-var tokenSecret = Environment.GetEnvironmentVariable("FACTORY_TOKEN_SECRET") ?? "";
+var ssePingSeconds = gw.SsePingSeconds;
+var sweepSeconds = gw.SweepSeconds;
+var ownerMode = gw.OwnerMode;
+var environmentName = gw.EnvironmentName;
+var publicUrl = gw.PublicUrl;
+var tokenSecret = gw.TokenSecret;
+var instanceConfig = InstanceConfig.Load(InstanceConfig.PathFor(scriptsDir, Environment.GetEnvironmentVariable), Environment.GetEnvironmentVariable);
+var timing = TimingOptions.From(instanceConfig);
+var revocationOptions = RevocationOptions.FromEnvironment(Environment.GetEnvironmentVariable);
 // the role token r1 (Auth.cs, agents-roles-launch.md 4): bound to this environment; auth.legacyKinds false refuses the per-role kinds
 Auth.Environment = environmentName.Trim().ToLowerInvariant();
-Auth.LegacyKinds = LegacyKindsOn(scriptsDir);
-static bool LegacyKindsOn(string scriptsDir)
-{
-    try { return JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")))?["auth"]?["legacyKinds"] is not JsonValue v || !v.TryGetValue<bool>(out var b) || b; }
-    catch { return true; }
-}
+Auth.LegacyKinds = instanceConfig.LegacyKinds;
 // The accept window of an offer: FACTORY_ASSIGN_ACK_SECONDS, else FACTORY_TIMING_assignAckSeconds, else timing.assignAckSeconds of the config, else 120.
-var ackSeconds = AckSeconds(scriptsDir);
-// timing.<name> of the config (FACTORY_TIMING_<name> first), a positive number, else the fallback
-// a top-level true/false of the config (FACTORY_CONFIG, else config/instance.json); absent or unreadable is false
-static bool ConfigBool(string scriptsDir, string name)
-{
-    try { return JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")))?[name] is JsonValue v && v.TryGetValue<bool>(out var b) && b; }
-    catch { return false; }
-}
-static double TimingNumber(string scriptsDir, string name, double fallback)
-{
-    bool Good(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v > 0;
-    if (Good(Environment.GetEnvironmentVariable("FACTORY_TIMING_" + name), out var a)) return a;
-    try
-    {
-        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
-        if (Good(root?["timing"]?[name]?.ToString(), out a)) return a;
-    }
-    catch { }
-    return fallback;
-}
-static double AckSeconds(string scriptsDir)
-{
-    bool Good(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v > 0;
-    if (Good(Environment.GetEnvironmentVariable("FACTORY_ASSIGN_ACK_SECONDS"), out var a)) return a;
-    if (Good(Environment.GetEnvironmentVariable("FACTORY_TIMING_assignAckSeconds"), out a)) return a;
-    try
-    {
-        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
-        if (Good(root?["timing"]?["assignAckSeconds"]?.ToString(), out a)) return a;
-    }
-    catch { }
-    return 120;
-}
-// issue 97: the first column the factory works (columns.ai[0] of the configuration), its intake of new work
-static string IntakeColumnOf(string scriptsDir)
-{
-    try
-    {
-        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
-        if (root?["columns"]?["ai"] is JsonArray ai && ai.Count > 0 && ai[0]?.ToString() is { Length: > 0 } c) return c;
-    }
-    catch { }
-    return "Technical Design";
-}
-
-// timing.<key> of the config, FACTORY_TIMING_<key> first (tests); a value that is not a number of 0 or more is the default
-static double TimingValue(string scriptsDir, string key, double fallback)
-{
-    bool Good(string? text, out double v) => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && double.IsFinite(v) && v >= 0;
-    if (Good(Environment.GetEnvironmentVariable("FACTORY_TIMING_" + key), out var a)) return a;
-    try
-    {
-        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
-        if (Good(root?["timing"]?[key]?.ToString(), out a)) return a;
-    }
-    catch { }
-    return fallback;
-}
+var ackSeconds = timing.AckSeconds;
 // plant.oneItemPerSession (docs/launcher.md): FACTORY_ONE_ITEM_PER_SESSION (1 or 0), else the config, else on.
-var oneItemPerSession = OneItemPerSession(scriptsDir);
-static bool OneItemPerSession(string scriptsDir)
-{
-    var e = Environment.GetEnvironmentVariable("FACTORY_ONE_ITEM_PER_SESSION");
-    if (e is "1" or "true") return true;
-    if (e is "0" or "false") return false;
-    try
-    {
-        var root = JsonNode.Parse(File.ReadAllText(Environment.GetEnvironmentVariable("FACTORY_CONFIG") ?? Path.Combine(scriptsDir, "..", "..", "config", "instance.json")));
-        if (root?["plant"]?["oneItemPerSession"] is JsonValue v && v.TryGetValue<bool>(out var b)) return b;
-    }
-    catch { }
-    return true;
-}
-if (ownerMode && tokenSecret.Length < 16) throw new InvalidOperationException("FACTORY_TOKEN_SECRET (at least 16 characters) is required in owner mode");
+var oneItemPerSession = instanceConfig.OneItemPerSession;
+gw.ValidateOwnerMode();
 var qcSettings = QcSettings.Load(scriptsDir, publicUrl, ownerMode);
 var messaging = MessagingSettings.Load(scriptsDir, ownerMode);
 // the gateway's own secrets, so that a message carrying one verbatim is refused (worker-messaging.md 5.4); short development values are left out
@@ -117,16 +49,23 @@ Auth.Keeper = keeper;
 if (keeper.Enabled) messaging.Reserved.UnionWith(keeper.Names);
 
 var builder = WebApplication.CreateBuilder(args);
-var apiPort = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_API_PORT"), out var ap) ? ap : 5100;
-var hookPort = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_WEBHOOK_PORT"), out var hp) ? hp : 5101;
+var apiPort = gw.ApiPort;
+var hookPort = gw.HookPort;
 // Container mode (FACTORY_SINGLE_PORT, or ASPNETCORE_HTTP_PORTS from the image): one listener on every interface; the routes separate by path
 // (webhook: HMAC only; /api: bearer token; /health, /_build, /dashboard page: anonymous). Local mode keeps two loopback listeners.
-var singlePort = int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SINGLE_PORT") ?? Environment.GetEnvironmentVariable("ASPNETCORE_HTTP_PORTS"), out var sp) ? sp : 0;
+var singlePort = gw.SinglePort;
 if (singlePort > 0) { apiPort = singlePort; hookPort = singlePort; builder.WebHost.ConfigureKestrel(k => k.ListenAnyIP(singlePort)); }
 else builder.WebHost.ConfigureKestrel(k => { k.ListenLocalhost(apiPort); k.ListenLocalhost(hookPort); });
 builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.Services.AddSingleton<EventHub>();
 builder.Services.AddSingleton(qcSettings);
+// the configuration as read above, the same instances the locals hold (registered as instances: ValidateOnBuild has nothing to construct)
+builder.Services.AddSingleton(gw);
+builder.Services.AddSingleton(instanceConfig);
+builder.Services.AddSingleton(timing);
+builder.Services.AddSingleton(revocationOptions);
+builder.Services.AddSingleton(messaging);
+builder.Services.AddSingleton(keeper);
 // The client address of a QC click comes from X-Forwarded-For only when qc.trustProxy is on, and then only through the proxies listed in qc.knownProxies.
 if (qcSettings.TrustProxy)
     builder.Services.Configure<Microsoft.AspNetCore.Builder.ForwardedHeadersOptions>(o =>
@@ -137,6 +76,7 @@ if (qcSettings.TrustProxy)
     });
 // the shared GitHub budget (GitHubBudget.cs, issue 92): fed by every rule-script answer, read by the verb route and the sweeper
 var githubBudget = GitHubBudget.Load(scriptsDir);
+builder.Services.AddSingleton(githubBudget);
 var runnerInstance = new Runner(entry) { Budget = githubBudget };
 // session transcripts of runtime workers (Transcripts.cs): stored encrypted beside the plant snapshot; FACTORY_TRANSCRIPTS=0 keeps them in memory only
 var transcriptsDurable = ownerMode && tokenSecret.Length > 0 && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPTS") != "0";
@@ -151,12 +91,13 @@ builder.Services.AddSingleton(runnerInstance);
 var snapshotOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_PLANT_SNAPSHOT") != "0";
 // The leader lease (Leader.cs, issue 94): only the process that holds it acts on the board. Owner mode with a GitHub identity, not the suites' second
 // gateways; FACTORY_LEADER_LEASE=0 switches it off (every process acts, and the snapshot is written at SIGTERM and read once, as before).
-var leaderOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && GitHubConfigured();
+var leaderOn = ownerMode && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_LEADER_LEASE") != "0" && revocationOptions.GitHubConfigured;
 var leader = new GatewayLeader(runnerInstance, LeaderSettings.Load(scriptsDir, leaderOn),
     (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0");
+builder.Services.AddSingleton<ILeadership>(leader);
 // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
 var sweepGap = new SweepGap();
-var snapshotMaxAge = TimingNumber(scriptsDir, "plantSnapshotMaxAgeMinutes", 30);
+var snapshotMaxAge = timing.PlantSnapshotMaxAgeMinutes;
 var plantRestored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 if (!snapshotOn) plantRestored.SetResult();
 var snapshotState = new JsonObject { ["enabled"] = snapshotOn, ["maxAgeMinutes"] = snapshotMaxAge };
@@ -205,7 +146,7 @@ builder.Services.AddSingleton(sp =>
         try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
     }, ackSeconds) { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = oneItemPerSession,
-        PassUnmergedDigestMinutes = TimingValue(scriptsDir, "passUnmergedDigestMinutes", 5), OfferMissLimit = (int)TimingValue(scriptsDir, "offerMissLimit", 2), OfferCoolDownMinutes = TimingValue(scriptsDir, "offerCoolDownMinutes", 5), SessionEndGraceSeconds = TimingValue(scriptsDir, "sessionEndGraceSeconds", 90), PinFallbackMinutes = TimingValue(scriptsDir, "pinFallbackMinutes", 30), SessionRestartMinutes = TimingValue(scriptsDir, "sessionRestartMinutes", 10), RepeatQuestionLimit = (int)TimingValue(scriptsDir, "sessionRepeatQuestionLimit", 2), Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = IntakeColumnOf(scriptsDir), Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager, Octopus = octopusManager,
+        PassUnmergedDigestMinutes = timing.PassUnmergedDigestMinutes, OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = LeaseSettings.Load(scriptsDir), IntakeColumn = instanceConfig.IntakeColumn, Hosts = HostSettings.Load(scriptsDir), MgrActions = ManagerActionSettings.Load(scriptsDir), Keeper = keeper, Runtimes = runtimeManager, Cursor = cursorManager, Copilot = copilotManager, Octopus = octopusManager,
         SessionPage = (kind, name) => kind is "octopus" or "cae-job" && LinkBase() is { Length: > 0 } lb ? $"{lb}/sessions/{Uri.EscapeDataString(name)}" : "" };
 
 });
@@ -215,7 +156,7 @@ builder.Services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), s
 builder.Services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), BaseUpdateSettings.Load(scriptsDir), ownerMode));
 builder.Services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
 // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
-var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : TimingValue(scriptsDir, "sweepMinSeconds", 60));
+var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : timing.SweepMinSeconds);
 builder.Services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, ownerMode, sp.GetRequiredService<BaseWatch>(), plantRestored.Task) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
 // one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
 // with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
@@ -455,31 +396,19 @@ string PluginHash()
 var revocationsLoaded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 var revokeGate = new SemaphoreSlim(1, 1);
 // FACTORY_TEST_SKIP_REVOCATIONS=1 (the scenario suites' second gateways, whose GitHub is a port nothing listens on): nothing is read, and revoke is refused.
-var revocationsOff = Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") == "1";
+var revocationsOff = revocationOptions.SkipRevocations;
 if (revocationsOff && !messaging.TestHooks) throw new InvalidOperationException("FACTORY_TEST_SKIP_REVOCATIONS is for test gateways only: it needs messaging.testHooks in the configuration");
 if (revocationsOff && ownerMode) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"off\",\"warning\":\"FACTORY_TEST_SKIP_REVOCATIONS is set: revoked credentials are not read and cannot be revoked\"}}");
 // FACTORY_REVOCATIONS_ATTEMPT_SECONDS (45): the time limit of one read. FACTORY_REVOCATIONS_ALARM_SECONDS (180): failing for this long logs the error line.
-double RevSeconds(string name, double fallback, double min, double max) => double.TryParse(Environment.GetEnvironmentVariable(name), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? Math.Clamp(v, min, max) : fallback;
-var revAttemptLimit = TimeSpan.FromSeconds(RevSeconds("FACTORY_REVOCATIONS_ATTEMPT_SECONDS", 45, 1, 120));
-var revAlarmAfter = TimeSpan.FromSeconds(RevSeconds("FACTORY_REVOCATIONS_ALARM_SECONDS", 180, 1, 3600));
+var revAttemptLimit = TimeSpan.FromSeconds(revocationOptions.AttemptSeconds);
+var revAlarmAfter = TimeSpan.FromSeconds(revocationOptions.AlarmSeconds);
 var revSince = DateTime.UtcNow; var revAttempts = 0;   // failed or timed-out attempts so far (read by /ready)
 // Nothing to read: owner sessions, messaging, the supervisor and the operator are all off in the configuration (no session credential is issued), or the gateway
 // has no GitHub identity (no App key, or no GH_TOKEN; the vault placeholder 'unset' counts as none). Such a gateway becomes ready at once instead of
 // retrying a read that can never succeed; /api/v1/status names the reason under "revocations", and revoke is refused. A configured identity whose
 // read fails (a wrong key, a GitHub error) still keeps the gateway un-ready: that is never failed open.
-var revSkipReason = !ownerMode ? "" : !ConfigBool(scriptsDir, "ownerSessions") && !messaging.On && !messaging.OperatorEnabled ? "owner-sessions-off" : !GitHubConfigured() ? "github-not-configured" : "";
+var revSkipReason = !ownerMode ? "" : !instanceConfig.OwnerSessions && !messaging.On && !messaging.OperatorEnabled ? "owner-sessions-off" : !revocationOptions.GitHubConfigured ? "github-not-configured" : "";
 if (revSkipReason != "") Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"revocations\":\"skipped\",\"reason\":\"{revSkipReason}\",\"warning\":\"revoked credentials are not read and cannot be revoked\"}}");
-static bool Unset(string? v) => string.IsNullOrWhiteSpace(v) || v.Trim() == "unset";
-static bool GitHubConfigured()
-{
-    if (Environment.GetEnvironmentVariable("FACTORY_AUTHOR_APP") == "1")
-    {
-        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("FACTORY_FAKE_APPS"))) return true;   // an absent variable may still have a key in the keyring of a local gateway: only an empty or placeholder value is known to be none
-        var key = Environment.GetEnvironmentVariable("FACTORY_APP_AUTHOR_KEY");
-        return key == null || !Unset(key);
-    }
-    return !Unset(Environment.GetEnvironmentVariable("GH_TOKEN"));
-}
 if (!ownerMode || tokenSecret.Length == 0 || revocationsOff || revSkipReason != "") revocationsLoaded.SetResult();
 else _ = Task.Run(async () =>
 {
@@ -553,7 +482,6 @@ if (leaderOn)
     });
 }
 
-static bool FixedEquals(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
 Principal Who(HttpContext c) => (Principal)c.Items["principal"]!;
 // {name, url} of the AI session behind a session credential, null for the operator, the gateway itself and a click. octopus and cae-job: the
 // gateway's transcript page; cursor-cloud and copilot-cloud: the agent's or task's page; the on-demand manager: its Copilot session; a connected
@@ -573,7 +501,6 @@ JsonObject? SessionLinkOf(Principal p)
     if (url != "" && !(url.StartsWith("https://", StringComparison.Ordinal) || url.StartsWith("http://", StringComparison.Ordinal)) || url.Contains('?') || url.Contains('#') || url.Any(char.IsWhiteSpace)) url = "";
     return new JsonObject { ["name"] = p.Name, ["url"] = url };
 }
-static async Task Refuse(HttpContext c, int status, string code, string reason, int exit = 30) { c.Response.StatusCode = status; await c.Response.WriteAsJsonAsync(new { ok = false, code, reason, exit }); }
 
 app.Use(async (ctx, next) =>
 {
@@ -2243,22 +2170,10 @@ async Task OperatorStream(HttpContext ctx, Principal who, string name, long afte
 // how long until the next `: ping` of a stream is due (zero: now)
 TimeSpan PingDue(DateTime lastPing) { var left = lastPing.AddSeconds(ssePingSeconds) - DateTime.UtcNow; return left > TimeSpan.Zero ? left : TimeSpan.Zero; }
 string Sid(long id) => messaging.On ? $"{plant.Epoch}.{id}" : id.ToString();
-static long ParseCursor(string header, string epoch)
-{
-    var i = header.LastIndexOf('.');
-    return i > 0 && header[..i] == epoch && long.TryParse(header[(i + 1)..], System.Globalization.NumberStyles.None, null, out var n) ? n : 0;
-}
-static IResult Fail(int status, string code, string reason, int exit) => Results.Json(new { ok = false, code, reason, exit }, statusCode: status);
-static async Task<(string Text, bool TooLarge)> ReadBody(HttpContext ctx, int max)
-{
-    var buf = new byte[max + 1]; var n = 0; int r;
-    while (n <= max && (r = await ctx.Request.Body.ReadAsync(buf.AsMemory(n, max + 1 - n))) > 0) n += r;
-    return n > max ? ("", true) : (Encoding.UTF8.GetString(buf, 0, n), false);
-}
 
 app.MapMcp("/mcp");
 // the worker sessions of r1 holders at /mcp (gateway/Mcp/WorkerSessions.cs): registered with the plant at their first call, idle ones end
-var mcpSessions = new WorkerSessions(plant) { IdleMinutes = TimingValue(scriptsDir, "mcpIdleMinutes", 30) };
+var mcpSessions = new WorkerSessions(plant) { IdleMinutes = timing.McpIdleMinutes };
 mcpSessionsRef = mcpSessions;
 // a worker session that ends (session_end, idle, revoke, the plant closing its stream) stops what runs it: the Cursor agent is cancelled and deleted
 mcpSessions.OnEnded = async (name, reason) =>
