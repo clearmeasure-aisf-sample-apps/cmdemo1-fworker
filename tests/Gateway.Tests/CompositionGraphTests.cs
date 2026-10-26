@@ -21,6 +21,7 @@ public static class CompositionGraph
         typeof(LeadershipService), typeof(RevocationService), typeof(IRevocationService), typeof(OperatorReleaseLoader), typeof(IOperatorReleaseLoader),
         typeof(LeaseSettings), typeof(HostSettings), typeof(ManagerActionSettings), typeof(BaseUpdateSettings), typeof(RuntimeSettings),
         typeof(CursorCloudSettings), typeof(CopilotCloudSettings), typeof(Plant), typeof(Messenger), typeof(QcHub), typeof(BaseWatch),
+        typeof(ManagerCopilotSettings),
     };
 
     /// <summary>The interfaces registered as aliases of a concrete singleton: both resolve to the same instance.</summary>
@@ -73,7 +74,7 @@ public sealed class CompositionGraphTests(TwoPortGateway gw) : IClassFixture<Two
     {
         if (!StubPwsh.Supported) return;
         var order = CompositionGraph.GatewayHostedOrder(gw.Host.Services);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "PlantTicker" }, order);
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "PlantTicker", "McpSessionSweeper" }, order);
         CompositionGraph.AssertHostedAreSingletons(gw.Host.Services);
     }
 
@@ -167,7 +168,7 @@ public sealed class CompositionGraphRuntimesTests(RuntimesOnGateway gw) : IClass
     {
         if (!StubPwsh.Supported) return;
         var order = CompositionGraph.GatewayHostedOrder(gw.Host.Services);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "RuntimeLoop", "RuntimeLoop", "PlantTicker" }, order);
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "BaseWatch", "Sweeper", "RuntimeLoop", "RuntimeLoop", "PlantTicker", "McpSessionSweeper" }, order);
         CompositionGraph.AssertHostedAreSingletons(gw.Host.Services);
     }
 
