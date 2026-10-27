@@ -4,7 +4,7 @@
 # journal (ci-released: a read and a save of the state under the item lock) is called directly, on an item that is not factory work. The fake
 # GitHub's control state-race makes the next single reads of a state comment find another process's write first.
 
-function Sg-Release([int]$n, [string]$Key) { Pm-Server 'journal' @{ item = $n; event = 'ci-released'; key = $Key; fields = @{ release = $Key; reason = 'test' } } }
+function Sg-Release([int]$n, [string]$Key) { Pm-Server 'journal' @{ item = $n; event = 'ci-released'; key = $Key; fields = @{ run = $Key; pr = 1; sha7 = 'abcdef0'; branch = "b-$Key" } } }
 function Sg-StateComment([int]$n) { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)".StartsWith('<!-- factory-state:') })[0] }
 # the item's state comment rewritten with $St (as another process, or an older gateway, would leave it)
 function Sg-PutState([int]$n, $St) {
@@ -42,7 +42,7 @@ $StateGuardScenarios['state guard: a save that finds the comment changed since t
         Fake 'state-race' @{ times = 0 } | Out-Null
         $st = Pm-State $n
         Check 'refused with exit 11 and the code state-conflict' ($r.exit -eq 11 -and "$($r.code)" -eq 'state-conflict') ($r | ConvertTo-Json -Compress)
-        Check 'the other process''s state stands: no release d, three attempts raised rev by the three other writes only' (-not (@($st.journal.ciReleased) -match ' d$' ) -and @($st.journal.ciReleased).Count -eq 2 -and $st.rev -eq $before + 3) ($st | ConvertTo-Json -Compress -Depth 5)
+        Check 'the other process''s state stands: no release d, three attempts raised rev by the three other writes only' (-not (@($st.journal.ciReleased) -match 'run d ') -and @($st.journal.ciReleased).Count -eq 2 -and $st.rev -eq $before + 3) ($st | ConvertTo-Json -Compress -Depth 5)
         $r = Sg-Release $n 'd'; CheckExit 'once the other writes stop, the same call succeeds' $r 0
         Check 'and records the release' ($r.recorded -eq $true -and @((Pm-State $n).journal.ciReleased).Count -eq 3) ((Pm-State $n) | ConvertTo-Json -Compress -Depth 5)
     } finally { Fake 'state-race' @{ times = 0 } | Out-Null }
