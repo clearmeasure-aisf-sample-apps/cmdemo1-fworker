@@ -1909,8 +1909,16 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // scope (issue 92): the items of an incremental pass. Only they were read, so owners and unanswered assignments of every other item are kept.
     // sweepStarted: when the sweep that made this plan started reading the board. An owner it names for an item that was merged after that is not
     // put back: the sweep read the claim before the merge removed it (issue 107).
+    // The leader lease (Leader.cs; set by LeadershipService): false once a newer process holds it. A plan made from a sweep that began while this process held
+    // the lease, and ended after it lost it, is dropped (W0.1, delivery-speed.md 18.1.1): the successor plans from its own sweep.
+    public Func<bool>? MayAct { get; set; }
     public void Plan(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned = null, IEnumerable<int>? keep = null, JsonObject? priorities = null, DateTime? sweepStarted = null, IReadOnlyCollection<int>? scope = null, JsonObject? runtimes = null, JsonObject? profiles = null)
     {
+        if (MayAct?.Invoke() == false)
+        {
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["plant"] = "plan-fenced", ["reason"] = "this process no longer holds the leader lease; the plan of a sweep that ended after the hand-over is dropped" }.ToJsonString());
+            return;
+        }
         try { PlanLocked(offers, owners, pins, owned, keep, priorities, sweepStarted, scope, runtimes, profiles); }
         finally { LaunchProvisions(); }
     }

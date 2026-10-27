@@ -60,6 +60,9 @@ if ($Rest.Count -ge 2 -and $Rest[0] -eq '--server') {
         # call whose request the gateway served when it started this run (gateway/TestCause.cs), sent as X-Fake-Cause with every write
         $script:FactoryCause = $null
         if ($env:FACTORY_TEST_CAUSE_HEADER -eq '1' -and $a -is [System.Collections.IDictionary] -and $a.ContainsKey('_cause')) { $script:FactoryCause = "$($a['_cause'])"; $a.Remove('_cause') }
+        # fencing (W0.1, lib/Leader.ps1): the lease epoch the gateway runs this verb under (gateway/Runner.cs); from here every write first confirms it
+        $script:LeaseFence = $null
+        if ($a -is [System.Collections.IDictionary] -and $a.ContainsKey('_lease')) { $lease = $a['_lease']; $a.Remove('_lease'); if ($verb -ne 'leader-lease') { Set-LeaseFence $lease } }
         $fn = 'Verb_' + ($verb -replace '-', '_')
         $r = if ((Test-Has $a 'item') -and $verb -notin $NoLockVerbs) { Use-ItemLock ([int]$a.item) { & $fn $a } } else { & $fn $a }
         $r.verb = $verb

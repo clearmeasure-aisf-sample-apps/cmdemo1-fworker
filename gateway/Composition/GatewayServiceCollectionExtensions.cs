@@ -70,6 +70,8 @@ static class GatewayServiceCollectionExtensions
         var leader = new GatewayLeader(c.Runner, leaderSettings,
             (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0");
         services.AddSingleton<ILeadership>(leader);
+        // fencing (W0.1): the rule scripts that act on the board run under this process's lease epoch and refuse their writes once it is lost (Runner.InjectLease)
+        c.Runner.Lease = () => leader.FenceLease;
         // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
         var sweepGap = new SweepGap();
         // the plant snapshot and the lease's start, hand-over and stop (gateway/Leadership/): the restore before the first sweep, the write of every change

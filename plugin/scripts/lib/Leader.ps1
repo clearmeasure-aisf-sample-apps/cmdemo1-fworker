@@ -107,3 +107,53 @@ function Verb_leader_lease($a) {
         default { Reject 2 'usage' 'action is acquire, renew, check or release' }
     }
 }
+
+# ---- fencing (W0.1, docs/design/delivery-speed.md 18.1.1) ----------------------------------------------------------------------------------------
+# The gateway adds "_lease": { epoch, holder } to the rule scripts that act on the board (gateway/Runner.cs: sync-board, auto-promote, merge, ...).
+# While it is set ($script:LeaseFence, Core.ps1), every write to GitHub (Invoke-GhRaw) and Octopus (Invoke-OctoPost), and each step of the sweep and the
+# promotion that acts, first asks Test-LeaseHeld: is the lease ref still this epoch's? The read is conditional (an unchanged ref answers 304, which
+# GitHub does not count) and its answer is kept for timing.fenceCheckSeconds (5), so a script pays for one read per few seconds, not one per write.
+# Once the lease was found lost it stays lost for the run (an epoch only grows). A lease that cannot be read keeps the script acting, as the gateway's
+# own check does (gateway/Leader.cs Hold): fencing narrows the window of a stale write, it does not need GitHub to be reachable.
+function Set-LeaseFence($Lease) {
+    $script:LeaseFence = $null
+    if ($Lease -is [System.Collections.IDictionary] -and (Test-Has $Lease 'epoch') -and (Test-Has $Lease 'holder') -and [long]$Lease['epoch'] -gt 0) {
+        $script:LeaseFence = @{ epoch = [long]$Lease['epoch']; holder = "$($Lease['holder'])"; checkedAt = [DateTime]::MinValue; etag = ''; lost = $null; verb = '' }
+    }
+}
+
+function Test-LeaseHeld {
+    $f = $script:LeaseFence
+    if ($null -eq $f) { return $true }
+    if ($f.lost) { return $false }
+    $ttl = 5.0; try { $c = Get-Cfg; if ((Test-Has $c 'timing') -and (Test-Has $c.timing 'fenceCheckSeconds')) { $ttl = [double]$c.timing.fenceCheckSeconds } } catch { }
+    if (([DateTime]::UtcNow - $f.checkedAt).TotalSeconds -lt $ttl) { return $true }
+    try {
+        $cur = Read-LeaderLease $f.etag
+        $f.checkedAt = [DateTime]::UtcNow
+        if ($cur.ContainsKey('unchanged') -or $cur.ContainsKey('missing')) { return $true }
+        if ($cur.etag) { $f.etag = "$($cur.etag)" }
+        $rec = $cur.record
+        if ($rec -and ([long]$rec.epoch -ne $f.epoch -or "$($rec.holder)" -ne $f.holder -or ($rec.Contains('released') -and $rec.released -eq $true))) {
+            $f.lost = @{ current_epoch = [long]$rec.epoch; current_holder = "$($rec.holder)"; released = [bool]($rec.Contains('released') -and $rec.released -eq $true) }
+            return $false
+        }
+    } catch { }
+    return $true
+}
+
+# What a fenced step reports: the epoch this run held, the epoch that holds the lease now, and the step that was refused
+function Get-LeaseFenceInfo([string]$Step) {
+    $f = $script:LeaseFence
+    $o = @{ code = 'lease-lost'; step = $Step; epoch = $(if ($f) { $f.epoch } else { 0 }); current_epoch = 0; current_holder = '' }
+    if ($f -and $f.lost) { $o.current_epoch = $f.lost.current_epoch; $o.current_holder = $f.lost.current_holder }
+    return $o
+}
+
+# One line for the gateway's log (the runner copies a script's stderr there) and a refusal. Used before a write; $Step says which.
+function Assert-LeaseHeld([string]$Step) {
+    if (Test-LeaseHeld) { return }
+    $i = Get-LeaseFenceInfo $Step
+    try { [Console]::Error.WriteLine((@{ fence = 'refused'; code = 'lease-lost'; step = $Step; epoch = $i.epoch; current_epoch = $i.current_epoch; current_holder = $i.current_holder } | ConvertTo-Json -Compress)) } catch { }
+    Reject 20 'lease-lost' "this gateway no longer holds the leader lease (its epoch $($i.epoch), the lease is at epoch $($i.current_epoch)); the step was not performed: $Step" @{ step = $Step; epoch = $i.epoch; current_epoch = $i.current_epoch; current_holder = $i.current_holder; retryAfterSeconds = 60 }
+}

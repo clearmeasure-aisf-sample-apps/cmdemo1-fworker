@@ -69,6 +69,50 @@ $LeaderScenarios['leader: the lease is a compare-and-swap with a growing epoch; 
     Check 'a final snapshot of epoch 2 does not overwrite the snapshot of epoch 3 (exit 11 snapshot-newer)' ($s1.exit -eq 0 -and $s2.exit -eq 11 -and $s2.code -eq 'snapshot-newer' -and $ld.snapshot.epoch -eq 3) "$($s2 | ConvertTo-Json -Compress) / $($ld.snapshot | ConvertTo-Json -Compress)"
 }
 
+# Fencing (W0.1, docs/design/delivery-speed.md 18.1.1): the gateway runs its sweep, merges and promotions under the lease epoch it holds ("_lease" in the
+# input of the rule script, gateway/Runner.cs); a script whose epoch a newer process has replaced does none of its writes. The scripts are called directly
+# here with the lease of a process that was superseded, as the gateway's hand-over leaves one that is still running.
+$LeaderScenarios['leader: fencing: a rule script under a superseded lease refuses its writes and its sweep stops, while the holder''s scripts act as before'] = {
+    $a = Ld-Leader 'gw-fence-a' 'acquire'; $b = Ld-Leader 'gw-fence-b' 'acquire'
+    Check 'a newer process holds the lease (epoch higher than the first process''s)' ($a.exit -eq 0 -and $b.exit -eq 0 -and $b.epoch -gt $a.epoch) (($a, $b) | ConvertTo-Json -Compress -Depth 4)
+    if ($a.exit -ne 0 -or $b.exit -ne 0) { return }
+    $stale = @{ epoch = $a.epoch; holder = 'gw-fence-a' }; $cur = @{ epoch = $b.epoch; holder = 'gw-fence-b' }
+    $n = New-Item-Fake 'Fence trial' 'x' @('factory worker')
+    $w = Qc-Server 'comment' @{ item = $n; body = 'written by a superseded gateway'; _lease = $stale }
+    Check 'a write under the stale epoch is refused: exit 20, lease-lost, both epochs and the step named' ($w.exit -eq 20 -and $w.code -eq 'lease-lost' -and $w.epoch -eq $a.epoch -and $w.current_epoch -eq $b.epoch -and "$($w.step)" -match 'POST .*issues/\d+/comments') ($w | ConvertTo-Json -Compress -Depth 4)
+    Check 'and nothing was written' (@((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'written by a superseded gateway' }).Count -eq 0)
+    $s = Qc-Server 'sync-board' @{ _lease = $stale }
+    Check 'a sweep under the stale epoch stops and says so: fenced names the epochs, no offer, no action, the tail steps deferred' ($s.exit -eq 0 -and $s.fenced -is [System.Collections.IDictionary] -and $s.fenced.code -eq 'lease-lost' -and $s.fenced.epoch -eq $a.epoch -and $s.fenced.current_epoch -eq $b.epoch -and @($s.offers).Count -eq 0 -and @($s.actions).Count -eq 0 -and 'fenced' -in @($s.skipped) -and 'claim-ref-reap-deferred' -in @($s.skipped)) ($s | ConvertTo-Json -Compress -Depth 4)
+    $w2 = Qc-Server 'comment' @{ item = $n; body = 'written by the holder'; _lease = $cur }
+    Check 'the holder''s write under the current epoch is made' ($w2.exit -eq 0 -and @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'written by the holder' }).Count -eq 1) ($w2 | ConvertTo-Json -Compress -Depth 4)
+    $s2 = Qc-Server 'sync-board' @{ _lease = $cur; dry = $true }
+    Check 'and its sweep is not fenced' ($s2.exit -eq 0 -and $null -eq $s2.fenced -and 'fenced' -notin @($s2.skipped)) ($s2 | ConvertTo-Json -Compress -Depth 3)
+    $w3 = Qc-Server 'comment' @{ item = $n; body = 'no lease at all (the lease is off, a worker''s call)' }
+    Check 'a script run without a lease is not fenced' ($w3.exit -eq 0 -and @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'no lease at all' }).Count -eq 1) ($w3 | ConvertTo-Json -Compress -Depth 4)
+}
+
+$LeaderScenarios['leader: fencing: a sweep already running when a newer process takes the lease stops at its next item and answers fenced'] = {
+    $a = Ld-Leader 'gw-flight-a' 'acquire'
+    if ($a.exit -ne 0) { Check 'the first process takes the lease' $false ($a | ConvertTo-Json -Compress); return }
+    [void](New-Item-Fake 'Flight one' 'x' @('factory worker')); [void](New-Item-Fake 'Flight two' 'x' @('factory worker'))
+    $in = Join-Path $script:Work 'flight-in.json'; $out = Join-Path $script:Work 'flight-out.json'
+    (@{ _lease = @{ epoch = $a.epoch; holder = 'gw-flight-a' }; test_item_delay_ms = 4000; budget_seconds = 100 } | ConvertTo-Json -Compress) | Set-Content $in
+    # the lease is checked at every item (no keep time), and the item loop is slowed so the sweep is still running when the lease moves
+    $old = Ld-SetEnv @{ FACTORY_TIMING_fenceCheckSeconds = '0' }
+    try { $p = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', (Join-Path $script:Root 'plugin/scripts/factory.ps1'), '--server', 'sync-board') -RedirectStandardInput $in -RedirectStandardOutput $out -RedirectStandardError (Join-Path $script:Work 'flight-err.txt') -PassThru }
+    finally { [void](Ld-SetEnv $old) }
+    Start-Sleep -Seconds 3
+    $b = Ld-Leader 'gw-flight-b' 'acquire'
+    Check 'a newer process takes the lease while the sweep runs' ($b.exit -eq 0 -and $b.epoch -gt $a.epoch) ($b | ConvertTo-Json -Compress)
+    $done = $p.WaitForExit(120000)
+    Check 'the running sweep ends by itself, well before it would have finished its item loop' $done
+    if (-not $done) { try { $p.Kill($true) } catch { } ; return }
+    $j = try { (Get-Content -Raw $out | ConvertFrom-Json -AsHashtable) } catch { @{} }
+    Check 'its answer says fenced, with both epochs, and defers the tail steps' ($j.ContainsKey('fenced') -and $j.fenced -is [System.Collections.IDictionary] -and $j.fenced.code -eq 'lease-lost' -and $j.fenced.epoch -eq $a.epoch -and $j.fenced.current_epoch -eq $b.epoch -and 'fenced' -in @($j.skipped) -and 'intake-deferred' -in @($j.skipped)) ((Get-Content -Raw $out) -replace '\s+', ' ')
+    $err = if (Test-Path (Join-Path $script:Work 'flight-err.txt')) { Get-Content -Raw (Join-Path $script:Work 'flight-err.txt') } else { '' }
+    Check 'and its log line (stderr, copied into the gateway log) names the refusal' ($err -match '"fence":"sweep-stopped"' -and $err -match '"code":"lease-lost"') $err
+}
+
 $LeaderScenarios['leader: two gateways overlap: the newer takes the lease, the older stops acting, writes its final snapshot and hands its streams over; the newer restores it before its first sweep [full]'] = {
     $old = Ld-SetEnv ($script:LeaderEnv + @{ FACTORY_ASSIGN_ACK_SECONDS = '90' })
     $oldUrl = $env:FACTORY_URL; $b = $null

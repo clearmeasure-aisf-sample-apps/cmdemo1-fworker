@@ -21,7 +21,7 @@ sealed class RunnerPool
 {
     sealed class Worker
     {
-        public required Process P; public required string Mark; public int Calls; public int Dead; public volatile bool Busy; public DateTime ReadyAt;
+        public required Process P; public required string Mark; public int Calls; public int Dead; public volatile bool Busy; public volatile string? Verb; public DateTime ReadyAt;
         public readonly StringBuilder Err = new();
         public string TakeErr() { lock (Err) { var s = Err.ToString(); Err.Clear(); return s; } }
     }
@@ -57,6 +57,15 @@ sealed class RunnerPool
     // the live workers' processes (the memory of /status, gateway/RunnerGate.cs)
     public IEnumerable<Process> Processes() => all.Values.Select(w => w.P).ToList();
     static void Kill(Worker w) { try { if (!w.P.HasExited) w.P.Kill(true); } catch { } }
+
+    // Ends the workers that are running a call of one of these verbs now (the fencing of a superseded gateway, Runner.DrainFencedAsync): the call fails as one
+    // whose worker died does, and the worker is replaced. Returns how many it ended.
+    public int KillBusy(Func<string, bool> verbs)
+    {
+        var n = 0;
+        foreach (var w in all.Values.ToList()) if (w.Busy && w.Verb is { } v && verbs(v)) { Kill(w); n++; }
+        return n;
+    }
 
     // Ends a worker (once) and starts its replacement.
     void Retire(Worker w)
@@ -120,7 +129,7 @@ sealed class RunnerPool
         {
             bool gone; try { gone = c.Dead != 0 || c.P.HasExited; } catch { gone = true; }
             if (gone) { Retire(c); continue; }
-            c.Busy = true; w = c; break;
+            c.Verb = verb; c.Busy = true; w = c; break;
         }
         if (w is null) return null;
 
