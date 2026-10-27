@@ -1,0 +1,10 @@
+# suite: owner
+# scenario: leader: fencing: a rule script under a superseded lease refuses its writes and its sweep stops, while the holder's scripts act as before
+# runs: 2
+~ rule PATCH /repos/{repo}/git/refs/factory/factory-worker/gateway-leader 200 {"force":false,"sha":"{sha}"}
+~ rule POST /repos/{repo}/git/commits 201 {"message":"{\"acquired_at\":\"{time}\",\"epoch\":1,\"holder\":\"gw-fence-a\",\"kind\":\"gateway-leader\",\"predecessor\":null,\"released\":false,\"renewed_at\":\"{time}\",\"replica\":\"\",\"revision\":\"\",\"until\":\"{time}\",\"v\":1,\"version\":\"test\"}","parents":[],"tree":"{sha}"}
+~ rule POST /repos/{repo}/git/commits 201 {"message":"{\"acquired_at\":\"{time}\",\"epoch\":2,\"holder\":\"gw-fence-b\",\"kind\":\"gateway-leader\",\"predecessor\":{\"acquired_at\":\"{time}\",\"epoch\":1,\"holder\":\"gw-fence-a\",\"released\":false,\"renewed_at\":\"{time}\",\"replica\":\"\",\"revision\":\"\",\"until\":\"{time}\",\"version\":\"test\"},\"released\":false,\"renewed_at\":\"{time}\",\"replica\":\"\",\"revision\":\"\",\"until\":\"{time}\",\"v\":1,\"version\":\"test\"}","parents":["{sha}"],"tree":"{sha}"}
+~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/gateway-leader","sha":"{sha}"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: no lease at all (a worker's call, the lease is off)\n\n<!-- factory-journal:factory-worker -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: written by the holder\n\n<!-- factory-journal:factory-worker -->"}
+~ rule STATE factory-worker v1 #{#1}

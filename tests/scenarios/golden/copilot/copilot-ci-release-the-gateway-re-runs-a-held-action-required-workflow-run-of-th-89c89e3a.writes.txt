@@ -1,11 +1,11 @@
 # suite: copilot
 # scenario: copilot: CI release: the gateway re-runs a held (action_required) workflow run of the item's copilot/ pull request head with its App, once; a head mismatch and another env's item are skipped; a 403 is surfaced as an owner action
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/ci-{#1}","title":"[WIP] Ci"}
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","head":"copilot/uat-{#3}","title":"Fix #{#3}"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 = harness PATCH /repos/{repo}/issues/{#3} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"copilot/ci-{#1}","create_pull_request":false,"prompt":"{len:6817 sha256:6de8e396 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"copilot/ci-{#1}","create_pull_request":false,"prompt":"{len:7217 sha256:c4a158ed \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 + rule PATCH /repos/{repo}/pulls/{#2} 200 {"title":"Ci (#{#1})"}
 + rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#2}"}}

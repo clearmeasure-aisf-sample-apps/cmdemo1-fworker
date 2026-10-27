@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: the owner's later draft on its own branch (not stacked, the older pull request closed) is the item's current pull request: marked ready, never the closed one, and the item moves on [full]
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/old-{#1}","title":"Later (#{#1})"}
 = harness PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/later-{#1}","title":"Later again (#{#1})"}
@@ -14,7 +14,7 @@
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: Development is done pending checks: it already has its pull request with changes; no new Development task is started, and PR #{#3} carries the change (head `{sha}`). The gateway waits for its checks and moves the item on when they are green; red checks go back to Development to fix forward.\n\n<!-- factory-journal:factory-worker -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#3} checks are green; development complete. Completed by the gateway: it already has its pull request with changes; no new Development task is started.\n\n<!-- factory-journal:factory-worker -->"}
 + rule STATE factory-worker v1 #{#1}
-~ gateway POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:7674 sha256:0a8f1b94 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
+~ gateway POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:8074 sha256:6197bcce \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Functional Testing** (task `{task}#1`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task}#1 -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (settled); offering to the next worker.\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}

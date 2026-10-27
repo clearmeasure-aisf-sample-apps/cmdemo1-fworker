@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: board guard: a labelled issue missing from the board is added in Technical Design and offered
-# runs: 3
+# runs: 2
 = harness PATCH /repos/{repo}/issues/{#4} 200 {"state":"closed"}
 ~ rule POST /graphql addProjectV2ItemById 200 {"query":"mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }","variables":{"c":"I_{#1}","p":"PVT_fake"}}
 ~ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Technical_Design","p":"PVT_fake"}}

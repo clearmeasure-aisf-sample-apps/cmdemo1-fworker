@@ -1,12 +1,12 @@
 # suite: copilot
 # scenario: copilot: a red master after the merge resumes the owner task once to fix forward; the owner is done only once master is green and the change is in production [full]
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/red-{#1}","title":"Red (#{#1})"}
 = harness STATE factory-worker v1 #{#1}
 = harness STATE factory-worker v1 #{#1}
 = harness STATE factory-worker v1 #{#1}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:4c23e87d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7038 sha256:34a75812 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 + gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"@copilot Follow-up session of the task that owns #{#1}: master is red after PR #{#2} was merged as {sha} (failed: Build result). Fix forward: make a new branch from master, fix the failing checks, run the tests, push and open ONE pull request against master titled \"Fix master after #{#2} (#{#1})\". Never wait for CI; end the session after opening it."}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}

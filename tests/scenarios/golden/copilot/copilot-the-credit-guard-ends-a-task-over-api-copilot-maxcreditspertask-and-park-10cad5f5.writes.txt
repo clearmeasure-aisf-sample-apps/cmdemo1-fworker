@@ -1,9 +1,9 @@
 # suite: copilot
 # scenario: copilot: the credit guard ends a task over api.copilot.maxCreditsPerTask and parks its item credit-guard; after an unpark, an item whose pull request already carries the change starts no new Development task: it waits for its checks
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/credit-{#1}","title":"Credit (#{#1})"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7028 sha256:7cd71330 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 + rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#2}"}}
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}
@@ -11,9 +11,7 @@
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cop-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cop-{session} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `credit-guard` released early by the operator: credit spike looked at. The next sweep takes it up again in **Development**.\n\n<!-- plant event=unparked key={time} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: parked\n\n<!-- plant event=parked key={time} -->"}
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (failed); offering to the next worker. Copilot session: {agent-url}\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (settled); offering to the next worker.\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **Owner:** Copilot task [{task}]({agent-url}) owns #{#1} from Development until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item.\n\n<!-- factory-journal:factory-worker -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: Development is done pending checks: it already has its pull request with changes; no new Development task is started, and PR #{#2} carries the change (head `{sha}`). The gateway waits for its checks and moves the item on when they are green; red checks go back to Development to fix forward.\n\n<!-- factory-journal:factory-worker -->"}
 + rule STATE factory-worker v1 #{#1}
-~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `development:awaiting-checks` removed by the sweep: the item is closed. The item is closed: nothing is offered.\n\n<!-- plant event=unparked key=closed|{time} -->"}
-~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (settled); offering to the next worker.\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}

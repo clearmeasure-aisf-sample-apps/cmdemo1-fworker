@@ -1,11 +1,11 @@
 # suite: copilot
 # scenario: copilot: one task owns the item end to end: Technical Design opens the draft, Development and Functional Testing are follow-up sessions of the same task on that pull request, no other worker is offered the item, the draft is marked ready, and the owner is done only after the merge, a green master and the production delivery [full]
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/own-{#1}","title":"[WIP] Own"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:4c23e87d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
-+ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7672 sha256:183aea01 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
-+ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8143 sha256:35f9058d \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7038 sha256:34a75812 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8072 sha256:fd908732 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
++ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8543 sha256:e52e2a31 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 + rule PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed","state_reason":"completed"}

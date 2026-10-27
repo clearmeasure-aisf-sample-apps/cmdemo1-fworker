@@ -1,6 +1,6 @@
 # suite: copilot
 # scenario: copilot: a recorded pull request that was closed (a migration, a takeover) is replaced by the open pull request of the owner task's branch; the wait for checks follows it and the item moves on, not parked stuck [full]
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/old-{#1}","title":"Old (#{#1})"}
 = harness PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/cur-{#1}","title":"Cur (#{#1})"}
@@ -13,6 +13,6 @@
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR #{#3} checks are green; development complete. test\n\n<!-- factory-journal:factory-worker -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: The item's pull request is now #{#3}, the open pull request of the owner task's branch `copilot/cur-{#1}` (the recorded #{#2} is closed or superseded).\n\n<!-- factory-journal:factory-worker -->"}
 + rule STATE factory-worker v1 #{#1}
-~ gateway POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:7672 sha256:b83002bf \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
+~ gateway POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:8072 sha256:3afe46d9 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Functional Testing** (task `{task}#1`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task}#1 -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cop-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cop-{session} -->"}

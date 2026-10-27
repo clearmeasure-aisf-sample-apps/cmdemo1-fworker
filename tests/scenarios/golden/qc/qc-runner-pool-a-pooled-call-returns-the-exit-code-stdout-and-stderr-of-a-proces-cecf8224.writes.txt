@@ -1,4 +1,4 @@
 # suite: qc
 # scenario: qc: runner pool a pooled call returns the exit code, stdout and stderr of a process call
-# runs: 3
+# runs: 2
 ~ rule STATE factory-worker v1 #{#1}

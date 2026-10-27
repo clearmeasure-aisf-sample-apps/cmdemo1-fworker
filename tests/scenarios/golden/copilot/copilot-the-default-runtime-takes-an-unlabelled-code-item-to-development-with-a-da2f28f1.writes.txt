@@ -1,11 +1,11 @@
 # suite: copilot
 # scenario: copilot: the default runtime takes an unlabelled code item to Development with a pull request by Copilot; pr_open takes over its draft on the copilot/ branch; Functional Testing starts from that branch
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/thing-{#1}","title":"[WIP] Thing"}
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/other-{#1}","title":"Fix #{#far}"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
-+ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7674 sha256:ee077a9a \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7028 sha256:7cd71330 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8074 sha256:e3f6d5a0 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 + rule PATCH /repos/{repo}/pulls/{#2} 200 {"title":"Thing (#{#1})"}
 + rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#2}"}}

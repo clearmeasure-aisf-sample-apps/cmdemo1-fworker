@@ -1,0 +1,6 @@
+# suite: auto
+# scenario: orphan claim refs: a busy item lock does not stall the sweep; a later sweep removes the ref once the lock is free (issue 400) [full]
+# runs: 2
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
+= harness POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -

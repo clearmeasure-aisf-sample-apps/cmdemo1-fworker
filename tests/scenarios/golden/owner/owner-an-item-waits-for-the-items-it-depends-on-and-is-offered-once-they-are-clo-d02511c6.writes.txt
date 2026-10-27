@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: an item waits for the items it depends on and is offered once they are closed
-# runs: 3
+# runs: 2
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 = harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}
 + rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **dep1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|dep1 -->"}

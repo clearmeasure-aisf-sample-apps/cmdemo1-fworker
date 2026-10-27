@@ -1,0 +1,5 @@
+# suite: owner
+# scenario: state guard: a state over the 48,000-character budget is trimmed (promote_health, flow, lineage, oldest first), stays valid, and the trim is recorded
+# runs: 2
+= harness STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#1}
