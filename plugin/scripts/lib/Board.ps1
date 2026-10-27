@@ -250,7 +250,8 @@ function Get-StateEntryCount($S, [string]$Key) {
 function Limit-StateBudget($S, [scriptblock]$Measure) {
     $before = & $Measure; $len = $before; $dropped = @{}
     $room = 400   # (kept free for the record of the trim itself)
-    while ($len -gt ($script:StateBudget - $room)) {
+    # (trimmed only over the budget itself, down to the budget less the room: a state at the budget is not trimmed again for the record it carries)
+    while ($len -gt $script:StateBudget -or ($dropped.Count -gt 0 -and $len -gt ($script:StateBudget - $room))) {
         # a round drops $step entries of each collection. Sized from the average characters per entry (an over-estimate: the state's other keys
         # count too), so a round never drops more than the excess needs; the last rounds go one entry at a time. Each measure serializes the whole state.
         $entries = 0; foreach ($k in $script:StateTrimOrder) { $entries += Get-StateEntryCount $S $k }
@@ -269,7 +270,7 @@ function Limit-StateBudget($S, [scriptblock]$Measure) {
     if ($dropped.Count -gt 0) {
         # the record (journal.trims, the last 5, and the gateway log): when, from how many characters, what was dropped
         if (-not (Test-Has $S 'journal')) { $S.journal = @{ keys = @(); count = 0 } }
-        $prev = if (Test-Has $S.journal 'trims') { @($S.journal.trims) } else { @() }
+        $prev = @(if (Test-Has $S.journal 'trims') { $S.journal.trims })
         $S.journal.trims = @($prev + @(@{ at = (ConvertTo-Iso (Get-UtcNow)); before = $before; dropped = $dropped }) | Select-Object -Last 5)
         [Console]::Error.WriteLine("state of #$($S.item) over the $($script:StateBudget)-character budget ($before): dropped $(($dropped.Keys | Sort-Object | ForEach-Object { "$_ x$($dropped[$_])" }) -join ', ')")
         $len = & $Measure
