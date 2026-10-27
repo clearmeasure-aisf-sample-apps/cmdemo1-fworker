@@ -51,10 +51,17 @@ public sealed class EngineOptionsTests : IDisposable
     }
 
     [Fact]
-    public void DeployOverrides_DoNotSwitchAnEngineYet()
+    public void DeployOverrides_PutTddInShadowAndNothingInV2()
     {
-        // the plan moves tdd into shadowEnvironments at W2 and v2Environments at W9.9, in a pull request of its own
-        Assert.DoesNotContain("\"engine\"", File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")));
+        // W2 "tdd joins shadow mode": the deployed image merges engine.shadowEnvironments = [tdd] over the empty default; v2Environments stays empty
+        // until W9.9, so v1 still acts everywhere. Changing this pin is a protected-area change (deploy.overrides.json) and needs its own pull request.
+        var merged = ApplyOverrides.Merge(File.ReadAllText(Path.Combine(RepoRoot(), "config", "instance.json")), File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")));
+        Assert.Equal(new[] { "tdd" }, merged["engine"]!["shadowEnvironments"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
+        Assert.Empty(merged["engine"]!["v2Environments"]!.AsArray());
+        var cfg = Config(merged["engine"]!.ToJsonString() is var j ? "{\"engine\":" + j + "}" : "");
+        Assert.Equal(EngineMode.Shadow, EngineOptions.From(cfg, "tdd", Env()).Mode);
+        Assert.Equal(EngineMode.V1, EngineOptions.From(cfg, "uat", Env()).Mode);
+        Assert.Equal(EngineMode.V1, EngineOptions.From(cfg, "prod", Env()).Mode);
     }
 
     [Theory]
