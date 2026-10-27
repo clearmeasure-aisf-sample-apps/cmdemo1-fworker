@@ -88,6 +88,8 @@ sealed class RuntimeManager
     bool relisted;
 
     public Plant? Plant { get; set; }
+    // the leader lease (W0.1): a start is not made, and an end it caused is not settled, claimed or revoked, once this says false; defaults to the plant's
+    public Func<bool>? MayAct { get; set; }
     // the gateway's own hands: park an item (rule verb park-item), end a claim the item still carries, revoke a name
     public Func<int, string, Task>? Park { get; set; }
     public Func<int, string, Task>? ReleaseClaim { get; set; }
@@ -191,7 +193,7 @@ sealed class RuntimeManager
         span?.SetTag("fworker.runtime", cae.Kind); span?.SetTag("fworker.worker", t.Name); span?.SetTag("fworker.item", t.Item); span?.SetTag("fworker.phase", t.Phase);
         // fencing (W0.1): a session is not started by a process that lost the lease after it decided to (the successor decides again from its own sweep).
         // The slot and the launch count are given back as for "no capacity": no failure of the item, no launch.
-        if (Plant?.MayAct?.Invoke() == false)
+        if ((MayAct ?? Plant?.MayAct)?.Invoke() == false)
         {
             nonces.Forget(t.Name);
             lock (gate) { today = Math.Max(0, today - 1); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
@@ -289,7 +291,7 @@ sealed class RuntimeManager
         }
         lock (gate) { if (idle) idleFollowUps[e.Item] = idleFollowUps.GetValueOrDefault(e.Item) + 1; else if (pushed) idleFollowUps.Remove(e.Item); }
         var settled = false;
-        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked" or "no-capacity")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
+        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked" or "no-capacity" or "fenced")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
         // the phase is done pending checks: the next Development task (a fix-forward round) is counted afresh; fixForwardMaxRounds caps those
         if (settled) lock (gate) launches.Remove((e.Item, e.Phase));
         var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome, e.Url) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }
@@ -300,9 +302,9 @@ sealed class RuntimeManager
             lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == lim.MaxFailuresPerPhase; failureErrors[(e.Item, e.Phase)] = outcome; }
         }
         Executions.Add(1, new KeyValuePair<string, object?>("runtime", cae.Kind), new KeyValuePair<string, object?>("outcome", outcome));
-        if (tookBack && ReleaseClaim != null) { try { await ReleaseClaim(e.Item, name); } catch (Exception x) { Log("release-claim-failed", name, e.Item, x.Message); } }
+        if (tookBack && outcome != "fenced" && ReleaseClaim != null) { try { await ReleaseClaim(e.Item, name); } catch (Exception x) { Log("release-claim-failed", name, e.Item, x.Message); } }
         // a failure costs the item one of its executions in this phase: the one that failed, or the one whose offer was lost with it
-        if (Revoke != null && ((failed && e.RegisteredAt != null) || lim.RevokeOnEnd)) { try { await Revoke(name); } catch (Exception x) { Log("revoke-failed", name, e.Item, x.Message); } }
+        if (Revoke != null && outcome != "fenced" && ((failed && e.RegisteredAt != null) || lim.RevokeOnEnd)) { try { await Revoke(name); } catch (Exception x) { Log("revoke-failed", name, e.Item, x.Message); } }
         // at the limit the next plan of the item parks it (Plant.RouteRuntime), so the park happens once, on the plant's side
         if (park) Log("failures-exhausted", name, e.Item, e.Phase);
     }

@@ -132,6 +132,10 @@ public sealed class FencingTests
         input=$(cat)
         action=$(printf '%s' "$input" | grep -o '"action":"[^"]*"' | head -n 1 | sed 's/^"action":"//; s/"$//')
         printf '%s\t%s\t%s\n' "$verb" "$action" "$input" >> "$FWTEST_DIR/fence.log"
+        if [ "$verb" = leader-lease ] && [ "$action" = check ] && [ -e "$FWTEST_DIR/supersede" ]; then
+          echo '{"ok":true,"leader":false,"sha":"s2","current":{"epoch":2,"holder":"newer","until":"2099-01-01T00:00:00Z"}}'; exit 0
+        fi
+        if [ "$verb" = sync-board ] && [ -e "$FWTEST_DIR/slow" ]; then exec sleep 60; fi
         case "$verb" in
           revocations) echo '{"ok":true,"revoked":{}}' ;;
           leader-lease)
@@ -174,5 +178,82 @@ public sealed class FencingTests
         // the lease's own verb and the snapshot's carry none: a superseded gateway must still be able to write its final snapshot
         foreach (var p in calls.Where(p => p[0] is "leader-lease" or "plant-snapshot-save" or "plant-snapshot-load" or "revocations"))
             Assert.DoesNotContain("_lease", p[2]);
+    }
+
+    [Fact]
+    public async Task SupersededWhileAFencedScriptRuns_FinalSnapshotAndHandOverComeFirst_AndTheStopIsNotHeldUp()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = new GatewayEnvironment();
+        env.Set("FACTORY_TEST_SKIP_REVOCATIONS", null);
+        env.Set("FACTORY_LEADER_LEASE", null);
+        env.Set("FACTORY_PLANT_SNAPSHOT", null);
+        env.Set("GH_TOKEN", "fake");
+        env.Set("FACTORY_TRANSCRIPTS", "0");
+        env.Set("FACTORY_TIMING_leaderCheckSeconds", "1");
+        env.Set("FACTORY_TIMING_plantSnapshotDebounceSeconds", "1");
+        env.Apply();
+        File.WriteAllText(Path.Combine(env.Dir, "bin", "pwsh"), Stub.Replace("\r\n", "\n") + "\n");
+        File.WriteAllText(Path.Combine(env.Dir, "slow"), "");   // the first sync-board runs for 60 s
+        var host = new GatewayHost();
+        var disposed = false;
+        try
+        {
+            _ = host.Server;
+            var log = Path.Combine(env.Dir, "fence.log");
+            List<string[]> Lines() => !File.Exists(log) ? new() : File.ReadAllLines(log).Select(l => l.Split('\t', 3)).Where(p => p.Length == 3).ToList();
+            var sw = Stopwatch.StartNew();
+            while (sw.Elapsed < TimeSpan.FromSeconds(40) && !Lines().Any(p => p[0] == "sync-board")) await Task.Delay(100);
+            Assert.Contains(Lines(), p => p[0] == "sync-board");   // in flight now
+            File.WriteAllText(Path.Combine(env.Dir, "supersede"), "");
+            sw.Restart();
+            while (sw.Elapsed < TimeSpan.FromSeconds(15) && !Lines().Any(p => p[0] == "plant-snapshot-save" && p[2].Contains("\"final\":true"))) await Task.Delay(100);
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(15), "the final snapshot waited for the running script");
+            var s = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json;
+            Assert.Equal("superseded", (string?)s?["leader"]?["role"]);
+            var stop = Stopwatch.StartNew();
+            await host.DisposeAsync();
+            disposed = true;
+            Assert.True(stop.Elapsed < TimeSpan.FromSeconds(30), $"the stop took {stop.Elapsed.TotalSeconds:0.0} s");
+        }
+        finally { if (!disposed) await host.DisposeAsync(); }
+    }
+
+    [Fact]
+    public void InjectLease_AClientsOwnLease_IsTakenOut_WhateverTheVerbAndTheLease()
+    {
+        var on = NewRunner(() => (7, "gw"));
+        var forged = """{"item":3,"_lease":{"epoch":999,"holder":"x"}}""";
+        Assert.Null(JsonNode.Parse(on.InjectLease("comment", forged))!["_lease"]);   // not a fenced verb
+        Assert.Equal(7L, (long?)JsonNode.Parse(on.InjectLease("merge", forged))!["_lease"]?["epoch"]);   // a fenced verb: the gateway's, not the client's
+        Assert.Null(JsonNode.Parse(NewRunner(null).InjectLease("merge", forged))!["_lease"]);   // the lease is off
+        Assert.Equal(3, (int?)JsonNode.Parse(on.InjectLease("comment", forged))!["item"]);
+    }
+
+    [Fact]
+    public async Task Provision_WithoutTheLease_StartsNothing_AndItsEndIsNotSettledClaimedOrRevoked()
+    {
+        var cfg = RuntimeSettings.Load(Path.Combine(AppContext.BaseDirectory, "no-such-dir"));
+        var cae = new NeverStarts();
+        var limits = RuntimeLimits.Of(cfg.CaeJob); limits.RevokeOnEnd = true;
+        var m = new RuntimeManager(cfg, cae, new RuntimeNonces(), limits) { MayAct = () => false };
+        var ending = 0; var revoked = 0; var claimed = 0;
+        m.Ending = _ => { ending++; return Task.FromResult(false); };
+        m.Revoke = _ => { revoked++; return Task.CompletedTask; };
+        m.ReleaseClaim = (_, _) => { claimed++; return Task.CompletedTask; };
+        var t = m.Begin(5, "Development", "");
+        await m.Provision(t);
+        Assert.Equal(0, cae.Provisions);
+        Assert.Equal((0, 0, 0), (ending, revoked, claimed));
+    }
+
+    sealed class NeverStarts : IWorkerRuntime
+    {
+        public int Provisions;
+        public string Kind => "cae-job";
+        public int MaxConcurrent => 1;
+        public Task<ProvisionResult> Provision(ProvisionRequest r, CancellationToken ct) { Provisions++; return Task.FromResult(new ProvisionResult(true, "x", "")); }
+        public Task Deprovision(string workerName, string reason, CancellationToken ct) => Task.CompletedTask;
+        public Task<IReadOnlyList<RuntimeInstance>> List(CancellationToken ct) => Task.FromResult<IReadOnlyList<RuntimeInstance>>(Array.Empty<RuntimeInstance>());
     }
 }

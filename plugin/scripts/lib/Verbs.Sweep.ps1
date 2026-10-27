@@ -805,6 +805,7 @@ function Invoke-SyncBoard($a) {
         }
         catch { $errors += @{ item = $n; code = 'error'; reason = "$($_.Exception.Message)" } }
     }
+    if (-not $fenced -and $script:LeaseFence -and -not (Test-LeaseHeld)) { $fenced = Get-LeaseFenceInfo 'sweep-tail' }   # (checked before the tail writes: a lease lost since the last item still ends in `fenced`)
     if ($fenced) {
         # the tail steps below see an expired deadline and defer; the log line is the sweep's journal of the refusal (the runner copies stderr into the gateway log)
         $script:SweepDeadline = [DateTime]::MinValue; $skipped += 'fenced'
@@ -878,6 +879,8 @@ function Invoke-SyncBoard($a) {
     $steps['replenish'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # (the automatic promotion is no step of the sweep: the verb auto-promote, Verbs.Promote.ps1, run by the gateway's own loop)
     $script:SweepDeadline = $null
+    # a lease lost during a tail step (its write was refused, however the step recorded it) still makes the answer `fenced`, not a sweep with errors
+    if (-not $fenced -and $script:LeaseFence -and $script:LeaseFence.lost) { $fenced = Get-LeaseFenceInfo 'sweep-tail' }
     $stepsText = ($steps.Keys | ForEach-Object { "$_=$($steps[$_])" }) -join ' '
     [Console]::Error.WriteLine("sync-board steps (ms): $stepsText total=$([int]((Get-Date) - $sweepT0).TotalMilliseconds)")
     return @{ ok = $true; steps = $steps; elapsed_ms = [int]((Get-Date) - $sweepT0).TotalMilliseconds; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only -or $partial) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only -or $partial) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); partial = $partial; viewed = $(if ($partial) { @($viewed) } else { $null }); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; fenced = $fenced; at = ConvertTo-Iso (Get-UtcNow) }

@@ -23,10 +23,18 @@ sealed class Runner(string entry)
     int fencedInFlight;
     public int FencedInFlight => Volatile.Read(ref fencedInFlight);
 
+    static string StripLease(string stdin)
+    {
+        if (!stdin.Contains("\"_lease\"", StringComparison.Ordinal)) return stdin;
+        try { if (JsonNode.Parse(stdin) is JsonObject o && o.Remove("_lease")) return o.ToJsonString(); } catch (JsonException) { }
+        return stdin;
+    }
+
     /// <summary>The rule script's stdin with "_lease" added for a fenced verb while the lease is on; anything else is returned unchanged.</summary>
     public string InjectLease(string verb, string stdin)
     {
-        if (!FencedVerbs.Contains(verb) || Lease?.Invoke() is not { } l) return stdin;
+        // a "_lease" in the input came from a caller, never from the gateway: it is taken out, as "_cause" is, so no client can fence or unfence a script
+        if (!FencedVerbs.Contains(verb) || Lease?.Invoke() is not { } l) return StripLease(stdin);
         try
         {
             var o = string.IsNullOrWhiteSpace(stdin) ? new JsonObject() : JsonNode.Parse(stdin) as JsonObject;

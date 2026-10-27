@@ -16,6 +16,7 @@ sealed class LeadershipService : IHostedService
     readonly IRevocationService revocations;
     readonly IHostApplicationLifetime lifetime;
     int stoppingRegistered;
+    readonly Runner runner;
 
     // how long a superseded process lets the running rule scripts that act on the board finish before it ends them (delivery-speed.md 18.1.1): a sync-board
     // can run 280 s, the successor waits leaderHandoverSeconds (90) for the final snapshot
@@ -23,20 +24,29 @@ sealed class LeadershipService : IHostedService
 
     public LeadershipService(GatewayLeader leader, SnapshotCoordinator snapshots, IRevocationService revocations, Plant plant, IHostApplicationLifetime lifetime, Runner runner)
     {
-        this.leader = leader; this.snapshots = snapshots; this.revocations = revocations; this.lifetime = lifetime;
+        this.leader = leader; this.snapshots = snapshots; this.revocations = revocations; this.lifetime = lifetime; this.runner = runner;
         // the plant plans and starts runtime sessions only while this process holds the lease (Plant.Plan, RuntimeManager.Provision; W0.1)
         plant.MayAct = () => leader.MayAct;
         if (!leader.On) return;
         snapshots.MarkLeader();
         // superseded: nothing acts any more (the sweeper and the ticks ask MayAct); the running rule scripts that act on the board stop at their next write
-        // (they find the lease lost) and are awaited for at most 45 s, then ended; only then the final snapshot, then the streams end with stream.replaced
+        // (they find the lease lost); the final snapshot, then the streams end with stream.replaced, then the scripts are awaited for at most 45 s and ended
         leader.OnSuperseded = async cur =>
         {
-            var (waitedMs, killed) = await runner.DrainFencedAsync(DrainFenced);
-            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "fenced-drain", ["epoch"] = leader.Epoch, ["waitedMs"] = waitedMs, ["killed"] = killed }.ToJsonString());
+            // the final snapshot and the hand-over come FIRST: the successor waits for them, and a SIGTERM during a drain would skip them. The running
+            // fenced scripts refuse their own writes (they find the lease lost); they are drained in the background and ended after 45 s.
             var saved = snapshots.On && snapshots.Restored.IsCompleted && await snapshots.SaveAsync(true, TimeSpan.FromSeconds(30));
             var n = plant.HandOver("a newer gateway process took over the plant; connect again");
             Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "handed-over", ["epoch"] = leader.Epoch, ["finalSnapshot"] = saved, ["streamsEnded"] = n, ["to"] = cur?["holder"]?.DeepClone() }.ToJsonString());
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var (waitedMs, killed) = await runner.DrainFencedAsync(DrainFenced);
+                    Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "fenced-drain", ["epoch"] = leader.Epoch, ["waitedMs"] = waitedMs, ["killed"] = killed }.ToJsonString());
+                }
+                catch (Exception e) { Console.Error.WriteLine($"fenced drain: {e.Message}"); }
+            });
         };
         // a standby that takes the lease again restores from the releaser's snapshot and writes one of its own epoch at once
         leader.OnReacquired = async pred => { await snapshots.RestoreFromPredecessorAsync(pred, "reacquired"); snapshots.ResetCadence(); };
@@ -58,6 +68,7 @@ sealed class LeadershipService : IHostedService
                 if (was is not (GatewayLeader.Role.Acting or GatewayLeader.Role.Starting))
                 {   // superseded: its final snapshot was written when it stood down; one still being written is given its time
                     snapshots.WaitForWrite(TimeSpan.FromSeconds(10));
+                    runner.DrainFencedAsync(TimeSpan.Zero).GetAwaiter().GetResult();   // (W0.1) a fenced script still running must not hold the stop up: it refuses its writes anyway
                     Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"{was.ToString().ToLowerInvariant()}\"}}"); return;
                 }
                 var sw = Stopwatch.StartNew();
