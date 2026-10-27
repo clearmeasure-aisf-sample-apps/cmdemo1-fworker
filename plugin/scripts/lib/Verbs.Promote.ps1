@@ -168,7 +168,41 @@ function Get-ReleaseContent($Rd, [string]$TargetName, $BySha) {
 # The factory work item a master commit is the merge of, from the pull request its squash message names ("... (#P)"): that pull request was merged
 # as this commit, and an item it names (branch <name>/<N>-..., "#N" in the title, "Closes #N" in the body) records the merge (merge.sha) or, not
 # picked up yet, the pull request. @{ item (0: none); gap ('' when settled) }.
+# A settled answer (an item whose merge record is final) is kept in the state directory, keyed by repository and commit: the automatic promotion
+# judges every commit of a release's range at each sweep, and without this each sweep paid two or more GitHub reads per commit (issue 426). A hit is
+# never trusted alone: the item's own state must still name the commit as its settled merge (one read), else the entry is dropped and the commit is
+# judged afresh. The file is read on every call (never held in the process), holds at most 500 entries and is replaced atomically.
+function Get-CommitItemCacheFile { Join-Path (Get-StateDir) 'commit-items.json' }
+function Read-CommitItemCache {
+    $c = @{}
+    try { $f = Get-CommitItemCacheFile; if (Test-Path $f) { $j = Get-Content -Raw $f | ConvertFrom-Json -AsHashtable; if ($j -is [hashtable]) { $c = $j } } } catch { $c = @{} }
+    return $c
+}
+function Save-CommitItemCache($Cache) {
+    try {
+        $keys = @($Cache.Keys); if ($keys.Count -gt 500) { foreach ($k in ($keys | Select-Object -First ($keys.Count - 500))) { $Cache.Remove($k) } }
+        $f = Get-CommitItemCacheFile; $tmp = "$f.$PID.tmp"
+        $Cache | ConvertTo-Json -Compress | Set-Content $tmp; Move-Item -Force $tmp $f
+    } catch { }
+}
+function Test-CommitItemSettled([int]$Item, [string]$Sha) {
+    $s = try { (Get-State $Item).state } catch [FactoryReject] { $null }
+    if (-not $s -or -not (Test-Has $s 'merge') -or -not (Test-Has $s.merge 'sha') -or "$($s.merge.sha)".ToLower() -ne $Sha) { return $false }
+    $aw = if ((Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { "$($s.merge.awaiting)" } else { '' }
+    return ($aw -eq 'release-queue' -or (-not $aw -and (Test-Has $s.merge 'done_at') -and $s.merge.done_at))
+}
 function Find-CommitItem([string]$Sha, [string]$Message) {
+    $c0 = Get-Cfg; $key = "$($c0.owner)/$($c0.repo)@$Sha"
+    $cache = Read-CommitItemCache
+    if ($cache.ContainsKey($key)) {
+        if (Test-CommitItemSettled ([int]$cache[$key]) $Sha) { return @{ item = [int]$cache[$key]; gap = '' } }
+        $cache.Remove($key); Save-CommitItemCache $cache
+    }
+    $r = Find-CommitItemUncached $Sha $Message
+    if ($r.item -gt 0 -and -not $r.gap) { $cache[$key] = $r.item; Save-CommitItemCache $cache }
+    return $r
+}
+function Find-CommitItemUncached([string]$Sha, [string]$Message) {
     $first = ($Message -split "`n")[0]
     $pm = [regex]::Match($first, '\(#(\d+)\)\s*$'); if (-not $pm.Success) { return @{ item = 0; gap = '' } }
     $prNum = [int]$pm.Groups[1].Value
@@ -267,6 +301,8 @@ function Invoke-AutoPromote($Queue, $Labels) {
     $out = @()
     foreach ($g in @($Queue | Where-Object { $_.release } | Group-Object { "$($_.release)" })) {
         $ver = $g.Name; [int[]]$items = @($g.Group | ForEach-Object { [int]$_.item } | Sort-Object -Unique)
+        # the sweep's budget (issue 426): the releases not judged in this sweep are judged first in the next (the commit cache makes that cheap)
+        if ($script:SweepDeadline -and (Get-Date) -gt $script:SweepDeadline) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
         $rd = Get-ReleaseDeployments $ver
         if (-not $rd) { $out += @{ item = $items[0]; action = 'promotion-waiting'; release = $ver; reason = 'release-not-in-octopus' }; continue }
         $tk = $null
