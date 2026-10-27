@@ -124,6 +124,9 @@ public sealed class GatewayEnvironment : IDisposable
         foreach (var k in Environment.GetEnvironmentVariables().Keys.Cast<string>().Where(k => k.StartsWith("FACTORY_TIMING_", StringComparison.Ordinal))) Set(k, null);
     }
 
+    /// <summary>Changes the configuration file before it is written (for example engine.shadowEnvironments, W2.3).</summary>
+    public Action<JsonObject>? EditConfig { get; set; }
+
     /// <summary>Sets (or, with null, removes) a variable when <see cref="Apply"/> runs.</summary>
     public void Set(string name, string? value) => values[name] = value;
 
@@ -133,7 +136,8 @@ public sealed class GatewayEnvironment : IDisposable
         Directory.CreateDirectory(Dir);
         Directory.CreateDirectory(Path.Combine(Dir, "state"));
         Directory.CreateDirectory(Path.Combine(Dir, "home"));
-        File.WriteAllText(Path.Combine(Dir, "instance.test.json"), TestConfig(Root).ToJsonString());
+        var testConfig = TestConfig(Root); EditConfig?.Invoke(testConfig);
+        File.WriteAllText(Path.Combine(Dir, "instance.test.json"), testConfig.ToJsonString());
         var stub = StubPwsh.Install(Path.Combine(Dir, "bin"));
         values["PATH"] = stub + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH");
         foreach (var (k, v) in values)

@@ -46,6 +46,8 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
     public EngineOptions Engine { get; } = engine;
     // the database of the Wolverine host (FACTORY_DB_CONNECTION, W2.0): unset means v1 alone; nothing reads it until the host is wired (W2.2)
     public DatabaseOptions Database { get; } = DatabaseOptions.From(Environment.GetEnvironmentVariable);
+    // the Wolverine host runs where there is a connection string and the engine switch names shadow or v2 for this environment (W2.3; the kill switch makes it v1)
+    public bool WolverineHost => Database.Configured && Engine.Mode != EngineMode.V1;
     // where and how often the system catalog is read (W1.2): off by default
     public CatalogSettings Catalog { get; } = CatalogSettings.From(instance, Environment.GetEnvironmentVariable);
     public QcSettings Qc { get; } = qc;

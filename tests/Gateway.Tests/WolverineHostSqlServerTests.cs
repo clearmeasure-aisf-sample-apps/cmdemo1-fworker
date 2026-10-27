@@ -33,6 +33,7 @@ public sealed class WolverineHostSqlServerTests
         var cs = With(sql, db);
         using var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", cs);
+        WolverineHostTestSupport.Shadow(env);
         env.Apply();
         if (mode != null)
         {

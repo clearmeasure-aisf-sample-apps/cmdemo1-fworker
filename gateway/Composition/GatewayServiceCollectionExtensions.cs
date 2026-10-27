@@ -202,10 +202,13 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(sp =>
         {
             var runner = sp.GetRequiredService<Runner>();
+            var shadow = sp.GetService<IShadowHistory>();   // W2.3: only in a shadow environment, with the Wolverine host
             return new Plant(gw.TokenSecret, async (item, ev, fields, key) =>
             {
-                try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
+                var posted = false;
+                try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); posted = true; }
                 catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
+                shadow?.Journal(item, ev, fields, key, posted);   // after v1's call, best-effort, never throws
             }, timing.AckSeconds, gw.OwnerMode ? sp.GetRequiredService<IPlantHooks>() : null)
             { Home = c.Credentials.HomeClaim, HomeBranch = instance.DefaultBranch, QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = instance.OneItemPerSession,
                 PassUnmergedDigestMinutes = timing.PassUnmergedDigestMinutes, OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = leaseSettings, IntakeColumn = instance.IntakeColumn, Hosts = hostSettings, MgrActions = managerActionSettings, Keeper = keeper, Runtimes = rts.CaeJob, Cursor = rts.Cursor, Copilot = rts.Copilot, Octopus = rts.Octopus,
@@ -239,7 +242,7 @@ static class GatewayServiceCollectionExtensions
         // the lease's start (LeadershipService) waits for the revocation read; without the lease, the snapshot's one read
         services.AddHostedService(sp => sp.GetRequiredService<LeadershipService>());
         // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
-        if (c.Database.Configured) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
+        if (c.WolverineHost) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
         services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
         // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
         var sweepSeconds = gw.SweepSeconds;

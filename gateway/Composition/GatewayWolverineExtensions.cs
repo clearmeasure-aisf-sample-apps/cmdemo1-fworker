@@ -5,7 +5,7 @@ static class GatewayWolverineExtensions
 {
     public static IServiceCollection AddGatewayWolverine(this IServiceCollection services, GatewayComposition c)
     {
-        if (!c.Database.Configured) return services;
+        if (!c.WolverineHost) return services;
         services.AddSingleton(c.Database);
         services.AddSingleton(WolverineHostOptions.From(c.Instance));
         // built after LeadershipService, whose hand-over callbacks it wraps (the order of the callbacks is the order of the stop: hand-over, then the node leaves)
@@ -14,6 +14,9 @@ static class GatewayWolverineExtensions
             _ = sp.GetRequiredService<LeadershipService>();
             return new WolverineHostService(sp.GetRequiredService<DatabaseOptions>(), sp.GetRequiredService<WolverineHostOptions>(), sp.GetRequiredService<GatewayLeader>());
         });
+        // W2.3: shadow history, only where the environment is a shadow environment (v2 acting records its own history, later)
+        if (c.Engine.ShadowRuns)
+            services.AddSingleton<IShadowHistory>(sp => new ShadowHistory(r => sp.GetRequiredService<WolverineHostService>().PublishAsync(r), c.Instance.Home));
         return services;
     }
 }

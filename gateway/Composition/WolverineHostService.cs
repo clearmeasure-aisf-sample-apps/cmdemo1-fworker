@@ -4,6 +4,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using JasperFx.CodeGeneration;
 using Wolverine;
+using Wolverine.ErrorHandling;
 using Wolverine.SqlServer;
 
 // The Wolverine host (task W2.2, docs/design/wolverine-host.md), registered only when FACTORY_DB_CONNECTION is set (GatewayWolverineExtensions). It is a second,
@@ -126,6 +127,20 @@ sealed class WolverineHostService : IHostedService
         }
     }
 
+    /// <summary>
+    /// Publishes one message through the running host (W2.3: shadow history). False when the host is not up; the caller drops the message. An exception is the
+    /// bus's (a database that does not answer): the caller counts it.
+    /// </summary>
+    public async Task<bool> PublishAsync<T>(T message) where T : notnull
+    {
+        IHost? h;
+        lock (gate) h = phase == Phase.Running ? host : null;
+        if (h == null) return false;
+        using var scope = h.Services.CreateScope();
+        await scope.ServiceProvider.GetRequiredService<IMessageBus>().PublishAsync(message);
+        return true;
+    }
+
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         lock (gate) shuttingDown = true;
@@ -177,13 +192,22 @@ sealed class WolverineHostService : IHostedService
         return new HostBuilder()
             // errors only: a SqlClient message can name the server
             .ConfigureLogging(l => l.SetMinimumLevel(LogLevel.Error).AddConsole())
+            .ConfigureServices(s => s.AddSingleton(new ShadowHistoryStore(cs)))
             .UseWolverine(w =>
             {
                 w.ServiceName = o.ServiceName;
-                w.Discovery.DisableConventionalDiscovery();   // inert: no handler of this assembly is registered
-                // no handler means no generated code: Static needs no runtime compiler (WolverineFx.RuntimeCompilation) in the image; a wave that adds handlers pre-generates or adds it
-                w.CodeGeneration.TypeLoadMode = TypeLoadMode.Static;
+                w.Discovery.DisableConventionalDiscovery();   // no handler is found by convention; the handlers below are named
+                // W2.3: the one handler is shadow history's (ShadowHistoryHandler), whose code Wolverine generates at its first use: Auto loads pre-generated code when there is
+                // some and compiles otherwise (the WolverineFx.RuntimeCompilation package, added with W2.3)
+                w.Discovery.IncludeType(typeof(ShadowHistoryHandler));
+                w.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
                 w.PersistMessagesWithSqlServer(cs, o.Schema);
+                // shadow history: a durable local queue, so a record is stored in the database (wolverine schema) before it is handled; a database that does not
+                // answer is retried with growing pauses, then the record goes to the dead letters
+                w.PublishMessage<ShadowHistoryRecord>().ToLocalQueue("shadow-history");
+                w.LocalQueue("shadow-history").UseDurableInbox().MaximumParallelMessages(2);
+                w.Policies.UseDurableOutboxOnAllSendingEndpoints();
+                w.Policies.OnException<SqlException>().RetryWithCooldown(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(60)).Then.MoveToErrorQueue();
                 w.Durability.Mode = o.LeaderElection ? DurabilityMode.Balanced : DurabilityMode.Solo;
                 var d = w.Durability;
                 d.HealthCheckPollingTime = o.HealthCheckPollingTime; d.FirstHealthCheckExecution = o.FirstHealthCheckExecution; d.StaleNodeTimeout = o.StaleNodeTimeout;
