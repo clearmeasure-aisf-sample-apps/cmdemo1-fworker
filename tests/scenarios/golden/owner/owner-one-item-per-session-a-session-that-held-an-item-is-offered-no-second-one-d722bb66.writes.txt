@@ -1,0 +1,11 @@
+# suite: owner
+# scenario: owner: one item per session: a session that held an item is offered no second one; the next session of the name is, and the status counts items per session
+# runs: 2
+~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **fresh1** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **fresh1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|fresh1 -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: ownership released by **fresh1** (scenario: the item ends); the next trigger assigns it again.\n\n<!-- plant event=released key=rel|{n} -->"}
+~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **fresh1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|fresh1 -->"}
+~ rule STATE factory-worker v1 #{#1}
+~ rule STATE factory-worker v1 #{#2}

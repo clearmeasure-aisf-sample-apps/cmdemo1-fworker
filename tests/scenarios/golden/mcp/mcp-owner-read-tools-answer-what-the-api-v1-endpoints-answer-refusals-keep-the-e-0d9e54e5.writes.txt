@@ -1,0 +1,4 @@
+# suite: mcp
+# scenario: mcp: owner read tools answer what the /api/v1 endpoints answer; refusals keep the endpoint's code
+# runs: 2
+~ rule STATE factory-worker v1 #{#1}

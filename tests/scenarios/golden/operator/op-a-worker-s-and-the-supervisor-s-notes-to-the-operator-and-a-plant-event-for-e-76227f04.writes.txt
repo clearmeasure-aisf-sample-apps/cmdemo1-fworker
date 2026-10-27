@@ -1,0 +1,3 @@
+# suite: operator
+# scenario: op: a worker's and the supervisor's notes to the operator and a plant event for each item milestone arrive on its stream, with codes and never free text
+# runs: 2

@@ -1,0 +1,3 @@
+# suite: operator
+# scenario: op: it drains and resumes a worker name as the operator does, the drain holds across a new session of the name, it sets a capacity and reads the metrics; nobody else gets these
+# runs: 2

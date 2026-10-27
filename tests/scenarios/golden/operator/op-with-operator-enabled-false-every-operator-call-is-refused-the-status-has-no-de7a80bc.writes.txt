@@ -1,0 +1,3 @@
+# suite: operator
+# scenario: op: with operator.enabled false every operator call is refused, the status has no operator block, and without messaging the gateway does not start
+# runs: 2

@@ -1,0 +1,15 @@
+# suite: manager
+# scenario: keeper: a worker-failure park sends the keeper a job; it amends a timing criterion keeping the original, with a follow-up and the park released; protected and held items are refused
+# runs: 2
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:505 sha256:6b41a46f \"\uD83E\uDD16 factory-worker: **Timing or statistical acceptance criteria** (flagged at Tec…\"}"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: worker reported **FAILURE** for **Technical Design**; item parked for review. criterion 1 missed: {dur} measured\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /repos/{repo}/issues 201 {"body":"The backlog keeper amended a criterion of #{#1} to what was measured (decision K-{#1}-1). This item restores the original target.\n\n## Acceptance criteria\n\n- The list page loads within {dur} for 100 work orders\n\nDepends on #{#1}\n","labels":["factory worker"],"title":"Follow-up of #{#1}: The list page loads within {dur} for 100 work orders"}
+= rule POST /graphql addProjectV2ItemById 200 {"query":"mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }","variables":{"c":"I_{#3}","p":"PVT_fake"}}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#3}","o":"opt_Technical_Design","p":"PVT_fake"}}
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"{len:662 sha256:0a7b57dc \"Make the list page fast.\n\n- The list page loads within {dur} for 100 work orders…\"}"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: the backlog keeper (**backlog-keeper**) created as the follow-up of decision K-{#1}-1 on #{#1}, for the original target, under policy `criterion-dispute`: measured {dur} against {dur}; baseline {dur}.\n\n<!-- plant event=keeper-action key=create-item|{n} -->"}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#3}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the backlog keeper (**backlog-keeper**) amended a criterion (decision K-{#1}-1; the original is kept in the body), follow-up #{#3}, released the park, under policy `criterion-dispute`: measured {dur} against {dur}; baseline {dur}.\n\n<!-- plant event=keeper-action key=amend-criteria|{n} -->"}

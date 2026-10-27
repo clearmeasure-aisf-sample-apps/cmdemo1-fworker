@@ -1,0 +1,5 @@
+# suite: owner
+# scenario: owner: an operator drain holds across a new session of the name until the operator resumes it
+# runs: 2
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **drn1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|drn1 -->"}
+~ rule STATE factory-worker v1 #{#1}

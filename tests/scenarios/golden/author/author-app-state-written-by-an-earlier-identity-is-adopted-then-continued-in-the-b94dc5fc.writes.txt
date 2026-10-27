@@ -1,0 +1,6 @@
+# suite: author
+# scenario: author app: state written by an earlier identity is adopted, then continued in the App's own comment [full]
+# runs: 2
+= harness STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
+~ rule STATE factory-worker v1 #{#1}

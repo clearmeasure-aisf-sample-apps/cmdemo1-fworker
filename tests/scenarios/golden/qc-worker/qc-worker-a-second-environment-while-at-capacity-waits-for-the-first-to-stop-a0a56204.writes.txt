@@ -1,0 +1,40 @@
+# suite: qc-worker
+# scenario: qc: worker a second environment while at capacity waits for the first to stop [full]
+# runs: 2
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation verdict for **Functional Testing**: PASS - Both criteria met.\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation PASSED - awaiting human merge (no 'Auto Merge' label; the worker will not merge).\n\n<!-- factory-journal:factory-worker -->"}
+= rule PATCH /repos/{repo}/issues/{#3} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#3}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#3}","draft":false,"head":"factory-worker/{#3}-development","title":"Trial {#3} (#{#3})"}
+= rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#3}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+= rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation verdict for **Functional Testing**: PASS - Both criteria met.\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation PASSED - awaiting human merge (no 'Auto Merge' label; the worker will not merge).\n\n<!-- factory-journal:factory-worker -->"}
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#3} 204 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: a QC environment is offered for PR #{#2} at head {sha}; nothing runs until a person presses Start.\n\n<!-- plant event=qc-offered key={#2}|{sha} -->"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:416 sha256:0c4ca506 \"QC environment available for PR #{#2} at head {sha}: [Start the QC environment](…\"}"}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#3}
+~ rule PATCH /repos/{repo}/issues/comments/{c} 200 {"body":"QC environment for PR #{#2} at head {sha} runs on **qwl**'s computer (reachable only from networks that can reach it): [QC page](http://127.0.0.1:{port}/qc/{#2}?t=q1.{token})\nThis environment was requested and runs on that worker.\n<!-- qc link pr={#2} sha={sha} exp={n} -->"}
+~ rule PATCH /repos/{repo}/issues/comments/{c} 200 {"body":"QC environment for PR #{#4} at head {sha} runs on **qwl**'s computer (reachable only from networks that can reach it): [QC page](http://127.0.0.1:{port}/qc/{#4}?t=q1.{token})\nThis environment was requested and runs on that worker.\n<!-- qc link pr={#4} sha={sha} exp={n} -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: **qwl** accepted the QC environment job for PR #{#2} (attempt 1).\n\n<!-- plant event=qc-assigned key=a-{id} -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: QC environment for PR #{#2} torn down (worker-stopped).\n\n<!-- plant event=qc-torn-down key={#2}|{sha}|1 -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: a person asked for a QC environment for PR #{#2} at head {sha} (attempt 1).\n\n<!-- plant event=qc-requested key={#2}|{sha}|1 -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **qwl** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|qwl -->"}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: QC environment for PR #{#4} torn down (person).\n\n<!-- plant event=qc-torn-down key={#4}|{sha}|1 -->"}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: a QC environment is offered for PR #{#4} at head {sha}; nothing runs until a person presses Start.\n\n<!-- plant event=qc-offered key={#4}|{sha} -->"}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: a person asked for a QC environment for PR #{#4} at head {sha} (attempt 1).\n\n<!-- plant event=qc-requested key={#4}|{sha}|1 -->"}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **qwl** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|qwl -->"}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:416 sha256:f387b4ef \"QC environment available for PR #{#4} at head {sha}: [Start the QC environment](…\"}"}
+~ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"{len:416 sha256:f387b4ef \"QC environment available for PR #{#4} at head {sha}: [Start the QC environment](…\"}"}

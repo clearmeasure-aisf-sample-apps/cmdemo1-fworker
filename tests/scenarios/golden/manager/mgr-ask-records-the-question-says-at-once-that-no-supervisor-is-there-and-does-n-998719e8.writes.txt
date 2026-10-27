@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: ask records the question, says at once that no supervisor is there, and does not wait
+# runs: 2

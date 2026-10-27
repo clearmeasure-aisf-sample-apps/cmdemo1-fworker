@@ -1,0 +1,3 @@
+# suite: runtime
+# scenario: runtime: a w2 expires with the execution
+# runs: 2

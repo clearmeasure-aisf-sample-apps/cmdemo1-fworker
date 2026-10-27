@@ -1,0 +1,3 @@
+# suite: manager
+# scenario: mgr: ten workers asking at their limit cost the supervisor the hour's budget and no more: ten question batches, two patrols, sixty steps
+# runs: 2

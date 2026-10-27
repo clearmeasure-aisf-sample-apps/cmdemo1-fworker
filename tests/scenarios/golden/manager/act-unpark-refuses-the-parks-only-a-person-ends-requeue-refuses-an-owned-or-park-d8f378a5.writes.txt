@@ -1,0 +1,23 @@
+# suite: manager
+# scenario: act: unpark refuses the parks only a person ends, requeue refuses an owned or parked item, and rerun-failed re-runs the failed jobs of the head once
+# runs: 2
+= rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#1}","draft":false,"head":"factory-worker/{#1}-development","title":"Trial {#1} (#{#1})"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: PR open, CI green. REVIEW: COMPLETE\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Functional_Testing","p":"PVT_fake"}}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation verdict for **Functional Testing**: PASS - Both criteria met.\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: validation PASSED - awaiting human merge (no 'Auto Merge' label; the worker will not merge).\n\n<!-- factory-journal:factory-worker -->"}
+= rule POST /repos/{repo}/pulls 201 {"base":"master","body":"change\n\nRefs #{#4}","draft":false,"head":"factory-worker/{#4}-development","title":"Trial {#4} (#{#4})"}
+= rule POST /repos/{repo}/actions/runs/{id}/rerun-failed-jobs 201 -
++ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#4}","sha":"{sha}"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: the plant manager (**supervisor**) ended the lease of **w1**; the item is offered again in resume mode, under policy `stalled-owner`: no verb for {dur}.\n\n<!-- plant event=manager-action key=release-owner|{n} -->"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"\uD83C\uDFED Plant manager: the plant manager (**supervisor**) put it back to be offered in **Technical Design** at once, under policy `stuck-offer`.\n\n<!-- plant event=manager-action key=requeue|{n} -->"}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#3}
++ rule STATE factory-worker v1 #{#4}
+~ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"\uD83C\uDFED Plant manager: the plant manager (**supervisor**) re-ran the failed jobs of PR #{#5} at `{sha}` (workflow run {n}), once for this head, under policy `flaky-check`.\n\n<!-- plant event=manager-action key=rerun-failed|{n} -->"}
