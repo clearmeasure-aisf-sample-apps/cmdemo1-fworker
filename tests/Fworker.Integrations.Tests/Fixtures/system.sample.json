@@ -1,0 +1,52 @@
+{
+  "system": {
+    "slug": "cmdemo1",
+    "name": "Sample system",
+    "location": "southcentralus",
+    "githubOrg": "Sample-Org",
+    "repository": "sample-system",
+    "links": [ { "text": "Scorecard", "url": "https://example.invalid/scorecard" } ]
+  },
+  "azure": {
+    "tenantId": "00000000-0000-0000-0000-000000000000",
+    "subscriptionId": "00000000-0000-0000-0000-000000000000",
+    "resourceGroups": { "nonprod": "rg-sample-nonprod", "prod": "rg-sample-prod" }
+  },
+  "deployables": [
+    {
+      "name": "ui",
+      "repository": "sample-workorders",
+      "port": 8080,
+      "healthPath": "/_healthcheck",
+      "buildPath": "/_build",
+      "trafficPaths": [ "/" ],
+      "pipelineSignOff": true,
+      "settings": { "Some_Setting": "value" },
+      "secrets": [ { "name": "some-secret", "env": "SOME_SECRET" } ]
+    },
+    {
+      "name": "app2-ui",
+      "repository": "sample-app2-ui",
+      "hosting": "appservice",
+      "healthPath": "/_healthcheck",
+      "buildPath": "/_build"
+    },
+    {
+      "name": "gateway",
+      "repository": "sample-gateway",
+      "port": 8080,
+      "healthPath": "/health"
+    },
+    {
+      "name": "gateway-worker",
+      "repository": "sample-gateway",
+      "healthPath": "/health"
+    }
+  ],
+  "environments": [
+    { "name": "tdd", "tier": "nonprod", "capabilities": [ "baseline" ] },
+    { "name": "prod", "tier": "prod", "capabilities": [ "baseline" ] }
+  ],
+  "github": { "app": { "slug": "sample-system" } },
+  "octopus": { "url": "https://example.invalid", "spaceSlug": "sample" }
+}
