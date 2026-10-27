@@ -16,6 +16,9 @@
   "operator": {
     "enabled": true
   },
+  "engine": {
+    "shadowEnvironments": ["tdd"]
+  },
   "octopus": {
     "tddUrl": "https://ca-cmdemo1-tdd-ui.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
     "uatUrl": "https://ca-cmdemo1-uat-ui-fccv.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
