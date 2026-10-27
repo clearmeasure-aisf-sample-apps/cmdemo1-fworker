@@ -1,7 +1,6 @@
 namespace Fworker.Contracts.Seams;
 
-// The three seams of docs/design/fworker-wolverine-refactor.md 4. S1 has its members since W1.4; S2 and S3 arrive with W1.5 and W1.6 and are empty
-// until then; nothing but S1 is implemented or called, so v1's behaviour does not change.
+// The three seams of docs/design/fworker-wolverine-refactor.md 4. S1 has its members since W1.4; S2 is empty until W1.5; S3 has its members since W1.6. v1's behaviour does not change.
 
 /// <summary>What a verb call answered: the exit code and the JSON text the caller gets (the shape the rule script printed).</summary>
 public readonly record struct VerbAnswer(int Code, string Output);
@@ -26,5 +25,18 @@ public interface ICommandPort
     Task<Fworker.Contracts.Commands.CommandResult> SendAsync(Fworker.Contracts.Commands.IntegrationCommand command, CancellationToken ct = default);
 }
 
-/// <summary>S3, the event ingress: one entry for webhook and verb events (members: W1.6).</summary>
-public interface IEventIngress { }
+/// <summary>An event that enters the gateway: a webhook event or a verb's request for a sweep. One typed record for each kind.</summary>
+public abstract record IngressEvent;
+
+/// <summary>An event the rule verb ingest-event returned for a webhook delivery: <paramref name="Json"/> is the event object as the script printed it.</summary>
+public sealed record WebhookEventIngested(string Json) : IngressEvent;
+
+/// <summary>A request for a sweep of the board: of one item (<paramref name="Item"/> above 0) or, with 0, a full sweep. The sweeper coalesces repeats.</summary>
+public sealed record SweepRequested(int Item = 0) : IngressEvent;
+
+/// <summary>S3, the event ingress: the one entry for webhook events and for the verbs' sweep requests. v1 publishes the event and asks the sweeper as before.</summary>
+public interface IEventIngress
+{
+    /// <summary>Takes one event in. It returns when the event is handed on; it does not wait for a sweep.</summary>
+    void Ingest(IngressEvent ev);
+}

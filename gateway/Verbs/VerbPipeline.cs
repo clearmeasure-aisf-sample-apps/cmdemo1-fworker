@@ -9,7 +9,7 @@ using static HttpResultsX;
 // the supervisor's budget, the plant manager's flow verb, text derived from a message, QC, the GitHub budget, the accept of an offer), the run of the
 // rule script and the plant's hooks after it. The order of the checks is the order Program.cs had; each answer is the one it gave.
 sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, KeeperSettings keeper, Plant plant, Messenger messenger, QcHub qc,
-    IVerbRouter engine, EventHub hub, GitHubBudget githubBudget, IServiceProvider services)
+    IVerbRouter engine, IEventIngress ingress, GitHubBudget githubBudget, IServiceProvider services)
 {
     public async Task<IResult> Run(string verb, HttpContext ctx)
     {
@@ -102,7 +102,7 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
                 if (mAction == "restart-session")
                     foreach (var oi in items)
                         plant.JournalManagerAction(oi, new JsonObject { ["action"] = mAction, ["policy"] = mPolicy, ["by"] = mBy, ["reason"] = mReason, ["session"] = mSession, ["detail"] = $"restarted the session of **{mWorker}**, which owns this item; its next session resumes it" }, $"restart|{mWorker}|{DateTime.UtcNow.Ticks}");
-                hub.RequestSweep();
+                ingress.Ingest(new SweepRequested());
                 var mstate = plant.IsDraining(mWorker);
                 return Results.Text(JsonSerializer.Serialize(new { ok = true, verb, action = mAction, worker = mWorker, policy = mPolicy, draining = mstate, items, exit = 0 }), "application/json");
             }
@@ -178,7 +178,7 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
                     }
                 }
                 catch (Exception e) { Console.Error.WriteLine($"plant hook manager-action: {e.Message}"); }
-                hub.RequestSweep();
+                ingress.Ingest(new SweepRequested());
             }
         }
         var item = authorized["item"]?.ToString() ?? ""; var holder = authorized["holder"]?.ToString() ?? "";
@@ -200,7 +200,7 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
         // any call of the owner for its item is its activity and renews the lease when due (gateway/Lease.cs); after OnVerb, which records an accept
         if (ownerMode && who.Kind == "item" && who.Role == "owner") { try { JsonObject? vr = null; try { vr = JsonNode.Parse(output) as JsonObject; } catch { } plant.NoteItemCall(who.Name, who.Item, verb, authorized, vr, code == 0); } catch (Exception e) { Console.Error.WriteLine($"lease hook {verb}: {e.Message}"); } }
         if (ownerMode && code == 0 && (verb is "qc-progress" or "qc-fail" or "qc-stopped" || (verb == "accept" && who.Role == "qc"))) { try { await qc.AfterVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"qc hook {verb}: {e.Message}"); } }
-        if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") hub.RequestSweep(int.TryParse(item, out var swItem) ? swItem : 0);
+        if ((code == 0 || code == 21) && verb is "complete" or "validation-verdict" or "claim-item" or "accept" or "settle" or "merge" or "approve-pr") ingress.Ingest(new SweepRequested(int.TryParse(item, out var swItem) ? swItem : 0));
         return Results.Text(output, "application/json", Encoding.UTF8, status);
     }
 
