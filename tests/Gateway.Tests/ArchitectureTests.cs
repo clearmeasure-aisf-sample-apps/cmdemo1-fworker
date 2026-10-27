@@ -267,7 +267,7 @@ public class ArchitectureTests
     {
         ["Fworker.Contracts"] = [],
         ["Fworker.Domain"] = [],
-        ["Fworker.Persistence"] = ["Microsoft.EntityFrameworkCore.SqlServer", "WolverineFx.EntityFrameworkCore", "System.Security.Cryptography.Pkcs"],
+        ["Fworker.Persistence"] = ["Microsoft.EntityFrameworkCore.SqlServer", "WolverineFx.EntityFrameworkCore", "Microsoft.EntityFrameworkCore.Design", "System.Security.Cryptography.Pkcs"],
         ["Fworker.Integrations"] = [],
         ["Fworker.Workflows"] = ["WolverineFx"],
     };
