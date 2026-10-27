@@ -8,6 +8,10 @@
     <RootNamespace>Fworker.Workflows</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <!-- W2.0: the saga and handler base types -->
+    <PackageReference Include="WolverineFx" Version="6.56.0" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../Fworker.Contracts/Fworker.Contracts.csproj" />
     <ProjectReference Include="../Fworker.Domain/Fworker.Domain.csproj" />
     <ProjectReference Include="../Fworker.Persistence/Fworker.Persistence.csproj" />

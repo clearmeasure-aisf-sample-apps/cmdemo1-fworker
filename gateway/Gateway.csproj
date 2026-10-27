@@ -9,6 +9,12 @@
   <ItemGroup>
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.0.0" />
+    <!-- W2.0: the Wolverine host and its telemetry (registered from W2.2; nothing uses them yet) -->
+    <PackageReference Include="WolverineFx.SqlServer" Version="6.56.0" />
+    <PackageReference Include="WolverineFx.Http" Version="6.56.0" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.20.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.20.1" />
+    <PackageReference Include="Azure.Monitor.OpenTelemetry.Exporter" Version="1.10.0" />
   </ItemGroup>
   <ItemGroup>
     <!-- the host references every project of src/ (docs/design/fworker-wolverine-refactor.md 3); none of them references the host -->

@@ -39,6 +39,23 @@ jobs:
     runs-on: ubuntu-24.04
     # a shard takes about 6 minutes of suites (issue 371, 2.8); the suites step stops at 16 minutes, and the rest leaves the uploads their time
     timeout-minutes: 25
+    # SQL Server beside every shard (W2.0), limited to 1 GB so the suites keep their memory; it starts while the job builds. Its SA password is composed
+    # per run from the run id and attempt (nothing credential-shaped is committed; the container lives for the job and only the runner reaches it).
+    # Tier 1 does not pass the connection to the gateway: FACTORY_DB_CONNECTION stays unset, so the gateway under test runs as v1.
+    env:
+      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
+    services:
+      sql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
+          MSSQL_MEMORY_LIMIT_MB: "1024"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' -b"
+          --health-interval 5s --health-timeout 5s --health-retries 30 --health-start-period 10s
     strategy:
       fail-fast: false
       matrix:
@@ -186,6 +203,16 @@ jobs:
       - name: Smoke
         run: pwsh -NoProfile -File tests/smoke.ps1
 
+      # the service container's health check passed before the steps started (the job waits for it); this proves the port answers from the runner
+      - name: SQL Server is reachable
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/1433) 2>/dev/null; then echo "SQL Server answers on 127.0.0.1:1433"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::the SQL Server service container does not answer on port 1433"; exit 1
+
       - name: Suites ${{ matrix.suites }} (full tier)
         # below the job's 25 minutes, so that a hung shard still uploads its logs and results
         timeout-minutes: 16
@@ -245,6 +272,20 @@ jobs:
     name: Smoke and gateway tests
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
+    services:
+      sql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
+          MSSQL_MEMORY_LIMIT_MB: "1024"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' -b"
+          --health-interval 5s --health-timeout 5s --health-retries 30 --health-start-period 10s
     steps:
       - uses: actions/checkout@v6.0.1
 
