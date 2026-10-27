@@ -34,6 +34,8 @@ sealed class RuntimeSettings
     // runtimes.octopus (OctopusRunbookRuntime.cs): its key and host token come from the environment, never from the file
     public OctopusRunbookSettings Octopus = new();
     public bool AnyOn => CaeJob.On;
+    // the home repository's launch fields, set once by the composition; null where the configuration names no repository
+    public LaunchFields? Launch;
 
     public static RuntimeSettings Load(string scriptsDir)
     {

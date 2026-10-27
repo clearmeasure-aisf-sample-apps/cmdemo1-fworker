@@ -1,12 +1,22 @@
 using System.Text;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Ids;
 
 // The credential rules that depend on the gateway's configuration (task C8, gateway-composition.md 3 F), moved verbatim out of Auth.cs, where the
 // environment, auth.legacyKinds and the keeper's settings were process-wide statics set by Program.cs. They are fields of this object now, made once
 // by the composition (GatewayComposition) and injected into the authentication middleware and the endpoints that mint a token. The token formats
 // and their MACs stay in Auth.cs (pure functions of a secret); tests/Gateway.Tests/CredentialPolicyTests.cs.
-sealed class CredentialPolicy(string environment, bool legacyKinds, KeeperSettings keeper)
+sealed class CredentialPolicy(string environment, bool legacyKinds, KeeperSettings keeper, RepoId home = default)
 {
+    // the home repository (instance.json owner and repo): the only repository an i1 or r1 may claim while the system-gateway is v1 (W1.8). Default: unset,
+    // and then no claim is accepted. HomeClaim is what the gateway puts into the tokens it mints: "" when unset (the claim is then left out).
+    public RepoId Home { get; } = home;
+    public string HomeClaim { get; } = home.Owner is null ? "" : home.ToString();
+
+    // The repository a well-formed (MAC-valid) i1 or r1 claims that this gateway does not serve, for the refusal code repository-not-served; else null.
+    public string? ForeignRepository(string? header, string secret) =>
+        string.IsNullOrEmpty(header) || !header.StartsWith("Bearer ") || (!LegacyKinds && header.StartsWith("Bearer i1.")) ? null : Auth.ForeignRepoClaim(secret, header[7..], Home);
+
     // auth.legacyKinds (agents-roles-launch.md 4, 15 step 10): while true (the source default) the per-role kinds w1, w2, m1, o1, k1 and i1 are
     // accepted beside r1; false refuses them at every endpoint. The admin token, q1 links and n1 nonces are not role credentials and stay.
     public bool LegacyKinds { get; } = legacyKinds;
@@ -53,7 +63,7 @@ sealed class CredentialPolicy(string environment, bool legacyKinds, KeeperSettin
             var parts = t.Split('.'); if (parts.Length != 4 || !Keeper.Enabled || !Keeper.Names.Contains(parts[1])) return null;
             return Auth.Same(t, Auth.KeeperToken(secret, parts[1], Keeper.TokenGeneration, rev.Of(parts[1]))) ? new Principal("keeper", parts[1]) : null;
         }
-        if (t.StartsWith("i1.")) return Auth.VerifyItemToken(secret, t, rev);
+        if (t.StartsWith("i1.")) return Auth.VerifyItemToken(secret, t, rev, Home);
         return null;
     }
 
@@ -72,8 +82,9 @@ sealed class CredentialPolicy(string environment, bool legacyKinds, KeeperSettin
             if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds() || !Auth.ValidName(name) || msg.Reserved.Contains(name) || !Auth.Roles.Contains(role) || !Auth.Modes.Contains(mode)) return null;
             if (!string.Equals(env, Environment, StringComparison.Ordinal)) return null;
             if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(name)) return null;
+            if (!Auth.RepoClaimOk(j, Home, out var repo)) return null;
             return new Principal("role", name, j["i"]?.GetValue<int>() ?? 0, role, j["a"]?.ToString() ?? "", x, Runtime: mode == "manual" ? "" : mode == "api" ? (j["ag"]?.ToString() == "copilot-cloud-agent" ? "copilot-cloud" : "cursor-cloud") : "cae-job",
-                Phase: j["p"]?.ToString() ?? "", Mode: mode, Agent: j["ag"]?.ToString() ?? "", Env: env);
+                Phase: j["p"]?.ToString() ?? "", Mode: mode, Agent: j["ag"]?.ToString() ?? "", Env: env, Repo: repo);
         }
         catch { return null; }
     }

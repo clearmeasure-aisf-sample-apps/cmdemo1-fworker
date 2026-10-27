@@ -114,6 +114,7 @@ static class GatewayServiceCollectionExtensions
         var prompts = new PromptStore(Environment.GetEnvironmentVariable("FACTORY_PROMPTS") ?? Path.Combine(scriptsDir, "..", "..", "prompts"));
         services.AddSingleton(prompts);
         var runtimeSettings = RuntimeSettings.Load(scriptsDir);
+        if (c.Credentials.HomeClaim != "") runtimeSettings.Launch = new LaunchFields(c.Credentials.HomeClaim, "https://github.com/" + c.Credentials.HomeClaim + ".git", c.Instance.DefaultBranch);
         var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new RuntimeManager(runtimeSettings, new CaeJobRuntime(runtimeSettings.CaeJob), runtimeNonces) : null;
         // the api mode, v1 Cursor Cloud Agents (gateway/Runtimes/CursorCloudRuntime.cs, agents-roles-launch.md 10): api.cursor.enabled and a key (CURSOR_API_KEY)
         // and the gateway's public URL; the bootstrap prompt is read from prompts/ (CursorPromptBuilder, gateway/Templates/RuntimePrompts.cs)
@@ -126,7 +127,7 @@ static class GatewayServiceCollectionExtensions
         var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, cursorPrompts, owners: ownerVerbs, settle: settleClient) : null;
         var cursorManager = cursorRuntime != null
             ? new RuntimeManager(runtimeSettings, cursorRuntime, runtimeNonces,
-                cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", c.Credentials.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
+                cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", c.Credentials.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase), Repo: c.Credentials.HomeClaim), revocations.Of(name))))
             : null;
         // the Copilot cloud agent (gateway/Runtimes/CopilotCloudRuntime.cs, docs/design/copilot-cloud-agent.md): api.copilot.enabled, a token
         // (COPILOT_TASKS_TOKEN) and the gateway's public URL; the task's prompt carries a one-time code for the worker's r1 (copilotCodes)
@@ -139,7 +140,7 @@ static class GatewayServiceCollectionExtensions
             ? new CopilotCloudRuntime(copilotSettings, copilotCodes, copilotPrompts, itemPr: itemPr, owners: ownerVerbs, settle: settleClient) : null;
         var copilotManager = copilotRuntime != null
             ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
-                copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", c.Credentials.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
+                copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", c.Credentials.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase), Repo: c.Credentials.HomeClaim), revocations.Of(name))))
             : null;
         // the Octopus runbook runtime (gateway/Runtimes/OctopusRunbookRuntime.cs, docs/design/octopus-runbook-runtime.md): runtimes.octopus.enabled and the
         // key of the service account that may run the runbooks of that one project (OCTOPUS_RUNBOOK_API_KEY); off without the key
@@ -206,7 +207,7 @@ static class GatewayServiceCollectionExtensions
                 try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
                 catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
             }, timing.AckSeconds, gw.OwnerMode ? sp.GetRequiredService<IPlantHooks>() : null)
-            { QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = instance.OneItemPerSession,
+            { Home = c.Credentials.HomeClaim, HomeBranch = instance.DefaultBranch, QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = instance.OneItemPerSession,
                 PassUnmergedDigestMinutes = timing.PassUnmergedDigestMinutes, OfferMissLimit = timing.OfferMissLimit, OfferCoolDownMinutes = timing.OfferCoolDownMinutes, SessionEndGraceSeconds = timing.SessionEndGraceSeconds, PinFallbackMinutes = timing.PinFallbackMinutes, SessionRestartMinutes = timing.SessionRestartMinutes, RepeatQuestionLimit = timing.SessionRepeatQuestionLimit, Lease = leaseSettings, IntakeColumn = instance.IntakeColumn, Hosts = hostSettings, MgrActions = managerActionSettings, Keeper = keeper, Runtimes = rts.CaeJob, Cursor = rts.Cursor, Copilot = rts.Copilot, Octopus = rts.Octopus,
                 // the items the cloud runtimes' tasks own, and their part of the plant snapshot (C5c: set here, where Program.cs set them after Build())
                 CopilotOwns = rts.CopilotRuntime != null ? rts.CopilotRuntime.Owns : null, CopilotOwnersSnapshot = rts.CopilotRuntime != null ? rts.CopilotRuntime.OwnedJson : null, CopilotOwnersRestore = rts.CopilotRuntime != null ? rts.CopilotRuntime.Restore : null,
@@ -324,7 +325,7 @@ static class GatewayServiceCollectionExtensions
             var revocationService = sp.GetRequiredService<RevocationService>();
             var prompts = sp.GetRequiredService<PromptStore>();   // the prompt files AddGatewayRuntimes registered
             var manager = new ManagerCopilot(mgrCopSettings, copilotRuntime, copilotCodes, sp.GetRequiredService<Plant>(),
-                (name, expires) => Auth.RoleToken(gw.TokenSecret, new RoleClaims(name, "manager", "api", "copilot-cloud-agent", c.Credentials.Environment, expires, 0, "", "patrol"), revocations.Of(name)),
+                (name, expires) => Auth.RoleToken(gw.TokenSecret, new RoleClaims(name, "manager", "api", "copilot-cloud-agent", c.Credentials.Environment, expires, 0, "", "patrol", Repo: c.Credentials.HomeClaim), revocations.Of(name)),
                 code =>
                 {
                     var bp = prompts.ByPath("bootstrap/copilot-manager.md");
@@ -371,7 +372,7 @@ static class GatewayServiceCollectionExtensions
             var plant = sp.GetRequiredService<Plant>(); var revocations = sp.GetRequiredService<Revocations>(); var ownerMode = gw.OwnerMode; var tokenSecret = gw.TokenSecret;
             var managerCopilot = sp.GetService<ManagerCopilot>();   // null where the on-demand manager is not enabled
             return new McpTools(new InProcess(sp.GetRequiredService<EndpointDataSource>(), sp, sp.GetRequiredService<AdmissionService>().Admit), sp.GetRequiredService<WorkerSessions>(),
-                t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
+                t => Auth.VerifyItemToken(tokenSecret, t, revocations, c.Credentials.Home), (name, item) =>
                 {
                     if (messaging.Enabled && ownerMode) plant.Touch(name);
                     if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }

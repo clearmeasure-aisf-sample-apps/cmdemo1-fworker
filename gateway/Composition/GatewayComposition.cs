@@ -35,7 +35,7 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
     // the address for links (see PublicBase) and the credential rules of this process (gateway/Policies/CredentialPolicy.cs): the role token r1 is bound to
     // this environment (Auth.cs, agents-roles-launch.md 4); auth.legacyKinds false refuses the per-role kinds
     public PublicBase PublicBase { get; } = publicBase;
-    public CredentialPolicy Credentials { get; } = new(gateway.EnvironmentName.Trim().ToLowerInvariant(), instance.LegacyKinds, keeper);
+    public CredentialPolicy Credentials { get; } = new(gateway.EnvironmentName.Trim().ToLowerInvariant(), instance.LegacyKinds, keeper, instance.Home ?? default);
 
     // the configuration (C3), registered by AddGatewayConfiguration
     public GatewayOptions Gateway { get; } = gateway;

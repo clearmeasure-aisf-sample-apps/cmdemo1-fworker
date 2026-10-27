@@ -67,6 +67,7 @@ sealed class CaeJobRuntime : IWorkerRuntime
         void Add(string n, string v) => env.Add(new JsonObject { ["name"] = n, ["value"] = v });
         Add("FWORKER_NONCE", r.Nonce); Add("FWORKER_NAME", r.WorkerName); Add("FWORKER_ITEM", r.Item.ToString()); Add("FWORKER_PHASE", r.Phase);
         Add("FWORKER_MODEL_PROFILE", r.ModelProfile); Add("FWORKER_RUNTIME", Kind); if (cfg.GatewayUrl != "") Add("FWORKER_GATEWAY_URL", cfg.GatewayUrl);
+        if (r.Launch is { } l) { Add("FWORKER_REPOSITORY", l.Repository); Add("FWORKER_CLONE_URL", l.CloneUrl); Add("FWORKER_DEFAULT_BRANCH", l.DefaultBranch); }   // launch fields (W1.8): additive, the image ignores what it does not read
         // the agent of the image follows the configuration even when the job template says otherwise
         env.RemoveAll(e => e?["name"]?.ToString() == "FWRUNNER_AGENT"); Add("FWRUNNER_AGENT", cfg.Agent);
         baseC["env"] = new JsonArray(env.ToArray());

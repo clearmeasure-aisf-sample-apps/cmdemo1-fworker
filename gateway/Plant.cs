@@ -79,6 +79,9 @@ sealed record OwnedInfo(string Holder, string Column, DateTime? LeaseUntil, Date
 sealed partial class Plant(string secret, Func<int, string, JsonObject, string, Task> journal, double ackSeconds, IPlantHooks? hooks = null)
 {
     readonly IPlantHooks? plantHooks = hooks;
+    // the home repository as owner/repo ("" when the configuration names none) and its default branch: the repository claim of the tokens minted here and the launch fields of an assignment
+    public string Home { get; init; } = "";
+    public string HomeBranch { get; init; } = "";
     // The one lock (worker-messaging.md 3.5): workers, assignments, the directory maps, and the MessageStore (counters, inboxes, presence, modes,
     // the supervisor slot). Lock order: nothing is called under it that takes another lock, except a channel TryWrite and a signal completion,
     // which never run the reader's code inline.
@@ -1740,8 +1743,10 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             ["provider"] = "gateway", ["event"] = "item.assigned", ["item"] = a.Item, ["column"] = a.Column, ["job"] = a.Kind, ["role"] = a.Role, ["mode"] = a.Mode, ["reason"] = a.Reason,
             ["pr"] = a.Pr, ["assignment"] = a.Id, ["ackBySeconds"] = AckFor(a.Worker),
             ["token"] = Auth.MintItemToken(secret, a.Item, a.Role, a.Id, a.Worker, IsQc(a) ? TimeSpan.FromHours(QcCfg.TokenHours) : TimeSpan.FromHours(12), Rev.Of(a.Worker),
-                workers.TryGetValue(a.Worker, out var aw) && aw.Runtime != "local" ? aw.Runtime : "")
+                workers.TryGetValue(a.Worker, out var aw) && aw.Runtime != "local" ? aw.Runtime : "", Home)
         };
+        // the launch fields (W1.8, system-gateway.md H7): the repository the item lives in, set to the home repository; additive, a worker that does not know them ignores them
+        if (Home != "") { o["repository"] = Home; o["cloneUrl"] = "https://github.com/" + Home + ".git"; if (HomeBranch != "") o["defaultBranch"] = HomeBranch; }
         if (IsQc(a)) { o["sha"] = a.Sha; o["env_id"] = a.EnvId; }
         return o.ToJsonString();
     }

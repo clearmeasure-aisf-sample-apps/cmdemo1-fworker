@@ -45,6 +45,9 @@ sealed class GatewayAuthMiddleware(RequestDelegate next, GatewayOptions gateway,
                 if (!revocationService.IsLoaded) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }); return; }
                 p = credentials.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
             }
+            // a well-formed i1 or r1 that claims a repository this gateway does not serve (W1.8): refused with its own code, not as a forged credential
+            if (p == null && credentials.ForeignRepository(ctx.Request.Headers.Authorization.ToString(), tokenSecret) is { } foreign)
+            { await HttpResultsX.Refuse(ctx, 403, "repository-not-served", $"this credential claims the repository {foreign}; this gateway serves {(credentials.HomeClaim == "" ? "no repository" : credentials.HomeClaim + " only")}"); return; }
             if (p == null) { await HttpResultsX.Refuse(ctx, 401, "unauthorized", "missing, malformed, forged or expired credential"); return; }
             ctx.Items["principal"] = p;
             if (p.Kind == "admin") publicBase.NoteBase(ctx);
