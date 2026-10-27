@@ -71,7 +71,12 @@ sealed class StatusQuery
         // FACTORY_CATALOG=1), so a default deployment answers exactly as before. Resolved at the ask: it is registered only where it is enabled
         if (services.GetService<CatalogRefreshService>() is { } catalog) o["catalog"] = catalog.Status();
         // the Wolverine host (W2.2): only where FACTORY_DB_CONNECTION is set, so a default deployment answers exactly as before. Never the connection string
-        if (services.GetService<WolverineHostService>() is { } wolverine) o["wolverine"] = wolverine.Status();
+        if (services.GetService<WolverineHostService>() is { } wolverine)
+        {
+            var wb = wolverine.Status();
+            if (services.GetService<IShadowHistory>() is { } shadow) wb["shadowHistory"] = shadow.Status();   // W2.3: counts only
+            o["wolverine"] = wb;
+        }
         return o;
     }
 

@@ -21,6 +21,9 @@ internal static class WolverineHostTestSupport
     /// <summary>The service types that exist only with a connection string.</summary>
     public static readonly Type[] HostTypes = { typeof(DatabaseOptions), typeof(WolverineHostOptions), typeof(WolverineHostService) };
 
+    /// <summary>The environment of the test gateways is tdd: lists it in engine.shadowEnvironments, which (with a connection string) registers the host (W2.3).</summary>
+    public static void Shadow(GatewayEnvironment env) => env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray(), ["shadowEnvironments"] = new JsonArray("tdd") };
+
     public static WolverineHostOptions Fast() => new() { RetryFirst = TimeSpan.FromMilliseconds(50), RetryMax = TimeSpan.FromMilliseconds(200), StopTimeout = TimeSpan.FromSeconds(2) };
 }
 
@@ -52,7 +55,7 @@ public sealed class WolverineHostOffTests(TwoPortGateway gw) : IClassFixture<Two
 /// <summary>With a connection string and a database that cannot be reached: the gateway starts and is ready anyway, and the host keeps trying in the background.</summary>
 public sealed class WolverineHostUnreachableFixture : GatewayFixture
 {
-    protected override void Configure(GatewayEnvironment env) => env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
+    protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); }
 }
 
 public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachableFixture gw) : IClassFixture<WolverineHostUnreachableFixture>
@@ -100,7 +103,7 @@ public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachab
 public sealed class WolverineHostStopOrderTests
 {
     [Fact]
-    public Task StopOrder_HandOverBeforeTranscriptFlush_WithTheHostRegistered_Within30Seconds() => StopOrderTests.Run(env => env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable));
+    public Task StopOrder_HandOverBeforeTranscriptFlush_WithTheHostRegistered_Within30Seconds() => StopOrderTests.Run(env => { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); });
 }
 
 /// <summary>The service itself, without a database: retries, never waits for it, leaves with the lease, comes back, stops at shutdown.</summary>

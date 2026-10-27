@@ -53,7 +53,11 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule>(sp => new RuntimeHostEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<Plant>(),
             sp.GetRequiredService<Revocations>(), sp.GetRequiredService<RevocationService>(), sp.GetRequiredService<RuntimeRegistry>(), c.RuntimeNonces));
         // S3 (W1.6): the one entry for webhook events and the verbs' sweep requests; v1 only
-        services.AddSingleton<IEventIngress>(sp => new V1EventIngress(sp.GetRequiredService<EventHub>()));
+        services.AddSingleton<IEventIngress>(sp =>
+        {
+            var v1 = new V1EventIngress(sp.GetRequiredService<EventHub>());
+            return sp.GetService<IShadowHistory>() is { } shadow ? new ShadowEventIngress(v1, shadow) : v1;   // W2.3: shadow history records after v1 has done its part
+        });
         services.AddSingleton<IEndpointModule, WebhookEndpoints>();
         services.AddSingleton<IEndpointModule, CopilotEndpoints>();
         services.AddSingleton<IEndpointModule, TranscriptEndpoints>();
