@@ -217,7 +217,31 @@ function Verb_set_priority($a) {
 # ---- link-dependency --item N --depends-on M [--remove] --policy CODE [--reason R]: a line "Depends on #M" in the item's body ---------------------
 function Verb_link_dependency($a) {
     $n = Get-ItemNumber $a; $call = Get-KeeperCall $a
-    $m = "$(Need $a 'depends_on')"; if ($m -notmatch '^\d{1,9}$' -or [int]$m -eq $n) { Reject 2 'usage' 'depends-on is the number of another item' }
+    $m = "$(Need $a 'depends_on')"
+    # W0.4: depends-on is N, #N, repo#N or owner/repo#N. A ref to another repository is recorded as a qualified line and checked for nothing else
+    # (it blocks nothing in v1 and its body cannot be read, so no cycle check); N, #N and a qualified ref naming the home repository are the home item.
+    $c0 = Get-Cfg; $foreignRef = $null
+    if ($m -match '^#?(\d{1,9})$') { $m = $Matches[1] }
+    elseif ($m -match '^(?:(?<o>[A-Za-z0-9][A-Za-z0-9\-]*)/)?(?<r>[A-Za-z0-9_.\-]+)#(?<n>\d{1,7})$') {
+        $qo = if ($Matches['o']) { $Matches['o'].ToLowerInvariant() } else { "$($c0.owner)".ToLowerInvariant() }; $qr = $Matches['r'].ToLowerInvariant(); $qn = $Matches['n']
+        if ($qo -eq "$($c0.owner)".ToLowerInvariant() -and $qr -eq "$($c0.repo)".ToLowerInvariant()) { $m = $qn } else { $foreignRef = "$qo/$qr#$qn" }
+    }
+    if ($foreignRef) {
+        $info = Get-ItemInfo $n; Assert-Open $info; Assert-NotOwnerHeld $info $call.cfg
+        $body = "$($info.body)".Replace("`r", ''); $line = "Depends on $foreignRef"
+        $has = $body -match "(?m)^Depends on $([regex]::Escape($foreignRef))\s*$"
+        if ((Test-Has $a 'remove') -and $a.remove) {
+            if (-not $has) { Reject 10 'not-linked' "#$n has no line '$line'" }
+            Set-IssueBody $n (($body -replace "(?m)^Depends on $([regex]::Escape($foreignRef))\s*\n?", '').TrimEnd() + "`n")
+            Add-KeeperJournal $n $null 'link-dependency' $call "removed its dependency on $foreignRef"
+            return @{ ok = $true; id = $n; item = $n; depends_on = $foreignRef; foreign = $true; removed = $true }
+        }
+        if ($has) { Reject 10 'already' "#$n depends on $foreignRef already" }
+        Set-IssueBody $n ($body.TrimEnd() + "`n`n$line`n")
+        Add-KeeperJournal $n $null 'link-dependency' $call "recorded its dependency on $foreignRef (another repository: shown, not waited for)"
+        return @{ ok = $true; id = $n; item = $n; depends_on = $foreignRef; foreign = $true; removed = $false }
+    }
+    if ($m -notmatch '^\d{1,9}$' -or [int]$m -eq $n) { Reject 2 'usage' 'depends-on is the number of another item' }
     $info = Get-ItemInfo $n; Assert-Open $info; Assert-NotOwnerHeld $info $call.cfg
     $other = Get-ItemInfo ([int]$m)
     $body = "$($info.body)".Replace("`r", '')
@@ -230,7 +254,9 @@ function Verb_link_dependency($a) {
         return @{ ok = $true; id = $n; item = $n; depends_on = [int]$m; removed = $true }
     }
     if ($has) { Reject 10 'already' "#$n depends on #$m already" }
-    if ("$($other.body)" -match "(?m)^Depends on .*#$n\b") { Reject 10 'cycle' "#$m depends on #${n}: linking the other way would hold both for ever" }
+    # the cycle check reads the other item's body with the sweep's parser, so "Depends on other-repo#N" (a foreign item) is no cycle and "owner/repo#N" naming home is
+    $otherDeps = Get-ItemDependencies ([int]$m) "$($other.body)"
+    if ($otherDeps -contains $n) { Reject 10 'cycle' "#$m depends on #${n}: linking the other way would hold both for ever" }
     Set-IssueBody $n ($body.TrimEnd() + "`n`n$line`n")
     Add-KeeperJournal $n $null 'link-dependency' $call "made it depend on #$m (it is offered once #$m is merged or closed)"
     return @{ ok = $true; id = $n; item = $n; depends_on = [int]$m; removed = $false }

@@ -96,6 +96,24 @@ $KeeperScenarios['keeper: split-item creates ordered children and closes the par
             Check 'the item names its dependency in its body' ((Kp-Body $c1) -match "(?m)^Depends on #$fx\s*$")
             $r = Kp-F @('link-dependency', '--item', "$fx", '--depends-on', "$c1", '--policy', 'dependency-order')
             CheckExit 'the other way round is a cycle' $r 10 'cycle'
+            # W0.4: qualified refs. owner/repo#N naming the home repository is the home item N; the line it writes is the plain "Depends on #N"
+            $homeRepo = 'cmdemo1-workorders'
+            $r = Kp-F @('link-dependency', '--item', "$c2", '--depends-on', "clearmeasure-aisf-sample-apps/$homeRepo#$fx", '--policy', 'dependency-order')
+            CheckExit 'a qualified ref to the home repository links like #N' $r 0
+            Check 'and is written as the plain home ref' ((Kp-Body $c2) -match "(?m)^Depends on #$fx\s*$" -and (Kp-Body $c2) -notmatch 'clearmeasure-aisf-sample-apps/')
+            $r = Kp-F @('link-dependency', '--item', "$fx", '--depends-on', "$homeRepo#$c2", '--policy', 'dependency-order')
+            CheckExit 'a cycle through a repo#N ref is found' $r 10 'cycle'
+            $r = Kp-F @('link-dependency', '--item', "$fx", '--depends-on', "#$c2", '--policy', 'dependency-order')
+            CheckExit 'a cycle through a #N ref is found' $r 10 'cycle'
+            # a ref to another repository is recorded and shown; it is not the home item of that number and it makes no cycle
+            $r = Kp-F @('link-dependency', '--item', "$fx", '--depends-on', "other-org/other-repo#$c2", '--policy', 'dependency-order')
+            CheckExit 'a foreign ref is recorded' $r 0
+            Check 'the answer names it as foreign and the body carries the qualified line' ($r.foreign -eq $true -and "$($r.depends_on)" -eq "other-org/other-repo#$c2" -and (Kp-Body $fx) -match "(?m)^Depends on other-org/other-repo#$c2\s*$")
+            $r = Kp-F @('link-dependency', '--item', "$fx", '--depends-on', "other-org/other-repo#$c2", '--policy', 'dependency-order')
+            CheckExit 'the same foreign ref twice is refused' $r 10 'already'
+            $r = Kp-F @('link-dependency', '--item', "$fx", '--depends-on', "other-org/other-repo#$c2", '--remove', '--policy', 'dependency-order')
+            CheckExit 'a foreign ref is removed' $r 0
+            Check 'and its line is gone' ((Kp-Body $fx) -notmatch 'other-org/other-repo')
             $r = Kp-F @('create-item', '--title', 'One item too many', '--body-file', (TmpFile 'kp-more.md' "Over the limit of the day.`n`n- something to check`n"), '--policy', 'backlog-low')
             CheckExit 'the fourth new item of the day is refused' $r 20 'daily-item-limit'
             Check 'and nothing was created' (@((Get-FakeState).issues | Where-Object { $_.title -eq 'One item too many' }).Count -eq 0)
