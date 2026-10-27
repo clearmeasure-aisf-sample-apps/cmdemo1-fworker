@@ -1,6 +1,6 @@
 # The factory worker gateway (ASP.NET Core minimal API that runs the PowerShell rule scripts and the sweep), one container.
 # Build context = the root of the repository:  docker build -t fworker .
-# The image holds gateway/, plugin/, config/ and prompts/ only; tests/, tools/ and docs/ are not copied (.dockerignore keeps them out of the context).
+# The image is built from gateway/, src/, plugin/, config/ and prompts/ only; tests/, tools/ and docs/ are not copied (.dockerignore keeps them out of the context).
 #
 # What the demo-environment kit expects of a container deployable: this Dockerfile at the root; the port and health path
 # system.json names for it (8080, /health); a non-root process; ARG VERSION for the build version (/_build answers it).
@@ -8,6 +8,8 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY gateway/Gateway.csproj gateway/
+# the projects the gateway references (docs/design/fworker-wolverine-refactor.md 3); restore needs their project files
+COPY src/ src/
 RUN dotnet restore gateway/Gateway.csproj
 COPY gateway/ gateway/
 ARG VERSION=0.0.0

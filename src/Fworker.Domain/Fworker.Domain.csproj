@@ -1,0 +1,12 @@
+<!-- Pure rules (ranking, admission, recovery table, journal text ...). Depends on Contracts only. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Fworker.Domain</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Fworker.Contracts/Fworker.Contracts.csproj" />
+  </ItemGroup>
+</Project>

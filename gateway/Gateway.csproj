@@ -11,6 +11,14 @@
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.0.0" />
   </ItemGroup>
   <ItemGroup>
+    <!-- the host references every project of src/ (docs/design/fworker-wolverine-refactor.md 3); none of them references the host -->
+    <ProjectReference Include="../src/Fworker.Contracts/Fworker.Contracts.csproj" />
+    <ProjectReference Include="../src/Fworker.Domain/Fworker.Domain.csproj" />
+    <ProjectReference Include="../src/Fworker.Persistence/Fworker.Persistence.csproj" />
+    <ProjectReference Include="../src/Fworker.Integrations/Fworker.Integrations.csproj" />
+    <ProjectReference Include="../src/Fworker.Workflows/Fworker.Workflows.csproj" />
+  </ItemGroup>
+  <ItemGroup>
     <!-- the Copilot cloud agent's stdio MCP proxy, served at /fworker-mcp.mjs -->
     <EmbeddedResource Include="Mcp/fworker-mcp.mjs" LogicalName="fworker-mcp.mjs" />
     <!-- the dashboard page and its connect-prompt generator, put together by Templates/DashboardPage.cs, served at /dashboard -->

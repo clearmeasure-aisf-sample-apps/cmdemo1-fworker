@@ -23,7 +23,8 @@ builder.Services
     .AddGatewayBackground(composition)
     .AddGatewayMcp(composition)
     .AddGatewayHttp(composition.PublicBase)
-    .AddGatewayEndpoints(composition);
+    .AddGatewayEndpoints(composition)
+    .AddGatewaySeams(composition);
 var app = builder.Build();
 
 app.UseGatewayLifetime();       // the stopping callbacks in their order, the objects resolved where they were made, the runtimes' revoke

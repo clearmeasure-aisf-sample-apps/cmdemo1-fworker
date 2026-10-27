@@ -1,0 +1,15 @@
+<!-- The sagas, the scheduler, the reconcilers (W3 and later). Depends on Contracts, Domain and Persistence; it reaches the outside only through the
+     integration commands of Contracts (S2), so it never references Integrations. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Fworker.Workflows</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Fworker.Contracts/Fworker.Contracts.csproj" />
+    <ProjectReference Include="../Fworker.Domain/Fworker.Domain.csproj" />
+    <ProjectReference Include="../Fworker.Persistence/Fworker.Persistence.csproj" />
+  </ItemGroup>
+</Project>
