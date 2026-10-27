@@ -1,9 +1,9 @@
 @startuml fwi-waves
 skinparam dpi 150
-title Implementing ADR 0001: stage C first and stabilised, then the waves (fork = tasks that may run together)
+title Implementing ADR 0001 (revised 2026-10-26): stage C, a tdd gate in hours, the waves, one cutover of tdd (fork = may run together)
 
 start
-:W-1 decisions and prerequisites\n(#253, #254 merged; Program.cs frozen for outside PRs);
+:W-1 decisions and prerequisites\n(actions outside the repo; Program.cs frozen for outside PRs);
 partition "Stage C  Program.cs becomes a composition root (behaviour-neutral)" {
   fork
     :C-1 defect: board reading ignores other repositories;
@@ -40,32 +40,31 @@ partition "Stage C  Program.cs becomes a composition root (behaviour-neutral)" {
   :C7d VerbEndpoints + VerbPipeline;
   :C8 policies, statics to DI, architecture test;
 }
-:stabilisation gate: architecture test; golden writes unchanged;\n2 measured tdd batches; promoted to uat and prod; 2 quiet weeks;
-partition "W0  safety and quick wins" {
-  :W0.0 flags;
+:stabilisation gate: architecture test (C8) green; golden writes unchanged;\n1 measured tdd batch, no regression; /ready 200, leader acting, restore ok after each release;\n4-hour quiet tdd window (batch inside);
+partition "W0  safety and quick wins on v1" {
+  :W0.0 engine switch per environment, FACTORY_V2_OFF reader;
   fork
     :W0.1 fencing;
     fork
       :W0.2 day budget;
-      :W0.7 durable budgets;
-      fork
-        :W0.8 flow metrics;
-      fork again
-        :W0.9 ranking, slot freed;
-        note right: W0.9 also after W0.6
-      end fork
     fork again
       :W0.3 rev, state budget;
     fork again
+      :W0.8 flow metrics;
+    fork again
       :W0.6 replenish backpressure;
-      :W0.4 Depends-on refs;
+      fork
+        :W0.4 Depends-on refs;
+      fork again
+        :W0.9 ranking, slot freed;
+      end fork
     end fork
   fork again
     :W0.5 exit-21 text;
   end fork
 }
-:gate: tdd batch no slower; golden baseline re-recorded;
-partition "W1  structure and seams" {
+:gate: 2-hour tdd window, flow times, no stage slower; golden re-recorded;
+partition "W1  structure and seams S1 to S3, no behaviour change" {
   :W1.0 projects, seam stubs;
   fork
     :W1.1 ItemId, catalog;
@@ -77,31 +76,34 @@ partition "W1  structure and seams" {
   fork again
     :W1.3 Domain first ports;
   fork again
-    :W1.4 S1 in VerbPipeline;
-    fork
-      :W1.6 S3 ingress, S6 loopback;
-    fork again
-      :W1.7 S4 item state;
-    end fork
+    :W1.4 S1 engine per environment;
+    :W1.6 S3 ingress (can feed a shadow engine);
+  fork again
+    :W1.5 S2 command contracts, recording sink;
+  fork again
     :W1.9 isolation tests;
     note right: W1.9 after W0.4 and W1.0
-  fork again
-    :W1.5 S2 commands, S5 timers;
   fork again
     :W1.10 verb inventory;
   end fork
 }
-:gate: golden writes identical to the W0-gate baseline;
+:gate: golden writes identical to the W0-gate baseline (CI);
 fork
-  partition "W2..W9 (the plan's tables are the source for their tasks, parallel groups and gates)" {
-    :W2 Wolverine host inert (7-day soak);
-    :W3 durable side effects;
-    :W4 ingress, board reconciler;
-    :W5 DeliveryTrainSaga (3 shadow releases);
-    :W6 docs plan;
-    :W7 feature plan;
-    :W8 incidents;
-    :W9 retire v1;
+  partition "W2..W8 (the plan's tables are the source for their tasks, parallel groups and gates)" {
+    :W2 Wolverine host, Balanced, mailbox; tdd in shadow mode (2 h window);
+    :W3 v2 integration commands (2 h shadow window);
+    :W4 ingress, board reconciler (2 h shadow window);
+    :W5 DeliveryTrainSaga (shadow run: 4 h or 3 app releases);
+    :W6 docs plan (v2 Tier 1 job, CI);
+    :W7 feature plan (v2 Tier 1 job, CI);
+    :W9.0..W9.8 QC and the remaining verbs on v2;
+    :W9.9 tdd cutover to v2 as a whole: adoption, kill-switch drill;
+    :cutover gate: 1 measured batch on v2; 4-hour quiet window;
+    fork
+      :W8 incidents (staged incident);
+    fork again
+      :W9.11 remove v1 (2 h window);
+    end fork
   }
 fork again
   partition "Lane D beside W1..W7" {
