@@ -34,6 +34,15 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule, DashboardEndpoints>();
         services.AddSingleton<IEndpointModule, PluginEndpoints>();
         services.AddSingleton<IEndpointModule, OperatorReleaseEndpoints>();
+        // C7c: wait, the event streams (their framing in SseStreams), presence, messaging, the supervisor, and the test hooks (which map nothing unless
+        // messaging.testHooks is on); the runtime nonces are the composition's, not (yet) a service of their own
+        services.AddSingleton<SseStreams>();
+        services.AddSingleton<IEndpointModule, WaitEndpoints>();
+        services.AddSingleton<IEndpointModule, EventStreamEndpoints>();
+        services.AddSingleton<IEndpointModule, PresenceEndpoints>();
+        services.AddSingleton<IEndpointModule, MessagingEndpoints>();
+        services.AddSingleton<IEndpointModule, SupervisorEndpoints>();
+        services.AddSingleton<IEndpointModule>(sp => ActivatorUtilities.CreateInstance<TestHookEndpoints>(sp, c.RuntimeNonces));
         return services;
     }
 
