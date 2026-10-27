@@ -1,6 +1,6 @@
 # suite: promote
 # scenario: promote: when the commit running in the target is not known, the release waits (fail closed)
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.12.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: release 3.12.1 waits for the automatic promotion to **uat**: the commit running in uat is not known (no successful deployment of a release with a commit). The item stays in the Release Queue; the gateway looks again at every sweep.\n\n<!-- plant event=promotion-waiting key=3.12.1|uat|the commit running in uat is not known (no successful deployment of a release with a commit) -->"}
 ~ rule STATE factory-worker v1 #{#1}

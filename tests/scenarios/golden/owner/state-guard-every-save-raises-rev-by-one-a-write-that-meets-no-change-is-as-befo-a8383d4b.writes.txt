@@ -1,0 +1,4 @@
+# suite: owner
+# scenario: state guard: every save raises rev by one; a write that meets no change is as before
+# runs: 2
+~ rule STATE factory-worker v1 #{#1}

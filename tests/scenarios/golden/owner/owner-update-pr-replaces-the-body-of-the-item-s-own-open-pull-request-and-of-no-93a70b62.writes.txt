@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: update-pr replaces the body of the item's own open pull request, and of no other [full]
-# runs: 3
+# runs: 2
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n<!-- aisf:docs-only -->\n- change as described in the item.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}

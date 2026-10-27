@@ -1,10 +1,10 @@
 # suite: copilot
 # scenario: copilot: a fix-forward draft that GitHub will not retarget (part of a stack, 422) is closed and the item's pull request is opened on its branch, superseding the old one
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/stack-{#1}","title":"[WIP] Thing"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/stack-{#1}","body":"x","draft":true,"head":"copilot/stack-fix-{#1}","title":"Fix (#{#1})"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7028 sha256:7cd71330 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 + rule DELETE /repos/{repo}/git/refs/heads/copilot/stack-{#1} 204 -
 + rule PATCH /repos/{repo}/pulls/{#2} 200 {"state":"closed"}
 + rule PATCH /repos/{repo}/pulls/{#2} 200 {"title":"Thing (#{#1})"}

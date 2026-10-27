@@ -1,9 +1,9 @@
 # suite: copilot
 # scenario: copilot: CI release: passes run with no candidate item; an unlabelled item routed to copilot-cloud by runtimes.routing has its held run released
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/routed-{#1}","title":"[WIP] Routed"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"copilot/routed-{#1}","create_pull_request":false,"prompt":"{len:6821 sha256:49a3c2fe \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"copilot/routed-{#1}","create_pull_request":false,"prompt":"{len:7221 sha256:d4107087 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 + rule PATCH /repos/{repo}/pulls/{#2} 200 {"title":"Routed (#{#1})"}
 + rule POST /graphql markPullRequestReadyForReview 200 {"query":"mutation($id:ID!){ markPullRequestReadyForReview(input:{pullRequestId:$id}){ pullRequest{ number } } }","variables":{"id":"PR_{#2}"}}

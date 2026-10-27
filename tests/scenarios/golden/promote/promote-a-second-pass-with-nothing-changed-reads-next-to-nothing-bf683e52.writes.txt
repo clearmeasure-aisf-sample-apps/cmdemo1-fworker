@@ -1,0 +1,44 @@
+# suite: promote
+# scenario: promote: a second pass with nothing changed reads next to nothing
+# runs: 2
+= harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.42.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#2}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#2}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.42.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#3}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#3}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.42.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#4}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#4}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.42.1\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#5}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#5}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.42.2\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#6}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#6}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.42.2\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#7}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#7}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.42.2\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#8}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#8}\",\"merge\":{\"awaiting\":\"release-queue\",\"green_at\":\"{time}\",\"merged_at\":\"{time}\",\"pr\":\"{#old}\",\"queued_at\":\"{time}\",\"release\":\"3.42.2\",\"sha\":\"{sha}\"},\"schema\":1,\"verdict\":{\"passed\":true,\"pr\":\"{#old}\",\"processed\":true}}\n```\n"}
+= harness POST /repos/{repo}/issues/{#1}/labels 200 {"labels":["Auto Merge"]}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:575 sha256:df7e36a5 \"\uD83C\uDFED Plant manager: release 3.42.1 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:975 sha256:1c31d68c \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:575 sha256:036fc259 \"\uD83C\uDFED Plant manager: release 3.42.1 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:975 sha256:70fc9369 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:575 sha256:e66aecb7 \"\uD83C\uDFED Plant manager: release 3.42.1 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:975 sha256:53a5c410 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"{len:575 sha256:d0e0c983 \"\uD83C\uDFED Plant manager: release 3.42.1 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"{len:975 sha256:41a48abc \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"{len:975 sha256:61e6d32c \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#6}/comments 201 {"body":"{len:975 sha256:bdb1dc70 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#7}/comments 201 {"body":"{len:975 sha256:88f5a6c2 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
++ rule POST /repos/{repo}/issues/{#8}/comments 201 {"body":"{len:975 sha256:89792ec3 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
++ rule STATE factory-worker v1 #{#1}
++ rule STATE factory-worker v1 #{#2}
++ rule STATE factory-worker v1 #{#3}
++ rule STATE factory-worker v1 #{#4}
++ rule STATE factory-worker v1 #{#5}
++ rule STATE factory-worker v1 #{#6}
++ rule STATE factory-worker v1 #{#7}
++ rule STATE factory-worker v1 #{#8}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:509 sha256:f4940ac3 \"\uD83C\uDFED Plant manager: release 3.42.1 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:909 sha256:3ede4757 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:475 sha256:7cc8afb9 \"\uD83C\uDFED Plant manager: release 3.42.1 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:875 sha256:32dc68bb \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:475 sha256:3645066a \"\uD83C\uDFED Plant manager: release 3.42.1 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#3}/comments 201 {"body":"{len:875 sha256:bbcd7b2d \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"{len:475 sha256:bb495a12 \"\uD83C\uDFED Plant manager: release 3.42.1 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#4}/comments 201 {"body":"{len:875 sha256:fa5d33b8 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#5}/comments 201 {"body":"{len:875 sha256:91f21508 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#6}/comments 201 {"body":"{len:875 sha256:9b8996d1 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#7}/comments 201 {"body":"{len:875 sha256:210990c7 \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}
+~ rule POST /repos/{repo}/issues/{#8}/comments 201 {"body":"{len:875 sha256:66aa508b \"\uD83C\uDFED Plant manager: release 3.42.2 waits for the automatic promotion to **uat**: #…\"}"}

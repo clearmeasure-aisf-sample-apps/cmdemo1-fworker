@@ -1,8 +1,8 @@
 # suite: copilot-deadline
 # scenario: copilot: a task past api.copilot.maxMinutes fails and its code dies
-# runs: 3
+# runs: 2
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:4c23e87d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7038 sha256:34a75812 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: copilot-cloud started **cop-{session}** for **Technical Design** (task `{task}`). Copilot session: {agent-url}\n\n<!-- plant event=launched key=rtl|cop-{session}|{task} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cop-{session}** (runtime); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cop-{session} -->"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: **Owner:** Copilot task [{task}]({agent-url}) owns #{#1} from Technical Design until its pull request is merged and master is green. Between phases the gateway holds the item for this task and resumes it with a follow-up session; no other worker is offered the item.\n\n<!-- factory-journal:factory-worker -->"}

@@ -1,0 +1,3 @@
+# suite: auto
+# scenario: sync-board: with its budget used up the tail steps are deferred, the plan is still answered and each step reports its time
+# runs: 2

@@ -1,6 +1,6 @@
 # suite: manager
 # scenario: mgr: the plant data follows the sweep and the verbs: waiting code, column and lease, activity per item, refusals, and an owner the sweep stops listing
-# runs: 3
+# runs: 2
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: completion for **Technical Design** rejected: missing required section `## Technical Design` (no body append landed after dispatch: dispatched={time} last_append=none). A fresh append is needed.\n\nAI session: owen\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: completion for **Technical Design** rejected: missing required section `## Technical Design` (no body append landed after dispatch: dispatched={time} last_append=none). A fresh append is needed.\n\nAI session: owen\n\n<!-- factory-journal:factory-worker -->"}
 = harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}

@@ -1,6 +1,6 @@
 # suite: auto
 # scenario: escalate earlier: the same criterion cited twice parks the item with a question; timing criteria are flagged at Technical Design
-# runs: 3
+# runs: 2
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:501 sha256:50695544 \"\uD83E\uDD16 factory-worker: **Timing or statistical acceptance criteria** (flagged at Tec…\"}"}
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"Acceptance criteria:\n- The work order list shows the room number.\n- The list loads within {dur} for 500 work orders.\n\n## Technical Design\n\nFiles: src/a.cs\n- add the column.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"{len:679 sha256:c4155261 \"\uD83E\uDD16 factory-worker: **Question for the owner:** two consecutive review rounds in …\"}"}

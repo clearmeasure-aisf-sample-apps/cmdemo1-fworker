@@ -1,0 +1,8 @@
+# suite: auto
+# scenario: idle owner on a hold: a busy item lock does not stall the sweep; a later sweep releases the idle owner once the lock is free (issue 405) [full]
+# runs: 2
+= harness STATE factory-worker v1 #{#1}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule STATE factory-worker v1 #{#1}
+~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: ownership released by **w1** (idle for more than {dur} on a hold); the next trigger assigns it again.\n\n<!-- plant event=released key=idle|{time} -->"}

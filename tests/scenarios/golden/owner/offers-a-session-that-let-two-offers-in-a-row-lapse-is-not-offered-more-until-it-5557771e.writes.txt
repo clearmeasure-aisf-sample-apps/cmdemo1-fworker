@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: offers: a session that let two offers in a row lapse is not offered more until it calls a verb, and the status shows the cool-down
-# runs: 3
+# runs: 2
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: cool1 did not confirm within {dur}; offering to the next worker.\n\n<!-- plant event=reassigned key=ack|a-{id}|cool1 -->"}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **cool1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|cool1 -->"}
 ~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: cool1 did not confirm within {dur}; cool1 let 2 offers in a row lapse and is offered nothing new for {dur}, or until it calls a verb; offering to the next worker.\n\n<!-- plant event=reassigned key=ack|a-{id}|cool1 -->"}

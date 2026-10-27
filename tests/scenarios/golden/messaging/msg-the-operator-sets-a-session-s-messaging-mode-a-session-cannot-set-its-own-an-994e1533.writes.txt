@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: the operator sets a session's messaging mode, a session cannot set its own, and the operator sees sessions that are on no list
-# runs: 3
+# runs: 2
