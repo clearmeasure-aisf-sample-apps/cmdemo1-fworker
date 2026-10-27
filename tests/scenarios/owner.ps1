@@ -81,6 +81,10 @@ $OwnerScenarios = [ordered]@{
     $it = @($a.items | Where-Object { $_.item -eq $n })
     Check 'match, offer and accept times and the wait between them' ($it.Count -eq 1 -and $it[0].times.matched -and $it[0].times.offered -and $it[0].times.accepted -and $it[0].durations.matchToAccept -ge 0) ($a | ConvertTo-Json -Depth 6 -Compress)
     Check 'the aggregate counts it' ($a.aggregate.matchToAccept.count -ge 1)
+    # W0.8: the accept (the claim) stamps the stage the owner takes the item in
+    $of = @((Get-ItemState $n).flow)
+    Check 'flow: the accepted item has one entry, the stage it was taken in' ($of.Count -eq 1 -and "$($of[0].c)" -eq (Get-FakeIssue $n).column -and "$($of[0].at)" -match '^\d{4}-\d\d-\d\dT') ($of | ConvertTo-Json -Compress)
+    Check 'and the metrics route lists it with no time spent yet (the stage is still open)' ($it.Count -eq 1 -and @($it[0].flow).Count -eq 1 -and @($it[0].flow)[0].stage -eq $of[0].c -and $null -eq @($it[0].flow)[0].seconds) ($it | ConvertTo-Json -Depth 5 -Compress)
     Stop-OwnerClient 'met-a'
 }
 

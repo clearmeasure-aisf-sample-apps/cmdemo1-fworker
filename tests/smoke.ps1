@@ -199,4 +199,24 @@ $sbRefused = try { [void](Limit-StateBudget $sbBad { ($sbBad | ConvertTo-Json).L
 Check 'state budget: a state that does not fit without the three collections is refused' $sbRefused
 $script:StateBudget = 48000
 Check 'state rev: absent is 0, present is read' ((Get-StateRev @{}) -eq 0 -and (Get-StateRev @{ rev = 7 }) -eq 7)
+'flow metrics'
+. (Join-Path $root 'plugin/scripts/lib/Metrics.ps1')
+$fl = @{ item = 5 }
+Add-FlowStamp $fl 'Technical Design'; Add-FlowStamp $fl 'Technical Design'; Add-FlowStamp $fl 'Development'
+Check 'flow: one entry per stage entered, the same stage twice in a row is one' (@($fl.flow).Count -eq 2 -and $fl.flow[0].c -eq 'Technical Design' -and $fl.flow[1].c -eq 'Development' -and "$($fl.flow[1].at)" -match '^\d{4}-\d\d-\d\dT')
+Add-FlowStamp $fl 'Technical Design'
+Check 'flow: a stage visited again is a new entry' (@($fl.flow).Count -eq 3 -and $fl.flow[2].c -eq 'Technical Design')
+foreach ($i in 1..40) { Add-FlowStamp $fl $(if ($i % 2) { 'Functional Testing' } else { 'Development' }) }
+Check 'flow: only the last entries are kept, the newest stays' (@($fl.flow).Count -eq $script:FlowKeep -and $fl.flow[-1].c -eq 'Development')
+Check 'flow: a full set is far inside the state budget' ((@{ flow = $fl.flow } | ConvertTo-Json -Depth 6 -Compress).Length -lt 1500)
+$ms = @{ item = 8; claim = @{ holder = 'w' } }
+Move-OwnerTo 8 $ms 'Development'; Move-OwnerTo 8 $ms 'Functional Testing'
+Check 'flow: Move-OwnerTo stamps each stage it enters, next to dispatched_at' (@($ms.flow).Count -eq 2 -and $ms.flow[0].c -eq 'Development' -and $ms.flow[1].c -eq 'Functional Testing' -and $ms.dispatched_at.ContainsKey('Functional Testing') -and $ms.claim.column -eq 'Functional Testing')
+$fs = @{ item = 5; flow = @(@{ c = 'Technical Design'; at = '2026-01-01T00:00:00Z' }, @{ c = 'Development'; at = '2026-01-01T00:10:00Z' }, @{ c = 'Functional Testing'; at = '2026-01-01T01:10:00Z' }); merge = @{ merged_at = '2026-01-01T01:40:00Z' } }
+$cy = Get-ItemCycle 5 @{ state = $fs; comments = @() } 'bot'
+Check 'flow metrics: the seconds of each stage, the last one up to the merge' (@($cy.flow).Count -eq 3 -and $cy.flow[0].seconds -eq 600 -and $cy.flow[1].seconds -eq 3600 -and $cy.flow[2].seconds -eq 1800 -and $cy.flow[1].stage -eq 'Development')
+$cyOpen = Get-ItemCycle 6 @{ state = @{ item = 6; flow = @(@{ c = 'Development'; at = '2026-01-01T00:00:00Z' }) ; merge = @{ pr = 3; merged_at = $null } }; comments = @() } 'bot'
+Check 'flow metrics: an item with no merge time is not measured (no journal either)' ($null -eq $cyOpen)
+$cyOld = Get-ItemCycle 7 @{ state = @{ item = 7; merge = @{ merged_at = '2026-01-01T00:20:00Z' } }; comments = @() } 'bot'
+Check 'flow metrics: a state without flow has an empty flow and the old fields' (@($cyOld.flow).Count -eq 0 -and $cyOld.times.merged -and $cyOld.columns -is [hashtable])
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }

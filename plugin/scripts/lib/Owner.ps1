@@ -6,8 +6,21 @@ function Test-OwnedClaim($s) { (Test-Has $s 'claim') -and (Test-Has $s.claim 'ow
 function Test-BotLive($s) { if (-not (Test-Has $s 'bot')) { return $false }; $u = ConvertFrom-Iso $s.bot.lease_until; return ($u -and $u -gt (Get-UtcNow)) }
 
 # The owner finishes a stage and keeps the item: the claim moves to the new column with a fresh lease; reviews of the new column start empty.
+# Flow metrics (W0.8, delivery-speed.md 13): the state's `flow` is one small entry per stage the item entered, oldest first: @{ c = column; at = ISO }.
+# Only the last FlowKeep entries are kept (about 3 rounds of the board's 5 columns), so it stays small inside the state budget; Limit-StateBudget
+# trims it oldest-first as well when the whole state is over the budget. An entry for the column the item is already in is not added again
+# (a claim taken again in the same stage is not a new stage). The `metrics` verb turns the entries into the time spent per stage.
+$script:FlowKeep = 15
+function Add-FlowStamp($s, [string]$Column) {
+    if (-not $Column) { return }
+    $prev = @(if (Test-Has $s 'flow') { $s.flow })
+    if ($prev.Count -gt 0 -and "$($prev[-1].c)" -eq $Column) { return }
+    $s.flow = @($prev + @(@{ c = $Column; at = (ConvertTo-Iso (Get-UtcNow)) }) | Select-Object -Last $script:FlowKeep)
+}
+
 function Move-OwnerTo([int]$n, $s, [string]$Column) {
     $t = (Get-Cfg).timing
+    Add-FlowStamp $s $Column
     $s.claim.column = $Column; $s.claim.heartbeat = ConvertTo-Iso (Get-UtcNow); $s.claim.lease_until = ConvertTo-Iso ((Get-UtcNow).AddMinutes($t.leaseMinutes))
     if (-not (Test-Has $s 'dispatched_at')) { $s.dispatched_at = @{} }
     $s.dispatched_at[$Column] = ConvertTo-Iso (Get-UtcNow)
