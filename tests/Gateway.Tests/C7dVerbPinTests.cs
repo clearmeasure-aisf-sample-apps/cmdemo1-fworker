@@ -393,3 +393,29 @@ public class C7dVerbBudgetPinTests(C7dVerbGateway gw) : IClassFixture<C7dVerbGat
         Assert.Equal(503, (await Verb("pin-budget", Admin)).Status);
     }
 }
+
+/// <summary>The plant's part of a verb call that succeeded: OnVerb runs after the rule script and only when it exited 0.</summary>
+public class C7dVerbPlantHookPinTests(C7dVerbGateway gw) : IClassFixture<C7dVerbGateway>
+{
+    const int Api = GatewayEnvironment.ApiPort;
+
+    string Owner(int item, string name) => Auth.MintItemToken(gw.Env.TokenSecret, item, "owner", "a" + item, name, TimeSpan.FromHours(1));
+    async Task<string?> OwnerOf(int item) => (await gw.Host.SendAsync("GET", "/api/v1/status", Api, GatewayEnvironment.AdminToken)).Json?["plant"]?["owners"]?[item.ToString()]?.ToString();
+    Task SetOwner(int item, string name) => gw.Host.SendAsync("POST", "/api/v1/_test/plan", Api, GatewayEnvironment.AdminToken, new JsonObject { ["owners"] = new JsonObject { [item.ToString()] = name }, ["owned"] = new JsonObject(), ["keep"] = new JsonArray(item) }.ToJsonString());
+
+    [Fact]
+    public async Task Release_DropsTheOwner_OnlyWhenTheRuleScriptSucceeded()
+    {
+        if (!StubPwsh.Supported) return;
+        await SetOwner(31, "olga");
+        Assert.Equal("olga", await OwnerOf(31));
+        // the rule script refused (exit 10): the plant's hook does not run
+        StubPwsh.Answer(gw.Env.Dir, "release", "{\"ok\":false,\"code\":\"x\",\"exit\":10}", 10);
+        Assert.Equal(409, (await gw.Host.SendAsync("POST", "/api/v1/verbs/release", Api, Owner(31, "olga"), "{\"item\":31}")).Status);
+        Assert.Equal("olga", await OwnerOf(31));
+        // it succeeded: OnVerb ran before the answer was returned
+        StubPwsh.Answer(gw.Env.Dir, "release", "{\"ok\":true}");
+        Assert.Equal(200, (await gw.Host.SendAsync("POST", "/api/v1/verbs/release", Api, Owner(31, "olga"), "{\"item\":31}")).Status);
+        Assert.Null(await OwnerOf(31));
+    }
+}
