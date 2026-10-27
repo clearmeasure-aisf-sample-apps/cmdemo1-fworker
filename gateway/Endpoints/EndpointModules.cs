@@ -55,6 +55,11 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule, TranscriptEndpoints>();
         services.AddSingleton<IEndpointModule, ItemAdminEndpoints>();
         services.AddSingleton<IEndpointModule, DemoEndpoints>();
+        // C7d: the verb route and its pipeline (seam S1); the GitHub budget is the composition's, not (yet) a service of its own
+        services.AddSingleton(sp => new VerbPipeline(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(), sp.GetRequiredService<KeeperSettings>(),
+            sp.GetRequiredService<Plant>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(),
+            c.GitHubBudget, sp));
+        services.AddSingleton<IEndpointModule, VerbEndpoints>();
         return services;
     }
 
