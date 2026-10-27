@@ -271,7 +271,7 @@ jobs:
       - name: Domain and workflow tests
         run: |
           set -euo pipefail
-          for project in tests/Fworker.Domain.Tests tests/Fworker.Workflow.Tests; do
+          for project in tests/Fworker.Contracts.Tests tests/Fworker.Domain.Tests tests/Fworker.Integrations.Tests tests/Fworker.Workflow.Tests; do
             dotnet test "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false
           done
 
