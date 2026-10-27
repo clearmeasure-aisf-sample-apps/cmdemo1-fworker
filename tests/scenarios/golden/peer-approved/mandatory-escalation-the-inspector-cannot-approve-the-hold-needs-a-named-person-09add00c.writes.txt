@@ -1,6 +1,6 @@
 # suite: peer-approved
 # scenario: mandatory escalation: the inspector cannot approve, the hold needs a named person [full]
-# runs: 3
+# runs: 2
 = rule PATCH /repos/{repo}/issues/{#1} 200 {"body":"x\n\n## Technical Design\n\n\n- change as described in the item.\n"}
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: REVIEW: COMPLETE - design done\n\n<!-- factory-journal:factory-worker -->"}
 = rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Development","p":"PVT_fake"}}
@@ -22,4 +22,6 @@
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 + rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: hold cleared: factory-worker-testperson[bot] approved `{sha}`. The merge may proceed.\n\n<!-- factory-journal:factory-worker -->"}
 + rule STATE factory-worker v1 #{#1}
+~ rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#1}","o":"opt_Release_Queue","p":"PVT_fake"}}
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: master is GREEN at `{sha}` - waiting for the release candidate that carries it.\n\n<!-- factory-journal:factory-worker -->"}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: release candidate **2.4.100** carries `{sha}` - waiting in **Release Queue** for the production deployment.\n\n<!-- factory-journal:factory-worker -->"}

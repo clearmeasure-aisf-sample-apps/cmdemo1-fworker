@@ -1,6 +1,6 @@
 # suite: auto
 # scenario: orphan claim refs: an accept takes one over, the sweep removes those of closed items and keeps a young one (issue 47)
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 = harness POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
 = harness POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#3}","sha":"{sha}"}

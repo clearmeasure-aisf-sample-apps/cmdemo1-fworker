@@ -1,6 +1,6 @@
 # suite: octopus
 # scenario: octopus: provision picks a healthy fworker-host with capacity and runs Start worker there with the prompted variables; the worker redeems and is offered; no capacity left refuses and the item waits
-# runs: 3
+# runs: 2
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: octopus worker note\n\nAI session: [oct-{session}]({session-link})\n\n<!-- factory-journal:factory-worker -->"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 = harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}

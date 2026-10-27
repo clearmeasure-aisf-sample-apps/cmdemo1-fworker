@@ -1,11 +1,11 @@
 # suite: copilot
 # scenario: copilot: an FT FAIL sends the item back to Development as a follow-up session of the owner task, naming the findings [full]
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/ft-{#1}","title":"[WIP] Ft"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
-+ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:7671 sha256:0c350a79 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
-+ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8189 sha256:b08c3f5e \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7028 sha256:7cd71330 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8071 sha256:fb5f3624 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
++ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8589 sha256:544846d3 \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 + rule PATCH /repos/{repo}/pulls/{#2} 200 {"title":"Thing (#{#1})"}

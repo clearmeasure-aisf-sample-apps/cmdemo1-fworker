@@ -1,3 +1,3 @@
 # suite: manager
 # scenario: mgr: questions leave as one batch per window, wait while a batch is unanswered, and split at batchMax
-# runs: 3
+# runs: 2

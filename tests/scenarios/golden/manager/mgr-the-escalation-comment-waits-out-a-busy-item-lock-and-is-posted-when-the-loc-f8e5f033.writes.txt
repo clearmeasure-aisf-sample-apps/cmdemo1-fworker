@@ -1,5 +1,5 @@
 # suite: manager
 # scenario: mgr: the escalation comment waits out a busy item lock and is posted when the lock frees [full]
-# runs: 3
+# runs: 2
 ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: a question from **alice** has waited {dur} for the supervisor (supervisor: absent); a person is asked to look at the dashboard.\n\n<!-- plant event=question-escalated key=q|m-{sha}-{n} -->"}
 ~ rule STATE factory-worker v1 #{#1}

@@ -1,0 +1,10 @@
+# suite: manager
+# scenario: keeper: replenish backpressure holds at holdWhenWaiting, holds unless idle (onlyWhenIdle) and releases only when nothing waits and a session is free
+# runs: 2
+= harness POST /repos/{repo}/issues/{#1}/comments 201 {"body":"<!-- factory-state:factory-worker v1 -->\nstate\n\n```json\n{\"item\":\"{#1}\",\"merge\":{\"awaiting\":null,\"done_at\":\"{time}\",\"merged_at\":\"{time}\",\"sha\":\"{sha}\"}}\n```\n"}
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
+= rule POST /repos/{repo}/issues 201 {"body":"{len:891 sha256:85ec2025 \"Docs-only change. Add or extend `docs/domain/work-order-lifecycle.md` with a sho…\"}","labels":["enhancement","Auto Merge","factory worker","env:tdd"],"title":"Docs: work order lifecycle guide"}
+= rule POST /graphql addProjectV2ItemById 200 {"query":"mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }","variables":{"c":"I_{#2}","p":"PVT_fake"}}
+= rule POST /graphql updateProjectV2ItemFieldValue 200 {"query":"mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){ updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){ projectV2Item{ id } } }","variables":{"f":"FIELD_status","i":"card_{#2}","o":"opt_Technical_Design","p":"PVT_fake"}}
++ rule STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: the gateway created work item #{#2} (**Docs: work order lifecycle guide**) to keep activity going after this item finished.\n\n<!-- plant event=replenish key= -->"}

@@ -1,0 +1,8 @@
+# suite: auto
+# scenario: closed park: a busy item lock does not stall the sweep; a later sweep removes the park of the closed item once the lock is free (issue 405) [full]
+# runs: 2
+= harness STATE factory-worker v1 #{#1}
+= harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `stuck` removed by the sweep: the item is closed. The item is closed: nothing is offered.\n\n<!-- plant event=unparked key=closed|{time} -->"}

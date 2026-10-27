@@ -1,3 +1,3 @@
 # suite: messaging
 # scenario: msg: headless inspector and QC processes get the item token, never the worker credential
-# runs: 3
+# runs: 2

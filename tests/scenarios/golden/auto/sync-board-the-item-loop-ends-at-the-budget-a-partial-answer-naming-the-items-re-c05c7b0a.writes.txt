@@ -1,0 +1,3 @@
+# suite: auto
+# scenario: sync-board: the item loop ends at the budget: a partial answer naming the items read, and the next sweep begins where it stopped
+# runs: 2
