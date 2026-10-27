@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 //
 //   AddGatewayConfiguration  the configuration read at start (C3)
 //   AddGatewayCore           EventHub, the GitHub budget, the Runner, the transcript store and its service
-//   AddGatewayLeadership     the leader lease, the plant snapshot, LeadershipService (C4d)
+//   AddGatewayLeadership     the leader lease, the plant snapshot, LeadershipService (C4d); with FACTORY_DB_CONNECTION the Wolverine host's services (W2.2)
 //   AddGatewayIdentity       revocations, runtime nonces, RevocationService (C4a)
 //   AddGatewayRuntimes       the prompt files, the prompt builders, RuntimeRegistry (the runtime adapters and managers) and their settings (C5b)
 //   AddGatewayPlant          the plant's settings, IPlantHooks, Plant, Messenger, QcHub, BaseWatch, the operator's releases (C4b)
@@ -81,7 +81,7 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton<ISnapshotCoordinator>(sp => sp.GetRequiredService<SnapshotCoordinator>());
         services.AddSingleton<LeadershipService>();
         c.SnapshotOn = snapshotOn; c.LeaderOn = leaderOn; c.Leader = leader; c.SweepGap = sweepGap;
-        return services;
+        return services.AddGatewayWolverine(c);   // W2.2: the Wolverine host's services, only with a connection string
     }
 
     public static IServiceCollection AddGatewayIdentity(this IServiceCollection services, GatewayComposition c)
@@ -238,6 +238,8 @@ static class GatewayServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<TranscriptService>());
         // the lease's start (LeadershipService) waits for the revocation read; without the lease, the snapshot's one read
         services.AddHostedService(sp => sp.GetRequiredService<LeadershipService>());
+        // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
+        if (c.Database.Configured) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
         services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
         // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
         var sweepSeconds = gw.SweepSeconds;
