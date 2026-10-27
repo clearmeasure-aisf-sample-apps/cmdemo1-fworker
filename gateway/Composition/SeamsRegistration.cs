@@ -5,5 +5,21 @@
 /// </summary>
 internal static class SeamsRegistration
 {
-    public static IServiceCollection AddGatewaySeams(this IServiceCollection services, GatewayComposition c) => services;
+    public static IServiceCollection AddGatewaySeams(this IServiceCollection services, GatewayComposition c)
+    {
+        // S2 (W1.5): v1's port delegates to the runtime adapters; the recording sink is registered by its own type. Nothing resolves either yet.
+        services.AddSingleton<Fworker.Domain.Commands.RecordingCommandSink>();
+        services.AddSingleton<Fworker.Contracts.Seams.ICommandPort>(sp =>
+        {
+            var rts = sp.GetRequiredService<RuntimeRegistry>();
+            return new V1CommandPort(kind => kind switch
+            {
+                "cursor-cloud" => rts.CursorRuntime,
+                "copilot-cloud" => rts.CopilotRuntime,
+                "octopus" => rts.OctopusRuntime,
+                _ => null,
+            });
+        });
+        return services;
+    }
 }
