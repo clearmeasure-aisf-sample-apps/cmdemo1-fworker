@@ -32,10 +32,6 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: "1"
   POWERSHELL_TELEMETRY_OPTOUT: "1"
   POWERSHELL_UPDATECHECK: "Off"
-  # The SQL Server service container of the jobs below (W2.0). A throwaway password of a container that lives for the job and is reachable only from
-  # the runner (the services block cannot read env, so it is written there too). Tier 1 does not pass it to the gateway: FACTORY_DB_CONNECTION stays
-  # unset, so the gateway under test runs as v1; only the smoke checks and Fworker.Workflow.Tests read it, as FACTORY_TEST_SQL.
-  FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw0rker-Ci-Only-1;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
 
 jobs:
   tier1:
@@ -43,13 +39,17 @@ jobs:
     runs-on: ubuntu-24.04
     # a shard takes about 6 minutes of suites (issue 371, 2.8); the suites step stops at 16 minutes, and the rest leaves the uploads their time
     timeout-minutes: 25
-    # SQL Server beside every shard (W2.0), limited to 1 GB so the suites keep their memory; it starts while the job builds
+    # SQL Server beside every shard (W2.0), limited to 1 GB so the suites keep their memory; it starts while the job builds. Its SA password is composed
+    # per run from the run id and attempt (nothing credential-shaped is committed; the container lives for the job and only the runner reaches it).
+    # Tier 1 does not pass the connection to the gateway: FACTORY_DB_CONNECTION stays unset, so the gateway under test runs as v1.
+    env:
+      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
     services:
       sql:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
           ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: Fw0rker-Ci-Only-1
+          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
           MSSQL_MEMORY_LIMIT_MB: "1024"
         ports:
           - 1433:1433
@@ -272,12 +272,14 @@ jobs:
     name: Smoke and gateway tests
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
     services:
       sql:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
           ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: Fw0rker-Ci-Only-1
+          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
           MSSQL_MEMORY_LIMIT_MB: "1024"
         ports:
           - 1433:1433
