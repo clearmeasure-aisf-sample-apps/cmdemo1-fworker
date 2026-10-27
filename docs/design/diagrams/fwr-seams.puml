@@ -1,26 +1,24 @@
 @startuml fwr-seams
 skinparam dpi 150
 skinparam componentStyle rectangle
-title fworker refactor: one gateway process, two engines behind six seams (R1 to R8)
+title fworker refactor (revised 2026-10-26): one gateway process, one acting engine per environment, three seams
 
 actor "AI session" as S
 actor "GitHub / Octopus" as X
-package "Gateway process (lease holder; Wolverine in Solo mode, started when Acting)" {
-  [S1 Verb router\nper verb and per item:\nrule script, or the saga (InvokeAsync / event)] as S1
-  [S3 Event ingress\nwebhooks, verbs' events,\nOctopus watcher, board reconciler] as S3
-  [S2 Command port\nruntime start/stop (results back as messages),\nrunbook runs, journal via the journal verb] as S2
-  [S4 Item state store\nv1: state comment;\nv2: saga row + versioned projection] as S4
-  [S5 Timers\nv1: compared on each pass;\nv2: scheduled messages] as S5
-  [S6 Loopback route\nrule scripts ask v2:\nslots, ItemMerged(commit, gates)] as S6
-  package "v1 engine (shrinks phase by phase)" {
-    [Sweep + rule scripts in pwsh children (RunnerPool)\nPlant (offers, leases, pushes for both engines until R9),\nleader lease, snapshot] as V1
+package "Gateway process (engine composed at start for FACTORY_ENVIRONMENT)" {
+  [S1 Verb router\none engine interface:\nv1 rule scripts, or v2 sagas (InvokeAsync / event)] as S1
+  [S3 Event ingress\nwebhooks, verbs' events,\nOctopus watcher, board reconciler;\nfeeds the shadow engine too] as S3
+  [S2 Command port\none integration command per side effect\n(outbox); or the recording sink] as S2
+  [Recording sink\nshadow mode and the golden-write\ncomparison with v1's writes] as REC
+  package "v1 engine (acts until the cutover; removed after it)" {
+    [Sweep + rule scripts in pwsh children (RunnerPool),\nPlant, leader lease, snapshot;\nreads the state comment (rollback path)] as V1
   }
-  package "v2 engine (grows phase by phase)" {
-    [Wolverine: sagas, coordinators,\nintegration handlers] as V2
+  package "v2 engine (shadow from R2, acting from the cutover)" {
+    [Wolverine, Balanced mode, leader election:\nsagas, coordinators, integration handlers,\nsession mailbox; state comment kept in v1's format] as V2
   }
-  [Switches\nengine:v2 label (replenish marker + Auto Merge, set at every intake path);\nflags: commands, ingress, delivery, intake.v2Plans,\nscheduler, merge, incidents;\nFACTORY_V2_OFF (fast rollback; v2 work frozen, not handed to v1)] as SW
+  [Switch\nengine: v2Environments, shadowEnvironments\n(config/deploy.overrides.json);\nFACTORY_V2_OFF (kill switch: back to v1, no shadow);\nrollback also by revert] as SW
 }
-database "Azure SQL\n(acting gateway only)" as DB
+database "Azure SQL\n(where v2 runs)" as DB
 
 S --> S1
 X --> S3
@@ -28,18 +26,13 @@ S1 --> V1 : engine v1
 S1 --> V2 : engine v2
 S3 --> V1 : RequestSweep(item)
 S3 --> V2 : publish (inbox, dedup)
-V1 --> S6
-S6 --> V2
-V1 --> S2
+V1 --> X : its own writes
 V2 --> S2
-S2 --> X
-V1 --> S4
-V2 --> S4
-V1 --> S5
-V2 --> S5
+S2 --> X : when acting
+S2 --> REC : in shadow
 SW ..> S1
-SW ..> S2
 SW ..> S3
+SW ..> S2
 V2 --> DB
 S2 --> DB : outbox
 @enduml

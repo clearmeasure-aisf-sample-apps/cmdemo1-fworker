@@ -2,7 +2,7 @@
 
 - **Status:** Proposed. On 2026-10-25 the owner asked for "a phased refactoring plan that keeps fworker releases stable" and then
   "Save an adr with this plan"; this records the plan. It becomes Accepted with the decisions of the plan's section 7, the base
-  included; nothing is built.
+  included; nothing is built. Revised 2026-10-26 (section "Revision 2026-10-26"); still Proposed.
 - **Date:** 2026-10-25
 - **Plan:** `docs/design/fworker-wolverine-refactor.md` (phases R0 to R9, the rules that keep releases stable, the seams, the verb
   inventory).
@@ -116,6 +116,45 @@ taken is decision 1 of the plan's section 7.
   - the incident rollback policy in prod.
 - **The delivery-speed design is built once,** inside R0 (safety and quick wins), R5 (evidence and train) and R7 (scheduler, Functional
   Testing with CI alongside, file-overlap hold, merge train), not first in v1 and again in v2.
+
+## Revision 2026-10-26
+
+**Decision of the owner, 2026-10-26:**
+1. uat and prod do not matter for this plan: if it works in tdd, it is accepted.
+2. Green pull requests merge and deploy without approval stops.
+
+**What changes in the decision above:**
+- **Point 3, the stabilisation after stage C:** the gate is now the architecture test green, the golden writes unchanged, one measured
+  batch in tdd with no regression against the 2026-10-25 delivery-speed baseline, `/ready` 200 with the leader acting and the plant
+  restored after each release, and a 4-hour quiet observation window in tdd. It replaces two batches, the promotion to uat and prod,
+  and two quiet weeks.
+- **Point 4, the path:** v2 is built beside v1 as new projects in this repository, held to the same Tier 1 suites and golden-write
+  oracle, and observed in tdd in shadow mode (it reads the board, its commands go to a recording sink). **tdd then switches engines
+  as a whole,** once (`engine: { v2Environments, shadowEnvironments }`, tdd's value in `config/deploy.overrides.json`), not item by
+  item. Three seams stay because they give the new code its shape: S1 the verb router, S2 the command port (with the recording sink),
+  S3 the event ingress. S4 as a seam in v1, S5 and S6 go.
+- **Point 5, the rules:** gone are the `engine:v2` label and every v1 path that skipped or forwarded v2 items, the per-capability
+  flags, Solo mode on the lease holder (v2 runs Balanced with Wolverine's leader election and the session mailbox from R2), v1's side
+  effects through the outbox, and expand and contract for uat's and prod's lag. Kept: Tier 1 as the contract, the database only where
+  v2 runs, compatible answers for agents, `FACTORY_V2_OFF`.
+- **Point 6, the environments:** fworker's uat and prod gateways are out of scope; no gate waits on them and nothing in the plan
+  promotes to them. The tdd gateway still delivers the app to the app's uat and prod.
+- **Gates** are tdd observation windows measured in hours (2 or 4), not soaks of days, shadow releases or batches to prod. Incidents
+  (R8) come after the cutover.
+
+**Consequences:**
+- **Faster:** the side-by-side work (10 tasks removed or merged) and the soaks, shadow releases, promotions and quiet weeks are gone;
+  the estimate is about 61 hours of clock time (55 to 75) at the observed 50 minutes per task with 2 to 3 in parallel
+  (`fworker-wolverine-implementation.md` 5), against the earlier 53 to 56 weeks, which assumed tasks of days to weeks.
+- **All or nothing per environment:** at the cutover v2 takes every item and capability in tdd at once, so a defect that Tier 1 on v2
+  and the shadow windows missed reaches every item there. Accepted, because tdd is the only environment in scope.
+- **Rollback by revert or kill switch:** a revert of the switch's pull request (a release), or `FACTORY_V2_OFF` (a new revision, no
+  image change). v2 writes the state comments in the format v1 reads until v1 is removed, so v1 resumes every open item; the cutover
+  rehearses this before its measured batch. After v1's removal, rollback is a revert of the removal.
+- **uat and prod out of scope:** no promotion of fworker to them, no wait on cmdemo1-system#314, no `ui-auto-promote` path change.
+- **No approval stops inside the repository:** protected paths and security-sensitive tasks merge on green after the reviewer
+  subagent (with a security brief for the latter), recorded in the handoff. The actions outside the repository (Azure SQL, a replica,
+  `FACTORY_V2_OFF` in cmdemo1-system, cmdemo1-aisf off board 679) remain.
 
 ## Alternatives considered
 
