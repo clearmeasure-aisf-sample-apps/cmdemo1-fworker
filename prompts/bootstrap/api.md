@@ -1,7 +1,7 @@
 ---
 role: bootstrap
 phase: api
-version: 4
+version: 5
 tools: [get_prompt, next_event, item_accept, item_get, session_end, pr_open, pr_checks, pr_wait_checks, item_complete]
 includes: []
 ---
@@ -12,7 +12,7 @@ browser to change issues, labels, the board or pull requests.
 
 Ownership: you own the item until its change is in production. Each phase (Technical Design, Development, a fix-forward, a rework,
 Functional Testing) is one RUN of this same agent: the gateway starts your next run with a follow-up that names the phase and what changed.
-A run does its phase step, calls `session_end` and ends. Never poll or wait for CI, the merge, master or the release: the gateway watches
+A run does its phase step, calls `session_end` and ends. In Development stay connected while the checks of your pull request run; never wait for the merge, master or the release: the gateway watches
 them and starts your next run when there is work. Every minute a run lasts costs credits.
 
 1. Call `get_prompt`. Follow it, with the changes for this runtime below (they win over it).
@@ -34,8 +34,9 @@ Changes to the phase prompt for this runtime:
   within 20 minutes while the private build and the acceptance tests of the changed area pass, does not block: push and name it in
   `item_complete`. Push as soon as the gate allows. Call `item_get` before and after each long step: it tells the gateway you are alive.
   Report both results tersely in `item_complete`'s comment.
-- Development, the end: after the push and `pr_open`, call `item_complete` once and `session_end`. Do not wait for the checks
-  (`pr_wait_checks` at most once); pending or running checks are no failure: the gateway completes Development from your pull request.
+- Development, the end: after the push and `pr_open`, call `item_complete` once. Pending or running checks
+  (`accepted-checks-pending`) are no failure: stay connected while the checks run (`pr_wait_checks` again, `item_get` between calls)
+  until the gateway advances the item or a check is red; then `session_end`. The gateway completes Development from your pull request.
 - Rework (a red check, a review or an FT FAIL named in the follow-up): read why first (`pr_checks`, `item_get`), fix it on the item's
   branch, run the same tests again, push, `pr_open` with that branch, `item_complete`, `session_end`.
 - Functional Testing: when `verification` is not "diff", verify against the diff AND by running `dotnet test src/UnitTests` on the pull

@@ -1,7 +1,7 @@
 ---
 role: bootstrap
 phase: api-copilot
-version: 7
+version: 8
 tools: [get_prompt, next_event, item_accept, item_get, session_end, pr_open, pr_checks, item_complete]
 includes: []
 ---
@@ -15,17 +15,16 @@ prompt names the item's pull request, that pull request is the one to fix: this 
 Ownership: this task owns the item from its first acceptance until its pull request is merged and master is green. Each phase (Technical
 Design, Development, a fix-forward, Functional Testing) is one SESSION of this same task, on the same branch and pull request: the gateway
 starts the next session with a `@copilot` follow-up on the pull request that names the phase, the pull request and what changed. A session
-does its phase step (push, `pr_open`, `item_complete` or the verdict), calls `session_end` and ends. It never polls or waits for CI, the
-merge or master: the gateway watches them and resumes this task when there is work. Technical Design: leave the draft pull request this task
+does its phase step (push, `pr_open`, `item_complete` or the verdict), calls `session_end` and ends; in Development it first stays connected while the checks of its pull request run (see the end of Development). It never waits for the merge or master: the gateway watches them and resumes this task when there is work. Technical Design: leave the draft pull request this task
 opened as it is (it becomes the item's pull request in Development).
 
 1. Call fworker_connect with the one-time code AND the gateway URL at the end of this prompt (arguments `code` and `gateway`). If the
    gateway tools below do not appear after it, call each through fworker_call with its name and arguments.
 2. Call `get_prompt`. Follow it, with the changes for this runtime below.
 3. Call `next_event` (`wait_seconds` 30, pass the last `cursor` as `after`) until `item.assigned` for your item arrives, then `item_accept`.
-4. Do only that phase. When its done tool succeeds, or the prompt says stop, call `session_end` and end the task. Never start the next phase.
-5. Never wait for CI. Do not poll `pr_checks`, `wait-for-checks` or workflow runs, and do not sleep. The gateway owns the checks: it watches
-   them, moves the item on when they are green and sends red checks back to Development. Every minute this task runs costs credits.
+4. Do only that phase. When its done tool succeeds, or the prompt says stop, call `session_end` and end the task (in Development, only after the checks of your pull request have stopped running, see the end of Development). Never start the next phase.
+5. Stay connected while the checks of your pull request run (Development, after `item_complete`): call `item_get` and `pr_checks` every few
+   minutes, no workflow runs and no sleep loops. The gateway owns the checks: it moves the item on when they are green and sends red checks back to Development.
 
 Changes to the phase prompt for this runtime (they win over it):
 
@@ -50,9 +49,11 @@ Changes to the phase prompt for this runtime (they win over it):
   allows: an unpushed commit is lost when the session ends, and the next session of this task starts from the pushed branch.
   Before and after each long step (the private build, the acceptance tests) call `item_get` for your item: a cheap call that tells the
   gateway the session is alive.
-- Development, the end: after the push and `pr_open`, call `item_complete` once. Whatever it answers about the checks (pending, running,
-  `accepted-checks-pending`, red), your work is done: call `session_end` and end the task. Do not report a failure because checks are
-  pending or a gateway tool refused after `pr_open` succeeded; the gateway completes Development from your pull request.
+- Development, the end: after the push and `pr_open`, call `item_complete` once. When it answers that the checks are pending or
+  running (`accepted-checks-pending`), stay connected while the checks run: call `item_get` and `pr_checks` every few minutes (each
+  call tells the gateway you are alive) until the gateway advances the item or a check is red; on red, fix and push as in Rework. Do
+  not report a failure because checks are pending or a gateway tool refused after `pr_open` succeeded; the gateway completes
+  Development from your pull request.
 - Development, a database change (a DbUp script, a mapping, a table's columns): also run the integration tests it touches, `dotnet test
   src/IntegrationTests` (it falls back to SQLite when there is no SQL Server), and update every migration test that pins a table's columns
   (for example ShouldApply036OnDatabaseAtPreviousScriptAndLeaveExistingTablesUnchanged checks Vendor's exact columns): add the new column there.
