@@ -111,7 +111,10 @@ public sealed class OperatorReleaseGatewayTests
         Assert.Equal(2, (int?)check.Json?["releasesToday"]);
         Assert.Equal(12, (int?)check.Json?["limit"]);
         var reads = Calls(env).Where(c => c.Verb == "operator-releases").ToList();
-        Assert.Equal(3, reads.Count);
+        // the loader retries every 5 s until a read succeeds, so under load the failing stub can be read more than twice: at least the failing,
+        // the no-array and the successful read happened, and the count is pinned below once the read has succeeded
+        Assert.True(reads.Count >= 3, $"expected at least 3 reads, saw {reads.Count}");
+        var readsWhenLoaded = reads.Count;
         var dayAfter = Today();
         Assert.All(reads, c => Assert.Contains(c.Input, new[] { $"{{\"day\":\"{dayBefore}\"}}", $"{{\"day\":\"{dayAfter}\"}}" }));
         var op = (await host.SendAsync("GET", "/api/v1/status", api, admin)).Json?["operator"];
@@ -137,7 +140,7 @@ public sealed class OperatorReleaseGatewayTests
         Assert.Equal($"{{\"day\":\"{day}\",\"pr\":104,\"version\":\"1.0.10\"}}", write.Input);
         // the read is made once: a successful read is never repeated
         await Task.Delay(300);
-        Assert.Equal(3, Calls(env).Count(c => c.Verb == "operator-releases"));
+        Assert.Equal(readsWhenLoaded, Calls(env).Count(c => c.Verb == "operator-releases"));
     }
 
     [Fact]
