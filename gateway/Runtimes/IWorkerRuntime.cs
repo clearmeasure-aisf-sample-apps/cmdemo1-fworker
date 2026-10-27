@@ -18,6 +18,15 @@ interface IWorkerRuntime
     Task<IReadOnlyList<RuntimeInstance>> List(CancellationToken ct);
 }
 
+// A runtime whose own task history says how many executions were started in a stretch of time (W0.2, docs/design/delivery-speed.md 18.1.4):
+// the manager counts the day budget from it at the start and at every UTC midnight, so a restart does not give the day back. The Octopus
+// runtime reads its server tasks; the Copilot and Cursor runtimes keep no history outside the process and do not implement it.
+interface IRunHistory
+{
+    // every Start and overflow run queued at or after sinceUtc, however it ended (a stop does not take it back); throws when the history cannot be read
+    Task<int> LaunchesSince(DateTime sinceUtc, CancellationToken ct);
+}
+
 // A runtime that reports more about one worker's execution for /status (the Cursor adapter: the model asked for, the model the agent
 // reports, the token usage): plain values, never a credential.
 interface IRuntimeDetail

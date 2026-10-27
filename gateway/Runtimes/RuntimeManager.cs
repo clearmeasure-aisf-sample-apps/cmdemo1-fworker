@@ -86,6 +86,9 @@ sealed class RuntimeManager
     DateTime day = DateTime.UtcNow.Date; int today;
     int startFailuresInRow; bool healthy = true; string unhealthyWhy = "";
     bool relisted;
+    // W0.2: the UTC day for which `today` was last counted from the runtime's task history (IRunHistory); `today` is a cache of that count plus the
+    // launches since. A runtime without a history never sets it and counts in memory only.
+    DateTime countedDay = DateTime.MinValue;
 
     public Plant? Plant { get; set; }
     // the leader lease (W0.1): a start is not made, and an end it caused is not settled, claimed or revoked, once this says false; defaults to the plant's
@@ -149,6 +152,7 @@ sealed class RuntimeManager
             Roll();
             if (!lim.IsOn()) return (false, "runtime-off");
             if (!relisted) return (false, "runtime-relisting");       // until the executions were read at start, a second one could be started
+            if (cae is IRunHistory && countedDay != day) return (false, "runtime-relisting");   // a new UTC day: until the day's runs are counted from the history
             if (!healthy) return (false, "runtime-unhealthy");
             if (lim.Blocked() is { Length: > 0 } why) return (false, why);
             if (execs.Values.Count(e => !e.Ended) >= lim.MaxConcurrent) return (false, "runtime-at-capacity");
@@ -332,14 +336,28 @@ sealed class RuntimeManager
         catch (Exception e) { Log("list-failed", "", 0, e.Message); return; }
         var ends = new List<(string Name, string Outcome, bool Failed)>(); var stops = new List<(string Name, string Why)>();
         var now = DateTime.UtcNow;
+        // W0.2: the day budget is counted from the runtime's task history at the start and after every UTC midnight (outside the lock: it reads the server)
+        int? fromHistory = null; var historyDay = now.Date;
+        if (cae is IRunHistory history && countedDay != historyDay)
+        {
+            try { fromHistory = await history.LaunchesSince(historyDay, ct); }
+            catch (Exception e) { Log("history-failed", "", 0, e.Message); if (!relisted) return; }   // the first reading waits for the history: retried at the next poll
+        }
         lock (gate)
         {
+            if (fromHistory is int counted)
+            {
+                // Roll first: a midnight that passed while the history was read leaves the count for the next poll; otherwise the count replaces what the
+                // process had (nothing before the first reading; after a midnight, the launches since it, which the history includes)
+                Roll();
+                if (day == historyDay) { today = Math.Max(today, counted); countedDay = historyDay; Log("budget-counted", "", 0, $"{counted} since {historyDay:yyyy-MM-dd} 00:00 UTC"); }
+            }
             if (!relisted)
             {
                 foreach (var i in list.Where(i => i.Status is "Running" or "Processing" && !execs.ContainsKey(i.WorkerName)))
                 {
                     execs[i.WorkerName] = new Exec { Name = i.WorkerName, Item = i.Item, Phase = i.Phase, Execution = i.Execution, Status = i.Status, StartedAt = now };   // its window starts at adoption: the worker reconnects after the restart
-                    if (i.Started is { } st && st.Date == day) today++;
+                    if (cae is not IRunHistory && i.Started is { } st && st.Date == day) today++;   // a runtime with a history counts the whole day from it
                     Log("relisted", i.WorkerName, i.Item, i.Execution);
                 }
                 relisted = true;

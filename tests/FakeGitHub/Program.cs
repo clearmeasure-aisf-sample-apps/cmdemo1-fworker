@@ -1184,10 +1184,12 @@ sealed class World
             case "octo-machines":   // [{id, name, health, roles, env, disabled}]: the deployment targets of the space
                 octoMachines = (b?["machines"] as JsonArray ?? new JsonArray()).Select(m => new OctoMachine { Id = m!["id"]!.ToString(), Name = m["name"]?.ToString() ?? m["id"]!.ToString(), Health = m["health"]?.ToString() ?? "Healthy", Env = m["env"]?.ToString() ?? "Environments-11", Roles = (m["roles"] as JsonArray)?.Select(x => x!.ToString()).ToList() ?? new() { "fworker-host" }, Disabled = m["disabled"]?.GetValue<bool>() == true }).ToList();
                 return (200, J(("ok", true)));
-            case "octo-task":   // {id, state}: a server task's state as Octopus would set it
+            case "octo-task":   // {id, state?, queued?}: a server task's state as Octopus would set it; queued (ISO 8601, UTC) moves its QueueTime (the day budget scenarios)
             {
                 if (!octoTasks.TryGetValue(b?["id"]?.ToString() ?? "", out var t)) return (404, J(("ok", false)));
-                t.State = b!["state"]!.ToString(); return (200, J(("ok", true)));
+                if (b?["state"] != null) t.State = b["state"]!.ToString();
+                if (b?["queued"] != null) t.Queued = DateTime.Parse(b["queued"]!.ToString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal);
+                return (200, J(("ok", true)));
             }
             case "cursor": return (200, CursorState());
             case "copilot": return (200, CopilotState());
