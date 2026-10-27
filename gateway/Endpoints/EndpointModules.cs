@@ -52,6 +52,8 @@ static class EndpointModuleExtensions
             sp.GetRequiredService<RevocationService>(), sp.GetRequiredService<RuntimeRegistry>(), () => sp.GetRequiredService<WorkerSessions>()));
         services.AddSingleton<IEndpointModule>(sp => new RuntimeHostEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<Plant>(),
             sp.GetRequiredService<Revocations>(), sp.GetRequiredService<RevocationService>(), sp.GetRequiredService<RuntimeRegistry>(), c.RuntimeNonces));
+        // S3 (W1.6): the one entry for webhook events and the verbs' sweep requests; v1 only
+        services.AddSingleton<IEventIngress>(sp => new V1EventIngress(sp.GetRequiredService<EventHub>()));
         services.AddSingleton<IEndpointModule, WebhookEndpoints>();
         services.AddSingleton<IEndpointModule, CopilotEndpoints>();
         services.AddSingleton<IEndpointModule, TranscriptEndpoints>();
@@ -61,7 +63,7 @@ static class EndpointModuleExtensions
         // S1 (W1.4): the engine the environment is composed with; v1 is the only one
         services.AddSingleton<IVerbRouter>(sp => VerbRouterFactory.For(sp.GetRequiredService<EngineOptions>(), sp.GetRequiredService<Runner>()));
         services.AddSingleton(sp => new VerbPipeline(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(), sp.GetRequiredService<KeeperSettings>(),
-            sp.GetRequiredService<Plant>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<IVerbRouter>(), sp.GetRequiredService<EventHub>(),
+            sp.GetRequiredService<Plant>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<IVerbRouter>(), sp.GetRequiredService<IEventIngress>(),
             c.GitHubBudget, sp));
         services.AddSingleton<IEndpointModule, VerbEndpoints>();
         // the MCP server's route, last as it was mapped (the tools it serves are McpTools, AddGatewayMcp)

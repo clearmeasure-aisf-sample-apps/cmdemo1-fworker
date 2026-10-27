@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using static HttpResultsX;
 
 // The deliveries of the last ten minutes, by GitHub's delivery id: a delivery GitHub sends again is accepted and not ingested twice.
@@ -21,7 +22,7 @@ sealed class WebhookDeduplicator
 // GitHub's webhook (task C7b): the one route of the webhook port (the port a tunnel exposes; the middleware answers 404 for any other path there).
 // The signature (X-Hub-Signature-256, HMAC-SHA256 with the webhook secret, compared in constant time) is its only credential: a protected area
 // (CLAUDE.md). An accepted event runs the rule verb ingest-event; the events it returns are published, routed to the items' owners and ask for a sweep.
-sealed class WebhookEndpoints(GatewayOptions gateway, Runner runner, EventHub hub, Plant plant, QcHub qc, BaseWatch baseWatch, WebhookDeduplicator deliveries) : IEndpointModule
+sealed class WebhookEndpoints(GatewayOptions gateway, Runner runner, IEventIngress ingress, Plant plant, QcHub qc, BaseWatch baseWatch, WebhookDeduplicator deliveries) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes) => routes.MapPost("/webhooks/github", async (HttpContext c) => { return await Receive(c); });
 
@@ -46,7 +47,7 @@ sealed class WebhookEndpoints(GatewayOptions gateway, Runner runner, EventHub hu
             foreach (var e in events)
             {
                 if (e is not JsonObject eo) continue;
-                hub.Publish(eo.ToJsonString());
+                ingress.Ingest(new WebhookEventIngested(eo.ToJsonString()));
                 // master moved (a pull request merged into the default branch), or an item's branch got a new head: the back-merge trigger (BaseUpdate.cs)
                 if (eo["event"]?.ToString() == "base.merged") baseWatch.OnMerged(eo["pr"] is JsonValue bp && bp.TryGetValue<int>(out var bpn) ? bpn : 0);
                 if (eo["event"]?.ToString() is "pr.head_changed" or "pr.opened" && eo["item"] is JsonValue hv && hv.TryGetValue<int>(out var hn)) baseWatch.NoteHeadChange(hn);
@@ -63,8 +64,8 @@ sealed class WebhookEndpoints(GatewayOptions gateway, Runner runner, EventHub hu
             // a pull request event also asks for a full sweep (still at most every sweepMinSeconds): the QC offers and teardowns are made only there
             foreach (var e in events) if (e is JsonObject eo2)
             {
-                if (eo2["item"] is JsonValue iv2 && iv2.TryGetValue<int>(out var ii2) && ii2 > 0) hub.RequestSweep(ii2); else hub.RequestSweep();
-                if (ownerMode && eo2["event"]?.ToString() is "pr.opened" or "pr.head_changed" or "pr.closed" or "pr.merged") hub.RequestSweep();
+                if (eo2["item"] is JsonValue iv2 && iv2.TryGetValue<int>(out var ii2) && ii2 > 0) ingress.Ingest(new SweepRequested(ii2)); else ingress.Ingest(new SweepRequested());
+                if (ownerMode && eo2["event"]?.ToString() is "pr.opened" or "pr.head_changed" or "pr.closed" or "pr.merged") ingress.Ingest(new SweepRequested());
             }
         }
         return Results.Accepted();
