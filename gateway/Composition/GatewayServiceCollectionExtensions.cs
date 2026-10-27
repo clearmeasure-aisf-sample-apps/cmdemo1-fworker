@@ -31,6 +31,7 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(c.Instance);
         services.AddSingleton(c.Timing);
         services.AddSingleton(c.Revocation);
+        services.AddSingleton(c.Engine);
         services.AddSingleton(c.Messaging);
         services.AddSingleton(c.Keeper);
         return services;
