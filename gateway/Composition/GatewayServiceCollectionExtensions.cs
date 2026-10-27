@@ -211,7 +211,7 @@ static class GatewayServiceCollectionExtensions
                 // the items the cloud runtimes' tasks own, and their part of the plant snapshot (C5c: set here, where Program.cs set them after Build())
                 CopilotOwns = rts.CopilotRuntime != null ? rts.CopilotRuntime.Owns : null, CopilotOwnersSnapshot = rts.CopilotRuntime != null ? rts.CopilotRuntime.OwnedJson : null, CopilotOwnersRestore = rts.CopilotRuntime != null ? rts.CopilotRuntime.Restore : null,
                 CursorOwns = rts.CursorRuntime != null ? rts.CursorRuntime.Owns : null, CursorOwnersSnapshot = rts.CursorRuntime != null ? rts.CursorRuntime.OwnedJson : null, CursorOwnersRestore = rts.CursorRuntime != null ? rts.CursorRuntime.Restore : null,
-                SessionPage = (kind, name) => kind is "octopus" or "cae-job" && linkBase() is { Length: > 0 } lb ? $"{lb}/sessions/{Uri.EscapeDataString(name)}" : "" };
+                SweepRequest = sp.GetRequiredService<EventHub>().RequestSweep, SessionPage = (kind, name) => kind is "octopus" or "cae-job" && linkBase() is { Length: > 0 } lb ? $"{lb}/sessions/{Uri.EscapeDataString(name)}" : "" };
         });
         services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
         services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, gw.PublicUrl, gw.TokenSecret));

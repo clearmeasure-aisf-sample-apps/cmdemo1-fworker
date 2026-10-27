@@ -133,9 +133,27 @@ sealed partial class Plant
                 Journal(a.Item, "reassigned", new JsonObject { ["reason"] = $"the execution of {name} ended ({outcome})", ["url"] = url, ["opCode"] = "runtime-ended" }, "rtend|" + a.Id + "|" + name);
             }
             if (workers.TryGetValue(name, out var w)) { w.Out?.Writer.TryComplete(); w.Connected = false; workers.Remove(name); }
+            SlotFreed(item);
             return took;
         }
     }
+
+    // Plan on slot freed (delivery-speed.md 3.3, 4.1; W0.9). A worker's slot freed (an owner dropped, a runtime execution ended): the items that wait
+    // for an owner are asked for at once, as an incremental pass through the hub's sweep request (SweepRequest, set from the EventHub), instead of
+    // at the next full sweep. The pass reads the board and plans, so nothing is decided here. It runs outside the sweep, so it asks the leader lease
+    // first (MayAct), as the sweep and the tick do. Under gate. Not from inside a plan (a drop there is the plan's own, and would ask for the next).
+    public Action<int>? SweepRequest { get; set; }
+    bool planning;
+    public int SlotFreedRequests { get; private set; }
+    void SlotFreed(int freedItem)
+    {
+        if (SweepRequest == null || planning || MayAct?.Invoke() == false) return;
+        foreach (var i in QueuedItems(freedItem).Take(MaxSlotFreedItems)) { SweepRequest(i); SlotFreedRequests++; }
+    }
+    const int MaxSlotFreedItems = 5;   // a freed slot takes one item; a few spare cover a pin or a hold. More wait for the sweep.
+    // the numbers of the items waiting for an owner, in the order Plan would take them (the oldest assignment first among equals), but for the freed item
+    List<int> QueuedItems(int except) => assignments.Values.Where(a => a.Kind == "own-item" && !IsQc(a) && !a.Accepted && a.Worker == "" && a.Item != except && !ownerOf.ContainsKey(a.Item))
+        .OrderBy(a => a.Pin != "" ? 0 : 1).ThenBy(a => string.Equals(a.Column, IntakeColumn, StringComparison.OrdinalIgnoreCase) ? 1 : 0).ThenBy(a => a.CreatedAt).Select(a => a.Item).Distinct().ToList();
 
     public void RuntimeParked(int item, string phase) { lock (gate) parkQueued.Remove((item, phase)); }
 
