@@ -462,6 +462,13 @@
   "priorityLabels": { "top": "priority:top", "high": "priority:high" },
   "mergeQueueDepth": 0,
   "gatewayMerge": true,
+  "catalog": {
+    "enabled": false,
+    "repository": "cmdemo1-system",
+    "path": "system.json",
+    "ref": "",
+    "refreshSeconds": 300
+  },
   "ownerSessions": false,
   "idleReleaseMinutes": 60,
   "stateAuthors": [

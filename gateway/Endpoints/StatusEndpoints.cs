@@ -67,6 +67,9 @@ sealed class StatusQuery
         // the engine that acts here: shadow (v1 acts, v2 beside it) or v2, or the kill switch FACTORY_V2_OFF while the file names one (W0.0). Plain v1, the
         // default of every environment, adds nothing, so a default deployment answers exactly as before (the C0 pins list the keys); no block means v1
         if (engine.Reported) o["engine"] = engine.Status();
+        // the system catalog (W1.2): its snapshot and the mismatch report against instance.json, only where it is switched on (catalog.enabled or
+        // FACTORY_CATALOG=1), so a default deployment answers exactly as before. Resolved at the ask: it is registered only where it is enabled
+        if (services.GetService<CatalogRefreshService>() is { } catalog) o["catalog"] = catalog.Status();
         return o;
     }
 

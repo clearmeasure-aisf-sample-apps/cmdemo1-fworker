@@ -44,6 +44,8 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
     public RevocationOptions Revocation { get; } = revocation;
     // the engine switch of this environment and the FACTORY_V2_OFF kill switch (W0.0); only /api/v1/status reads it so far
     public EngineOptions Engine { get; } = engine;
+    // where and how often the system catalog is read (W1.2): off by default
+    public CatalogSettings Catalog { get; } = CatalogSettings.From(instance, Environment.GetEnvironmentVariable);
     public QcSettings Qc { get; } = qc;
     public MessagingSettings Messaging { get; } = messaging;
     public KeeperSettings Keeper { get; } = keeper;

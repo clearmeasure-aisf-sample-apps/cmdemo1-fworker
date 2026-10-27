@@ -271,6 +271,8 @@ static class GatewayServiceCollectionExtensions
         // C5d: the two loops Program.cs started last, after Build(), in that order: the on-demand manager's tick, then the MCP session sweep
         services.AddGatewayManagerCopilot(c);
         services.AddHostedService(sp => new McpSessionSweeper(() => sp.GetRequiredService<WorkerSessions>(), McpSessionSweeper.DefaultInterval));
+        // W1.2: the system catalog's refresh, last, and only where the catalog is switched on (catalog.enabled or FACTORY_CATALOG=1); off, the list of hosted services is what it was
+        if (c.Catalog.Enabled && c.Instance.CanCompose) services.AddHostedService(sp => sp.GetRequiredService<CatalogRefreshService>());
         return services;
     }
 
