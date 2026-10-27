@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using static HttpResultsX;
 
 // The single path a verb call takes (task C7d, seam S1 of docs/design/fworker-wolverine-refactor.md), moved verbatim out of Program.cs: the verb name and
@@ -8,7 +9,7 @@ using static HttpResultsX;
 // the supervisor's budget, the plant manager's flow verb, text derived from a message, QC, the GitHub budget, the accept of an offer), the run of the
 // rule script and the plant's hooks after it. The order of the checks is the order Program.cs had; each answer is the one it gave.
 sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, KeeperSettings keeper, Plant plant, Messenger messenger, QcHub qc,
-    Runner runner, EventHub hub, GitHubBudget githubBudget, IServiceProvider services)
+    IVerbRouter engine, EventHub hub, GitHubBudget githubBudget, IServiceProvider services)
 {
     public async Task<IResult> Run(string verb, HttpContext ctx)
     {
@@ -154,7 +155,7 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
         // to that session (Board.ps1 Add-Comment). Never a token: the page of the gateway, or the runtime's own page of the agent or task.
         authorized.Remove("_session");
         if (ctx.Caller().SessionLinkOf(who) is { } sl) authorized["_session"] = sl;
-        var (code, output) = await runner.RunAsync(verb, authorized.ToJsonString(), timeout);
+        var (code, output) = await engine.RunAsync(verb, authorized.ToJsonString(), timeout);
         if (mgrTicket != null)
         {   // the plant's part of an item action of the plant manager, after its rule script changed the item (Manager.cs)
             JsonObject? mo = null; try { mo = JsonNode.Parse(output) as JsonObject; } catch { }
