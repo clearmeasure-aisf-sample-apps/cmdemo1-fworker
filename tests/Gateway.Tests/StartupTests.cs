@@ -41,7 +41,10 @@ public sealed class StartupTests(TwoPortGateway gw) : IClassFixture<TwoPortGatew
 public sealed class StopOrderTests
 {
     [Fact]
-    public async Task StopOrder_HandOverBeforeTranscriptFlush_Within30Seconds()
+    public Task StopOrder_HandOverBeforeTranscriptFlush_Within30Seconds() => Run(null);
+
+    /// <summary>The scenario; <paramref name="change"/> adds to the environment (WolverineHostTests runs it again with the Wolverine host registered).</summary>
+    public static async Task Run(Action<GatewayEnvironment>? change)
     {
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
@@ -51,6 +54,7 @@ public sealed class StopOrderTests
         env.Set("GH_TOKEN", "fake");
         env.Set("FACTORY_TRANSCRIPT_SAVE_SECONDS", "3600");
         env.Set("FACTORY_TIMING_leaderCheckSeconds", "3600");
+        change?.Invoke(env);
         env.Apply();
         var host = new GatewayHost();
         var disposed = false;
