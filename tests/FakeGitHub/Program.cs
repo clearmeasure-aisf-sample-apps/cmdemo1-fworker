@@ -556,6 +556,18 @@ sealed class World
             int page = int.TryParse(q["page"], out var pg) ? pg : 1;
             return (200, new JsonArray(thread.Skip((page - 1) * 100).Take(100).Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body), ("user", J(("login", c.User))), ("created_at", c.At.ToString("o")), ("updated_at", c.Updated.ToString("o")))).ToArray()));
         }
+        if ((m = Regex.Match(path, $"^{root}/issues/comments/(\\d+)$")).Success && method == "GET")
+        {   // as GitHub: one comment by its id (404 when there is none)
+            var id = long.Parse(m.Groups[1].Value);
+            foreach (var thread in issues.Values.Select(x => x.Comments).Concat(prs.Values.Select(x => x.Comments))) { var c = thread.FirstOrDefault(x => x.Id == id); if (c != null && stateRaces > 0 && c.Body.StartsWith("<!-- factory-state:", StringComparison.Ordinal))
+                {   // test control state-race: another process wrote this state comment since the caller read it
+                    stateRaces--; var rm = Regex.Match(c.Body, "\"rev\":\\s*(\\d+)");
+                    c.Body = rm.Success ? c.Body.Remove(rm.Index, rm.Length).Insert(rm.Index, "\"rev\": " + (long.Parse(rm.Groups[1].Value) + 1)) : Regex.Replace(c.Body, "```json\\s*\\{", "```json\n{\n  \"rev\": 1,", RegexOptions.None);
+                    var nu = DateTime.UtcNow; c.Upd = nu > c.Updated ? nu : c.Updated.AddMilliseconds(1);
+                }
+                if (c != null) return (200, J(("id", id), ("body", c.Body), ("user", J(("login", c.User))), ("created_at", c.At.ToString("o")), ("updated_at", c.Updated.ToString("o")))); }
+            return (404, "{\"message\":\"Not Found\"}");
+        }
         if ((m = Regex.Match(path, $"^{root}/issues/comments/(\\d+)$")).Success && method == "PATCH")
         {
             var id = long.Parse(m.Groups[1].Value);
@@ -1097,6 +1109,7 @@ sealed class World
         else return (res, r.Limit, 0, r.Reset, r.Limit);
         return (res, r.Limit, r.Remaining, r.Reset, r.Limit - r.Remaining);
     }
+    int stateRaces;   // /_fake/state-race: how many more single reads of a state comment find it written by another process first
     int latencyMs; Regex? latencyMatch; int refPage; int rerunJobs;   // refPage 0: matching-refs does not page (GitHub)
     public int LatencyFor(string method, string path, string body) => latencyMs > 0 && !path.StartsWith("/_fake/") && latencyMatch!.IsMatch(method + " " + path + "\n" + body) ? latencyMs : 0;
     (int, object?) Control(string method, string what, Microsoft.AspNetCore.Http.IQueryCollection q, JsonNode? b)
@@ -1105,6 +1118,8 @@ sealed class World
         {
             case "latency":   // { ms, match }: every request whose "METHOD path" line plus body matches the regular expression waits ms first; ms 0 ends it
                 latencyMs = b?["ms"]?.GetValue<int>() ?? 0; latencyMatch = latencyMs > 0 ? new Regex(b?["match"]?.ToString() ?? ".") : null; return (200, J(("ok", true)));
+            case "state-race":   // { times }: the next `times` single reads of a state comment (GET issues/comments/{id}) first find another process's write: its rev raised by one and its updated_at moved. 0 ends it
+                stateRaces = b?["times"]?.GetValue<int>() ?? 0; return (200, J(("ok", true), ("times", stateRaces)));
             case "proxy":   // { port }: new connections of the proxy (FAKE_PROXY_PORT) go to this port; 0 refuses them
                 ProxyBackend = b?["port"]?.GetValue<int>() ?? 0; return (200, J(("ok", true), ("port", ProxyBackend)));
             case "rate":   // { resource (core), remaining, resetSeconds (3600), limit }: what is left of the rate limit; remaining 0 makes every request of it a 403

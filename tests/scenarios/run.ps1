@@ -47,6 +47,7 @@ foreach ($k in $LeaseScenarios.Keys) { $ManagerScenarios[$k] = $LeaseScenarios[$
 . (Join-Path $PSScriptRoot 'leader.ps1')      # one acting gateway (Leader.cs): the leader lease, the hand-over, the gap; scenarios named "leader: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'runtime.ps1')     # cloud worker runtimes: w2, the nonce, git-credential; suite 'runtime' (uses the helpers of owner.ps1)
 . (Join-Path $PSScriptRoot 'journal-fold.ps1') # the journal folds its repeats (Journal.ps1): scenarios named "journal fold: ..." join the owner suite
+. (Join-Path $PSScriptRoot 'state-guard.ps1') # the state comment's rev check and 48,000-character budget (Board.ps1): scenarios named "state guard: ..." join the owner suite
 . (Join-Path $PSScriptRoot 'manager-actions.ps1')   # the plant manager's flow verbs (gateway/Manager.cs): scenarios named "act: ..." join the manager suite
 foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerActionScenarios[$k] }
 . (Join-Path $PSScriptRoot 'mcp.ps1')               # the MCP server at /mcp (gateway/Mcp/): suite 'mcp' (uses the helpers of owner.ps1)
