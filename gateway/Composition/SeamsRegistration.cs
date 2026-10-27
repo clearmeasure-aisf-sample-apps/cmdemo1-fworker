@@ -15,13 +15,28 @@ internal static class SeamsRegistration
     public static IServiceCollection AddGatewaySeams(this IServiceCollection services, GatewayComposition c)
     {
         // a gateway without a readable instance.json (no owner and repo) has no fallback entry for the catalog: it composes none
-        if (!c.Instance.CanCompose) return services;
-        services.AddSingleton(c.Catalog);
-        services.AddSingleton(sp =>
+        if (c.Instance.CanCompose) services.AddGatewayCatalog(c);
+        // S2 (W1.5): v1's port delegates to the runtime adapters; the recording sink is registered by its own type. Nothing resolves either yet.
+        services.AddSingleton<Fworker.Domain.Commands.RecordingCommandSink>();
+        services.AddSingleton<Fworker.Contracts.Seams.ICommandPort>(sp =>
         {
-            var source = new GitHubSystemJson(c.Catalog);
-            return new SystemCatalogLoader(source.ReadAsync, c.Instance.Root!.ToJsonString());
+            var rts = sp.GetRequiredService<RuntimeRegistry>();
+            return new V1CommandPort(kind => kind switch
+            {
+                "cursor-cloud" => rts.CursorRuntime,
+                "copilot-cloud" => rts.CopilotRuntime,
+                "octopus" => rts.OctopusRuntime,
+                _ => null,
+            });
         });
+        return services;
+    }
+
+    // W1.2: the system catalog (the loader, its GitHub source and, only where switched on, the refresh service that AddGatewayBackground runs)
+    static IServiceCollection AddGatewayCatalog(this IServiceCollection services, GatewayComposition c)
+    {
+        services.AddSingleton(c.Catalog);
+        services.AddSingleton(sp => new SystemCatalogLoader(new GitHubSystemJson(c.Catalog).ReadAsync, c.Instance.Root!.ToJsonString()));
         services.AddSingleton<ISystemCatalog>(sp => sp.GetRequiredService<SystemCatalogLoader>());
         if (c.Catalog.Enabled) services.AddSingleton(sp => new CatalogRefreshService(sp.GetRequiredService<ISystemCatalog>(), c.Catalog));
         return services;
