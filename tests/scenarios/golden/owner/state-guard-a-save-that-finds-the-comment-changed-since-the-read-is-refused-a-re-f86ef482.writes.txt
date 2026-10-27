@@ -1,0 +1,4 @@
+# suite: owner
+# scenario: state guard: a save that finds the comment changed since the read is refused; a retry on a fresh read succeeds; none is lost
+# runs: 2
+~ rule STATE factory-worker v1 #{#1}

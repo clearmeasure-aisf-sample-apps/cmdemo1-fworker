@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: unpark: a closed item keeps no park: the sweep removes it, and unpark of a closed item removes only the park
-# runs: 3
+# runs: 2
 = rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: worker reported **FAILURE** for **Technical Design**; item parked for review. cannot be met as written\n\nAI session: cpk\n\n<!-- factory-journal:factory-worker -->"}
 = harness DELETE /repos/{repo}/issues/{#1}/labels/factory worker 200 -
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}

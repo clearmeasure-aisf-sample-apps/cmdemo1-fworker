@@ -1,11 +1,11 @@
 # suite: copilot
 # scenario: copilot: a task that ends by itself ends its worker and reports its premium requests; a failed create frees the slot
-# runs: 3
+# runs: 2
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
 = harness PATCH /repos/{repo}/issues/{#2} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:0ad4ce6a \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:4c23e87d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
-+ gateway POST /agents/repos/{repo}/tasks 500 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6638 sha256:0ad4ce6a \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7038 sha256:34a75812 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7038 sha256:d51ead0f \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 500 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7038 sha256:d51ead0f \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#2} 422 -
 + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/cop-{session}/1","sha":"{sha}"}

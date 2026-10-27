@@ -1,0 +1,7 @@
+# suite: auto
+# scenario: expired park: a busy item lock does not stall the sweep; a later sweep resets the expired park and its counts once the lock is free (issue 405) [full]
+# runs: 2
+= harness STATE factory-worker v1 #{#1}
++ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
++ rule STATE factory-worker v1 #{#1}
+~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: park `verdict-failed` expired (the park ended at {time}). Its fix-forward rounds and demotions count from 0 again. The next sweep takes it up again in **Technical Design**.\n\n<!-- plant event=unparked key=expired|{time} -->"}

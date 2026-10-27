@@ -1,6 +1,6 @@
 # suite: owner
 # scenario: owner: a build slot is freed when its work ends: the item released, the session disconnected for good, the name revoked
-# runs: 3
+# runs: 2
 ~ rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 204 -
 ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#1}","sha":"{sha}"}
 ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/revoked/slot-a/1","sha":"{sha}"}

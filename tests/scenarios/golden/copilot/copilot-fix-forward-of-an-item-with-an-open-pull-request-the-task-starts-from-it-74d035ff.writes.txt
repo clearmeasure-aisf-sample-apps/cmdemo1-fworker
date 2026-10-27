@@ -1,12 +1,12 @@
 # suite: copilot
 # scenario: copilot: fix-forward of an item with an open pull request: the task starts from its branch, pr_open makes the task's draft the item's pull request, closes the superseded one and its branch, and closes extra drafts; no duplicates (Functional Testing from that branch: the scenario above)
-# runs: 3
+# runs: 2
 = harness POST /repos/{repo}/pulls 201 {"base":"master","body":"x","draft":true,"head":"copilot/thing-{#1}","title":"[WIP] Thing"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/thing-{#1}","body":"Fixes the failing check of #{#2}.","draft":true,"head":"copilot/thing-fix-{#1}","title":"[WIP] Thing"}
 = harness POST /repos/{repo}/pulls 201 {"base":"copilot/thing-fix-{#1}","body":"x","draft":true,"head":"copilot/thing-extra-{#1}","title":"[WIP] Thing"}
 = harness PATCH /repos/{repo}/issues/{#1} 200 {"state":"closed"}
-+ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:6628 sha256:d16d717d \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
-+ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8219 sha256:c4776b5c \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
++ gateway POST /agents/repos/{repo}/tasks 201 {"base_ref":"master","create_pull_request":true,"prompt":"{len:7028 sha256:7cd71330 \"You are a factory worker for ONE phase of ONE work item in clearmeasure-aisf-sam…\"}"}
++ gateway POST /repos/{repo}/issues/{#2}/comments 201 {"body":"{len:8619 sha256:dc2e60ca \"@copilot FIRST, before you read or change anything: call fworker_connect with co…\"}"}
 + rule DELETE /repos/{repo}/git/refs/factory/factory-worker/claims/{#1} 422 -
 + rule DELETE /repos/{repo}/git/refs/heads/copilot/thing-extra-{#1} 204 -
 + rule DELETE /repos/{repo}/git/refs/heads/copilot/thing-{#1} 204 -
