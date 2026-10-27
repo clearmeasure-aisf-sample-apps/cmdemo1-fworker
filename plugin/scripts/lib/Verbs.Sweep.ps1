@@ -467,6 +467,13 @@ function Test-DependencyMet([int]$Dep, $ByNumber, $Cache) {
 function Verb_sync_board($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
+    # Issue 426: the sweep answers within the gateway's cap (280 s). Its plan (the offers, owners, parks) is made by the item loop; the tail steps (claim-ref
+    # reap, intake, board guard, QC sync, replenish, automatic promotion) run only while budget_seconds (default 200) remain and are deferred to the next
+    # sweep otherwise (skipped: <step>-deferred). steps: the milliseconds of each step, so the next slow sweep names its culprit.
+    $sweepT0 = Get-Date
+    $budgetSeconds = if ((Test-Has $a 'budget_seconds') -and [double]$a.budget_seconds -gt 0) { [double]$a.budget_seconds } else { 200 }
+    $script:SweepDeadline = $sweepT0.AddSeconds($budgetSeconds)
+    $steps = [ordered]@{}
     # gap { since, until }: the gateway was down in between (Leader.cs); see Invoke-GapRenew
     $gap = $null
     if ((Test-Has $a 'gap') -and (Test-Has $a.gap 'since') -and (Test-Has $a.gap 'until')) { $gap = @{ since = (ConvertFrom-Iso $a.gap.since); until = (ConvertFrom-Iso $a.gap.until) } }
@@ -785,44 +792,61 @@ function Verb_sync_board($a) {
     }
     $offers = $kept
     if (-not $dry) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
+    $steps['items'] = [int]((Get-Date) - $sweepT0).TotalMilliseconds
+    $stepT = Get-Date
     # claim refs with no live claim behind them (issue 47): removed at once for a closed item, after a lease for an open one
     if ($null -ne $only) { }
     elseif ($low) { $skipped += 'claim-ref-reap' }
+    elseif ((Get-Date) -gt $script:SweepDeadline) { $skipped += 'claim-ref-reap-deferred' }
     elseif (-not $dry) {
         try { $actions += @(Invoke-ClaimRefReap $list) }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "claim-ref-reap: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "claim-ref-reap: $($_.Exception.Message)" } }
     }
+    $steps['claim-ref-reap'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # work intake (issue 104): with a worker slot free and nothing waiting in Technical Design, the next item comes onto the board from Todo (a full sweep only: it needs the whole board)
-    if (-not $dry -and $null -eq $only) {
+    if (-not $dry -and $null -eq $only -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'intake-deferred' }
+    elseif (-not $dry -and $null -eq $only) {
         try { $in = Invoke-Intake $a $list $offers $unconfirmed $pins $seen $seenFile; if ($in) { $actions += $in.action; $offers += $in.offer } }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "intake: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "intake: $($_.Exception.Message)" } }
     }
+    $steps['intake'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # the board guard: open labelled issues without a card are put on the board in the intake column (they are offered from the next sweeps); it
     # needs the whole board, so a full sweep only, and not on a low budget (it lists every labelled issue)
     if ($null -ne $only) { }
     elseif ($low) { $skipped += 'board-guard' }
+    elseif ((Get-Date) -gt $script:SweepDeadline) { $skipped += 'board-guard-deferred' }
     elseif (-not $dry) {
         try { $actions += Invoke-BoardGuard $list }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "board-guard: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "board-guard: $($_.Exception.Message)" } }
     }
+    $steps['board-guard'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # PR QC environments: offers and teardowns only, never a start (design pr-qc-environment.md 3.5)
     $qcRecords = @(); $qcTeardowns = @(); $qcApprovals = @()
     if ((Test-QcEnabled) -and $low -and $null -eq $only) { $skipped += 'qc-sync' }
-    if ((Test-QcEnabled) -and -not $low -and $null -eq $only) {
+    if ((Test-QcEnabled) -and -not $low -and $null -eq $only -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'qc-sync-deferred' }
+    elseif ((Test-QcEnabled) -and -not $low -and $null -eq $only) {
         try { $qs = Invoke-QcSync $list $dry; $actions += @($qs.actions); $errors += @($qs.errors); $qcRecords = @($qs.records); $qcTeardowns = @($qs.teardowns); $qcApprovals = @($qs.approvals) }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "qc-sync: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "qc-sync: $($_.Exception.Message)" } }
     }
+    $steps['qc-sync'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     $replenish = $null
-    if ($null -eq $only -and -not $dry) { try { $replenish = Invoke-Replenish $list $last $designCol } catch { $errors += @{ item = 0; code = 'error'; reason = "replenish: $($_.Exception.Message)" } } }
+    if ($null -eq $only -and -not $dry -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'replenish-deferred' }
+    elseif ($null -eq $only -and -not $dry) { try { $replenish = Invoke-Replenish $list $last $designCol } catch { $errors += @{ item = 0; code = 'error'; reason = "replenish: $($_.Exception.Message)" } } }
+    $steps['replenish'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # the automatic promotion of a release to uat and prod (delivery.autoPromote, docs/design/auto-promote.md): a full sweep only, it needs every
     # item of the release
-    if (-not $dry -and $null -eq $only -and $releaseQueue.Count -gt 0) { try { $actions += @(Invoke-AutoPromote $releaseQueue $rqLabels) } catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = $_.Exception.Message } }
+    if (-not $dry -and $null -eq $only -and $releaseQueue.Count -gt 0 -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'auto-promote-deferred' }
+    elseif (-not $dry -and $null -eq $only -and $releaseQueue.Count -gt 0) { try { $actions += @(Invoke-AutoPromote $releaseQueue $rqLabels) } catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = $_.Exception.Message } }
         catch { [Console]::Error.WriteLine("promote: $($_.Exception.Message) $($_.ScriptStackTrace -replace "`r?`n", " | ")"); $actions += @{ item = 0; action = 'promotion-error'; reason = "$($_.Exception.Message)" } } }   # (the promotion never fails the sweep: the board work goes on; the gateway log has where it failed)
-    return @{ ok = $true; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
+    $steps['auto-promote'] = [int]((Get-Date) - $stepT).TotalMilliseconds
+    $script:SweepDeadline = $null
+    $stepsText = ($steps.Keys | ForEach-Object { "$_=$($steps[$_])" }) -join ' '
+    [Console]::Error.WriteLine("sync-board steps (ms): $stepsText total=$([int]((Get-Date) - $sweepT0).TotalMilliseconds)")
+    return @{ ok = $true; steps = $steps; elapsed_ms = [int]((Get-Date) - $sweepT0).TotalMilliseconds; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- work intake (issue 104) -----------------------------------------------------------------------------------------

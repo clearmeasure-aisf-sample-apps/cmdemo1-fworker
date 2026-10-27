@@ -168,7 +168,23 @@ function Get-ReleaseContent($Rd, [string]$TargetName, $BySha) {
 # The factory work item a master commit is the merge of, from the pull request its squash message names ("... (#P)"): that pull request was merged
 # as this commit, and an item it names (branch <name>/<N>-..., "#N" in the title, "Closes #N" in the body) records the merge (merge.sha) or, not
 # picked up yet, the pull request. @{ item (0: none); gap ('' when settled) }.
+# A settled answer (an item, no gap) never changes for a commit, so it is kept in the state directory: the automatic promotion judges every commit of
+# a release's range at each sweep, and without this each sweep paid two or more GitHub reads per commit (the sweep outran its cap, issue 426).
+function Get-CommitItemCacheFile { Join-Path (Get-StateDir) 'commit-items.json' }
+function Read-CommitItemCache {
+    if ($null -ne $script:CommitItemCache) { return $script:CommitItemCache }
+    $script:CommitItemCache = @{}
+    try { $f = Get-CommitItemCacheFile; if (Test-Path $f) { $j = Get-Content -Raw $f | ConvertFrom-Json -AsHashtable; if ($j -is [hashtable]) { $script:CommitItemCache = $j } } } catch { $script:CommitItemCache = @{} }
+    return $script:CommitItemCache
+}
 function Find-CommitItem([string]$Sha, [string]$Message) {
+    $cache = Read-CommitItemCache
+    if ($cache.ContainsKey($Sha)) { return @{ item = [int]$cache[$Sha]; gap = '' } }
+    $r = Find-CommitItemUncached $Sha $Message
+    if ($r.item -gt 0 -and -not $r.gap) { $cache[$Sha] = $r.item; try { $cache | ConvertTo-Json -Compress | Set-Content (Get-CommitItemCacheFile) } catch { } }
+    return $r
+}
+function Find-CommitItemUncached([string]$Sha, [string]$Message) {
     $first = ($Message -split "`n")[0]
     $pm = [regex]::Match($first, '\(#(\d+)\)\s*$'); if (-not $pm.Success) { return @{ item = 0; gap = '' } }
     $prNum = [int]$pm.Groups[1].Value
@@ -267,6 +283,8 @@ function Invoke-AutoPromote($Queue, $Labels) {
     $out = @()
     foreach ($g in @($Queue | Where-Object { $_.release } | Group-Object { "$($_.release)" })) {
         $ver = $g.Name; [int[]]$items = @($g.Group | ForEach-Object { [int]$_.item } | Sort-Object -Unique)
+        # the sweep's budget (issue 426): the releases not judged in this sweep are judged first in the next (the commit cache makes that cheap)
+        if ($script:SweepDeadline -and (Get-Date) -gt $script:SweepDeadline) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
         $rd = Get-ReleaseDeployments $ver
         if (-not $rd) { $out += @{ item = $items[0]; action = 'promotion-waiting'; release = $ver; reason = 'release-not-in-octopus' }; continue }
         $tk = $null
