@@ -94,7 +94,7 @@ app.Run();
 
 sealed class Issue { public int Number; public string Node = ""; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = new(); public string? Column; public string? Card; public List<Comment> Comments = new(); public DateTime Created = DateTime.UtcNow;
     public string? Repo; }   // Repo: owner/name of another repository whose issue is linked to the board; null: the configured repository
-sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; }
+sealed class Comment { public long Id; public string Body = ""; public string User = "factory-bot"; public DateTime At = DateTime.UtcNow; public DateTime Upd = DateTime.MinValue; public DateTime Updated => Upd == DateTime.MinValue ? At : Upd; }
 sealed class Pr { public int Number; public string Ref = ""; public string Sha = ""; public string Title = ""; public string Body = ""; public bool Open = true; public bool Merged; public string? MergeSha; public int MergeableNullReads; public int Behind; public bool Conflict; public List<string> Files = new(); public List<JsonObject> FileObjs = new(); public List<Rev> Reviews = new(); public int? Issue; public string Author = "factory-bot"; public string Profile = "green"; public double DelaySeconds; public bool Fork, Draft, UpdateNoop; public string Base = "master"; public List<Comment> Comments = new(); public bool Dispatched; public string? ChecksUntilCause; }
 sealed record Redirect(string To);
 sealed record PlainText(string Text);
@@ -525,6 +525,15 @@ sealed class World
                 .Select(i => (JsonNode)J(("number", i.Number), ("node_id", i.Node), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body), ("created_at", i.Created.ToString("o")), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))).ToArray();
             return (200, new JsonArray(rows));
         }
+        if (path == $"{root}/issues/comments" && method == "GET")
+        {   // as GitHub: the comments of every issue and pull request of the repository, those updated at or after `since`, oldest first (sort=updated: by update), per_page (default 30, at most 100), page
+            var since = DateTime.TryParse(q["since"], null, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var sd) ? sd : DateTime.MinValue;
+            int per = Math.Clamp(int.TryParse(q["per_page"], out var pp) ? pp : 30, 1, 100), pg = Math.Max(1, int.TryParse(q["page"], out var pq) ? pq : 1);
+            var all = issues.Values.Where(i => i.Repo == null).SelectMany(i => i.Comments.Select(c => (i.Number, c))).Concat(prs.Values.SelectMany(p => p.Comments.Select(c => (p.Number, c))))
+                .Where(x => x.c.Updated >= since);
+            var ordered = q["sort"].ToString() == "updated" ? all.OrderBy(x => x.c.Updated).ThenBy(x => x.c.Id) : all.OrderBy(x => x.c.Id);
+            return (200, new JsonArray(ordered.Skip((pg - 1) * per).Take(per).Select(x => (JsonNode)J(("id", x.c.Id), ("body", x.c.Body), ("user", J(("login", x.c.User))), ("created_at", x.c.At.ToString("o")), ("updated_at", x.c.Updated.ToString("o")), ("issue_url", $"https://fake/repos/x/y/issues/{x.Number}"))).ToArray()));
+        }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)$")).Success)
         {
             if (!issues.ContainsKey(int.Parse(m.Groups[1].Value))) return (404, "{\"message\":\"Not Found\"}");
@@ -542,15 +551,15 @@ sealed class World
             {
                 var c = new Comment { Id = nextComment++, Body = b!["body"]!.ToString() }; thread.Add(c);
                 if (auth == "Bearer fake-copilot" && c.Body.StartsWith("@copilot") && prs.TryGetValue(cn, out var mp)) CopilotMention(cn, mp.Ref, c.Body);
-                return (201, J(("id", c.Id)));
+                return (201, J(("id", c.Id), ("updated_at", c.Updated.ToString("o"))));
             }
             int page = int.TryParse(q["page"], out var pg) ? pg : 1;
-            return (200, new JsonArray(thread.Skip((page - 1) * 100).Take(100).Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body), ("user", J(("login", c.User))), ("created_at", c.At.ToString("o")))).ToArray()));
+            return (200, new JsonArray(thread.Skip((page - 1) * 100).Take(100).Select(c => (JsonNode)J(("id", c.Id), ("body", c.Body), ("user", J(("login", c.User))), ("created_at", c.At.ToString("o")), ("updated_at", c.Updated.ToString("o")))).ToArray()));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/comments/(\\d+)$")).Success && method == "PATCH")
         {
             var id = long.Parse(m.Groups[1].Value);
-            foreach (var thread in issues.Values.Select(x => x.Comments).Concat(prs.Values.Select(x => x.Comments))) { var c = thread.FirstOrDefault(x => x.Id == id); if (c != null) { c.Body = b!["body"]!.ToString(); return (200, J(("id", id))); } }
+            foreach (var thread in issues.Values.Select(x => x.Comments).Concat(prs.Values.Select(x => x.Comments))) { var c = thread.FirstOrDefault(x => x.Id == id); if (c != null) { c.Body = b!["body"]!.ToString(); var nu = DateTime.UtcNow; c.Upd = nu > c.Updated ? nu : c.Updated.AddMilliseconds(1); return (200, J(("id", id), ("updated_at", c.Updated.ToString("o")))); } }
             return (404, "{\"message\":\"Not Found\"}");
         }
         if (path == root + $"/git/ref/heads/{Master}") return (200, J(("object", J(("sha", masterSha)))));

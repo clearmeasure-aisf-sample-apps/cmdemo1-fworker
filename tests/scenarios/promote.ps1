@@ -74,23 +74,23 @@ $PromoteScenarios = [ordered]@{
     Check 'no waiting comment but the health settle time' (@(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -notmatch 'not been Healthy long enough' }).Count -eq 0) (Pm-Brief $i.n)
 }
 
-'promote: a slow promotion ends the sweep within its budget, names where the time went, and is judged in the next sweep' = {
+'promote: a slow promotion ends within its budget, names where the time went, and is judged in the next pass' = {
     $a = Pm-Item '3.30.1' -Tdd 'Failed'; $b = Pm-Item '3.30.2' -Tdd 'Failed'; $c = Pm-Item '3.30.3' -Tdd 'Failed'
     [void](Wait-Until -Seconds 40 { @(Pm-Events $a.n 'promotion-waiting').Count -ge 1 -and @(Pm-Events $c.n 'promotion-waiting').Count -ge 1 })
-    # each release costs 5 s more than it should and the sweep may spend 8 s: the third release is not reached
+    # each release costs 5 s more than it should and the pass may spend 8 s: the third release is not reached
     $t0 = Get-Date
-    $sw = F 'w1' @('sync-board', '--budget_seconds', '8', '--test_promotion_delay_ms', '5000')
+    $sw = F 'w1' @('auto-promote', '--budget_seconds', '8', '--test_promotion_delay_ms', '5000')
     $spent = ((Get-Date) - $t0).TotalSeconds
     $act = { param($l, $n) @($l | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') -and $_['action'] -eq $n }) }
     $acts = @(Pv $sw 'actions'); $swj = $sw | ConvertTo-Json -Depth 8 -Compress
-    Check 'the sweep answers its plan' ((Pv $sw 'ok') -eq $true) $swj
+    Check 'the pass answers' ((Pv $sw 'ok') -eq $true) $swj
     Check 'it ends within its budget plus the one release in progress' ($spent -lt 28) "$spent s"
     Check 'the release it did not reach is deferred, not judged' (@(& $act $acts 'promotion-deferred').Count -ge 1) $swj
     $tm = (& $act $acts 'promotion-timing')[0]
     Check 'the pass reports its time per release and per kind of call' (($swj -match '"action":"promotion-timing"') -and ($swj -match '"3\.30\.1":\d+') -and ($swj -match '"release-deployments":\{')) $swj
-    $sw2 = F 'w1' @('sync-board'); $acts2 = @(Pv $sw2 'actions')
+    $sw2 = F 'w1' @('auto-promote'); $acts2 = @(Pv $sw2 'actions')
     $sw2j = $sw2 | ConvertTo-Json -Depth 8 -Compress
-    Check 'the next sweep, with its budget, defers nothing and judges every release' (($sw2j -notmatch 'promotion-deferred') -and ([regex]::Matches($sw2j, '"3\.30\.\d":\d+').Count -ge 3)) $sw2j
+    Check 'the next pass, with its budget, defers nothing and judges every release' (($sw2j -notmatch 'promotion-deferred') -and ([regex]::Matches($sw2j, '"3\.30\.\d":\d+').Count -ge 3)) $sw2j
 }
 
 'promote: an item merged without a PASS verdict holds the whole release back, explained once on each item' = {
@@ -336,6 +336,64 @@ $PromoteScenarios = [ordered]@{
     Check 'since when is recorded on the item' (Wait-Until -Seconds 120 { $u = (Get-ItemState $i.n).merge.promoted.uat; "$(if ($u -is [System.Collections.IDictionary]) { $u['signoff_wait_since'] } elseif ($u -and $u.PSObject.Properties['signoff_wait_since']) { $u.signoff_wait_since })" -ne '' }) ((Get-ItemState $i.n) | ConvertTo-Json -Compress -Depth 6)
     Check 'after the limit it is aborted' (Wait-Until -Seconds 480 { @(Pm-Dep '3.20.1' 'uat')[0].result -eq 'Abort' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
     Check 'journaled once with the wait and the reason' (Wait-Until -Seconds 20 { @(@(Pm-Events $i.n 'promotion-signoff') | Where-Object { $_.body -match 'Abort' -and $_.body -match 'waited .* h at the Sign-off .*not settled yet' }).Count -eq 1 }) (Pm-Brief $i.n)
+}
+
+# Issue 429: the promotion is a loop of its own (verb auto-promote), apart from the board sweep. A release queue of nine items in three releases, the
+# oldest of which never passes (its deployment to tdd failed): a slow promotion pass runs on the side, and the board sweep still answers at once, with no
+# promotion action and no promotion step; the promotion drains the newer releases; the old failed release is never deployed.
+'promote: a large release queue with an old failed release does not slow the board sweep, and the promotion drains the newer releases [full]' = {
+    $it = @()
+    $it += Pm-Item '3.41.1' -NoRelease
+    foreach ($k in 1..4) { $it += Pm-Item '3.41.2' -NoRelease }
+    foreach ($k in 1..4) { $it += Pm-Item '3.41.3' -NoRelease }
+    [void](Fake 'octo-release' @{ version = '3.41.1'; sha = $it[0].sha; tdd = 'Failed' })
+    [void](Fake 'octo-release' @{ version = '3.41.2'; sha = $it[4].sha; tdd = 'Success' })
+    [void](Fake 'octo-release' @{ version = '3.41.3'; sha = $it[8].sha; tdd = 'Success' })
+    # a promotion pass that takes its time (5 s per release) runs on the side
+    $env:FACTORY_HOLDER = 'w1'
+    $slowOut = Join-Path $script:Work 'slow-promotion.json'
+    $slow = Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-File', (Join-Path $script:Root 'plugin/scripts/factory.ps1'), 'auto-promote', '--budget_seconds', '60', '--test_promotion_delay_ms', '5000') -PassThru -RedirectStandardOutput $slowOut
+    Start-Sleep -Seconds 2
+    $t0 = Get-Date
+    $sw = F 'w1' @('sync-board'); $took = ((Get-Date) - $t0).TotalSeconds; $swj = $sw | ConvertTo-Json -Depth 8 -Compress
+    $stillRunning = -not $slow.HasExited
+    Check 'the board sweep answers while the slow promotion pass is still running' (((Pv $sw 'ok') -eq $true) -and $stillRunning) "ok=$(Pv $sw 'ok') slow pass running=$stillRunning after $took s"
+    Check 'and in a few seconds, not after the promotion' ($took -lt 12) "$took s"
+    Check 'its answer has no promotion action and no promotion step' (($swj -notmatch 'promotion-') -and $null -eq (Pv (Pv $sw 'steps') 'auto-promote')) $swj
+    Check 'the whole queue is still listed in the sweep answer' (@(Pv $sw 'release_queue').Count -eq 9) $swj
+    [void]$slow.WaitForExit(120000)
+    $slowText = (Get-Content -Raw $slowOut) -replace '\s+', ' '
+    Check 'the slow pass judged every release of the queue' (($slowText -match '"3\.41\.1"') -and ($slowText -match '"3\.41\.3"')) $slowText
+    # (the newest release carries the earlier ones: they are not deployed themselves, the newest goes to uat and prod with all their items)
+    Check 'the newest release is deployed to uat and prod' (Wait-Until -Seconds 240 { @(Pm-Dep '3.41.3' 'prod').Count -eq 1 -and @(Pm-Dep '3.41.3' 'prod')[0].result -eq 'Proceed' }) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+    Check 'the items of the newer releases are delivered' (Wait-Until -Seconds 120 { @($it[1..8] | Where-Object { -not (Get-FakeIssue $_.n).open }).Count -eq 8 }) (Pm-Brief $it[8].n)
+    Check 'the old release with the failed deployment, and the middle one, were never deployed to uat' (@(Pm-Dep '3.41.1' 'uat').Count -eq 0 -and @(Pm-Dep '3.41.2' 'uat').Count -eq 0) ((Pm-Deps) | ConvertTo-Json -Compress -Depth 4)
+}
+
+# Issue 429: what a pass learned is kept (promote-judgments.json): a second pass with nothing changed asks GitHub for the board and for the state
+# comments changed since, and nothing else; the pass reports the requests it made.
+'promote: a second pass with nothing changed reads next to nothing' = {
+    $it = @()
+    foreach ($k in 1..4) { $it += Pm-Item '3.42.1' @('factory worker') -NoRelease }
+    foreach ($k in 1..4) { $it += Pm-Item '3.42.2' @('factory worker') -NoRelease }
+    [void](Fake 'octo-release' @{ version = '3.42.1'; sha = $it[3].sha; tdd = 'Success' })
+    [void](Fake 'octo-release' @{ version = '3.42.2'; sha = $it[7].sha; tdd = 'Success' })
+    # (no Auto Merge label: the releases wait for good, each item told why once)
+    # (an item is told once for each release that waits with it: the first four items by both releases, the others by the second)
+    $told = { @($it | ForEach-Object { @(Pm-Events $_.n 'promotion-waiting').Count }) }
+    Check 'every item is told why its release waits' (Wait-Until -Seconds 60 { (@(& $told | Measure-Object -Sum).Sum) -ge 12 }) (Pm-Brief $it[7].n)
+    $before = (& $told) -join ','
+    $p1 = F 'w1' @('auto-promote'); $p2 = F 'w1' @('auto-promote', '--trace', 'true')
+    $j2 = $p2 | ConvertTo-Json -Depth 6 -Compress
+    Check 'a pass judges the queue' ((Pv $p2 'ok') -eq $true -and $j2 -match '"promotion-waiting"') $j2
+    Check 'the second pass made at most 4 GitHub requests (the board, the changed state comments)' ([int](Pv $p2 'github_calls') -le 4) "github_calls=$(Pv $p2 'github_calls') $j2"
+    Check 'it read no item state, no commit and no pull request one by one' ($j2 -notmatch '"item-state"' -and $j2 -notmatch '"commit-item"' -and $j2 -notmatch '"compare"' -and $j2 -notmatch '"item-info"') $j2
+    Check 'and wrote nothing: no item was told again' ((& $told) -join ',' -eq $before) "$before -> $((& $told) -join ',')"
+    # a change is seen: a label is added, and the pass that follows judges that item's release again (the other items still lack it)
+    $n0 = $it[0].n
+    [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n0/labels" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ labels = @('Auto Merge') } | ConvertTo-Json) -ContentType 'application/json')
+    $p3 = F 'w1' @('auto-promote'); $j3 = $p3 | ConvertTo-Json -Depth 6 -Compress
+    Check 'a changed item is judged again: it is told its release now waits for the items that still lack the label' (Wait-Until -Seconds 30 { @(Pm-Events $n0 'promotion-waiting').Count -ge 2 }) "$j3 /// $(Pm-Brief $n0)"
 }
 
 }

@@ -1,8 +1,28 @@
 # Automatic promotion of cmdemo1-ui (owner decision 2026-10-23)
 
 The acting gateway promotes a release of `octopus.project` (cmdemo1-ui) from tdd to uat, then to prod, by itself: "gated by checks", no AI
-session and no person in the loop. Code: `plugin/scripts/lib/Verbs.Promote.ps1` (`Invoke-AutoPromote`), called at the end of every full sweep
-(`sync-board`, not dry, not incremental) with the Release Queue the sweep collected. Suite: `tests/scenarios/promote.ps1` (`promote`).
+session and no person in the loop. Code: `plugin/scripts/lib/Verbs.Promote.ps1` (the verb `auto-promote`, `Invoke-AutoPromote`), run by the
+gateway's own loop (`gateway/AutoPromoter.cs`, registered in `AddGatewayBackground` after the sweeper) every `timing.promoteSeconds` (60) with
+its own call timeout (240 s) and its own leader gate (`MayAct`); it runs only where `delivery.autoPromote` names the gateway's environment. It
+is not a step of `sync-board` (issue 429): a slow promotion never delays the board sweep and a slow sweep never delays a promotion. The pass reads
+the Release Queue itself (the board list, then the state of each card in the hold column). Suite: `tests/scenarios/promote.ps1` (`promote`).
+
+## What a pass keeps (issue 429)
+
+`promote-judgments.json` in the gateway's state directory is a cache; a missing file is an empty store and nothing in it is trusted past what it was
+derived from:
+
+- `states`: the slim state (verdict, merge) of each item with the update time of its state comment. A pass asks GitHub once which state comments changed
+  since the last pass (`GET issues/comments?since=`), drops those entries and reads nothing else of an item whose entry stands (at most 30 minutes).
+- `content`: the judgment of a release's content (`Get-ReleaseContent`) keyed by release id, target and the commit range (commit running in the target,
+  the release's commit), with the stamps of the items it names; it stands while those stamps stand and for ten minutes at most. A range with a
+  commit that is no item's merge is judged again when any other item's state changed.
+- `journaled`: the journal lines (event and key) known to be on an item at its current state stamp; they are not written or looked for again.
+- `none`, `demo`: commits that are no item's merge (ten minutes); items whose demo video is published.
+- `deferred`: the releases the last pass had no time for (budget 200 s); the next pass judges them first.
+
+So a pass in which nothing changed asks for the board, the changed comments and Octopus, and writes nothing. The decisions, waits, aborts and
+journal lines are the same as before; only repeated reads are gone. Labels come from the board list, not one read per item.
 
 ## Settings
 
@@ -14,7 +34,7 @@ session and no person in the loop. Code: `plugin/scripts/lib/Verbs.Promote.ps1` 
 | `octopus.tddUrl`, `octopus.uatUrl` | `""`: the release waits ("no health URL") | the cmdemo1-ui app URLs of tdd and uat |
 | `octopus.healthPath`, `octopus.health` | `/_healthcheck/detailed`; spacing 5, settle 10 min, 3 retries 20 s | same |
 
-Only the acting gateway sweeps (the leader lease), so only it promotes.
+Only the acting gateway promotes (the leader lease gates the loop).
 
 ## Which items a release carries
 

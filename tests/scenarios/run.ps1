@@ -154,7 +154,7 @@ $SuiteDefs = @(
             runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = '__FAKE_URL__'; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
                 agent = 'codex'; perHostCapacity = 1; overflowRoles = @('qc'); overflowMax = 1; maxConcurrent = 10; maxExecutionsPerDay = 1000; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 30; listSeconds = 1; reportGraceSeconds = 2 } } } }
     # the automatic promotion (promote.ps1, docs/design/auto-promote.md): on, for any gateway environment; tdd and uat health on the fake's /_healthcheck
-    @{ Name = 'promote'; Policy = 'auto'; Set = $PromoteScenarios; Env = 'promote'; Timing = @{ staleItemMinutes = 600 }
+    @{ Name = 'promote'; Policy = 'auto'; Set = $PromoteScenarios; Env = 'promote'; Timing = @{ staleItemMinutes = 600; promoteSeconds = 3 }
         Extra = @{ delivery = @{ autoPromote = @{ enabled = $true; environments = @('uat', 'prod'); gatewayEnvironment = 'tdd'; signoffWaitHours = 0.05 } }
             octopus = @{ url = '__FAKE_URL__/octopus'; space = 'Spaces-355'; project = 'cmdemo1-ui'; prodUrl = 'https://ca-cmdemo1-prod-ui.example'; tddUrl = '__FAKE_URL__'; uatUrl = '__FAKE_URL__'; healthPath = '/_healthcheck/detailed'; health = @{ spacingMinutes = 0.05; settleMinutes = 0.1; retries = 2; retrySeconds = 0.5 }
                 environments = @{ tdd = 'tdd'; uat = 'uat'; prod = 'prod' } } } }

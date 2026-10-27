@@ -4,6 +4,7 @@ function Invoke-Octo([string]$Path) {
     if (-not $env:OCTOPUS_API_KEY) { Reject 30 'secret-missing' 'OCTOPUS_API_KEY is not set on the gateway' }
     $o = (Get-Cfg).octopus
     $uri = "$($o.url.TrimEnd('/'))/$($Path.TrimStart('/'))"
+    $script:OctoCalls++
     try { Invoke-RestMethod -Uri $uri -Headers @{ 'X-Octopus-ApiKey' = $env:OCTOPUS_API_KEY; 'User-Agent' = 'factory-worker-gateway' } -TimeoutSec 30 }
     catch {
         $code = try { [int]$_.Exception.Response.StatusCode } catch { 0 }
