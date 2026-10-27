@@ -1,6 +1,9 @@
 # Backlog replenishment (keeper.replenish): when an item the gateway owns reaches Done (delivered to production), the sweep creates ONE new,
 # small, docs-only work item so the board keeps moving. Off unless keeper.replenish.enabled (tdd only; the source leaves it off).
-#   keeper.replenish = { enabled, maxPerDay (items created in 24 h), targetOpen (open factory items of this environment, never exceeded) }
+#   keeper.replenish = { enabled, maxPerDay (items created in 24 h), targetOpen (open factory items of this environment, never exceeded),
+#                        holdWhenWaiting (backpressure: nothing is created while this many real items or more wait for a session; 0 = off),
+#                        onlyWhenIdle (nothing is created unless nothing waits and a session could take a new item) }
+# Both read the gateway's last plan (sync-board input replenish_waiting, delivery-speed.md 6); with either set and no plan counted yet nothing is created.
 # One new item per finished item: the finished item's state records `replenished` (the new number), so a sweep never repeats it.
 
 $script:ReplenishTopics = @(
@@ -41,6 +44,8 @@ function Get-ReplenishCfg {
         enabled = ((Test-Has $r 'enabled') -and $r.enabled -eq $true -and $inEnv)
         maxPerDay = (& $num 'maxPerDay' 30 0 500)
         targetOpen = (& $num 'targetOpen' 10 0 200)
+        holdWhenWaiting = (& $num 'holdWhenWaiting' 0 0 1000)
+        onlyWhenIdle = ((Test-Has $r 'onlyWhenIdle') -and $r.onlyWhenIdle -eq $true)
     }
 }
 
@@ -67,12 +72,19 @@ function Get-ReplenishTopic($Used) {
 }
 
 # Called by the full sweep: $List the board's cards (this environment's), $Last the last column. Returns the counts for /status, or $null when off.
-function Invoke-Replenish($List, [string]$Last, [string]$Column) {
+# $Waiting: the items of the gateway's last plan that no session has accepted ($null: no plan counted yet); $FreeWorkers: sessions that could take a new item now.
+function Invoke-Replenish($List, [string]$Last, [string]$Column, $Waiting = $null, [int]$FreeWorkers = 0) {
     $rc = Get-ReplenishCfg
     if (-not $rc.enabled) { return $null }
     $c = Get-Cfg; $envLabel = Get-EnvLabel
     $open = @($List | Where-Object { $_.open -and (Test-NameIn $c.label $_.labels) }).Count
-    $res = @{ enabled = $true; maxPerDay = $rc.maxPerDay; targetOpen = $rc.targetOpen; open = $open; createdToday = 0; created = @(); skipped = '' }
+    $res = @{ enabled = $true; maxPerDay = $rc.maxPerDay; targetOpen = $rc.targetOpen; open = $open; createdToday = 0; created = @(); skipped = ''; waiting = $Waiting; holdWhenWaiting = $rc.holdWhenWaiting; onlyWhenIdle = $rc.onlyWhenIdle }
+    # backpressure: generated work only when the plant is short of it (unchanged when neither setting is on)
+    if ($rc.holdWhenWaiting -gt 0 -or $rc.onlyWhenIdle) {
+        if ($null -eq $Waiting) { $res.skipped = 'no-plan'; return $res }
+        if ($rc.holdWhenWaiting -gt 0 -and [int]$Waiting -ge $rc.holdWhenWaiting) { $res.skipped = 'waiting'; return $res }
+        if ($rc.onlyWhenIdle -and ([int]$Waiting -gt 0 -or $FreeWorkers -le 0)) { $res.skipped = 'not-idle'; return $res }
+    }
     $done = @($List | Where-Object { "$($_.column)" -ieq $Last -and (Test-NameIn $c.label $_.labels) } | Sort-Object { [int]$_.number } -Descending)
     $issues = $null; $today = 0; $used = [System.Collections.Generic.HashSet[string]]::new()
     $cutoff = (Get-UtcNow).AddHours(-24)
