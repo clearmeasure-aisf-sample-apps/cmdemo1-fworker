@@ -259,13 +259,52 @@ public class ArchitectureTests
         Assert.True(bad.Count == 0, $"src/{project} references {string.Join(", ", bad)}; it may reference only [{string.Join(", ", AllowedProjectReferences[project])}] (projects point inward, refactor design 3).");
     }
 
+    /// <summary>The only NuGet packages each src/ project may have (W2.0 names them: refactor design R2, ADR 0001). Contracts, Domain and Integrations stay free of
+    /// packages: the rules and the contracts must not know the engine, and Integrations (W3) reaches the outside through its own clients. Persistence holds the
+    /// DbContext (EF Core, SQL Server) and Wolverine's EF Core storage; Workflows holds the sagas (WolverineFx). The SQL Server transport, the HTTP endpoints and the
+    /// telemetry packages belong to the host (gateway/Gateway.csproj), where the Wolverine registration is.</summary>
+    static readonly Dictionary<string, string[]> AllowedPackages = new()
+    {
+        ["Fworker.Contracts"] = [],
+        ["Fworker.Domain"] = [],
+        ["Fworker.Persistence"] = ["Microsoft.EntityFrameworkCore.SqlServer", "WolverineFx.EntityFrameworkCore", "System.Security.Cryptography.Pkcs"],
+        ["Fworker.Integrations"] = [],
+        ["Fworker.Workflows"] = ["WolverineFx"],
+    };
+
+    internal static List<(string Name, string Version)> PackageReferences(string csprojText) =>
+        Regex.Matches(csprojText, @"<PackageReference\s+[^>]*Include\s*=\s*""([^""]+)""[^>]*Version\s*=\s*""([^""]*)""", RegexOptions.IgnoreCase)
+            .Select(m => (m.Groups[1].Value, m.Groups[2].Value)).ToList();
+
     [Theory]
     [MemberData(nameof(SrcProjects))]
-    public void SrcProjectsAddNoPackageYet(string project)
+    public void SrcProjectsAddOnlyThePackagesThePlanNames(string project)
     {
-        // no NuGet package before the plan names it (W2.0 adds Wolverine and EF Core); Contracts stays free of packages for good
         var text = Csproj($"src/{project}/{project}.csproj");
-        Assert.DoesNotMatch(new Regex(@"<PackageReference\b", RegexOptions.IgnoreCase), text);
+        var all = Regex.Matches(text, @"<PackageReference\b", RegexOptions.IgnoreCase).Count;
+        var named = PackageReferences(text);
+        Assert.True(all == named.Count, $"src/{project}: every PackageReference needs Include and Version");
+        var bad = named.Where(p => !AllowedPackages[project].Contains(p.Name)).Select(p => p.Name).ToList();
+        Assert.True(bad.Count == 0, $"src/{project} references the package(s) {string.Join(", ", bad)}; it may have only [{string.Join(", ", AllowedPackages[project])}].");
+    }
+
+    [Theory]
+    [MemberData(nameof(SrcProjects))]
+    public void EveryPackageIsPinnedToOneExactVersion(string project)
+    {
+        // pinned (W2.0): a plain version number, no range, wildcard or floating version
+        var versions = PackageReferences(Csproj($"src/{project}/{project}.csproj")).Concat(PackageReferences(Csproj("gateway/Gateway.csproj")));
+        var loose = versions.Where(p => !Regex.IsMatch(p.Version, @"^\d+\.\d+\.\d+$")).Select(p => $"{p.Name} {p.Version}").ToList();
+        Assert.True(loose.Count == 0, "not pinned to an exact version: " + string.Join(", ", loose));
+    }
+
+    [Fact]
+    public void WolverinePackagesShareOneVersion()
+    {
+        var all = new[] { "gateway/Gateway.csproj", "src/Fworker.Persistence/Fworker.Persistence.csproj", "src/Fworker.Workflows/Fworker.Workflows.csproj" }
+            .SelectMany(f => PackageReferences(Csproj(f))).Where(p => p.Name.StartsWith("WolverineFx", StringComparison.Ordinal)).ToList();
+        Assert.NotEmpty(all);
+        Assert.Single(all.Select(p => p.Version).Distinct());
     }
 
     [Fact]
