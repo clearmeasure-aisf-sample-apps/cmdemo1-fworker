@@ -504,6 +504,10 @@ function Invoke-SyncBoard($a) {
     # partial: a full sweep whose item loop ran out of budget; viewed: the items it did look at (the gateway treats such a sweep like an incremental
     # pass over them: what it did not look at keeps its owner and its facts); resumeAt: where the next full sweep begins
     $partial = $false; $viewed = @(); $resumeAt = 0
+    # fenced (W0.1, docs/design/delivery-speed.md 18.1.1): the lease this sweep ran under was taken by a newer gateway process while it ran. The item loop
+    # stops, the tail steps are deferred, and the answer says so; the gateway then plans nothing from it. Every write the sweep makes (a merge, a settle,
+    # a state save, a move) also checks the lease (Core.ps1 Invoke-GhRaw), so a step already begun is refused, not performed.
+    $fenced = $null
     # unparked: items whose park the sweep removed because they are closed (issue 82); the plant forgets their parks
     $unparked = @()
     # parks: every parked item the sweep read (issue 99)
@@ -527,6 +531,7 @@ function Invoke-SyncBoard($a) {
     }
     $unparkCtx = @{ free_workers = $(if (Test-Has $a 'free_workers') { [int]$a.free_workers } else { 0 }) }
     foreach ($it in $list) {
+        if ($script:LeaseFence -and -not (Test-LeaseHeld)) { $fenced = Get-LeaseFenceInfo 'sweep-item'; break }   # (W0.1: before each item, so a superseded gateway acts on no more of them)
         # a closed item is still followed when its merged pull request closed it and the flow after the merge is not finished
         if (-not (Test-NameIn $c.label $it.labels)) { continue }
         # (issue 82: a closed item in any column the factory works is read too, so a park it was left with is removed below)
@@ -723,7 +728,7 @@ function Invoke-SyncBoard($a) {
                     } catch [FactoryReject] {
                         # item-busy: a verb of the item is running (the session's own merge call): the next sweep looks again. Anything else the merge
                         # verb refuses (the card was moved, the item closed) is not a merge the gateway may make.
-                        if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { throw }
+                        if ($_.Exception.Code -in 'github-not-found', 'item-not-found', 'lease-lost') { throw }   # (lease-lost: the sweep is fenced, not the merge refused)
                         @{ outcome = $(if ($_.Exception.Code -eq 'item-busy') { 'waiting' } else { 'skipped' }); reason = $_.Exception.Code }
                     }
                     $actions += @{ item = $n; action = 'pass-merge'; outcome = "$($gm.outcome)"; reason = $(if (Test-Has $gm 'reason') { "$($gm.reason)" } else { '' }); roundTrip = $(if ((Test-Has $gm 'detail') -and (Test-Has $gm.detail 'round_trip')) { [int]$gm.detail.round_trip } else { 0 }); masterDefectNew = ((Test-Has $gm 'masterDefectNew') -and $gm.masterDefectNew) }
@@ -795,9 +800,16 @@ function Invoke-SyncBoard($a) {
         } catch [FactoryReject] {
             # an item (or its card) that vanished while the sweep was reading it is not an error: the next sweep sees the board as it is
             if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $actions += @{ item = $n; action = 'skip'; reason = 'vanished-during-sweep' } }
+            elseif ($_.Exception.Code -eq 'lease-lost') { $fx = $_.Exception.Extra; $fenced = Get-LeaseFenceInfo "$($fx['step'])"; $fenced.item = $n; break }   # (W0.1: a write was refused: the pass ends here)
             else { $errors += @{ item = $n; code = $_.Exception.Code; reason = $_.Exception.Message } }
         }
         catch { $errors += @{ item = $n; code = 'error'; reason = "$($_.Exception.Message)" } }
+    }
+    if (-not $fenced -and $script:LeaseFence -and -not (Test-LeaseHeld)) { $fenced = Get-LeaseFenceInfo 'sweep-tail' }   # (checked before the tail writes: a lease lost since the last item still ends in `fenced`)
+    if ($fenced) {
+        # the tail steps below see an expired deadline and defer; the log line is the sweep's journal of the refusal (the runner copies stderr into the gateway log)
+        $script:SweepDeadline = [DateTime]::MinValue; $skipped += 'fenced'
+        try { [Console]::Error.WriteLine((@{ fence = 'sweep-stopped'; code = 'lease-lost'; step = $fenced.step; item = $(if ($fenced.ContainsKey('item')) { $fenced.item } else { 0 }); epoch = $fenced.epoch; current_epoch = $fenced.current_epoch; current_holder = $fenced.current_holder } | ConvertTo-Json -Compress)) } catch { }
     }
     # issue 65: an item is offered to nobody while an item it depends on is neither merged nor closed. The seen count goes on meanwhile, so the
     # sweep after its last dependency was merged offers it at once. held: the items that wait, with the code and the numbers they wait for.
@@ -815,7 +827,7 @@ function Invoke-SyncBoard($a) {
         else { $kept += $o }
     }
     $offers = $kept
-    if (-not $dry) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
+    if (-not $dry -and -not $fenced) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
     $steps['items'] = [int]((Get-Date) - $sweepT0).TotalMilliseconds
     if ($partial) { $skipped += 'items-deferred'; $steps['items-viewed'] = $viewed.Count }
     if ($null -eq $only -and -not $dry) {
@@ -872,9 +884,11 @@ function Invoke-SyncBoard($a) {
     $steps['replenish'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # (the automatic promotion is no step of the sweep: the verb auto-promote, Verbs.Promote.ps1, run by the gateway's own loop)
     $script:SweepDeadline = $null
+    # a lease lost during a tail step (its write was refused, however the step recorded it) still makes the answer `fenced`, not a sweep with errors
+    if (-not $fenced -and $script:LeaseFence -and $script:LeaseFence.lost) { $fenced = Get-LeaseFenceInfo 'sweep-tail' }
     $stepsText = ($steps.Keys | ForEach-Object { "$_=$($steps[$_])" }) -join ' '
     [Console]::Error.WriteLine("sync-board steps (ms): $stepsText total=$([int]((Get-Date) - $sweepT0).TotalMilliseconds)")
-    return @{ ok = $true; steps = $steps; elapsed_ms = [int]((Get-Date) - $sweepT0).TotalMilliseconds; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only -or $partial) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only -or $partial) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); partial = $partial; viewed = $(if ($partial) { @($viewed) } else { $null }); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; steps = $steps; elapsed_ms = [int]((Get-Date) - $sweepT0).TotalMilliseconds; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only -or $partial) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only -or $partial) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); partial = $partial; viewed = $(if ($partial) { @($viewed) } else { $null }); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; fenced = $fenced; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- work intake (issue 104) -----------------------------------------------------------------------------------------

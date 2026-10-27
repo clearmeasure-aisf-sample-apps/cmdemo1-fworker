@@ -104,6 +104,16 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         if (code == 0)
         {
             var j = JsonNode.Parse(output)!;
+            // Fencing (W0.1, delivery-speed.md 18.1.1): the rule script found the lease lost and stopped its pass (`fenced`), or this process lost it while the
+            // script ran. Either way what the pass read is dropped: no plan, no offers, no triggers. The gap and the items go back for the next holder's pass.
+            var fencedBy = j["fenced"] as JsonObject;
+            if (fencedBy != null || MayAct?.Invoke() == false)
+            {
+                Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["sweep"] = "fenced", ["kind"] = kind, ["reason"] = fencedBy != null ? "the rule script found the leader lease lost" : "this process lost the leader lease while the sweep ran", ["fence"] = fencedBy?.DeepClone() }.ToJsonString());
+                if (gapTaken is { } gf) Gap?.Set(gf);
+                if (items != null) foreach (var i in items) hub.RequestSweep(i);
+                return unconfirmedOut;
+            }
             foreach (var x in j["unconfirmed"] as JsonArray ?? new JsonArray()) if (x is JsonValue uv && uv.TryGetValue<int>(out var ui) && ui > 0) unconfirmedOut.Add(ui);
             var acts = j["actions"]!.AsArray();
             // A full sweep whose item loop ran out of its budget (issue 429, `partial`) names the items it read (`viewed`): it is taken like an

@@ -115,6 +115,7 @@
     "leaderLeaseSeconds": 360,
     "leaderRenewSeconds": 120,
     "leaderCheckSeconds": 15,
+    "fenceCheckSeconds": 5,
     "leaderHandoverSeconds": 90,
     "gapRenewMaxMinutes": 120,
     "leaseMinutes": 30,

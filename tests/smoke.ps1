@@ -35,6 +35,22 @@ Check 'belongs: #123 matches' (Test-PrBelongs $pr2 123)
 Check 'column order' ((Get-ColumnIndex 'Development') -eq 1 -and (Get-ColumnIndex 'Nope') -eq -1)
 Check 'name in list is case-insensitive' (Test-NameIn 'FACTORY WORKER' @('factory worker'))
 try { Reject 10 'x' 'y' } catch { Check 'reject carries exit and code' ($_.Exception.Exit -eq 10 -and $_.Exception.Code -eq 'x') }
+# fencing (W0.1): the lease the gateway ran a script under, and the refusal of a write once it is lost; nothing here touches the network
+. (Join-Path $root 'plugin/scripts/lib/Leader.ps1')
+Check 'fence: a read is never fenced; any other GitHub write is' (-not (Test-FencedWrite 'GET' 'repos/a/b/issues/1') -and (Test-FencedWrite 'POST' 'repos/a/b/issues/1/comments') -and (Test-FencedWrite 'PATCH' 'repos/a/b/issues/comments/9') -and (Test-FencedWrite 'PUT' 'repos/a/b/pulls/3/merge') -and (Test-FencedWrite 'DELETE' 'repos/a/b/git/refs/x'))
+Check 'fence: a GraphQL query is a read, a mutation is a write' (-not (Test-FencedWrite 'POST' 'graphql' @{ query = 'query { viewer { login } }' }) -and (Test-FencedWrite 'POST' 'graphql' @{ query = '  mutation { x }' }))
+Check 'fence: without a lease nothing is fenced' ($null -eq $script:LeaseFence -and (Test-LeaseHeld))
+Set-LeaseFence @{ epoch = 4; holder = 'gw:1:a' }
+Check 'fence: the lease is kept as given' ($script:LeaseFence.epoch -eq 4 -and $script:LeaseFence.holder -eq 'gw:1:a')
+Set-LeaseFence @{ epoch = 0; holder = 'gw:1:a' }
+Check 'fence: no epoch, no fence' ($null -eq $script:LeaseFence)
+Set-LeaseFence @{ epoch = 4; holder = 'gw:1:a' }
+$script:LeaseFence.lost = @{ current_epoch = 5; current_holder = 'gw:2:b'; released = $false }
+Check 'fence: a lease found lost stays lost' (-not (Test-LeaseHeld))
+try { Assert-LeaseHeld 'PUT repos/a/b/pulls/3/merge'; Check 'fence: a lost lease refuses the step' $false } catch { Check 'fence: a lost lease refuses the step, naming both epochs and the step' ($_.Exception.Code -eq 'lease-lost' -and $_.Exception.Exit -eq 20 -and $_.Exception.Extra.epoch -eq 4 -and $_.Exception.Extra.current_epoch -eq 5 -and $_.Exception.Extra.step -eq 'PUT repos/a/b/pulls/3/merge') }
+try { Invoke-GhRaw -Method PATCH -Path 'repos/a/b/issues/comments/9' -Body @{ body = 'x' }; Check 'fence: a GitHub write of a superseded gateway is refused' $false } catch { Check 'fence: a GitHub write of a superseded gateway is refused before any request' ($_.Exception.Code -eq 'lease-lost') }
+try { Invoke-OctoPost 'api/Spaces-1/interruptions/x/submit' @{ Result = 'Proceed' }; Check 'fence: an Octopus write of a superseded gateway is refused' $false } catch { Check 'fence: an Octopus write (a deployment, a Sign-off answer) of a superseded gateway is refused' ($_.Exception.Code -eq 'lease-lost') }
+$script:LeaseFence = $null
 $d = '{"a":"2026-10-10T21:09:32.250Z"}' | ConvertFrom-Json -AsHashtable -DateKind String
 Check 'state dates stay strings through the JSON round trip (milliseconds kept)' ((ConvertTo-Iso (ConvertFrom-Iso $d.a)) -eq '2026-10-10T21:09:32.250Z')
 $d2 = '{"a":"2026-10-10T21:09:32.250Z"}' | ConvertFrom-Json -AsHashtable
