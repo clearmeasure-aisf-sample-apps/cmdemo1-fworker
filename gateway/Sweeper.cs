@@ -87,6 +87,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         if (ownerMode) args["free_workers"] = plant.FreeOwnerSessions();
         // work intake (issue 104): a full sweep may pull a Todo item onto the board when an owner session has a free slot
         if (ownerMode && items == null) args["intake"] = new JsonObject { ["freeSlots"] = plant.IntakeSlots() };
+        // replenish backpressure (delivery-speed.md 6): the waiting items of the last plan; absent before the first plan has run (Replenish.ps1 then holds back)
+        if (ownerMode && items == null && plant.LastPlanWaiting() is { } lastWaiting) args["replenish_waiting"] = lastWaiting;
         var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
         // the first full sweep after a gap (no gateway was up): the owners' claims that ran out in it are renewed, not offered again (issue 94)
         var gapTaken = items == null ? Gap?.Take() : null;
@@ -117,7 +119,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 var keep = new List<int>();
                 foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
                 plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, scope, j["runtimes"] as JsonObject, j["profiles"] as JsonObject);
-                if (items == null && j["replenish"] is JsonObject rpj) plant.SetReplenish(rpj);
+                if (items == null && j["replenish"] is JsonObject rpj) { plant.SetReplenish(rpj); plant.NoteGenerated((rpj["created"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var gi) ? gi : 0)); }
                 if (items == null && j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);   // a full sweep only: an incremental one reads a few items
                 // the hold:owner items of the whole board: a full sweep replaces them, an incremental pass updates its own items; the plant hears
                 // them once a full sweep has read the whole board (until then its name actions wait, sweep-pending)

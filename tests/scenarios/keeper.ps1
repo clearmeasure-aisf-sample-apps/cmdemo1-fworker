@@ -148,3 +148,45 @@ $KeeperScenarios['keeper: replenish creates one docs-only item per Done item on 
         Check '/status shows the keeper counts' ($st.replenish.maxPerDay -eq 2 -and $st.replenish.targetOpen -eq 2 -and $st.replenish.createdSinceStart -eq 2 -and $st.replenish.createdToday -ge 2) ($st.replenish | ConvertTo-Json -Compress)
     }
 }
+
+# W0.6 (delivery-speed.md 6): replenish backpressure. The gateway hands the last plan's waiting count to sync-board (replenish_waiting); the scenario plays
+# the gateway's part with explicit sync-board calls on the second gateway, whose own sweeps are not in owner mode and so pass no count at all.
+$KeeperScenarios['keeper: replenish backpressure holds while items wait or without a plan, releases below the limit, and onlyWhenIdle also needs a free session'] = {
+    $wl = @('factory worker', 'Auto Merge', 'env:tdd')
+    $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+    $mkDone = {
+        param($title)
+        $d = New-Item-Fake $title 'Done in production.' $wl 'Done'
+        $state = @{ item = $d; merge = @{ sha = 'abc1234'; merged_at = (Get-Date).ToUniversalTime().ToString('o'); done_at = (Get-Date).ToUniversalTime().ToString('o'); awaiting = $null } }
+        $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($state | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
+        [void](Invoke-RestMethod "$gh/issues/$d/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ body = $body } | ConvertTo-Json))
+        [void](Invoke-RestMethod "$gh/issues/$d" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json))
+        return $d
+    }
+    $made = { @((Get-FakeState).issues | Where-Object { "$($_.body)" -match '<!-- keeper-replenish -->' }) }
+    $cfg = Msg-Config 'instance.rpbp.json' { param($c) $c.envScope = @('tdd'); $c.keeper.replenish = @{ enabled = $true; environments = @('tdd'); maxPerDay = 5; targetOpen = 5; holdWhenWaiting = 2; onlyWhenIdle = $false } }
+    $d1 = & $mkDone 'Backpressure done one'
+    Msg-OnGateway @{ FACTORY_CONFIG = $cfg; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_ENVIRONMENT = 'tdd'; FACTORY_SWEEP_SECONDS = '2'; FACTORY_SWEEP_MIN_SECONDS = '1' } {
+        param($g)
+        Start-Sleep -Seconds 8
+        Check 'without a plan counted (the gateway''s own sweeps pass none) nothing is created' (@(& $made).Count -eq 0) ((Get-FakeState).issues | ForEach-Object { $_.title } | Out-String)
+        $r = Kp-Admin @('sync-board', '--replenish_waiting', '3'); CheckExit 'a sweep with 3 waiting' $r 0
+        Check '3 waiting is at or above holdWhenWaiting (2): held with the reason waiting, the count in the answer' ($r.replenish.skipped -eq 'waiting' -and $r.replenish.waiting -eq 3 -and @($r.replenish.created).Count -eq 0) ($r.replenish | ConvertTo-Json -Compress)
+        Check 'and no item was created' (@(& $made).Count -eq 0)
+        $r = Kp-Admin @('sync-board', '--replenish_waiting', '2'); Check '2 waiting is still at the limit: held' ($r.replenish.skipped -eq 'waiting' -and @(& $made).Count -eq 0) ($r.replenish | ConvertTo-Json -Compress)
+        $r = Kp-Admin @('sync-board', '--replenish_waiting', '1')
+        Check '1 waiting is below the limit: released, one item created for the Done item' (@($r.replenish.created).Count -eq 1 -and @(& $made).Count -eq 1) ($r.replenish | ConvertTo-Json -Compress)
+    }
+    $cfg2 = Msg-Config 'instance.rpidle.json' { param($c) $c.envScope = @('tdd'); $c.keeper.replenish = @{ enabled = $true; environments = @('tdd'); maxPerDay = 5; targetOpen = 5; holdWhenWaiting = 0; onlyWhenIdle = $true } }
+    $d2 = & $mkDone 'Backpressure done two'
+    Msg-OnGateway @{ FACTORY_CONFIG = $cfg2; GITHUB_API_URL = "http://127.0.0.1:$($script:FakePort)"; FACTORY_ENVIRONMENT = 'tdd'; FACTORY_SWEEP_SECONDS = '2'; FACTORY_SWEEP_MIN_SECONDS = '1' } {
+        param($g)
+        $before = @(& $made).Count
+        $r = Kp-Admin @('sync-board', '--replenish_waiting', '1', '--free_workers', '2')
+        Check 'onlyWhenIdle: an item waits, so the plant is not idle, even with a free session' ($r.replenish.skipped -eq 'not-idle' -and @(& $made).Count -eq $before) ($r.replenish | ConvertTo-Json -Compress)
+        $r = Kp-Admin @('sync-board', '--replenish_waiting', '0', '--free_workers', '0')
+        Check 'onlyWhenIdle: nothing waits but no session could take a new item: not idle' ($r.replenish.skipped -eq 'not-idle' -and @(& $made).Count -eq $before) ($r.replenish | ConvertTo-Json -Compress)
+        $r = Kp-Admin @('sync-board', '--replenish_waiting', '0', '--free_workers', '1')
+        Check 'onlyWhenIdle: nothing waits and a session is free: released, one item created' (@($r.replenish.created).Count -eq 1 -and @(& $made).Count -eq $before + 1) ($r.replenish | ConvertTo-Json -Compress)
+    }
+}

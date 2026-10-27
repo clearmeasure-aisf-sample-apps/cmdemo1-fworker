@@ -863,7 +863,12 @@ function Invoke-SyncBoard($a) {
     $steps['qc-sync'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     $replenish = $null
     if ($null -eq $only -and -not $dry -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'replenish-deferred' }
-    elseif ($null -eq $only -and -not $dry) { try { $replenish = Invoke-Replenish $list $last $designCol } catch { $errors += @{ item = 0; code = 'error'; reason = "replenish: $($_.Exception.Message)" } } }
+    elseif ($null -eq $only -and -not $dry) {
+        # backpressure input (Replenish.ps1): the gateway's last plan; $null (no plan counted yet) is passed as a variable, a $(...) that yields nothing would drop the argument
+        $rpWaiting = $null; if ((Test-Has $a 'replenish_waiting') -and "$($a.replenish_waiting)" -match '^\d+$') { $rpWaiting = [int]$a.replenish_waiting }
+        $rpFree = 0; if (Test-Has $a 'free_workers') { $rpFree = [int]$a.free_workers }
+        try { $replenish = Invoke-Replenish $list $last $designCol $rpWaiting $rpFree } catch { $errors += @{ item = 0; code = 'error'; reason = "replenish: $($_.Exception.Message)" } }
+    }
     $steps['replenish'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # (the automatic promotion is no step of the sweep: the verb auto-promote, Verbs.Promote.ps1, run by the gateway's own loop)
     $script:SweepDeadline = $null
