@@ -465,7 +465,7 @@ function Test-DependencyMet([int]$Dep, $ByNumber, $Cache) {
 # each item read by itself instead of the whole board, and no claim-ref reaping and no QC sync (both are about the whole board). low: the gateway's
 # GitHub budget is below its reserve; the full sweep skips the claim-ref reaping and the QC sync, which can wait for the reset.
 function Verb_sync_board($a) {
-    try { return (Invoke-SyncBoard $a) } finally { $script:SweepDeadline = $null }   # (the sweep's deadline never outlives the sweep, whatever ends it)
+    try { return (Invoke-SyncBoard $a) } finally { $script:SweepDeadline = $null; $script:PromoTestDelayMs = 0 }   # (the sweep's deadline never outlives the sweep, whatever ends it)
 }
 function Invoke-SyncBoard($a) {
     $c = Get-Cfg; $t = $c.timing
@@ -476,6 +476,7 @@ function Invoke-SyncBoard($a) {
     $sweepT0 = Get-Date
     $budgetSeconds = if ((Test-Has $a 'budget_seconds') -and [double]$a.budget_seconds -gt 0) { [double]$a.budget_seconds } else { 200 }
     $script:SweepDeadline = $sweepT0.AddSeconds($budgetSeconds)
+    $script:PromoTestDelayMs = if (Test-Has $a 'test_promotion_delay_ms') { [int]$a.test_promotion_delay_ms } else { 0 }
     $steps = [ordered]@{}
     # gap { since, until }: the gateway was down in between (Leader.cs); see Invoke-GapRenew
     $gap = $null
