@@ -425,6 +425,22 @@ Reading the code for this section found four gaps that exist today; the design's
    without the stop exclusion, except runs that ended `host-full` (4.2): like a "no capacity" start (RuntimeManager.cs:219), a
    `host-full` start is refunded in process, so the rebuilt count skips it too.
 
+**Fencing as built (W0.1, gap 1).** The gateway adds `_lease: { epoch, holder }` to the input of the rule scripts that act on the board
+(`Runner.FencedVerbs`: `sync-board`, `auto-promote`, `merge`, `settle`, `resettle-item`, `copilot-settle`, `base-update-branch`, `base-watch`,
+`qc-sync`, `ci-release`; not the lease's and the snapshot's own verbs, which a superseded gateway still needs for its final snapshot). While the
+field is set (`$script:LeaseFence`, `lib/Leader.ps1`), the script asks `Test-LeaseHeld` before every write: `Invoke-GhRaw` for every GitHub request
+that is not a read (a GraphQL mutation counts, a query does not), `Invoke-OctoPost` for every deployment and Sign-off answer, and explicitly before
+each item of the sweep and each release of the promotion. The answer is one conditional read of the lease ref (304 when unchanged), kept for
+`timing.fenceCheckSeconds` (5); once lost it stays lost for the run; a lease that cannot be read keeps the script acting, as the gateway's own check
+does. A refused write is exit 20, code `lease-lost`, with `step`, `epoch`, `current_epoch` and `current_holder`, and one JSON line on the script's
+stderr (`"fence":"refused"`), which the runner copies into the gateway log. The sweep ends its item loop at the next item, defers the tail steps
+(`skipped: fenced`) and answers `fenced`; `auto-promote` answers `fenced` and lists the refusal in `errors`. The gateway logs `"gateway":"fenced"`
+for either answer, drops the plan of a sweep that is `fenced` or that ended after the process lost the lease (`"sweep":"fenced"`, `"plant":"plan-fenced"`;
+`Plant.Plan` asks `MayAct` again), and `RuntimeManager.Provision` starts nothing for a lost lease (`provision-fenced`; the slot and the launch count
+are given back). On supersession the process waits for the running fenced scripts at most 45 s (`LeadershipService.DrainFenced`), ends those still
+running (`"gateway":"fenced-drain"`), and only then writes the final snapshot. What stays open: a check-then-write window of a few milliseconds
+between the lease read and the write (GitHub has no conditional write for comments), and `Save-State`'s own `rev` check (W0.3).
+
 ### 18.2 Where each new piece of state lives
 
 Each piece of state is in exactly one class:

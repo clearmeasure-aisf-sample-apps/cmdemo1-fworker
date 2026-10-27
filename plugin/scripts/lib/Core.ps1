@@ -13,6 +13,21 @@ $script:GhCalls = 0; $script:OctoCalls = 0; $script:GhTrace = $null   # (request
 # was loaded without factory.ps1 (the smoke test): the read never fails under StrictMode.
 function Get-FactoryCause { $c = Get-Variable -Name FactoryCause -Scope Script -ValueOnly -ErrorAction SilentlyContinue; if ($c) { return "$c" }; return $null }
 
+# Fencing (W0.1, docs/design/delivery-speed.md 18.1.1): the lease the gateway ran this rule script under, { epoch; holder; ... } (factory.ps1 --server
+# sets it from the "_lease" field the gateway adds, gateway/Runner.cs; Set-LeaseFence in lib/Leader.ps1). $null when none (the lease is off, a client
+# call, a verb that is not fenced): then nothing here checks anything. While it is set, every write to GitHub or Octopus first confirms that the lease
+# is still this epoch's (Assert-LeaseHeld), so a gateway that was superseded while a script ran cannot merge, settle, promote or save a state.
+$script:LeaseFence = $null
+# The writes the fence guards: any GitHub request that is not a read. GraphQL is a POST for reads too, so only a mutation counts there.
+function Test-FencedWrite([string]$Method, [string]$Path, $Body = $null) {
+    if ($Method -in 'GET', 'HEAD') { return $false }
+    if ($Path -match '(^|/)graphql/?$') {
+        $q = if ($Body -is [System.Collections.IDictionary] -and $Body.Contains('query')) { "$($Body['query'])" } else { '' }
+        return ($q -match '^\s*mutation\b')
+    }
+    return $true
+}
+
 class FactoryReject : System.Exception {
     [int]$Exit
     [string]$Code
@@ -68,6 +83,7 @@ function Invoke-GhRaw {
     # -TimeoutSec: the longest one attempt may take (0: the default of the client); -Tries: attempts on a network error or a 502-504.
     # The author identity: an organization GitHub App (cloud gateways; FACTORY_AUTHOR_APP=1) or the GH_TOKEN of a local gateway. The value
     # 'unset' is the vault placeholder written before an identity exists: it counts as no token.
+    if ($script:LeaseFence -and (Test-FencedWrite $Method $Path $Body)) { Assert-LeaseHeld "$Method $Path" }   # (W0.1: no write of a superseded gateway)
     $tok = Get-GhToken
     $base = if ($env:GITHUB_API_URL) { $env:GITHUB_API_URL.TrimEnd('/') } else { 'https://api.github.com' }   # tests point this at the fake server
     $uri = if ($Path -match '^https?://') { $Path } else { "$base/$($Path.TrimStart('/'))" }

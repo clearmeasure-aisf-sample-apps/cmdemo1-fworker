@@ -17,14 +17,23 @@ sealed class LeadershipService : IHostedService
     readonly IHostApplicationLifetime lifetime;
     int stoppingRegistered;
 
-    public LeadershipService(GatewayLeader leader, SnapshotCoordinator snapshots, IRevocationService revocations, Plant plant, IHostApplicationLifetime lifetime)
+    // how long a superseded process lets the running rule scripts that act on the board finish before it ends them (delivery-speed.md 18.1.1): a sync-board
+    // can run 280 s, the successor waits leaderHandoverSeconds (90) for the final snapshot
+    public static readonly TimeSpan DrainFenced = TimeSpan.FromSeconds(45);
+
+    public LeadershipService(GatewayLeader leader, SnapshotCoordinator snapshots, IRevocationService revocations, Plant plant, IHostApplicationLifetime lifetime, Runner runner)
     {
         this.leader = leader; this.snapshots = snapshots; this.revocations = revocations; this.lifetime = lifetime;
+        // the plant plans and starts runtime sessions only while this process holds the lease (Plant.Plan, RuntimeManager.Provision; W0.1)
+        plant.MayAct = () => leader.MayAct;
         if (!leader.On) return;
         snapshots.MarkLeader();
-        // superseded: nothing acts any more (the sweeper and the ticks ask MayAct); the final snapshot, then the streams end with stream.replaced
+        // superseded: nothing acts any more (the sweeper and the ticks ask MayAct); the running rule scripts that act on the board stop at their next write
+        // (they find the lease lost) and are awaited for at most 45 s, then ended; only then the final snapshot, then the streams end with stream.replaced
         leader.OnSuperseded = async cur =>
         {
+            var (waitedMs, killed) = await runner.DrainFencedAsync(DrainFenced);
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "fenced-drain", ["epoch"] = leader.Epoch, ["waitedMs"] = waitedMs, ["killed"] = killed }.ToJsonString());
             var saved = snapshots.On && snapshots.Restored.IsCompleted && await snapshots.SaveAsync(true, TimeSpan.FromSeconds(30));
             var n = plant.HandOver("a newer gateway process took over the plant; connect again");
             Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "handed-over", ["epoch"] = leader.Epoch, ["finalSnapshot"] = saved, ["streamsEnded"] = n, ["to"] = cur?["holder"]?.DeepClone() }.ToJsonString());

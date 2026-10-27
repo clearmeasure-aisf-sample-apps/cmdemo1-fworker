@@ -189,6 +189,16 @@ sealed class RuntimeManager
     {
         using var span = Source.StartActivity("runtime.provision");
         span?.SetTag("fworker.runtime", cae.Kind); span?.SetTag("fworker.worker", t.Name); span?.SetTag("fworker.item", t.Item); span?.SetTag("fworker.phase", t.Phase);
+        // fencing (W0.1): a session is not started by a process that lost the lease after it decided to (the successor decides again from its own sweep).
+        // The slot and the launch count are given back as for "no capacity": no failure of the item, no launch.
+        if (Plant?.MayAct?.Invoke() == false)
+        {
+            nonces.Forget(t.Name);
+            lock (gate) { today = Math.Max(0, today - 1); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            Log("provision-fenced", t.Name, t.Item, "lease-lost: this process no longer holds the leader lease; nothing was started");
+            await End(t.Name, "fenced", failed: false, startFailure: false);
+            return;
+        }
         ProvisionResult r;
         try { r = await cae.Provision(new ProvisionRequest(t.Name, t.Item, t.Phase, t.Profile, t.Nonce, t.Role), CancellationToken.None); }
         catch (Exception e) { r = new ProvisionResult(false, "", "start-error: " + (e is HttpRequestException { Message: var m } && m.StartsWith("octopus ", StringComparison.Ordinal) ? m : e.GetType().Name)); }
