@@ -101,10 +101,11 @@ function Test-EnvHealth([string]$EnvKey, [string]$Version, $FinishedAt, [string]
     $keep = @($reads | Select-Object -Last 30)
     try {
         [void](Use-ItemLock $StoreItem {
-            $f = Get-State $StoreItem
-            if (-not (Test-Has $f.state 'promote_health')) { $f.state.promote_health = @{} }
-            foreach ($k in @($f.state.promote_health.Keys)) { if ($k -ne $hkey -and "$k" -like "$EnvKey|*") { $f.state.promote_health.Remove($k) } }
-            $f.state.promote_health[$hkey] = $keep; Save-State $StoreItem $f } 10)
+            [void](Update-State $StoreItem {
+                param($f)
+                if (-not (Test-Has $f.state 'promote_health')) { $f.state.promote_health = @{} }
+                foreach ($k in @($f.state.promote_health.Keys)) { if ($k -ne $hkey -and "$k" -like "$EnvKey|*") { $f.state.promote_health.Remove($k) } }
+                $f.state.promote_health[$hkey] = $keep }) } 10)
     }
     catch { [Console]::Error.WriteLine("promote: the health reads of $EnvKey could not be saved on #$($StoreItem): $($_.Exception.Message)"); return @{ gap = "the health reads of $EnvKey could not be saved on #$StoreItem (see the gateway log)"; note = '' } }
     $bad = @($reads | Where-Object { "$($_.status)" -ne 'Healthy' }) | Select-Object -First 1

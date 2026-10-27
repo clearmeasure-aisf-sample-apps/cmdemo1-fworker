@@ -198,18 +198,23 @@ function Format-JournalFold([string]$Event, $Fold, [string]$Key) {
 # saving it would undo that (seen on slow runners: an inspector's approval lost to the sweep that was posting the QC offer).
 function Save-JournalKeys([int]$Item, [string[]]$Keys) {
     Use-ItemLock $Item {
-        $f = Get-State $Item; $fs = $f.state; $added = 0
-        if (-not (Test-Has $fs 'journal')) { $fs.journal = @{ keys = @(); count = 0 } }
-        $at = ConvertTo-Iso (Get-UtcNow)
-        foreach ($k in $Keys) {
-            if (@($fs.journal.keys) -contains $k) { continue }
-            $fs.journal.keys = @(@($fs.journal.keys) + $k | Select-Object -Last 200); $fs.journal.count = [int]$fs.journal.count + 1; $added++
-            # the line's kind ends the open folds and is counted, as Add-Journal does for a holder it saves itself (the lines of this path are
-            # QC and skipped lines, never folded)
-            $ev = ($k -split '\|', 2)[0]; if (-not (Test-Has $fs.journal 'fold')) { $fs.journal.fold = @{} }
-            Close-JournalFolds $fs.journal $ev; Add-JournalKind $fs.journal $ev $at
+        # (a state-conflict, a write by another process since the read, reads the state again and adds the keys to that: they are repeatable)
+        for ($try = 1; ; $try++) {
+            $f = Get-State $Item; $fs = $f.state; $added = 0
+            if (-not (Test-Has $fs 'journal')) { $fs.journal = @{ keys = @(); count = 0 } }
+            $at = ConvertTo-Iso (Get-UtcNow)
+            foreach ($k in $Keys) {
+                if (@($fs.journal.keys) -contains $k) { continue }
+                $fs.journal.keys = @(@($fs.journal.keys) + $k | Select-Object -Last 200); $fs.journal.count = [int]$fs.journal.count + 1; $added++
+                # the line's kind ends the open folds and is counted, as Add-Journal does for a holder it saves itself (the lines of this path are
+                # QC and skipped lines, never folded)
+                $ev = ($k -split '\|', 2)[0]; if (-not (Test-Has $fs.journal 'fold')) { $fs.journal.fold = @{} }
+                Close-JournalFolds $fs.journal $ev; Add-JournalKind $fs.journal $ev $at
+            }
+            if ($added -eq 0) { break }
+            try { Save-State $Item $f; break }
+            catch [FactoryReject] { if ($_.Exception.Code -ne 'state-conflict' -or $try -ge 3) { throw } }
         }
-        if ($added -gt 0) { Save-State $Item $f }
     }
 }
 function Get-JournalKeys($State) { if (Test-Has $State 'journal') { return @($State.journal.keys) }; return @() }
@@ -238,15 +243,19 @@ function Verb_journal($a) {
     if ($ev -eq 'ci-released') {
         $f.item = $n; $line = Limit-JournalLine (Protect-JournalText (Get-JournalText $ev $f))
         $rec = & {
-            $st = Get-State $n; $s = $st.state
-            if (-not (Test-Has $s 'journal')) { $s.journal = @{ keys = @(); count = 0 } }
-            $k = "$ev|$key"
-            if (@($s.journal.keys) -contains $k) { return $false }
-            $s.journal.keys = @(@($s.journal.keys) + $k | Select-Object -Last 200); $s.journal.count = [int]$s.journal.count + 1
-            $prev = if (Test-Has $s.journal 'ciReleased') { @($s.journal.ciReleased) } else { @() }
-            $s.journal.ciReleased = @($prev + @("$(Get-JournalStamp (Get-UtcNow)) $line") | Select-Object -Last 20)
-            [void](Add-JournalKind $s.journal $ev (ConvertTo-Iso (Get-UtcNow)))
-            [void](Save-State $n $st); $true
+            for ($try = 1; ; $try++) {
+                $st = Get-State $n; $s = $st.state
+                if (-not (Test-Has $s 'journal')) { $s.journal = @{ keys = @(); count = 0 } }
+                $k = "$ev|$key"
+                if (@($s.journal.keys) -contains $k) { return $false }
+                $s.journal.keys = @(@($s.journal.keys) + $k | Select-Object -Last 200); $s.journal.count = [int]$s.journal.count + 1
+                $prev = if (Test-Has $s.journal 'ciReleased') { @($s.journal.ciReleased) } else { @() }
+                $s.journal.ciReleased = @($prev + @("$(Get-JournalStamp (Get-UtcNow)) $line") | Select-Object -Last 20)
+                [void](Add-JournalKind $s.journal $ev (ConvertTo-Iso (Get-UtcNow)))
+                # a state-conflict (another write since the read) reads the state again and records the release in that
+                try { [void](Save-State $n $st); return $true }
+                catch [FactoryReject] { if ($_.Exception.Code -ne 'state-conflict' -or $try -ge 3) { throw } }
+            }
         }
         return @{ ok = $true; id = $n; posted = $false; recorded = ($rec -eq $true) }
     }

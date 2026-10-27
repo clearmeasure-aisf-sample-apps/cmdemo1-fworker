@@ -162,4 +162,19 @@ foreach ($pf in $pfiles) {
     $key = "$($fm.role)/$($fm.phase)"; Check "prompts: $rel is the only prompt of $key" (-not $seen.ContainsKey($key)); $seen[$key] = $rel
 }
 foreach ($need in 'worker/technical-design', 'worker/development', 'worker/functional-testing', 'bootstrap/api', 'bootstrap/api-copilot') { Check "prompts: there is a prompt for $need" ($seen.ContainsKey($need)) }
+"state budget"
+$sb = @{ item = 1; rev = 4; keep = 'x'; promote_health = @{ 'tdd|1' = @(0..59 | ForEach-Object { @{ seq = $_; pad = ('p' * 300) } }) }; flow = @(0..59 | ForEach-Object { @{ seq = $_; pad = ('f' * 300) } }); lineage = @(0..59 | ForEach-Object { @{ seq = $_; pad = ('l' * 300) } }) }
+$sbMeasure = { ($sb | ConvertTo-Json -Depth 12).Length }
+$script:StateBudget = 30000
+$sbRes = Limit-StateBudget $sb $sbMeasure
+Check 'state budget: an oversized state is trimmed to the budget' ($sbRes.trimmed -and $sbRes.before -gt 30000 -and (& $sbMeasure) -le 30000 -and $sbRes.after -eq (& $sbMeasure))
+Check 'state budget: the oldest entries go, the newest stay, other keys are untouched' ($sb.promote_health['tdd|1'][-1].seq -eq 59 -and $sb.flow[-1].seq -eq 59 -and $sb.lineage[-1].seq -eq 59 -and $sb.promote_health['tdd|1'][0].seq -gt 0 -and $sb.flow[0].seq -gt 0 -and $sb.lineage[0].seq -gt 0 -and $sb.keep -eq 'x' -and $sb.rev -eq 4)
+Check 'state budget: the trim is recorded' (@($sb.journal.trims).Count -eq 1 -and $sb.journal.trims[0].dropped.promote_health -gt 0)
+$sbRes2 = Limit-StateBudget $sb $sbMeasure
+Check 'state budget: a state within the budget is left alone' (-not $sbRes2.trimmed -and @($sb.journal.trims).Count -eq 1)
+$sbBad = @{ item = 2; huge = ('h' * 40000) }
+$sbRefused = try { [void](Limit-StateBudget $sbBad { ($sbBad | ConvertTo-Json).Length }); $false } catch [FactoryReject] { $_.Exception.Code -eq 'state-too-large' }
+Check 'state budget: a state that does not fit without the three collections is refused' $sbRefused
+$script:StateBudget = 48000
+Check 'state rev: absent is 0, present is read' ((Get-StateRev @{}) -eq 0 -and (Get-StateRev @{ rev = 7 }) -eq 7)
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }
