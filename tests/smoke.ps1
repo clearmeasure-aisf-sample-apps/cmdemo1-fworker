@@ -32,6 +32,18 @@ Check 'belongs: branch /12-' (Test-PrBelongs $pr 12)
 $pr2 = [pscustomobject]@{ head = [pscustomobject]@{ ref = 'other/branch' }; title = 'fix #123' }
 Check 'belongs: #12 does not match #123' (-not (Test-PrBelongs $pr2 12))
 Check 'belongs: #123 matches' (Test-PrBelongs $pr2 123)
+# W0.4: the forms of a Depends on reference. Home is clearmeasure-aisf-sample-apps/cmdemo1-workorders (config/instance.json)
+$ho = "$((Get-Cfg).owner)"; $hr = "$((Get-Cfg).repo)"
+Check 'depends: #N is the home item' ((Get-ItemDependencies 1 'Depends on #12').Count -eq 1 -and (Get-ItemDependencies 1 'Depends on #12')[0] -eq 12)
+Check 'depends: repo#N naming the home repository is the home item' ((Get-ItemDependencies 1 "Depends on $hr#12")[0] -eq 12)
+Check 'depends: owner/repo#N naming the home repository is the home item, in any case' ((Get-ItemDependencies 1 "Depends on $($ho.ToUpperInvariant())/$hr#12")[0] -eq 12 -and (Get-ItemDependencies 1 "depends on: $ho/$hr#12").Count -eq 1)
+Check 'depends: owner/other#N is not the home item' ((Get-ItemDependencies 1 'Depends on acme/other#12').Count -eq 0 -and (Get-ItemDependencies 1 'Depends on other#12').Count -eq 0)
+Check 'depends: a foreign ref is listed as a foreign dependency, qualified and lowercased' ((Get-ItemForeignDependencies 1 'Depends on Acme/Other#12, other#13')[0] -eq 'acme/other#12' -and (Get-ItemForeignDependencies 1 'Depends on Acme/Other#12, other#13')[1] -eq "$($ho.ToLowerInvariant())/other#13" -and (Get-ItemForeignDependencies 1 'Depends on #12').Count -eq 0)
+$mix = Get-ItemDependencies 5 "Depends on #7, acme/other#7, $ho/$hr#8 and #5 and #7`nDepends on:#9"
+Check 'depends: a mixed line keeps the home items once each, without its own number or the foreign ref of the same number' ($mix.Count -eq 3 -and $mix[0] -eq 7 -and $mix[1] -eq 8 -and $mix[2] -eq 9)
+Check 'depends: a qualified ref to the home repository with the item''s own number is not a dependency' ((Get-ItemDependencies 5 "Depends on $ho/$hr#5").Count -eq 0 -and (Get-ItemDependencies 5 'Depends on acme/other#5').Count -eq 0)
+Check 'depends: the refs carry owner, repo, number and home' ((Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].owner -eq 'acme' -and (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].repo -eq 'other' -and (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].number -eq 12 -and -not (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].home)
+Check 'depends: text outside a Depends on line is not read' ((Get-ItemDependencies 1 "See #12 and acme/other#13`nDepends on #14").Count -eq 1)
 Check 'column order' ((Get-ColumnIndex 'Development') -eq 1 -and (Get-ColumnIndex 'Nope') -eq -1)
 Check 'name in list is case-insensitive' (Test-NameIn 'FACTORY WORKER' @('factory worker'))
 try { Reject 10 'x' 'y' } catch { Check 'reject carries exit and code' ($_.Exception.Exit -eq 10 -and $_.Exception.Code -eq 'x') }

@@ -439,12 +439,36 @@ function Invoke-BoardGuard($List, [int]$Max = 20) {
 
 # Issue 65: the items an item waits for, from "Depends on #N" in its body (any case, a colon allowed, several numbers on the same line: "Depends
 # on #291 and #292"; a list on the following lines is not read). Its own number is never a dependency.
+# W0.4 (system-gateway.md H5): a reference is "#N", "repo#N" or "owner/repo#N". "#N" is the home repository's item N; "repo#N" takes the home
+# owner; a qualified ref that names the home repository (any case, GitHub being case-insensitive) is that home item. Anything else is a FOREIGN
+# ref: recorded and shown, blocking nothing until the system gateway exists (v1 serves the home repository only).
+$script:DepRefPattern = '(?<![\w.\-/])(?:(?<o>[A-Za-z0-9][A-Za-z0-9\-]*)/(?<r>[A-Za-z0-9_.\-]+)|(?<r>[A-Za-z0-9_.\-]+))?#(?<n>\d{1,7})\b'
+function Get-ItemDependencyRefs([int]$Item, [string]$Body) {
+    $c = Get-Cfg; $refs = @(); $seen = @{}
+    $ho = "$($c.owner)".ToLowerInvariant(); $hr = "$($c.repo)".ToLowerInvariant()
+    foreach ($m in [regex]::Matches("$Body", '(?im)\bdepends[ \t]+on[ \t]*:?[ \t]*([^\r\n]*)')) {
+        foreach ($d in [regex]::Matches($m.Groups[1].Value, $script:DepRefPattern)) {
+            $o = if ($d.Groups['o'].Success) { $d.Groups['o'].Value.ToLowerInvariant() } else { $ho }
+            $r = if ($d.Groups['r'].Success) { $d.Groups['r'].Value.ToLowerInvariant() } else { $hr }
+            $v = [int]$d.Groups['n'].Value
+            $isHome = ($o -eq $ho -and $r -eq $hr)
+            if ($isHome -and $v -eq $Item) { continue }   # its own number is never a dependency
+            $key = "$o/$r#$v"; if ($seen.ContainsKey($key)) { continue }; $seen[$key] = $true
+            $refs += @{ owner = $o; repo = $r; number = $v; home = $isHome; ref = $key }
+        }
+    }
+    return , $refs
+}
+# The home repository's dependencies as numbers: what the sweep and the intake hold on. Foreign refs are not in it.
 function Get-ItemDependencies([int]$Item, [string]$Body) {
     $deps = @()
-    foreach ($m in [regex]::Matches("$Body", '(?im)\bdepends[ \t]+on[ \t]*:?[ \t]*([^\r\n]*)')) {
-        foreach ($d in [regex]::Matches($m.Groups[1].Value, '#(\d{1,7})\b')) { $v = [int]$d.Groups[1].Value; if ($v -ne $Item -and $deps -notcontains $v) { $deps += $v } }
-    }
+    foreach ($r in (Get-ItemDependencyRefs $Item $Body)) { if ($r.home) { $deps += [int]$r.number } }
     return , $deps
+}
+# The foreign refs of an item as "owner/repo#N" strings: recorded and shown, never blocking (v1).
+function Get-ItemForeignDependencies([int]$Item, [string]$Body) {
+    $out = @(); foreach ($r in (Get-ItemDependencyRefs $Item $Body)) { if (-not $r.home) { $out += "$($r.ref)" } }
+    return , $out
 }
 # A dependency is met once it is merged or closed: closed, or (still open) in a hold column (the Release Queue: merged, waiting for production) or
 # Done. An item that is not on the board is read once per sweep through the REST API; one that cannot be read counts as not met.
