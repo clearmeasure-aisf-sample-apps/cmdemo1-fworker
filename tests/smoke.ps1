@@ -148,6 +148,12 @@ try {
     # Wanted: a loop that registers each RuntimeLoop with AddSingleton<IHostedService>; refused: any AddHostedService that makes a RuntimeLoop
     # (the lambda up to `new RuntimeLoop(` with no other Add* call between, or AddHostedService<RuntimeLoop>), anywhere in gateway/
     $gwSources = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..' 'gateway') -Recurse -Filter '*.cs' -File | Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName })
+    # replenish backpressure (W0.6, delivery-speed.md 6): the gateway passes the last plan's waiting count, the sweep hands it to Invoke-Replenish, and both settings
+    # exist in the source defaults (off) so an override can name them
+    $rpText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'plugin' 'scripts' 'lib' 'Replenish.ps1'); $swText = Get-Content -Raw (Join-Path $PSScriptRoot '..' 'plugin' 'scripts' 'lib' 'Verbs.Sweep.ps1')
+    $rpSrc = (Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable).keeper.replenish
+    Check 'replenish: the gateway passes replenish_waiting, the sweep hands it and the free sessions to Invoke-Replenish, which holds on no-plan, waiting and not-idle' (@($gwSources | Where-Object { $_ -match 'args\["replenish_waiting"\]' }).Count -eq 1 -and $swText -match 'Invoke-Replenish \$list \$last \$designCol \$rpWaiting \$rpFree' -and $rpText -match "skipped = 'no-plan'" -and $rpText -match "skipped = 'waiting'" -and $rpText -match "skipped = 'not-idle'")
+    Check 'replenish: holdWhenWaiting (0) and onlyWhenIdle (false) are in the source defaults, so behaviour is unchanged until a setting turns them on' ($rpSrc.holdWhenWaiting -eq 0 -and $rpSrc.onlyWhenIdle -eq $false)
     $loopEach = 'foreach \([^\n]*?\) (?:builder\.)?services\.AddSingleton<IHostedService>\(sp =>\s*\{(?:(?!\bAdd(?:Singleton|HostedService|Transient|Scoped)\b)[\s\S])*?new RuntimeLoop\('
     $loopHosted = 'AddHostedService(?:<RuntimeLoop>|\((?:(?!\bAdd(?:Singleton|HostedService|Transient|Scoped)\b)[\s\S])*?new RuntimeLoop\()'
     Check 'gateway: every runtime adapter gets its own poll loop (AddSingleton<IHostedService>; AddHostedService would keep only the first RuntimeLoop, so Copilot never relisted)' ($gwSources.Count -gt 0 -and @($gwSources | Where-Object { $_ -match $loopEach }).Count -ge 1 -and @($gwSources | Where-Object { $_ -match $loopHosted }).Count -eq 0)

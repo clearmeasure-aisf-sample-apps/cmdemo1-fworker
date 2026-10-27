@@ -2054,6 +2054,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 && !string.Equals(a.Column, IntakeColumn, StringComparison.OrdinalIgnoreCase)).Select(a => a.Item).ToHashSet();
             foreach (var i in orphanSince.Keys.Where(i => !orphans.Contains(i)).ToList()) orphanSince.Remove(i);
             foreach (var i in orphans) orphanSince.TryAdd(i, planNow);
+            lastPlanWaiting = CountWaitingNonGenerated();   // (replenish backpressure, below)
         }
     }
 
@@ -2132,6 +2133,15 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         }
         foreach (var a in placed) { try { _ = OnQcPlaced?.Invoke(a); } catch { } }
     }
+
+    // Replenish backpressure (delivery-speed.md 6, Replenish.ps1): the work items this plant holds that no session has accepted yet (waiting for a worker,
+    // or offered and not yet answered), as the last plan left them; null until the first plan has run. Items the replenisher created itself are not
+    // counted, or its own filler would hold it back from the next one. Written at the end of every plan, read when the next sweep is started.
+    int? lastPlanWaiting;
+    readonly HashSet<int> generatedItems = new();
+    public void NoteGenerated(IEnumerable<int> items) { lock (gate) foreach (var i in items) if (i > 0) generatedItems.Add(i); }
+    public int? LastPlanWaiting() { lock (gate) return lastPlanWaiting; }
+    int CountWaitingNonGenerated() => assignments.Values.Count(a => a.Kind == "own-item" && !IsQc(a) && !a.Accepted && !generatedItems.Contains(a.Item));
 
     // The launcher watchdog (docs/launcher.md): a session that is stuck is told session.restart; its stream client writes the launcher's end marker
     // and the reason, and the launcher starts a new session of the name (which resumes what the name still owns). Once per session, again after a
