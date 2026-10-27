@@ -212,6 +212,16 @@ $Scenarios = [ordered]@{
     }
     Check 'aggregate merge to done counts the item' ($a.aggregate.mergeToDone.count -ge 1 -and $null -ne $a.aggregate.mergeToDone.median -and $null -ne $a.aggregate.mergeToDone.p90)
     Check 'per-column aggregate' ($a.columns.'Development'.count -ge 1)
+    # W0.8: one timestamp per stage in the state (flow), turned into per-stage durations and medians by the metrics route
+    $fst = @((Get-ItemState $n).flow)
+    $fnames = @($fst | ForEach-Object { $_.c })
+    Check 'flow in the state: Technical Design, then Development, then the stages after, each entered once in a row, with a time' ($fnames.Count -ge 2 -and $fnames[0] -eq 'Technical Design' -and $fnames[1] -eq 'Development' -and @($fst | Where-Object { -not $_.at }).Count -eq 0 -and @(0..($fnames.Count - 2) | Where-Object { $fnames[$_] -eq $fnames[$_ + 1] }).Count -eq 0) ($fst | ConvertTo-Json -Compress)
+    if ($it.Count -eq 1) {
+        $fl = @($it[0].flow)
+        Check 'metrics: the item lists its stages in order with the seconds spent, the last one up to the merge' ($fl.Count -eq $fnames.Count -and $fl[0].stage -eq 'Technical Design' -and $fl[1].stage -eq 'Development' -and $null -ne $fl[0].seconds -and $fl[0].seconds -ge 0 -and $null -ne $fl[-1].seconds) ($fl | ConvertTo-Json -Compress)
+    }
+    Check 'metrics: stages has the count, median and p90 of each stage' ($a.stages.'Technical Design'.count -ge 1 -and $null -ne $a.stages.'Technical Design'.median -and $null -ne $a.stages.Development.p90 -and $a.stages.Development.count -ge 1) ($a.stages | ConvertTo-Json -Depth 4 -Compress)
+    Check 'metrics: the existing fields are all still there' (@(@('ok', 'since', 'computedAt', 'scanned', 'unreadable', 'items', 'aggregate', 'columns', 'unit') | Where-Object { $null -eq $a.PSObject.Properties[$_] }).Count -eq 0)
     Restart-Gateway
     $b = Invoke-RestMethod $u -Headers $h
     $ib = @($b.items | Where-Object { $_.item -eq $n })

@@ -276,6 +276,7 @@ function Verb_claim_item($a) {
     }
     if (-not (Test-Has $s 'dispatched_at')) { $s.dispatched_at = @{} }
     $s.dispatched_at[$info.column] = ConvertTo-Iso (Get-UtcNow)
+    Add-FlowStamp $s "$($info.column)"   # (W0.8: the stage hook of a claim; Owner.ps1)
     if (-not (Test-Has $s 'reviews')) { $s.reviews = @{} }
     $s.reviews.Remove($info.column)
     if ($park) { $s.Remove('park') } elseif (Test-Has $s 'park') { $s.Remove('park') }

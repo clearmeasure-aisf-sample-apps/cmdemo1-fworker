@@ -10,6 +10,11 @@
 # Durations in seconds: matchToAccept, acceptToMerge, matchToMerge, mergeToDone, matchToDone, and columns.<name>: from that column's dispatch to the
 # next column's dispatch (the last one to the merge). dispatched_at keeps only the latest dispatch per column, so a column visited twice (a
 # demotion to Development) counts from its last visit.
+#
+# Flow (W0.8, delivery-speed.md 13): the state's `flow` keeps one entry per stage entered (Add-FlowStamp, Owner.ps1), the last 15, so a stage visited
+# twice is counted twice. Per item `flow` lists { stage, at, seconds } (seconds: until the next entry, or for the last one until the merge; missing while
+# the item is still in that stage), and the answer's `stages` has per stage the count, median, p90, min and max of those visits: the stage medians
+# of the gate, measured by the gateway itself. The fields above are unchanged.
 
 function Get-MetricsSince([string]$Since, [DateTime]$Now) {
     if (-not $Since) { return $Now.AddDays(-7) }
@@ -61,6 +66,16 @@ function Get-ItemCycle([int]$Item, $St, [string]$Login) {
             if ($end) { $o.columns[$ds[$i].column] = [Math]::Round(($end - $ds[$i].at).TotalSeconds) }
         }
     }
+    $o.flow = @()
+    if (Test-Has $s 'flow') {
+        $fl = @(@($s.flow) | ForEach-Object { @{ stage = "$($_.c)"; at = (ConvertFrom-Iso $_.at) } } | Where-Object { $_.stage -and $_.at })
+        for ($i = 0; $i -lt $fl.Count; $i++) {
+            $e = @{ stage = $fl[$i].stage; at = (ConvertTo-Iso $fl[$i].at) }
+            $end = if ($i + 1 -lt $fl.Count) { $fl[$i + 1].at } elseif ($first.ContainsKey('merged')) { $first.merged } else { $null }
+            if ($end -and $end -ge $fl[$i].at) { $e.seconds = [Math]::Round(($end - $fl[$i].at).TotalSeconds) }
+            $o.flow += @($e)
+        }
+    }
     if (Test-Has $s 'merge') { if (Test-Has $s.merge 'pr') { $o.pr = [int]$s.merge.pr } }
     $o.last = ConvertTo-Iso (@($first.Values | Sort-Object)[-1])
     return $o
@@ -82,6 +97,9 @@ function Verb_metrics($a) {
     foreach ($k in 'matchToAccept', 'acceptToMerge', 'matchToMerge', 'mergeToDone', 'matchToDone') { $agg[$k] = Get-MetricsStats @($items | Where-Object { $_.durations.ContainsKey($k) } | ForEach-Object { [double]$_.durations[$k] }) }
     $cols = @{}
     foreach ($col in @($items | ForEach-Object { $_.columns.Keys } | Sort-Object -Unique)) { $cols[$col] = Get-MetricsStats @($items | Where-Object { $_.columns.ContainsKey($col) } | ForEach-Object { [double]$_.columns[$col] }) }
+    $visits = @($items | ForEach-Object { $_.flow } | Where-Object { $_ -and $_.ContainsKey('seconds') })
+    $stages = @{}
+    foreach ($st in @($visits | ForEach-Object { $_.stage } | Sort-Object -Unique)) { $stages[$st] = Get-MetricsStats @($visits | Where-Object { $_.stage -eq $st } | ForEach-Object { [double]$_.seconds }) }
     return @{ ok = $true; since = (ConvertTo-Iso $since); computedAt = (ConvertTo-Iso $now); scanned = $cands.Count; unreadable = @($failed)
-        items = @($items | Sort-Object { $_.item } -Descending); aggregate = $agg; columns = $cols; unit = 'seconds' }
+        items = @($items | Sort-Object { $_.item } -Descending); aggregate = $agg; columns = $cols; stages = $stages; unit = 'seconds' }
 }
