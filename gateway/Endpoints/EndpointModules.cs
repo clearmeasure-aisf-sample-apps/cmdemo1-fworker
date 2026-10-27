@@ -1,3 +1,4 @@
+using Fworker.Contracts.Seams;
 // The gateway's endpoints as modules, one class per area (task C7a, gateway-composition.md 3 C and D). C7b to C7d add theirs the same way:
 //
 // 1. A sealed class implementing IEndpointModule in gateway/Endpoints/<Area>Endpoints.cs. Its collaborators come through its constructor (it is a
@@ -57,8 +58,10 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule, ItemAdminEndpoints>();
         services.AddSingleton<IEndpointModule, DemoEndpoints>();
         // C7d: the verb route and its pipeline (seam S1); the GitHub budget is the composition's, not (yet) a service of its own
+        // S1 (W1.4): the engine the environment is composed with; v1 is the only one
+        services.AddSingleton<IVerbRouter>(sp => VerbRouterFactory.For(sp.GetRequiredService<EngineOptions>(), sp.GetRequiredService<Runner>()));
         services.AddSingleton(sp => new VerbPipeline(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(), sp.GetRequiredService<KeeperSettings>(),
-            sp.GetRequiredService<Plant>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(),
+            sp.GetRequiredService<Plant>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<IVerbRouter>(), sp.GetRequiredService<EventHub>(),
             c.GitHubBudget, sp));
         services.AddSingleton<IEndpointModule, VerbEndpoints>();
         // the MCP server's route, last as it was mapped (the tools it serves are McpTools, AddGatewayMcp)

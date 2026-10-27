@@ -1,10 +1,20 @@
 namespace Fworker.Contracts.Seams;
 
-// The three seams of docs/design/fworker-wolverine-refactor.md 4, as empty interfaces (task W1.0). Their members arrive with W1.4 (S1), W1.5 (S2) and
-// W1.6 (S3); nothing implements or calls them yet, so v1's behaviour does not change.
+// The three seams of docs/design/fworker-wolverine-refactor.md 4. S1 has its members since W1.4; S2 and S3 arrive with W1.5 and W1.6 and are empty
+// until then; nothing but S1 is implemented or called, so v1's behaviour does not change.
 
-/// <summary>S1, the verb router: the one engine interface behind VerbPipeline (members: W1.4).</summary>
-public interface IVerbRouter { }
+/// <summary>What a verb call answered: the exit code and the JSON text the caller gets (the shape the rule script printed).</summary>
+public readonly record struct VerbAnswer(int Code, string Output);
+
+/// <summary>
+/// S1, the verb router: the one engine interface behind VerbPipeline. The pipeline has already authorized and checked the call; the router runs
+/// it on the engine the environment is composed with (v1: the rule scripts; v2, later: sagas by InvokeAsync or a published event).
+/// </summary>
+public interface IVerbRouter
+{
+    /// <summary>Runs one verb. <paramref name="stdin"/> is the JSON body the rule script reads; the answer is the script's exit code and output.</summary>
+    Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout);
+}
 
 /// <summary>S2, the command port: one integration command per external side effect (members: W1.5).</summary>
 public interface ICommandPort { }
