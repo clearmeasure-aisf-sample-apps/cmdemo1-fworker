@@ -43,6 +43,8 @@ $mix = Get-ItemDependencies 5 "Depends on #7, acme/other#7, $ho/$hr#8 and #5 and
 Check 'depends: a mixed line keeps the home items once each, without its own number or the foreign ref of the same number' ($mix.Count -eq 3 -and $mix[0] -eq 7 -and $mix[1] -eq 8 -and $mix[2] -eq 9)
 Check 'depends: a qualified ref to the home repository with the item''s own number is not a dependency' ((Get-ItemDependencies 5 "Depends on $ho/$hr#5").Count -eq 0 -and (Get-ItemDependencies 5 'Depends on acme/other#5').Count -eq 0)
 Check 'depends: the refs carry owner, repo, number and home' ((Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].owner -eq 'acme' -and (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].repo -eq 'other' -and (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].number -eq 12 -and -not (Get-ItemDependencyRefs 1 'Depends on acme/other#12')[0].home)
+foreach ($sep in @('#1/#2', '#1-#2', '#1, #2', '#1 #2', '#1 and #2', '#1,#2', '#1;#2')) { $dd = Get-ItemDependencies 9 "Depends on $sep"; Check "depends: '$sep' reads both home items, as before" ($dd.Count -eq 2 -and $dd[0] -eq 1 -and $dd[1] -eq 2) }
+Check 'depends: a bare #N after a qualified ref is still home' ((Get-ItemDependencies 9 'Depends on acme/other#1, #2')[0] -eq 2 -and (Get-ItemDependencies 9 'Depends on acme/other#1, #2').Count -eq 1)
 Check 'depends: text outside a Depends on line is not read' ((Get-ItemDependencies 1 "See #12 and acme/other#13`nDepends on #14").Count -eq 1)
 Check 'column order' ((Get-ColumnIndex 'Development') -eq 1 -and (Get-ColumnIndex 'Nope') -eq -1)
 Check 'name in list is case-insensitive' (Test-NameIn 'FACTORY WORKER' @('factory worker'))

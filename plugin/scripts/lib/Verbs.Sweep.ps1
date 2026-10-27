@@ -442,7 +442,7 @@ function Invoke-BoardGuard($List, [int]$Max = 20) {
 # W0.4 (system-gateway.md H5): a reference is "#N", "repo#N" or "owner/repo#N". "#N" is the home repository's item N; "repo#N" takes the home
 # owner; a qualified ref that names the home repository (any case, GitHub being case-insensitive) is that home item. Anything else is a FOREIGN
 # ref: recorded and shown, blocking nothing until the system gateway exists (v1 serves the home repository only).
-$script:DepRefPattern = '(?<![\w.\-/])(?:(?<o>[A-Za-z0-9][A-Za-z0-9\-]*)/(?<r>[A-Za-z0-9_.\-]+)|(?<r>[A-Za-z0-9_.\-]+))?#(?<n>\d{1,7})\b'
+$script:DepRefPattern = '(?:(?<![\w.\-/])(?:(?<o>[A-Za-z0-9][A-Za-z0-9\-]*)/(?<r>[A-Za-z0-9_.\-]+)|(?<r>[A-Za-z0-9_.\-]+))|)#(?<n>\d{1,7})\b'   # the empty alternative: a bare #N after anything ("#1/#2", "#1-#2") is a home ref, as before
 function Get-ItemDependencyRefs([int]$Item, [string]$Body) {
     $c = Get-Cfg; $refs = @(); $seen = @{}
     $ho = "$($c.owner)".ToLowerInvariant(); $hr = "$($c.repo)".ToLowerInvariant()
