@@ -177,6 +177,9 @@ function Get-Comments([int]$Item) {
     return $all
 }
 
+# A time GitHub sent (the JSON reader turns it into a DateTime) as one stable text, to compare two reads of it
+function Get-Stamp($v) { if ($v -is [datetime]) { return $v.ToUniversalTime().ToString('o') }; return "$v" }
+
 # Returns @{ commentId; state } . Only a comment written by the gateway's own login counts.
 function Get-State([int]$Item) {
     $marker = Get-StateMarker; $login = Get-ServerLogin
@@ -195,7 +198,7 @@ function Get-State([int]$Item) {
     }
     $m = [regex]::Match($found.body, '(?s)```json\s*(.*?)\s*```')
     $s = if ($m.Success) { $m.Groups[1].Value | ConvertFrom-Json -AsHashtable -DateKind String } else { @{ schema = 1; item = $Item } }
-    return @{ commentId = $found.id; state = $s; comments = $all }
+    return @{ commentId = $found.id; state = $s; comments = $all; updatedAt = $(if ($found.PSObject.Properties['updated_at']) { Get-Stamp $found.updated_at } else { '' }) }   # (updatedAt: when the state comment last changed, for the promotion's cache of state reads)
 }
 
 function Save-State([int]$Item, $Holder) {
@@ -207,10 +210,12 @@ function Save-State([int]$Item, $Holder) {
     if ($Holder.commentId) {
         $r0 = Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/comments/$($Holder.commentId)" -Body @{ body = $body } -Allow 404
         if ($r0 -is [hashtable] -and $r0.ContainsKey('status') -and $r0.status -eq 404) { $Holder.commentId = $null }
+        else { $Holder.updatedAt = $(if ($r0 -and $r0.PSObject.Properties['updated_at']) { Get-Stamp $r0.updated_at } else { '' }) }
     }
     if (-not $Holder.commentId) {
         $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues/$Item/comments" -Body @{ body = $body }
         $Holder.commentId = $r.id
+        $Holder.updatedAt = $(if ($r -and $r.PSObject.Properties['updated_at']) { Get-Stamp $r.updated_at } else { '' })
     }
 }
 

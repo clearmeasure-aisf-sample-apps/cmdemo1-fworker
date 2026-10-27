@@ -33,9 +33,9 @@ function Get-OctoMissingPermission($Body) {
 # task } } } (the newest per environment), or $null when Octopus has no such release
 function Get-ReleaseDeployments([string]$Version) {
     $o = (Get-Cfg).octopus; $sp = $o.space
-    $proj = Invoke-Octo "api/$sp/projects/$($o.project)"; if (-not $proj) { return $null }
+    $proj = Get-PromoOcto "api/$sp/projects/$($o.project)"; if (-not $proj) { return $null }
     $rel = Invoke-Octo "api/$sp/projects/$($proj.Id)/releases/$Version"; if (-not $rel) { return $null }
-    $envs = @{}; foreach ($e in (Invoke-Octo "api/$sp/environments?take=1000").Items) { $envs[$e.Id] = $e.Name }
+    $envs = @{}; foreach ($e in (Get-PromoOcto "api/$sp/environments?take=1000").Items) { $envs[$e.Id] = $e.Name }
     $res = @{ release_id = "$($rel.Id)"; commit = (Get-ReleaseCommit $rel); deployments = @{} }
     $dl = Invoke-Octo "api/$sp/releases/$($rel.Id)/deployments?take=100"
     $dItems = if ($dl -and $dl.PSObject.Properties['Items']) { @($dl.Items) } else { @() }
@@ -120,8 +120,8 @@ function Test-EnvHealth([string]$EnvKey, [string]$Version, $FinishedAt, [string]
 # the commit running in an environment: that of the release of the newest successful deployment of octopus.project there; $null when unknown
 function Get-EnvDeployedCommit([string]$EnvName) {
     $o = (Get-Cfg).octopus; $sp = $o.space
-    $proj = Invoke-Octo "api/$sp/projects/$($o.project)"; if (-not $proj) { return $null }
-    $eid = $null; foreach ($e in (Invoke-Octo "api/$sp/environments?take=1000").Items) { if ("$($e.Name)" -ieq $EnvName) { $eid = "$($e.Id)" } }
+    $proj = Get-PromoOcto "api/$sp/projects/$($o.project)"; if (-not $proj) { return $null }
+    $eid = $null; foreach ($e in (Get-PromoOcto "api/$sp/environments?take=1000").Items) { if ("$($e.Name)" -ieq $EnvName) { $eid = "$($e.Id)" } }
     if (-not $eid) { return $null }
     $dl = Invoke-Octo "api/$sp/deployments?projects=$($proj.Id)&environments=$eid&take=30"
     $ds = if ($dl -and $dl.PSObject.Properties['Items']) { @($dl.Items) } else { @() }
@@ -138,6 +138,32 @@ function Get-EnvDeployedCommit([string]$EnvName) {
 # skip when the release is not newer than what runs there; gaps (fail closed) when the range cannot be read or a commit is not the merge commit of
 # a queued item; items: the queued items whose merge commits are in the range. $BySha: merge sha -> item of the Release Queue.
 function Get-ReleaseContent($Rd, [string]$TargetName, $BySha) {
+    if ($null -eq $script:PromoStore -or -not $Rd.commit) { return (Get-ReleaseContentRead $Rd $TargetName $BySha) }
+    # The judgment of a release's content is kept (promote-judgments.json), keyed by the release, the target and the commit range (the commit running in
+    # the target, the release's commit). It holds while every item it names has the state comment it had (their stamps) and, for ten minutes at most,
+    # so a pass in which nothing changed reads neither the range nor the commits' items again. A range with a commit that is no work item's (hard)
+    # is judged again when the state of any other item changed: that commit may have become an item's merge.
+    $td = Get-Date
+    $dep = if ($script:PromoMemo.envCommit.ContainsKey($TargetName)) { $script:PromoMemo.envCommit[$TargetName] } else { Get-EnvDeployedCommit $TargetName }
+    $script:PromoMemo.envCommit[$TargetName] = $dep
+    Add-PromoTime 'env-deployed-commit' $td
+    if (-not $dep) { return (Get-ReleaseContentRead $Rd $TargetName $BySha) }
+    $ck = "$($Rd.release_id)|$TargetName|$($dep.commit)|$($Rd.commit)"
+    $e = $script:PromoStore.content[$ck]
+    if ($e -and ((Get-UtcNow) - (ConvertFrom-Iso $e.at)).TotalMinutes -lt 10) {
+        $ok = $true
+        foreach ($k in @($e.stamps.Keys)) { $se = $script:PromoStore.states["$k"]; if (-not $se -or $se.stamp -ne $e.stamps[$k]) { $ok = $false; break } }
+        if ($ok -and $e.open) { foreach ($k in @($script:PromoChanged.Keys)) { if (-not $e.stamps.ContainsKey("$k")) { $ok = $false; break } } }
+        if ($ok) { $script:PromoMemo.hits++; return $e.content }
+    }
+    $r = Get-ReleaseContentRead $Rd $TargetName $BySha
+    if ((Test-Has $r 'deferred') -and $r.deferred) { return $r }
+    $stamps = @{}; $all = $true
+    foreach ($n in @($r.items)) { [void](Get-PromoState ([int]$n)); $se = $script:PromoStore.states["$n"]; if ($se -and $se.stamp) { $stamps["$n"] = $se.stamp } else { $all = $false } }
+    if ($all) { $script:PromoStore.content[$ck] = @{ at = (ConvertTo-Iso (Get-UtcNow)); stamps = $stamps; open = [bool]((Test-Has $r 'hard') -and @($r.hard).Count -gt 0); content = $r } }
+    return $r
+}
+function Get-ReleaseContentRead($Rd, [string]$TargetName, $BySha) {
     if (-not $Rd.commit) { return @{ skip = $false; gaps = @("the release names no commit (its build information or notes)"); items = @() } }
     $td = Get-Date
     $dep = if ($null -ne $script:PromoMemo -and $script:PromoMemo.envCommit.ContainsKey($TargetName)) { $script:PromoMemo.envCommit[$TargetName] } else { Get-EnvDeployedCommit $TargetName }
@@ -202,8 +228,12 @@ function Find-CommitItem([string]$Sha, [string]$Message) {
         if (Test-CommitItemSettled ([int]$cache[$key]) $Sha) { return @{ item = [int]$cache[$key]; gap = '' } }
         $cache.Remove($key); Save-CommitItemCache $cache
     }
+    # a commit that is no work item's merge is remembered for ten minutes (the pull request is not read again at every judgment of the range)
+    $nn = if ($null -ne $script:PromoStore) { $script:PromoStore.none[$key] } else { $null }
+    if ($nn -and ((Get-UtcNow) - (ConvertFrom-Iso $nn)).TotalMinutes -lt 10) { return @{ item = 0; gap = '' } }
     $r = Find-CommitItemUncached $Sha $Message
     if ($r.item -gt 0 -and -not $r.gap) { $cache[$key] = $r.item; Save-CommitItemCache $cache }
+    elseif ($r.item -eq 0 -and -not $r.gap -and $null -ne $script:PromoStore) { $script:PromoStore.none[$key] = ConvertTo-Iso (Get-UtcNow) }
     return $r
 }
 function Find-CommitItemUncached([string]$Sha, [string]$Message) {
@@ -248,8 +278,13 @@ function Get-ItemPromotionGapsRead([int]$n, $Labels) {
     $passMerged = (Test-Has $s 'verdict') -and (Test-Has $s.verdict 'passed') -and $s.verdict.passed -and (Test-Has $s.verdict 'pr') -and (Test-Has $s 'merge') -and (Test-Has $s.merge 'pr') -and [int]$s.merge.pr -gt 0 -and [int]$s.merge.pr -eq [int]$s.verdict.pr -and -not ((Test-Has $s.merge 'by') -and "$($s.merge.by)" -eq 'person')
     if (-not $passMerged) { $gaps += "#$n has no pull request merged after a Functional Testing PASS verdict" }
     if (Test-NameIn $c.videoLabel @($Labels)) {
-        $tv = Get-Date; $rel = Invoke-Gh -Path "$(Get-RepoPath)/releases/tags/demo-$n" -Allow 404; Add-PromoTime 'demo-release' $tv
-        $has = $rel -isnot [hashtable] -and $rel.PSObject.Properties['assets'] -and @(@($rel.assets) |Where-Object { $_ -and "$($_.name)" -eq "demo-$n.mp4" }).Count -gt 0
+        # (a demo video once published stays: kept, so only an item still waiting for its video costs a read)
+        $has = $null -ne $script:PromoStore -and $script:PromoStore.demo.ContainsKey("$n")
+        if (-not $has) {
+            $tv = Get-Date; $rel = Invoke-Gh -Path "$(Get-RepoPath)/releases/tags/demo-$n" -Allow 404; Add-PromoTime 'demo-release' $tv
+            $has = $rel -isnot [hashtable] -and $rel.PSObject.Properties['assets'] -and @(@($rel.assets) |Where-Object { $_ -and "$($_.name)" -eq "demo-$n.mp4" }).Count -gt 0
+            if ($has -and $null -ne $script:PromoStore) { $script:PromoStore.demo["$n"] = $true }
+        }
         if (-not $has) { $gaps += "#$n has the '$($c.videoLabel)' label and no demo video published (release demo-$n, asset demo-$n.mp4)" }
     }
     return $gaps
@@ -267,7 +302,14 @@ function Get-PromotedTasks([int[]]$Items, [string]$Key) {
 
 function Add-PromotionJournal([int[]]$Items, [string]$Event, [hashtable]$Fields, [string]$Key, [scriptblock]$Edit = $null) {
     foreach ($n in $Items) {
-        try { [void](Use-ItemLock $n { $f = Get-State $n; if ($Edit) { & $Edit $f.state }; $did = Add-Journal $n $f $Event $Fields.Clone() $Key; if ($did -or $Edit) { Save-State $n $f } } 10); if ($null -ne $script:PromoMemo) { $script:PromoMemo.state.Remove($n) } }
+        # A line this pass or an earlier one wrote (or found written) for this event and key, with the item's state comment unchanged since, is written
+        # again as nothing: Add-Journal would find its key. Skipped here without the lock and the three reads.
+        $tok = "$Event|$Key"
+        if (-not $Edit -and $null -ne $script:PromoStore) {
+            $jn = $script:PromoStore.journaled["$n"]; $se = $script:PromoStore.states["$n"]
+            if ($jn -and $se -and $jn.stamp -eq $se.stamp -and @($jn.tokens) -contains $tok) { continue }
+        }
+        try { [void](Use-ItemLock $n { $f = Get-State $n; if ($Edit) { & $Edit $f.state }; $did = Add-Journal $n $f $Event $Fields.Clone() $Key; if ($did -or $Edit) { Save-State $n $f }; Set-PromoCached $n $f $tok } 10); if ($null -ne $script:PromoMemo) { $script:PromoMemo.state.Remove($n) } }
         catch [FactoryReject] { if ($_.Exception.Code -notin 'item-busy', 'github-not-found', 'item-not-found') { throw } }
     }
 }
@@ -290,14 +332,14 @@ function Resolve-SignOff([string]$Task, [string[]]$Gaps) {
     return @{ answered = $done; result = $result; refused = $null }
 }
 
-# One pass over the Release Queue of a full sweep ($Queue: @{ item; release; since }, $Labels: item -> labels). Returns the sweep's actions.
-# ---- the promotion pass's memo, deadline and timing (issue 428) -------------------------------------------------------------------------------
-# The releases of the queue are cumulative ranges, so one sweep judged the same ~50 items once per release (a state read, a label read and a demo
-# video read each): the reads are kept for the length of one pass ($script:PromoMemo, null outside it). The pass ends before the sweep's deadline
-# (Test-PromoOver, checked between releases and between the expensive calls; what is not judged is judged first in the next sweep), and it reports
-# where its time went (promotion-timing: ms per release and per kind of call).
-$script:PromoMemo = $null; $script:PromoRel = $null; $script:PromoRelT = $null; $script:PromoTestDelayMs = 0
-function Test-PromoOver { return [bool]($script:SweepDeadline -and (Get-Date) -gt $script:SweepDeadline) }
+# ---- the promotion pass's memo, deadline and timing (issues 428, 429) ----------------------------------------------------------------------------
+# The releases of the queue are cumulative ranges, so one pass would judge the same ~50 items once per release (a state read, a label read and a demo
+# video read each): the reads are kept for the length of one pass ($script:PromoMemo, null outside it) and, across passes, in the store below. The pass
+# ends before its own deadline (budget_seconds of the verb; Test-PromoOver, checked between releases and between the expensive calls; what is not
+# judged is judged first in the next pass), and it reports where its time went (promotion-timing: ms per release and per kind of call).
+$script:PromoMemo = $null; $script:PromoRel = $null; $script:PromoRelT = $null; $script:PromoTestDelayMs = 0; $script:PromoDeadline = $null
+$script:PromoStore = $null; $script:PromoChanged = @{}; $script:PromoDeferred = @()
+function Test-PromoOver { return [bool]($script:PromoDeadline -and (Get-Date) -gt $script:PromoDeadline) }
 function Add-PromoTime([string]$Kind, [datetime]$Since) {
     if ($null -eq $script:PromoMemo) { return }
     $ms = ((Get-Date) - $Since).TotalMilliseconds; $t = $script:PromoMemo.times
@@ -308,9 +350,91 @@ function Close-PromoRelease {
     if ($null -ne $script:PromoMemo -and $script:PromoRel) { $script:PromoMemo.releases[$script:PromoRel] = [int]((Get-Date) - $script:PromoRelT).TotalMilliseconds }
     $script:PromoRel = $null
 }
+# ---- the promotion's store (promote-judgments.json in the state directory, issue 429) --------------------------------------------------------
+# What a pass learned and the next one may rely on, so a pass in which nothing changed reads next to nothing:
+#   states     per item: the slim state (verdict, merge) with the update time ("stamp") of the state comment it was read from. A pass first asks
+#              GitHub which state comments changed since the last pass (one listing of the repository's comments by update time, not one read per item);
+#              the entries of those are dropped. At most 30 minutes old.
+#   content    per release, target and commit range: the judgment of the release's content (Get-ReleaseContent), with the stamps of the items it names
+#   journaled  per item: the journal events and keys written or found, with the stamp of the state then (Add-PromotionJournal)
+#   none       commits that are no work item's merge; demo: items whose demo video is published
+#   deferred   the releases the last pass had no time for: judged first by the next
+# It is a cache: a missing or unreadable file is an empty store, and an entry is only used while what it was derived from is unchanged.
+function Get-PromoStoreFile { Join-Path (Get-StateDir) 'promote-judgments.json' }
+function Read-PromoStore {
+    $st = $null
+    try { $f = Get-PromoStoreFile; if (Test-Path $f) { $j = Get-Content -Raw $f | ConvertFrom-Json -AsHashtable -DateKind String; if ($j -is [hashtable] -and $j.v -eq 1) { $st = $j } } } catch { $st = $null }
+    if (-not $st) { $st = @{ v = 1 } }
+    foreach ($k in 'states', 'content', 'journaled', 'none', 'demo') { if (-not ($st[$k] -is [hashtable])) { $st[$k] = @{} } }
+    $st.deferred = @(if ($st.ContainsKey('deferred') -and $null -ne $st.deferred) { @($st.deferred) | ForEach-Object { "$_" } })
+    return $st
+}
+function Save-PromoStore {
+    if ($null -eq $script:PromoStore) { return }
+    try {
+        $st = $script:PromoStore; $now = Get-UtcNow
+        foreach ($k in @($st.states.Keys)) { if (($now - (ConvertFrom-Iso $st.states[$k].at)).TotalMinutes -ge 30) { $st.states.Remove($k) } }
+        foreach ($k in @($st.content.Keys)) { if (($now - (ConvertFrom-Iso $st.content[$k].at)).TotalMinutes -ge 10) { $st.content.Remove($k) } }
+        foreach ($k in @($st.none.Keys)) { if (($now - (ConvertFrom-Iso $st.none[$k])).TotalMinutes -ge 10) { $st.none.Remove($k) } }
+        foreach ($k in @($st.journaled.Keys)) { if (-not $st.states.ContainsKey($k)) { $st.journaled.Remove($k) } }
+        $st.deferred = @($script:PromoDeferred)
+        $f = Get-PromoStoreFile; $tmp = "$f.$PID.tmp"
+        $st | ConvertTo-Json -Depth 12 -Compress | Set-Content $tmp; Move-Item -Force $tmp $f
+    } catch { [Console]::Error.WriteLine("promote: the store could not be saved: $($_.Exception.Message)") }
+}
+# The items whose state comment changed since the last pass: ONE listing of the repository's comments updated since then. Without a store, or when
+# the listing fails, nothing is trusted (every state is read afresh); the store is rebuilt by this pass.
+function Update-PromoStore {
+    $st = $script:PromoStore; $script:PromoChanged = @{}
+    $scanStart = Get-UtcNow
+    try {
+        if (-not $st.ContainsKey('watermark') -or -not $st.watermark) { throw 'no earlier pass' }
+        $marker = Get-StateMarker; $page = 1; $t = Get-Date
+        do {
+            $chunk = @(Invoke-Gh -Path "$(Get-RepoPath)/issues/comments?since=$($st.watermark)&sort=updated&direction=asc&per_page=100&page=$page")
+            foreach ($cm in $chunk) {
+                if (-not "$($cm.body)".StartsWith($marker)) { continue }
+                $m = [regex]::Match("$($cm.issue_url)", '/issues/(\d+)$'); if (-not $m.Success) { continue }
+                $n = [int]$m.Groups[1].Value; $e = $st.states["$n"]
+                if (-not $e -or $e.stamp -ne (Get-Stamp $cm.updated_at)) { $script:PromoChanged[$n] = $true; $st.states.Remove("$n") }
+            }
+            $page++
+        } while ($chunk.Count -eq 100)
+        Add-PromoTime 'comments-since' $t
+    }
+    catch { $st.states = @{}; $st.content = @{}; $st.journaled = @{}; $script:PromoChanged = @{} }
+    $st.watermark = ConvertTo-Iso ($scanStart.AddMinutes(-2))
+}
+function Get-SlimPromoState($S) { $o = @{}; foreach ($k in 'verdict', 'merge') { if ((Test-Has $S $k)) { $o[$k] = $S[$k] } }; return $o }
+# a state read or written by this pass: kept with its stamp, and the journal line (event|key) the state is known to carry
+function Set-PromoCached([int]$n, $F, [string]$Token = '') {
+    if ($null -eq $script:PromoStore) { return }
+    if (-not $F.commentId -or -not $F.updatedAt) { $script:PromoStore.states.Remove("$n"); $script:PromoStore.journaled.Remove("$n"); return }
+    $script:PromoStore.states["$n"] = @{ stamp = $F.updatedAt; at = (ConvertTo-Iso (Get-UtcNow)); state = (Get-SlimPromoState $F.state) }
+    if ($Token) {
+        # (an item carries the lines of every release that waits with it: the tokens known for this stamp are kept together)
+        $jn = $script:PromoStore.journaled["$n"]
+        $known = if ($jn -and $jn.stamp -eq $F.updatedAt) { @($jn.tokens) } else { @() }
+        $script:PromoStore.journaled["$n"] = @{ stamp = $F.updatedAt; tokens = @(@($known) + @($Token) | Select-Object -Unique) }
+    }
+    elseif ($script:PromoStore.journaled.ContainsKey("$n") -and $script:PromoStore.journaled["$n"].stamp -ne $F.updatedAt) { $script:PromoStore.journaled.Remove("$n") }
+}
+# Octopus answers that do not change within a pass (the project, the environments), read once per pass
+function Get-PromoOcto([string]$Path) {
+    if ($null -eq $script:PromoMemo) { return (Invoke-Octo $Path) }
+    if (-not $script:PromoMemo.octo.ContainsKey($Path)) { $t = Get-Date; $script:PromoMemo.octo[$Path] = Invoke-Octo $Path; Add-PromoTime 'octopus-lookup' $t }
+    return $script:PromoMemo.octo[$Path]
+}
 function Get-PromoState([int]$n) {
     if ($null -eq $script:PromoMemo) { return (Get-State $n) }
-    if (-not $script:PromoMemo.state.ContainsKey($n)) { $t = Get-Date; $script:PromoMemo.state[$n] = Get-State $n; Add-PromoTime 'item-state' $t }
+    if (-not $script:PromoMemo.state.ContainsKey($n)) {
+        $e = if ($null -ne $script:PromoStore) { $script:PromoStore.states["$n"] } else { $null }
+        if ($e -and $e.stamp) { $script:PromoMemo.state[$n] = @{ commentId = 1; state = $e.state; updatedAt = $e.stamp }; $script:PromoMemo.hits++ }
+        else {
+            $t = Get-Date; $f = Get-State $n; $script:PromoMemo.state[$n] = $f; Add-PromoTime 'item-state' $t
+            Set-PromoCached $n $f
+        }
+    }
     return $script:PromoMemo.state[$n]
 }
 function Get-PromoLabels([int]$n) {
@@ -318,16 +442,62 @@ function Get-PromoLabels([int]$n) {
     if (-not $script:PromoMemo.labels.ContainsKey($n)) { $t = Get-Date; $script:PromoMemo.labels[$n] = @((Get-ItemInfo $n).labels); Add-PromoTime 'item-info' $t }
     return $script:PromoMemo.labels[$n]
 }
-function Invoke-AutoPromote($Queue, $Labels) {
-    $script:PromoMemo = @{ state = @{}; labels = @{}; gaps = @{}; envCommit = @{}; times = @{}; releases = [ordered]@{} }; $script:PromoRel = $null
-    $t0 = Get-Date; $m = $script:PromoMemo
-    try { $out = @(Invoke-AutoPromoteInner $Queue $Labels) }
-    finally { Close-PromoRelease; $script:PromoMemo = $null }
+# The Release Queue as the sweep sees it, from the board list (one paged read) and the items' states: the open or closed cards in a hold column
+# (Release Queue) whose merge record awaits the release queue. $Labels: the labels of every card of the board (the gates read them from here, not from
+# a read per item). $null when the budget ran out before the whole queue was read: a queue read in part would judge a release without some of its items.
+function Get-PromoQueue($Board) {
+    $c = Get-Cfg; $queue = @(); $labels = @{}
+    foreach ($it in $Board) {
+        $labels["$($it.number)"] = @($it.labels)
+        if (-not (Test-NameIn $c.label $it.labels)) { continue }
+        if (-not (Test-NameIn "$($it.column)" $c.columns.hold)) { continue }
+        if (Test-NameIn $c.rivalLabel $it.labels) { continue }
+        if (Test-PromoOver) { return $null }
+        try { $s = (Get-PromoState ([int]$it.number)).state } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { throw }; continue }
+        if ((Test-Has $s 'merge') -and (Test-Has $s.merge 'awaiting') -and "$($s.merge.awaiting)" -eq 'release-queue') {
+            $queue += @{ item = [int]$it.number; release = $(if (Test-Has $s.merge 'release') { "$($s.merge.release)" } else { '' }); since = $(if (Test-Has $s.merge 'queued_at') { $s.merge.queued_at } else { $null }) }
+        }
+    }
+    return @{ queue = $queue; labels = $labels }
+}
+# One pass over the board's Release Queue: the actions it took or waits on, and the timing of where its time went.
+function Invoke-AutoPromote($Board) {
+    $script:PromoMemo = @{ state = @{}; labels = @{}; gaps = @{}; envCommit = @{}; octo = @{}; times = @{}; releases = [ordered]@{}; hits = 0 }; $script:PromoRel = $null
+    $script:PromoStore = Read-PromoStore; $script:PromoDeferred = @($script:PromoStore.deferred); $script:PromoChanged = @{}
+    $t0 = Get-Date; $m = $script:PromoMemo; $out = @(); $incomplete = $false; $qn = 0
+    try {
+        Update-PromoStore
+        $q = Get-PromoQueue $Board
+        if ($null -eq $q) { $incomplete = $true }
+        elseif (@($q.queue).Count -gt 0) { $qn = @($q.queue).Count; $out = @(Invoke-AutoPromoteInner $q.queue $q.labels) }
+        else { $script:PromoDeferred = @() }
+    }
+    finally { Close-PromoRelease; Save-PromoStore; $script:PromoMemo = $null; $script:PromoStore = $null }
     $calls = [ordered]@{}; foreach ($k in ($m.times.Keys | Sort-Object)) { $calls[$k] = @{ ms = [int]$m.times[$k].ms; n = $m.times[$k].n } }
-    if ($m.releases.Count -eq 0 -and $m.times.Count -eq 0) { return $out }
-    $timing = @{ item = 0; action = 'promotion-timing'; total_ms = [int]((Get-Date) - $t0).TotalMilliseconds; releases = $m.releases; calls = $calls }
+    if ($incomplete) { $out += @{ item = 0; action = 'promotion-deferred'; release = ''; reason = 'queue-not-read' } }
+    $timing = @{ item = 0; action = 'promotion-timing'; total_ms = [int]((Get-Date) - $t0).TotalMilliseconds; queue = $qn; cache_hits = $m.hits; releases = $m.releases; calls = $calls }
     [Console]::Error.WriteLine("promotion timing: " + ($timing | ConvertTo-Json -Depth 5 -Compress))
     return @($out + $timing)
+}
+# The verb: the gateway's own loop calls it (gateway/AutoPromoter.cs), apart from the board sweep, with its own budget (budget_seconds, default 200;
+# the gateway's cap for the call is longer), so a slow promotion never delays the sweep and a slow sweep never delays a promotion.
+function Verb_auto_promote($a) {
+    try { return (Invoke-AutoPromoteVerb $a) } finally { $script:PromoDeadline = $null; $script:PromoTestDelayMs = 0; $script:GhTrace = $null }
+}
+function Invoke-AutoPromoteVerb($a) {
+    $c = Get-Cfg; $t0 = Get-Date
+    $on = (Test-Has $c 'delivery') -and (Test-Has $c.delivery 'autoPromote') -and (Test-Has $c.delivery.autoPromote 'enabled') -and $c.delivery.autoPromote.enabled
+    $gwEnv = if ($on -and (Test-Has $c.delivery.autoPromote 'gatewayEnvironment')) { "$($c.delivery.autoPromote.gatewayEnvironment)" } else { '' }
+    if (-not $on -or -not $gwEnv -or "$env:FACTORY_ENVIRONMENT" -ine $gwEnv) { return @{ ok = $true; enabled = $false; actions = @(); errors = @(); elapsed_ms = 0 } }
+    $budget = if ((Test-Has $a 'budget_seconds') -and [double]$a.budget_seconds -gt 0) { [double]$a.budget_seconds } else { 200 }
+    $script:PromoDeadline = $t0.AddSeconds($budget)
+    $script:PromoTestDelayMs = if (Test-Has $a 'test_promotion_delay_ms') { [int]$a.test_promotion_delay_ms } else { 0 }
+    $actions = @(); $errors = @(); $g0 = $script:GhCalls; $o0 = $script:OctoCalls
+    if ((Test-Has $a 'trace') -and $a.trace) { $script:GhTrace = [System.Collections.Generic.List[string]]::new() }   # (diagnosis: the requests of the pass are listed in github_paths)
+    try { $actions += @(Invoke-AutoPromote (Get-BoardList)) }
+    catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = $_.Exception.Message } }
+    catch { [Console]::Error.WriteLine("promote: $($_.Exception.Message) $($_.ScriptStackTrace -replace "`r?`n", " | ")"); $actions += @{ item = 0; action = 'promotion-error'; reason = "$($_.Exception.Message)" } }   # (the failure is reported and the next pass tries again)
+    return @{ ok = $true; enabled = $true; github_calls = ($script:GhCalls - $g0); octopus_calls = ($script:OctoCalls - $o0); github_paths = $(if ($null -ne $script:GhTrace) { @($script:GhTrace) } else { $null }); actions = $actions; errors = $errors; elapsed_ms = [int]((Get-Date) - $t0).TotalMilliseconds; at = ConvertTo-Iso (Get-UtcNow) }
 }
 function Invoke-AutoPromoteInner($Queue, $Labels) {
     $c = Get-Cfg
@@ -347,11 +517,15 @@ function Invoke-AutoPromoteInner($Queue, $Labels) {
     $targets = @(@($ap.environments) | ForEach-Object { "$_".ToLower() } | Where-Object { $chain.IndexOf($_) -ge 1 })
     $envName = { param($k) "$($o.environments.$k)" }
     $out = @()
-    foreach ($g in @($Queue | Where-Object { $_.release } | Group-Object { "$($_.release)" })) {
+    # the releases the last pass had no time for come first, in the order they were left (they keep their place); then the others as before
+    $groups = @($Queue | Where-Object { $_.release } | Group-Object { "$($_.release)" })
+    $prevDef = @($script:PromoDeferred); $newDef = @()
+    $groups = @(@($prevDef | ForEach-Object { $d0 = $_; $groups | Where-Object { $_.Name -eq $d0 } }) + @($groups | Where-Object { $_.Name -notin $prevDef }))
+    foreach ($g in $groups) {
         $ver = $g.Name; [int[]]$items = @($g.Group | ForEach-Object { [int]$_.item } | Sort-Object -Unique)
         # the sweep's budget (issue 426): the releases not judged in this sweep are judged first in the next (the commit cache makes that cheap)
         Close-PromoRelease; $script:PromoRel = $ver; $script:PromoRelT = Get-Date
-        if (Test-PromoOver) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
+        if (Test-PromoOver) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; $newDef += $ver; continue }
         if ($script:PromoTestDelayMs -gt 0) { Start-Sleep -Milliseconds $script:PromoTestDelayMs }   # (tests only: sync-board test_promotion_delay_ms, a slow promotion)
         $tr = Get-Date; $rd = Get-ReleaseDeployments $ver; Add-PromoTime 'release-deployments' $tr
         if (-not $rd) { $out += @{ item = $items[0]; action = 'promotion-waiting'; release = $ver; reason = 'release-not-in-octopus' }; continue }
@@ -363,7 +537,7 @@ function Invoke-AutoPromoteInner($Queue, $Labels) {
         # the release's whole content relative to what runs in the target: every commit must be a queued item's merge commit; those items are
         # judged with the release's own items (an earlier release's unqualified change never rides along)
         $content = Get-ReleaseContent $rd $tname $bySha
-        if ((Test-Has $content 'deferred') -and $content.deferred) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
+        if ((Test-Has $content 'deferred') -and $content.deferred) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; $newDef += $ver; continue }
         if ($content.skip -and -not $have) { continue }   # not newer than what runs there: nothing to promote
         $own = $items
         $items = [int[]]@(@($own) + @($content.items) | Sort-Object -Unique)
@@ -372,7 +546,7 @@ function Invoke-AutoPromoteInner($Queue, $Labels) {
         $deferred = $false
         foreach ($n in $items) { if (Test-PromoOver) { $deferred = $true; break }; try { $gaps[$n] = @(Get-ItemPromotionGaps $n $(if ($Labels.ContainsKey("$n")) { $Labels["$n"] } else { @(Get-PromoLabels $n) })) } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { throw }; $gone = $true; break }; $itemGaps += $gaps[$n] }
         if ($gone) { continue }   # an item of the release vanished since the sweep read it: judged again at the next sweep
-        if ($deferred) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
+        if ($deferred) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; $newDef += $ver; continue }
         $common = @(@($content.gaps)); $note = ''
         $pd = $rd.deployments[$pname.ToLower()]
         if (-not $pd) { $common += "it has no deployment to $pname" }
@@ -459,5 +633,6 @@ function Invoke-AutoPromoteInner($Queue, $Labels) {
         }
         $out += @{ item = $items[0]; action = 'promotion-waiting'; release = $ver; environment = $tname; items = $items; reasons = @($common) }
     }
+    $script:PromoDeferred = @($newDef)
     return $out
 }

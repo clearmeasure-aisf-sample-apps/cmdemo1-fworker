@@ -465,18 +465,20 @@ function Test-DependencyMet([int]$Dep, $ByNumber, $Cache) {
 # each item read by itself instead of the whole board, and no claim-ref reaping and no QC sync (both are about the whole board). low: the gateway's
 # GitHub budget is below its reserve; the full sweep skips the claim-ref reaping and the QC sync, which can wait for the reset.
 function Verb_sync_board($a) {
-    try { return (Invoke-SyncBoard $a) } finally { $script:SweepDeadline = $null; $script:PromoTestDelayMs = 0 }   # (the sweep's deadline never outlives the sweep, whatever ends it)
+    try { return (Invoke-SyncBoard $a) } finally { $script:SweepDeadline = $null; $script:SweepTestItemDelayMs = 0 }   # (the sweep's deadline never outlives the sweep, whatever ends it)
 }
 function Invoke-SyncBoard($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
     # Issue 426: the sweep answers within the gateway's cap (280 s). Its plan (the offers, owners, parks) is made by the item loop; the tail steps (claim-ref
-    # reap, intake, board guard, QC sync, replenish, automatic promotion) run only while budget_seconds (default 200) remain and are deferred to the next
-    # sweep otherwise (skipped: <step>-deferred). steps: the milliseconds of each step, so the next slow sweep names its culprit.
+    # reap, intake, board guard, QC sync, replenish) run only while budget_seconds (default 200) remain and are deferred to the next sweep otherwise
+    # (skipped: <step>-deferred). The item loop checks the same deadline before each item of a full sweep (see below). The automatic promotion is not
+    # a step of the sweep any more: it is the verb auto-promote (Verbs.Promote.ps1), run by the gateway's own loop. steps: the milliseconds of each
+    # step, so the next slow sweep names its culprit.
     $sweepT0 = Get-Date
     $budgetSeconds = if ((Test-Has $a 'budget_seconds') -and [double]$a.budget_seconds -gt 0) { [double]$a.budget_seconds } else { 200 }
     $script:SweepDeadline = $sweepT0.AddSeconds($budgetSeconds)
-    $script:PromoTestDelayMs = if (Test-Has $a 'test_promotion_delay_ms') { [int]$a.test_promotion_delay_ms } else { 0 }
+    $script:SweepTestItemDelayMs = if (Test-Has $a 'test_item_delay_ms') { [int]$a.test_item_delay_ms } else { 0 }   # (tests only: a slow item loop)
     $steps = [ordered]@{}
     # gap { since, until }: the gateway was down in between (Leader.cs); see Invoke-GapRenew
     $gap = $null
@@ -499,7 +501,9 @@ function Invoke-SyncBoard($a) {
     $passUnmerged = @()
     # release_queue: the items that wait in the Release Queue for the production deployment, with their release and since when (enhancement 9)
     $releaseQueue = @()
-    $rqLabels = @{}
+    # partial: a full sweep whose item loop ran out of budget; viewed: the items it did look at (the gateway treats such a sweep like an incremental
+    # pass over them: what it did not look at keeps its owner and its facts); resumeAt: where the next full sweep begins
+    $partial = $false; $viewed = @(); $resumeAt = 0
     # unparked: items whose park the sweep removed because they are closed (issue 82); the plant forgets their parks
     $unparked = @()
     # parks: every parked item the sweep read (issue 99)
@@ -512,12 +516,29 @@ function Invoke-SyncBoard($a) {
         @(foreach ($n0 in $only) { try { $i0 = Get-ItemInfo $n0; if ($i0.cardId) { $i0 } } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found', 'out-of-scope') { $errors += @{ item = $n0; code = $_.Exception.Code; reason = $_.Exception.Message } } } })
     } else { Get-BoardList }
     $last = Get-LastColumn
+    # a full sweep that was cut short begins where it stopped, so the items at the end of the board are not starved by the ones at the front
+    $resumeFile = Join-Path (Get-StateDir) 'sweep-resume.json'
+    if ($null -eq $only -and -not $dry -and (Test-Path $resumeFile)) {
+        try {
+            $rn = [int]((Get-Content -Raw $resumeFile | ConvertFrom-Json -AsHashtable).item)
+            $ri = -1; for ($k = 0; $k -lt @($list).Count; $k++) { if ([int]@($list)[$k].number -eq $rn) { $ri = $k; break } }
+            if ($ri -gt 0) { $list = @(@($list)[$ri..(@($list).Count - 1)]) + @(@($list)[0..($ri - 1)]) }
+        } catch { }
+    }
     $unparkCtx = @{ free_workers = $(if (Test-Has $a 'free_workers') { [int]$a.free_workers } else { 0 }) }
     foreach ($it in $list) {
         # a closed item is still followed when its merged pull request closed it and the flow after the merge is not finished
         if (-not (Test-NameIn $c.label $it.labels)) { continue }
         # (issue 82: a closed item in any column the factory works is read too, so a park it was left with is removed below)
         if (-not $it.open -and -not ((Test-NameIn "$($it.column)" $c.columns.ai) -or (Test-NameIn "$($it.column)" $c.columns.hold))) { continue }
+        # The budget of the sweep (issue 426) is checked before each item of a full sweep. The sweep then answers what it has read, marked partial: the
+        # gateway handles it like an incremental pass over `viewed` (an item not looked at keeps its owner, its hold and its facts), so stopping here
+        # loses nothing; the next full sweep begins at this item. Always at least one item. An incremental pass (at most 50 items) and a dry run are not cut.
+        if ($null -eq $only -and -not $dry) {
+            if ($viewed.Count -gt 0 -and (Get-Date) -gt $script:SweepDeadline) { $partial = $true; $resumeAt = [int]$it.number; break }
+            $viewed += [int]$it.number
+            if ($script:SweepTestItemDelayMs -gt 0) { Start-Sleep -Milliseconds $script:SweepTestItemDelayMs }
+        }
         $n = $it.number; $col = "$($it.column)"
         if ($it.open -and $col -ieq $designCol) { $designWaiting++ }
         if (Test-NameIn $c.rivalLabel $it.labels) { $actions += @{ item = $n; action = 'skip'; reason = 'ambiguous-owner' }; continue }
@@ -590,8 +611,7 @@ function Invoke-SyncBoard($a) {
                 if (-not $dry -and $r.outcome -eq 'busy' -and "$($s.merge.awaiting)" -eq 'release-queue') { $r = @{ outcome = 'waiting'; awaiting = 'release-queue'; release = "$($s.merge.release)"; queued_at = $(if (Test-Has $s.merge 'queued_at') { $s.merge.queued_at } else { $null }) } }
                 if (-not $dry -and $r.outcome -in 'advanced', 'waiting' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue') {
                     $releaseQueue += @{ item = $n; release = $(if (Test-Has $r 'release') { "$($r.release)" } else { '' }); since = $(if (Test-Has $r 'queued_at') { $r.queued_at } else { $null }) }
-                    $rqLabels["$n"] = @($it.labels)   # (the gates of the automatic promotion, Invoke-AutoPromote)
-                }
+                        }
                 if (-not $dry -and ($r.outcome -eq 'done' -or ($r.outcome -eq 'advanced' -and (Test-Has $r 'awaiting') -and $r.awaiting -eq 'release-queue'))) { $triggers += @{ item = $n; event = 'item.complete'; path = $(if (Test-Has $r 'path') { "$($r.path)" } else { '' }) } }
                 elseif (-not $dry -and $r.outcome -eq 'parked') { $triggers += @{ item = $n; event = 'item.parked'; reason = $r.reason } }
                 if (-not $dry -and (Test-Has $r 'recovered') -and $r.recovered) { $unparked += $n }   # its master-broken or timeout park is gone
@@ -797,6 +817,10 @@ function Invoke-SyncBoard($a) {
     $offers = $kept
     if (-not $dry) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
     $steps['items'] = [int]((Get-Date) - $sweepT0).TotalMilliseconds
+    if ($partial) { $skipped += 'items-deferred'; $steps['items-viewed'] = $viewed.Count }
+    if ($null -eq $only -and -not $dry) {
+        try { if ($partial) { @{ item = $resumeAt; at = ConvertTo-Iso (Get-UtcNow) } | ConvertTo-Json -Compress | Set-Content $resumeFile } elseif (Test-Path $resumeFile) { Remove-Item -Force $resumeFile } } catch { }
+    }
     $stepT = Get-Date
     # claim refs with no live claim behind them (issue 47): removed at once for a closed item, after a lease for an open one
     if ($null -ne $only) { }
@@ -841,16 +865,11 @@ function Invoke-SyncBoard($a) {
     if ($null -eq $only -and -not $dry -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'replenish-deferred' }
     elseif ($null -eq $only -and -not $dry) { try { $replenish = Invoke-Replenish $list $last $designCol } catch { $errors += @{ item = 0; code = 'error'; reason = "replenish: $($_.Exception.Message)" } } }
     $steps['replenish'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
-    # the automatic promotion of a release to uat and prod (delivery.autoPromote, docs/design/auto-promote.md): a full sweep only, it needs every
-    # item of the release
-    if (-not $dry -and $null -eq $only -and $releaseQueue.Count -gt 0 -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'auto-promote-deferred' }
-    elseif (-not $dry -and $null -eq $only -and $releaseQueue.Count -gt 0) { try { $actions += @(Invoke-AutoPromote $releaseQueue $rqLabels) } catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = $_.Exception.Message } }
-        catch { [Console]::Error.WriteLine("promote: $($_.Exception.Message) $($_.ScriptStackTrace -replace "`r?`n", " | ")"); $actions += @{ item = 0; action = 'promotion-error'; reason = "$($_.Exception.Message)" } } }   # (the promotion never fails the sweep: the board work goes on; the gateway log has where it failed)
-    $steps['auto-promote'] = [int]((Get-Date) - $stepT).TotalMilliseconds
+    # (the automatic promotion is no step of the sweep: the verb auto-promote, Verbs.Promote.ps1, run by the gateway's own loop)
     $script:SweepDeadline = $null
     $stepsText = ($steps.Keys | ForEach-Object { "$_=$($steps[$_])" }) -join ' '
     [Console]::Error.WriteLine("sync-board steps (ms): $stepsText total=$([int]((Get-Date) - $sweepT0).TotalMilliseconds)")
-    return @{ ok = $true; steps = $steps; elapsed_ms = [int]((Get-Date) - $sweepT0).TotalMilliseconds; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; steps = $steps; elapsed_ms = [int]((Get-Date) - $sweepT0).TotalMilliseconds; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only -or $partial) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only -or $partial) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); partial = $partial; viewed = $(if ($partial) { @($viewed) } else { $null }); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- work intake (issue 104) -----------------------------------------------------------------------------------------

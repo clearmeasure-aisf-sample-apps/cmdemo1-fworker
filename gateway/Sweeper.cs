@@ -104,6 +104,11 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             var j = JsonNode.Parse(output)!;
             foreach (var x in j["unconfirmed"] as JsonArray ?? new JsonArray()) if (x is JsonValue uv && uv.TryGetValue<int>(out var ui) && ui > 0) unconfirmedOut.Add(ui);
             var acts = j["actions"]!.AsArray();
+            // A full sweep whose item loop ran out of its budget (issue 429, `partial`) names the items it read (`viewed`): it is taken like an
+            // incremental pass over them, so an item it did not look at keeps its owner, its hold and its facts, and the sweep that follows begins there.
+            var partial = items == null && j["partial"] is JsonValue pv && pv.TryGetValue<bool>(out var pb) && pb;
+            var scope = items ?? (partial ? (j["viewed"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var vi) ? vi : 0).Where(i => i > 0).ToList() : null);
+            if (partial) kind = "partial";
             if (ownerMode)
             {
                 // step 5a (worker-messaging.md 3.9): the sweep's `owned` replaces the plant's owner list, except for items the sweep could not read
@@ -111,18 +116,18 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 // item.merged (Plant.Merged).
                 var keep = new List<int>();
                 foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
-                plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, items, j["runtimes"] as JsonObject, j["profiles"] as JsonObject);
+                plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, scope, j["runtimes"] as JsonObject, j["profiles"] as JsonObject);
                 if (items == null && j["replenish"] is JsonObject rpj) plant.SetReplenish(rpj);
                 if (items == null && j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);   // a full sweep only: an incremental one reads a few items
                 // the hold:owner items of the whole board: a full sweep replaces them, an incremental pass updates its own items; the plant hears
                 // them once a full sweep has read the whole board (until then its name actions wait, sweep-pending)
                 var holds = (j["holds"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var hi) ? hi : 0).Where(i => i > 0);
-                if (items == null) { ownerHolds.Clear(); holdsComplete = true; } else foreach (var i in items) ownerHolds.Remove(i);
+                if (scope == null) { ownerHolds.Clear(); holdsComplete = true; } else foreach (var i in scope) ownerHolds.Remove(i);
                 ownerHolds.UnionWith(holds);
                 if (holdsComplete) plant.SetOwnerHeld(ownerHolds.ToList());
-                plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray, items);
-                plant.SetHeld(j["held"] as JsonArray, items);   // issue 65: items that wait for their dependencies
-                if (items == null) plant.SetSweepFacts(j["parks"] as JsonArray, j["unconfirmed"] as JsonArray);   // issue 99: why each unowned item waits (a full sweep: it read every item)
+                plant.SetPassUnmerged(j["pass_unmerged"] as JsonArray, scope);
+                plant.SetHeld(j["held"] as JsonArray, scope);   // issue 65: items that wait for their dependencies
+                if (scope == null) plant.SetSweepFacts(j["parks"] as JsonArray, j["unconfirmed"] as JsonArray);   // issue 99: why each unowned item waits (a full sweep: it read every item)
                 if (j["unparked"] is JsonArray up && up.Count > 0) plant.ClearParks(up.Select(x => int.TryParse(x?.ToString(), out var ui) ? ui : 0));   // issue 82
                 // issue 117: what the sweep flags (a Release Queue card without a merge record): one plant event per item and code in this process
                 foreach (var f in j["flags"] as JsonArray ?? new JsonArray())
@@ -140,7 +145,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                         && ((mo["action"]?.ToString() == "awaiting-checks" && mo["result"] is JsonObject mr && mr["outcome"]?.ToString() == "master-defect" && mr["new"] is JsonValue mn && mn.TryGetValue<bool>(out var mNew) && mNew)
                             || (mo["action"]?.ToString() == "pass-merge" && mo["masterDefectNew"] is JsonValue pn && pn.TryGetValue<bool>(out var pNew) && pNew)))
                         plant.OperatorPlantEvent("master-defect", mItem);
-                if (items == null)
+                if (scope == null)
                 {
                     plant.SetReleaseQueue(j["release_queue"] switch { JsonArray ra => ra, JsonObject ro => new JsonArray(ro.DeepClone()), _ => null });   // (PowerShell sends a one-item queue as an object)
                     try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
@@ -157,7 +162,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                     }
                 // the fallback of the back-merge trigger: master's head compared with the last one seen (not awaited: the sweep goes on); not on a
                 // low budget, and only after a full sweep
-                if (baseWatch != null && items == null && !low) _ = Task.Run(baseWatch.AfterSweep);
+                if (baseWatch != null && scope == null && !low) _ = Task.Run(baseWatch.AfterSweep);
                 Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":{{\"offers\":{j["offers"]!.AsArray().Count},\"actions\":{acts.Count},\"errors\":{j["errors"]!.AsArray().Count},\"kind\":\"{kind}\",\"items\":{items?.Count ?? -1},\"lowBudget\":{(low ? "true" : "false")},\"elapsedMs\":{(j["elapsed_ms"]?.ToString() ?? "null")},\"steps\":{(j["steps"]?.ToJsonString() ?? "null")},\"skipped\":{(j["skipped"]?.ToJsonString() ?? "[]")}}}}}");
             }
             else

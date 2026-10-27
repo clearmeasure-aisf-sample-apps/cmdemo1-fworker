@@ -424,8 +424,9 @@ $Scenarios = [ordered]@{
     Check 'once, and nothing moves it' (@((Get-FakeIssue $m).comments | Where-Object { $_.body -match 'plant event=flagged' }).Count -eq 1 -and (Get-FakeIssue $m).column -eq 'Release Queue')
 }
 
-# Issue 426: a sweep answers within its budget. Its plan (the item loop) is made first; the tail steps (claim-ref reap, intake, board guard, replenish,
-# automatic promotion) run only while budget remains and are deferred otherwise, and every step reports its milliseconds, so a slow step is named.
+# Issue 426: a sweep answers within its budget. Its plan (the item loop) is made first; the tail steps (claim-ref reap, intake, board guard, replenish)
+# run only while budget remains and are deferred otherwise, and every step reports its milliseconds, so a slow step is named. The automatic promotion
+# is no step of the sweep (issue 429: the verb auto-promote, its own loop).
 'sync-board: with its budget used up the tail steps are deferred, the plan is still answered and each step reports its time' = {
     $n = New-Item-Fake 'Budgeted' 'x' $L
     $sw = F 'w1' @('sync-board', '--budget_seconds', '0.001'); $swj = $sw | ConvertTo-Json -Depth 12 -Compress
@@ -435,7 +436,21 @@ $Scenarios = [ordered]@{
     Check 'the answer has the milliseconds of the items step and a total' ($null -ne (Pv $sw 'elapsed_ms') -and $null -ne (Pv (Pv $sw 'steps') 'items')) $swj
     $sw2 = F 'w1' @('sync-board'); $swj2 = $sw2 | ConvertTo-Json -Depth 12 -Compress
     $sk2 = @(Pv $sw2 'skipped')
-    Check 'with the default budget nothing is deferred and every tail step reports its time' ((-not ($sk2 | Where-Object { $_ -like '*-deferred' })) -and $null -ne (Pv (Pv $sw2 'steps') 'auto-promote') -and $null -ne (Pv (Pv $sw2 'steps') 'replenish')) $swj2
+    Check 'with the default budget nothing is deferred and every tail step reports its time' ((-not ($sk2 | Where-Object { $_ -like '*-deferred' })) -and $null -eq (Pv (Pv $sw2 'steps') 'auto-promote') -and $null -ne (Pv (Pv $sw2 'steps') 'replenish')) $swj2
+}
+
+# Issue 429: the item loop checks the budget too. A full sweep whose budget is used up between two items answers what it has read, marked partial with
+# the items it looked at (the gateway treats it like an incremental pass over them), and the next full sweep begins where it stopped.
+'sync-board: the item loop ends at the budget: a partial answer naming the items read, and the next sweep begins where it stopped' = {
+    $ns = @(1..4 | ForEach-Object { New-Item-Fake "Slow loop $_" 'x' $L })
+    $t0 = Get-Date
+    $sw = F 'w1' @('sync-board', '--budget_seconds', '1', '--test_item_delay_ms', '2000'); $swj = $sw | ConvertTo-Json -Depth 12 -Compress
+    $spent = ((Get-Date) - $t0).TotalSeconds
+    Check 'the sweep ends at its budget plus the item in progress, not after every item' ($spent -lt 6.5) "$spent s"
+    Check 'it is partial, names the items it read and defers the rest' ((Pv $sw 'partial') -eq $true -and @(Pv $sw 'viewed').Count -ge 1 -and @(Pv $sw 'viewed').Count -lt $ns.Count -and (@(Pv $sw 'skipped') -contains 'items-deferred')) $swj
+    Check 'a partial sweep does not claim the whole queue or the whole backlog' ($null -eq (Pv $sw 'release_queue') -and $null -eq (Pv $sw 'design_waiting')) $swj
+    $sw2 = F 'w1' @('sync-board'); $swj2 = $sw2 | ConvertTo-Json -Depth 12 -Compress
+    Check 'the next sweep, with its budget, is complete' ((Pv $sw2 'partial') -eq $false -and -not (@(Pv $sw2 'skipped') -contains 'items-deferred')) $swj2
 }
 
 # A card of another repository linked to the board (issue 269): its number is not an issue of this repository. The sweep never lists it, writes

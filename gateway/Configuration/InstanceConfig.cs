@@ -44,6 +44,22 @@ sealed class InstanceConfig
 
     public bool OwnerSessions => Bool("ownerSessions");
 
+    // delivery.autoPromote (Verbs.Promote.ps1): on, and naming this gateway's environment (FACTORY_ENVIRONMENT); the promotion's loop runs only then
+    public bool AutoPromoteHere
+    {
+        get
+        {
+            try
+            {
+                var ap = Root?["delivery"]?["autoPromote"];
+                if (ap?["enabled"] is not JsonValue ev || !ev.TryGetValue<bool>(out var on) || !on) return false;
+                var gwEnv = ap["gatewayEnvironment"]?.ToString() ?? "";
+                return gwEnv.Length > 0 && string.Equals(env("FACTORY_ENVIRONMENT") ?? "", gwEnv, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+    }
+
     // issue 97: the first column the factory works (columns.ai[0] of the configuration), its intake of new work
     public string IntakeColumn
     {

@@ -240,6 +240,9 @@ static class GatewayServiceCollectionExtensions
         var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : c.Timing.SweepMinSeconds);
         var githubBudget = c.GitHubBudget; var leaderOn = c.LeaderOn; var sweepGap = c.SweepGap;
         services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
+        // The automatic promotion: a loop of its own after the sweep, its own call (verb auto-promote), timeout and leader gate; it never runs inside the sweep
+        var promoteOn = c.Instance.AutoPromoteHere; var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
+        services.AddHostedService(sp => new AutoPromoter(sp.GetRequiredService<Runner>(), promoteInterval, promoteOn) { MayAct = () => leader.MayAct });
         // one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
         // with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
         var transcripts = c.Transcripts;

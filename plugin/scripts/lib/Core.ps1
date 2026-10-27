@@ -6,6 +6,7 @@ $script:AsToken = $null
 # The rate limit GitHub reported in this process, per resource (core, graphql): the latest answer's numbers. The server wrapper (factory.ps1) hands
 # them to the gateway in the field _github of its answer; the gateway keeps the shared budget (gateway/GitHubBudget.cs, issue 92).
 $script:GhRate = @{}
+$script:GhCalls = 0; $script:OctoCalls = 0; $script:GhTrace = $null   # (requests made by this process, for a verb that reports what it read: auto-promote)
 # Test-only (Tier 1 golden writes, tests/scenarios/golden/README.md), inert unless the gateway runs with FACTORY_TEST_CAUSE_HEADER=1: the cause
 # id of the harness's call this rule-script run serves (factory.ps1 --server sets $script:FactoryCause from the "_cause" field the gateway adds),
 # sent as X-Fake-Cause with every write so the fake tells the writes the call caused from background work. $null when none, and when this file
@@ -78,6 +79,7 @@ function Invoke-GhRaw {
     if ($OutFile) { $params.OutFile = $OutFile }
     if ($TimeoutSec -gt 0) { $params.ConnectionTimeoutSeconds = $TimeoutSec; $params.OperationTimeoutSeconds = $TimeoutSec }
     for ($try = 1; $try -le $Tries; $try++) {
+        $script:GhCalls++; if ($null -ne $script:GhTrace) { $script:GhTrace.Add("$Method $Path") }
         try { $resp = Invoke-RestMethod @params } catch { if ($try -ge $Tries) { Reject 20 'github-unreachable' $_.Exception.Message @{ retryAfterSeconds = 30 } }; Start-Sleep -Seconds (2 * $try); continue }
         Add-GhRate $rh   # (a redirect to a store that is not GitHub's API carries no rate headers and records nothing)
         if ($sc -in 502, 503, 504 -and $try -lt $Tries) { Start-Sleep -Seconds (2 * $try); continue }

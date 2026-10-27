@@ -183,6 +183,7 @@
     "questionDedupeMinutes": 60,
     "baseUpdateDebounceSeconds": 20,
     "sweepMinSeconds": 60,
+    "promoteSeconds": 60,
     "journalWaitingMinutes": 30
   },
   "baseUpdate": {
