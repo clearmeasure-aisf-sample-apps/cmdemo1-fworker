@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Ids;
 
 // Credentials. Three kinds, all checked here before a rule script ever runs:
 //   admin     the gateway's own token (the sweep, tests, the operator)
@@ -21,11 +22,11 @@ using System.Text.Json.Nodes;
 // GitHub by the rule scripts (refs/factory/<instance>/revoked/<name>/<generation>) and read back at start, like owners after a restart.
 
 sealed record Principal(string Kind, string Name = "", int Item = 0, string Role = "", string Assignment = "", long Expires = 0, int Pr = 0, string Sha = "", string Ip = "", string Runtime = "",
-    string Phase = "", string Mode = "", string Agent = "", string Env = "");
+    string Phase = "", string Mode = "", string Agent = "", string Env = "", string Repo = "");
 
 // The claims of a role token "r1.<payload>.<hmac>" (docs/design/agents-roles-launch.md 4): one session, one role, and for item roles one item,
 // assignment and phase. Minted only by the gateway (a runtime adapter, a test seam); the MAC is over "role:" + payload, so no other kind validates as it.
-sealed record RoleClaims(string Name, string Role, string Mode, string Agent, string Env, long Expires, int Item = 0, string Assignment = "", string Phase = "", int PromptVersion = 0);
+sealed record RoleClaims(string Name, string Role, string Mode, string Agent, string Env, long Expires, int Item = 0, string Assignment = "", string Phase = "", int PromptVersion = 0, string Repo = "");
 
 // One-time nonces of runtime workers (cloud-worker-runtimes.md 2.6). The adapter puts only a nonce into the execution's environment (anyone with
 // read on the job's executions sees it); the execution redeems it once for its w2. Kept as SHA-256 hashes in memory: a gateway restart loses the
@@ -104,6 +105,7 @@ static class Auth
         if (c.Assignment != "") o["a"] = c.Assignment;
         if (rev != 0) o["g"] = rev;
         if (c.PromptVersion != 0) o["pv"] = c.PromptVersion;
+        if (c.Repo != "") o["rp"] = c.Repo;   // the repository claim (W1.8, system-gateway.md H7): absent means the home repository
         var p = B64(Encoding.UTF8.GetBytes(o.ToJsonString()));
         return $"r1.{p}.{Mac(secret, "role:" + p)}";
     }
@@ -160,11 +162,12 @@ static class Auth
         ? $"m1.{name}.{generation}.{Mac(secret, $"manager:{name}:{generation}")}" : $"m1.{name}.{generation}-{rev}.{Mac(secret, $"manager:{name}:{generation}:{rev}")}";
 
     // runtime: the runtime of the worker the assignment is offered to, from its w2 ("" for a local worker); it admits git-credential
-    public static string MintItemToken(string secret, int item, string role, string assignment, string worker, TimeSpan ttl, int rev = 0, string runtime = "")
+    public static string MintItemToken(string secret, int item, string role, string assignment, string worker, TimeSpan ttl, int rev = 0, string runtime = "", string repo = "")
     {
         var o = new JsonObject { ["i"] = item, ["r"] = role, ["a"] = assignment, ["w"] = worker, ["x"] = DateTimeOffset.UtcNow.Add(ttl).ToUnixTimeSeconds() };
         if (rev != 0) o["g"] = rev;
         if (runtime != "") o["rt"] = runtime;
+        if (repo != "") o["rp"] = repo;   // the repository claim (W1.8): absent means the home repository, so a token minted before it stays valid
         var payload = o.ToJsonString();
         var p = B64(Encoding.UTF8.GetBytes(payload));
         return $"i1.{p}.{Mac(secret, p)}";
@@ -172,7 +175,7 @@ static class Auth
 
     // An i1 (an item token): MAC, expiry and the holder's revocation generation. Also used by /mcp for the item token it keeps for a worker
     // session (gateway/Mcp/WorkerSessions.cs): that token is the gateway's own, so auth.legacyKinds does not apply to it there.
-    public static Principal? VerifyItemToken(string secret, string t, Revocations rev)
+    public static Principal? VerifyItemToken(string secret, string t, Revocations rev, RepoId home = default)
     {
         if (secret.Length == 0 || !t.StartsWith("i1.")) return null;
         var parts = t.Split('.'); if (parts.Length != 3) return null;
@@ -183,8 +186,33 @@ static class Auth
             var x = j["x"]!.GetValue<long>(); if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
             // minted before the last revocation of its worker name: refused with everything else of that name
             if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(j["w"]!.ToString())) return null;
-            return new Principal("item", j["w"]!.ToString(), j["i"]!.GetValue<int>(), j["r"]!.ToString(), j["a"]!.ToString(), x, Runtime: j["rt"]?.ToString() ?? "");
+            if (!RepoClaimOk(j, home, out var repo)) return null;
+            return new Principal("item", j["w"]!.ToString(), j["i"]!.GetValue<int>(), j["r"]!.ToString(), j["a"]!.ToString(), x, Runtime: j["rt"]?.ToString() ?? "", Repo: repo);
         }
+        catch { return null; }
+    }
+
+    // The repository claim "rp" of an i1 or r1 payload (W1.8, system-gateway.md H7). Absent means the home repository (every token minted before the claim
+    // existed). Present, it must be a string that parses as owner/repo and names the home repository (compared lowercase, as RepoId does); anything else, a
+    // number, an object, an empty or malformed string or another repository, is refused: this gateway serves one repository while the system-gateway is v1.
+    // repo: the home repository as text when the token is accepted. An unset home (a configuration that names no owner and repo) accepts no claim at all.
+    internal static bool RepoClaimOk(JsonNode j, RepoId home, out string repo)
+    {
+        repo = home.Owner is null ? "" : home.ToString();
+        var c = j["rp"];
+        if (c is null) return true;
+        return c is JsonValue v && v.TryGetValue<string>(out var s) && RepoId.TryParse(s, out var claimed) && home.Owner is not null && claimed == home;
+    }
+
+    // The repository a MAC-valid i1 or r1 claims when this gateway does not serve it ("" when the token claims none or the home, is not an i1 or r1 or has
+    // a bad MAC): only for the clear refusal code "repository-not-served"; it grants nothing, the token is refused either way.
+    public static string? ForeignRepoClaim(string secret, string t, RepoId home)
+    {
+        if (secret.Length == 0 || t.Length > 4000) return null;
+        var parts = t.Split('.'); if (parts.Length != 3) return null;
+        var mac = parts[0] switch { "i1" => Mac(secret, parts[1]), "r1" => Mac(secret, "role:" + parts[1]), _ => null };
+        if (mac == null || !Same(parts[2], mac)) return null;
+        try { var j = JsonNode.Parse(Encoding.UTF8.GetString(UnB64(parts[1])))!; if (j["x"]?.GetValue<long>() is not long x || x < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;   /* an expired token is the ordinary 401 */ var cl = j["rp"]; return cl is not null && !RepoClaimOk(j, home, out _) ? (cl.ToString() is { Length: > 100 } long_ ? long_[..100] : cl.ToString()) : null; }
         catch { return null; }
     }
 

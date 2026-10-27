@@ -35,6 +35,22 @@ sealed class InstanceConfig
         }
     }
 
+    // the home repository: owner and repo of the file (the work-orders repository the board belongs to); null when either is missing or invalid
+    public Fworker.Contracts.Ids.RepoId? Home
+    {
+        get
+        {
+            try { return Fworker.Contracts.Ids.RepoId.TryParse($"{Root?["owner"]}/{Root?["repo"]}", out var id) ? id : null; }
+            catch { return null; }
+        }
+    }
+
+    // the default branch of the home repository (instance.json defaultBranch, else master)
+    public string DefaultBranch
+    {
+        get { try { return Root?["defaultBranch"]?.ToString() is { Length: > 0 } b ? b : "master"; } catch { return "master"; } }
+    }
+
     // a top-level true/false of the configuration; absent or unreadable is false
     bool Bool(string name)
     {

@@ -83,7 +83,7 @@ sealed class TestHookEndpoints(GatewayOptions gateway, MessagingSettings messagi
         if (!Auth.ValidName(nm) || !Auth.Roles.Contains(rl) || !Auth.Modes.Contains(md) || tokenSecret.Length == 0) return Fail(400, "usage", "a valid name, a known role and mode, and a token secret", 2);
         var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (long)(double.TryParse(b["tokenSeconds"]?.ToString(), out var ts) && double.IsFinite(ts) ? Math.Clamp(ts, -86400, 86400) : 3600);
         var claims = new RoleClaims(nm, rl, md, b["agent"]?.ToString() ?? "", b["env"]?.ToString() ?? credentials.Environment, exp,
-            int.TryParse(b["item"]?.ToString(), out var ri) ? ri : 0, b["assignment"]?.ToString() ?? "", b["phase"]?.ToString() ?? "");
+            int.TryParse(b["item"]?.ToString(), out var ri) ? ri : 0, b["assignment"]?.ToString() ?? "", b["phase"]?.ToString() ?? "", Repo: b["repo"]?.ToString() ?? "");
         return Results.Json(new { ok = true, token = Auth.RoleToken(tokenSecret, claims, revocations.Of(nm)) });
     }
 

@@ -3,7 +3,9 @@ using System.Text.Json.Nodes;
 // and lists what it runs (restart recovery and status). "local" is not an adapter: local sessions connect by themselves. The interface keeps the
 // plant independent of how a runtime starts its workers, so another runtime can be added without touching the plant.
 // Role: the role the worker plays when it is not the item's phase (the octopus runtime's overflow rule); "" for an own-item worker
-sealed record ProvisionRequest(string WorkerName, int Item, string Phase, string ModelProfile, string Nonce, string Role = "");
+sealed record ProvisionRequest(string WorkerName, int Item, string Phase, string ModelProfile, string Nonce, string Role = "", LaunchFields? Launch = null);
+// The launch fields every runtime receives (W1.8, system-gateway.md H7): the repository the item lives in, its clone URL and default branch. Set to the home repository.
+sealed record LaunchFields(string Repository, string CloneUrl, string DefaultBranch);
 // Url: the page of the execution a person can open (a Copilot task: its live session, then its transcript), "" when the runtime has none
 sealed record ProvisionResult(bool Ok, string Execution, string Error, string Url = "");
 // Status: Running, Processing, Succeeded, Failed, Stopped, Degraded or Unknown (the execution states of Container Apps jobs)
