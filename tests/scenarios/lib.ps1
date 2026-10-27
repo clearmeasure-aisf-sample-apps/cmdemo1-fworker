@@ -555,6 +555,12 @@ function Lock-ItemFile([int]$Item) {
     [void][IO.Directory]::CreateDirectory($env:FACTORY_STATE_DIR)
     return [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR "item-$Item.lock"), 'OpenOrCreate', 'ReadWrite', 'None')
 }
+# Holds the board-intake lock (Use-IntakeLock, plugin/scripts/lib/Core.ps1) the way a verb that creates a work item does (issue 411); the caller
+# disposes it.
+function Lock-IntakeFile {
+    [void][IO.Directory]::CreateDirectory($env:FACTORY_STATE_DIR)
+    return [IO.File]::Open((Join-Path $env:FACTORY_STATE_DIR 'board-intake.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+}
 function Expire-Claim([int]$Item, [string]$TakenBack = '') {
     Set-ItemState $Item { param($st) $st.claim.lease_until = (Get-Date).ToUniversalTime().AddMinutes(-1).ToString('o'); if ($TakenBack) { $st.claim.taken_back = $TakenBack } }
 }

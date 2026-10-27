@@ -172,6 +172,24 @@ $Scenarios = [ordered]@{
     Check 'the hold stays' ((Get-ItemState $n).ContainsKey('park')) ((Get-ItemState $n) | ConvertTo-Json -Compress -Depth 4)
 }
 
+# Issue 411: a verb that creates a work item (the keeper's create-item and split-item) holds the board-intake lock from the new issue until its card is
+# in its column, and the board guard places a card only under that lock, taken without waiting. Here the harness holds the lock, as such a verb does,
+# while a labelled issue has no card: two full sweeps finish within 30 s and leave the issue to the holder; once the lock is free a later sweep's guard
+# places it and journals it once.
+'board guard: an issue a verb is still putting on the board is left to it; the guard places it once the intake lock is free (issue 411) [full]' = {
+    $lock = Lock-IntakeFile
+    $n = 0
+    try {
+        $n = (Fake 'issue' @{ title = 'Created by a verb that has not placed it yet'; body = 'x'; labels = $L }).number
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
+        Check 'the sweeps go on while the intake lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'and leave the issue to the holder of the lock' ($null -eq (Get-FakeIssue $n).column -and @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=board-added ' }).Count -eq 0) ((Get-FakeIssue $n) | ConvertTo-Json -Compress -Depth 3)
+    } finally { $lock.Dispose() }
+    Check 'once the lock is free a later sweep puts it in Technical Design' (Wait-Until -Seconds 40 { (Get-FakeIssue $n).column -eq 'Technical Design' }) ((Get-FakeIssue $n) | ConvertTo-Json -Compress -Depth 3)
+    Check 'and journals it once' (Wait-Until -Seconds 20 { @((Get-FakeIssue $n).comments | Where-Object { $_.body -match 'plant event=board-added ' }).Count -eq 1 })
+}
+
 # Enhancement 13: cycle times come from the item's journal and state comments on GitHub, so a restarted gateway answers the same.
 'metrics: a merged item has its column times, merge and done; the answer survives a restart; operator token only' = {
     $n = New-Item-Fake 'Metrics item' 'Add docs/m.md' $L

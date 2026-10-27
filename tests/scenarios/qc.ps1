@@ -655,6 +655,28 @@ $QcScenarios = [ordered]@{
     Check 'the worker of the stale environment was told to stop it' $td
 }
 
+# Issue 407: the sweep's QC step marks a live record stale under the item lock, taken without waiting. Here the harness holds the item lock, as a verb
+# of the item does, when the head moves: two full sweeps finish within 30 s (with the 45 s wait the first one that met the lock alone outlasted that)
+# and leave the record; once the lock is free a later sweep marks it stale and offers the new head.
+'qc: a busy item lock does not stall the sweep; a later sweep marks the environment stale once the lock is free (issue 407) [full]' = {
+    Ensure-QcWorker
+    $x = New-QcOffered
+    $x = Start-QcRun $x 'running'
+    [void](Qc-Report $x "http://$(Qc-Fake)")
+    Check 'the environment is ready' (Wait-Until -Seconds 20 { (Qc-RecState $x.n $x.pr) -eq 'ready' }) (Qc-RecState $x.n $x.pr)
+    $lock = Lock-ItemFile $x.n
+    try {
+        Fake 'push-branch' @{ branch = "factory-worker/$($x.n)-development"; files = @('src/a.cs', 'src/c.cs') } | Out-Null
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
+        Check 'the sweeps go on while the item lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'and leave the record for a later sweep' ((Qc-RecState $x.n $x.pr) -eq 'ready') (Qc-RecState $x.n $x.pr)
+    } finally { $lock.Dispose() }
+    Check 'once the lock is free a later sweep marks the record stale' (Wait-Until -Seconds 40 { (Qc-RecState $x.n $x.pr) -eq 'stale' }) (Qc-RecState $x.n $x.pr)
+    $newSha = Get-Head $x.pr
+    Check 'and the offer then carries the new head' (Wait-Until -Seconds 40 { (Qc-OfferComments $x.pr)[0].body -match $newSha.Substring(0, 7) })
+}
+
 'qc: a closed pull request tears the environment down [full]' = {
     Ensure-QcWorker
     $x = New-QcOffered

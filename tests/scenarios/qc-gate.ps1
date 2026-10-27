@@ -188,6 +188,28 @@ $QcGateScenarios = [ordered]@{
     Check 'merged' ((Pv $r0 'outcome') -eq 'merged') "$(Pv $r0 'outcome') $(Pv $r0 'reason')"
 }
 
+# Issue 407: the sweep keeps the persisted copy of a person's approval under the item lock, taken without waiting. Here the harness holds the item
+# lock, as a verb of the item does, when a person approves: two full sweeps finish within 30 s and leave the approval (neither the copy nor the
+# owner's wake-up); once the lock is free a later sweep keeps the approval in the record and wakes the owner once.
+'qc: gate a busy item lock does not stall the sweep; a later sweep keeps the approval and wakes the owner once the lock is free (issue 407) [full]' = {
+    Ensure-QcWorker
+    $x = New-QcOffered
+    $x = Gate-Run $x 'qw1'
+    Check 'no qc.approved before the approval' ((Gate-MailCount $x.n 'qc.approved') -eq 0)
+    $lock = Lock-ItemFile $x.n
+    try {
+        Gate-Human $x
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $swept = try { Wait-Sweeps -Count 2 -Seconds 30; $true } catch { $_.Exception.Message }
+        Check 'the sweeps go on while the item lock is held' ($swept -eq $true) "$swept; $([int]$sw.Elapsed.TotalSeconds) s"
+        Check 'and leave the approval for a later sweep' (-not (Qc-Rec $x.n $x.pr).ContainsKey('approved') -and (Gate-MailCount $x.n 'qc.approved') -eq 0) "$((Qc-Rec $x.n $x.pr) | ConvertTo-Json -Compress -Depth 4)"
+    } finally { $lock.Dispose() }
+    Check 'once the lock is free a later sweep keeps the approval in the QC record' (Wait-Until -Seconds 40 { $r0 = Qc-Rec $x.n $x.pr; $r0.ContainsKey('approved') -and "$($r0.approved.by)" -eq 'factory-worker-testperson[bot]' -and "$($r0.approved.sha)" -eq (Get-Head $x.pr) }) "$((Qc-Rec $x.n $x.pr) | ConvertTo-Json -Compress -Depth 4)"
+    Check 'and wakes the owner' (Wait-Until -Seconds 20 { (Gate-MailCount $x.n 'qc.approved') -ge 1 })
+    Wait-Sweeps -Count 2 -Seconds 60
+    Check 'once' ((Gate-MailCount $x.n 'qc.approved') -eq 1) "$(Gate-MailCount $x.n 'qc.approved')"
+}
+
 'qc: gate the requirements can be switched off in the configuration [full]' = {
     $c = Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable
     $x = New-QcPr
