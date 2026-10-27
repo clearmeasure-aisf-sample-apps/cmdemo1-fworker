@@ -267,6 +267,14 @@ jobs:
       - name: Gateway tests
         run: dotnet test tests/Gateway.Tests --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --logger "trx;LogFileName=gateway-tests.trx" --results-directory "$RUNNER_TEMP/gateway-tests"
 
+      # the test projects of src/ (the Domain rules and parity tests, the workflows); the project dependency rules are in Gateway.Tests (ArchitectureTests)
+      - name: Domain and workflow tests
+        run: |
+          set -euo pipefail
+          for project in tests/Fworker.Domain.Tests tests/Fworker.Workflow.Tests; do
+            dotnet test "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false
+          done
+
       - name: Keep the test results
         if: failure()
         uses: actions/upload-artifact@v7

@@ -1,0 +1,14 @@
+<!-- GitHub and Octopus clients, runtimes, integration command handlers, the recording sink. Depends on Contracts, Domain and Persistence. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Fworker.Integrations</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Fworker.Contracts/Fworker.Contracts.csproj" />
+    <ProjectReference Include="../Fworker.Domain/Fworker.Domain.csproj" />
+    <ProjectReference Include="../Fworker.Persistence/Fworker.Persistence.csproj" />
+  </ItemGroup>
+</Project>

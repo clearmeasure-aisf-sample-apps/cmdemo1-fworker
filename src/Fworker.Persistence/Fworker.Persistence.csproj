@@ -1,0 +1,12 @@
+<!-- The DbContext, saga rows, history, correlation map (W2). Empty until then; no EF Core package yet. Depends on Contracts only. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Fworker.Persistence</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Fworker.Contracts/Fworker.Contracts.csproj" />
+  </ItemGroup>
+</Project>

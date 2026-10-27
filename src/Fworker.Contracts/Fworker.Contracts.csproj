@@ -1,0 +1,9 @@
+<!-- Message records, ids and the integration-command contracts (docs/design/fworker-wolverine-refactor.md 3). Depends on nothing: no project, no package. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Fworker.Contracts</RootNamespace>
+  </PropertyGroup>
+</Project>

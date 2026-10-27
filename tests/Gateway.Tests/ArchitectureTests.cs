@@ -229,6 +229,105 @@ public class ArchitectureTests
         Assert.True(offenders.Count == 0, "gateway/Policies/ names " + why + ": " + string.Join(", ", offenders));
     }
 
+    // ---- the projects of src/ point inward (docs/design/fworker-wolverine-refactor.md 3, task W1.0) ----------------------------------------------
+
+    /// <summary>The src/ projects and the only projects each may reference. Contracts depends on nothing; Domain on Contracts; the host (gateway) may reference all of them.</summary>
+    static readonly Dictionary<string, string[]> AllowedProjectReferences = new()
+    {
+        ["Fworker.Contracts"] = [],
+        ["Fworker.Domain"] = ["Fworker.Contracts"],
+        ["Fworker.Persistence"] = ["Fworker.Contracts"],
+        ["Fworker.Integrations"] = ["Fworker.Contracts", "Fworker.Domain", "Fworker.Persistence"],
+        ["Fworker.Workflows"] = ["Fworker.Contracts", "Fworker.Domain", "Fworker.Persistence"],
+    };
+
+    /// <summary>The names of the projects a csproj references (the file name without .csproj), from its ProjectReference items.</summary>
+    internal static List<string> ProjectReferences(string csprojText) =>
+        Regex.Matches(csprojText, @"<ProjectReference\s+[^>]*Include\s*=\s*""([^""]+)""", RegexOptions.IgnoreCase)
+            .Select(m => System.IO.Path.GetFileNameWithoutExtension(m.Groups[1].Value.Replace('\\', '/').Split('/').Last())).ToList();
+
+    static string Csproj(string relative) => File.ReadAllText(System.IO.Path.Combine(Root, relative));
+
+    public static IEnumerable<object[]> SrcProjects() => AllowedProjectReferences.Keys.Select(k => new object[] { k });
+
+    [Theory]
+    [MemberData(nameof(SrcProjects))]
+    public void SrcProjectReferencesOnlyWhatTheDependencyDirectionAllows(string project)
+    {
+        var refs = ProjectReferences(Csproj($"src/{project}/{project}.csproj"));
+        var bad = refs.Where(r => !AllowedProjectReferences[project].Contains(r)).ToList();
+        Assert.True(bad.Count == 0, $"src/{project} references {string.Join(", ", bad)}; it may reference only [{string.Join(", ", AllowedProjectReferences[project])}] (projects point inward, refactor design 3).");
+    }
+
+    [Theory]
+    [MemberData(nameof(SrcProjects))]
+    public void SrcProjectsAddNoPackageYet(string project)
+    {
+        // no NuGet package before the plan names it (W2.0 adds Wolverine and EF Core); Contracts stays free of packages for good
+        var text = Csproj($"src/{project}/{project}.csproj");
+        Assert.DoesNotMatch(new Regex(@"<PackageReference\b", RegexOptions.IgnoreCase), text);
+    }
+
+    [Fact]
+    public void ContractsDependsOnNothing() =>
+        Assert.Empty(ProjectReferences(Csproj("src/Fworker.Contracts/Fworker.Contracts.csproj")));
+
+    [Fact]
+    public void DomainDependsOnlyOnContracts() =>
+        Assert.Equal(["Fworker.Contracts"], ProjectReferences(Csproj("src/Fworker.Domain/Fworker.Domain.csproj")));
+
+    [Fact]
+    public void WorkflowsDoNotReferenceIntegrations() =>
+        // a saga reaches the outside only through the integration commands of Contracts (S2)
+        Assert.DoesNotContain("Fworker.Integrations", ProjectReferences(Csproj("src/Fworker.Workflows/Fworker.Workflows.csproj")));
+
+    [Fact]
+    public void NoSrcProjectReferencesTheHost()
+    {
+        foreach (var dir in Directory.EnumerateDirectories(System.IO.Path.Combine(Root, "src")))
+            foreach (var f in Directory.EnumerateFiles(dir, "*.csproj"))
+                Assert.DoesNotContain("Gateway", ProjectReferences(File.ReadAllText(f)));
+    }
+
+    [Fact]
+    public void TheHostReferencesEverySrcProject()
+    {
+        var refs = ProjectReferences(Csproj("gateway/Gateway.csproj"));
+        Assert.Equal(AllowedProjectReferences.Keys.Order(), refs.Where(r => r.StartsWith("Fworker.")).Order());
+    }
+
+    [Fact]
+    public void EverySrcDirectoryIsInTheTable()
+    {
+        // a new project under src/ needs its row in AllowedProjectReferences, or it would escape the rules above
+        var dirs = Directory.EnumerateDirectories(System.IO.Path.Combine(Root, "src")).Select(System.IO.Path.GetFileName).Order().ToList();
+        Assert.Equal(AllowedProjectReferences.Keys.Order(), dirs);
+    }
+
+    [Fact]
+    public void TheSolutionHoldsEverySrcAndTestProject()
+    {
+        var sln = File.ReadAllText(System.IO.Path.Combine(Root, "FactoryWorker.sln"));
+        foreach (var p in AllowedProjectReferences.Keys.Concat(["Fworker.Domain.Tests", "Fworker.Workflow.Tests", "Gateway", "Gateway.Tests"]))
+            Assert.Contains($"{p}.csproj", sln);
+    }
+
+    [Fact]
+    public void TheDockerfileCopiesSrcBeforeRestoringTheGateway()
+    {
+        var docker = File.ReadAllText(System.IO.Path.Combine(Root, "Dockerfile"));
+        var copy = docker.IndexOf("COPY src/", StringComparison.Ordinal);
+        var restore = docker.IndexOf("dotnet restore", StringComparison.Ordinal);
+        Assert.True(copy >= 0 && copy < restore, "the Dockerfile must copy src/ before `dotnet restore`: the gateway references the src/ projects");
+    }
+
+    [Fact]
+    public void TheProjectReferenceScanSeesAViolation_WhenOneIsPlanted()
+    {
+        Assert.Equal(["Fworker.Domain"], ProjectReferences("<ProjectReference Include=\"../Fworker.Domain/Fworker.Domain.csproj\" />"));
+        Assert.Equal(["Gateway"], ProjectReferences("<ProjectReference Include=\"..\\..\\gateway\\Gateway.csproj\"/>"));
+    }
+
     // ---- the checker itself ----------------------------------------------------------------------------------------------------------------------
 
     [Fact]
