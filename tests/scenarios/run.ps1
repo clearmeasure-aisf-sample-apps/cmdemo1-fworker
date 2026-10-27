@@ -59,6 +59,7 @@ foreach ($k in $ManagerActionScenarios.Keys) { $ManagerScenarios[$k] = $ManagerA
 foreach ($k in $KeeperScenarios.Keys) { $ManagerScenarios[$k] = $KeeperScenarios[$k] }
 . (Join-Path $PSScriptRoot 'octopus.ps1')           # the Octopus runbook runtime against the fake Octopus: suite 'octopus' (uses the helpers of owner.ps1 and runtime.ps1)
 . (Join-Path $PSScriptRoot 'promote.ps1')           # the automatic promotion of a release to uat and prod (Verbs.Promote.ps1): suite 'promote'
+. (Join-Path $PSScriptRoot 'repos.ps1')             # isolation of the home repository from a second repository in the fake (W1.9): suite 'repos'
 # every barrier of the owner suite (owner.ps1) names one of its scenarios: a renamed one would move the cut of its groups without a word
 foreach ($barrier0 in $OwnerBarriers) { if (-not $OwnerScenarios.Contains($barrier0) -and -not $OwnerScenarios.Contains("$barrier0 [full]")) { throw "owner.ps1 `$OwnerBarriers names no scenario of the owner suite: '$barrier0'" } }
 
@@ -159,6 +160,8 @@ $SuiteDefs = @(
         Extra = @{ delivery = @{ autoPromote = @{ enabled = $true; environments = @('uat', 'prod'); gatewayEnvironment = 'tdd'; signoffWaitHours = 0.05 } }
             octopus = @{ url = '__FAKE_URL__/octopus'; space = 'Spaces-355'; project = 'cmdemo1-ui'; prodUrl = 'https://ca-cmdemo1-prod-ui.example'; tddUrl = '__FAKE_URL__'; uatUrl = '__FAKE_URL__'; healthPath = '/_healthcheck/detailed'; health = @{ spacingMinutes = 0.05; settleMinutes = 0.1; retries = 2; retrySeconds = 0.5 }
                 environments = @{ tdd = 'tdd'; uat = 'uat'; prod = 'prod' } } } }
+    # isolation (repos.ps1, docs/design/system-gateway.md H12): v1 serves the home repository only; a second repository's issues are linked to the shared board of the fake
+    @{ Name = 'repos'; Policy = 'auto'; Set = $ReposScenarios; Timing = @{ staleItemMinutes = 600 } }
 )
 
 # ---- which scenarios run: Run-Suite runs them and -ListScenarios -Suite prints them, through the same functions, so the two cannot differ ----------

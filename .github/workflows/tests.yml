@@ -70,7 +70,7 @@ jobs:
             suites: merge-queue@0/2,qc-rate
             parallel: 2
           - name: merge-queue-b
-            suites: merge-queue@1/2,qc-proxy
+            suites: merge-queue@1/2,qc-proxy,repos
             parallel: 2
           # owner: about 2,600 s of scenarios, one group of 8 per job (contiguous runs, cut only at the barriers of owner.ps1: the largest is about 440 s)
           - name: owner-0
@@ -175,7 +175,7 @@ jobs:
           done
 
       # Every port Tier 1 listens on is below 40000: a suite's slot range 6100-8999, a group's 10000 + 1000 * slot + 100 * group + 0..99 (slot
-      # at most 28, group at most 9: at most 38999). Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of
+      # at most 29, group at most 9: at most 39999). Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of
       # one suite could take the port a group of a high slot (23 and up: 33000 and up) is about to listen on. This moves that range above them.
       - name: Ephemeral ports above the test ports
         run: |
