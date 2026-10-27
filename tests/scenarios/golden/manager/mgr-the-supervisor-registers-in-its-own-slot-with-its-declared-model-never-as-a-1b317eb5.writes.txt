@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: the supervisor registers in its own slot with its declared model, never as a worker
-# runs: 3

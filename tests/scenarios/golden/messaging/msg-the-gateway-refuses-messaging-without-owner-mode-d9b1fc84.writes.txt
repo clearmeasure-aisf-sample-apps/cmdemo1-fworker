@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: the gateway refuses messaging without owner mode
-# runs: 3

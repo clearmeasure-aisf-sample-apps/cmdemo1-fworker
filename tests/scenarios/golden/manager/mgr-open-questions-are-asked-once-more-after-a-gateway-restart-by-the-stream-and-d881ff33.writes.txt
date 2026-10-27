@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: open questions are asked once more after a gateway restart, by the stream and by the poll [full]
-# runs: 3

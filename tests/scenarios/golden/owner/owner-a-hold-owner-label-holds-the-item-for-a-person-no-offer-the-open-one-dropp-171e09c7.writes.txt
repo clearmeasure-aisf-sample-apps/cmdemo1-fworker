@@ -1,7 +1,0 @@
-# suite: owner
-# scenario: owner: a hold:owner label holds the item for a person: no offer, the open one dropped, claim-item refused; offered again without it
-# runs: 3
-= harness POST /repos/{repo}/issues/{#1}/labels 200 {"labels":["hold:owner"]}
-= harness DELETE /repos/{repo}/issues/{#1}/labels/hold:owner 200 -
-+ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **hld1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|hld1 -->"}
-+ rule STATE factory-worker v1 #{#1}

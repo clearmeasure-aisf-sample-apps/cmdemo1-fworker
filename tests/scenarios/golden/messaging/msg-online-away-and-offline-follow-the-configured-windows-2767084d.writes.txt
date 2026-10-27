@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: online, away and offline follow the configured windows
-# runs: 3

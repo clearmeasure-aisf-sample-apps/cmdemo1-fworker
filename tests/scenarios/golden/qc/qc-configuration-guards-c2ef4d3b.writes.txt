@@ -1,3 +1,0 @@
-# suite: qc
-# scenario: qc: configuration guards [full]
-# runs: 3

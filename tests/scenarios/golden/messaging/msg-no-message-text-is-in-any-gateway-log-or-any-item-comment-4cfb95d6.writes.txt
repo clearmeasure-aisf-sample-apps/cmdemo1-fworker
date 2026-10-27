@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: no message text is in any gateway log or any item comment
-# runs: 3

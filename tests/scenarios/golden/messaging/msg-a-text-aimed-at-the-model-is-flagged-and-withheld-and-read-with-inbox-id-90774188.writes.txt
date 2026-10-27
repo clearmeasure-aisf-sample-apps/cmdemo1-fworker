@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a text aimed at the model is flagged and withheld, and read with inbox --id
-# runs: 3

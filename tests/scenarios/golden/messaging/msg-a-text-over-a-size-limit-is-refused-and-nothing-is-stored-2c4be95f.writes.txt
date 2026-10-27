@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a text over a size limit is refused and nothing is stored
-# runs: 3

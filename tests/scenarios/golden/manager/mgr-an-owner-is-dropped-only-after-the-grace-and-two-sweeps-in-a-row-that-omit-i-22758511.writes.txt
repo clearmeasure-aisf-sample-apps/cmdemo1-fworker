@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: an owner is dropped only after the grace and two sweeps in a row that omit it; a settling or unread item keeps its owner
-# runs: 3

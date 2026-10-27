@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a QC job whose item token is missing spawns nothing and says so
-# runs: 3

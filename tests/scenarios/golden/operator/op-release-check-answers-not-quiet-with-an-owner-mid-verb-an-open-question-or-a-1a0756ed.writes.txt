@@ -1,7 +1,0 @@
-# suite: operator
-# scenario: op: release-check answers not quiet with an owner mid-verb, an open question or a pending offer, with the reasons, and quiet otherwise
-# runs: 3
-~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/claims/{#2}","sha":"{sha}"}
-~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: **alice** accepted: it owns this item from **Technical Design** until it is merged (attempt 1, mode first). Lease until {time}.\n\n<!-- plant event=assigned key=owner|a-{id} -->"}
-~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **alice** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|alice -->"}
-~ rule STATE factory-worker v1 #{#2}

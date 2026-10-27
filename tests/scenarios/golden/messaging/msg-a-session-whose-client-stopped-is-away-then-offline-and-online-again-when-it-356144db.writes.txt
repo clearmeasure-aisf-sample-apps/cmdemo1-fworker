@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a session whose client stopped is away, then offline, and online again when it is back
-# runs: 3

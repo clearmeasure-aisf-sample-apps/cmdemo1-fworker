@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a muted or closed session is told, and still receives what it may
-# runs: 3

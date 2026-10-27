@@ -1,3 +1,0 @@
-# suite: qc
-# scenario: qc: webhooks for pull requests and reviews become events [full]
-# runs: 3

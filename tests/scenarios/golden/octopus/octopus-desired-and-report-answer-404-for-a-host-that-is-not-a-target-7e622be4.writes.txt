@@ -1,3 +1,0 @@
-# suite: octopus
-# scenario: octopus: desired and report answer 404 for a host that is not a target
-# runs: 3

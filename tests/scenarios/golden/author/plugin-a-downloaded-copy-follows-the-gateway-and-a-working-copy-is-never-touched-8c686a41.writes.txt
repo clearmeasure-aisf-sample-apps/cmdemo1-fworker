@@ -1,3 +1,0 @@
-# suite: author
-# scenario: plugin: a downloaded copy follows the gateway and a working copy is never touched [full]
-# runs: 3

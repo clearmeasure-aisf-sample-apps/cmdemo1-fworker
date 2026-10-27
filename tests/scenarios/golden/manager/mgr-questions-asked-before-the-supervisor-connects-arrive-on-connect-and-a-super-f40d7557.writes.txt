@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: questions asked before the supervisor connects arrive on connect, and a supervisor that starts again gets the open ones, split at batchMax
-# runs: 3

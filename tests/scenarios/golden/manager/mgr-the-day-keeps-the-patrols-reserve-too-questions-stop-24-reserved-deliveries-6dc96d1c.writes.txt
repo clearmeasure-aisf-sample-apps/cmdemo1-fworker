@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: the day keeps the patrols' reserve too: questions stop 24 reserved deliveries short of the day's budget
-# runs: 3

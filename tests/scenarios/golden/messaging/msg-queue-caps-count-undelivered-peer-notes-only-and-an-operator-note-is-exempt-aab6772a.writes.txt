@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: queue caps count undelivered peer notes only, and an operator note is exempt [full]
-# runs: 3

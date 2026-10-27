@@ -1,5 +1,0 @@
-# suite: author
-# scenario: author app: the gateway acts as the App, mints once, caches the token and never needs GH_TOKEN
-# runs: 3
-= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: hello from the App\n\n<!-- factory-journal:factory-worker -->"}
-= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83E\uDD16 factory-worker: second call\n\n<!-- factory-journal:factory-worker -->"}

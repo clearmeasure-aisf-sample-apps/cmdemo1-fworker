@@ -1,3 +1,0 @@
-# suite: owner
-# scenario: runner: a second run is refused while one is active, a short disk is refused, -Force overrides, and pwsh exit 139 is reported as a crash
-# runs: 3

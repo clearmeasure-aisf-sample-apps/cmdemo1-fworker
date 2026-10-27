@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: an item thread reaches the QC worker of the owner's item and never the inspector
-# runs: 3

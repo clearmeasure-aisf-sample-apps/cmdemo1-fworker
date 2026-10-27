@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: the digest reports a disconnected owner, a late question, waiting, refusals and parks with gateway values only, flags what is new, and stays under its cap
-# runs: 3

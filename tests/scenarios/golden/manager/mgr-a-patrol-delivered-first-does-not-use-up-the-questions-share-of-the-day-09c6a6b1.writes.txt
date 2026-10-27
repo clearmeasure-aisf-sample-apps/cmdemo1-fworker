@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: a patrol delivered first does not use up the questions' share of the day
-# runs: 3

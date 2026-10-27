@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a new session leaves out the replayed history of items its name no longer owns, and a reconnect does not repeat an unchanged peers.snapshot [full]
-# runs: 3

@@ -1,4 +1,0 @@
-# suite: messaging
-# scenario: msg: a message never changes an item, an assignment or the verb count
-# runs: 3
-~ rule STATE factory-worker v1 #{#1}

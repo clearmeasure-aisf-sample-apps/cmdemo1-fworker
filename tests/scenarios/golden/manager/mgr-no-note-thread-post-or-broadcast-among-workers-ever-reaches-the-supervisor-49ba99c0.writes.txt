@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: no note, thread post or broadcast among workers ever reaches the supervisor
-# runs: 3

@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: a spent delivery budget drops the patrol of a reported condition until the operator grants more, a restart is reported, and with messaging off none of it exists
-# runs: 3

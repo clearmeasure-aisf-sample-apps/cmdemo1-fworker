@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: three open questions at most, one per item, six an hour
-# runs: 3

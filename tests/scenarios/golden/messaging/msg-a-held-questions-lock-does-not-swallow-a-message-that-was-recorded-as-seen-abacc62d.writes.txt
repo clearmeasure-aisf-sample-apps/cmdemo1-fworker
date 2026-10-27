@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a held questions lock does not swallow a message that was recorded as seen
-# runs: 3

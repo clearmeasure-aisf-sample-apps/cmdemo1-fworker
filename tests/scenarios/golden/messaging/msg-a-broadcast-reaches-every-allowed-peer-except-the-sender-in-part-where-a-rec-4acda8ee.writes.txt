@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: a broadcast reaches every allowed peer except the sender, in part where a recipient refuses
-# runs: 3

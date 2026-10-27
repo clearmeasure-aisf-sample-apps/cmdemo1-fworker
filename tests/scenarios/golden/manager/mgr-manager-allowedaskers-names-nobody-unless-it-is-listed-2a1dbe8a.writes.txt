@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: manager.allowedAskers names nobody unless it is listed
-# runs: 3

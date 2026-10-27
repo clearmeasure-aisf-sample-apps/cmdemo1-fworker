@@ -1,3 +1,0 @@
-# suite: qc
-# scenario: qc: dashboard connect prompt generator has the QC environment setup box and flags
-# runs: 3

@@ -1,3 +1,0 @@
-# suite: messaging
-# scenario: msg: the presence verb sets the summary, once in ten seconds, and refuses a credential in it
-# runs: 3

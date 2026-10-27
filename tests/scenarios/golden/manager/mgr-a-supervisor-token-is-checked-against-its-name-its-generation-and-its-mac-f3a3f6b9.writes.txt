@@ -1,3 +1,0 @@
-# suite: manager
-# scenario: mgr: a supervisor token is checked against its name, its generation and its MAC
-# runs: 3
