@@ -25,6 +25,9 @@ sealed class InstanceConfig
         return new InstanceConfig(path, root, env);
     }
 
+    // whether the system catalog can be built from this file: it names an owner and a repo (the loader's fallback entry); a missing file has none
+    public bool CanCompose => Root?["owner"] is JsonValue o && o.TryGetValue<string>(out var os) && os.Length > 0 && Root["repo"] is JsonValue r && r.TryGetValue<string>(out var rs) && rs.Length > 0;
+
     // auth.legacyKinds (Auth.cs, agents-roles-launch.md 4): on unless the configuration says false; unreadable is on
     public bool LegacyKinds
     {
