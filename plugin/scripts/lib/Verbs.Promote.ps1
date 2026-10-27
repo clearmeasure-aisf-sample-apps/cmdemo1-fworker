@@ -8,6 +8,7 @@
 
 # the key that may create deployments and answer interruptions: the runbook service account's (OCTOPUS_RUNBOOK_API_KEY), else the reader key
 function Invoke-OctoPost([string]$Path, $Body, [string]$Method = 'POST') {
+    if ($script:LeaseFence) { Assert-LeaseHeld "octopus $Method $Path" }   # (W0.1: a deployment or a Sign-off answer is a write; none from a superseded gateway)
     $key = if ($env:OCTOPUS_RUNBOOK_API_KEY) { $env:OCTOPUS_RUNBOOK_API_KEY } else { $env:OCTOPUS_API_KEY }
     if (-not $key) { Reject 30 'secret-missing' 'neither OCTOPUS_RUNBOOK_API_KEY nor OCTOPUS_API_KEY is set on the gateway' }
     $o = (Get-Cfg).octopus
@@ -503,12 +504,15 @@ function Invoke-AutoPromoteVerb($a) {
     $script:PromoDeadline = $t0.AddSeconds($budget)
     $script:PromoTestDelayMs = if (Test-Has $a 'test_promotion_delay_ms') { [int]$a.test_promotion_delay_ms } else { 0 }
     if ((Test-Has $a 'test_cold') -and $a.test_cold) { Remove-Item -Force (Get-PromoStoreFile) -ErrorAction SilentlyContinue }   # (tests only: a cold start)
-    $actions = @(); $errors = @(); $g0 = $script:GhCalls; $o0 = $script:OctoCalls
+    $actions = @(); $errors = @(); $fenced = $null; $g0 = $script:GhCalls; $o0 = $script:OctoCalls
     if ((Test-Has $a 'trace') -and $a.trace) { $script:GhTrace = [System.Collections.Generic.List[string]]::new() }   # (diagnosis: the requests of the pass are listed in github_paths)
     try { $actions += @(Invoke-AutoPromote (Get-BoardList)) }
-    catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = $_.Exception.Message } }
+    catch [FactoryReject] {
+        $errors += @{ item = 0; code = $_.Exception.Code; reason = $_.Exception.Message }
+        if ($_.Exception.Code -eq 'lease-lost') { $fenced = Get-LeaseFenceInfo "$($_.Exception.Extra['step'])" }   # (W0.1: this gateway was superseded; the pass ends, nothing more is promoted)
+    }
     catch { [Console]::Error.WriteLine("promote: $($_.Exception.Message) $($_.ScriptStackTrace -replace "`r?`n", " | ")"); $actions += @{ item = 0; action = 'promotion-error'; reason = "$($_.Exception.Message)" } }   # (the failure is reported and the next pass tries again)
-    return @{ ok = $true; enabled = $true; github_calls = ($script:GhCalls - $g0); octopus_calls = ($script:OctoCalls - $o0); github_paths = $(if ($null -ne $script:GhTrace) { @($script:GhTrace) } else { $null }); actions = $actions; errors = $errors; elapsed_ms = [int]((Get-Date) - $t0).TotalMilliseconds; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; enabled = $true; fenced = $fenced; github_calls = ($script:GhCalls - $g0); octopus_calls = ($script:OctoCalls - $o0); github_paths = $(if ($null -ne $script:GhTrace) { @($script:GhTrace) } else { $null }); actions = $actions; errors = $errors; elapsed_ms = [int]((Get-Date) - $t0).TotalMilliseconds; at = ConvertTo-Iso (Get-UtcNow) }
 }
 function Invoke-AutoPromoteInner($Queue, $Labels) {
     $c = Get-Cfg
@@ -533,6 +537,7 @@ function Invoke-AutoPromoteInner($Queue, $Labels) {
     $prevDef = @($script:PromoDeferred); $newDef = @()
     $groups = @(@($prevDef | ForEach-Object { $d0 = $_; $groups | Where-Object { $_.Name -eq $d0 } }) + @($groups | Where-Object { $_.Name -notin $prevDef }))
     foreach ($g in $groups) {
+        if ($script:LeaseFence) { Assert-LeaseHeld "promotion of release $($g.Name)" }   # (W0.1: before each release; the deployment and the Sign-off answer check again at their write)
         $ver = $g.Name; [int[]]$items = @($g.Group | ForEach-Object { [int]$_.item } | Sort-Object -Unique)
         # the sweep's budget (issue 426): the releases not judged in this sweep are judged first in the next (the commit cache makes that cheap)
         Close-PromoRelease; $script:PromoRel = $ver; $script:PromoRelT = Get-Date

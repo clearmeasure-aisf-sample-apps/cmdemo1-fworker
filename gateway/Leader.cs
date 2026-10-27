@@ -64,6 +64,9 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
     public bool MayAct { get { lock (gate) return role is Role.Off or Role.Acting; } }
     public bool Replaced { get { lock (gate) return role == Role.Superseded; } }
     public long Epoch { get { lock (gate) return epoch; } }
+    // The lease this process holds or held last, for the rule scripts that act on the board (Runner.InjectLease, W0.1): its epoch stays what this process took
+    // even after it was superseded, which is what makes the scripts refuse their writes. Null while the lease is off or not yet taken.
+    public (long Epoch, string Holder)? FenceLease { get { lock (gate) return cfg.On && epoch > 0 ? (epoch, Holder) : null; } }
     public Task ActingTask => acting.Task;
     // called when this process finds itself superseded (stop, final snapshot, streams) and when a standby takes the lease again (restore)
     public Func<JsonObject?, Task>? OnSuperseded { get; set; }
