@@ -6,7 +6,7 @@ using static HttpResultsX;
 // The operator's administration of worker names and the plant's switches (task C7b): the gateway's own back-merges, the promotion request, a name's
 // credential and its revoke, a runtime's health, and a worker's capacity, messaging mode, drain and resume. Credentials and revoke are a protected
 // area (CLAUDE.md): the refusals and their order are pinned by tests/Gateway.Tests (caller-matrix.json, c7b-endpoints.json).
-// mcpSessions: the worker sessions at /mcp, made by Program.cs after the routes are mapped (GatewayComposition.McpSessions), read at the revoke.
+// mcpSessions: the worker sessions at /mcp (a singleton of the container, AddGatewayMcp), read at the revoke.
 sealed class WorkerAdminEndpoints(GatewayOptions gateway, MessagingSettings messaging, KeeperSettings keeper, Plant plant, BaseWatch baseWatch,
     Revocations revocations, RevocationService revocationService, RuntimeRegistry runtimes, Func<WorkerSessions?> mcpSessions) : IEndpointModule
 {

@@ -28,7 +28,8 @@ static class EndpointModuleExtensions
         services.AddSingleton(sp => new StatusQuery(sp, c.SweepMinSeconds));
         services.AddSingleton<MetricsCache>();
         services.AddSingleton<WebhookDeduplicator>();
-        // mapped in this order, the order Program.cs mapped these routes in
+        // mapped in this order, the order Program.cs mapped these routes in; the QC routes first, in owner mode only (QcHub is the module, Qc.cs)
+        if (c.Gateway.OwnerMode) services.AddSingleton<IEndpointModule>(sp => sp.GetRequiredService<QcHub>());
         services.AddSingleton<IEndpointModule, HealthEndpoints>();
         services.AddSingleton<IEndpointModule, StatusEndpoints>();
         services.AddSingleton<IEndpointModule, MetricsEndpoints>();
@@ -47,7 +48,7 @@ static class EndpointModuleExtensions
         // C7b: what is not a service of its own comes from the composition (the runtime nonces; the worker sessions at /mcp, made after the mapping)
         services.AddSingleton<IEndpointModule>(sp => new WorkerAdminEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(),
             sp.GetRequiredService<KeeperSettings>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<Revocations>(),
-            sp.GetRequiredService<RevocationService>(), sp.GetRequiredService<RuntimeRegistry>(), () => c.McpSessions));
+            sp.GetRequiredService<RevocationService>(), sp.GetRequiredService<RuntimeRegistry>(), () => sp.GetRequiredService<WorkerSessions>()));
         services.AddSingleton<IEndpointModule>(sp => new RuntimeHostEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<Plant>(),
             sp.GetRequiredService<Revocations>(), sp.GetRequiredService<RevocationService>(), sp.GetRequiredService<RuntimeRegistry>(), c.RuntimeNonces));
         services.AddSingleton<IEndpointModule, WebhookEndpoints>();
@@ -60,6 +61,8 @@ static class EndpointModuleExtensions
             sp.GetRequiredService<Plant>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(),
             c.GitHubBudget, sp));
         services.AddSingleton<IEndpointModule, VerbEndpoints>();
+        // the MCP server's route, last as it was mapped (the tools it serves are McpTools, AddGatewayMcp)
+        services.AddSingleton<IEndpointModule, McpEndpoints>();
         return services;
     }
 

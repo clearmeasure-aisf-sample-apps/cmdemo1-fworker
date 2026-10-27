@@ -17,7 +17,7 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
         string text; using (var rd = new StreamReader(ctx.Request.Body)) text = await rd.ReadToEndAsync();
         JsonObject body; try { body = string.IsNullOrWhiteSpace(text) ? new JsonObject() : (JsonNode.Parse(text) as JsonObject ?? new JsonObject()); } catch { return Results.BadRequest(new { ok = false, code = "bad-json", exit = 2 }); }
         var who = ctx.Caller().Who;
-        var (authorized, refusal) = Auth.AuthorizeVerb(who, verb, body);
+        var (authorized, refusal) = VerbPolicy.AuthorizeVerb(who, verb, body);
         if (authorized == null)
         {
             Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":{JsonSerializer.Serialize(refusal)}}}");
@@ -25,46 +25,18 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
         }
         if (verb == "git-credential" && who.Kind == "item" && !(ownerMode && plant.OwnsAccepted(who.Name, who.Item)))
             return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "not-owner", reason = $"this session does not own item #{who.Item} through an accepted assignment: no git credential", exit = 10 }), "application/json", Encoding.UTF8, 409);
-        // the rule scripts of a revocation run only inside POST /workers/{name}/revoke, which keeps the stored generation and this process in step
-        if (verb is "revoke-worker" or "revocations")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/workers/{name}/revoke", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        // likewise the release records of the operator session: only POST /api/v1/operator/record-release keeps the stored refs and this process in step
-        if (verb is "plant-snapshot-save" or "plant-snapshot-load" or "plant-snapshot-clear" or "plant-snapshot-await" or "leader-lease" or "transcript-save" or "transcript-load" or "transcript-prune")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the plant snapshot is written and read by the gateway itself, at its stop and its start", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        if (verb is "operator-release" or "operator-releases")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/operator/record-release", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        // a person releases a park early only through POST /api/v1/items/{n}/unpark (operator token, with a reason)
-        if (verb is "ci-release")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway releases the Copilot agent's held workflow runs by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        if (verb is "park-item")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway parks an item runtime-failed by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        if (verb is "copilot-owner")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway records a Copilot task's ownership of an item by itself", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        if (verb is "copilot-settle")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "the gateway settles a Copilot Development task by itself, at its launch and its end", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        if (verb is "unpark-item")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/items/{n}/unpark (client: factory.ps1 unpark --item N --reason \"...\")", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        if (verb is "resettle-item")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "use POST /api/v1/items/{n}/resettle", exit = 2 }), "application/json", Encoding.UTF8, 400);
-        // the demo video arrives as a file: only POST /api/v1/demo/{item} streams it to the place the rule script reads it from
-        if (verb is "publish-demo")
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = "send the MP4 as the body of POST /api/v1/demo/{item} (client: factory.ps1 publish-demo --item N --file F)", exit = 2 }), "application/json", Encoding.UTF8, 400);
+        // the verbs that have an endpoint or a loop of their own (revocation, the plant snapshot and the transcripts, the operator's release records, the
+        // CI release, parking and unparking, the Copilot owner and settle, the demo upload): the rule scripts run only there (VerbPolicy.UseEndpointReason)
+        if (VerbPolicy.UseEndpointReason(verb) is { } useEndpoint)
+            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = "use-endpoint", reason = useEndpoint, exit = 2 }), "application/json", Encoding.UTF8, 400);
         // the backlog keeper (Keeper.cs): only the name that holds the slot; the day's limit of new items before a verb that creates one; a pin
         // "next-free" resolved to the worker the plan would offer an unpinned item to
         if (who.Kind == "keeper")
         {
             if (!ownerMode || plant.ActiveKeeper() != who.Name) return Fail(403, "not-keeper", "this credential is not the active backlog keeper: register with subscribe --own --keeper first", 30);
             // flags are JSON booleans and children a JSON array: the rule verb reads exactly what was counted here
-            foreach (var bf in new[] { "follow_up", "unpark", "remove", "chain" })
-                if (authorized[bf] is { } bv && bv.GetValueKind() is not (JsonValueKind.True or JsonValueKind.False)) return Fail(400, "usage", $"{bf} is true or false", 2);
-            if (authorized["children"] is { } cv && cv is not JsonArray) return Fail(400, "usage", "children is a JSON array", 2);
-            var need = verb switch
-            {
-                "create-item" => 1,
-                "split-item" => authorized["children"] is JsonArray ka ? ka.Count : 2,
-                "amend-criteria" => authorized["follow_up"] is JsonValue fu && fu.TryGetValue<bool>(out var fb) && fb ? 1 : 0,
-                _ => 0
-            };
+            if (VerbPolicy.KeeperBodyError(authorized) is { } keeperBodyError) return Fail(400, "usage", keeperBodyError, 2);
+            var need = VerbPolicy.KeeperItemsNeeded(verb, authorized);
             if (need > 0 && plant.KeeperItemsLeft() < need)
                 return Results.Json(new { ok = false, verb, code = "daily-item-limit", reason = $"the backlog keeper may create {keeper.MaxNewItemsPerDay} new items in 24 hours; this would need {need} and {plant.KeeperItemsLeft()} are left", retryAfterSeconds = 3600, exit = 20 }, statusCode: 429);
             if (verb == "create-item" && authorized["pin"]?.ToString() == "next-free")
@@ -100,19 +72,19 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
             var mSession = who.Kind == "manager" ? services.GetService<ManagerCopilot>()?.SessionUrl(who.Name) ?? "" : "";
             if (mSession != "") authorized["session"] = mSession; else authorized.Remove("session");
             // one line, no HTML comment markers (the journal's machine-read marker), no mention: as the rule verb cleans it, for the name actions too
-            var mReason = authorized["reason"] is JsonValue mrv && mrv.TryGetValue<string>(out var mrs) ? System.Text.RegularExpressions.Regex.Replace(System.Text.RegularExpressions.Regex.Replace(mrs.Replace("://", " "), @"[<>@`\[\]!]", ""), @"\s+", " ").Trim() : "";
+            var mReason = VerbPolicy.CleanManagerReason(authorized["reason"]);
             IResult MgrNo(int status, string code, string reason, int exit, int retry = 0)
             {
                 Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["managerAction"] = Auth.ValidTag(mAction) ? mAction : "", ["by"] = mBy, ["refused"] = code }.ToJsonString());
                 return Results.Text(retry > 0 ? JsonSerializer.Serialize(new { ok = false, verb, code, reason, retryAfterSeconds = retry, exit }) : JsonSerializer.Serialize(new { ok = false, verb, code, reason, exit }), "application/json", Encoding.UTF8, status);
             }
-            if (!Auth.ManagerItemActions.Contains(mAction) && !Auth.ManagerNameActions.Contains(mAction))
-                return MgrNo(400, "usage", $"action is one of {string.Join(", ", Auth.ManagerItemActions.Concat(Auth.ManagerNameActions))}", 2);
+            if (!VerbPolicy.ManagerItemActions.Contains(mAction) && !VerbPolicy.ManagerNameActions.Contains(mAction))
+                return MgrNo(400, "usage", $"action is one of {string.Join(", ", VerbPolicy.ManagerItemActions.Concat(VerbPolicy.ManagerNameActions))}", 2);
             if (!plant.MgrActions.Policies.Contains(mPolicy)) return MgrNo(400, "unknown-policy", $"the policy code is one of manager.actions.policies: {string.Join(", ", plant.MgrActions.Policies)}", 2);
             if (mReason.Length > 300 || (authorized["reason"] is { } rn && rn.GetValueKind() != JsonValueKind.String)) return MgrNo(400, "usage", "reason is text of at most 300 characters", 2);
             if (mReason != "" && messenger.LooksSecret(mReason)) return MgrNo(409, "secret-in-message", "the reason looks like a credential or token; it goes into a journal comment and never carries a secret", 10);
             if (plant.ManagerMode() == "advise") return MgrNo(409, "advise-mode", "the plant manager is in advise mode (manager.mode, set by the owner): it changes nothing; report to the operator instead", 10);
-            if (Auth.ManagerNameActions.Contains(mAction))
+            if (VerbPolicy.ManagerNameActions.Contains(mAction))
             {
                 if (!Auth.ValidName(mWorker) || messaging.Reserved.Contains(mWorker)) return MgrNo(400, "usage", "worker is the name of a worker session", 2);
                 if (mAction is "restart-session" or "drain" && plant.ManagerRuntimeOwned(0, mWorker)) return MgrNo(409, "runtime-owner", "that session is a runtime task that is still running; the runtime manager ends it past its deadline", 10);
@@ -211,7 +183,7 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
         var item = authorized["item"]?.ToString() ?? ""; var holder = authorized["holder"]?.ToString() ?? "";
         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"item\":\"{item}\",\"holder\":\"{holder}\",\"caller\":\"{who.Kind}:{who.Role}\",\"exit\":{code}}}");
         if (string.IsNullOrWhiteSpace(output)) output = JsonSerializer.Serialize(new { ok = false, code = "no-output", reason = "the rule script produced no output", exit = code == 0 ? 20 : code });
-        var status = code switch { 0 => 200, 21 => 202, 2 => 400, 12 => 404, 10 or 11 or 40 => 409, 20 => 503, _ => 500 };
+        var status = VerbPolicy.StatusOfExit(code);
         // a gate refusal of one code on one item, for the digest's refusals ring (worker-messaging.md 3.9)
         if (ownerMode && messaging.On && code is 10 or 11 && who.Kind == "item") { try { plant.NoteRefusal(who.Name, who.Item, JsonNode.Parse(output)?["code"]?.ToString() ?? ""); } catch { } }
         // a verb that failed for an item (the gateway or GitHub could not serve it, or the rule script crashed), for the digest's verb-errors (3.9)
@@ -231,35 +203,14 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
         return Results.Text(output, "application/json", Encoding.UTF8, status);
     }
 
-    // from_message on append-body and comment (worker-messaging.md 3.8): the id must be a message the caller sent or received; the text loses backticks
-    // and HTML comment markers, is capped at 500 characters and becomes one marked, quoted block before the rule script runs. Without from_message the
-    // literal marker is refused, so a session can neither forge a block nor close one early. Returns the refusal, or null when the call goes on.
+
+    // from_message on append-body and comment (worker-messaging.md 3.8): the rule is DerivedTextRule (gateway/Policies/); this logs a refusal and
+    // answers it as the route always did. Returns the refusal, or null when the call goes on.
     IResult? DerivedText(string verb, JsonObject body, Principal who)
     {
-        var field = verb == "append-body" ? "content" : "body";
-        IResult No(int status, string code, string reason, int exit)
-        {
-            Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":\"{code}\"}}");
-            return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code, reason, exit }), "application/json", Encoding.UTF8, status);
-        }
-        var text = body[field] is JsonValue tv && tv.TryGetValue<string>(out var ts) ? ts : null;
-        if (!body.ContainsKey("from_message") || body["from_message"] is null)
-            return text != null && text.Contains("aisf:assumption", StringComparison.OrdinalIgnoreCase)
-                ? No(409, "reserved-marker", "the text carries the marker aisf:assumption, which only the gateway writes: text that comes from a message goes in with --from-message <id>", 10) : null;
-        var mid = body["from_message"]!.ToString();
-        if (who.Kind != "item" || text == null || !System.Text.RegularExpressions.Regex.IsMatch(mid, @"^m-[0-9a-f]{8}-\d{4,}\z"))
-            return No(400, "usage", "from_message is the id of a message this session sent or received, given with the session's item token and the text", 2);
-        var (known, source, from, inReplyTo) = plant.MessageParty(mid, who.Name);
-        if (!known) return No(404, "no-such-message", "from_message names no message that this session sent or received in this run of the gateway", 12);
-        var clean = text.Replace("`", "").Replace("\r", "");
-        while (clean.Contains("<!--") || clean.Contains("-->")) clean = clean.Replace("<!--", "").Replace("-->", "");
-        var capped = new StringBuilder(); var count = 0;
-        foreach (var rune in clean.Trim().EnumerateRunes()) { if (count++ >= 500) break; capped.Append(rune.ToString()); }
-        clean = capped.ToString().Trim();
-        if (clean.Length == 0) return No(400, "usage", "there is no text left to write: send the assumption or the decision in your own words", 2);
-        // the block names the message whose text it carries and that message's sender; for an answer also the question it answers
-        body[field] = $"<!-- aisf:assumption source={source} from={from}{(inReplyTo == "" ? "" : " in_reply_to=" + inReplyTo)} -->\n" + string.Join("\n", clean.Split('\n').Select(l => "> " + l)) + "\n<!-- /aisf:assumption -->";
-        body.Remove("from_message");
-        return null;
+        var refusal = DerivedTextRule.Apply(verb, body, who.Kind, who.Name, (id, name) => { var (ok, source, from, inReplyTo) = plant.MessageParty(id, name); return (ok, source, from, inReplyTo); });
+        if (refusal == null) return null;
+        Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"{verb}\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":\"{refusal.Code}\"}}");
+        return Results.Text(JsonSerializer.Serialize(new { ok = false, verb, code = refusal.Code, reason = refusal.Reason, exit = refusal.Exit }), "application/json", Encoding.UTF8, refusal.Status);
     }
 }

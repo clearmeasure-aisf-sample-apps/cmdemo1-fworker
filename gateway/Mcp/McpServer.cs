@@ -18,8 +18,8 @@ sealed record ToolDef(string Name, string Description, JsonObject Schema, Func<T
 
 static class GatewayMcp
 {
-    // set by Program.cs once the app is built: the tools need the endpoints, which exist only then
-    public static McpTools? Tools { get; set; }
+    // the tools are a singleton of the container (AddGatewayMcp, task C8; GatewayMcp.Tools was a static set by Program.cs): the request carries its provider
+    static McpTools? ToolsOf(MessageContext c) => c.Services?.GetService<McpTools>();
 
     static Principal? Who(MessageContext c) => (c.User?.Identity as GatewayIdentity)?.Principal;
 
@@ -43,7 +43,7 @@ static class GatewayMcp
     public static ValueTask<ListToolsResult> ListTools(RequestContext<ListToolsRequestParams> c, CancellationToken ct)
     {
         var who = Who(c); var role = who == null ? "" : RoleTools.RoleOf(who);
-        var tools = Tools?.All.Where(t => who != null && RoleTools.Allows(who, role, t.Name)).Select(t => new Tool
+        var tools = ToolsOf(c)?.All.Where(t => who != null && RoleTools.Allows(who, role, t.Name)).Select(t => new Tool
         {
             Name = t.Name, Description = t.Description, InputSchema = JsonSerializer.SerializeToElement(t.Schema)
         }).ToList() ?? new List<Tool>();
@@ -57,7 +57,7 @@ static class GatewayMcp
         var args = new JsonObject();
         if (c.Params?.Arguments is { } a) foreach (var (k, v) in a) args[k] = JsonNode.Parse(v.GetRawText());
         ToolResult r;
-        var tool = Tools?.All.FirstOrDefault(t => t.Name == name);
+        var tool = ToolsOf(c)?.All.FirstOrDefault(t => t.Name == name);
         if (who != null && !RateOk(who.Kind + ":" + who.Name)) r = McpTools.No("rate-limited", $"at most {PerMinute} tool calls a minute per credential", 20);
         else if (who == null) r = McpTools.No("unauthorized", "missing, malformed, forged or expired credential", 30);
         else if (tool == null) r = McpTools.No("unknown-tool", $"no tool '{name}'", 2);

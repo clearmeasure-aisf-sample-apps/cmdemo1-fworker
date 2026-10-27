@@ -15,33 +15,20 @@ sealed class MetricsCache
     public static int StatusOf(int code) => code == 0 ? 200 : code == 2 ? 400 : code == 20 ? 503 : 502;
 }
 
-// Who may read the metrics, and with which queries (an endpoint filter of this module, ahead of SupervisorBudget, so a refused call spends no step;
-// C8 moves the rule into a MetricsAccessPolicy): the operator, the active operator session (as the operator: Admitted), the active supervisor for
-// its daily summary (docs/design/plant-manager.md 10e) and the active backlog keeper (the median time in Development, for the oversized-item policy).
-// The supervisor and the keeper read the cached answers of two windows only: they never force a recomputation over every item's comments.
+// Who may read the metrics, and with which queries (an endpoint filter of this module, ahead of SupervisorBudget, so a refused call spends no step).
+// The rule itself is MetricsAccessPolicy (gateway/Policies/, task C8); the filter reads the plant's slots and turns its refusal into the answer.
 sealed class MetricsAccessFilter(GatewayOptions gateway, MessagingSettings messaging, Plant plant) : IEndpointFilter
 {
     public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
         var c = context.HttpContext;
         var mw = c.Caller().Admitted;
-        if (mw.Kind == "manager")
-        {
-            if (!gateway.OwnerMode || !messaging.ManagerEnabled || plant.ActiveSupervisor().Name != mw.Name) return Fail(403, "not-supervisor", "this credential is not the active supervisor: register with subscribe --own --supervisor first", 30);
-            if (BeyondTwoWindows(c)) return Fail(400, "usage", "the supervisor reads since=24h or since=7d (no fresh, no max)", 2);
-        }
-        else if (mw.Kind == "keeper")
-        {
-            if (!gateway.OwnerMode || plant.ActiveKeeper() != mw.Name) return Fail(403, "not-keeper", "this credential is not the active backlog keeper: register with subscribe --own --keeper first", 30);
-            if (BeyondTwoWindows(c)) return Fail(400, "usage", "the backlog keeper reads since=24h or since=7d (no fresh, no max)", 2);
-        }
-        else if (mw.Kind != "admin") return Results.StatusCode(403);
+        var q = c.Request.Query;
+        var refusal = MetricsAccessPolicy.Check(mw.Kind, mw.Name, gateway.OwnerMode, messaging.ManagerEnabled, () => plant.ActiveSupervisor().Name, plant.ActiveKeeper,
+            q["fresh"].ToString(), q["max"].ToString(), q["since"].ToString());
+        if (refusal != null) return refusal.IsBare ? Results.StatusCode(refusal.Status) : Fail(refusal.Status, refusal.Code, refusal.Reason, refusal.Exit);
         return await next(context);
     }
-
-    // true when the query asks for more than the cached answers of since=24h or 7d (or none)
-    static bool BeyondTwoWindows(HttpContext c) =>
-        c.Request.Query["fresh"].ToString() == "1" || c.Request.Query["max"].ToString() != "" || c.Request.Query["since"].ToString() is not ("" or "24h" or "7d");
 }
 
 // Cycle-time metrics (enhancement 13), read-only: computed by the rule script `metrics` from the items' journal comments and state comments on GitHub,
@@ -62,8 +49,8 @@ sealed class MetricsEndpoints(MetricsCache cache, Runner runner) : IEndpointModu
         var since = c.Request.Query["since"].ToString().Trim(); var maxText = c.Request.Query["max"].ToString().Trim();
         if (c.Caller().OperatorActive)
         {
-            if (since is not ("" or "24h" or "7d") || maxText != "" || c.Request.Query.ContainsKey("fresh"))
-                return Results.Json(new { ok = false, code = "usage", reason = "the operator session reads the metrics with since=24h or 7d (or none), no max and no fresh: answers come from a 120 s cache and a miss computes them", exit = 2 }, statusCode: 400);
+            if (MetricsAccessPolicy.OperatorQueryError(since, maxText, c.Request.Query.ContainsKey("fresh")) is { } operatorQueryError)
+                return Results.Json(new { ok = false, code = "usage", reason = operatorQueryError, exit = 2 }, statusCode: 400);
             if (since == "") since = "7d";   // the script's default: one cache entry for both spellings
         }
         if (since.Length > 40 || maxText.Length > 4 || (maxText != "" && !int.TryParse(maxText, out _))) return Results.Json(new { ok = false, code = "usage", reason = "since is an ISO date or 30m, 24h, 7d; max a number", exit = 2 }, statusCode: 400);

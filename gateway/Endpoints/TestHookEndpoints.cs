@@ -7,7 +7,7 @@ using static HttpResultsX;
 // supervisor's and the operator's endpoints exist (steps 5 and 6). Not mapped unless the config asks for it: Map maps nothing unless messaging is
 // enabled and messaging.testHooks is on, read when the routes are mapped, as Program.cs read them. Every route's guard is Admin with a bare 403.
 sealed class TestHookEndpoints(GatewayOptions gateway, MessagingSettings messaging, TimingOptions timing, Plant plant, Messenger messenger, RuntimeRegistry runtimes,
-    Revocations revocations, RuntimeNonces runtimeNonces) : IEndpointModule
+    Revocations revocations, RuntimeNonces runtimeNonces, CredentialPolicy credentials) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes)
     {
@@ -82,7 +82,7 @@ sealed class TestHookEndpoints(GatewayOptions gateway, MessagingSettings messagi
         var nm = b["name"]?.ToString() ?? ""; var rl = b["role"]?.ToString() ?? ""; var md = b["mode"]?.ToString() ?? "manual";
         if (!Auth.ValidName(nm) || !Auth.Roles.Contains(rl) || !Auth.Modes.Contains(md) || tokenSecret.Length == 0) return Fail(400, "usage", "a valid name, a known role and mode, and a token secret", 2);
         var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (long)(double.TryParse(b["tokenSeconds"]?.ToString(), out var ts) && double.IsFinite(ts) ? Math.Clamp(ts, -86400, 86400) : 3600);
-        var claims = new RoleClaims(nm, rl, md, b["agent"]?.ToString() ?? "", b["env"]?.ToString() ?? Auth.Environment, exp,
+        var claims = new RoleClaims(nm, rl, md, b["agent"]?.ToString() ?? "", b["env"]?.ToString() ?? credentials.Environment, exp,
             int.TryParse(b["item"]?.ToString(), out var ri) ? ri : 0, b["assignment"]?.ToString() ?? "", b["phase"]?.ToString() ?? "");
         return Results.Json(new { ok = true, token = Auth.RoleToken(tokenSecret, claims, revocations.Of(nm)) });
     }
