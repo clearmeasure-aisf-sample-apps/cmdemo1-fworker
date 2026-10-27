@@ -74,6 +74,25 @@ $PromoteScenarios = [ordered]@{
     Check 'no waiting comment but the health settle time' (@(@(Pm-Events $i.n 'promotion-waiting') | Where-Object { $_.body -notmatch 'not been Healthy long enough' }).Count -eq 0) (Pm-Brief $i.n)
 }
 
+'promote: a slow promotion ends the sweep within its budget, names where the time went, and is judged in the next sweep' = {
+    $a = Pm-Item '3.30.1' -Tdd 'Failed'; $b = Pm-Item '3.30.2' -Tdd 'Failed'; $c = Pm-Item '3.30.3' -Tdd 'Failed'
+    [void](Wait-Until -Seconds 40 { @(Pm-Events $a.n 'promotion-waiting').Count -ge 1 -and @(Pm-Events $c.n 'promotion-waiting').Count -ge 1 })
+    # each release costs 5 s more than it should and the sweep may spend 8 s: the third release is not reached
+    $t0 = Get-Date
+    $sw = F 'w1' @('sync-board', '--budget_seconds', '8', '--test_promotion_delay_ms', '5000')
+    $spent = ((Get-Date) - $t0).TotalSeconds
+    $act = { param($l, $n) @($l | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') -and $_['action'] -eq $n }) }
+    $acts = @(Pv $sw 'actions'); $swj = $sw | ConvertTo-Json -Depth 8 -Compress
+    Check 'the sweep answers its plan' ((Pv $sw 'ok') -eq $true) $swj
+    Check 'it ends within its budget plus the one release in progress' ($spent -lt 28) "$spent s"
+    Check 'the release it did not reach is deferred, not judged' (@(& $act $acts 'promotion-deferred').Count -ge 1) $swj
+    $tm = (& $act $acts 'promotion-timing')[0]
+    Check 'the pass reports its time per release and per kind of call' (($swj -match '"action":"promotion-timing"') -and ($swj -match '"3\.30\.1":\d+') -and ($swj -match '"release-deployments":\{')) $swj
+    $sw2 = F 'w1' @('sync-board'); $acts2 = @(Pv $sw2 'actions')
+    $sw2j = $sw2 | ConvertTo-Json -Depth 8 -Compress
+    Check 'the next sweep, with its budget, defers nothing and judges every release' (($sw2j -notmatch 'promotion-deferred') -and ([regex]::Matches($sw2j, '"3\.30\.\d":\d+').Count -ge 3)) $sw2j
+}
+
 'promote: an item merged without a PASS verdict holds the whole release back, explained once on each item' = {
     # The release is made once both items are in the Release Queue. Made with the first item, a sweep between the two Pm-Item calls judged the
     # release with that item alone and journaled the tdd health settle time on it: two waiting comments on it, the first not naming the other item.

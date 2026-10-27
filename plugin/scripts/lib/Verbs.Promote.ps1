@@ -139,10 +139,13 @@ function Get-EnvDeployedCommit([string]$EnvName) {
 # a queued item; items: the queued items whose merge commits are in the range. $BySha: merge sha -> item of the Release Queue.
 function Get-ReleaseContent($Rd, [string]$TargetName, $BySha) {
     if (-not $Rd.commit) { return @{ skip = $false; gaps = @("the release names no commit (its build information or notes)"); items = @() } }
-    $dep = Get-EnvDeployedCommit $TargetName
+    $td = Get-Date
+    $dep = if ($null -ne $script:PromoMemo -and $script:PromoMemo.envCommit.ContainsKey($TargetName)) { $script:PromoMemo.envCommit[$TargetName] } else { Get-EnvDeployedCommit $TargetName }
+    if ($null -ne $script:PromoMemo) { $script:PromoMemo.envCommit[$TargetName] = $dep }
+    Add-PromoTime 'env-deployed-commit' $td
     if (-not $dep) { return @{ skip = $false; gaps = @("the commit running in $TargetName is not known (no successful deployment of a release with a commit)"); items = @() } }
     if ($dep.commit -eq $Rd.commit) { return @{ skip = $true; gaps = @(); items = @() } }
-    $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($dep.commit)...$($Rd.commit)" -Allow 404, 422
+    $tc = Get-Date; $cmp = Invoke-Gh -Path "$(Get-RepoPath)/compare/$($dep.commit)...$($Rd.commit)" -Allow 404, 422; Add-PromoTime 'compare' $tc
     if ($cmp -is [hashtable]) { return @{ skip = $false; gaps = @("GitHub cannot compare the commit running in $TargetName ($($dep.commit.Substring(0,7)), release $($dep.version)) with the release's"); items = @() } }
     if ("$($cmp.status)" -in 'behind', 'identical') { return @{ skip = $true; gaps = @(); items = @() } }
     $cs = if ($cmp.PSObject.Properties['commits']) { @($cmp.commits) } else { @() }
@@ -155,10 +158,11 @@ function Get-ReleaseContent($Rd, [string]$TargetName, $BySha) {
     if ($cur -ne $dep.commit.ToLower()) { return @{ skip = $false; gaps = @("the first-parent history from the release back to $TargetName ($($dep.commit.Substring(0,7))) cannot be followed"); items = @() } }
     $gaps = @(); $items = @(); $hardGaps = @()   # hard: a failure the Sign-off aborts on (the others are waiting reasons)
     foreach ($sha in $chain) {
+        if (Test-PromoOver) { return @{ skip = $false; gaps = @(); items = @(); deferred = $true } }   # the sweep's budget is used up: judged first in the next
         if ($BySha.ContainsKey($sha)) { $items += [int]$BySha[$sha]; continue }
         # not a queued item's: the factory item whose merge it is, in any column (a docs-only item went straight to Done; a merge not settled yet)
         $msg = if ($byCommit[$sha].PSObject.Properties['commit'] -and $byCommit[$sha].commit.PSObject.Properties['message']) { "$($byCommit[$sha].commit.message)" } else { '' }
-        $f = Find-CommitItem $sha $msg
+        $tf = Get-Date; $f = Find-CommitItem $sha $msg; Add-PromoTime 'commit-item' $tf
         if ($f.item -gt 0) { $items += $f.item; if ($f.gap) { $gaps += $f.gap } }
         else { $g1 = "commit $($sha.Substring(0,7)) in the release is not the merge commit of a factory work item"; $gaps += $g1; $hardGaps += $g1 }
     }
@@ -186,7 +190,7 @@ function Save-CommitItemCache($Cache) {
     } catch { }
 }
 function Test-CommitItemSettled([int]$Item, [string]$Sha) {
-    $s = try { (Get-State $Item).state } catch [FactoryReject] { $null }
+    $s = try { (Get-PromoState $Item).state } catch [FactoryReject] { $null }
     if (-not $s -or -not (Test-Has $s 'merge') -or -not (Test-Has $s.merge 'sha') -or "$($s.merge.sha)".ToLower() -ne $Sha) { return $false }
     $aw = if ((Test-Has $s.merge 'awaiting') -and $s.merge.awaiting) { "$($s.merge.awaiting)" } else { '' }
     return ($aw -eq 'release-queue' -or (-not $aw -and (Test-Has $s.merge 'done_at') -and $s.merge.done_at))
@@ -230,15 +234,21 @@ function Find-CommitItemUncached([string]$Sha, [string]$Message) {
 
 # what one item lacks for the promotion of its release (reasons; empty when it qualifies)
 function Get-ItemPromotionGaps([int]$n, $Labels) {
+    if ($null -ne $script:PromoMemo -and $script:PromoMemo.gaps.ContainsKey($n)) { return @($script:PromoMemo.gaps[$n]) }
+    $r = @(Get-ItemPromotionGapsRead $n $Labels)
+    if ($null -ne $script:PromoMemo) { $script:PromoMemo.gaps[$n] = $r }
+    return @($r)
+}
+function Get-ItemPromotionGapsRead([int]$n, $Labels) {
     $c = Get-Cfg; $gaps = @()
     if (-not (Test-NameIn $c.autoMergeLabel @($Labels))) { $gaps += "#$n has no '$($c.autoMergeLabel)' label" }
     $hold = if (Test-NameIn 'Hold' @($Labels)) { 'Hold' } else { Get-HoldLabel @($Labels) }
     if ($hold) { $gaps += "#$n carries the '$hold' label" }
-    $s = (Get-State $n).state
+    $s = (Get-PromoState $n).state
     $passMerged = (Test-Has $s 'verdict') -and (Test-Has $s.verdict 'passed') -and $s.verdict.passed -and (Test-Has $s.verdict 'pr') -and (Test-Has $s 'merge') -and (Test-Has $s.merge 'pr') -and [int]$s.merge.pr -gt 0 -and [int]$s.merge.pr -eq [int]$s.verdict.pr -and -not ((Test-Has $s.merge 'by') -and "$($s.merge.by)" -eq 'person')
     if (-not $passMerged) { $gaps += "#$n has no pull request merged after a Functional Testing PASS verdict" }
     if (Test-NameIn $c.videoLabel @($Labels)) {
-        $rel = Invoke-Gh -Path "$(Get-RepoPath)/releases/tags/demo-$n" -Allow 404
+        $tv = Get-Date; $rel = Invoke-Gh -Path "$(Get-RepoPath)/releases/tags/demo-$n" -Allow 404; Add-PromoTime 'demo-release' $tv
         $has = $rel -isnot [hashtable] -and $rel.PSObject.Properties['assets'] -and @(@($rel.assets) |Where-Object { $_ -and "$($_.name)" -eq "demo-$n.mp4" }).Count -gt 0
         if (-not $has) { $gaps += "#$n has the '$($c.videoLabel)' label and no demo video published (release demo-$n, asset demo-$n.mp4)" }
     }
@@ -249,7 +259,7 @@ function Get-ItemPromotionGaps([int]$n, $Labels) {
 function Get-PromotedTasks([int[]]$Items, [string]$Key) {
     $tasks = @()
     foreach ($n in $Items) {
-        $s0 = (Get-State $n).state; $m = if (Test-Has $s0 'merge') { $s0.merge } else { $null }
+        $s0 = (Get-PromoState $n).state; $m = if (Test-Has $s0 'merge') { $s0.merge } else { $null }
         if ($m -and (Test-Has $m 'promoted') -and (Test-Has $m.promoted $Key) -and "$($m.promoted[$Key].task)") { $tasks += "$($m.promoted[$Key].task)" }
     }
     return @($tasks | Select-Object -Unique)
@@ -257,7 +267,7 @@ function Get-PromotedTasks([int[]]$Items, [string]$Key) {
 
 function Add-PromotionJournal([int[]]$Items, [string]$Event, [hashtable]$Fields, [string]$Key, [scriptblock]$Edit = $null) {
     foreach ($n in $Items) {
-        try { [void](Use-ItemLock $n { $f = Get-State $n; if ($Edit) { & $Edit $f.state }; $did = Add-Journal $n $f $Event $Fields.Clone() $Key; if ($did -or $Edit) { Save-State $n $f } } 10) }
+        try { [void](Use-ItemLock $n { $f = Get-State $n; if ($Edit) { & $Edit $f.state }; $did = Add-Journal $n $f $Event $Fields.Clone() $Key; if ($did -or $Edit) { Save-State $n $f } } 10); if ($null -ne $script:PromoMemo) { $script:PromoMemo.state.Remove($n) } }
         catch [FactoryReject] { if ($_.Exception.Code -notin 'item-busy', 'github-not-found', 'item-not-found') { throw } }
     }
 }
@@ -281,7 +291,45 @@ function Resolve-SignOff([string]$Task, [string[]]$Gaps) {
 }
 
 # One pass over the Release Queue of a full sweep ($Queue: @{ item; release; since }, $Labels: item -> labels). Returns the sweep's actions.
+# ---- the promotion pass's memo, deadline and timing (issue 428) -------------------------------------------------------------------------------
+# The releases of the queue are cumulative ranges, so one sweep judged the same ~50 items once per release (a state read, a label read and a demo
+# video read each): the reads are kept for the length of one pass ($script:PromoMemo, null outside it). The pass ends before the sweep's deadline
+# (Test-PromoOver, checked between releases and between the expensive calls; what is not judged is judged first in the next sweep), and it reports
+# where its time went (promotion-timing: ms per release and per kind of call).
+$script:PromoMemo = $null; $script:PromoRel = $null; $script:PromoRelT = $null; $script:PromoTestDelayMs = 0
+function Test-PromoOver { return [bool]($script:SweepDeadline -and (Get-Date) -gt $script:SweepDeadline) }
+function Add-PromoTime([string]$Kind, [datetime]$Since) {
+    if ($null -eq $script:PromoMemo) { return }
+    $ms = ((Get-Date) - $Since).TotalMilliseconds; $t = $script:PromoMemo.times
+    if (-not $t.ContainsKey($Kind)) { $t[$Kind] = @{ ms = 0.0; n = 0 } }
+    $t[$Kind].ms += $ms; $t[$Kind].n++
+}
+function Close-PromoRelease {
+    if ($null -ne $script:PromoMemo -and $script:PromoRel) { $script:PromoMemo.releases[$script:PromoRel] = [int]((Get-Date) - $script:PromoRelT).TotalMilliseconds }
+    $script:PromoRel = $null
+}
+function Get-PromoState([int]$n) {
+    if ($null -eq $script:PromoMemo) { return (Get-State $n) }
+    if (-not $script:PromoMemo.state.ContainsKey($n)) { $t = Get-Date; $script:PromoMemo.state[$n] = Get-State $n; Add-PromoTime 'item-state' $t }
+    return $script:PromoMemo.state[$n]
+}
+function Get-PromoLabels([int]$n) {
+    if ($null -eq $script:PromoMemo) { return @((Get-ItemInfo $n).labels) }
+    if (-not $script:PromoMemo.labels.ContainsKey($n)) { $t = Get-Date; $script:PromoMemo.labels[$n] = @((Get-ItemInfo $n).labels); Add-PromoTime 'item-info' $t }
+    return $script:PromoMemo.labels[$n]
+}
 function Invoke-AutoPromote($Queue, $Labels) {
+    $script:PromoMemo = @{ state = @{}; labels = @{}; gaps = @{}; envCommit = @{}; times = @{}; releases = [ordered]@{} }; $script:PromoRel = $null
+    $t0 = Get-Date; $m = $script:PromoMemo
+    try { $out = @(Invoke-AutoPromoteInner $Queue $Labels) }
+    finally { Close-PromoRelease; $script:PromoMemo = $null }
+    $calls = [ordered]@{}; foreach ($k in ($m.times.Keys | Sort-Object)) { $calls[$k] = @{ ms = [int]$m.times[$k].ms; n = $m.times[$k].n } }
+    if ($m.releases.Count -eq 0 -and $m.times.Count -eq 0) { return $out }
+    $timing = @{ item = 0; action = 'promotion-timing'; total_ms = [int]((Get-Date) - $t0).TotalMilliseconds; releases = $m.releases; calls = $calls }
+    [Console]::Error.WriteLine("promotion timing: " + ($timing | ConvertTo-Json -Depth 5 -Compress))
+    return @($out + $timing)
+}
+function Invoke-AutoPromoteInner($Queue, $Labels) {
     $c = Get-Cfg
     if (-not (Test-Has $c 'delivery') -or -not (Test-Has $c.delivery 'autoPromote') -or -not (Test-Has $c.delivery.autoPromote 'enabled') -or -not $c.delivery.autoPromote.enabled) { return @() }
     $ap = $c.delivery.autoPromote
@@ -292,7 +340,7 @@ function Invoke-AutoPromote($Queue, $Labels) {
     # the merge commit of every queued item, to judge each release by its whole content
     $bySha = @{}
     foreach ($q in @($Queue)) {
-        try { $s0 = (Get-State ([int]$q.item)).state; if ((Test-Has $s0 'merge') -and (Test-Has $s0.merge 'sha') -and $s0.merge.sha) { $bySha["$($s0.merge.sha)".ToLower()] = [int]$q.item } }
+        try { $s0 = (Get-PromoState ([int]$q.item)).state; if ((Test-Has $s0 'merge') -and (Test-Has $s0.merge 'sha') -and $s0.merge.sha) { $bySha["$($s0.merge.sha)".ToLower()] = [int]$q.item } }
         catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { throw } }
     }
     $o = $c.octopus; $chain = @('tdd', 'uat', 'prod')
@@ -302,8 +350,10 @@ function Invoke-AutoPromote($Queue, $Labels) {
     foreach ($g in @($Queue | Where-Object { $_.release } | Group-Object { "$($_.release)" })) {
         $ver = $g.Name; [int[]]$items = @($g.Group | ForEach-Object { [int]$_.item } | Sort-Object -Unique)
         # the sweep's budget (issue 426): the releases not judged in this sweep are judged first in the next (the commit cache makes that cheap)
-        if ($script:SweepDeadline -and (Get-Date) -gt $script:SweepDeadline) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
-        $rd = Get-ReleaseDeployments $ver
+        Close-PromoRelease; $script:PromoRel = $ver; $script:PromoRelT = Get-Date
+        if (Test-PromoOver) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
+        if ($script:PromoTestDelayMs -gt 0) { Start-Sleep -Milliseconds $script:PromoTestDelayMs }   # (tests only: sync-board test_promotion_delay_ms, a slow promotion)
+        $tr = Get-Date; $rd = Get-ReleaseDeployments $ver; Add-PromoTime 'release-deployments' $tr
         if (-not $rd) { $out += @{ item = $items[0]; action = 'promotion-waiting'; release = $ver; reason = 'release-not-in-octopus' }; continue }
         $tk = $null
         foreach ($t in $targets) { $d = $rd.deployments[(& $envName $t).ToLower()]; if (-not ($d -and $d.state -eq 'Success')) { $tk = $t; break } }
@@ -313,13 +363,16 @@ function Invoke-AutoPromote($Queue, $Labels) {
         # the release's whole content relative to what runs in the target: every commit must be a queued item's merge commit; those items are
         # judged with the release's own items (an earlier release's unqualified change never rides along)
         $content = Get-ReleaseContent $rd $tname $bySha
+        if ((Test-Has $content 'deferred') -and $content.deferred) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
         if ($content.skip -and -not $have) { continue }   # not newer than what runs there: nothing to promote
         $own = $items
         $items = [int[]]@(@($own) + @($content.items) | Sort-Object -Unique)
         $gaps = @{}; $itemGaps = @()
         $gone = $false
-        foreach ($n in $items) { try { $gaps[$n] = @(Get-ItemPromotionGaps $n $(if ($Labels.ContainsKey("$n")) { $Labels["$n"] } else { @((Get-ItemInfo $n).labels) })) } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { throw }; $gone = $true; break }; $itemGaps += $gaps[$n] }
+        $deferred = $false
+        foreach ($n in $items) { if (Test-PromoOver) { $deferred = $true; break }; try { $gaps[$n] = @(Get-ItemPromotionGaps $n $(if ($Labels.ContainsKey("$n")) { $Labels["$n"] } else { @(Get-PromoLabels $n) })) } catch [FactoryReject] { if ($_.Exception.Code -notin 'github-not-found', 'item-not-found') { throw }; $gone = $true; break }; $itemGaps += $gaps[$n] }
         if ($gone) { continue }   # an item of the release vanished since the sweep read it: judged again at the next sweep
+        if ($deferred) { $out += @{ item = $items[0]; action = 'promotion-deferred'; release = $ver; reason = 'sweep-budget' }; continue }
         $common = @(@($content.gaps)); $note = ''
         $pd = $rd.deployments[$pname.ToLower()]
         if (-not $pd) { $common += "it has no deployment to $pname" }
