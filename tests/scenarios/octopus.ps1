@@ -274,7 +274,7 @@ $OctopusScenarios = [ordered]@{
 }
 
 # W0.2: the day budget is counted from the server tasks, every Start and overflow run since 00:00 UTC, whether its worker still runs or was stopped.
-'octopus: the day budget survives a restart (a stopped worker's Start still counts) and a UTC midnight (a Start queued before it does not)' = {
+'octopus: the day budget survives a restart (a stopped worker''s Start still counts) and a UTC midnight (a Start queued before it does not)' = {
     Oct-Up
     $n = 0
     try {
