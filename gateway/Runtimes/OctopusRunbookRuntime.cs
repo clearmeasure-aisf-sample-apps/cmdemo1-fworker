@@ -70,7 +70,7 @@ sealed class OctopusRunbookSettings
     };
 }
 
-sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
+sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
 {
     sealed class Rec
     {
@@ -410,6 +410,49 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         return list;
     }
 
+    // every task of the project back to the cutoff, newest first, page by page (the scheduled Reconcile hosts runs would push the starts out of one page)
+    async Task<List<JsonNode>> TasksSince(DateTime cutoff, CancellationToken ct)
+    {
+        var tasks = new List<JsonNode>();
+        for (var skip = 0; skip < 20000; skip += 100)
+        {
+            var page = Items(await Get(Space($"/tasks?project={Uri.EscapeDataString(projectId)}&skip={skip}&take=100"), ct)).ToList();
+            tasks.AddRange(page);
+            if (page.Count < 100 || page.All(t => DateTime.TryParse(t["QueueTime"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var qt) && qt < cutoff)) break;
+        }
+        return tasks;
+    }
+
+    // The runbook of a run, by run id: a run never changes its runbook, so it is read once.
+    readonly Dictionary<string, string> runbookOfRun = new(StringComparer.Ordinal);
+
+    // W0.2 (IRunHistory): the day budget counted from the server tasks, so a restart does not give the day back. Every Start and overflow run
+    // queued since the cutoff counts, whether its worker still runs, was stopped or ended by itself; a start that found no host queued no run and
+    // is not in the history (the manager refunds that one in process too).
+    public async Task<int> LaunchesSince(DateTime sinceUtc, CancellationToken ct)
+    {
+        await Ids(ct);
+        var books = await Runbooks(ct);
+        var startIds = new[] { cfg.StartRunbook, cfg.OverflowRunbook }.Select(n => books.TryGetValue(n, out var b) ? b.Id : "").Where(i => i != "").ToHashSet();
+        var n = 0;
+        foreach (var t in await TasksSince(sinceUtc, ct))
+        {
+            var runId = t["Arguments"]?["RunbookRunId"]?.ToString() ?? "";
+            if (runId == "") continue;
+            if (!DateTime.TryParse(t["QueueTime"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var queued) || queued < sinceUtc) continue;
+            string? rb; lock (gate) runbookOfRun.TryGetValue(runId, out rb);
+            if (rb == null)
+            {
+                var (s, run) = await Send(HttpMethod.Get, Space($"/runbookRuns/{Uri.EscapeDataString(runId)}"), null, ct);
+                if (s != 200 || run == null) continue;
+                rb = run["RunbookId"]?.ToString() ?? "";
+                lock (gate) runbookOfRun[runId] = rb;
+            }
+            if (startIds.Contains(rb)) n++;
+        }
+        return n;
+    }
+
     // Restart recovery: the runs of the last day of the project's runbooks are read back (task, run, its prompted values); a Start whose
     // worker has no later Stop is a record again. The values are read by the control ids of the runbook's form.
     async Task Rebuild(CancellationToken ct)
@@ -418,14 +461,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail
         string Id(string n) => books.TryGetValue(n, out var b) ? b.Id : "";
         var startIds = new HashSet<string> { Id(cfg.StartRunbook), Id(cfg.OverflowRunbook) }; startIds.Remove("");
         var stopId = Id(cfg.StopRunbook);
-        // every task of the project back to the one-day cutoff, page by page (the scheduled Reconcile hosts runs would push the starts out of one page)
-        var tasks = new List<JsonNode>(); var cutoff = DateTime.UtcNow.AddDays(-1);
-        for (var skip = 0; skip < 20000; skip += 100)
-        {
-            var page = Items(await Get(Space($"/tasks?project={Uri.EscapeDataString(projectId)}&skip={skip}&take=100"), ct)).ToList();
-            tasks.AddRange(page);
-            if (page.Count < 100 || page.All(t => DateTime.TryParse(t["QueueTime"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var qt) && qt < cutoff)) break;
-        }
+        var tasks = await TasksSince(DateTime.UtcNow.AddDays(-1), ct);
         var stopped = new HashSet<string>(StringComparer.Ordinal);
         var found = new List<Rec>();
         foreach (var t in tasks)   // newest first, as Octopus lists them

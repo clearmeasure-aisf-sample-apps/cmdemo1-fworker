@@ -273,6 +273,33 @@ $OctopusScenarios = [ordered]@{
     } finally { Oct-Cleanup @($n) }
 }
 
+# W0.2: the day budget is counted from the server tasks, every Start and overflow run since 00:00 UTC, whether its worker still runs or was stopped.
+'octopus: the day budget survives a restart (a stopped worker's Start still counts) and a UTC midnight (a Start queued before it does not)' = {
+    Oct-Up
+    $n = 0
+    try {
+        $n = New-Item-Fake 'Octopus day budget' 'x' $OctLabels
+        Check 'a run is made' (Wait-Until -Seconds 60 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        $run = (Oct-Runs 'Start worker' $n)[0]; $name = "$($run.values.Name)"
+        Check 'the day budget counts the start in memory' ((Oct-Status).today -ge 1) (Oct-Status | ConvertTo-Json -Compress -Depth 4)
+        $rv = Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/api/v1/workers/$name/revoke" -Method POST -Headers @{ Authorization = 'Bearer test-token' } -SkipHttpErrorCheck
+        Check 'the worker is stopped' (Wait-Until -Seconds 20 { @((Oct-State).runs | Where-Object { $_.runbook -eq 'Stop worker' -and $_.values.Name -eq $name }).Count -eq 1 })
+        # no second start for the item may be made while the process restarts: the item is closed first, so the history holds this one Start only
+        Rt-Close $n
+        Restart-Gateway
+        Check 'after the restart the stopped worker is no execution, but its Start still counts against today (1)' (Wait-Until -Seconds 20 { $s = Oct-Status; $s.relisted -and $s.today -eq 1 -and @($s.executions | Where-Object { $_.worker -eq $name }).Count -eq 0 }) (Oct-Status | ConvertTo-Json -Compress -Depth 4)
+        # the Start was queued before this UTC midnight: it belongs to yesterday
+        $yesterday = [DateTime]::UtcNow.Date.AddSeconds(-1).ToString('o')
+        [void](Fake 'octo-task' @{ id = $run.task; queued = $yesterday })
+        Restart-Gateway
+        Check 'a Start queued before 00:00 UTC is not today''s (0)' (Wait-Until -Seconds 20 { $s = Oct-Status; $s.relisted -and $s.today -eq 0 }) (Oct-Status | ConvertTo-Json -Compress -Depth 4)
+        # and one queued just after it is
+        [void](Fake 'octo-task' @{ id = $run.task; queued = [DateTime]::UtcNow.Date.AddSeconds(1).ToString('o') })
+        Restart-Gateway
+        Check 'a Start queued just after 00:00 UTC is today''s (1)' (Wait-Until -Seconds 20 { $s = Oct-Status; $s.relisted -and $s.today -eq 1 }) (Oct-Status | ConvertTo-Json -Compress -Depth 4)
+    } finally { Oct-Cleanup @($n) }
+}
+
 # Runs started through runbook-runs/create/v1 keep FormValues {} (the fake's default, as Octopus): the rebuild reads nothing back, the host
 # reports are the source of truth. perHostCapacity is 1, but every running container is adopted (capacity limits new starts only): two on host-a.
 'octopus: after a restart the running containers the hosts report are all adopted, also beyond perHostCapacity; desired names them, the reconcile keeps them, List shows them' = {
