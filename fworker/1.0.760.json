@@ -1,0 +1,74 @@
+{
+  "deployable": "fworker",
+  "version": "1.0.760",
+  "generated": "2026-10-27T18:43:59Z",
+  "kind": "container image",
+  "process": "dotnet FactoryWorker.Gateway.dll",
+  "entry": "FactoryWorker.Gateway",
+  "assemblies": [
+    {
+      "name": "FactoryWorker.Gateway",
+      "entry": true,
+      "references": [
+        "Fworker.Contracts",
+        "Fworker.Domain",
+        "Fworker.Integrations",
+        "Fworker.Persistence",
+        "Fworker.Workflows"
+      ],
+      "packages": [
+        {
+          "name": "Azure.Identity",
+          "version": "1.21.0"
+        },
+        {
+          "name": "ModelContextProtocol.AspNetCore",
+          "version": "1.0.0"
+        }
+      ]
+    },
+    {
+      "name": "Fworker.Contracts",
+      "entry": false,
+      "references": [],
+      "packages": []
+    },
+    {
+      "name": "Fworker.Domain",
+      "entry": false,
+      "references": [
+        "Fworker.Contracts"
+      ],
+      "packages": []
+    },
+    {
+      "name": "Fworker.Integrations",
+      "entry": false,
+      "references": [
+        "Fworker.Contracts",
+        "Fworker.Domain",
+        "Fworker.Persistence"
+      ],
+      "packages": []
+    },
+    {
+      "name": "Fworker.Persistence",
+      "entry": false,
+      "references": [
+        "Fworker.Contracts"
+      ],
+      "packages": []
+    },
+    {
+      "name": "Fworker.Workflows",
+      "entry": false,
+      "references": [
+        "Fworker.Contracts",
+        "Fworker.Domain",
+        "Fworker.Persistence"
+      ],
+      "packages": []
+    }
+  ],
+  "truncated": false
+}
