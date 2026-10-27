@@ -148,7 +148,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
     // An item loses its owner: everything the plant kept about that ownership goes with it, so the next owner starts clean (it must not inherit a
     // sweep that missed the previous one, nor its lease).
     // Its build slots go too (issue 108): a take-back, a release, the item's completion and every drop of an owner come through here.
-    void DropOwner(int item) { var was = ownerOf.TryGetValue(item, out var o) ? o : null; ownerOf.Remove(item); ownedMisses.Remove(item); ownedSince.Remove(item); ownedInfo.Remove(item); lastRouted.Remove(item); reviews.Remove(item); if (was != null) FreeItemSlots(item, was, "owner-dropped"); }
+    void DropOwner(int item) { var was = ownerOf.TryGetValue(item, out var o) ? o : null; ownerOf.Remove(item); ownedMisses.Remove(item); ownedSince.Remove(item); ownedInfo.Remove(item); lastRouted.Remove(item); reviews.Remove(item); if (was != null) { FreeItemSlots(item, was, "owner-dropped"); SlotFreed(item); } }
     static readonly Regex CodeRx = new(@"^[A-Za-z0-9: ._-]{1,60}\z", RegexOptions.CultureInvariant);
     // A column or code that may enter the digest: the pattern of 3.9, or nothing.
     static string Gated(string? s) => s != null && CodeRx.IsMatch(s) ? s : "";
@@ -1920,7 +1920,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             return;
         }
         try { PlanLocked(offers, owners, pins, owned, keep, priorities, sweepStarted, scope, runtimes, profiles); }
-        finally { LaunchProvisions(); }
+        finally { lock (gate) planning = false; LaunchProvisions(); }
     }
     void PlanLocked(JsonArray offers, JsonObject? owners, JsonObject? pins, JsonObject? owned, IEnumerable<int>? keep, JsonObject? priorities, DateTime? sweepStarted, IReadOnlyCollection<int>? scope, JsonObject? runtimes, JsonObject? profiles)
     {
@@ -1939,6 +1939,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                 }
                 runtimeLabels = Merge(runtimeLabels, runtimes, scope); itemProfiles = Merge(itemProfiles, profiles, scope);
             }
+            planning = true;   // (a drop of an owner inside the plan frees no slot for a new plan: SlotFreed)
             var planNow = DateTime.UtcNow;
             foreach (var k in mergedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) mergedAt.Remove(k);
             foreach (var k in releasedAt.Where(kv => (planNow - kv.Value).TotalHours > 1).Select(kv => kv.Key).ToList()) releasedAt.Remove(k);
@@ -1957,8 +1958,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             // order is stable, so items of one rank keep the sweep's order)
             // then (issue 97) work already started before new work: an orphan in a column past the intake (Development, Functional Testing) takes a
             // free worker before an item in the intake column
-            static int Rank(string? p) => p == "top" ? 0 : p == "high" ? 1 : 2;
-            foreach (var o in offers.OrderBy(x => string.IsNullOrEmpty(pins?[x!["item"]!.ToString()]?.ToString()) ? 1 : 0).ThenBy(x => Rank(priorities?[x!["item"]!.ToString()]?.ToString())).ThenBy(x => string.Equals(x!["column"]?.ToString() ?? "", IntakeColumn, StringComparison.OrdinalIgnoreCase) ? 1 : 0))
+            foreach (var o in PlanRankComparer.Order(offers, pins, priorities, IntakeColumn))
             {
                 var item = o!["item"]!.GetValue<int>(); var kind = o["kind"]?.ToString() ?? "own-item"; var role = kind == "bot-job" ? (o["role"]?.ToString() ?? "inspector") : "owner";
                 var key = $"{item}|{kind}|{role}";
