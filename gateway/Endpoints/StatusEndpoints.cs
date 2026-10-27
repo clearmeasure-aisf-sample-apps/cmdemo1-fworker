@@ -23,6 +23,7 @@ sealed class StatusQuery
     readonly GitHubBudget githubBudget;
     readonly TranscriptStore transcripts;
     readonly RevocationService revocations;
+    readonly EngineOptions engine;
 
     // sweepMinSeconds: the sweep's minimum interval as AddGatewayBackground computed it (GatewayComposition.SweepMinSeconds)
     public StatusQuery(IServiceProvider services, int sweepMinSeconds)
@@ -33,7 +34,7 @@ sealed class StatusQuery
         messenger = services.GetRequiredService<Messenger>(); baseWatch = services.GetRequiredService<BaseWatch>(); runtimes = services.GetRequiredService<RuntimeRegistry>();
         copilotSettings = services.GetRequiredService<CopilotCloudSettings>(); snapshots = services.GetRequiredService<ISnapshotCoordinator>(); leader = services.GetRequiredService<GatewayLeader>();
         runner = services.GetRequiredService<Runner>(); githubBudget = services.GetRequiredService<GitHubBudget>(); transcripts = services.GetRequiredService<TranscriptStore>();
-        revocations = services.GetRequiredService<RevocationService>();
+        revocations = services.GetRequiredService<RevocationService>(); engine = services.GetRequiredService<EngineOptions>();
     }
 
     // GET /api/v1/status: counts and states only
@@ -63,6 +64,9 @@ sealed class StatusQuery
         // the session transcripts: sessions held, how many have lines not yet saved to GitHub, saves and failures
         o["transcripts"] = transcripts.Status();
         if (ownerMode) o["revocations"] = revocations.Status();
+        // the engine that acts here: shadow (v1 acts, v2 beside it) or v2, or the kill switch FACTORY_V2_OFF while the file names one (W0.0). Plain v1, the
+        // default of every environment, adds nothing, so a default deployment answers exactly as before (the C0 pins list the keys); no block means v1
+        if (engine.Reported) o["engine"] = engine.Status();
         return o;
     }
 

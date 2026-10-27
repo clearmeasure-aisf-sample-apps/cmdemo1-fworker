@@ -6,7 +6,7 @@
 // It shrinks as stage C goes on: what a step registers as a service leaves it once nothing outside the container reads it (C6: the middleware
 // takes its collaborators by injection; C7: the handlers move into endpoint modules). The runtimes are RuntimeRegistry since C5b; it stays here
 // while AddGatewayPlant and AddGatewayBackground read it at registration.
-sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance, TimingOptions timing, RevocationOptions revocation, QcSettings qc,
+sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance, TimingOptions timing, RevocationOptions revocation, EngineOptions engine, QcSettings qc,
     MessagingSettings messaging, KeeperSettings keeper, PublicBase publicBase)
 {
     // The configuration of a process, read once from its environment and the configuration file (task C8: this was the top of Program.cs). The same
@@ -18,6 +18,7 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
         var instanceConfig = InstanceConfig.Load(InstanceConfig.PathFor(scriptsDir, env), env);
         var timing = TimingOptions.From(instanceConfig);
         var revocationOptions = RevocationOptions.FromEnvironment(env);
+        var engineOptions = EngineOptions.From(instanceConfig, gw.EnvironmentName, env);
         gw.ValidateOwnerMode();
         var qcSettings = QcSettings.Load(scriptsDir, gw.PublicUrl, gw.OwnerMode);
         var messaging = MessagingSettings.Load(scriptsDir, gw.OwnerMode);
@@ -28,7 +29,7 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
         if (keeper.Enabled) messaging.Reserved.UnionWith(keeper.Names);
         // the gateway's own address for the links it writes into the journal: FACTORY_PUBLIC_URL, else the address the operator or a container last used
         // (gateway/Http/PublicBase.cs, noted by the authentication middleware)
-        return new GatewayComposition(gw, instanceConfig, timing, revocationOptions, qcSettings, messaging, keeper, new PublicBase(gw.PublicUrl));
+        return new GatewayComposition(gw, instanceConfig, timing, revocationOptions, engineOptions, qcSettings, messaging, keeper, new PublicBase(gw.PublicUrl));
     }
 
     // the address for links (see PublicBase) and the credential rules of this process (gateway/Policies/CredentialPolicy.cs): the role token r1 is bound to
@@ -41,6 +42,8 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
     public InstanceConfig Instance { get; } = instance;
     public TimingOptions Timing { get; } = timing;
     public RevocationOptions Revocation { get; } = revocation;
+    // the engine switch of this environment and the FACTORY_V2_OFF kill switch (W0.0); only /api/v1/status reads it so far
+    public EngineOptions Engine { get; } = engine;
     public QcSettings Qc { get; } = qc;
     public MessagingSettings Messaging { get; } = messaging;
     public KeeperSettings Keeper { get; } = keeper;
