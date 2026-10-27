@@ -396,4 +396,23 @@ $PromoteScenarios = [ordered]@{
     Check 'a changed item is judged again: it is told its release now waits for the items that still lack the label' (Wait-Until -Seconds 30 { @(Pm-Events $n0 'promotion-waiting').Count -ge 2 }) "$j3 /// $(Pm-Brief $n0)"
 }
 
+# A cold start with a large queue of releases that all wait on a Failed tdd deployment, under a small budget: the pass ends within its budget (the
+# journal writes and the releases it had no time for are deferred, not run on), the progress is saved, and the following passes finish; once judged, a
+# release whose previous environment's deployment failed costs next to nothing until that changes.
+'promote: a cold pass over a large queue ends within its budget, saves its progress, and the next passes finish and then read next to nothing' = {
+    $it = @()
+    foreach ($r in 1..4) { foreach ($k in 1..3) { $it += Pm-Item "3.43.$r" -NoRelease } }
+    foreach ($r in 1..4) { [void](Fake 'octo-release' @{ version = "3.43.$r"; sha = $it[$r * 3 - 1].sha; tdd = 'Failed' }) }
+    $t0 = Get-Date
+    $c1 = F 'w1' @('auto-promote', '--test_cold', 'true', '--budget_seconds', '2', '--test_promotion_delay_ms', '1500'); $s1 = ((Get-Date) - $t0).TotalSeconds
+    $j1 = $c1 | ConvertTo-Json -Depth 8 -Compress
+    Check 'the cold pass ends within its budget plus the release in progress' ($s1 -lt 15) "$s1 s $j1"
+    Check 'it defers the releases it had no time for' ($j1 -match 'promotion-deferred') $j1
+    $c2 = F 'w1' @('auto-promote'); $j2 = $c2 | ConvertTo-Json -Depth 8 -Compress
+    Check 'the next pass judges every release and defers none' (([regex]::Matches($j2, '"action":"promotion-waiting"')).Count -ge 4 -and $j2 -notmatch 'promotion-deferred') $j2
+    $c3 = F 'w1' @('auto-promote'); $j3 = $c3 | ConvertTo-Json -Depth 8 -Compress
+    Check 'a pass after that makes at most 4 GitHub requests' ([int](Pv $c3 'github_calls') -le 4) "github_calls=$(Pv $c3 'github_calls') $j3"
+    Check 'and still reports every release as waiting' (([regex]::Matches($j3, '"action":"promotion-waiting"')).Count -ge 4) $j3
+}
+
 }
