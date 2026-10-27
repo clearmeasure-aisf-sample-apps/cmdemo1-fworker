@@ -198,14 +198,117 @@ function Get-State([int]$Item) {
     }
     $m = [regex]::Match($found.body, '(?s)```json\s*(.*?)\s*```')
     $s = if ($m.Success) { $m.Groups[1].Value | ConvertFrom-Json -AsHashtable -DateKind String } else { @{ schema = 1; item = $Item } }
-    return @{ commentId = $found.id; state = $s; comments = $all; updatedAt = $(if ($found.PSObject.Properties['updated_at']) { Get-Stamp $found.updated_at } else { '' }) }   # (updatedAt: when the state comment last changed, for the promotion's cache of state reads)
+    return @{ commentId = $found.id; state = $s; comments = $all; rev = (Get-StateRev $s); updatedAt = $(if ($found.PSObject.Properties['updated_at']) { Get-Stamp $found.updated_at } else { '' }) }   # (updatedAt: when the state comment last changed, for the promotion's cache of state reads)
 }
 
+# The state comment's revision: a counter in the state (rev), raised by every save. A state written before the counter existed is revision 0.
+function Get-StateRev($S) { if ($S -is [System.Collections.IDictionary] -and $S.Contains('rev')) { try { return [int]$S['rev'] } catch { return 0 } }; return 0 }
+
+# GitHub caps a comment at 65,536 characters; the state keeps this budget (docs/design/delivery-speed.md 18.2). Over it, the oldest entries of
+# promote_health, flow and lineage go first (Limit-StateBudget). A key that is not present is skipped.
+$script:StateBudget = 48000
+$script:StateTrimOrder = @('promote_health', 'flow', 'lineage')
+
+# Removes the oldest entry of one trimmable collection; returns $true when there was one. An array loses its first element; a table of arrays
+# (promote_health: one array of reads per environment and release) loses the first element of its longest array and the key once that is empty;
+# any other table loses the entry with the lowest 'at' (or the first key).
+function Remove-OldestStateEntry($S, [string]$Key) {
+    if (-not (Test-Has $S $Key)) { return $false }
+    $c = $S[$Key]
+    if ($c -is [System.Collections.IDictionary]) {
+        if ($c.Count -eq 0) { return $false }
+        $best = $null; $bestN = 0
+        foreach ($k in @($c.Keys)) { if ($c[$k] -is [System.Collections.IList] -and $c[$k].Count -gt $bestN) { $best = $k; $bestN = $c[$k].Count } }
+        if ($best) {
+            $rest = @($c[$best] | Select-Object -Skip 1)
+            if ($rest.Count -eq 0) { $c.Remove($best) } else { $c[$best] = $rest }
+            return $true
+        }
+        $oldest = $null; $oldestAt = $null
+        foreach ($k in @($c.Keys)) { $at = if ($c[$k] -is [System.Collections.IDictionary] -and $c[$k].Contains('at')) { "$($c[$k]['at'])" } else { '' }; if ($null -eq $oldest -or $at -lt $oldestAt) { $oldest = $k; $oldestAt = $at } }
+        $c.Remove($oldest); return $true
+    }
+    if ($c -is [System.Collections.IList]) {
+        if ($c.Count -eq 0) { return $false }
+        $S[$Key] = @($c | Select-Object -Skip 1); return $true
+    }
+    return $false
+}
+
+# How many entries a trimmable collection holds (the reads of a table of arrays count one by one)
+function Get-StateEntryCount($S, [string]$Key) {
+    if (-not (Test-Has $S $Key)) { return 0 }
+    $c = $S[$Key]
+    if ($c -is [System.Collections.IDictionary]) { $n = 0; foreach ($k in @($c.Keys)) { $n += $(if ($c[$k] -is [System.Collections.IList]) { $c[$k].Count } else { 1 }) }; return $n }
+    if ($c -is [System.Collections.IList]) { return $c.Count }
+    return 0
+}
+
+# Trims $S (in place) until its comment body fits the budget; $Measure returns the body's length now. Returns @{ trimmed; before; after; dropped }
+# (dropped: entries removed per collection). One entry of each collection per round, in the order of StateTrimOrder, so no collection is emptied while
+# another keeps its old entries. A state that still does not fit with those three empty is refused (GitHub would answer 422): nothing else is dropped.
+function Limit-StateBudget($S, [scriptblock]$Measure) {
+    $before = & $Measure; $len = $before; $dropped = @{}
+    $room = 400   # (kept free for the record of the trim itself)
+    # (trimmed only over the budget itself, down to the budget less the room: a state at the budget is not trimmed again for the record it carries)
+    while ($len -gt $script:StateBudget -or ($dropped.Count -gt 0 -and $len -gt ($script:StateBudget - $room))) {
+        # a round drops $step entries of each collection. Sized from the average characters per entry (an over-estimate: the state's other keys
+        # count too), so a round never drops more than the excess needs; the last rounds go one entry at a time. Each measure serializes the whole state.
+        $entries = 0; foreach ($k in $script:StateTrimOrder) { $entries += Get-StateEntryCount $S $k }
+        if ($entries -eq 0) { break }
+        $step = [Math]::Max(1, [int][Math]::Floor(($len - ($script:StateBudget - $room)) / ([Math]::Max(1, $len / $entries) * 3)))
+        $any = $false
+        foreach ($k in $script:StateTrimOrder) {
+            for ($i = 0; $i -lt $step; $i++) {
+                if (-not (Remove-OldestStateEntry $S $k)) { break }
+                $dropped[$k] = 1 + $(if ($dropped.ContainsKey($k)) { $dropped[$k] } else { 0 }); $any = $true
+            }
+        }
+        if (-not $any) { break }
+        $len = & $Measure
+    }
+    if ($dropped.Count -gt 0) {
+        # the record (journal.trims, the last 5, and the gateway log): when, from how many characters, what was dropped
+        if (-not (Test-Has $S 'journal')) { $S.journal = @{ keys = @(); count = 0 } }
+        $prev = @(if (Test-Has $S.journal 'trims') { $S.journal.trims })
+        $S.journal.trims = @($prev + @(@{ at = (ConvertTo-Iso (Get-UtcNow)); before = $before; dropped = $dropped }) | Select-Object -Last 5)
+        [Console]::Error.WriteLine("state of #$($S.item) over the $($script:StateBudget)-character budget ($before): dropped $(($dropped.Keys | Sort-Object | ForEach-Object { "$_ x$($dropped[$_])" }) -join ', ')")
+        $len = & $Measure
+    }
+    if ($len -gt $script:StateBudget) { Reject 10 'state-too-large' "the state of item $($S.item) is $len characters after trimming promote_health, flow and lineage; the budget is $($script:StateBudget)" }
+    return @{ trimmed = ($dropped.Count -gt 0); before = $before; after = $len; dropped = $dropped }
+}
+
+# Reads the state, applies $Mutate (called with the holder), saves; on a state-conflict it reads again and applies again, up to $Tries times, then the
+# conflict is thrown. $Mutate must be repeatable: it runs on a fresh read each time. Returns the holder that was saved.
+function Update-State([int]$Item, [scriptblock]$Mutate, [int]$Tries = 3) {
+    for ($i = 1; ; $i++) {
+        $f = Get-State $Item
+        & $Mutate $f
+        try { Save-State $Item $f; return $f }
+        catch [FactoryReject] { if ($_.Exception.Code -ne 'state-conflict' -or $i -ge $Tries) { throw } }
+    }
+}
+
+# Writes the state comment. Refused (FactoryReject 11 'state-conflict') when the comment changed since it was read: it is read again right before the
+# PATCH and its rev compared with the one the holder was read at. The caller reads the state again and retries (Update-State), or reports. GitHub has
+# no conditional PATCH for comments, so this narrows the window of a stale write; it cannot close it.
 function Save-State([int]$Item, $Holder) {
     $s = $Holder.state; $s.item = $Item; $s.updated = ConvertTo-Iso (Get-UtcNow)
-    $json = $s | ConvertTo-Json -Depth 12
+    $readRev = if ($Holder.ContainsKey('rev')) { [int]$Holder.rev } else { $null }   # (a holder without rev, such as a cached read, is written as before)
+    if ($Holder.commentId -and $null -ne $readRev) {
+        $cur = Invoke-Gh -Path "$(Get-RepoPath)/issues/comments/$($Holder.commentId)" -Allow 404
+        if (-not ($cur -is [hashtable] -and $cur.ContainsKey('status'))) {
+            $cm = [regex]::Match("$($cur.body)", '(?s)```json\s*(.*?)\s*```')
+            $curRev = if ($cm.Success) { try { Get-StateRev ($cm.Groups[1].Value | ConvertFrom-Json -AsHashtable -DateKind String) } catch { $readRev } } else { $readRev }
+            if ($curRev -ne $readRev) { Reject 11 'state-conflict' "the state of item $Item changed since it was read (revision $readRev, now $curRev); read it again and retry" @{ item = $Item; readRev = $readRev; currentRev = $curRev; retryAfterSeconds = 1 } }
+        }
+    }
+    $s.rev = $(if ($null -ne $readRev) { $readRev } else { Get-StateRev $s }) + 1
     $summary = "state of #$Item for ``$((Get-Cfg).name)`` (machine-read; edits by others are ignored)"
-    $body = "$(Get-StateMarker)`n$summary`n`n``````json`n$json`n```````n"
+    $mk = { "$(Get-StateMarker)`n$summary`n`n``````json`n$($s | ConvertTo-Json -Depth 12)`n```````n" }
+    $body = & $mk
+    if ($body.Length -gt $script:StateBudget) { [void](Limit-StateBudget $s { (& $mk).Length }); $body = & $mk }
     # a state comment that is gone since it was read (deleted by a person) is written again as a new one, never an error
     if ($Holder.commentId) {
         $r0 = Invoke-Gh -Method PATCH -Path "$(Get-RepoPath)/issues/comments/$($Holder.commentId)" -Body @{ body = $body } -Allow 404
@@ -217,6 +320,7 @@ function Save-State([int]$Item, $Holder) {
         $Holder.commentId = $r.id
         $Holder.updatedAt = $(if ($r -and $r.PSObject.Properties['updated_at']) { Get-Stamp $r.updated_at } else { '' })
     }
+    $Holder.rev = [int]$s.rev
 }
 
 function Get-Park($State) {
