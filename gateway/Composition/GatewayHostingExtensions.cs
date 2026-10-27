@@ -58,6 +58,17 @@ static class GatewayHostingExtensions
         // the test switch keep their place; the read of the generations starts with the host. Until it succeeds no session credential is accepted.
         sp.GetRequiredService<RevocationService>();
         sp.GetRequiredService<LeadershipService>().RegisterStopping();
+        // the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5) were loaded when AddGatewayRuntimes registered them; a broken one keeps /ready at 503
+        foreach (var pe in sp.GetRequiredService<PromptStore>().Errors) Console.Error.WriteLine($"prompts: {pe}");
+        // the revocation itself is RevocationService.RevokeAsync: a runtime revokes a failed execution's name through it
+        var runtimes = sp.GetRequiredService<RuntimeRegistry>(); var revocation = sp.GetRequiredService<RevocationService>();
+        if (runtimes.CaeJob is { } caeJob) caeJob.Revoke = async n => { await revocation.RevokeAsync(n, "runtime"); };
+        if (runtimes.Cursor is { } cursor) cursor.Revoke = async n => { await revocation.RevokeAsync(n, "runtime"); };
+        if (runtimes.Copilot is { } copilot) copilot.Revoke = async n => { runtimes.CopilotCodes.Forget(n); await revocation.RevokeAsync(n, "runtime"); };
+        if (runtimes.Octopus is { } octopus) octopus.Revoke = async n => { await revocation.RevokeAsync(n, "runtime"); };
+        // the plant manager on demand (api.copilot.manager): registered where it is enabled, ticked by ManagerCopilotService; resolved here so that its
+        // start-up line (copilot-config) is written at the start, not at the first use
+        sp.GetService<ManagerCopilot>();
         return app;
     }
 }

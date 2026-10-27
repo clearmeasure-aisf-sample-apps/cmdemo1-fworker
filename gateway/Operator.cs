@@ -25,8 +25,7 @@ sealed partial class Plant
     // self-merged releases, newest last, at most ReleaseCap; counted per UTC day against operator.maxSelfMergesPerDay
     readonly List<(DateTime At, int Pr, string Version)> opReleases = new();
     public const int ReleaseCap = 100;
-    static readonly Regex VersionRx = new(@"^[0-9]{1,6}(\.[0-9]{1,9}){1,3}\z", RegexOptions.CultureInvariant);
-    public static bool ValidVersion(string v) => VersionRx.IsMatch(v);
+    public static bool ValidVersion(string v) => ReleaseRecordPolicy.ValidVersion(v);
 
     public string ActiveOperator() { lock (gate) return opSlot?.Name ?? ""; }
     public void OperatorHeard(string name) { lock (gate) { if (opSlot?.Name == name) opHeard = DateTime.UtcNow; } }
@@ -123,7 +122,7 @@ sealed partial class Plant
 
     // the hourly cap of the session's own budget grants, and the cap on release records written in one day
     readonly List<(DateTime At, int N)> opGrants = new();
-    public const int GrantsPerHour = 12, ReleaseWritesPerDay = 20;
+    public const int GrantsPerHour = 12, ReleaseWritesPerDay = ReleaseRecordPolicy.WritesPerDay;
     public bool OperatorGrant(int n)
     {
         lock (gate)

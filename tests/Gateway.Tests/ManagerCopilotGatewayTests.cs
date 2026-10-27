@@ -83,7 +83,7 @@ public sealed class ManagerCopilotGatewayTests(ManagerCopilotOnGateway gw) : ICl
     public async Task McpTools_AskTheManagerWhetherATaskIsLive_AndEndIt()
     {
         if (!StubPwsh.Supported) return;
-        var tools = GatewayMcp.Tools;
+        var tools = gw.Host.Services.GetRequiredService<McpTools>();
         Assert.NotNull(tools);
         Assert.NotNull(tools!.ManagerLive);
         Assert.NotNull(tools.ManagerEnd);
@@ -167,7 +167,7 @@ public sealed class ManagerCopilotOffTests(TwoPortGateway gw) : IClassFixture<Tw
     public async Task McpTools_ManagerHooksAnswerNoTask()
     {
         if (!StubPwsh.Supported) return;
-        var tools = GatewayMcp.Tools;
+        var tools = gw.Host.Services.GetRequiredService<McpTools>();
         Assert.NotNull(tools);
         Assert.False(tools!.ManagerLive!("mgr-cop-000000"));
         await tools.ManagerEnd!("mgr-cop-000000", "session-end");

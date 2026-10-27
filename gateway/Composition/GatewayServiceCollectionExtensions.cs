@@ -94,6 +94,8 @@ static class GatewayServiceCollectionExtensions
         // the generations themselves, for the authentication middleware (gateway/Http/GatewayAuthMiddleware.cs, C6); the same instance the service raises
         services.AddSingleton(revocations);
         c.Revocations = revocations; c.RuntimeNonces = runtimeNonces;
+        // the credential rules that depend on the configuration (the environment, auth.legacyKinds, the keeper): for the middleware and the endpoints that mint
+        services.AddSingleton(c.Credentials);
         return services;
     }
 
@@ -121,7 +123,7 @@ static class GatewayServiceCollectionExtensions
         var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, cursorPrompts, owners: ownerVerbs, settle: settleClient) : null;
         var cursorManager = cursorRuntime != null
             ? new RuntimeManager(runtimeSettings, cursorRuntime, runtimeNonces,
-                cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", Auth.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
+                cursorSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "cursor-cloud-agent", c.Credentials.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
             : null;
         // the Copilot cloud agent (gateway/Runtimes/CopilotCloudRuntime.cs, docs/design/copilot-cloud-agent.md): api.copilot.enabled, a token
         // (COPILOT_TASKS_TOKEN) and the gateway's public URL; the task's prompt carries a one-time code for the worker's r1 (copilotCodes)
@@ -134,7 +136,7 @@ static class GatewayServiceCollectionExtensions
             ? new CopilotCloudRuntime(copilotSettings, copilotCodes, copilotPrompts, itemPr: itemPr, owners: ownerVerbs, settle: settleClient) : null;
         var copilotManager = copilotRuntime != null
             ? new RuntimeManager(runtimeSettings, copilotRuntime, runtimeNonces,
-                copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", Auth.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
+                copilotSettings.Limits((name, item, phase, expires) => Auth.RoleToken(tokenSecret, new RoleClaims(name, "worker", "api", "copilot-cloud-agent", c.Credentials.Environment, expires, item, "", RuntimeRegistry.PhaseSlug(phase)), revocations.Of(name))))
             : null;
         // the Octopus runbook runtime (gateway/Runtimes/OctopusRunbookRuntime.cs, docs/design/octopus-runbook-runtime.md): runtimes.octopus.enabled and the
         // key of the service account that may run the runbooks of that one project (OCTOPUS_RUNBOOK_API_KEY); off without the key
@@ -262,7 +264,7 @@ static class GatewayServiceCollectionExtensions
         services.AddGatewayCloudOwners(c);
         // C5d: the two loops Program.cs started last, after Build(), in that order: the on-demand manager's tick, then the MCP session sweep
         services.AddGatewayManagerCopilot(c);
-        services.AddHostedService(sp => new McpSessionSweeper(() => c.McpSessions, McpSessionSweeper.DefaultInterval));
+        services.AddHostedService(sp => new McpSessionSweeper(() => sp.GetRequiredService<WorkerSessions>(), McpSessionSweeper.DefaultInterval));
         return services;
     }
 
@@ -316,7 +318,7 @@ static class GatewayServiceCollectionExtensions
             var revocationService = sp.GetRequiredService<RevocationService>();
             var prompts = sp.GetRequiredService<PromptStore>();   // the prompt files AddGatewayRuntimes registered
             var manager = new ManagerCopilot(mgrCopSettings, copilotRuntime, copilotCodes, sp.GetRequiredService<Plant>(),
-                (name, expires) => Auth.RoleToken(gw.TokenSecret, new RoleClaims(name, "manager", "api", "copilot-cloud-agent", Auth.Environment, expires, 0, "", "patrol"), revocations.Of(name)),
+                (name, expires) => Auth.RoleToken(gw.TokenSecret, new RoleClaims(name, "manager", "api", "copilot-cloud-agent", c.Credentials.Environment, expires, 0, "", "patrol"), revocations.Of(name)),
                 code =>
                 {
                     var bp = prompts.ByPath("bootstrap/copilot-manager.md");
@@ -333,12 +335,42 @@ static class GatewayServiceCollectionExtensions
     }
 
     // The MCP server at /mcp (gateway/Mcp/, docs/design/agents-roles-launch.md 6): stateless Streamable HTTP; the middleware authenticates it like /api.
-    // Its tools (GatewayMcp.Tools) are set in Program.cs once the prompts and the worker sessions exist (C5d and C8 move them).
-    public static IServiceCollection AddGatewayMcp(this IServiceCollection services)
+    // Its tools (McpTools, which GatewayMcp.Tools held as a static until C8) and the worker sessions are singletons made when first resolved: the sweep
+    // of the sessions resolves them at its first pass, the tools at the first call, by when the routes they call in process are mapped (InProcess).
+    public static IServiceCollection AddGatewayMcp(this IServiceCollection services, GatewayComposition c)
     {
         services.AddMcpServer(o => o.ServerInfo = new() { Name = "fworker", Version = "1" })
             .WithHttpTransport(o => o.Stateless = true)
             .WithListToolsHandler(GatewayMcp.ListTools).WithCallToolHandler(GatewayMcp.CallTool);
+        var gw = c.Gateway; var messaging = c.Messaging; var timing = c.Timing;
+        // the worker sessions of r1 holders at /mcp (gateway/Mcp/WorkerSessions.cs): registered with the plant at their first call, idle ones end
+        services.AddSingleton(sp =>
+        {
+            var plant = sp.GetRequiredService<Plant>(); var runtimes = sp.GetRequiredService<RuntimeRegistry>();
+            var cursorManager = runtimes.Cursor; var copilotManager = runtimes.Copilot;
+            return new WorkerSessions(plant)
+            {
+                IdleMinutes = timing.McpIdleMinutes,
+                // a worker session that ends (session_end, idle, revoke, the plant closing its stream) stops what runs it: the Cursor agent is cancelled and deleted
+                OnEnded = async (name, reason) =>
+                {
+                    if (cursorManager != null && cursorManager.IsRuntimeWorker(name)) await cursorManager.Deprovision(name, reason);
+                    if (copilotManager != null && copilotManager.IsRuntimeWorker(name)) await copilotManager.Deprovision(name, reason);
+                }
+            };
+        });
+        // the tools call the endpoints in process, found through the container's EndpointDataSource (gateway/Mcp/InProcess.cs)
+        services.AddSingleton(sp =>
+        {
+            var plant = sp.GetRequiredService<Plant>(); var revocations = sp.GetRequiredService<Revocations>(); var ownerMode = gw.OwnerMode; var tokenSecret = gw.TokenSecret;
+            var managerCopilot = sp.GetService<ManagerCopilot>();   // null where the on-demand manager is not enabled
+            return new McpTools(new InProcess(sp.GetRequiredService<EndpointDataSource>(), sp, sp.GetRequiredService<AdmissionService>().Admit), sp.GetRequiredService<WorkerSessions>(),
+                t => Auth.VerifyItemToken(tokenSecret, t, revocations), (name, item) =>
+                {
+                    if (messaging.Enabled && ownerMode) plant.Touch(name);
+                    if (ownerMode && item > 0) { try { plant.NoteProgress(name, new[] { (item, DateTime.UtcNow, "work") }); } catch { } }
+                }) { Prompts = sp.GetRequiredService<PromptStore>(), ManagerLive = n => managerCopilot?.Live(n) == true, ManagerEnd = (n, why) => managerCopilot?.End(n, why) ?? Task.CompletedTask };
+        });
         return services;
     }
 }

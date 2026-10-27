@@ -36,11 +36,11 @@ sealed class OperatorReleaseEndpoints(Plant plant, Runner runner, RevocationServ
     // is always recorded, also beyond the limit (the record is the truth; the next release-check refuses). Idempotent per pull request.
     async Task<IResult> Record(HttpContext c)
     {
-        if (revocations.Off) return Fail(403, "releases-off", "this gateway runs with FACTORY_TEST_SKIP_REVOCATIONS: it cannot record a release", 30);
+        if (ReleaseRecordPolicy.CheckOn(revocations.Off) is { } off) return Fail(off.Status, off.Code, off.Reason, off.Exit);
         var (text, tooLarge) = await ReadBody(c, 4096);
         JsonObject body; try { body = tooLarge ? new JsonObject() : Messenger.ParseObject(text); } catch { body = new JsonObject(); }
-        if (!(body["pr"] is JsonValue pv && pv.TryGetValue<int>(out var pr) && pr >= 1 && pr <= 999_999_999) || body["version"]?.ToString() is not { } version || !Plant.ValidVersion(version) || body.Count != 2)
-            return Fail(400, "usage", "the body is { \"pr\": <pull request number>, \"version\": \"<the version /_build shows, digits and dots>\" }", 2);
+        if (ReleaseRecordPolicy.ParseBody(body) is not { } parsed) return Fail(400, "usage", ReleaseRecordPolicy.UsageReason, 2);
+        var (pr, version) = parsed;
         var now = DateTime.UtcNow;
         // a cap on the writes of one day
         await releaseGate.WaitAsync();
@@ -48,7 +48,7 @@ sealed class OperatorReleaseEndpoints(Plant plant, Runner runner, RevocationServ
         {
             if (!plant.HasRelease(pr))
             {
-                if (plant.ReleaseRecordsToday() >= Plant.ReleaseWritesPerDay) return Results.Json(new { ok = false, code = "record-limit", reason = $"{Plant.ReleaseWritesPerDay} releases are recorded today; no more are written", retryAfterSeconds = 3600, exit = 20 }, statusCode: 429);
+                if (!ReleaseRecordPolicy.WriteAllowed(false, plant.ReleaseRecordsToday())) return Results.Json(new { ok = false, code = "record-limit", reason = $"{Plant.ReleaseWritesPerDay} releases are recorded today; no more are written", retryAfterSeconds = 3600, exit = 20 }, statusCode: 429);
                 var (code, _) = await runner.RunAsync("operator-release", new JsonObject { ["day"] = OperatorReleaseLoader.Day(now), ["pr"] = pr, ["version"] = version }.ToJsonString(), TimeSpan.FromSeconds(120));
                 if (code != 0) return Results.Json(new { ok = false, code = "not-recorded", reason = "the release could not be written to GitHub, so it is not counted; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
                 plant.AddRelease(now, pr, version);

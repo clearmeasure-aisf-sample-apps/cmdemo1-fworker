@@ -5,7 +5,7 @@
 // It is middleware, so an MCP tool's in-process call (gateway/Mcp/InProcess.cs) never passes it: such a call is authenticated at /mcp and admitted
 // by InProcess through the same AdmissionService. A guard an in-process call must meet therefore belongs in an endpoint filter, never here.
 sealed class GatewayAuthMiddleware(RequestDelegate next, GatewayOptions gateway, MessagingSettings messaging, GatewayLeader leader, Revocations revocations,
-    RevocationService revocationService, PublicBase publicBase, AdmissionService admission)
+    RevocationService revocationService, PublicBase publicBase, AdmissionService admission, CredentialPolicy credentials)
 {
     // Container mode (FACTORY_SINGLE_PORT): one listener for the API and the webhook (GatewayHostingExtensions); the routes are told apart by path
     readonly int apiPort = gateway.SinglePort > 0 ? gateway.SinglePort : gateway.ApiPort;
@@ -25,7 +25,7 @@ sealed class GatewayAuthMiddleware(RequestDelegate next, GatewayOptions gateway,
         if (port == hookPort && hookPort != apiPort && !(Is(path, "/webhooks/github") && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
         // a process that a newer one superseded (Leader.cs) serves nothing any more but its status to the operator: calls and new streams are answered
         // 503 gateway-replaced, so the client tries again and reaches the new process; a webhook too (the new process's sweep catches up)
-        if (leader.Replaced && (Is(path, "/webhooks/github") || Under(path, "/qc/") || ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) || (Under(path, "/api/") && !((Is(path, "/api/v1/status") || Is(path, "/api/v1/dashboard")) && Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
+        if (leader.Replaced && (Is(path, "/webhooks/github") || Under(path, "/qc/") || ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) || (Under(path, "/api/") && !((Is(path, "/api/v1/status") || Is(path, "/api/v1/dashboard")) && credentials.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
         {
             ctx.Response.StatusCode = 503;
             await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "gateway-replaced", reason = "this gateway process was replaced by a newer one; try again", retryAfterSeconds = 5, exit = 20 });
@@ -38,12 +38,12 @@ sealed class GatewayAuthMiddleware(RequestDelegate next, GatewayOptions gateway,
         var isMcp = port == apiPort && ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase);
         if (port == apiPort && (Under(path, "/api/") || isMcp))
         {
-            var p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
+            var p = credentials.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
             if (p?.Kind != "admin" && !revocationService.IsLoaded)
             {
                 await Task.WhenAny(revocationService.Loaded, Task.Delay(TimeSpan.FromSeconds(20), ctx.RequestAborted));
                 if (!revocationService.IsLoaded) { ctx.Response.StatusCode = 503; await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "starting", reason = "the gateway is still reading the revoked credentials; try again", retryAfterSeconds = 5, exit = 20 }); return; }
-                p = Auth.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
+                p = credentials.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations);
             }
             if (p == null) { await HttpResultsX.Refuse(ctx, 401, "unauthorized", "missing, malformed, forged or expired credential"); return; }
             ctx.Items["principal"] = p;

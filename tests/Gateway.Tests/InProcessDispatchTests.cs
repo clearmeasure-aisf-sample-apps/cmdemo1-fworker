@@ -8,7 +8,7 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// The gateway's own InProcess (the one GatewayMcp.Tools holds, with the gateway's Admit), reached the way a session reaches it: an MCP
+/// The gateway's own InProcess (the one the container's McpTools holds, with the gateway's Admit), reached the way a session reaches it: an MCP
 /// tools/call at /mcp. InProcessPatternTests builds an InProcess of its own; this pins the one Program.cs wires (C5a: it finds the endpoints
 /// through EndpointDataSource instead of the WebApplication).
 /// </summary>

@@ -12,7 +12,7 @@ using System.Text.Json.Nodes;
 //   manager   "m1.<name>.<generation>.<hmac>" the supervisor: three read verbs (worker-messaging.md 4.6) and the plant manager's flow verb
 //             manager-action (docs/design/plant-manager.md 10e), which never merges, approves, records a verdict or clears a hold.
 //   operator  "o1.<name>.<generation>.<hmac>" the factory operator SESSION (Operator.cs, docs/design/operator-session.md): not the admin token. It
-//             calls no verb, mints and revokes nothing, and is admitted only at the endpoints that name it (Program.cs, Admitted and OperatorActive):
+//             calls no verb, mints and revokes nothing, and is admitted only at the endpoints that name it (gateway/Endpoints/, the Admitted and OperatorActive guards):
 //             messaging, the questions, the supervisor's budget, its release checks, a worker's capacity, drain and resume, and the read-only metrics.
 // The secret never leaves the gateway host. Design: docs/design/plant-manager.md section 5.
 // Revocation (operator, POST /workers/{name}/revoke): tokens are stateless, so each name has a generation, 0 until its first revocation. Every
@@ -87,56 +87,12 @@ sealed class Revocations
     public int Raise(string name, int to) => gen.AddOrUpdate(name, to, (_, old) => Math.Max(old, to));
 }
 
+// The token formats and their checks that need only a secret. What depends on the gateway's configuration is CredentialPolicy (the environment,
+// auth.legacyKinds and the keeper, once statics here), and the verb tables and AuthorizeVerb are VerbPolicy (gateway/Policies/, task C8).
 static class Auth
 {
-    public static readonly HashSet<string> OwnerVerbs = new()
-    {
-        "get-item", "append-body", "comment", "accept", "release", "claim-item", "record-review", "complete", "open-pr", "update-pr", "pr-checks",
-        "wait-for-checks", "validation-verdict", "merge", "model-tier", "get-delivery", "private-build", "publish-demo"
-    };
-    public static readonly HashSet<string> InspectorVerbs = new() { "get-item", "inspect-facts", "approve-pr", "accept", "pr-checks", "model-tier" };
-    public static readonly HashSet<string> WorkerVerbs = new() { "my-items" };
-    // A verb set of its own (cloud-worker-runtimes.md 2.6): a one-hour GitHub installation token for the work-orders repository, contents write
-    // only. Callable only by an item token of role owner minted for a runtime worker (the "rt" claim, from its w2): never by a local worker, an
-    // inspector, a QC session, the supervisor or the operator session.
-    public static readonly HashSet<string> GitCredentialVerbs = new() { "git-credential" };
-    // The supervisor's verbs. The body keeps only the fields listed for the verb, whatever the caller sent.
-    // manager-action is the plant manager's flow verb (docs/design/plant-manager.md 10e): one action per call, from ManagerItemActions (a rule script,
-    // Verbs.Manager.ps1) or ManagerNameActions (the gateway's own plant). Its `by` is the credential's name, never the body's. The verbs that decide
-    // about the work itself are never in this list: merge, approve-pr, validation-verdict, clear-hold, complete, move-next, claim-item, accept.
-    public static readonly HashSet<string> ManagerVerbs = new() { "get-item", "pr-checks", "get-delivery", "manager-action" };
-    static readonly Dictionary<string, string[]> ManagerBodyFields = new()
-    {
-        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["get-delivery"] = ["item", "commit"],
-        ["manager-action"] = ["item", "action", "policy", "reason", "worker", "level"]
-    };
-    // The backlog keeper (Keeper.cs, docs/design/backlog-keeper.md): two read verbs, the board read, and its five verbs, which never merge, approve,
-    // record a verdict, clear a hold, claim or move an existing card. Its `by` is the credential's name, never the body's.
-    public static KeeperSettings Keeper = new();
-    public static readonly HashSet<string> KeeperVerbs = new() { "get-item", "pr-checks", "backlog", "amend-criteria", "split-item", "create-item", "set-priority", "link-dependency" };
-    static readonly Dictionary<string, string[]> KeeperBodyFields = new()
-    {
-        ["get-item"] = ["item"], ["pr-checks"] = ["item", "pr", "sha"], ["backlog"] = [],
-        ["amend-criteria"] = ["item", "criterion", "replacement", "follow_up", "unpark", "policy", "reason"],
-        ["split-item"] = ["item", "children", "chain", "policy", "reason"],
-        ["create-item"] = ["title", "body", "labels", "priority", "pin", "depends_on", "policy", "reason"],
-        ["set-priority"] = ["item", "level", "policy", "reason"],
-        ["link-dependency"] = ["item", "depends_on", "remove", "policy", "reason"]
-    };
     public static string KeeperToken(string secret, string name, int generation, int rev = 0) => rev == 0
         ? $"k1.{name}.{generation}.{Mac(secret, $"keeper:{name}:{generation}")}" : $"k1.{name}.{generation}-{rev}.{Mac(secret, $"keeper:{name}:{generation}:{rev}")}";
-    public static readonly HashSet<string> ManagerItemActions = new() { "unpark", "release-owner", "pin", "unpin", "requeue", "prioritize", "rerun-failed" };
-    public static readonly HashSet<string> ManagerNameActions = new() { "drain", "resume", "restart-session" };
-    // Role "qc": the session that runs a PR's environment. No release, no merge, no comment, no approval: only its own job.
-    public static readonly HashSet<string> QcVerbs = new() { "get-item", "accept", "qc-job", "qc-progress", "qc-report", "qc-fail", "qc-heartbeat", "qc-stopped" };
-    // Principal "qc-click": a person who holds a link. Not a credential: the /qc handlers build it after checking the link, and /api/v1/verbs never yields one.
-    public static readonly HashSet<string> QcClickVerbs = new() { "qc-view", "qc-request", "qc-reset", "qc-teardown", "qc-touch" };
-
-    // auth.legacyKinds (agents-roles-launch.md 4, 15 step 10): while true (the source default) the per-role kinds w1, w2, m1, o1, k1 and i1 are
-    // accepted beside r1; false refuses them at every endpoint. The admin token, q1 links and n1 nonces are not role credentials and stay.
-    public static bool LegacyKinds = true;
-    // the gateway's environment (FACTORY_ENVIRONMENT): an r1 names the environment it was minted for and is refused by any other
-    public static string Environment = "tdd";
     public static readonly HashSet<string> Roles = new(StringComparer.Ordinal) { "seat", "worker", "inspector", "qc", "manager", "operator", "keeper", "owner" };
     public static readonly HashSet<string> Modes = new(StringComparer.Ordinal) { "manual", "hosted", "api" };
 
@@ -165,12 +121,12 @@ static class Auth
         _ => ("", "")
     };
 
-    static byte[] Key(string secret) => Encoding.UTF8.GetBytes(secret);
-    static string Hex(byte[] b) => Convert.ToHexString(b).ToLowerInvariant();
-    static string Mac(string secret, string text) => Hex(HMACSHA256.HashData(Key(secret), Encoding.UTF8.GetBytes(text)));
-    static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-    static byte[] UnB64(string s) { s = s.Replace('-', '+').Replace('_', '/'); return Convert.FromBase64String(s + new string('=', (4 - s.Length % 4) % 4)); }
-    static bool Same(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
+    internal static byte[] Key(string secret) => Encoding.UTF8.GetBytes(secret);
+    internal static string Hex(byte[] b) => Convert.ToHexString(b).ToLowerInvariant();
+    internal static string Mac(string secret, string text) => Hex(HMACSHA256.HashData(Key(secret), Encoding.UTF8.GetBytes(text)));
+    internal static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    internal static byte[] UnB64(string s) { s = s.Replace('-', '+').Replace('_', '/'); return Convert.FromBase64String(s + new string('=', (4 - s.Length % 4) % 4)); }
+    internal static bool Same(string a, string b) => CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(a), Encoding.UTF8.GetBytes(b));
     public static bool ValidName(string n) => n.Length is > 0 and <= 40 && n.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_');
     public static bool ValidRuntime(string s) => s.Length is > 0 and <= 20 && s.All(ch => char.IsAsciiLetterLower(ch) || char.IsAsciiDigit(ch) || ch == '-') && s != "local";
     public static bool ValidTag(string s) => s.Length is > 0 and <= 60 && s.All(ch => char.IsAsciiLetterLower(ch) || char.IsAsciiDigit(ch) || ch is '.' or '_' or '-');
@@ -214,48 +170,6 @@ static class Auth
         return $"i1.{p}.{Mac(secret, p)}";
     }
 
-    // Returns null for an unknown, malformed, forged or expired credential.
-    public static Principal? Authenticate(string? header, string adminToken, string secret, MessagingSettings msg, Revocations rev)
-    {
-        if (string.IsNullOrEmpty(header) || !header.StartsWith("Bearer ")) return null;
-        var t = header[7..];
-        if (Same(t, adminToken)) return new Principal("admin");
-        if (secret.Length == 0) return null;
-        if (t.StartsWith("r1.")) return VerifyRoleToken(secret, t, msg, rev);
-        if (!LegacyKinds) return null;
-        if (t.StartsWith("w1."))
-        {
-            var last = t.LastIndexOf('.'); if (last <= 3) return null;
-            var name = t[3..last]; if (!ValidName(name) || msg.Reserved.Contains(name)) return null;
-            return Same(t, WorkerToken(secret, name, rev.Of(name))) ? new Principal("worker", name) : null;
-        }
-        if (t.StartsWith("w2."))
-        {
-            var parts = t.Split('.'); if (parts.Length != 5) return null;
-            var (name, runtime) = (parts[1], parts[2]);
-            if (!ValidName(name) || msg.Reserved.Contains(name) || !ValidRuntime(runtime) || !long.TryParse(parts[3], out var x) || parts[3] != x.ToString()) return null;
-            if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds()) return null;
-            return Same(t, WorkerToken2(secret, name, runtime, x, rev.Of(name))) ? new Principal("worker", name, Expires: x, Runtime: runtime) : null;
-        }
-        if (t.StartsWith("m1."))
-        {
-            var parts = t.Split('.'); if (parts.Length != 4 || !msg.ManagerEnabled || !msg.ManagerNames.Contains(parts[1])) return null;
-            return Same(t, ManagerToken(secret, parts[1], msg.TokenGeneration, rev.Of(parts[1]))) ? new Principal("manager", parts[1]) : null;
-        }
-        if (t.StartsWith("o1."))
-        {   // only while operator.enabled, only a name of operator.allowedNames, bound to operator.tokenGeneration and the name's revocation generation
-            var parts = t.Split('.'); if (parts.Length != 4 || !msg.OperatorEnabled || !msg.OperatorNames.Contains(parts[1])) return null;
-            return Same(t, OperatorToken(secret, parts[1], msg.OperatorTokenGeneration, rev.Of(parts[1]))) ? new Principal("operator", parts[1]) : null;
-        }
-        if (t.StartsWith("k1."))
-        {   // only while keeper.enabled, only a name of keeper.allowedNames, bound to keeper.tokenGeneration and the name's revocation generation
-            var parts = t.Split('.'); if (parts.Length != 4 || !Keeper.Enabled || !Keeper.Names.Contains(parts[1])) return null;
-            return Same(t, KeeperToken(secret, parts[1], Keeper.TokenGeneration, rev.Of(parts[1]))) ? new Principal("keeper", parts[1]) : null;
-        }
-        if (t.StartsWith("i1.")) return VerifyItemToken(secret, t, rev);
-        return null;
-    }
-
     // An i1 (an item token): MAC, expiry and the holder's revocation generation. Also used by /mcp for the item token it keeps for a worker
     // session (gateway/Mcp/WorkerSessions.cs): that token is the gateway's own, so auth.legacyKinds does not apply to it there.
     public static Principal? VerifyItemToken(string secret, string t, Revocations rev)
@@ -270,27 +184,6 @@ static class Auth
             // minted before the last revocation of its worker name: refused with everything else of that name
             if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(j["w"]!.ToString())) return null;
             return new Principal("item", j["w"]!.ToString(), j["i"]!.GetValue<int>(), j["r"]!.ToString(), j["a"]!.ToString(), x, Runtime: j["rt"]?.ToString() ?? "");
-        }
-        catch { return null; }
-    }
-
-    // An r1: MAC, expiry, environment, a known role and mode, a valid unreserved name and the name's revocation generation. Null otherwise.
-    public static Principal? VerifyRoleToken(string secret, string t, MessagingSettings msg, Revocations rev)
-    {
-        if (t.Length > 4000) return null;
-        var parts = t.Split('.'); if (parts.Length != 3 || parts[0] != "r1") return null;
-        if (!Same(parts[2], Mac(secret, "role:" + parts[1]))) return null;
-        try
-        {
-            var j = JsonNode.Parse(Encoding.UTF8.GetString(UnB64(parts[1])))!;
-            if (j["v"]?.GetValue<int>() != 1) return null;
-            var name = j["n"]!.ToString(); var role = j["r"]!.ToString(); var mode = j["m"]!.ToString(); var env = j["e"]!.ToString();
-            var x = j["x"]!.GetValue<long>();
-            if (x < DateTimeOffset.UtcNow.ToUnixTimeSeconds() || !ValidName(name) || msg.Reserved.Contains(name) || !Roles.Contains(role) || !Modes.Contains(mode)) return null;
-            if (!string.Equals(env, Environment, StringComparison.Ordinal)) return null;
-            if ((j["g"]?.GetValue<int>() ?? 0) != rev.Of(name)) return null;
-            return new Principal("role", name, j["i"]?.GetValue<int>() ?? 0, role, j["a"]?.ToString() ?? "", x, Runtime: mode == "manual" ? "" : mode == "api" ? (j["ag"]?.ToString() == "copilot-cloud-agent" ? "copilot-cloud" : "cursor-cloud") : "cae-job",
-                Phase: j["p"]?.ToString() ?? "", Mode: mode, Agent: j["ag"]?.ToString() ?? "", Env: env);
         }
         catch { return null; }
     }
@@ -312,50 +205,4 @@ static class Auth
         catch { return (null, "bad-link"); }
     }
 
-    // Authorizes one verb call and returns the (possibly rewritten) body, or a refusal. For non-admin callers the identity fields come from the
-    // credential, never from the body: a caller cannot name a different holder, item, assignment or kind.
-    public static (JsonObject? Body, string? Refusal) AuthorizeVerb(Principal p, string verb, JsonObject body)
-    {
-        if (p.Kind == "admin") return (body, null);
-        // an r1 calls no verb itself: its tools at /mcp act through the credential the gateway holds for its assignment (gateway/Mcp/)
-        if (p.Kind == "role") return (null, $"a role token cannot call '{verb}' directly: use the tools at /mcp");
-        if (p.Kind == "manager")
-        {
-            if (!ManagerVerbs.Contains(verb)) return (null, $"the manager role cannot call '{verb}'");
-            var kept = new JsonObject();
-            foreach (var f in ManagerBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
-            if (verb == "manager-action") kept["by"] = p.Name;
-            return (kept, null);
-        }
-        if (p.Kind == "keeper")
-        {
-            if (!KeeperVerbs.Contains(verb)) return (null, $"the keeper role cannot call '{verb}'");
-            var kept = new JsonObject();
-            foreach (var f in KeeperBodyFields[verb]) if (body[f] is { } v) kept[f] = v.DeepClone();
-            if (verb is not ("get-item" or "pr-checks" or "backlog")) kept["by"] = p.Name;
-            return (kept, null);
-        }
-        if (p.Kind == "operator") return (null, $"an operator session credential cannot call '{verb}': it calls no verb");
-        if (p.Kind == "worker")
-        {
-            if (!WorkerVerbs.Contains(verb)) return (null, $"a worker credential cannot call '{verb}': it can only register, receive assignments and ask my-items; acting on an item needs the item token delivered with an assignment");
-            body["holder"] = p.Name; return (body, null);
-        }
-        if (p.Kind == "qc-click")
-            return QcClickVerbs.Contains(verb) ? (body, null) : (null, $"a QC link cannot call '{verb}'");
-        if (GitCredentialVerbs.Contains(verb))
-        {
-            if (p.Role != "owner" || p.Runtime == "") return (null, $"'{verb}' is only for the owner of an item that a runtime worker holds");
-            if (body["item"]?.ToString() != p.Item.ToString()) return (null, $"this token is for item #{p.Item} only");
-            return (new JsonObject { ["item"] = p.Item, ["holder"] = p.Name, ["runtime"] = p.Runtime }, null);
-        }
-        var allowed = p.Role == "inspector" ? InspectorVerbs : p.Role == "owner" ? OwnerVerbs : p.Role == "qc" ? QcVerbs : new HashSet<string>();
-        if (!allowed.Contains(verb)) return (null, $"the {p.Role} role cannot call '{verb}'");
-        var item = body["item"]?.ToString();
-        if (item != p.Item.ToString()) return (null, $"this token is for item #{p.Item} only");
-        body["holder"] = p.Name;
-        if (p.Role == "qc") { body["assignment"] = p.Assignment; body["role"] = "qc"; if (verb == "accept") body["kind"] = "qc-env"; }
-        else if (verb == "accept") { body["assignment"] = p.Assignment; body["kind"] = p.Role == "inspector" ? "bot-job" : "own-item"; body["role"] = p.Role; }
-        return (body, null);
-    }
 }

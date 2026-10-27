@@ -138,7 +138,7 @@ static class QcUrl
     }
 }
 
-sealed class QcHub
+sealed class QcHub : IEndpointModule
 {
     readonly Runner runner; readonly Plant plant; readonly EventHub events; readonly QcSettings cfg; readonly string publicUrl, secret;
     readonly ConcurrentDictionary<int, QcMem> mems = new();
@@ -744,7 +744,7 @@ sealed class QcHub
         return claims!.Pr != pr ? (null, "bad-link") : (claims, null);
     }
 
-    public void Map(WebApplication app)
+    public void Map(IEndpointRouteBuilder app)
     {
         app.MapGet("/qc/{pr}", async (string pr, HttpContext c) => await View(c, pr));
         app.MapGet("/qc/{pr}/status", async (string pr, HttpContext c) =>
@@ -804,7 +804,7 @@ sealed class QcHub
         var body = new JsonObject { ["item"] = claims!.Item, ["pr"] = pr, ["sha"] = claims.Sha, ["from"] = ip, ["link_nonce"] = claims.Nonce };
         var principal = new Principal("qc-click", "", claims.Item, "", "", 0, pr, claims.Sha, ip);
         var verb = action == "start" ? "qc-request" : action == "reset" ? "qc-reset" : "qc-teardown";
-        var (authorized, refusal) = Auth.AuthorizeVerb(principal, verb, body);
+        var (authorized, refusal) = VerbPolicy.AuthorizeVerb(principal, verb, body);
         if (authorized == null) { await Reply(c, 403, "forbidden", refusal ?? "refused"); return; }
         (int Exit, JsonObject Out) r = action switch { "start" => await DoRequest(authorized, ip, false), "reset" => await DoReset(authorized, ip), _ => await DoTeardown(authorized) };
         var rc = r.Exit == 0 || r.Exit == 21 ? Str(r.Out["code"]) : Str(r.Out["code"]);

@@ -74,7 +74,7 @@ public sealed class AdmissionPinTests(AdmissionGateway gw) : IClassFixture<Admis
         reasons.Any(r => (string?)r?["code"] == "owner-mid-verb" && (string?)r?["worker"] == worker && (int?)r?["item"] == item && (string?)r?["verb"] == verb);
 
     // the InProcess the gateway gave its MCP tools (with its own Admit)
-    static InProcess GatewaysInProcess() => (InProcess)typeof(McpTools).GetField("api", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(GatewayMcp.Tools)!;
+    InProcess GatewaysInProcess() => (InProcess)typeof(McpTools).GetField("api", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(gw.Host.Services.GetRequiredService<McpTools>())!;
 
     [Fact]
     public async Task Presence_OverHttp_TheSessionsOwnCredentialsOnly_EvenWhenTheEndpointRefuses()

@@ -20,8 +20,8 @@ sealed class DemoEndpoints(GatewayOptions gateway, Plant plant, Runner runner) :
         IResult No(int status, string code, string reason, int exit) => Results.Text(JsonSerializer.Serialize(new { ok = false, verb = "publish-demo", code, reason, exit }), "application/json", Encoding.UTF8, status);
         var who = ctx.Caller().Who;
         var probe = new JsonObject { ["item"] = item };
-        var (authorized, refusal) = Auth.AuthorizeVerb(who, "publish-demo", probe);
-        if (authorized == null && who.Kind == "item") (authorized, refusal) = Auth.AuthorizeVerb(who, "validation-verdict", new JsonObject { ["item"] = item });
+        var (authorized, refusal) = VerbPolicy.AuthorizeVerb(who, "publish-demo", probe);
+        if (authorized == null && who.Kind == "item") (authorized, refusal) = VerbPolicy.AuthorizeVerb(who, "validation-verdict", new JsonObject { ["item"] = item });
         if (authorized == null)
         {
             Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"publish-demo\",\"caller\":\"{who.Kind}:{who.Name}\",\"refused\":{JsonSerializer.Serialize(refusal)}}}");
