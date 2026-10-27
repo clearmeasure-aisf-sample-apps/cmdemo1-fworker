@@ -496,8 +496,8 @@ function Verb_complete($a) {
         Set-Park $s 'development:awaiting-checks' $c.timing.awaitingChecksParkMinutes
         if (Test-OwnedClaim $s) { Save-State $n $st } else { $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n }
         $why = if ($ciWait) { "checks failed and the gateway applies the CI rule ($ciWait); it decides when that is over" } else { 'checks are still running' }
-        Add-Comment $n "PR #$($pr.number) $why; the gateway is watching them and will advance the item when green. The worker's job here is done."
-        Reject 21 'accepted-checks-pending' "pull request $why; the gateway is watching them and will advance the item when they are green. Your work here is done - stop now." @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
+        Add-Comment $n "PR #$($pr.number) $why; the gateway is watching them and will advance the item when green. Stay connected while the checks run."
+        Reject 21 'accepted-checks-pending' "pull request $why; the gateway is watching them and will advance the item when they are green. Stay connected while the checks run: do not end the session. The gateway advances the item when the checks are green." @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
     }
     $s.Remove('fix_forward_rounds'); $s.Remove('master_defect')
     if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
