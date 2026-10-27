@@ -1,7 +1,7 @@
 ---
 role: worker
 phase: development
-version: 4
+version: 5
 tools: [item_get, item_claim, item_record_review, item_complete, pr_open, pr_wait_checks, pr_checks, session_end]
 includes: [common/rules.md]
 ---
@@ -19,6 +19,7 @@ includes: [common/rules.md]
 5. Review the diff once: `item_record_review` with column "Development", role "reviewer", `text` = one line per criterion
    (`CRITERION: "<copied>" - YES|NO`) and the last line `REVIEW: COMPLETE` (or `REVIEW: FINDINGS`: fix, push, review again).
 6. `item_complete` with column "Development", the `review_ref`, comment "PR open, CI green - <PR link>. REVIEW: COMPLETE". exit 21
-   (`accepted-checks-pending`) is success. exit 10: fix the named cause, one more call.
+   (`accepted-checks-pending`) is success, not the end: stay connected while the checks run (`pr_wait_checks` again, `item_get` between
+   calls) until the gateway advances the item or a check is red (fix, push, as in step 4). exit 10: fix the named cause, one more call.
 
-Then `session_end`, also when the answer says `continue: true`.
+Then `session_end`, also when the answer says `continue: true`, but not while the checks still run.
