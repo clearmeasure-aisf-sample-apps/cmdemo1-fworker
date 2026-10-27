@@ -249,7 +249,7 @@ function Verb_journal($a) {
                 $k = "$ev|$key"
                 if (@($s.journal.keys) -contains $k) { return $false }
                 $s.journal.keys = @(@($s.journal.keys) + $k | Select-Object -Last 200); $s.journal.count = [int]$s.journal.count + 1
-                $prev = if (Test-Has $s.journal 'ciReleased') { @($s.journal.ciReleased) } else { @() }
+                $prev = @(if (Test-Has $s.journal 'ciReleased') { $s.journal.ciReleased })   # (@(if ...): an if unrolls a one-line list to a string, and a string + a line joined them)
                 $s.journal.ciReleased = @($prev + @("$(Get-JournalStamp (Get-UtcNow)) $line") | Select-Object -Last 20)
                 [void](Add-JournalKind $s.journal $ev (ConvertTo-Iso (Get-UtcNow)))
                 # a state-conflict (another write since the read) reads the state again and records the release in that
