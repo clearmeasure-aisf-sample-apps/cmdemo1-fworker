@@ -15,7 +15,7 @@ public static class CompositionGraph
     /// <summary>The services Program.cs registered before C5a; every one stays a single singleton registration.</summary>
     public static readonly Type[] Singletons =
     {
-        typeof(EventHub), typeof(QcSettings), typeof(GatewayOptions), typeof(InstanceConfig), typeof(TimingOptions), typeof(RevocationOptions),
+        typeof(EventHub), typeof(QcSettings), typeof(GatewayOptions), typeof(InstanceConfig), typeof(TimingOptions), typeof(RevocationOptions), typeof(EngineOptions),
         typeof(MessagingSettings), typeof(KeeperSettings), typeof(GitHubBudget), typeof(TranscriptStore), typeof(TranscriptService), typeof(Runner),
         typeof(LeaderSettings), typeof(ILeadership), typeof(GatewayLeader), typeof(SnapshotCoordinator), typeof(ISnapshotCoordinator),
         typeof(LeadershipService), typeof(RevocationService), typeof(IRevocationService), typeof(OperatorReleaseLoader), typeof(IOperatorReleaseLoader),

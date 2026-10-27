@@ -103,6 +103,10 @@
     "progressMaxMinutes": 180,
     "continueMinutes": 3
   },
+  "engine": {
+    "v2Environments": [],
+    "shadowEnvironments": []
+  },
   "timing": {
     "assignAckSeconds": 120,
     "plantSnapshotMaxAgeMinutes": 30,
