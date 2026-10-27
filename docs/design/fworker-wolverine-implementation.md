@@ -1,14 +1,22 @@
 # Implementing ADR 0001: the sequence of work and its parallel lanes
 
-Status: implementation plan, 2026-10-26. Nothing here is built. Asked for by the owner: "prepare for implementation. I need the
-sequence of work, phased out including which tasks can be implemented by parallel subagents", then "Program.cs refactoring has to be
-first and stabilized before enhancement plan commences." It turns:
+Status: implementation plan, 2026-10-26, revised the same day. Nothing here is built. Asked for by the owner: "prepare for
+implementation. I need the sequence of work, phased out including which tasks can be implemented by parallel subagents", then
+"Program.cs refactoring has to be first and stabilized before enhancement plan commences." It turns:
 - `gateway-composition.md` (stage C, first);
 - the phases of `fworker-wolverine-refactor.md` (R0 to R9, waves W0 to W9);
 - the speed rules of `delivery-speed.md`;
 - the hooks of `system-gateway.md`;
 
 into tasks: each one pull request, with what it comes after, the files it owns, and its size.
+
+**Revision of 2026-10-26** (the owner's decisions of that day; ADR 0001, "Revision 2026-10-26"):
+1. uat and prod do not matter for this plan: if it works in tdd, it is accepted.
+2. Green pull requests merge and deploy without approval stops.
+
+So the gates are tdd observation windows in hours, not soaks in days or promotions to uat and prod. The v2 engine is built beside
+v1 as new projects, held to the same Tier 1 suites and golden-write oracle, and tdd switches engines **as a whole**, once; there is no
+per-item engine. Rollback is a revert or the `FACTORY_V2_OFF` kill switch. Appendix A lists the board's tasks whose scope changed.
 
 | View | Source | Rendered |
 |---|---|---|
@@ -18,14 +26,14 @@ into tasks: each one pull request, with what it comes after, the files it owns, 
 
 ## 1. How parallel subagents work on this repository
 
-1. **One task, one subagent, one worktree, one pull request.** S is a day or two, M about a week, L two weeks or more of one session. A
-   task that grows is split, not widened.
-2. **At most four subagents at once, lane D included,** plus one reviewer per pull request. CI is the bottleneck: each pull request runs
-   ten Tier 1 jobs for about 40 minutes.
+1. **One task, one subagent, one worktree, one pull request.** An S or M task is one task cycle of about 50 minutes (section 5); an
+   L task is two cycles, and is split into two pull requests where its content allows. A task that grows is split, not widened.
+2. **Two to three subagents at once, lane D included, at most four,** plus one reviewer per pull request. Every merge is a release to
+   tdd, so merges are serial: the merge, the release and its tdd check take about 10 minutes each.
 3. **What a subagent can run:** `dotnet build` and pure dotnet tests only. The worktree guard refuses pwsh to subagents, and Tier 1
    allows one run per machine. So `tests/smoke.ps1`, the parity tests (which call the rule scripts), Tier 1 and the SQL-backed workflow
-   tests run in CI. Every rule-script change is therefore first checked in CI, at about 40 minutes per round. Stage C adds a CI job that
-   runs the smoke and parity tests in minutes.
+   tests run in CI. Every rule-script change is therefore first checked in CI. Stage C added a CI job that runs the smoke and parity
+   tests in minutes.
 4. **The main session is the standing integrator of the hot files.** A task that needs an addition to a hot file it does not own puts
    the change in its pull request only when its row lists that file; otherwise it asks the main session, which serialises it.
    - **Hot files:**
@@ -33,7 +41,7 @@ into tasks: each one pull request, with what it comes after, the files it owns, 
      - the composition files `gateway/Composition/*`;
      - `config/instance.json`, `config/deploy.overrides.json`;
      - `tests/scenarios/run.ps1` (`$SuiteDefs`), `tests/scenarios/lib.ps1`, the shared scenario files (`owner.ps1`, `octopus.ps1`,
-       `leader.ps1`);
+       `leader.ps1`), and from W2 the golden-write declared-differences file of the v2 Tier 1 job;
      - `tests/FakeGitHub/Program.cs` (also the fake Octopus);
      - `.github/workflows/tests.yml`;
      - the solution file and `gateway/Gateway.csproj`;
@@ -47,41 +55,51 @@ into tasks: each one pull request, with what it comes after, the files it owns, 
 5. **Parallel pull requests are tested together on master.** The ruleset does not require branches to be up to date, and `tests.yml`
    does not run on master pushes. So the main session runs `gh workflow run Tests` on master after each batch of merges and before
    every gate.
-6. **Merge windows.**
-   - Every merge to master restarts the acting tdd gateway. No pull request merges during a measured batch, a soak or a shadow period,
-     except fixes for that period.
+6. **Merge windows and tdd observation windows.**
+   - Every merge to master restarts the acting tdd gateway. A **tdd observation window** is a stated number of hours from a release
+     with no merge to master, except a fix for the window (which restarts it). In every window the main session checks, after the
+     release that opens it and at its end: `/_build` shows the release, `/ready` answers 200, `/api/v1/status` shows the leader acting
+     and a successful restore (v1: `plantSnapshot.restore.how`; v2: the Wolverine node's leadership and the sagas resumed), and no
+     unplanned restart. Each gate adds its own comparison.
+   - Subagents keep working during a window; their pull requests wait for its end to merge.
    - Pull requests from outside the plan (operator-session fixes) avoid the hot files of the running wave; during stage C, `Program.cs`
      is frozen for them.
-7. **Every pull request:** the pre-commit review by a reviewer subagent, Tier 1 green, auto-merge. Flaky jobs are re-run at most twice,
-   then read.
+7. **Every pull request:** the pre-commit review by a reviewer subagent, Tier 1 green, then merge and release to tdd with no approval
+   stop (owner, 2026-10-26). Flaky jobs are re-run at most twice, then read. The tasks the earlier plan marked "owner review" (section 2)
+   get a reviewer brief with a security focus, and the main session records each in the handoff for the owner to read afterwards.
 8. **Kit-owned files stay untouched:** `build.yml` belongs to the demo-environment kit (only its tests job is local). New checks go into
    `tests.yml`. The Dockerfile copies every `*.csproj` before `dotnet restore`.
-9. **Behaviour behind flags** (refactor plan rule 3), default v1. Switching a flag on in tdd is the main session's measured step, an
-   owner-protected `deploy.overrides.json` change.
+9. **One engine switch per environment** (refactor plan rule 3), default v1. tdd goes to v2 shadow mode at W2 and to v2 at the cutover
+   (W9.9), each a `deploy.overrides.json` change that merges on green like any other pull request. There are no per-capability flags.
 10. **Subagents follow the owner's standing rule** (Opus, low effort). Each brief gives the task's row, the files it owns and must not
    touch, its tests and its "done when".
 
 ## 2. Before the first task (W-1: decisions and prerequisites)
 
-From the refactor plan's section 7, with who decides and which task needs it:
+From the refactor plan's section 7. Since 2026-10-26 nothing inside this repository waits for an approval; what remains are actions
+outside it:
 
 | Item | Who | Needed by |
 |---|---|---|
-| The test packages of the new .NET test projects (test SDK, test framework, assertions), pinned | owner | C0 (W1.0's projects reuse them) |
-| Lift cmdemo1-system#314's hold on uat and prod promotion (an unbounded wait until then) | owner, cmdemo1 session | the stabilisation gate |
-| Merge #253 (delivery speed) and #254 (Wolverine, plan, ADR 0001, system gateway, composition, this plan) | owner | C0 |
-| Freeze `Program.cs` for pull requests from outside the plan during stage C | owner | C0 |
-| The base (fworker) and, by W8, the incident rollback policy | owner | W0, W8 |
+| Freeze `Program.cs` for pull requests from outside the plan during stage C | owner (in force) | the rest of stage C |
+| The base: this plan proceeds on fworker; ADR 0001 stays Proposed until the owner accepts it | owner | W1.0 |
 | cmdemo1-aisf stops acting on board 679 (kit watcher change) | owner, Platform Hub, cmdemo1 session | W0 |
-| At least one replica for the acting gateway; `ui-auto-promote` paths (`src/`, `*.csproj`, `*.sln`); `FACTORY_V2_OFF` in cmdemo1-system | owner, done by the cmdemo1 session | W1 (paths), W3 (`FACTORY_V2_OFF`), W4 (replica) |
-| Workflow changes (protected): C0 (smoke and parity job), W1.0, W2.0 (SQL Server in `tests.yml`), each new suite | owner | per task |
-| The Dockerfile (`src/`) and every `deploy.overrides.json` flag switch (protected) | owner | W1.0, every wave |
-| Security-sensitive changes (fworker's CLAUDE.md): stage C: revocations and `RevokeName` (C4a), the auth middleware (C6), the admin and operator filters (C7a), the `Auth` statics (C8); the token's repository claim (W1.8), the loopback route's authentication (W1.6), webhook secrets per source (W4.0), the alert webhook and alert rules (W8.2), revocations, revoke-worker and git-credential (W9) | owner review | per task |
-| The new NuGet packages, pinned | owner | W2.0 |
 | Azure SQL for the tdd gateway (provisioned, managed identity) | owner, cmdemo1 session | W2.0 |
-| `projects_v2_item` delivery (organization or App webhook), or rely on the board reconciler | owner (admin) | W4 |
+| At least one replica for the tdd gateway (Balanced mode, timers and recurring jobs from W2) | cmdemo1 session | W2.2 |
+| `FACTORY_V2_OFF` in cmdemo1-system's infrastructure code, unset | cmdemo1 session | W2.3 (it also stops shadow mode); drilled at W9.9 |
+| `projects_v2_item` delivery (organization or App webhook); without it the board reconciler is the source | owner (admin) | W4, not a stop |
 | The gateway's read access to cmdemo1-system; the `system.json` fields for policy, toolchain and WIP limit (kit and cmdemo1-system) | owner, Platform Hub | W1 (falls back without), W6 and W7 |
-| Delivery-speed cross-repo pieces (merge queue ruleset, workorders pipeline, kit `release.yml`, uat settle, docs-only overflow) | owner, Platform Hub | W7, each optional |
+| Delivery-speed cross-repo pieces (merge queue ruleset, workorders pipeline, kit `release.yml`, docs-only overflow) | owner, Platform Hub | W7.10, each optional, off the critical path |
+| The incident rollback policy in the app's prod; until answered, the default of `wolverine-factory.md` 5.5: automatic in the app's tdd and uat, a person's Sign-off in its prod | owner | W8.0, not a stop |
+
+**Removed by the decisions of 2026-10-26:**
+- the lifting of cmdemo1-system#314's hold on uat and prod promotion, and `ui-auto-promote`'s application paths (`src/`, `*.csproj`,
+  `*.sln`): fworker's uat and prod are out of scope;
+- per-pull-request owner approvals: the workflow changes (smoke and parity job, W1.0, SQL Server in `tests.yml`, each new suite), the
+  Dockerfile (`src/`), the `deploy.overrides.json` switches, the pinned NuGet packages (W2.0) and the security-sensitive tasks (stage
+  C: C4a, C6, C7a, C8; W1.8 the token's repository claim, W4.0 webhook secrets per source, W8.2 the alert webhook and rules, W9.7
+  revocations, revoke-worker and git-credential). They merge on green after the reviewer subagent (section 1, rule 7);
+- the merges of #253 and #254, which are done.
 
 ## 3. Stage C: Program.cs becomes a composition root (first, then stabilised)
 
@@ -112,57 +130,99 @@ blocks and merge in sequence.
 
 Parallel: C-1 beside C0; C1 and C2; C4a and C4c together, then C4b after C4a, then C4d after all three; C5d beside C5b and C5c; C7b and C7c together (after C7a). C-1 does not touch Program.cs and ships now, ahead of stage C: board 679 links eight repositories (system-gateway.md 1). It and C0 both touch the fake, in different hunks; C-1 merges first, and C0's baseline is recorded after it.
 
-**Stabilisation gate (owner's condition):** all of these, before W0 starts:
-- Program.cs is the composition root and the architecture test passes;
-- Tier 1, the golden writes and the route-and-auth table are unchanged;
-- the refactored release runs in tdd for **two measured 8-item batches** with no regression against the 2026-10-25 baseline;
-- the same release is promoted to uat and prod by `ui-auto-promote` and starts there (needs cmdemo1-system#314's hold lifted: section 2);
-- **two weeks** pass without a fix to the refactored code.
+**Stabilisation gate (owner's condition, revised 2026-10-26):** all of these, before W0 starts:
+1. the architecture test (C8) is green: `Program.cs` is the composition root, at most 60 lines, no behaviour;
+2. the golden writes are unchanged against C0's baseline, with Tier 1 and the route-and-auth table green;
+3. **one measured 8-item batch** runs through tdd (from the first worker start to deployed in the app's tdd) with no regression against
+   the delivery-speed baseline of 2026-10-25 (batch #706 to #721, `delivery-speed.md` 1): no stage median more than 5 minutes slower
+   than the baseline's (Technical Design 5, Development 16, Functional Testing 10, merge 8, master CI and candidate 12, tdd 11) and no
+   item parked for a gateway fault;
+4. after each release of stage C and of the gate: `/_build` shows the new version, `/ready` answers 200, the leader is acting and the
+   plant restore succeeded (`/api/v1/status`: `leader.role`, `plantSnapshot.restore.how`);
+5. **a quiet tdd observation window of 4 hours** from the last release (section 1, rule 6): no merge and no fix to the refactored code,
+   no unplanned restart, no sweep error, no 5xx from a route other than its designed refusals. The measured batch runs inside it.
+
+**Why 4 hours:** the longest timer the acting gateway runs is the build slot's maximum TTL (`buildSlotMaxTtlSeconds` 7,200), which
+expires twice in 4 hours; the full sweep (180 s) runs about 80 times and the lease renewal and host reconcile (5 min each) about 48
+times. An 8-item batch on two slots reaches the app's tdd in about 3.5 hours (2026-10-25: about 44 minutes of slot time per item, so
+8 x 44 / 2 is about 3 hours of starts, plus about 30 minutes from merge to tdd), so the window is the batch plus a margin, and the gate
+takes about 4 to 4.5 hours, not 8. Not seen in it: the day budget's reset at 00:00 UTC and the 24-hour message TTL, neither of which
+stage C changes; Tier 1 covers both. (`caeJob.replicaTimeoutSeconds`, 14,400, belongs to the Container Apps job runtime, which is off.)
 
 ## 4. The enhancement waves (after stage C)
 
 With stage C done, `Program.cs` is no longer a hot file; areas live in their own modules and services, which the tasks below name.
 
-### W0: R0, safety and quick wins (up to 4)
+**How v2 is built and switched.** The Wolverine engine (v2) is built as the new projects of the refactor plan's section 3, beside v1,
+inside the same gateway host. Its CI is the same Tier 1 suites run with the engine set to v2 (a second Tier 1 job from W2.4) and the
+same golden-write oracle; where v2 writes differently on purpose, the difference is a line in a reviewed declared-differences file.
+The engine is chosen **per environment**, once, at start: `engine: { "v2Environments": [], "shadowEnvironments": [] }` in
+`config/instance.json`, read for `FACTORY_ENVIRONMENT`. tdd joins `shadowEnvironments` at W2 (v2 reads the board, its commands go to a
+recording sink, v1 acts) and `v2Environments` at the cutover W9.9 (v2 acts, v1 does not run). `FACTORY_V2_OFF=1` (cmdemo1-system) puts
+the environment back on v1 with no shadow, in a new revision and without an image change; reverting the switch's pull request does the
+same through a release.
+
+**What stays from the side-by-side design, and why:**
+- **S1, the verb router** (`VerbPipeline`): the verb endpoints call one engine interface, composed per environment. It keeps the
+  agents' contract in one place and lets Tier 1 run either engine.
+- **S2, the command port:** every external side effect of v2 is one integration command. Behind it are the outbox handlers, or the
+  recording sink that shadow mode and the golden-write comparison read.
+- **S3, the event ingress:** webhooks and the verbs' events enter through one interface, which in shadow mode also feeds v2.
+- **The state comment as v2's projection, in the format v1 reads:** this is how a revert or the kill switch hands every open item back
+  to v1 with nothing lost. It stays until v1's code is removed (W9.11).
+
+**What went, because it existed only for v1 and v2 side by side on one environment:** the `engine:v2` label and the intake labelling;
+v1 skipping or forwarding v2 items (W6.4a to c, W6.5); the separate runtime and offer filter for v2 items; S4 as a seam in v1's code,
+S5 (timers) and S6 (the loopback route); v1's side effects through the outbox; v1 asking v2's scheduler (W7.5); moving v1's merge onto
+C# (in W7.2); the per-capability flags (`commands`, `ingress`, `delivery`, `intake.v2Plans`, `scheduler`, `merge`, `incidents`); Solo
+mode on the lease holder; the expand-then-contract steps for uat's and prod's lag; v1's promotion off-switch (W5.3); the per-item
+moves to v2 (W7.9, W9.9's QC items) and the drain of `engine:v1` items in W9.11.
+
+### W0: R0, safety and quick wins on v1 (2 to 3 at once)
+
+v1 acts in tdd until the cutover, and releases now restart it several times an hour, so the fixes for a sweep acting after its
+successor and for blind state writes stay. The durable budgets (W0.7) are v2's by design and go to W6.1.
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W0.0 | integrator: the flags framework `{engine, v2Environments}`, `FACTORY_V2_OFF` reader, W0's flags | `config/*`, `gateway/Configuration/Flags*` | stage C gate | S |
+| W0.0 | integrator: the engine switch `engine: { v2Environments, shadowEnvironments }` read for `FACTORY_ENVIRONMENT`; the `FACTORY_V2_OFF` reader | `config/*`, `gateway/Configuration/Engine*` | stabilisation gate | S |
 | W0.1 | fencing: lease epoch into `sync-board`; lease checks before every mutating step (merge, settle, promotion, Sign-off, `Save-State`); `MayAct` in `Plan` and in `RuntimeManager.Provision`; supersession awaits the rule script at most 45 s, then kills it | `gateway/Sweeper.cs`, `Leadership/*`, `RunnerPool.cs`, `RuntimeManager.cs` (Provision), `Verbs.Sweep.ps1`, `Verbs.Delivery.ps1`, `Verbs.Promote.ps1`, `Verbs.Merge.ps1`, `Board.ps1` (Save-State lease check) | W0.0 | M |
 | W0.2 | the day budget counted from the task history (every Start and overflow run since 00:00 UTC) | `RuntimeManager.cs`, `IWorkerRuntime.cs`, `OctopusRunbookRuntime.cs`, the fake Octopus in `tests/FakeGitHub/Program.cs` | W0.1 | S |
 | W0.3 | `Save-State` `rev` check; the 48,000-character state budget (trim `promote_health`, `flow`, lineage) | `Board.ps1` (Save-State, Get-State) | W0.1 | S |
 | W0.4 | qualified refs: the `Depends on` parser and the keeper's cycle check (the board reading shipped in C-1) | `Verbs.Keeper.ps1`, `Verbs.Sweep.ps1` (419) | W0.6 | S |
 | W0.5 | the exit-21 text: "stay connected while checks run" | `Verbs.Item.ps1` (499-500), `plugin/skills/factory-development`, `factory-owner-session` | W0.0 | S |
 | W0.6 | replenish backpressure: the waiting count from the last plan into the sweep input; `onlyWhenIdle` | `Replenish.ps1`, `Plant.cs` (last plan's waiting count), the sweep input in `Sweeper.cs`, `Verbs.Sweep.ps1` (the `Invoke-Replenish` call, 779) | W0.1 | S |
-| W0.7 | durable budgets: failures, launches, `idleFollowUps` into the item state; runtime health into the snapshot | `RuntimeManager.cs`, `Leadership/SnapshotCoordinator*`, `Owner.ps1` | W0.2 | M |
-| W0.8 | flow metrics: one timestamp per stage (`Move-OwnerTo` and the stage hooks), exposed through the metrics route | `Metrics.ps1`, `Owner.ps1` (`Move-OwnerTo`), `gateway/Endpoints/Metrics*` | W0.7 | M |
-| W0.9 | ranking comparer and plan on slot freed (queued item numbers, the hub delegate) | `Plant.cs` (Plan), `Plant.Runtimes.cs`, `RuntimeManager.cs`, `EventHub.cs` | W0.6, W0.7 | M |
+| W0.8 | flow metrics: one timestamp per stage (`Move-OwnerTo` and the stage hooks), exposed through the metrics route; the measure of every later batch | `Metrics.ps1`, `Owner.ps1` (`Move-OwnerTo`), `gateway/Endpoints/Metrics*` | W0.1 | M |
+| W0.9 | ranking comparer and plan on slot freed (queued item numbers, the hub delegate) | `Plant.cs` (Plan), `Plant.Runtimes.cs`, `RuntimeManager.cs`, `EventHub.cs` | W0.6 | M |
 
-Parallel start: W0.1 and W0.5; then W0.2, W0.3 and W0.6 after W0.1; then W0.4 after W0.6, W0.7 after W0.2; W0.8 and W0.9 as their "after" items merge.
-**Gate:** Tier 1 green; a measured tdd batch no slower than the baseline; the golden-write baseline re-recorded from master (W0 changes writes on purpose: rev, flow times, durable budgets).
+Parallel start: W0.1 and W0.5; then W0.2, W0.3, W0.6 and W0.8 after W0.1; then W0.4 and W0.9 after W0.6.
+**Gate:** Tier 1 green; the golden-write baseline re-recorded from master (W0 changes writes on purpose: rev, flow times); a **2-hour
+tdd observation window** with board activity, in which every item that moved has its flow timestamps and no stage median is more than
+5 minutes slower than the baseline. Two hours: four full slot-TTL cycles (1,800 s) and about 40 sweeps, enough to see the fencing and
+the `rev` check through at least one release hand-over, which opens the window.
 
-### W1: R1, structure and seams, no behaviour change (up to 4)
+### W1: R1, structure and seams, no behaviour change (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W1.0 | integrator: the solution, projects `src/Fworker.Contracts`, `Domain`, `Persistence`, `Integrations`, `Workflows` and their test projects, `Gateway.csproj` references, the Dockerfile, `tests.yml`; one empty registration file per seam | `*.sln`, `src/*/*.csproj`, `gateway/Gateway.csproj`, Dockerfile, `tests.yml`, `gateway/Composition/Seams*` | W0 gate | S |
+| W1.0 | integrator: the solution, projects `src/Fworker.Contracts`, `Domain`, `Persistence`, `Integrations`, `Workflows` and their test projects, `Gateway.csproj` references, the Dockerfile, `tests.yml`; one empty registration file per seam (S1 to S3) | `*.sln`, `src/*/*.csproj`, `gateway/Gateway.csproj`, Dockerfile, `tests.yml`, `gateway/Composition/Seams*` | W0 gate | S |
 | W1.1 | `ItemId` (parse, format, lowercase) and message base types; `ISystemCatalog` and its loader as a library (`system.json` through the API, `instance.json` fallback) | `src/Fworker.Contracts/*`, `src/Fworker.Integrations/Catalog/*` | W1.0 | M |
 | W1.2 | the catalog's wiring and its mismatch report | `gateway/Composition/Seams*` (catalog), `gateway/Endpoints/Status*` (report) | W1.1 | S |
 | W1.3 | Domain, first ports: the ranking comparer (ported without rewiring the call) and the journal text, with parity tests | `src/Fworker.Domain/{Ranking,JournalText}*`, `tests/Fworker.Domain.Tests` | W1.0 | M |
-| W1.4 | S1: the engine branch inside `VerbPipeline` (v1 only); rule-script answers return their posted journal lines | `gateway/Verbs/*`, `factory.ps1`, `Journal.ps1` | W1.0 | M |
-| W1.5 | S2 command port and S5 timers, v1 implementations | `gateway/Ports/{Commands,Timers}*`, call sites in `Plant.cs` and `RuntimeManager.cs` | W1.0 | M |
-| W1.6 | S3 event ingress (also the verbs' `RequestSweep`) and S6 loopback route (authenticated; owner review) | `gateway/Ports/Ingress*`, `gateway/Endpoints/{Webhook,Loopback}*`, `gateway/Verbs/*` (the `RequestSweep` call) | W1.4 | M |
-| W1.7 | S4 item state store | `gateway/Ports/ItemState*` | W1.4 | S |
-| W1.8 | the token's repository claim (`i1`/`r1`, absent means home; owner review); launch fields (repository, clone URL, branch, toolchain) | `Auth.cs`, `Runtimes/*Runtime.cs` (launch only) | W1.1 | S |
+| W1.4 | S1: `VerbPipeline` calls one engine interface composed for the environment (only v1 behind it now) | `gateway/Verbs/*` | W1.0 | M |
+| W1.5 | S2: the command port as integration-command contracts, with a recording sink for shadow mode and tests; v1 is not rewired onto it | `src/Fworker.Contracts/Commands*`, `src/Fworker.Integrations/Commands/Recording*` | W1.0 | S |
+| W1.6 | S3: one event ingress for the webhook routes and the verbs' `RequestSweep`, able to feed a second (shadow) engine | `gateway/Ports/Ingress*`, `gateway/Endpoints/Webhook*`, `gateway/Verbs/*` (the `RequestSweep` call) | W1.4 | M |
+| W1.8 | the token's repository claim (`i1`/`r1`, absent means home; security-focused review); launch fields (repository, clone URL, branch, toolchain) | `Auth.cs`, `Runtimes/*Runtime.cs` (launch only) | W1.1 | S |
 | W1.9 | isolation scenarios with a second repository in the fake (webhook dropped, card ignored, `Depends on other#N` not home #N, same number no collision) | `tests/FakeGitHub/Program.cs`, a new `tests/scenarios/repos.ps1` with its `run.ps1` and `tests.yml` lines | W0.4, W1.0 | M |
 | W1.10 | the verb inventory (73 verbs, owner and destination) | `docs/design/verb-inventory.md` | W1.0 | S |
 
-Parallel start: W1.1, W1.3, W1.4, W1.5; then W1.6, W1.7, W1.8, W1.9, W1.2, W1.10 as slots free.
-**Gate:** golden writes identical to the baseline recorded at the W0 gate; per-item event sequences unchanged on tdd.
+Parallel start: W1.1, W1.3, W1.4, W1.5; then W1.6, W1.8, W1.9, W1.2, W1.10 as slots free.
+**Gate:** golden writes identical to the baseline recorded at the W0 gate (CI); the release check of section 1, rule 6. No window: W1
+changes no behaviour.
 
-### Lane D: Domain ports, beside W1 to W7 (one of the four slots)
+### Lane D: Domain ports, beside W1 to W7 (one of the slots)
 
-One pull request each in `src/Fworker.Domain` and its tests, never a hot file.
+One pull request each in `src/Fworker.Domain` and its tests, never a hot file. Unchanged by the revision.
 - **Parity tests,** for ports of existing rule-script functions:
   - D2: the evidence composite;
   - D3: release choice and the content gate;
@@ -175,160 +235,258 @@ One pull request each in `src/Fworker.Domain` and its tests, never a hot file.
 - Plans as data belong to W6.1, not lane D.
 - **Order by need:** D2 and D3 before W5; D4 and D5 before W6; D1, D6 and D7 before W7.
 
-### W2: R2, the Wolverine host, inert (up to 3)
+### W2: R2, the Wolverine host, in shadow mode (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W2.0 | integrator: the packages; the connection-string flag; SQL Server as a service container in the Tier 1 jobs (owner jobs split once more); an image-start check without a connection string in `tests.yml`; the `DbContext` stub | `*.csproj`, `tests.yml`, `config/*`, `src/Fworker.Persistence/FactoryDbContext.cs` (stub) | W1 gate, W-1 packages and SQL | S |
-| W2.1 | persistence: tables for history, correlation map, open-instance index, projection versions, the catalog's last good copy; migrations | `src/Fworker.Persistence/*` | W2.0 | M |
-| W2.2 | host wiring: registered only with a connection string; Solo mode started when Acting and stopped on supersession; storage set up in the background; `/ready` independent; OpenTelemetry and the Azure Monitor exporter; the dead-letter admin page | `gateway/Composition/Wolverine*`, `gateway/Endpoints/Admin*` | W2.1 | M |
-| W2.3 | shadow history: every returned journal line and every ingress event, best-effort | `gateway/Ports/*` (history sinks) | W2.2 | S |
-| W2.4 | `Fworker.Workflow.Tests`: tracked sessions against SQL Server (CI only) | `tests/Fworker.Workflow.Tests/*` | W2.2 | S |
+| W2.0 | integrator: the packages, pinned; the connection-string setting; SQL Server as a service container in the Tier 1 jobs (owner jobs split once more); an image-start check without a connection string in `tests.yml` (the kill switch's case); the `DbContext` stub | `*.csproj`, `tests.yml`, `config/*`, `src/Fworker.Persistence/FactoryDbContext.cs` (stub) | W1 gate, Azure SQL | S |
+| W2.1 | persistence: tables for history, correlation map, open-instance index, projection versions, the session mailbox, the catalog's last good copy; migrations | `src/Fworker.Persistence/*` | W2.0 | M |
+| W2.2 | host wiring: registered when the environment is in `shadowEnvironments` or `v2Environments` and a connection string is set; **Balanced mode with Wolverine's leader election** and the session mailbox from the start; storage set up in the background; `/ready` independent of the database; OpenTelemetry and the Azure Monitor exporter; the dead-letter admin page | `gateway/Composition/Wolverine*`, `gateway/Endpoints/Admin*`, `src/Fworker.Persistence/*` (mailbox) | W2.1 | L |
+| W2.3 | shadow mode: v2 reads S3's events, decides, writes its own history, and sends its commands to S2's recording sink; a comparison of the recorded commands with v1's actual writes, as a report | `gateway/Composition/Shadow*`, `src/Fworker.Integrations/Commands/Recording*`, `gateway/Endpoints/Admin*` (report) | W2.2 | M |
+| W2.4 | `Fworker.Workflow.Tests` (tracked sessions against SQL Server, CI only) and the **v2 Tier 1 job**: Tier 1 with the engine set to v2 for the suites v2 claims (a list that grows per wave), and the golden-write diff against the declared-differences file | `tests/Fworker.Workflow.Tests/*`, `tests.yml`, `tests/scenarios/golden/v2-differences*` | W2.2 | M |
 
-**Gate:** 7 days in tdd; a history row for every posted line; acting with the database stopped; the uat and prod images start without
-one.
+**Gate:** a **2-hour tdd observation window** with tdd in `shadowEnvironments`: the release check; v2's node elected leader and its
+storage ready; a history row for every ingress event; a 10-minute stop of the database inside the window, during which v1 acts and
+`/ready` stays 200. Two hours replaces the 7-day soak: shadow mode writes nothing to GitHub, so what can go wrong is in the process
+(storage setup, leader election, the durability agent's cycles, which run every few seconds) and shows within minutes; the window also
+spans the release that opened it.
 
-### W3: R3, durable side effects (up to 3)
+### W3: R3, v2's durable side effects (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W3.0 | integrator: `commands` flag; `FACTORY_V2_OFF` for commands; the integration command base (error classification, `IntegrationFailed`, idempotency keys); `GitHubBudget` keyed by (credential, resource); the GitHub client per repository and installation per owner (H6) | `src/Fworker.Integrations/{Commands,GitHub}/*`, `GitHubBudget.cs`, `config/*` | W2 gate | M |
-| W3.1 | runtime start and stop and runbook runs through the outbox, with result messages back into `RuntimeManager` | `RuntimeManager.cs`, `OctopusRunbookRuntime.cs` | W3.0 | M |
-| W3.2 | journal lines through the outbox handler that runs the `journal` verb; per-item partitioning; `ReserveLaunched` sends from the chain | `Plant.cs` (journal chain), `src/Fworker.Integrations/Commands/Journal*` | W3.0 | M |
+| W3.0 | integrator: the integration command base (error classification, `IntegrationFailed`, idempotency keys); `GitHubBudget` keyed by (credential, resource); the GitHub client per repository and installation per owner (H6) | `src/Fworker.Integrations/{Commands,GitHub}/*`, `GitHubBudget.cs` | W2 gate | M |
+| W3.1 | runtime start and stop and runbook runs as v2 integration commands, with result messages; `RuntimeManager` behind an interface v2 calls; v1's path unchanged | `src/Fworker.Integrations/Commands/Runtime*`, `RuntimeManager.cs` (interface), `OctopusRunbookRuntime.cs` | W3.0 | M |
+| W3.2 | the journal as a v2 integration command: `Add-Journal`'s ledger in C# (dedup keys, the 30-line cap, folds by comment id, the `waiting_at` rate limit), golden-identical; per-item partitioning; the launched line's order (#252) | `src/Fworker.Integrations/Commands/Journal*`, `src/Fworker.Domain/JournalText*` | W3.0 | L |
 | W3.3 | Copilot launch reservation and its reconciler | `CopilotCloudRuntime.cs`, `src/Fworker.Integrations/Commands/Copilot*` | W3.0 | S |
-| W3.4 | kill and restart scenarios for commands | a new suite with its `run.ps1` and `tests.yml` lines | W3.1, W3.2 | S |
+| W3.4 | kill and restart scenarios for commands, on the v2 engine | a new suite with its `run.ps1` and `tests.yml` lines | W3.1, W3.2 | S |
 
-**Gate:** no lost or duplicated line, start or stop in a tdd batch with a kill.
+**Gate:** W3.4 and the journal-fold and octopus suites green on v2 (no lost or duplicated line, start or stop across a kill); a
+**2-hour tdd observation window** in shadow mode in which every command v2 records has its counterpart in v1's writes, or a declared
+difference.
 
-### W4: R4, durable ingress and the board reconciler (up to 3)
+### W4: R4, durable ingress and the board reconciler (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W4.0 | integrator: `ingress` flag; a webhook secret per source (owner review); the recurring-job slots | `config/*`, `gateway/Endpoints/Webhook*`, `gateway/Composition/Wolverine*` | W3 gate | S |
+| W4.0 | integrator: a webhook secret per source (security-focused review); the recurring-job slots | `config/*`, `gateway/Endpoints/Webhook*`, `gateway/Composition/Wolverine*` | W3 gate | S |
 | W4.1 | ingress to the inbox: logical and business-key deduplication; correlation-map writers from verbs and runtimes | `gateway/Ports/Ingress*`, `src/Fworker.Integrations/Correlation/*` | W4.0 | M |
 | W4.2 | C# Octopus watcher: `ReleaseCreated`, deployment events, `SignOffRequested`, commit resolved | `src/Fworker.Integrations/Octopus/Watcher*` | W4.0 | M |
 | W4.3 | board reconciler and catalog re-read as recurring jobs (cards keyed by repository; cmdemo1-system pushes before v1's filter) | `src/Fworker.Workflows/Reconcilers/*` | W4.1 | M |
 
-**Gate:** every board-relevant change of a tdd batch has its event in the history.
+**Gate:** a **2-hour tdd observation window** in shadow mode with board activity (the main session starts a 4-item docs batch through
+the replenisher if the board is idle): every board-relevant change in it has its event in v2's history.
 
-### W5: R5, DeliveryTrainSaga (up to 3)
+### W5: R5, DeliveryTrainSaga (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W5.0 | integrator: `delivery` flag; `ItemMerged(commit, gates, dependencies)` from v1 through S6; the train's and delivered-to tables | `Verbs.Merge.ps1`, `Verbs.Delivery.ps1` (emit only), `config/*`, `src/Fworker.Persistence/*` (tables) | W4 gate, D2, D3 | S |
+| W5.0 | integrator: `ItemMerged(commit, gates, dependencies)` derived from the merge webhook and the reconciler (v1 emits nothing); the train's and delivered-to tables | `src/Fworker.Workflows/Delivery/ItemMerged*`, `src/Fworker.Persistence/*` (tables) | W4 gate, D2, D3 | S |
 | W5.1 | `DeliveryTrainSaga` per deployable and environment: candidates, evidence, newest qualifying release, Sign-off answers, due timers, supersession, the delivered-to table, the `dependencies-delivered` slot (off), policy and promoter per deployable from the catalog (H9) | `src/Fworker.Workflows/Delivery/*` | W5.0 | L |
-| W5.2 | shadow comparison and its report | `src/Fworker.Workflows/Delivery/Shadow*`, `gateway/Endpoints/Admin*` | W5.1 | S |
-| W5.3 | the switch: authoritative only with no Sign-off pending, or adoption of pending gateway deployments; v1 promotion off in the same release | `Verbs.Promote.ps1` (off switch), `src/Fworker.Workflows/Delivery/Switch*` | W5.2 | S |
+| W5.2 | the shadow run against the board: the train's decisions compared with v1's promotions and Sign-off answers, and its report | `src/Fworker.Workflows/Delivery/Shadow*`, `gateway/Endpoints/Admin*` | W5.1 | S |
 
-**Gate:** zero shadow differences over 3 releases; one batch to prod by v2.
+**Gate:** a **tdd shadow run of 4 hours or 3 app releases, whichever ends later**, with zero unexplained differences between the
+train's decisions and v1's. It replaces the 3 shadow releases; there is no batch to prod, and no switch while v1 acts: the train acts
+from the cutover (W9.9), which adopts any pending Sign-off.
 
-### W6: R6, the docs plan (up to 4)
+### W6: R6, the docs plan (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W6.0 | integrator: `intake.v2Plans` flag; the `engine:v2` label; the per-repository WIP intake rule; the saga tables | `config/*`, `Verbs.Sweep.ps1` (intake), `src/Fworker.Persistence/*` (tables) | W5 gate, D4, D5 | S |
-| W6.1 | `WorkItemSaga` core: plans as data, steps, generation and arm ids, `NotFound`, `IRevisioned`, partitioning; decision verbs by `InvokeAsync` through S1 | `src/Fworker.Workflows/WorkItem/*`, `gateway/Verbs/*` (v2 branch) | W6.0 | L |
+| W6.0 | integrator: the per-repository WIP intake rule; the saga tables | `src/Fworker.Persistence/*` (tables), `src/Fworker.Workflows/Intake*` | W5 gate, D4, D5 | S |
+| W6.1 | `WorkItemSaga` core: plans as data, steps, generation and arm ids, `NotFound`, `IRevisioned`, partitioning; the budgets (failures, launches, `idleFollowUps`) in the saga's state; decision verbs by `InvokeAsync` through S1 | `src/Fworker.Workflows/WorkItem/*`, `gateway/Verbs/*` (the v2 engine) | W6.0 | L |
 | W6.2 | C# direct merge (squash with the PASS head, mergeability wait, branch update, out-of-date retries) | `src/Fworker.Integrations/GitHub/Merge*` | W6.0 | M |
-| W6.3 | projections: board, labels and state comment, versioned; echo suppression | `src/Fworker.Integrations/GitHub/Projection*` | W6.0 | M |
-| W6.4a | v1 skips v2 items in the rule scripts: `Test-ItemInScope` and its callers; v2 counted in intake WIP (`Verbs.Sweep.ps1:804`) and the replenisher's `targetOpen` | `Board.ps1`, `Verbs.Sweep.ps1`, `Qc.ps1`, `Replenish.ps1` (scope and counts) | W6.0 | M |
-| W6.4b | v1 skips v2 items in C#: `BaseUpdate.cs`, the plant's offers, leases and expire-claim (`Plant*.cs`, `Lease.cs`, `Intake.cs`), `Plant.PassMerge` | those files | W6.0 | M |
-| W6.4c | v1 forwards actions on v2 items to the saga through S1: `Manager.cs`, the operator's unpark and resettle, keeper verbs, `CopilotCiRelease`, copilot-settle and copilot-owner (`CopilotCloudRuntime.cs`, `CursorCloudRuntime.cs`), runtime adoption (`RuntimeManager.cs`, `OctopusRunbookRuntime.cs`) | those files, `gateway/Endpoints/ItemAdmin*` | W6.1, W6.4b | M |
-| W6.5 | intake labelling at every entry point (replenish marker plus Auto Merge) | `Verbs.Keeper.ps1`, `Replenish.ps1` (label), intake | W6.4a | S |
-| W6.6 | the docs plan's steps; the plant offers v2 items only to the separate runtime's sessions; the `FACTORY_V2_OFF` freeze | `src/Fworker.Workflows/WorkItem/Plans/Docs*`, `Plant.cs` (offer filter) | W6.1, W6.2, W6.3, W6.4a, W6.4b, W6.4c, W6.5 | M |
-| W6.7 | views: dashboard, status and digest read the history for v2 items, grouped by repository | `gateway/Endpoints/{Dashboard,Status}*`, `StatusQuery*` | W6.1 | S |
+| W6.3 | projections: board, labels and state comment, versioned, the state comment **in the format v1's `Get-State` reads** (the rollback path); echo suppression | `src/Fworker.Integrations/GitHub/Projection*` | W6.0 | M |
+| W6.6 | the docs plan's steps | `src/Fworker.Workflows/WorkItem/Plans/Docs*` | W6.1, W6.2, W6.3 | M |
+| W6.7 | views: dashboard, status and digest read the history on the v2 engine, grouped by repository | `gateway/Endpoints/{Dashboard,Status}*`, `StatusQuery*` | W6.1 | S |
 
-Parallel start: W6.1, W6.2, W6.3, W6.4a; then W6.4b, W6.5, W6.7; then W6.4c; W6.6 last.
-**Gate:** 8 docs items to Done on v2; v1 unaffected on its own slots.
+Parallel start: W6.1, W6.2, W6.3; then W6.7; W6.6 last.
+**Gate:** the docs-plan suites green in the v2 Tier 1 job, golden writes unchanged but for declared differences (CI). No window: v2
+does not act in tdd yet.
 
-### W7: R7, the feature plan (up to 4)
+### W7: R7, the feature plan (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W7.0 | integrator: `scheduler` and `merge` flags; the owner's decisions on overflow and the uat settle; the scheduler's and merge train's tables | `config/*`, `src/Fworker.Persistence/*` (tables) | W6 gate, D1, D6, D7 | S |
+| W7.0 | integrator: the scheduler's and merge train's tables; the owner's decisions on overflow and the uat settle, if given (defaults otherwise: no overflow, today's settle) | `config/*`, `src/Fworker.Persistence/*` (tables) | W6 gate, D1, D6, D7 | S |
 | W7.1 | full `CapacityScheduler`: ranking, admission chain, ledger ownership, slot freed on `SessionEnded`, the `host-full` outcome | `src/Fworker.Workflows/Capacity/*` | W7.0 | L |
-| W7.2 | `MergeTrainSaga` (direct, train, queue) per repository; v1's merge moved onto R6's C# direct merge | `src/Fworker.Workflows/Merge/*`, `Verbs.Merge.ps1` (delegation) | W7.0 | L |
+| W7.2 | `MergeTrainSaga` (direct, train, queue) per repository, for the v2 engine; v1 keeps `Verbs.Merge.ps1` until W9.11 | `src/Fworker.Workflows/Merge/*` | W7.0 | M |
 | W7.3 | the feature plan: Functional Testing with CI alongside (watcher in Functional Testing; red CI as a fix-forward round), the file-overlap hold in the invoke, the 5.1 answer texts (skills branch on the answer) | `src/Fworker.Workflows/WorkItem/Plans/Feature*`, `plugin/skills/*` | W7.0 | L |
 | W7.4 | host metrics and capability labels, both sides: `reconcile-hosts.sh`, `start-worker.sh` (counting `fw-*`, headroom, `host-full`), Tentacle tags (applied by the cmdemo1 session); the gateway's parsing of the new report fields | `deploy/octopus/*`, `OctopusRunbookRuntime.cs` (report parsing) | W7.0 | M |
-| W7.5 | v1 asks the scheduler through S6; slot release through the scheduler | `RuntimeManager.cs`, `Plant.Runtimes.cs` | W7.1 | M |
 | W7.6 | smoke evidence: the Smoke test runbook and `[Category("Smoke")]` in cmdemo1-workorders (a pull request there) | `deploy/octopus/*` (runbook), cmdemo1-workorders tests | W7.4 | M |
 | W7.7 | `dependencies-delivered` rule on | `src/Fworker.Workflows/Delivery/*` | W7.1 | S |
-| W7.8 | docs-only overflow (`overflowItems`, `MayOverflow`), if the owner agreed | `OctopusRunbookRuntime.cs`, `RuntimeManager.cs` | W7.4, W7.5 | S |
-| W7.9 | intake puts every new Auto Merge item on v2 | intake | W7.3 | S |
+| W7.8 | docs-only overflow (`overflowItems`, `MayOverflow`) in the v2 scheduler, if the owner agreed | `src/Fworker.Workflows/Capacity/Overflow*`, `OctopusRunbookRuntime.cs` | W7.1, W7.4 | S |
 | W7.10 | approved cross-repo pieces, each its own pull request: the merge queue ruleset with `merge_group`, the workorders pipeline changes with fworker's docs-only signal (`Get-MergeDocsOnly`), the kit's `release.yml` | other repositories, `Verbs.Delivery.ps1` (docs-only signal) | W7.2 | per piece |
 
-Parallel start: W7.1, W7.2, W7.3, W7.4; then W7.5, W7.6, W7.7, W7.9; then W7.8, W7.10.
-**Gate:** an 8-item code batch to prod on v2 against the baseline.
+Parallel start: W7.1, W7.2, W7.3, W7.4; then W7.6, W7.7; then W7.8, W7.10.
+**Gate:** the feature-plan suites green in the v2 Tier 1 job with golden writes (CI). No window.
 
-### W8: R8, incidents (up to 3)
+### W9: R9, the rest of v2, the tdd cutover, then v1 removed (2 to 3 at once, then one)
 
-| Task | Content | Owns | After | Size |
-|---|---|---|---|---|
-| W8.0 | integrator: `incidents` flag; the rollback policy; the incident tables | `config/*`, `src/Fworker.Persistence/*` (tables) | W7 gate | S |
-| W8.1 | `IncidentSaga` per (deployable, environment), the hotfix plan, the train hold that lets the incident's own work through | `src/Fworker.Workflows/Incident/*`, `WorkItem/Plans/Hotfix*`, `Delivery/*` (hold) | W8.0 | L |
-| W8.2 | alert ingress: the Azure Monitor webhook route; alert rules and the factory's out-of-band alert (applied by the cmdemo1 session; owner review) | `gateway/Endpoints/Alerts*`, cmdemo1-system (rules) | W8.0 | M |
-| W8.3 | rollback through the DeliveryTrain with the migration precondition; `Undelivered` | `src/Fworker.Workflows/Delivery/Rollback*` | W8.1 | M |
-
-**Gate:** a staged incident in the app's tdd, end to end.
-
-### W9: R9, retire v1 (up to 4, then one)
+W9 now comes before W8: the cutover needs every verb on v2, and incidents are a new capability that only v2 has.
 
 | Task | Content (verb groups of the refactor plan, R9) | Owns | After | Size |
 |---|---|---|---|---|
-| W9.0 | integrator: the remaining tables; the flag that moves QC-gated items to v2; one route registration file per verb group (`gateway/Verbs/Routes/{Item,Merge,Delivery,ReadModels,Keeper,Services,Board}.cs`, stubs) | `src/Fworker.Persistence/*`, `config/*` | W8 gate | S |
+| W9.0 | integrator: the remaining tables; one route registration file per verb group (`gateway/Verbs/Routes/{Item,Merge,Delivery,ReadModels,Keeper,Services,Board}.cs`, stubs) | `src/Fworker.Persistence/*`, `gateway/Verbs/Routes/*` (stubs) | W7 gate | S |
 | W9.1 | QC environments and the QC gate (`qc-*`, `Qc.cs`, `Qc.ps1`) as a saga per (repository, pull request) | `src/Fworker.Workflows/Qc/*`, `Qc.cs` | W9.0 | L |
 | W9.2 | the item verbs (`get-item` … `expire-claim`) | `src/Fworker.Workflows/WorkItem/*`, `gateway/Verbs/Routes/Item.cs` | W9.0 | M |
 | W9.3 | the merge train verbs (`approve-pr`, `merge`, `clear-hold`, `base-watch`, `base-update-branch`) | `src/Fworker.Workflows/Merge/*`, `BaseUpdate.cs`, `gateway/Verbs/Routes/Merge.cs` | W9.0 | M |
 | W9.4 | the delivery train verbs (`settle`, `publish-demo`, `ci-release`, `copilot-settle`, `copilot-owner`, `private-build`) | `src/Fworker.Workflows/Delivery/*`, `Runtimes/Copilot*`, `gateway/Verbs/Routes/Delivery.cs` | W9.0 | M |
 | W9.5 | read models (`pr-checks`, `wait-for-checks`, `inspect-facts`, `get-delivery`, `model-tier`, `check-secrets`) | `src/Fworker.Workflows/ReadModels/*`, `gateway/Verbs/Routes/ReadModels.cs` | W9.0 | M |
 | W9.6 | keeper and manager commands (`backlog`, `amend-criteria`, `split-item`, `create-item`, `set-priority`, `link-dependency`, `manager-action`) | `src/Fworker.Workflows/Keeper/*`, `Manager.cs`, `gateway/Verbs/Routes/Keeper.cs` | W9.0 | M |
-| W9.7 | services (owner review): `revocations`, `revoke-worker`, `git-credential`, `operator-release(s)`, `metrics` | `gateway/Identity/*`, `gateway/Operator/*`, `gateway/Verbs/Routes/Services.cs` | W9.0 | M |
+| W9.7 | services (security-focused review): `revocations`, `revoke-worker`, `git-credential`, `operator-release(s)`, `metrics` | `gateway/Identity/*`, `gateway/Operator/*`, `gateway/Verbs/Routes/Services.cs` | W9.0 | M |
 | W9.8 | transcripts to the database; `sync-board` and `ingest-event` into the reconciler and ingress; `journal` into history and projection | `Transcripts.cs`, `src/Fworker.Workflows/Reconcilers/*`, `gateway/Verbs/Routes/Board.cs` | W9.0 | M |
-| W9.9 | QC-gated items on v2 | intake, `config/*` | W9.1 | S |
-| W9.10 | Balanced mode, Wolverine leader election, the session mailbox | `gateway/Composition/Wolverine*`, `src/Fworker.Persistence/*` (mailbox) | W9.1 to W9.9 | M |
-| W9.11 | drain `engine:v1` items; remove the sweep engine, server rule scripts, lease, snapshot, `RunnerPool` (one subagent, last) | many | W9.10 | L |
+| W9.9 | **the tdd cutover:** on its first start as v2, the engine adopts every open item from its state comment and claim refs (idempotent) and every pending Sign-off; tdd moves from `shadowEnvironments` to `v2Environments` in `deploy.overrides.json`; the kill-switch drill | `src/Fworker.Workflows/Adoption*`, `config/deploy.overrides.json` | W9.1 to W9.8, every Tier 1 suite green on v2 | M |
+| W9.11 | remove v1: the sweep engine, the server rule scripts, the lease, the snapshot, `RunnerPool`, shadow mode and the v1 side of S1 (one subagent, last) | many | the cutover gate | L |
 
-**Gate:** no v1 item left; Tier 1 green with every capability on v2.
+Parallel start: W9.1 to W9.8 after W9.0, three at a time; W9.9 when they are merged; W9.11 after the cutover gate, beside W8.
+**Cutover gate** (the stabilisation gate's form, on v2): the full Tier 1 on v2 with golden writes; the kill-switch drill first (set
+`FACTORY_V2_OFF`, v1 resumes every item from the state comments and acts for one sweep, unset it, v2 adopts them again); then **one
+measured 8-item batch** on v2 with no regression against the 2026-10-25 baseline (same rule as stage C's gate); after each release
+`/ready` 200, v2's node leading and every open saga resumed; a **4-hour quiet window** with the batch inside, for the reasons given in
+section 3. After W9.11 merges: the release check and a **2-hour window**; rollback from then on is a revert of W9.11.
 
-## 5. Critical path and calendar
+### W8: R8, incidents, after the cutover (2 to 3 at once)
+
+| Task | Content | Owns | After | Size |
+|---|---|---|---|---|
+| W8.0 | integrator: the rollback policy (the default of section 2 until the owner answers); the incident tables | `config/*`, `src/Fworker.Persistence/*` (tables) | the cutover gate | S |
+| W8.1 | `IncidentSaga` per (deployable, environment), the hotfix plan, the train hold that lets the incident's own work through | `src/Fworker.Workflows/Incident/*`, `WorkItem/Plans/Hotfix*`, `Delivery/*` (hold) | W8.0 | L |
+| W8.2 | alert ingress: the Azure Monitor webhook route; alert rules and the factory's out-of-band alert (applied by the cmdemo1 session; security-focused review) | `gateway/Endpoints/Alerts*`, cmdemo1-system (rules) | W8.0 | M |
+| W8.3 | rollback through the DeliveryTrain with the migration precondition; `Undelivered` | `src/Fworker.Workflows/Delivery/Rollback*` | W8.1 | M |
+
+**Gate:** a staged incident in the app's tdd, end to end (about an hour).
+
+## 5. Critical path and clock time
 
 ```
-W-1 approvals -> Stage C (C-1 and C0 .. C8) -> stabilisation (2 batches, uat/prod promotion, 2 quiet weeks)
-  -> W0 -> W1 -> W2 (+7-day soak) -> W3 -> W4 -> W5 (+3 shadow releases) -> W6 -> W7 -> W8 -> W9
+W-1 actions -> Stage C (C7b, C7c, C7d, C8 left) -> stabilisation gate (4 h window, measured batch inside)
+  -> W0 (+2 h) -> W1 -> W2 (+2 h, shadow) -> W3 (+2 h) -> W4 (+2 h) -> W5 (+4 h or 3 app releases) -> W6 -> W7
+  -> W9.0..W9.9 -> cutover gate (drill, 4 h window, measured batch inside)
+  -> W8 beside W9.11 (+1 h staged incident; +2 h after the removal)
      Lane D (Domain ports) beside W1..W7, landing before W5, W6 and W7
 ```
 
-From the task sizes, along each wave's longest chain:
+**The observed throughput** (stage C, 2026-10-26): about 50 minutes per task from brief to live in tdd, with 2 to 3 tasks in
+parallel: about 20 minutes of agent work, 10 of CI, 10 of merge and release with the tdd check, and about 10 of review, hand-over and
+queueing. So:
+- one **unit** is one 50-minute task cycle; S and M tasks are one unit, L tasks two;
+- a wave's coding time is the larger of its longest chain (units x 50 minutes) and its throughput (all its units x 50 minutes / 2.5
+  tasks in parallel);
+- its clock time is the coding time plus its tdd window, which is serial because nothing merges during a window.
 
-| Stage or wave | Longest chain | Weeks |
-|---|---|---|
-| Stage C | C0, C1, C3, C4a, C4b, C4d, C5a, C5b, C5c, C6, C7a, C7b/c, C7d, C8 | about 12 |
-| Stabilisation | 2 measured batches, promotion, 2 quiet weeks | 2 to 3 |
-| W0 | W0.0, W0.1, W0.2, W0.7, W0.8 or W0.9 | about 4 |
-| W1 | W1.0, W1.4, W1.6, then W1.9 | about 3 |
-| W2 | W2.0, W2.1, W2.2, W2.3, plus 1 week soak | about 4 |
-| W3 | W3.0, W3.1, W3.4 | about 3 |
-| W4 | W4.0, W4.1, W4.3 | about 2.5 |
-| W5 | W5.0, W5.1, W5.2, W5.3, plus 3 shadow releases | about 4 |
-| W6 | W6.0, W6.1, W6.4c, W6.6 | about 5 |
-| W7 | W7.0, W7.1, W7.5, W7.8 | about 4 to 5 |
-| W8 | W8.0, W8.1, W8.3 | about 4 |
-| W9 | W9.0, W9.1, W9.9, W9.10, W9.11 | about 6 |
+| Stage or wave | Tasks (units) | Longest chain (units) | Coding | tdd window | Clock time |
+|---|---|---|---|---|---|
+| Stage C, the rest | C7b, C7c, C7d (L), C8: 4 (5) | C7b, C7d, C8 (4) | 3.3 h | none | 3.3 h |
+| Stabilisation gate | | | | 4 h with the batch inside, plus the release check | 4.5 h |
+| W0 | 9 (9) | W0.0, W0.1, W0.6, W0.9 (4) | 3.3 h | 2 h | 5.3 h |
+| W1 | 10 (10) | W1.0, W1.4, W1.6 (3) | 3.3 h (throughput) | none | 3.3 h |
+| Lane D | 7 (7), beside W1 to W7 | each one (1) | 2.3 h added throughput | none | 2.3 h |
+| W2 | 5 (6) | W2.0, W2.1, W2.2 (L), W2.3 (5) | 4.2 h | 2 h | 6.2 h |
+| W3 | 5 (6) | W3.0, W3.2 (L), W3.4 (4) | 3.3 h | 2 h | 5.3 h |
+| W4 | 4 (4) | W4.0, W4.1, W4.3 (3) | 2.5 h | 2 h | 4.5 h |
+| W5 | 3 (4) | W5.0, W5.1 (L), W5.2 (4) | 3.3 h | 4 h or 3 app releases | 7.3 h |
+| W6 | 6 (7) | W6.0, W6.1 (L), W6.6 (4) | 3.3 h | none | 3.3 h |
+| W7 (W7.10 excluded) | 8 (10) | W7.0, W7.1 (L), W7.7 (4) | 3.3 h | none | 3.3 h |
+| W9 to the cutover | W9.0 to W9.9: 10 (11) | W9.0, W9.1 (L), W9.9 (4) | 3.7 h (throughput) | drill 0.5 h, then 4 h with the batch inside | 8.2 h |
+| After the cutover | W8: 4 (5); W9.11 (L): 1 (2), side by side | W8.0, W8.1 (L), W8.3 (4) | 3.3 h | staged incident 1 h (W9.11's 2 h window fits beside it) | 4.3 h |
+| **Total** | **86 units** | | **about 39 h** | **about 22 h** | **about 61 h** |
 
-**About 53 to 56 weeks serial: roughly a year,** of which stage C and its stabilisation are about 3 months. The measured gates (soak,
-shadow, batches, stabilisation) are about 6 to 7 of those weeks; the rest is coding and CI.
+**About 61 hours of clock time, in a range of 55 to 75.** Run around the clock that is about 2.5 days; at about 12 supervised hours a
+day, about 5 days.
+- **Shorter:** subagents work during each window and merge at its end, so up to about 30 minutes of the next wave's agent work and
+  CI hides in each of the eight windows (about 4 hours).
+- **Longer:** a second CI round on one task in five (about 20 minutes on the chain each time), and a window or a measured batch that
+  fails once and is run again.
 
-**Shortening it:**
-- Next-wave development may start during a soak or shadow period on branches that do not merge until the gate passes. That overlap
-  saves up to about 1 to 1.5 months (the gate time it overlaps is about 4 to 6 weeks).
-- More than four parallel subagents mainly waits on CI.
-
-**Unbounded waits outside fworker:** the lifting of cmdemo1-system#314 (the stabilisation gate), the Platform Hub watcher change and the cmdemo1 changes (before W0), Azure SQL (before W2), and the
-cross-repo approvals (W7).
+**Assumptions:**
+- the 50-minute cycle and 10-minute CI hold for these waves. From W2, the SQL Server container and the v2 Tier 1 job add jobs that
+  run in parallel, not in series; if a pull request's CI takes 40 minutes, as section 1 assumed before, add 30 minutes per unit on
+  the chains (about 15 hours in all);
+- three subagents and one reviewer at once; more than that waits on the serial merges (about 10 minutes each);
+- an 8-item batch reaches the app's tdd in about 3.5 hours on two slots;
+- the windows run while the board has work, or the main session starts a small docs batch;
+- **not included:** the actions outside this repository (section 2: Azure SQL, the replica, `FACTORY_V2_OFF` in cmdemo1-system,
+  cmdemo1-aisf off board 679), which are unbounded waits; the cross-repo pieces of W7.10, which are off the critical path; and any
+  time the owner's decisions take.
 
 ## 6. What the main session does in each wave
 
-1. Brief and start the wave's integrator, then the parallel tasks as their "after" items merge (at most four at once, lane D included).
-2. Review each pull request with a reviewer subagent; watch CI; re-run flaky jobs at most twice; merge on green inside the merge window.
+1. Brief and start the wave's integrator, then the parallel tasks as their "after" items merge (two to three at once, lane D
+   included).
+2. Review each pull request with a reviewer subagent; watch CI; re-run flaky jobs at most twice; merge on green outside a window.
 3. Integrate hot-file additions in order; run `gh workflow run Tests` on master after each batch of merges.
-4. At the wave's end, switch its flag on in tdd, run the measured batch, record the gate's result in the item history and the handoff.
-5. If a gate fails, roll back with `FACTORY_V2_OFF` (through the cmdemo1 session), then fix forward.
+4. At the wave's end, open its tdd window, run its batch or comparison, and record the gate's result in the item history and the
+   handoff.
+5. If a gate fails: before the cutover v1 is acting, so fix forward (shadow mode can be stopped with `FACTORY_V2_OFF`); from the
+   cutover, revert the switch's pull request or set `FACTORY_V2_OFF` through the cmdemo1 session, then fix forward.
+
+## Appendix A. Board tasks whose scope changed (2026-10-26)
+
+Issue number to new disposition, for the orchestrator to apply to the board's issues (project "cmdemo1-fworker delivery"). Not
+listed means unchanged: C7b to C8 (#284 to #287), W0.1 to W0.6 (#289 to #294), W1.1 to W1.3 and W1.8 to W1.10 (#299 to #301, #306 to
+#308), W2.0 (#309), W3.3 (#317), W4.1 to W4.3 (#320 to #322), W5.1 (#324), W6.2 and W6.7 (#329, #336), W7.1, W7.3, W7.4, W7.6, W7.7,
+W7.10 (#338, #340, #341, #343, #344, #347), W8.1 to W8.3 (#349 to #351), W9.1 to W9.8 (#353 to #360), and lane D (#260, #364 to
+#370). Where a row below says "after" changed, the issue's "Depends on" line changes with it. In every issue, "owner review" now
+reads "security-focused review by the reviewer subagent; recorded in the handoff" (section 1, rule 7), and no task waits for an
+owner approval.
+
+**Epics (the wave issues):**
+- #257 Stage C → reworded: the stabilisation gate is section 3's (architecture test, golden writes, one measured batch, the release
+  checks, a 4-hour quiet tdd window); no uat or prod promotion, no two quiet weeks.
+- #258 W0 → reworded: W0.7 removed; no per-fix flags; gate with a 2-hour tdd window instead of a measured batch.
+- #259 W1 → reworded: seams S1 to S3 only (W1.7 removed; S5 and S6 dropped); W1.5 and W1.6 shrink.
+- #261 W2 → reworded: "the Wolverine host, in shadow mode"; Balanced mode and the session mailbox from the start; gate a 2-hour tdd
+  window instead of 7 days; no uat or prod image check.
+- #262 W3 → reworded: v2's own integration commands, v1's side effects unchanged; gate on the v2 kill scenarios and a 2-hour shadow
+  window.
+- #263 W4 → reworded: no `ingress` flag; gate a 2-hour shadow window.
+- #264 W5 → reworded: W5.3 merged into W9.9; gate a 4-hour (or 3 app releases) shadow run; no batch to prod.
+- #265 W6 → reworded: W6.4a, W6.4b, W6.4c and W6.5 removed; gate the v2 Tier 1 job (CI), no tdd items on v2.
+- #266 W7 → reworded: W7.5 and W7.9 removed; gate the v2 Tier 1 job (CI), no batch to prod.
+- #267 W8 → reworded: runs after the cutover gate, beside W9.11.
+- #268 W9 → reworded: "the rest of v2, the tdd cutover, then v1 removed"; W9.9 becomes the cutover; W9.10 merged into W2.2.
+
+**Tasks:**
+
+| Issue | Task | Disposition |
+|---|---|---|
+| #288 | W0.0 | reworded: the engine switch `engine: { v2Environments, shadowEnvironments }` per `FACTORY_ENVIRONMENT` and the `FACTORY_V2_OFF` reader; no per-capability flags |
+| #295 | W0.7 | removed: the budgets (failures, launches, `idleFollowUps`) become `WorkItemSaga` state in W6.1 (#328); runtime health in the snapshot goes with the snapshot |
+| #296 | W0.8 | reworded: after W0.1 (was W0.7) |
+| #297 | W0.9 | reworded: after W0.6 only (W0.7 removed) |
+| #298 | W1.0 | reworded: registration stubs for seams S1 to S3 only |
+| #302 | W1.4 | reworded: S1, `VerbPipeline` calls one engine interface composed per environment; "rule-script answers return their posted journal lines" dropped |
+| #303 | W1.5 | reworded, size S: S2 as integration-command contracts plus a recording sink (shadow mode, tests); no v1 implementation, S5 timers dropped |
+| #304 | W1.6 | reworded: S3 event ingress only, able to feed a shadow engine; the S6 loopback route dropped |
+| #305 | W1.7 | removed: no S4 seam in v1; the v1-readable state comment is v2's projection in W6.3 (#330) |
+| #310 | W2.1 | reworded: adds the session mailbox table |
+| #311 | W2.2 | reworded, size L: registered for `shadowEnvironments` or `v2Environments` with a connection string; Balanced mode with Wolverine's leader election and the session mailbox (absorbs W9.10, #362); no Solo mode on the lease holder |
+| #312 | W2.3 | reworded, size M: shadow mode (v2 reads S3's events, commands to the recording sink) and its comparison report with v1's writes; replaces shadow history |
+| #313 | W2.4 | reworded: adds the v2 Tier 1 job and the golden-write declared-differences file |
+| #314 | W3.0 | reworded: no `commands` flag and no per-capability `FACTORY_V2_OFF`; the command base, `GitHubBudget`, the per-repository client stay |
+| #315 | W3.1 | reworded: runtime start, stop and runbook runs as v2 integration commands; `RuntimeManager` behind an interface; v1's path unchanged |
+| #316 | W3.2 | reworded, size L: the journal ledger in C# as a v2 integration command, golden-identical; no longer through the `journal` verb |
+| #318 | W3.4 | reworded: the kill and restart scenarios run on the v2 engine |
+| #319 | W4.0 | reworded: no `ingress` flag; webhook secrets per source and the recurring-job slots stay |
+| #323 | W5.0 | reworded: no `delivery` flag; `ItemMerged` derived from the merge webhook and the reconciler, not emitted by v1 through S6; no change to `Verbs.Merge.ps1` or `Verbs.Delivery.ps1` |
+| #325 | W5.2 | reworded: a shadow run in tdd against the board, 4 hours or 3 app releases |
+| #326 | W5.3 | merged into W9.9 (#361): pending Sign-offs are adopted at the cutover; no separate v1 promotion off-switch |
+| #327 | W6.0 | reworded: no `intake.v2Plans` flag and no `engine:v2` label; the WIP intake rule and the saga tables stay |
+| #328 | W6.1 | reworded: also the budgets from W0.7 (#295) in the saga's state |
+| #330 | W6.3 | reworded: the state comment projection keeps v1's format until W9.11 (the rollback path) |
+| #331 | W6.4a | removed: no per-item engine |
+| #332 | W6.4b | removed: no per-item engine |
+| #333 | W6.4c | removed: no per-item engine |
+| #334 | W6.5 | removed: no `engine:v2` label |
+| #335 | W6.6 | reworded: the docs plan's steps only; no offer filter, no separate runtime, no per-item freeze; after W6.1 to W6.3 |
+| #337 | W7.0 | reworded: no `scheduler` or `merge` flags; owner decisions have defaults and stop nothing |
+| #339 | W7.2 | reworded, size M: `MergeTrainSaga` for the v2 engine only; v1's merge is not moved to C# |
+| #342 | W7.5 | removed: v1 does not ask v2's scheduler |
+| #345 | W7.8 | reworded: in the v2 scheduler; after W7.1 and W7.4 (W7.5 removed) |
+| #346 | W7.9 | removed: no per-item move to v2 |
+| #348 | W8.0 | reworded: no `incidents` flag; after the cutover gate |
+| #352 | W9.0 | reworded: no flag moving QC-gated items to v2 |
+| #361 | W9.9 | reworded: the tdd cutover (adoption of open items and pending Sign-offs, the `deploy.overrides.json` switch, the kill-switch drill); absorbs W5.3 (#326) |
+| #362 | W9.10 | merged into W2.2 (#311) |
+| #363 | W9.11 | reworded: remove v1 after the cutover gate (sweep engine, server rule scripts, lease, snapshot, `RunnerPool`, shadow mode); no drain of `engine:v1` items |
