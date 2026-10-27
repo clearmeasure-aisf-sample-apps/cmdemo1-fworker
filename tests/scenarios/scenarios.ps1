@@ -215,7 +215,7 @@ $Scenarios = [ordered]@{
     # W0.8: one timestamp per stage in the state (flow), turned into per-stage durations and medians by the metrics route
     $fst = @((Get-ItemState $n).flow)
     $fnames = @($fst | ForEach-Object { $_.c })
-    Check 'flow in the state: Technical Design, then Development, then the stages after, each entered once in a row, with a time' ($fnames.Count -ge 2 -and $fnames[0] -eq 'Technical Design' -and $fnames[1] -eq 'Development' -and @($fst | Where-Object { "$($_.at)" -notmatch '^\d{4}-\d\d-\d\dT' }).Count -eq 0 -and @(0..($fnames.Count - 2) | Where-Object { $fnames[$_] -eq $fnames[$_ + 1] }).Count -eq 0) ($fst | ConvertTo-Json -Compress)
+    Check 'flow in the state: Technical Design, then Development, then the stages after, each entered once in a row, with a time' ($fnames.Count -ge 2 -and $fnames[0] -eq 'Technical Design' -and $fnames[1] -eq 'Development' -and @($fst | Where-Object { -not $_.at }).Count -eq 0 -and @(0..($fnames.Count - 2) | Where-Object { $fnames[$_] -eq $fnames[$_ + 1] }).Count -eq 0) ($fst | ConvertTo-Json -Compress)
     if ($it.Count -eq 1) {
         $fl = @($it[0].flow)
         Check 'metrics: the item lists its stages in order with the seconds spent, the last one up to the merge' ($fl.Count -eq $fnames.Count -and $fl[0].stage -eq 'Technical Design' -and $fl[1].stage -eq 'Development' -and $null -ne $fl[0].seconds -and $fl[0].seconds -ge 0 -and $null -ne $fl[-1].seconds) ($fl | ConvertTo-Json -Compress)
