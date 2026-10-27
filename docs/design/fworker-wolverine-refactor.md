@@ -240,7 +240,7 @@ window).
 | `get-item`, `append-body`, `comment`, `claim-item`, `accept`, `release`, `my-items`, `record-review`, `move-next`, `complete`, `validation-verdict`, `open-pr`, `update-pr`, `item-pr`, `park-item`, `unpark-item`, `resettle-item`, `expire-claim` | WorkItemSaga (decision verbs by `InvokeAsync`, event verbs published) |
 | `pr-checks`, `wait-for-checks`, `inspect-facts`, `get-delivery`, `model-tier`, `check-secrets` | read models over the history and the integrations |
 | `approve-pr`, `merge`, `clear-hold`, `base-watch`, `base-update-branch` | MergeTrainSaga and its integration commands |
-| `settle`, `publish-demo`, `ci-release`, `copilot-settle`, `copilot-owner`, `private-build` | DeliveryTrainSaga and the runtime integrations |
+| `settle`, `publish-demo`, `ci-release`, `copilot-settle`, `copilot-owner`, `private-build`, `auto-promote` | DeliveryTrainSaga and the runtime integrations |
 | `sync-board`, `ingest-event` | the board reconciler and S3 ingress |
 | `journal` | the history plus the projection |
 | `qc-*` (14 verbs) | a QC service with its own saga per environment |
