@@ -465,6 +465,9 @@ function Test-DependencyMet([int]$Dep, $ByNumber, $Cache) {
 # each item read by itself instead of the whole board, and no claim-ref reaping and no QC sync (both are about the whole board). low: the gateway's
 # GitHub budget is below its reserve; the full sweep skips the claim-ref reaping and the QC sync, which can wait for the reset.
 function Verb_sync_board($a) {
+    try { return (Invoke-SyncBoard $a) } finally { $script:SweepDeadline = $null }   # (the sweep's deadline never outlives the sweep, whatever ends it)
+}
+function Invoke-SyncBoard($a) {
     $c = Get-Cfg; $t = $c.timing
     $dry = (Test-Has $a 'dry') -and $a.dry
     # Issue 426: the sweep answers within the gateway's cap (280 s). Its plan (the offers, owners, parks) is made by the item loop; the tail steps (claim-ref
