@@ -83,6 +83,29 @@ namespace Fworker.Persistence.Migrations
                     b.ToTable("Correlations", "factory");
                 });
 
+            modelBuilder.Entity("Fworker.Persistence.DeliveredToEntry", b =>
+                {
+                    b.Property<string>("ItemKey")
+                        .HasMaxLength(300)
+                        .HasColumnType("nvarchar(300)");
+
+                    b.Property<string>("Environment")
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<DateTimeOffset>("DeliveredAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Release")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.HasKey("ItemKey", "Environment");
+
+                    b.ToTable("DeliveredTo", "factory");
+                });
+
             modelBuilder.Entity("Fworker.Persistence.ItemHistoryEntry", b =>
                 {
                     b.Property<long>("Id")
@@ -133,6 +156,45 @@ namespace Fworker.Persistence.Migrations
                     b.HasIndex("ItemKey", "Generation", "Id");
 
                     b.ToTable("ItemHistory", "factory");
+                });
+
+            modelBuilder.Entity("Fworker.Persistence.MergedItem", b =>
+                {
+                    b.Property<string>("ItemKey")
+                        .HasMaxLength(300)
+                        .HasColumnType("nvarchar(300)");
+
+                    b.Property<string>("Commit")
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("DependenciesJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("GatesJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTimeOffset>("MergedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("PullRequest")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.HasKey("ItemKey", "Commit");
+
+                    b.HasIndex("Commit");
+
+                    b.ToTable("MergedItems", "factory");
                 });
 
             modelBuilder.Entity("Fworker.Persistence.OpenInstance", b =>

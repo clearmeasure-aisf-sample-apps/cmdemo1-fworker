@@ -39,6 +39,8 @@ static class GatewayWolverineExtensions
                     var map = new Fworker.Integrations.Correlation.SqlCorrelationMap(cs);
                     var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
                     IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
+                    // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN to read the pull request and the item
+                    if (ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable) is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));
                     correlations = new IngressCorrelations(map, home);
                     inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
                     // W4.1 follow-up (#485): the claims of the deduplication do not live for ever

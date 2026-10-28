@@ -18,6 +18,8 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<ProjectionVersion> ProjectionVersions => Set<ProjectionVersion>();
     public DbSet<SessionMailboxEntry> SessionMailbox => Set<SessionMailboxEntry>();
     public DbSet<CatalogCopy> CatalogCopies => Set<CatalogCopy>();
+    public DbSet<MergedItem> MergedItems => Set<MergedItem>();
+    public DbSet<DeliveredToEntry> DeliveredTo => Set<DeliveredToEntry>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -77,6 +79,28 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.HasIndex(x => new { x.SessionId, x.Id });
             // the cleanup deletes by age
             e.HasIndex(x => x.ExpiresAt);
+        });
+
+        b.Entity<MergedItem>(e =>
+        {
+            e.ToTable("MergedItems");
+            e.HasKey(x => new { x.ItemKey, x.Commit });
+            e.Property(x => x.ItemKey).HasMaxLength(300);
+            e.Property(x => x.Commit).HasMaxLength(40);
+            e.Property(x => x.Source).HasMaxLength(16).IsRequired();
+            e.Property(x => x.GatesJson).IsRequired();
+            e.Property(x => x.DependenciesJson).IsRequired();
+            // the train maps a commit to its items
+            e.HasIndex(x => x.Commit);
+        });
+
+        b.Entity<DeliveredToEntry>(e =>
+        {
+            e.ToTable("DeliveredTo");
+            e.HasKey(x => new { x.ItemKey, x.Environment });
+            e.Property(x => x.ItemKey).HasMaxLength(300);
+            e.Property(x => x.Environment).HasMaxLength(32);
+            e.Property(x => x.Release).HasMaxLength(200).IsRequired();
         });
 
         b.Entity<CatalogCopy>(e =>

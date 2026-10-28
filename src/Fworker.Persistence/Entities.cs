@@ -85,3 +85,31 @@ public class CatalogCopy
     public string? SourceSha { get; set; }
     public DateTimeOffset FetchedAt { get; set; }
 }
+
+/// <summary>An item whose pull request merged into the default branch, as the delivery train takes it in (W5.0). One row per item and merge commit: the webhook and the board reconciler both derive it, the first claims the row.</summary>
+public class MergedItem
+{
+    public string ItemKey { get; set; } = "";
+    /// <summary>The merge commit, 40 hex characters, lower case.</summary>
+    public string Commit { get; set; } = "";
+    public int PullRequest { get; set; }
+    /// <summary>The ItemMergedGates as JSON.</summary>
+    public string GatesJson { get; set; } = "";
+    /// <summary>The qualified dependencies as a JSON array of "owner/repo#N".</summary>
+    public string DependenciesJson { get; set; } = "";
+    /// <summary>"webhook" or "poll": which source derived it first.</summary>
+    public string Source { get; set; } = "";
+    public DateTimeOffset MergedAt { get; set; }
+    /// <summary>The Wolverine message that claimed the row: a redelivery of it passes, another message is a duplicate.</summary>
+    public Guid MessageId { get; set; }
+}
+
+/// <summary>Where an item has been delivered: the release it reached in an environment (system-gateway.md H5). Kept from DeliveredTo and Undelivered; answers the train's dependencies-delivered(env) slot.</summary>
+public class DeliveredToEntry
+{
+    public string ItemKey { get; set; } = "";
+    /// <summary>"tdd", "uat" or "prod".</summary>
+    public string Environment { get; set; } = "";
+    public string Release { get; set; } = "";
+    public DateTimeOffset DeliveredAt { get; set; }
+}
