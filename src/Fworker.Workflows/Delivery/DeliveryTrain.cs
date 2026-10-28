@@ -43,7 +43,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
     /// <summary>A replay that has not ended after this long stops holding the train back (the end marker was lost).</summary>
     public static readonly TimeSpan ReplayLimit = TimeSpan.FromMinutes(30);
     /// <summary>When a read of GitHub or of the app is refused or fails, the train looks again after this (the input is already saved).</summary>
-    public static readonly TimeSpan TransientRetry = TimeSpan.FromMinutes(1);
+    public static readonly TimeSpan TransientRetry = TimeSpan.FromSeconds(15);
     /// <summary>A train that waits (a release not promoted, a deployment followed) looks again at least this often, whatever else wakes it.</summary>
     public static readonly TimeSpan SafetyWake = TimeSpan.FromMinutes(10);
     const int Attempts = 5;
@@ -58,6 +58,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
         var policy = policies.For(deployable, environment);
         if (policy is null) return TrainResult.None;   // the deployable left the catalog
         var replayEnded = input is TrainReplay { Active: false };
+        TrainRecord? carried = null;
         if (input is not TrainWake)
         {
             var saved = false;
@@ -68,12 +69,13 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 Apply(state, input, policy, clock());
                 state.Sequence++;
                 saved = await store.Save(input.Key, state, rec?.Revision ?? 0, ct);
+                if (saved) carried = new TrainRecord(state, (rec?.Revision ?? 0) + 1);   // (the second phase goes on from what was just saved)
             }
             if (!saved) throw new TrainConflictException(input.Key);
         }
         for (var attempt = 0; attempt < Attempts; attempt++)
         {
-            var rec = await store.Load(input.Key, ct);
+            var rec = carried ?? await store.Load(input.Key, ct); carried = null;
             if (rec is null) return TrainResult.None;
             var state = rec.State;
             var now = clock();
