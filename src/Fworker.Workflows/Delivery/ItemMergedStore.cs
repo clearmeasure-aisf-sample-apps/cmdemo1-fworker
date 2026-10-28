@@ -63,7 +63,7 @@ public sealed class InMemoryMergedItemStore : IMergedItemStore
 /// The delivered-to table (system-gateway.md H5): the release an item reached in an environment, kept from <see cref="DeliveredTo"/> and <see cref="Undelivered"/>. It answers
 /// the delivery train's dependencies-delivered(env) slot; an event only triggers a re-check. A later delivery of the item to the same environment replaces the release.
 /// </summary>
-public sealed class DeliveredToTable(Func<FactoryDbContext> open)
+public sealed class DeliveredToTable(Func<FactoryDbContext> open) : IDeliveredLookup
 {
     public async Task Record(DeliveredTo e, DateTimeOffset at, CancellationToken ct = default)
     {

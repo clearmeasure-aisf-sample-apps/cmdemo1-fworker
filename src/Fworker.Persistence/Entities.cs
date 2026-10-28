@@ -113,3 +113,13 @@ public class DeliveredToEntry
     public string Release { get; set; } = "";
     public DateTimeOffset DeliveredAt { get; set; }
 }
+
+/// <summary>The state of one delivery train (W5.1): one row per deployable and environment, the key "deployable/environment". The state is a JSON document owned by Fworker.Workflows.Delivery.</summary>
+public class DeliveryTrainRow
+{
+    public string Key { get; set; } = "";
+    /// <summary>Counts the saves; the concurrency token: a writer that read an older revision fails and runs again on the new state.</summary>
+    public int Revision { get; set; }
+    public string StateJson { get; set; } = "";
+    public DateTimeOffset UpdatedAt { get; set; }
+}
