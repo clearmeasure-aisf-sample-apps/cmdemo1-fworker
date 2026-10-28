@@ -20,6 +20,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<CatalogCopy> CatalogCopies => Set<CatalogCopy>();
     public DbSet<MergedItem> MergedItems => Set<MergedItem>();
     public DbSet<DeliveredToEntry> DeliveredTo => Set<DeliveredToEntry>();
+    public DbSet<DeliveryTrainRow> DeliveryTrains => Set<DeliveryTrainRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -101,6 +102,16 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.Property(x => x.ItemKey).HasMaxLength(300);
             e.Property(x => x.Environment).HasMaxLength(32);
             e.Property(x => x.Release).HasMaxLength(200).IsRequired();
+        });
+
+        b.Entity<DeliveryTrainRow>(e =>
+        {
+            e.ToTable("DeliveryTrains");
+            e.HasKey(x => x.Key);
+            e.Property(x => x.Key).HasMaxLength(300);
+            e.Property(x => x.StateJson).IsRequired();
+            // the train's state is read and written by its key; a stale writer loses (the handler retries on the new state)
+            e.Property(x => x.Revision).IsConcurrencyToken();
         });
 
         b.Entity<CatalogCopy>(e =>

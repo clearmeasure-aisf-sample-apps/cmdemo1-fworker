@@ -106,6 +106,28 @@ namespace Fworker.Persistence.Migrations
                     b.ToTable("DeliveredTo", "factory");
                 });
 
+            modelBuilder.Entity("Fworker.Persistence.DeliveryTrainRow", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasMaxLength(300)
+                        .HasColumnType("nvarchar(300)");
+
+                    b.Property<int>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("int");
+
+                    b.Property<string>("StateJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("Key");
+
+                    b.ToTable("DeliveryTrains", "factory");
+                });
+
             modelBuilder.Entity("Fworker.Persistence.ItemHistoryEntry", b =>
                 {
                     b.Property<long>("Id")
