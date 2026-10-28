@@ -322,4 +322,28 @@ public sealed class JournalTextParityTests
         var expected = "Plant manager: " + AsJson(line) + "\\n\\n<!-- plant event=" + ev;
         Assert.True(GoldenCorpus.Value.Contains(expected, StringComparison.Ordinal), $"no golden write holds the {name} line produced by the port:\n{line}");
     }
+
+    // ---- W3.2: Protect-JournalText ----------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public void Protect_ReplacesEveryPatternOfTheCatalogue_AndNothingElse()
+    {
+        var token = "ghp_" + new string('A', 26);   // composed at run time: the secret scan stays meaningful
+        Assert.Equal("a [redacted] b", JournalText.Protect($"a {token} b", ["gh[pousr]_[A-Za-z0-9]{20,}"]));
+        Assert.Equal($"a {token} b", JournalText.Protect($"a {token} b", ["AKIA[0-9A-Z]{16}"]));
+        Assert.Equal("[redacted]-[redacted]", JournalText.Protect("x1-y2", ["x1", "y2"]));
+        Assert.Equal("", JournalText.Protect(null, ["x"]));
+        Assert.Equal("", JournalText.Protect("", ["x"]));
+    }
+
+    [Fact]
+    public void Protect_WithoutACatalogue_UsesTheFallbackPatternsOfTheScript()
+    {
+        var token = "ghp_" + new string('B', 26);
+        Assert.Equal("t [redacted]", JournalText.Protect($"t {token}", null));
+        Assert.Equal("t [redacted]", JournalText.Protect($"t {token}", [""]));
+        Assert.Equal("k [redacted] z", JournalText.Protect("k AKIA" + new string('Q', 16) + " z", []));
+        Assert.Equal("[redacted]", JournalText.Protect("password: " + new string('c', 14), null));
+        Assert.Equal(6, JournalText.FallbackSecretPatterns.Count);
+    }
 }
