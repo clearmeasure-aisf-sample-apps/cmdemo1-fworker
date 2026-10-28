@@ -82,12 +82,14 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             var stale = false;
             if (input is TrainWake { Due: { } due }) { if (due == state.WakeDue) state.WakeDue = null; else stale = true; }   // (a timer that is not the pending one only looks again)
             var gated = state.ReplayingSince is { } since && now - since < ReplayLimit;
+            if (!gated && state.ReplayingSince is not null) { state.ReplayingSince = null; state.RepublishPending = true; }   // the end marker was lost: the hold ran out, which is the end of the replay too
             TrainRun? run = null; DateTimeOffset? wake = null;
             if (gated) wake = state.ReplayingSince + DeliveryTrainService.ReplayLimit;   // if the end marker is lost, the train looks again when the hold runs out
             if (!gated)
             {
-                run = new TrainRun(state, policy, reads, delivered, now, replayEnded);
-                try { await run.Evaluate(ct); }
+                var republish = state.RepublishPending;
+                run = new TrainRun(state, policy, reads, delivered, now, replayEnded || republish);
+                try { await run.Evaluate(ct, republish); }
                 catch (Exception e) when (e is HttpRequestException or TimeoutException || (e is OperationCanceledException && !ct.IsCancellationRequested))
                 {
                     return new TrainResult([], now + TransientRetry);   // nothing of this look is kept; the input is saved
@@ -145,6 +147,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 break;
             case TrainReplay r:
                 s.ReplayingSince = r.Active ? now : null;
+                if (!r.Active) s.RepublishPending = true;   // the end of a replay is a restart's: whoever listens to the decisions starts empty
                 break;
         }
     }
@@ -168,7 +171,22 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
 
     // ---- the evaluation ------------------------------------------------------------------------------------------------------------------------------------
 
-    public async Task Evaluate(CancellationToken ct)
+    public async Task Evaluate(CancellationToken ct, bool republish = false)
+    {
+        // A decision is published once per change, and what the listener holds is gone after a restart. So after a replay every decision is published again: a fingerprint without its decision (a state
+        // saved before the details were kept) is forgotten, so that the evaluation decides it afresh, and the other decisions are repeated from their details once the evaluation is through.
+        if (republish) foreach (var release in s.Decisions.Keys.Where(k => !s.DecisionDetails.ContainsKey(k)).ToList()) s.Decisions.Remove(release);
+        await Evaluate(ct);
+        if (!republish) return;
+        foreach (var (release, d) in s.DecisionDetails.ToList())
+        {
+            if (release.Length == 0 || !s.Decisions.ContainsKey(release) || Out.OfType<TrainDecided>().Any(x => x.Release == release)) continue;
+            Out.Add(new TrainDecided(s.Key, d.Action, release, d.Items, d.Reasons, now, d.Superseded, replay));
+        }
+        s.RepublishPending = false;
+    }
+
+    async Task Evaluate(CancellationToken ct)
     {
         await Settle(ct);
         if (!p.Acts) return;   // tdd is deployed by the release's lifecycle and an external promoter creates its own deployments: the train observes
@@ -503,15 +521,17 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         var fp = $"{action}|{release}|{string.Join(",", items)}|{string.Join("; ", reasons)}";
         if (!always && s.Decisions.TryGetValue(release, out var last) && last == fp) return;
         // one decision is kept per release; a release that is delivered, superseded or no longer judged leaves none behind (the shadow retracts what it held for it)
-        if (action is "delivered" or "idle") { s.Decisions.Remove(release); foreach (var v in superseded ?? []) s.Decisions.Remove(v); }
-        else s.Decisions[release] = fp;
+        if (action is "delivered" or "idle") { Forget(release); foreach (var v in superseded ?? []) Forget(v); }
+        else { s.Decisions[release] = fp; s.DecisionDetails[release] = new TrainDecisionDetail { Action = action, Items = items.ToList(), Reasons = reasons.ToList(), Superseded = superseded?.ToList() }; }
         Out.Add(new TrainDecided(s.Key, action, release, items, reasons, now, superseded, replay));
     }
+
+    void Forget(string release) { s.Decisions.Remove(release); s.DecisionDetails.Remove(release); }
 
     /// <summary>The releases that had a decision and are not judged any more (promoted all the way, not newer than what runs here, gone from the open ones): each is retracted with an "idle" decision.</summary>
     void Retract(HashSet<string> judged)
     {
         foreach (var release in s.Decisions.Keys.Where(k => k.Length > 0 && !judged.Contains(k)).ToList()) Decide("idle", release, [], []);
-        s.Decisions.Remove("");
+        s.Decisions.Remove(""); s.DecisionDetails.Remove("");
     }
 }
