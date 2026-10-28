@@ -25,6 +25,7 @@ static class GatewayWolverineExtensions
                 copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()));
                 RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler), stores.Ledger);
                 journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands
+                RecurringJobSlots.Attach(host);   // W4.0: the slots of the board reconciler and the catalog re-read (W4.3), empty
             }
             return host;
         });
