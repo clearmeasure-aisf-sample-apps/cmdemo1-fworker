@@ -247,6 +247,11 @@ static class GatewayServiceCollectionExtensions
         // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
         if (c.WolverineHost) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
         if (c.Engine.V2Acts) services.AddHostedService(sp => sp.GetRequiredService<CopilotReconcileService>());   // W3.3
+        if (c.Engine.V2Acts)   // W4.2: the Octopus watcher, read only; v1 and shadow promote with the rule scripts
+        {
+            services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct));
+            services.AddHostedService(sp => sp.GetRequiredService<OctopusWatchService>());
+        }
         services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
         // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
         var sweepSeconds = gw.SweepSeconds;

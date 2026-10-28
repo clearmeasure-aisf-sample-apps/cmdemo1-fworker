@@ -23,7 +23,7 @@ sealed class WebhookDeduplicator
 // (github: FACTORY_WEBHOOK_SECRET, the one the gateway always had; octopus: FACTORY_WEBHOOK_SECRET_OCTOPUS); a source without a secret (unset or empty)
 // refuses every delivery, and an unknown source has none. The secrets are never logged; the comparison is in constant time. GitHub signs the body
 // (X-Hub-Signature-256, HMAC-SHA256); an Octopus subscription cannot compute a signature, so it sends the shared secret itself in a header
-// (X-Octopus-Webhook-Secret) over TLS. The Octopus route comes with the watcher (W4.2). A protected area (CLAUDE.md).
+// (X-Octopus-Webhook-Secret) over TLS. A protected area (CLAUDE.md).
 sealed class WebhookSecrets(Func<string, string?> env)
 {
     public const string GitHub = "github", Octopus = "octopus";

@@ -37,7 +37,7 @@ public sealed class RouteTableTests(TwoPortGateway gw) : IClassFixture<TwoPortGa
         if (!StubPwsh.Supported) return;
         var row = RouteTable.Find(method, pattern);
         var a = await gw.Host.SendAsync(method, RouteTable.PathOf(pattern), port);
-        if (port == GatewayEnvironment.HookPort && !(method == "POST" && pattern == "/webhooks/github"))
+        if (port == GatewayEnvironment.HookPort && !(method == "POST" && pattern is "/webhooks/github" or "/webhooks/octopus"))
         {
             Assert.Equal(404, a.Status);
             return;

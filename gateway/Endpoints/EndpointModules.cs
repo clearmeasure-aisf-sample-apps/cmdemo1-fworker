@@ -45,6 +45,7 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule, PresenceEndpoints>();
         services.AddSingleton<IEndpointModule, MessagingEndpoints>();
         services.AddSingleton<IEndpointModule, SupervisorEndpoints>();
+        services.AddSingleton<IEndpointModule>(sp => new OctopusWebhookEndpoints(sp));   // W4.2: answers 404 unless the Octopus watcher is on (v2 acting)
         services.AddSingleton<IEndpointModule>(sp => ActivatorUtilities.CreateInstance<TestHookEndpoints>(sp, c.RuntimeNonces));
         // C7b: what is not a service of its own comes from the composition (the runtime nonces; the worker sessions at /mcp, made after the mapping)
         services.AddSingleton<IEndpointModule>(sp => new WorkerAdminEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(),
