@@ -19,6 +19,35 @@ sealed class WebhookDeduplicator
     }
 }
 
+// W4.0: the secret of each webhook source and the check of its signature. A source's secret comes from its own environment variable
+// (github: FACTORY_WEBHOOK_SECRET, the one the gateway always had; octopus: FACTORY_WEBHOOK_SECRET_OCTOPUS); a source without a secret (unset or empty)
+// refuses every delivery, and an unknown source has none. The secrets are never logged; the comparison is in constant time. GitHub signs the body
+// (X-Hub-Signature-256, HMAC-SHA256); an Octopus subscription cannot compute a signature, so it sends the shared secret itself in a header
+// (X-Octopus-Webhook-Secret) over TLS. The Octopus route comes with the watcher (W4.2). A protected area (CLAUDE.md).
+sealed class WebhookSecrets(Func<string, string?> env)
+{
+    public const string GitHub = "github", Octopus = "octopus";
+    public static string EnvVar(string source) => source switch { GitHub => "FACTORY_WEBHOOK_SECRET", Octopus => "FACTORY_WEBHOOK_SECRET_OCTOPUS", _ => "" };
+
+    /// <summary>The secret of the source, or null when there is none (unset, empty, unknown source).</summary>
+    public string? For(string source) { var v = EnvVar(source) is { Length: > 0 } n ? env(n) : null; return string.IsNullOrEmpty(v) ? null : v; }
+
+    /// <summary>True only when the source has a secret and the delivery proves it: signature is the value of the source's header, body the raw request body.</summary>
+    public bool Verify(string source, string? signature, byte[] body)
+    {
+        var secret = For(source);
+        if (secret == null || signature == null) return false;
+        switch (source)
+        {
+            case GitHub:
+                var expected = "sha256=" + Convert.ToHexString(HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), body)).ToLowerInvariant();
+                return HttpResultsX.FixedEquals(signature, expected);
+            case Octopus: return CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(signature)), SHA256.HashData(Encoding.UTF8.GetBytes(secret)));   // hashed first: no length leak
+            default: return false;
+        }
+    }
+}
+
 // GitHub's webhook (task C7b): the one route of the webhook port (the port a tunnel exposes; the middleware answers 404 for any other path there).
 // The signature (X-Hub-Signature-256, HMAC-SHA256 with the webhook secret, compared in constant time) is its only credential: a protected area
 // (CLAUDE.md). An accepted event runs the rule verb ingest-event; the events it returns are published, routed to the items' owners and ask for a sweep.
@@ -32,8 +61,7 @@ sealed class WebhookEndpoints(GatewayOptions gateway, Runner runner, IEventIngre
         using var ms = new MemoryStream(); await ctx.Request.Body.CopyToAsync(ms);
         var raw = ms.ToArray();
         var sig = ctx.Request.Headers["X-Hub-Signature-256"].ToString();
-        var expected = "sha256=" + Convert.ToHexString(HMACSHA256.HashData(Encoding.UTF8.GetBytes(gateway.WebhookSecret), raw)).ToLowerInvariant();
-        if (!FixedEquals(sig, expected)) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"webhook\":\"bad-signature\"}}"); return Results.StatusCode(401); }
+        if (!new WebhookSecrets(n => n == "FACTORY_WEBHOOK_SECRET" ? gateway.WebhookSecret : null).Verify(WebhookSecrets.GitHub, sig, raw)) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"webhook\":\"bad-signature\"}}"); return Results.StatusCode(401); }
         var ev = ctx.Request.Headers["X-GitHub-Event"].ToString();
         var delivery = ctx.Request.Headers["X-GitHub-Delivery"].ToString();
         if (ev == "ping") return Results.Ok("pong");
