@@ -1660,6 +1660,7 @@ $OwnerBarriers = [System.Collections.Generic.HashSet[string]]::new()
     'pass-merge: a PASS on an Auto Merge item with green checks is merged by the verdict call itself; the session''s merge call answers already-merged'   # new items, the scripted holder only (Pm-ToValidation, as the ci rule barrier); the pass-merge scenarios after it start and stop their own sessions
     'offers: a late accept of a withdrawn offer is refused (stale-assignment) and never takes a worker over its capacity'   # stops every session first
     'offers: a session that let two offers in a row lapse is not offered more until it calls a verb, and the status shows the cool-down'   # stops every session first
+    'owner: the plant survives a graceful restart: owner, accepted assignment and an unanswered offer come back, and the offer is accepted after it [full]'   # restarts the gateway first (and again in finally) and starts only its own session, with its own pinned items; CI cut: it halves the longest run between two barriers
     'owner: auto-unpark: a red-shard park is lifted once the pull request is green on a newer head, not on the head it judged'   # the start of group 1 of 2 since the owner suite was split
     'intake: a free slot and an empty Technical Design pull the top Todo item that is not held, pinned or waiting, up to the WIP limit'   # stops every session, restarts the gateway
     'owner: pr-checks with an item token reads the checks of that item''s own pull request and of no other'   # (checks.ps1) items pinned to nobody, the scripted holder only

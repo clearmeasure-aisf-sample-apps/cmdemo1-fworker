@@ -70,7 +70,7 @@ Rules of the runners:
 - `run-all.ps1` rewrites `tests/scenarios/suite-times.json` (and a full run `scenario-stats.json`): commit them only when the timings
   really changed.
 
-The pull request runs the smoke test and every suite at the full tier (`tests.yml`, six jobs). The stress test is not part of it:
+The pull request runs the smoke test and every suite at the full tier (`tests.yml`: about 50 Tier 1 shard jobs, 4 shards of the gateway tests, the src tests with the SQL-backed Wolverine tests, and the coverage proof; about 8 minutes wall clock). The stress test is not part of it:
 `pwsh -NoProfile -File tests/stress/messaging-stress.ps1 -NoBuild` (10 minutes, alone on the machine).
 
 ## Deployed settings
