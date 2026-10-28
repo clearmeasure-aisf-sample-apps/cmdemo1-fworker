@@ -10,7 +10,7 @@ using Fworker.Workflows.Delivery;
 using Microsoft.EntityFrameworkCore;
 using Wolverine;
 
-// W5.0 (docs/design/fworker-wolverine-implementation.md W5): ItemMerged in the Wolverine host. Only where the engine acts (Engine.V2Acts); tdd (shadow) and v1 register none of it, and
+// W5.0 (docs/design/fworker-wolverine-implementation.md W5): ItemMerged in the Wolverine host. Where the engine acts (Engine.V2Acts) and, since W5.2, in the shadow run of the delivery train (tdd: DeliveryShadowWiring); v1 registers none of it, and
 // v1 emits nothing: no `delivery` flag, no change to Verbs.Merge.ps1 or Verbs.Delivery.ps1. The message is derived from what the ingress inbox takes in, a merge webhook
 // ("base.merged", "pr.merged") or the board reconciler's poll of a closed card, by ItemMergedDeriver (Fworker.Workflows.Delivery), which reads the pull request and the item from GitHub with
 // GH_TOKEN, as the board reconciler does, and claims a row per (item, merge commit) in the merged-items table so the two sources give one message. The message is recorded in ItemHistory

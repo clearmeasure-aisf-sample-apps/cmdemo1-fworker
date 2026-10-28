@@ -12,6 +12,8 @@ sealed class AutoPromoter(Runner runner, TimeSpan interval, bool enabled) : Back
     public static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(240);
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(60);
     public Func<bool>? MayAct { get; init; }
+    // W5.2: what the pass did, for the shadow run's comparison with the delivery train (DeliveryShadow); null where there is no shadow. It must not throw and v1 does not wait for it.
+    public Action<JsonArray>? OnActions { get; init; }
     public TimeSpan Interval { get; } = interval < TimeSpan.FromSeconds(1) ? TimeSpan.FromSeconds(1) : interval;
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -42,6 +44,7 @@ sealed class AutoPromoter(Runner runner, TimeSpan interval, bool enabled) : Back
         var acts = j["actions"] as JsonArray ?? new JsonArray();
         var errs = j["errors"] as JsonArray ?? new JsonArray();
         Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"promote\":{{\"actions\":{acts.Count},\"errors\":{errs.Count},\"elapsedMs\":{(j["elapsed_ms"]?.ToString() ?? "null")}}}}}");
+        try { OnActions?.Invoke(acts); } catch { }   // (the comparison is the shadow's: it never stops a pass)
         foreach (var a in acts) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweepAction\":{a!.ToJsonString()}}}");
         foreach (var er in errs) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweepError\":{er!.ToJsonString()}}}");
     }

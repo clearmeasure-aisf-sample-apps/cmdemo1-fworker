@@ -247,11 +247,14 @@ static class GatewayServiceCollectionExtensions
         // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
         if (c.WolverineHost) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
         if (c.Engine.V2Acts) services.AddHostedService(sp => sp.GetRequiredService<CopilotReconcileService>());   // W3.3
-        if (c.Engine.V2Acts)   // W4.2: the Octopus watcher, read only; v1 and shadow promote with the rule scripts
+        // W4.2: the Octopus watcher, read only; v1 promotes with the rule scripts. W5.2: it also runs in the shadow run of the delivery train (slower, a smaller call budget)
+        var shadowTrain = c.Engine.ShadowRuns && c.WolverineHost && c.Instance.Home != null;
+        if (c.Engine.V2Acts || shadowTrain)
         {
-            services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct));
+            services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct, shadow: shadowTrain));
             services.AddHostedService(sp => sp.GetRequiredService<OctopusWatchService>());
         }
+        if (shadowTrain) services.AddHostedService(sp => new DeliveryShadowService(sp.GetRequiredService<DeliveryShadowHolder>(), DeliveryShadowService.DefaultInterval));   // W5.2: compares and stores
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddHostedService(sp => sp.GetRequiredService<RecurringJobScheduler>());   // W4.3
         services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
         // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
@@ -261,7 +264,7 @@ static class GatewayServiceCollectionExtensions
         services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
         // The automatic promotion: a loop of its own after the sweep, its own call (verb auto-promote), timeout and leader gate; it never runs inside the sweep
         var promoteOn = c.Instance.AutoPromoteHere; var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
-        services.AddHostedService(sp => new AutoPromoter(sp.GetRequiredService<Runner>(), promoteInterval, promoteOn) { MayAct = () => leader.MayAct });
+        services.AddHostedService(sp => new AutoPromoter(sp.GetRequiredService<Runner>(), promoteInterval, promoteOn) { MayAct = () => leader.MayAct, OnActions = actions => sp.GetService<DeliveryShadowHolder>()?.Shadow?.ObserveV1(actions) });
         // one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
         // with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
         var transcripts = c.Transcripts;

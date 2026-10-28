@@ -72,7 +72,7 @@ public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachab
         }
         CompositionGraph.AssertSingletons(gw.Host.Services, gw.Host.Captured!);
         var order = CompositionGraph.GatewayHostedOrder(gw.Host.Services);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "WolverineHostService", "BaseWatch", "Sweeper", "AutoPromoter", "PlantTicker", "McpSessionSweeper" }, order);
+        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "WolverineHostService", "OctopusWatchService", "DeliveryShadowService", "BaseWatch", "Sweeper", "AutoPromoter", "PlantTicker", "McpSessionSweeper" }, order);   // W5.2: the shadow run adds the Octopus watcher and the comparison tick
         Assert.Same(gw.Host.Services.GetRequiredService<WolverineHostService>(), gw.Host.Services.GetServices<IHostedService>().OfType<WolverineHostService>().Single());
     }
 

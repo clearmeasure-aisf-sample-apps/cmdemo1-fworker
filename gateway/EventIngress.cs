@@ -11,6 +11,8 @@ sealed class V1EventIngress(EventHub hub) : IEventIngress
         {
             case WebhookEventIngested w: hub.Publish(w.Json); break;
             case SweepRequested s: hub.RequestSweep(s.Item); break;
+            // W4.2 / W5.2: what the Octopus watcher reads is for the v2 path (the delivery train); v1 promotes with the rule scripts and has nothing to do with it
+            case OctopusReleaseCreated or ReleaseCommitResolved or OctopusDeploymentChanged or SignOffRequested: break;
             default: throw new ArgumentOutOfRangeException(nameof(ev), ev.GetType().Name, "an event kind the v1 ingress does not know");
         }
     }
