@@ -203,8 +203,11 @@ static class GatewayServiceCollectionExtensions
         {
             var runner = sp.GetRequiredService<Runner>();
             var shadow = sp.GetService<IShadowHistory>();   // W2.3: only in a shadow environment, with the Wolverine host
+            var journalSink = c.Engine.V2Acts ? sp.GetService<JournalCommandSink>() : null;   // W3.2: only where v2 acts, with the Wolverine host
             return new Plant(gw.TokenSecret, async (item, ev, fields, key) =>
             {
+                // v2 acting: the line is a command in the outbox, written by the C# ledger (no `journal` verb); the chain of the plant only publishes
+                if (journalSink != null) { await journalSink.Send(item, ev, fields, key); return; }
                 var posted = false;
                 try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); posted = true; }
                 catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }

@@ -198,6 +198,24 @@ public static class JournalText
         }
     }
 
+    /// <summary>Used only when the configuration has no secrets catalogue (FallbackSecretPatterns of Journal.ps1).</summary>
+    public static readonly IReadOnlyList<string> FallbackSecretPatterns =
+    [
+        @"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)", @"gh[pousr]_[A-Za-z0-9]{20,}", @"xox[baprs]-[A-Za-z0-9-]{10,}", @"AKIA[0-9A-Z]{16}",
+        @"(?i)(bearer|token|secret|password|api[_-]?key)(\s*[:=]\s*|\s+)[A-Za-z0-9._~+/=-]{12,}", @"\b(w1|w2|m1|i1|q1|o1|k1|r1|n1)\.[A-Za-z0-9_.-]{20,}",
+    ];
+
+    /// <summary>Redaction of a line (Protect-JournalText): every pattern of the catalogue (patterns, then redactOnly) replaced by [redacted]; the fallback list when there is none.</summary>
+    public static string Protect(string? text, IReadOnlyList<string>? patterns)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        var list = (patterns ?? []).Where(p => !string.IsNullOrEmpty(p)).ToList();
+        if (list.Count == 0) list = FallbackSecretPatterns.ToList();
+        var t = text;
+        foreach (var p in list) t = Regex.Replace(t, p, "[redacted]");
+        return t;
+    }
+
     /// <summary>One line (no line breaks, no code fences), at most <see cref="FoldLineMax"/> long (Limit-JournalLine).</summary>
     public static string LimitLine(string line)
     {
