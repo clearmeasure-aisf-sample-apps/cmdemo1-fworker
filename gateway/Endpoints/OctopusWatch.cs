@@ -18,6 +18,12 @@ sealed class OctopusWatchService : BackgroundService
 
     public const int ShadowMinSeconds = 120, ShadowMaxCalls = 30;
 
+    /// <summary>
+    /// The shadow run replays the watcher's whole window (the newest 30 releases and deployments) at its first poll. With the default 15 minutes of lookback a train that starts after a deployment of the gateway
+    /// itself (every merge restarts tdd) sees nothing of the releases that are waiting for promotion, decides nothing, and the comparison stays empty. The train's inputs are idempotent, so a replay is harmless.
+    /// </summary>
+    public static readonly TimeSpan ShadowLookback = TimeSpan.FromDays(30);
+
     /// <summary>The settings from octopus.url, .space, .project, .watchSeconds and OCTOPUS_API_KEY; a watcher that is off (no key, URL, space or project) is built as off.</summary>
     public static OctopusWatchService From(InstanceConfig cfg, IEventIngress ingress, Func<string, string?> env, Func<bool> mayAct, HttpClient? http = null, bool shadow = false)
     {
@@ -29,7 +35,7 @@ sealed class OctopusWatchService : BackgroundService
         if (shadow) seconds = Math.Max(seconds, ShadowMinSeconds);
         if (key == "" || S("url") == "" || S("space") == "" || S("project") == "") return new OctopusWatchService(null, TimeSpan.FromSeconds(seconds), mayAct);
         var reader = new HttpOctopusReader(http ?? new HttpClient(), S("url"), key);
-        return new OctopusWatchService(new OctopusWatcher(reader, ingress.Ingest, new OctopusWatchSettings(S("space"), S("project"), MaxCallsPerPoll: shadow ? ShadowMaxCalls : 60)), TimeSpan.FromSeconds(seconds), mayAct);
+        return new OctopusWatchService(new OctopusWatcher(reader, ingress.Ingest, new OctopusWatchSettings(S("space"), S("project"), MaxCallsPerPoll: shadow ? ShadowMaxCalls : 60, Lookback: shadow ? ShadowLookback : null)), TimeSpan.FromSeconds(seconds), mayAct);
     }
 
     /// <summary>Asks for a poll now (the webhook); several asks before the poll start are one.</summary>

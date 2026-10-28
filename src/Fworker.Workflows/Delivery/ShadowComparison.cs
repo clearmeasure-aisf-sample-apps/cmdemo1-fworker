@@ -90,7 +90,7 @@ public static class ShadowClassifier
 /// <summary>
 /// Pairs the decisions of the two sides. v1 repeats itself at every pass and the train publishes a decision once per change, so each side keeps its latest decision per key. A comparison is made
 /// when a side has something new: an agreement at once, anything else once <c>grace</c> has passed since the newest decision (the lagging side may still catch up: v1 decides at its next pass, the
-/// train when Octopus's events arrive). After the grace a missing side is a finding only for an actionable decision (promote, Sign-off answer): a waiting nobody answered is no news. The same
+/// train when Octopus's events arrive). After the grace a missing side is v1-only or v2-only whatever the decision (a waiting too: a train that decides nothing must show as v1-only rows, not as silence). The same
 /// pair is not reported twice. Not thread safe: <see cref="DeliveryShadow"/> locks.
 /// </summary>
 public sealed class ShadowComparer(TimeSpan grace)
@@ -110,7 +110,8 @@ public sealed class ShadowComparer(TimeSpan grace)
 
     public ShadowComparer() : this(DefaultGrace) { }
 
-    public int Tracked => slots.Count;
+    /// <summary>The keys with a decision that is not compared yet (waiting for the other side or for the grace).</summary>
+    public int Tracked => slots.Values.Count(s => s.V1New || s.V2New);
 
     /// <summary>Takes one decision. Returns true when it is news (a different decision from the side's last for this release).</summary>
     public bool Observe(ShadowDecision d)
@@ -140,11 +141,7 @@ public sealed class ShadowComparer(TimeSpan grace)
             {
                 if (s.V1.Action == s.V2.Action || aged) r = Make(s, now);
             }
-            else if (aged)
-            {
-                if ((s.V1 ?? s.V2)!.Actionable) r = Make(s, now);
-                else s.V1New = s.V2New = false;   // nobody answered a waiting: no finding
-            }
+            else if (aged) r = Make(s, now);   // one side only after the grace: v1-only or v2-only, a waiting too (the report counts what each side did, not only what changed something)
             if (r is null) continue;
             var pair = $"{s.V1?.Action}/{s.V1?.Native}|{s.V2?.Action}/{s.V2?.Native}|{r.Outcome}";
             s.V1New = s.V2New = false;

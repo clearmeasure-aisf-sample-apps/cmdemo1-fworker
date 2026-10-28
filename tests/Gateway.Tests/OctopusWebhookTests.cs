@@ -42,4 +42,37 @@ public sealed class OctopusWebhookTests
     [Fact] public async Task ASourceWithoutASecretRefusesEverything() => Assert.Equal(401, await Post(Active(), Secrets(""), ""));
     [Fact] public async Task WithoutTheWatcherTheRouteIsNotThere() => Assert.Equal(404, await Post(null, Secrets(), Secret));
     [Fact] public void WithoutAnApiKeyTheWatcherIsOff() => Assert.False(OctopusWatchService.From(InstanceConfig.Load(WriteConfig(), _ => null), new NoIngress(), _ => null, () => true).Enabled);
+
+    sealed class Recording : IEventIngress { public readonly List<IngressEvent> Got = []; public void Ingest(IngressEvent ev) { lock (Got) Got.Add(ev); } }
+
+    sealed class OldOctopus : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken ct)
+        {
+            var p = r.RequestUri!.PathAndQuery;
+            // tdd's case: the releases waiting for promotion are days old when the gateway (restarted by its own deployment) polls for the first time
+            var body = p.Contains("/releases?") ? """{"Items":[{"Id":"Releases-5","Version":"2.4.1288","Assembled":"2026-10-20T11:59:00Z","ReleaseNotes":"built 0123456789abcdef0123456789abcdef01234567"}]}"""
+                : p.Contains("/deployments?") ? """{"Items":[{"Id":"Deployments-9","TaskId":"ServerTasks-9","ReleaseId":"Releases-5","EnvironmentId":"Environments-1","Created":"2026-10-20T12:00:00Z"}]}"""
+                : p.Contains("/environments") ? """{"Items":[{"Id":"Environments-1","Name":"tdd"}]}"""
+                : p.Contains("/tasks/") ? """{"State":"Success"}"""
+                : p.Contains("/projects/ui") ? """{"Id":"Projects-1"}""" : "{}";
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+        }
+    }
+
+    static async Task<List<IngressEvent>> FirstPoll(bool shadow)
+    {
+        var ingress = new Recording();
+        var watch = OctopusWatchService.From(InstanceConfig.Load(WriteConfig(), _ => null), ingress, n => n == "OCTOPUS_API_KEY" ? "API-KEY" : null, () => true, new HttpClient(new OldOctopus()), shadow);
+        await watch.StartAsync(default); await Task.Delay(1500); await watch.StopAsync(default);
+        lock (ingress.Got) return ingress.Got.ToList();
+    }
+
+    [Fact] public async Task TheShadowWatcherReplaysTheWindowAtItsFirstPoll_SoTheTrainSeesTheWaitingReleases()
+    {
+        var shadow = await FirstPoll(shadow: true);
+        Assert.Contains(shadow, e => e is OctopusReleaseCreated { Version: "2.4.1288" });
+        Assert.Contains(shadow, e => e is OctopusDeploymentChanged { Environment: "tdd", Phase: OctopusDeploymentPhase.Succeeded });
+        Assert.Empty(await FirstPoll(shadow: false));   // the acting watcher keeps its 15 minute lookback
+    }
 }
