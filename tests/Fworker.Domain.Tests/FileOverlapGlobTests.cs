@@ -104,6 +104,30 @@ public sealed class FileOverlapGlobTests
     }
 
     [Fact]
+    public void IsMatch_ManyStarsAgainstALongNonMatchingName_StaysFast()
+    {
+        // Footprints are worker-written text and run in the sweep: a backtracking matcher takes exponential time on this pair.
+        var pattern = "src/" + string.Concat(Enumerable.Repeat("a*", 40)) + "b";
+        var path = "src/" + new string('a', 200);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        Assert.False(FileGlob.IsMatch(pattern, path));
+        Assert.True(FileGlob.IsMatch(pattern, path + "b"));
+        Assert.False(FileGlob.Intersects(pattern, "src/" + new string('a', 200)));
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"took {sw.Elapsed}");
+    }
+
+    [Theory]
+    [InlineData("a*b*c", "abc", true)]
+    [InlineData("a*b*c", "aXXbYYc", true)]
+    [InlineData("a*b*c", "aXXbYY", false)]
+    [InlineData("*a", "baba", true)]                          // the star must be able to take more after a partial match
+    [InlineData("*ab", "aab", true)]
+    [InlineData("a*?c", "abbc", true)]
+    [InlineData("**x", "x", true)]
+    public void IsMatch_StarBacktracksWithinASegment(string pattern, string name, bool expected)
+        => Assert.Equal(expected, FileGlob.IsMatch(pattern, name));
+
+    [Fact]
     public void Intersects_OnLiteralsAgreesWithIsMatch()
     {
         string[] patterns = { "src/*.cs", "src/**", "**/a.cs", "src/a?.cs", "ui/**/x.css", "docs/" };

@@ -48,25 +48,25 @@ public static class FileGlob
         bool r;
         if (i == pat.Length) r = j == path.Length;
         else if (pat[i] == "**") r = MatchSegments(pat, i + 1, path, j, memo) || (j < path.Length && MatchSegments(pat, i, path, j + 1, memo));
-        else r = j < path.Length && MatchSegment(pat[i], 0, path[j], 0) && MatchSegments(pat, i + 1, path, j + 1, memo);
+        else r = j < path.Length && MatchSegment(pat[i], path[j]) && MatchSegments(pat, i + 1, path, j + 1, memo);
         memo[(i, j)] = r;
         return r;
     }
 
-    static bool MatchSegment(string pat, int i, string text, int j)
+    // Linear-time glob for one segment (worker-written patterns run in the sweep): on a mismatch fall back to the last '*' and let it take one more
+    // character. Only the most recent '*' needs revisiting, so the work is at most pattern length times text length, never exponential.
+    static bool MatchSegment(string pat, string text)
     {
-        while (i < pat.Length)
+        int i = 0, j = 0, star = -1, mark = 0;
+        while (j < text.Length)
         {
-            var c = pat[i];
-            if (c == '*')
-            {
-                for (var k = j; k <= text.Length; k++) if (MatchSegment(pat, i + 1, text, k)) return true;
-                return false;
-            }
-            if (j >= text.Length || (c != '?' && c != text[j])) return false;
-            i++; j++;
+            if (i < pat.Length && pat[i] == '*') { star = i++; mark = j; }
+            else if (i < pat.Length && (pat[i] == '?' || pat[i] == text[j])) { i++; j++; }
+            else if (star >= 0) { i = star + 1; j = ++mark; }
+            else return false;
         }
-        return j == text.Length;
+        while (i < pat.Length && pat[i] == '*') i++;
+        return i == pat.Length;
     }
 
     /// <summary>

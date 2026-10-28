@@ -15,6 +15,17 @@ public sealed class FileOverlapFootprintTests
     }
 
     [Fact]
+    public void ParseFilesLine_ARemarkWithCommasIsOneRemark()
+    {
+        Assert.Equal(new[] { "a.cs", "b.cs", "c.cs" }, Footprint.ParseFilesLine("Files: a.cs (new, moved), b.cs, c.cs (new (renamed), moved)"));
+        Assert.Equal(new[] { "a.cs", "b.cs" }, Footprint.ParseFilesLine("Files: a.cs (new, moved), b.cs"));
+    }
+
+    [Fact]
+    public void ParseFilesLine_AParenthesisThatNeverClosesDoesNotSwallowTheLine()
+        => Assert.Contains("b.cs", Footprint.ParseFilesLine("Files: a.cs (new, b.cs"));
+
+    [Fact]
     public void ParseFilesLine_StripsBackticksQuotesAndRemarks()
     {
         var body = "Files: `src/a.cs`, \"src/b.cs\", src/c.cs (new), ./src/d.cs, src\\e.cs";

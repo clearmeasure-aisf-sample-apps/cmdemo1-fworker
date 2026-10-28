@@ -22,7 +22,7 @@ public sealed record Footprint(IReadOnlyList<string> Entries, FootprintSource So
     public bool IsEmpty => Entries.Count == 0;
 
     static readonly Regex FilesLine = new(@"^\s*Files\s*:(?<list>.*)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-    static readonly Regex Annotation = new(@"\s+\([^)]*\)\s*$", RegexOptions.CultureInvariant);
+    static readonly Regex Annotation = new(@"\s+\(.*\)\s*$", RegexOptions.CultureInvariant);
 
     /// <summary>
     /// The entries of the `Files: path, path` line of a Technical Design body (the convention of factory-technical-design). The line is read at the start
@@ -41,13 +41,38 @@ public sealed record Footprint(IReadOnlyList<string> Entries, FootprintSource So
         }
         if (list is null) return Array.Empty<string>();
         var entries = new List<string>();
-        foreach (var raw in list.Split(','))
+        foreach (var raw in SplitOutsideAnnotations(list))
         {
             var e = Annotation.Replace(raw.Trim().Trim('`', '"', '\'').Trim(), "");
             e = FileGlob.Normalize(e.Trim('`', '"', '\'').Trim());
             if (e != "" && !entries.Contains(e)) entries.Add(e);
         }
         return entries;
+    }
+
+    // Splits at commas that are not inside a parenthesised remark: "a.cs (new, moved), b.cs" is two entries. A '(' opens a remark only when it starts the
+    // entry or follows white space and a ')' follows later in the text; any other '(' (or one never closed) is plain text, so a stray one cannot swallow
+    // the rest of the line.
+    static List<string> SplitOutsideAnnotations(string list)
+    {
+        var parts = new List<string>();
+        var start = 0;
+        for (var i = 0; i < list.Length; i++)
+        {
+            var c = list[i];
+            if (c == '(' && (i == start || char.IsWhiteSpace(list[i - 1])))
+            {
+                var depth = 0;
+                for (var k = i; k < list.Length; k++)
+                {
+                    if (list[k] == '(') depth++;
+                    else if (list[k] == ')' && --depth == 0) { i = k; break; }
+                }
+            }
+            else if (c == ',') { parts.Add(list.Substring(start, i - start)); start = i + 1; }
+        }
+        parts.Add(list.Substring(start));
+        return parts;
     }
 
     /// <summary>The footprint a Technical Design body declares (<see cref="FootprintSource.None"/> and empty when it names no files).</summary>
