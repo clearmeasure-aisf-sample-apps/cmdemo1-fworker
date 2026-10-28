@@ -19,10 +19,12 @@ static class GatewayWolverineExtensions
             if (c.Engine.V2Acts)
             {
                 // W3.3: the Copilot launch runs under a reservation, settled by CopilotReconcileService (a hosted service of AddGatewayBackground)
-                var reservations = new InMemoryCopilotReservations();
+                // with the database the host needs, the reservations and the idempotency ledger are in SQL and survive the kill the host is built for (#481)
+                var stores = new SqlCommandStores(WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds));
+                var reservations = stores.Reservations;
                 copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()));
-                RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler));
-                journalSink = JournalCommandWiring.Attach(host, c);   // W3.2: the plant's journal lines become commands
+                RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler), stores.Ledger);
+                journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands
             }
             return host;
         });

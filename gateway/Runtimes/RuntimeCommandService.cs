@@ -52,10 +52,10 @@ public static class RuntimeCommandHandlers
 
 // W3.1: the one place the runtime commands are wired, and only where the engine mode is V2 (tdd is Shadow, prod and uat are v1: nothing changes there).
 // The managers then dispatch their start and stop through the host's outbox; the host gets the handlers, the durable queue and the retry rule.
-// The idempotency ledger is in memory here: a command replayed after a gateway restart finds the adapters' own idempotency (a worker name is never reused).
+// The idempotency ledger is the SQL one the gateway passes (#481); in memory only without a database (tests).
 static class RuntimeCommandWiring
 {
-    public static void Attach(WolverineHostService host, RuntimeRegistry runtimes, Fworker.Contracts.Seams.ICommandPort adapters)
+    public static void Attach(WolverineHostService host, RuntimeRegistry runtimes, Fworker.Contracts.Seams.ICommandPort adapters, IIdempotencyLedger? ledger = null)
     {
         foreach (var m in runtimes.Managers)
         {
@@ -63,7 +63,7 @@ static class RuntimeCommandWiring
             m.DispatchStart = t => Publish(host, new StartRuntimeSession(RuntimeKeys.Start(kind, t.Name), kind, t.Name, t.Item, t.Phase, t.Profile, t.Nonce, t.Role));
             m.DispatchStop = (name, reason) => Publish(host, new StopRuntimeSession(RuntimeKeys.Stop(kind, name), kind, name, reason));
         }
-        var ledger = new InMemoryIdempotencyLedger();
+        ledger ??= new InMemoryIdempotencyLedger();   // SQL where the gateway has its database (SqlCommandStores)
         IRunbookRunner runner = new OctopusRunner(runtimes.OctopusRuntime);
         var service = new RuntimeCommandService(new StartRuntimeSessionHandler(ledger, adapters), new StopRuntimeSessionHandler(ledger, adapters), new RunRunbookHandler(ledger, runner), kind => runtimes.ByKind(kind));
         host.RuntimeCommands = (services, w) =>
@@ -97,8 +97,8 @@ static class RuntimeCommandWiring
 }
 
 // W3.3: the Copilot launch under a reservation (src/Fworker.Integrations/Commands/CopilotLaunch.cs). The port wraps the adapters' port for the Copilot runtime only;
-// the lookup asks GitHub's agent tasks for the task of an item whose launch outcome is unknown. The reservations are in memory: a restart forgets an unsettled
-// one, and the owner record of the plant (one task owns an item) is what then stops a second launch.
+// the lookup asks GitHub's agent tasks for the task of an item whose launch outcome is unknown. The reservations are in SQL (#481): an unsettled one survives a restart and
+// the reconciler settles it.
 sealed class CopilotTaskLookup(RuntimeRegistry runtimes) : ICopilotTaskLookup
 {
     public async Task<(string TaskId, string Url)?> FindAsync(int item, string phase, DateTime since, CancellationToken ct) =>
