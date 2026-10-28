@@ -267,9 +267,11 @@ public sealed class ShadowHistorySqlServerTests
             Assert.Contains(7, hub.TakeSweepItems());   // v1 acted
             host.Services.GetRequiredService<Plant>().JournalManagerAction(9, new JsonObject { ["action"] = "restart" }, "shadow-test|1");
 
-            Assert.Equal(3, await WaitCount(cs, "SELECT COUNT(*) FROM factory.ItemHistory", 3));
+            // W5.2: the shadow run has the ingress inbox (the merge webhook feeds the delivery train), which also records the accepted webhook event: four rows
+            Assert.Equal(4, await WaitCount(cs, "SELECT COUNT(*) FROM factory.ItemHistory", 4));
             var rows = await Rows(cs, "SELECT ItemKey, Kind, Type, CASE WHEN MessageId IS NULL THEN 0 ELSE 1 END FROM factory.ItemHistory ORDER BY Type");
-            Assert.Equal(3, rows.Count);
+            Assert.Equal(4, rows.Count);
+            Assert.Contains(rows, r => r.EndsWith("#5|event|ingress.inbox.webhook.pr.opened|1"));
             Assert.Contains(rows, r => r.EndsWith("#5|event|ingress.webhook.pr.opened|1"));
             Assert.Contains(rows, r => r == "board|event|ingress.sweep-requested|1" || r.EndsWith("#7|event|ingress.sweep-requested|1"));
             Assert.Contains(rows, r => r.EndsWith("#9|event|v1.journal.manager-action|1"));

@@ -123,3 +123,28 @@ public class DeliveryTrainRow
     public string StateJson { get; set; } = "";
     public DateTimeOffset UpdatedAt { get; set; }
 }
+
+/// <summary>
+/// One comparison of the shadow run (W5.2): what the delivery train decided (v2) next to what v1's promotion pass did for the same deployable, environment and release. Written when the
+/// comparison is settled; read by the report. <see cref="Outcome"/> is match, v2-only, v1-only or differs.
+/// </summary>
+public class DeliveryShadowComparison
+{
+    public long Id { get; set; }
+    public DateTimeOffset At { get; set; }
+    public string Deployable { get; set; } = "";
+    /// <summary>"uat" or "prod": the environment the decision is about.</summary>
+    public string Environment { get; set; } = "";
+    public string Release { get; set; } = "";
+    public string Outcome { get; set; } = "";
+    /// <summary>Why the outcome: the difference for "differs", what was missing for "v1-only" and "v2-only", empty for a match.</summary>
+    public string Reason { get; set; } = "";
+    /// <summary>The normalized actions (promote, wait, follow, signoff-proceed, signoff-abort, signoff-wait), empty where that side decided nothing.</summary>
+    public string V1Action { get; set; } = "";
+    public string V2Action { get; set; } = "";
+    /// <summary>Each side's decision as JSON (its own action name, reasons, items, task) and the time it was made.</summary>
+    public string? V1Json { get; set; }
+    public string? V2Json { get; set; }
+    public DateTimeOffset? V1At { get; set; }
+    public DateTimeOffset? V2At { get; set; }
+}

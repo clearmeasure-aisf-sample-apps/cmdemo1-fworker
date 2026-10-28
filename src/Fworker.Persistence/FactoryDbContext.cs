@@ -21,6 +21,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<MergedItem> MergedItems => Set<MergedItem>();
     public DbSet<DeliveredToEntry> DeliveredTo => Set<DeliveredToEntry>();
     public DbSet<DeliveryTrainRow> DeliveryTrains => Set<DeliveryTrainRow>();
+    public DbSet<DeliveryShadowComparison> DeliveryShadowComparisons => Set<DeliveryShadowComparison>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -112,6 +113,22 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.Property(x => x.StateJson).IsRequired();
             // the train's state is read and written by its key; a stale writer loses (the handler retries on the new state)
             e.Property(x => x.Revision).IsConcurrencyToken();
+        });
+
+        b.Entity<DeliveryShadowComparison>(e =>
+        {
+            e.ToTable("DeliveryShadowComparisons");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Deployable).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Environment).HasMaxLength(32).IsRequired();
+            e.Property(x => x.Release).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Outcome).HasMaxLength(16).IsRequired();
+            e.Property(x => x.Reason).HasMaxLength(2000).IsRequired();
+            e.Property(x => x.V1Action).HasMaxLength(32).IsRequired();
+            e.Property(x => x.V2Action).HasMaxLength(32).IsRequired();
+            // the report reads the newest first, optionally of one outcome
+            e.HasIndex(x => new { x.Outcome, x.At });
+            e.HasIndex(x => x.At);
         });
 
         b.Entity<CatalogCopy>(e =>

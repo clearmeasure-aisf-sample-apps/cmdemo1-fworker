@@ -1,0 +1,187 @@
+using System.Text.Json.Nodes;
+using Fworker.Contracts.Catalog;
+using Fworker.Contracts.Ids;
+using Fworker.Contracts.Seams;
+using Fworker.Domain;
+using Fworker.Workflows.Delivery;
+using Wolverine;
+
+// W5.2 (docs/design/fworker-wolverine-implementation.md W5): the delivery train in the gateway, in SHADOW only (Engine.ShadowRuns: tdd until the cutover). It is fed what v1 leaves visible:
+// ItemMerged (derived from the merge webhook and the board poll by W5.0) and the events of the Octopus watcher (W4.2, read only). It decides as the train would and publishes TrainDecided,
+// PromoteRelease and AnswerSignOff; the handlers of a shadow host (DeliveryShadowHandlers) only RECORD them, so nothing is executed: no Octopus write, no board, comment or Git write. v1
+// keeps promoting with the rule scripts, and its pass's actions are given to the same DeliveryShadow, which compares them (DeliveryShadow, ShadowComparer) and stores the comparisons.
+// Everything the shadow reads from GitHub and Octopus is a GET, within v1's budget rules (HttpTrainReads, OctopusWatchService).
+
+/// <summary>The settings of the policy of each deployable, from v1's configuration (delivery.autoPromote and octopus.*): the home repository's deployables are the project v1 promotes.</summary>
+static class DeliveryShadowSettings
+{
+    public static Func<string, DeliveryPolicySettings?> For(InstanceConfig cfg, Func<CatalogSnapshot> catalog)
+    {
+        var settings = From(cfg);
+        return name => catalog().FindDeployable(name) is { } d && cfg.Home is { } home && d.Repository == home ? settings : null;
+    }
+
+    public static DeliveryPolicySettings? From(InstanceConfig cfg)
+    {
+        try
+        {
+            var o = cfg.Root?["octopus"]; var ap = cfg.Root?["delivery"]?["autoPromote"];
+            string S(JsonNode? n, string name) => n?[name]?.ToString() ?? "";
+            var project = S(o, "project");
+            if (project.Length == 0) return null;
+            // v1 promotes only where autoPromote is on and names this gateway's environment (AutoPromoteHere); otherwise the train observes
+            var acts = cfg.AutoPromoteHere;
+            var environments = acts && ap?["environments"] is JsonArray a ? a.Select(e => e?.ToString() ?? "").Where(e => e != "").ToList() : [];
+            var names = new Dictionary<string, string>(); var urls = new Dictionary<string, string>();
+            foreach (var k in DeliveryPolicy.Chain)
+            {
+                if (S(o?["environments"], k) is { Length: > 0 } n) names[k] = n;
+                if (S(o, k + "Url") is { Length: > 0 } u) urls[k] = u;
+            }
+            double Num(JsonNode? n, string name, double fallback) => n?[name] is JsonValue v && v.TryGetValue<double>(out var d) && d > 0 ? d : fallback;
+            var window = new HealthWindow(Num(o?["health"], "spacingMinutes", 5), Num(o?["health"], "settleMinutes", 10));
+            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2));
+        }
+        catch { return null; }
+    }
+}
+
+/// <summary>
+/// S3 for the shadow run: v1's ingress did its part, and the events of the Octopus watcher are also published to the shadow host, where the router turns them into the trains' inputs. A problem with
+/// the host never reaches the watcher.
+/// </summary>
+sealed class OctopusShadowIngress : IEventIngress
+{
+    readonly IEventIngress inner;
+    // one consumer, in the order the watcher published: a poll's release, commit and deployment events must reach the host in that order
+    readonly System.Threading.Channels.Channel<IngressEvent> queue = System.Threading.Channels.Channel.CreateBounded<IngressEvent>(new System.Threading.Channels.BoundedChannelOptions(2000) { FullMode = System.Threading.Channels.BoundedChannelFullMode.DropWrite, SingleReader = true });
+
+    public OctopusShadowIngress(IEventIngress inner, ShadowOctopusPort port)
+    {
+        this.inner = inner;
+        _ = Task.Run(async () =>
+        {
+            await foreach (var ev in queue.Reader.ReadAllAsync())
+                try { await port.Publish(ev); }
+                catch (Exception e) { Console.Error.WriteLine($"delivery shadow: {e.GetType().Name} publishing {ev.GetType().Name}"); }
+        });
+    }
+
+    public void Ingest(IngressEvent ev)
+    {
+        inner.Ingest(ev);
+        if (ev is OctopusReleaseCreated or ReleaseCommitResolved or OctopusDeploymentChanged or SignOffRequested) queue.Writer.TryWrite(ev);
+    }
+}
+
+/// <summary>The comparison tick of the shadow run (a hosted service of AddGatewayBackground): compares and stores every <c>interval</c>, and keeps the ingress deduplication short.</summary>
+sealed class DeliveryShadowService(DeliveryShadowHolder holder, TimeSpan interval) : BackgroundService
+{
+    public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(30);
+    DateTime nextHousekeeping = DateTime.UtcNow.AddMinutes(5);
+
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (holder.Shadow is { } shadow) await shadow.Tick(ct);
+                // off this loop's thread, and never at the start: a database that does not answer holds a connect for up to its timeout, and the stop of the host must not wait for it
+                if (holder.Housekeeping is { } purge && DateTime.UtcNow >= nextHousekeeping)
+                {
+                    nextHousekeeping = DateTime.UtcNow.AddHours(1);
+                    _ = Task.Run(() => { try { purge(); } catch (Exception e) { Console.Error.WriteLine($"delivery shadow housekeeping: {e.GetType().Name}"); } });
+                }
+            }
+            catch (Exception e) when (!ct.IsCancellationRequested) { Console.Error.WriteLine($"delivery shadow tick: {e.GetType().Name}"); }
+            catch (Exception) { return; }
+            try { await Task.Delay(interval, ct); } catch (OperationCanceledException) { return; }
+        }
+    }
+}
+
+static class DeliveryShadowWiring
+{
+    public const string TrainQueue = "delivery-train";
+
+    /// <summary>The shadow run's parts for a gateway in shadow with a home repository and a database; null when the environment cannot read GitHub (no GH_TOKEN): the train is left out then.</summary>
+    public static DeliveryShadowParts? Make(GatewayComposition c, ISystemCatalog catalog, string connectionString, Func<string, string?> env, HttpClient? github = null, HttpClient? app = null)
+    {
+        var token = env("GH_TOKEN");
+        if (RevocationOptions.Unset(token) || c.Instance.Home is not { } home) return null;
+        var root = c.Instance.Root;
+        string Str(string name, string fallback) => root?[name]?.ToString() is { Length: > 0 } s ? s : fallback;
+        var holds = (root?["holdLabels"] as JsonArray)?.Select(h => h?.ToString() ?? "").Where(h => h != "").ToList();
+        var api = env("GITHUB_API_URL");
+        if (github is null)
+        {
+            github = new HttpClient { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
+            github.DefaultRequestHeaders.Authorization = new("Bearer", token!.Trim());
+            github.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            github.DefaultRequestHeaders.UserAgent.ParseAdd("factory-worker-gateway");
+        }
+        app ??= new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        var budget = c.GitHubBudget;
+        void Observe(string resource, string? remaining, string? reset, string? limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
+        var gates = new ItemGateConfig(Str("autoMergeLabel", "Auto Merge"), Str("videoLabel", "video"), holds);
+        var facts = new Fworker.Integrations.GitHub.HttpMergeFactsReader(github, new Fworker.Integrations.GitHub.StaticCredentialSource([], new Fworker.Integrations.GitHub.GitHubCredential("gateway", token!.Trim())), Str("name", "factory-worker"), gates.VideoLabel,
+            (resource, remaining, reset, limit) => Observe(resource, remaining, reset, limit));
+        var policies = new CatalogDeliveryPolicies(() => catalog.Current, DeliveryShadowSettings.For(c.Instance, () => catalog.Current));
+        var reads = new HttpTrainReads(github, app, Str("name", "factory-worker"), facts, gates, policies, Observe, null, () => budget.Low().Low);
+        var shadow = new DeliveryShadow(policies, new SqlShadowComparisonStore(() => ItemMergedWiring.Open(connectionString)));
+        return new DeliveryShadowParts(shadow, policies, reads, new DeliveredToTable(() => ItemMergedWiring.Open(connectionString)), connectionString);
+    }
+
+    /// <summary>Adds the train and the shadow's handlers to the host: the router, the train, the recording of its decisions and commands.</summary>
+    public static void Attach(WolverineHostService host, DeliveryShadowParts p)
+    {
+        var previous = host.RuntimeCommands;
+        host.RuntimeCommands = (services, w) =>
+        {
+            previous?.Invoke(services, w);
+            services.AddSingleton(p.Shadow);
+            services.AddSingleton<IDeliveryPolicies>(p.Policies);
+            services.AddSingleton<ITrainReads>(p.Reads);
+            services.AddSingleton<IDeliveredLookup>(p.Delivered);
+            services.AddSingleton<ITrainStore>(new SqlTrainStore(() => ItemMergedWiring.Open(p.ConnectionString)));
+            services.AddSingleton<DeliveryTrainService>();
+            services.AddSingleton<DeliveryTrainRouter>();
+            w.Discovery.IncludeType(typeof(DeliveryTrainHandlers));
+            w.Discovery.IncludeType(typeof(DeliveryTrainRouting));
+            w.Discovery.IncludeType(typeof(DeliveryShadowHandlers));
+            // the inputs of the trains run one at a time: a burst of the watcher's events (one poll publishes a dozen) would otherwise move the same train from several threads and exhaust its retries
+            // (TrainConflictException). One queue for all trains is the shadow's stand-in for a queue per key; it is durable, so a timer or input survives a restart.
+            foreach (var t in typeof(TrainInput).Assembly.GetTypes().Where(t => !t.IsAbstract && typeof(TrainInput).IsAssignableFrom(t))) w.PublishMessage(t).ToLocalQueue(TrainQueue);
+            w.LocalQueue(TrainQueue).UseDurableInbox().Sequential();
+        };
+    }
+
+    /// <summary>The Octopus events to the host; the type is the event's own so that Wolverine routes it by it.</summary>
+    public static Task<bool> Publish(WolverineHostService host, object ev) => ev switch
+    {
+        OctopusReleaseCreated e => host.PublishAsync(e),
+        ReleaseCommitResolved e => host.PublishAsync(e),
+        OctopusDeploymentChanged e => host.PublishAsync(e),
+        SignOffRequested e => host.PublishAsync(e),
+        _ => Task.FromResult(false),
+    };
+}
+
+/// <summary>What the shadow run needs, made once at the start.</summary>
+sealed record DeliveryShadowParts(DeliveryShadow Shadow, IDeliveryPolicies Policies, ITrainReads Reads, DeliveredToTable Delivered, string ConnectionString);
+
+/// <summary>The way for the watcher's events into the shadow host; registered only in the shadow run. <see cref="Enabled"/> is false when the train could not be built (no GH_TOKEN): the events then go nowhere.</summary>
+sealed class ShadowOctopusPort(Func<object, Task<bool>> publish, bool enabled)
+{
+    public bool Enabled => enabled;
+    public Task<bool> Publish(object ev) => enabled ? publish(ev) : Task.FromResult(false);
+}
+
+/// <summary>The shadow run of the delivery train once the host has made it (null before, and where the train could not be built). Registered only in the shadow run.</summary>
+sealed class DeliveryShadowHolder
+{
+    public DeliveryShadow? Shadow { get; set; }
+    /// <summary>Hourly housekeeping of the ingress deduplication (the shadow run has no recurring jobs).</summary>
+    public Action? Housekeeping { get; set; }
+}

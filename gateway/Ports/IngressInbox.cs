@@ -4,8 +4,8 @@ using Fworker.Contracts.Seams;
 using Fworker.Integrations.Correlation;
 using Wolverine;
 
-// W4.1 (docs/design/fworker-wolverine-implementation.md W4): seam S3 into the Wolverine durable inbox. Only where the engine acts (Engine.V2Acts); tdd (shadow) and v1
-// register none of it. v1's ingress does its part first, exactly as before; then each webhook event is published to the durable local queue "ingress-inbox", whose
+// W4.1 (docs/design/fworker-wolverine-implementation.md W4): seam S3 into the Wolverine durable inbox. Where the engine acts (Engine.V2Acts) and, since W5.2, in the shadow run of the delivery train (tdd); v1
+// registers none of it. v1's ingress does its part first, exactly as before; then each webhook event is published to the durable local queue "ingress-inbox", whose
 // handler deduplicates it (the delivery, then the fact: IngressDedup) and writes the correlations the event implies (CorrelationWriters), and records the accepted
 // event in ItemHistory through the same durable queue the shadow history uses. The poll of the board reconciler (W4.3) publishes the same message with source "poll",
 // so a transition seen by both is taken in once. The correlation map is also written from verbs and runtimes (IngressCorrelations below).

@@ -106,6 +106,73 @@ namespace Fworker.Persistence.Migrations
                     b.ToTable("DeliveredTo", "factory");
                 });
 
+            modelBuilder.Entity("Fworker.Persistence.DeliveryShadowComparison", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("At")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("Deployable")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("Environment")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("nvarchar(16)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("Release")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("V1Action")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<DateTimeOffset?>("V1At")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("V1Json")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("V2Action")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<DateTimeOffset?>("V2At")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("V2Json")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("At");
+
+                    b.HasIndex("Outcome", "At");
+
+                    b.ToTable("DeliveryShadowComparisons", "factory");
+                });
+
             modelBuilder.Entity("Fworker.Persistence.DeliveryTrainRow", b =>
                 {
                     b.Property<string>("Key")

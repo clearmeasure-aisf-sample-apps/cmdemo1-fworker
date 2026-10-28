@@ -57,13 +57,21 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEventIngress>(sp =>
         {
             var v1 = new V1EventIngress(sp.GetRequiredService<EventHub>());
-            if (sp.GetService<IngressInboxPort>() is { } inbox) return new InboxEventIngress(v1, inbox);   // W4.1: where the engine acts, events also go to the durable inbox
+            if (sp.GetService<IngressInboxPort>() is { } inbox)
+            {
+                // W4.1: where the engine acts, events also go to the durable inbox. W5.2: in the shadow run they do too, the Octopus watcher's events go to the train, and the history is kept
+                IEventIngress withInbox = new InboxEventIngress(v1, inbox);
+                if (sp.GetService<ShadowOctopusPort>() is not { } octopus) return withInbox;
+                withInbox = new OctopusShadowIngress(withInbox, octopus);
+                return sp.GetService<IShadowHistory>() is { } history ? new ShadowEventIngress(withInbox, history) : withInbox;
+            }
             return sp.GetService<IShadowHistory>() is { } shadow ? new ShadowEventIngress(v1, shadow) : v1;   // W2.3: shadow history records after v1 has done its part
         });
         services.AddSingleton<IEndpointModule, WebhookEndpoints>();
         services.AddSingleton<IEndpointModule, CopilotEndpoints>();
         services.AddSingleton<IEndpointModule, TranscriptEndpoints>();
         services.AddSingleton<IEndpointModule, ItemAdminEndpoints>();
+        services.AddSingleton<IEndpointModule>(sp => new AdminDeliveryShadowEndpoints(sp));   // W5.2: 404 where the delivery train does not run in shadow
         services.AddSingleton<IEndpointModule, DemoEndpoints>();
         // C7d: the verb route and its pipeline (seam S1); the GitHub budget is the composition's, not (yet) a service of its own
         // S1 (W1.4): the engine the environment is composed with; v1 is the only one

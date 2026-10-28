@@ -1,7 +1,7 @@
 namespace Gateway.Tests;
 
 /// <summary>
-/// Every route the gateway maps (owner mode, messaging test hooks on: 52 production routes, 6 QC routes, 16 test hooks, MCP), with what it
+/// Every route the gateway maps (owner mode, messaging test hooks on: 53 production routes, 6 QC routes, 16 test hooks, MCP), with what it
 /// answers on the API port to a request without credentials (two-port mode; in single-port mode the same). On the webhook port of two-port
 /// mode every route answers 404 except POST /webhooks/github. The values are today's, pinned: a change of a route or of its guard changes
 /// this table in the same pull request.
@@ -46,6 +46,7 @@ public static class RouteTable
         new("GET", "/api/v1/dashboard", Unauthorized, "unauthorized"),
         new("GET", "/api/v1/sessions/{name}", Unauthorized, "unauthorized"),
         new("GET", "/api/v1/manager/actions", Unauthorized, "unauthorized"),
+        new("GET", "/api/v1/delivery-shadow", Unauthorized, "unauthorized"),   // W5.2: the delivery train's shadow report (404 where the train does not run in shadow)
         new("GET", "/api/v1/wait", Unauthorized, "unauthorized"),
         new("GET", "/api/v1/events", Unauthorized, "unauthorized"),
         new("GET", "/api/v1/peers", Unauthorized, "unauthorized"),

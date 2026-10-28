@@ -7,8 +7,8 @@ namespace Fworker.Workflows.Delivery;
 // W5.1: the Wolverine handlers of the delivery train. The train's own handler takes any TrainInput to DeliveryTrainService and returns what it decided: the messages (cascaded through the
 // outbox; the state is saved first by the train's own store, so a crash between the two can lose a command or a timer: the train sends an unconfirmed request again after five minutes and
 // every input sends its due time again, which heals it) and the timer as a scheduled TrainWake. The router turns an ItemMerged and the events of the Octopus watcher (W4.2) into
-// one input per train they concern. Public because Wolverine's generated code refers to them; the gateway attaches them only where the engine acts (Engine.V2Acts), and nothing executes
-// the commands they cascade.
+// one input per train they concern. Public because Wolverine's generated code refers to them; the gateway attaches them in the shadow run (W5.2, DeliveryShadowWiring) and, at the cutover, where the engine acts; in the shadow run the commands they cascade are only recorded
+// (DeliveryShadowHandlers) and nothing executes them.
 
 /// <summary>The handlers of the train's inputs, one per message type (Wolverine routes by the concrete type).</summary>
 public static class DeliveryTrainHandlers

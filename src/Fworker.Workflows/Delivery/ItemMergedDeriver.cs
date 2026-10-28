@@ -85,12 +85,15 @@ public sealed partial class ItemMergedDeriver(IMergeFactsReader reader, IMergedI
     }
 
     ItemMerged Build(ItemId id, string commit, int pr, ItemMergeFacts facts, string source)
+        => new(id, commit, pr, GatesOf(facts, id.Number, gates), ItemMergedDependencies.Parse(id, facts.Body), source);
+
+    /// <summary>The gates of an item as the facts of its state, labels and demo video show them (Get-ItemPromotionGapsRead); the shadow run reads them for items that are no candidate.</summary>
+    public static ItemMergedGates GatesOf(ItemMergeFacts facts, int number, ItemGateConfig gates)
     {
-        var gaps = ItemGates.Gaps(new ItemGateFacts(id.Number, facts.Labels, facts.VerdictPassed, facts.VerdictPr, facts.MergePr, facts.MergeBy, facts.DemoVideoPublished), gates);
+        var gaps = ItemGates.Gaps(new ItemGateFacts(number, facts.Labels, facts.VerdictPassed, facts.VerdictPr, facts.MergePr, facts.MergeBy, facts.DemoVideoPublished), gates);
         bool Has(string name) => facts.Labels.Any(l => string.Equals(l, name, StringComparison.OrdinalIgnoreCase));
         var passMerged = facts.VerdictPassed && facts.VerdictPr is not null && facts.MergePr is > 0 && facts.MergePr == facts.VerdictPr && !string.Equals(facts.MergeBy, "person", StringComparison.OrdinalIgnoreCase);
-        var g = new ItemMergedGates(Has(gates.AutoMergeLabel), Has("Hold") ? "Hold" : ItemGates.HoldLabel(facts.Labels, gates.HoldLabels), passMerged, Has(gates.VideoLabel), facts.DemoVideoPublished, gaps);
-        return new ItemMerged(id, commit, pr, g, ItemMergedDependencies.Parse(id, facts.Body), source);
+        return new ItemMergedGates(Has(gates.AutoMergeLabel), Has("Hold") ? "Hold" : ItemGates.HoldLabel(facts.Labels, gates.HoldLabels), passMerged, Has(gates.VideoLabel), facts.DemoVideoPublished, gaps);
     }
 
     static int Int(JsonNode? n) => n is JsonValue v && v.TryGetValue<int>(out var i) ? i : 0;
