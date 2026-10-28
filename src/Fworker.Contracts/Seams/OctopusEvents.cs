@@ -2,12 +2,14 @@ namespace Fworker.Contracts.Seams;
 
 // W4.2: what the Octopus watcher publishes on the event ingress (S3). Octopus is read only: these say what Octopus shows, never a request to change it.
 // Each event has a Key, its logical identity: the same fact read again by a later poll has the same key, so the ingress (W4.1) can drop a repeat.
+// #496: the events that mark a moment carry it in At, the time Octopus gives the fact (not the time the watcher read it): after a restart the watcher replays history, and a deployment that
+// finished hours ago must not look as if it finished now. At is the last, optional parameter: a message serialized before it existed (or by a reader that has no time) still deserializes, with At null.
 
 /// <summary>How far a deployment of a release has come in one environment.</summary>
 public enum OctopusDeploymentPhase { Started, Succeeded, Failed }
 
-/// <summary>A release of the project exists. <paramref name="Commit"/> is the 40 character commit it was built from, or null when its build information and notes name none.</summary>
-public sealed record OctopusReleaseCreated(string ReleaseId, string Version, string? Commit) : IngressEvent
+/// <summary>A release of the project exists. <paramref name="Commit"/> is the 40 character commit it was built from, or null when its build information and notes name none. <paramref name="At"/> is when the release was assembled.</summary>
+public sealed record OctopusReleaseCreated(string ReleaseId, string Version, string? Commit, DateTimeOffset? At = null) : IngressEvent
 {
     public string Key => $"octopus:release:{ReleaseId}";
 }
@@ -18,8 +20,11 @@ public sealed record ReleaseCommitResolved(string ReleaseId, string Version, str
     public string Key => $"octopus:commit:{ReleaseId}";
 }
 
-/// <summary>A deployment started, succeeded or failed (failed: Failed, TimedOut or Canceled). Each phase of a deployment is published once.</summary>
-public sealed record OctopusDeploymentChanged(string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, OctopusDeploymentPhase Phase, string? Commit) : IngressEvent
+/// <summary>
+/// A deployment started, succeeded or failed (failed: Failed, TimedOut or Canceled). Each phase of a deployment is published once. <paramref name="At"/> is when the phase happened in Octopus: the task's start time
+/// for Started (its queue time when it has not started), its completion time for Succeeded and Failed (its start time when it has no completion time).
+/// </summary>
+public sealed record OctopusDeploymentChanged(string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, OctopusDeploymentPhase Phase, string? Commit, DateTimeOffset? At = null) : IngressEvent
 {
     public string Key => $"octopus:deployment:{DeploymentId}:{Phase}";
 }
@@ -36,8 +41,8 @@ public sealed record OctopusReplayComplete : IngressEvent
     public string Key => "octopus:replay:complete";
 }
 
-/// <summary>A running deployment waits at a manual intervention (the Sign-off step). <paramref name="InterruptionId"/> identifies the wait.</summary>
-public sealed record SignOffRequested(string InterruptionId, string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, string? Commit) : IngressEvent
+/// <summary>A running deployment waits at a manual intervention (the Sign-off step). <paramref name="InterruptionId"/> identifies the wait; <paramref name="At"/> is when the interruption was created.</summary>
+public sealed record SignOffRequested(string InterruptionId, string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, string? Commit, DateTimeOffset? At = null) : IngressEvent
 {
     public string Key => $"octopus:signoff:{InterruptionId}";
 }
