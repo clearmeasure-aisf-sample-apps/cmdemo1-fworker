@@ -4,7 +4,7 @@
 # needs it: a red suite blocks the merge exactly as a failed image build does. It does not run for the push that follows a merge (that
 # content was tested as the pull request), so the time from a merge to its release is unchanged (a Build of master started by hand does wait for them). Run it alone with `gh workflow run Tests`.
 #
-# The suites are split over shard jobs of about 6 minutes each (issue 371), so the longest job, not the sum of the suites, is the time of a
+# The suites are split over shard jobs of about 3 to 8 minutes each (issue 371), so the longest job, not the sum of the suites, is the time of a
 # pull request. Every job runs run-all.ps1 with its list of suites and shards: a plain name is the whole suite in one process, name@g/n is
 # group g (from 0) of n of the suite (run.ps1 -Groups n -Group g: its own fake, gateway, ports, HOME and TMPDIR), name@all/n runs all n
 # groups of the suite in this job (as qc and messaging split themselves). The owner suite is cut only at its barriers ($OwnerBarriers,
@@ -15,7 +15,8 @@
 # of `run.ps1 -ListScenarios` is in no job or in two, and "Tests result" fails when a listed scenario has no result.
 # Every scenario's writes to the fake GitHub are recorded (TEST_WRITES_DIR) and compared with tests/scenarios/golden where a golden file
 # exists; each Tier 1 job uploads its records as the artifact writes-<job>-<attempt> (tests/scenarios/golden/README.md says how to re-record).
-# The job unit runs the smoke test and tests/Gateway.Tests (the gateway in process: routes and their guards, start and stop) in minutes.
+# The jobs unit (tests/Gateway.Tests, the gateway in process: routes and their guards, start and stop, in 4 shards) and src (the smoke test and the
+# test projects of src/) run the quick tests in minutes. SQL Server is a service of those two only: Tier 1 does not pass a connection to the gateway.
 name: Tests
 
 on:
@@ -39,46 +40,35 @@ jobs:
     runs-on: ubuntu-24.04
     # a shard takes about 6 minutes of suites (issue 371, 2.8); the suites step stops at 16 minutes, and the rest leaves the uploads their time
     timeout-minutes: 25
-    # SQL Server beside every shard (W2.0), limited to 1 GB so the suites keep their memory; it starts while the job builds. Its SA password is composed
-    # per run from the run id and attempt (nothing credential-shaped is committed; the container lives for the job and only the runner reaches it).
-    # Tier 1 does not pass the connection to the gateway: FACTORY_DB_CONNECTION stays unset, so the gateway under test runs as v1.
-    env:
-      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
-    services:
-      sql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        env:
-          ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
-          MSSQL_MEMORY_LIMIT_MB: "1024"
-        ports:
-          - 1433:1433
-        options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' -b"
-          --health-interval 5s --health-timeout 5s --health-retries 30 --health-start-period 10s
     strategy:
       fail-fast: false
       matrix:
         # parallel: how many entries of suites run-all.ps1 runs at once (an @all/n entry is n processes on its own)
         include:
-          # auto: one process, 40 scenarios, about 1,740 s of scenarios alone on a runner (run 40277285785): 6 groups of about 290 s, one per runner
+          # auto: one process, 40 scenarios, about 2,070 s of scenarios on CI runners (run 40765741009): 8 groups of about 260 s, one per runner
           - name: auto-0
-            suites: auto@0/6
+            suites: auto@0/8
             parallel: 1
           - name: auto-1
-            suites: auto@1/6
+            suites: auto@1/8
             parallel: 1
           - name: auto-2
-            suites: auto@2/6
+            suites: auto@2/8
             parallel: 1
           - name: auto-3
-            suites: auto@3/6
+            suites: auto@3/8
             parallel: 1
           - name: auto-4
-            suites: auto@4/6
+            suites: auto@4/8
             parallel: 1
           - name: auto-5
-            suites: auto@5/6
+            suites: auto@5/8
+            parallel: 1
+          - name: auto-6
+            suites: auto@6/8
+            parallel: 1
+          - name: auto-7
+            suites: auto@7/8
             parallel: 1
           - name: peer-approved
             suites: peer-approved@all/2
@@ -89,71 +79,105 @@ jobs:
           - name: merge-queue-b
             suites: merge-queue@1/2,qc-proxy,repos
             parallel: 2
-          # owner: about 2,600 s of scenarios, one group of 8 per job (contiguous runs, cut only at the barriers of owner.ps1: the largest is about 440 s)
+          # owner: about 2,900 s of scenarios in 10 contiguous groups, cut only at the barriers of owner.ps1 (the largest barrier-to-barrier run is about 410 s); the cuts are the optimal ones for the seconds of scenario-stats.json (Select-GroupShare)
           - name: owner-0
-            suites: owner@0/8
+            suites: owner@0/10
             parallel: 1
           - name: owner-1
-            suites: owner@1/8
+            suites: owner@1/10
             parallel: 1
           - name: owner-2
-            suites: owner@2/8
+            suites: owner@2/10
             parallel: 1
           - name: owner-3
-            suites: owner@3/8
+            suites: owner@3/10
             parallel: 1
           - name: owner-4
-            suites: owner@4/8
+            suites: owner@4/10
             parallel: 1
           - name: owner-5
-            suites: owner@5/8
+            suites: owner@5/10
             parallel: 1
           - name: owner-6
-            suites: owner@6/8
+            suites: owner@6/10
             parallel: 1
           - name: owner-7
-            suites: owner@7/8
+            suites: owner@7/10
             parallel: 1
+          - name: owner-8
+            suites: owner@8/10
+            parallel: 1
+          - name: owner-9
+            suites: owner@9/10
+            parallel: 1
+          # copilot: about 970 s of scenarios in 4 groups of about 245 s
           - name: copilot-0
-            suites: copilot@0/3
+            suites: copilot@0/4
             parallel: 1
           - name: copilot-1
-            suites: copilot@1/3
+            suites: copilot@1/4
             parallel: 1
           - name: copilot-2
-            suites: copilot@2/3
+            suites: copilot@2/4
             parallel: 1
-          # promote (slot 28): its group ports 38000-38199 are below the ephemeral range the step "Ephemeral ports above the test ports" sets
-          - name: promote-a
-            suites: promote@0/2,copilot-deadline,cursor-deadline
-            parallel: 3
-          - name: promote-b
-            suites: promote@1/2
+          - name: copilot-3
+            suites: copilot@3/4
+            parallel: 1
+          # promote (slot 28): its group ports 38000-38299 are below the ephemeral range the step "Ephemeral ports above the test ports" sets; one scenario alone is 190 s
+          - name: promote-0
+            suites: promote@0/3
+            parallel: 1
+          - name: promote-1
+            suites: promote@1/3
+            parallel: 1
+          - name: promote-2
+            suites: promote@2/3
             parallel: 1
           - name: operator
-            suites: operator,runtime,mcp,envscope
+            suites: operator,mcp,envscope,copilot-deadline,cursor-deadline
             parallel: 2
-          - name: cursor
-            suites: cursor,copilot-manager,octopus
-            parallel: 3
-          - name: gate-a
-            suites: qc-gate@all/3
+          # runtime alone: beside other suites its settled-background-line goldens failed under load (issue 371 follow-up: runs 40684732381, 40567669960)
+          - name: runtime
+            suites: runtime
             parallel: 1
-          # the six one-scenario qc-gate suites, about 1,040 s together: two jobs of 3 at once
+          - name: cursor
+            suites: cursor
+            parallel: 1
+          - name: octopus
+            suites: octopus,copilot-manager
+            parallel: 2
+          # qc-gate: its 9 scenarios (about 740 s alone) in 4 groups, one job each (three groups in one job ran about twice as slow as their scenarios alone)
+          - name: gate-0
+            suites: qc-gate@0/4
+            parallel: 1
+          - name: gate-1
+            suites: qc-gate@1/4
+            parallel: 1
+          - name: gate-2
+            suites: qc-gate@2/4
+            parallel: 1
+          - name: gate-3
+            suites: qc-gate@3/4
+            parallel: 1
+          # the six one-scenario qc-gate suites, about 1,040 s together: two jobs of 3 at once (the longest alone is 285 s)
           - name: gate-b
             suites: qc-gate-race,qc-gate-grace,qc-gate-idle
             parallel: 3
           - name: gate-c
             suites: qc-gate-lease,qc-gate-waiting,qc-gate-lifetime
             parallel: 3
-          - name: workers-a
-            suites: qc-worker@0/3,author
+          # qc-worker: about 750 s of scenarios in 4 groups
+          - name: workers-0
+            suites: qc-worker@0/4,author
             parallel: 2
-          - name: workers-b
-            suites: qc-worker@1/3
+          - name: workers-1
+            suites: qc-worker@1/4
             parallel: 1
-          - name: workers-c
-            suites: qc-worker@2/3
+          - name: workers-2
+            suites: qc-worker@2/4
+            parallel: 1
+          - name: workers-3
+            suites: qc-worker@3/4
             parallel: 1
           # qc and messaging: their 4 groups in one job, as before (the rule-script pool and the client host: no pwsh per call)
           - name: qc
@@ -162,12 +186,31 @@ jobs:
           - name: messaging
             suites: messaging@all/4
             parallel: 1
-          - name: manager-a
-            suites: manager@0/6,manager@1/6,manager@2/6
-            parallel: 3
-          - name: manager-b
-            suites: manager@3/6,manager@4/6,manager@5/6
-            parallel: 3
+          # manager: about 1,800 s of scenarios in 8 groups of about 230 s, one per runner (three groups in one job failed under load)
+          - name: manager-0
+            suites: manager@0/8
+            parallel: 1
+          - name: manager-1
+            suites: manager@1/8
+            parallel: 1
+          - name: manager-2
+            suites: manager@2/8
+            parallel: 1
+          - name: manager-3
+            suites: manager@3/8
+            parallel: 1
+          - name: manager-4
+            suites: manager@4/8
+            parallel: 1
+          - name: manager-5
+            suites: manager@5/8
+            parallel: 1
+          - name: manager-6
+            suites: manager@6/8
+            parallel: 1
+          - name: manager-7
+            suites: manager@7/8
+            parallel: 1
     steps:
       - uses: actions/checkout@v6.0.1
 
@@ -202,16 +245,6 @@ jobs:
 
       - name: Smoke
         run: pwsh -NoProfile -File tests/smoke.ps1
-
-      # the service container's health check passed before the steps started (the job waits for it); this proves the port answers from the runner
-      - name: SQL Server is reachable
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            if (exec 3<>/dev/tcp/127.0.0.1/1433) 2>/dev/null; then echo "SQL Server answers on 127.0.0.1:1433"; exit 0; fi
-            sleep 2
-          done
-          echo "::error::the SQL Server service container does not answer on port 1433"; exit 1
 
       - name: Suites ${{ matrix.suites }} (full tier)
         # below the job's 25 minutes, so that a hung shard still uploads its logs and results
@@ -267,9 +300,78 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # The quick tests: the smoke test and the gateway in process (tests/Gateway.Tests). No suite runs here.
+  # The quick tests, no suite: the gateway in process (tests/Gateway.Tests, 1,150 tests) in 4 shards by test class
+  # (tests/ci/shard-dotnet-tests.py: each class in exactly one shard, the filter of a shard proved against the listing before it runs).
+  # PowerShell 7.5 beside every shard (the deploy-overrides script test finds it on the PATH and skips without it). SQL Server beside every shard: the SQL-backed Wolverine host tests of Gateway.Tests (WolverineHostSqlServerTests) return early where
+  # FACTORY_TEST_SQL is not set, so a shard never runs without it.
   unit:
-    name: Smoke and gateway tests
+    name: Gateway tests (shard ${{ matrix.shard }} of 4)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
+    services:
+      sql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
+          MSSQL_MEMORY_LIMIT_MB: "1024"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' -b"
+          --health-interval 5s --health-timeout 5s --health-retries 30 --health-start-period 10s
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      # ConfigurationTests.DeployOverrides_ScriptAgreesWithThePort runs config/apply-overrides.ps1 with the real PowerShell where one is on the PATH (it needs 7.5)
+      - name: PowerShell ${{ env.PWSH_VERSION }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pwsh"
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" | tar -xz -C "$RUNNER_TEMP/pwsh"
+          chmod +x "$RUNNER_TEMP/pwsh/pwsh"
+          echo "$RUNNER_TEMP/pwsh" >> "$GITHUB_PATH"
+
+      # the service container's health check passed before the steps started (the job waits for it); this proves the port answers from the runner
+      - name: SQL Server is reachable
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/1433) 2>/dev/null; then echo "SQL Server answers on 127.0.0.1:1433"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::the SQL Server service container does not answer on port 1433"; exit 1
+
+      - name: Build the gateway tests
+        run: dotnet build tests/Gateway.Tests --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --verbosity quiet
+
+      # the gateway's rule scripts are a stub in these tests (tests/Gateway.Tests/StubPwsh.cs); only the deploy-overrides script test runs the real PowerShell
+      - name: Gateway tests, shard ${{ matrix.shard }} of 4
+        run: python3 tests/ci/shard-dotnet-tests.py tests/Gateway.Tests ${{ matrix.shard }} 4 --logger "trx;LogFileName=gateway-tests-${{ matrix.shard }}.trx" --results-directory "$RUNNER_TEMP/gateway-tests"
+
+      - name: Keep the test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gateway-tests-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gateway-tests
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The smoke test and the test projects of src/ (the Domain rules and parity tests, the workflows; the SQL-backed Wolverine tests among them
+  # need the SQL Server service). The project dependency rules are in Gateway.Tests (ArchitectureTests).
+  src:
+    name: Smoke and src tests
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -304,26 +406,22 @@ jobs:
       - name: Smoke
         run: pwsh -NoProfile -File tests/smoke.ps1
 
-      # the gateway's rule scripts are a stub in these tests (tests/Gateway.Tests/StubPwsh.cs): no PowerShell runs in them
-      - name: Gateway tests
-        run: dotnet test tests/Gateway.Tests --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --logger "trx;LogFileName=gateway-tests.trx" --results-directory "$RUNNER_TEMP/gateway-tests"
+      # the service container's health check passed before the steps started (the job waits for it); this proves the port answers from the runner
+      - name: SQL Server is reachable
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/1433) 2>/dev/null; then echo "SQL Server answers on 127.0.0.1:1433"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::the SQL Server service container does not answer on port 1433"; exit 1
 
-      # the test projects of src/ (the Domain rules and parity tests, the workflows); the project dependency rules are in Gateway.Tests (ArchitectureTests)
-      - name: Domain and workflow tests
+      - name: Domain, integration and workflow tests
         run: |
           set -euo pipefail
           for project in tests/Fworker.Contracts.Tests tests/Fworker.Domain.Tests tests/Fworker.Integrations.Tests tests/Fworker.Workflow.Tests; do
             dotnet test "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false
           done
-
-      - name: Keep the test results
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: gateway-tests-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/gateway-tests
-          if-no-files-found: ignore
-          retention-days: 7
 
   # Every scenario of every suite runs in exactly one shard: the scenarios each matrix entry lists (run.ps1 -ListScenarios -Suite s, with
   # -Groups n -Group g for a shard, every group of an @all/n), added up, are exactly those of run.ps1 -ListScenarios (the full tier), none
@@ -404,7 +502,7 @@ jobs:
   # shard that ended early without failing.
   result:
     name: Tests result
-    needs: [tier1, coverage, unit]
+    needs: [tier1, coverage, unit, src]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -492,8 +590,10 @@ jobs:
           TIER1_RESULT: ${{ needs.tier1.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          SRC_RESULT: ${{ needs.src.result }}
         run: |
-          echo "tier1: ${TIER1_RESULT}, coverage: ${COVERAGE_RESULT}, unit: ${UNIT_RESULT}"
+          echo "tier1: ${TIER1_RESULT}, coverage: ${COVERAGE_RESULT}, unit: ${UNIT_RESULT}, src: ${SRC_RESULT}"
           test "${TIER1_RESULT}" = "success"
           test "${COVERAGE_RESULT}" = "success"
           test "${UNIT_RESULT}" = "success"
+          test "${SRC_RESULT}" = "success"

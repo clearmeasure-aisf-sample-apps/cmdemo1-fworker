@@ -169,8 +169,8 @@ function Get-OnlyNames($Set) { @($Set.Keys | Where-Object { -not $Only -or $_ -m
 function Get-TierNames([string[]]$Names) { @(foreach ($n in @($Names)) { if ($n -and ($Tier -eq 'full' -or (Get-ScenarioTier $n) -eq 'fast')) { $n } }) }
 # The share of group $Index (from 0) of $Count of a suite's scenarios, kept in suite order; every scenario is in exactly one group. Seconds per scenario
 # come from scenario-stats.json (run-all.ps1 -Tier full rewrites it); one it does not know counts as 30 s, about the mean seen in CI for the long
-# suites (owner 29, auto 46, manager 19 s per scenario). owner: contiguous runs, cut only where a scenario of $OwnerBarriers (owner.ps1) starts, the
-# barrier nearest to each even share of the seconds; its scenarios lean on workers and state that earlier ones left behind, so a balanced pick from
+# suites (owner 29, auto 46, manager 19 s per scenario). owner: contiguous runs, cut only where a scenario of $OwnerBarriers (owner.ps1) starts, so
+# that the biggest group is as small as the barriers allow; its scenarios lean on workers and state that earlier ones left behind, so a balanced pick from
 # anywhere in the suite breaks them. The others: longest scenario first onto the least loaded group.
 function Select-GroupShare([string]$SuiteName, [string[]]$RunNames, [int]$Count, [int]$Index) {
     if (-not $RunNames) { return @() }
@@ -178,17 +178,23 @@ function Select-GroupShare([string]$SuiteName, [string[]]$RunNames, [int]$Count,
     if ($SuiteName -eq 'owner') {
         $secs = @($RunNames | ForEach-Object { $k = $_ -replace '\s\[full\]\s*$', ''; $(if ($st -and $st.ContainsKey($k)) { [double]$st[$k].seconds } else { 30.0 }) })
         $total = ($secs | Measure-Object -Sum).Sum; if (-not ($total -gt 0)) { $secs = @($secs | ForEach-Object { 1.0 }); $total = [double]$secs.Count }
-        $starts = New-Object double[] $RunNames.Count; $acc = 0.0
-        for ($i = 0; $i -lt $RunNames.Count; $i++) { $starts[$i] = $acc; $acc += $secs[$i] }
-        $cuts = @(0)   # the index each group starts at; a group with no barrier left after the one before it is empty
-        for ($c = 1; $c -lt $Count; $c++) {
-            $target = $total * $c / $Count; $best = $RunNames.Count
-            for ($i = $cuts[-1] + 1; $i -lt $RunNames.Count; $i++) {
-                $isBarrier = $OwnerBarriers.Contains($RunNames[$i]) -or $OwnerBarriers.Contains(($RunNames[$i] -replace '\s\[full\]\s*$', ''))
-                if ($isBarrier -and ($best -eq $RunNames.Count -or [math]::Abs($starts[$i] - $target) -lt [math]::Abs($starts[$best] - $target))) { $best = $i }
-            }
-            $cuts += $best
+        # the runs between two barriers (the first run starts one whatever the list says), then the fewest seconds the biggest group needs: binary
+        # search on the limit, packing the runs left to right into groups of at most the limit (the optimal cut of contiguous runs into $Count groups)
+        $segStart = [System.Collections.Generic.List[int]]::new(); $segSecs = [System.Collections.Generic.List[double]]::new()
+        for ($i = 0; $i -lt $RunNames.Count; $i++) {
+            $isBarrier = $OwnerBarriers.Contains($RunNames[$i]) -or $OwnerBarriers.Contains(($RunNames[$i] -replace '\s\[full\]\s*$', ''))
+            if ($i -eq 0 -or $isBarrier) { $segStart.Add($i); $segSecs.Add(0.0) }
+            $segSecs[$segSecs.Count - 1] += $secs[$i]
         }
+        $lo = [double](($segSecs | Measure-Object -Maximum).Maximum); $hi = [double]$total
+        while ($hi - $lo -gt 0.5) {
+            $mid = ($lo + $hi) / 2; $need = 1; $acc = 0.0
+            foreach ($sg in $segSecs) { if ($acc -gt 0 -and $acc + $sg -gt $mid) { $need++; $acc = 0.0 }; $acc += $sg }
+            if ($need -le $Count) { $hi = $mid } else { $lo = $mid }
+        }
+        $cuts = @(0); $acc = 0.0   # the index each group starts at
+        for ($sgi = 0; $sgi -lt $segStart.Count; $sgi++) { if ($acc -gt 0 -and $acc + $segSecs[$sgi] -gt $hi) { $cuts += $segStart[$sgi]; $acc = 0.0 }; $acc += $segSecs[$sgi] }
+        while ($cuts.Count -lt $Count) { $cuts += $RunNames.Count }   # groups the runs do not fill are empty
         $cuts += $RunNames.Count
         return @(for ($i = $cuts[$Index]; $i -lt $cuts[$Index + 1]; $i++) { $RunNames[$i] })
     }

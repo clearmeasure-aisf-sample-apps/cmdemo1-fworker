@@ -6,7 +6,7 @@ namespace Fworker.Workflow.Tests;
 
 /// <summary>
 /// Examples of Wolverine tracked sessions (W2.4) on the harness's trivial messages, against the SQL Server of FACTORY_TEST_SQL with the durable outbox.
-/// They return at once where FACTORY_TEST_SQL is unset; CI's unit job sets it. The same shapes carry the tests of the sagas and handlers of W3 on.
+/// They return at once where FACTORY_TEST_SQL is unset; the src and unit jobs of tests.yml set it. The same shapes carry the tests of the sagas and handlers of W3 on.
 /// </summary>
 public class TrackedSessionTests
 {

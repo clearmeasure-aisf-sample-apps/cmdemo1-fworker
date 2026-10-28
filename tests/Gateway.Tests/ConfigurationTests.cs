@@ -71,7 +71,7 @@ public sealed class ConfigurationTests : IDisposable
     [Fact]
     public async Task DeployOverrides_ScriptAgreesWithThePort()
     {
-        // the script itself, where a real PowerShell is on the PATH (CI's quick-tests job installs it); the stub pwsh of the host fixtures is skipped
+        // the script itself, where a real PowerShell is on the PATH (the unit job of tests.yml installs it); the stub pwsh of the host fixtures is skipped
         var pwsh = RealPwsh();
         if (pwsh == null) return;
         var outPath = Path.Combine(dir, "script.json");
