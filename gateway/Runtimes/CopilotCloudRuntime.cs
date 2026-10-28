@@ -459,6 +459,20 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
         return null;
     }
 
+    // W3.3: the newest task created at or after since whose title or prompt names the item ("#<item>"); the reservation reconciler asks this (throws when GitHub cannot be asked)
+    public async Task<(string TaskId, string Url)?> TaskForItem(int item, DateTime since, CancellationToken ct)
+    {
+        var (s, j) = await Send(HttpMethod.Get, $"{TasksPath}?per_page=100", null, ct);
+        if (s != 200) throw new HttpRequestException($"copilot tasks list: {s}");
+        foreach (var t in ((j?["tasks"] as JsonArray) ?? new JsonArray()).OrderByDescending(x => x?["created_at"]?.ToString() ?? "", StringComparer.Ordinal))
+        {
+            if (!DateTime.TryParse(t?["created_at"]?.ToString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var at) || at < since) continue;
+            var text = (t?["name"]?.ToString() ?? "") + " " + (t?["title"]?.ToString() ?? "") + " " + (t?["prompt"]?.ToString() ?? "");
+            if (t?["id"]?.ToString() is { Length: > 0 } id && System.Text.RegularExpressions.Regex.IsMatch(text, $@"#{item}(?!\d)")) return (id, TaskUrl(HtmlUrl(t), id));
+        }
+        return null;
+    }
+
     // the open pull request on a branch (0: none)
     async Task<int> PrOfBranch(string branch, CancellationToken ct)
     {
