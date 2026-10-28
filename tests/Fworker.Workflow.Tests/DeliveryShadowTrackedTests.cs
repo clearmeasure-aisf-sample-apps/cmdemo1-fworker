@@ -152,8 +152,17 @@ public class DeliveryShadowTrackedTests
         var summary = await store.Summary(default);
         Assert.True(summary.Counts[ShadowOutcomes.Match] >= 1);
         Assert.True(summary.Releases >= 1);
+        // the honest gate's inputs, read back from the database: the live outcomes and the sides seen of the release
+        Assert.True(summary.LiveCounts![ShadowOutcomes.Match] >= 1);
+        var seen = Assert.Single(summary.LiveSeen!, x => x.Release == "1.0.2");
+        Assert.True(seen.V1Seen && seen.V2Seen && seen.Compared && !seen.Differs);
+        Assert.Equal("promote", seen.Class);
         await NoDeadLetters(h);
         var report = await shadow.Report(10, null, default);
+        var gate = report["summary"]!["gate"]!;
+        Assert.Equal(1, (int)gate["comparedReleases"]!);   // one release compared is no gate: it needs 3
+        Assert.False((bool)gate["met"]!);
+        Assert.Equal("promote", (string)gate["outcomeClasses"]![0]!["class"]!);
         Assert.Equal("PromoteRelease", (string)report["recentCommands"]![0]!["command"]!);
         Assert.False((bool)report["recentCommands"]![0]!["executed"]!);
     }
