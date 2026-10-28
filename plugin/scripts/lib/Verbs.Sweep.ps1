@@ -996,9 +996,9 @@ function Verb_ingest_event($a) {
             $kind = if ($act -eq 'completed') { 'completed' } elseif ($act -eq 'in_progress') { 'started' } else { $null }
             if ($kind) {
                 if ($branch -match "^$([regex]::Escape($c.name))/(\d+)-") {
-                    $out += New-Event "build.branch_$kind" ([int]$Matches[1]) $null $delivery @{ sha = $run.head_sha; conclusion = $run.conclusion; workflow = $run.name }
+                    $out += New-Event "build.branch_$kind" ([int]$Matches[1]) $null $delivery @{ sha = $run.head_sha; conclusion = $run.conclusion; workflow = $run.name; run_id = $run.id; run_attempt = $run.run_attempt }
                 } elseif ($branch -eq $c.defaultBranch) {
-                    $out += New-Event "build.master_$kind" $null $null $delivery @{ sha = $run.head_sha; conclusion = $run.conclusion; workflow = $run.name }
+                    $out += New-Event "build.master_$kind" $null $null $delivery @{ sha = $run.head_sha; conclusion = $run.conclusion; workflow = $run.name; run_id = $run.id; run_attempt = $run.run_attempt }
                 }
             }
         }

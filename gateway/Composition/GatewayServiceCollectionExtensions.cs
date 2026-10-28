@@ -252,6 +252,7 @@ static class GatewayServiceCollectionExtensions
             services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct));
             services.AddHostedService(sp => sp.GetRequiredService<OctopusWatchService>());
         }
+        if (c.Engine.V2Acts && c.Instance.Home != null) services.AddHostedService(sp => sp.GetRequiredService<RecurringJobScheduler>());   // W4.3
         services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
         // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
         var sweepSeconds = gw.SweepSeconds;
