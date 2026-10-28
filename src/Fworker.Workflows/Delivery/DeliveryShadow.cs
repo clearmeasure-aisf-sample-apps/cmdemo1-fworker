@@ -23,9 +23,9 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
     readonly object gate = new();
     readonly List<ShadowComparisonResult> unsaved = [];
     readonly LinkedList<JsonObject> commands = new();
-    readonly HashSet<string> releases = [];
+    readonly HashSet<string> storedReleases = [];   // the releases of the comparisons stored by this process: what the gate counts, as the stored summary does
     readonly Dictionary<string, int> counts = ShadowOutcomes.All.ToDictionary(o => o, _ => 0);
-    DateTimeOffset? firstObserved, lastComparison, lastPassAt;
+    DateTimeOffset? firstStored, lastComparison, lastPassAt;
     long v1Decisions, v2Decisions, commandsRecorded, persisted, persistFailures, v1Passes;
     string lastError = "";
 
@@ -43,7 +43,7 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
             lock (gate)
             {
                 v1Passes++; lastPassAt = at;
-                foreach (var d in found) { Note(d.Release, at); v1Decisions++; comparer.Observe(d); }
+                foreach (var d in found) { v1Decisions++; comparer.Observe(d); }
             }
         }
         catch (Exception e) { lock (gate) lastError = $"v1 pass: {e.GetType().Name}"; }
@@ -74,7 +74,7 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
             if (action is null || d.Release.Length == 0) return;
             var (deployable, environment) = TrainKey.Split(d.Key);
             var decision = new ShadowDecision(ShadowSide.V2, deployable, environment, d.Release, action, d.Action, d.Reasons, d.Items, d.At);
-            lock (gate) { Note(d.Release, d.At); v2Decisions++; comparer.Observe(decision); }
+            lock (gate) { v2Decisions++; comparer.Observe(decision); }
         }
         catch (Exception e) { lock (gate) lastError = $"v2 decision: {e.GetType().Name}"; }
     }
@@ -91,7 +91,6 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
         }
     }
 
-    void Note(string release, DateTimeOffset at) { firstObserved ??= at; releases.Add(release); }
 
     // ---- the comparison --------------------------------------------------------------------------------------------------------------------------------------
 
@@ -110,7 +109,11 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
         try
         {
             await store.Add(batch, ct);
-            lock (gate) { unsaved.RemoveAll(batch.Contains); persisted += batch.Count; }
+            lock (gate)
+            {
+                unsaved.RemoveAll(batch.Contains); persisted += batch.Count;
+                foreach (var r in batch) { storedReleases.Add(r.Release); if (firstStored is null || r.At < firstStored) firstStored = r.At; }
+            }
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
@@ -131,7 +134,7 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
                 ["v1"] = new JsonObject { ["passes"] = v1Passes, ["decisions"] = v1Decisions, ["lastPass"] = lastPassAt?.ToString("o") },
                 ["v2"] = new JsonObject { ["decisions"] = v2Decisions, ["commandsRecorded"] = commandsRecorded, ["commandsExecuted"] = 0L },
                 ["stored"] = persisted, ["storeFailures"] = persistFailures, ["lastComparison"] = lastComparison?.ToString("o"),
-                ["gate"] = Gate(firstObserved, releases.Count),
+                ["gate"] = Gate(firstStored, storedReleases.Count),
             };
             if (lastError.Length > 0) o["lastError"] = lastError;
             return o;
@@ -144,7 +147,7 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
         var summary = await store.Summary(ct);
         var rows = await store.Recent(limit, outcome, ct);
         JsonObject live; JsonArray recentCommands;
-        lock (gate) { live = Status(); recentCommands = new JsonArray(commands.Select(c => (JsonNode?)c.DeepClone()).ToArray()); }
+        lock (gate) { live = Status(); live["gate"] = Gate(summary.First, summary.Releases); recentCommands = new JsonArray(commands.Select(c => (JsonNode?)c.DeepClone()).ToArray()); }
         var counts = ShadowOutcomes.All.ToDictionary(o => o, o => summary.Counts.GetValueOrDefault(o));
         return new JsonObject
         {

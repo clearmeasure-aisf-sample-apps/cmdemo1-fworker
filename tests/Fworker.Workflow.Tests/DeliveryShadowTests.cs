@@ -92,16 +92,17 @@ public class DeliveryShadowTests
     }
 
     [Fact]
-    public void AnActionNobodyAnswered_IsAFindingAfterTheGrace_AWaitingIsNot()
+    public void ADecisionNobodyAnswered_IsOneSidedAfterTheGrace_AWaitingToo()
     {
         var c = new ShadowComparer(Grace);
         c.Observe(D(ShadowSide.V2, "promote", release: "1.0.2"));
         c.Observe(D(ShadowSide.V1, "wait", release: "1.0.3"));
         c.Observe(D(ShadowSide.V2, "wait", release: "1.0.4"));
         Assert.Empty(c.Compare(T0.AddMinutes(1)));
-        var late = c.Compare(T0.AddMinutes(6));
-        var r = Assert.Single(late);
-        Assert.Equal((ShadowOutcomes.V2Only, "1.0.2"), (r.Outcome, r.Release));
+        Assert.Equal(3, c.Tracked);
+        var late = c.Compare(T0.AddMinutes(6)).ToDictionary(r => r.Release, r => r.Outcome);
+        Assert.Equal(new Dictionary<string, string> { ["1.0.2"] = ShadowOutcomes.V2Only, ["1.0.3"] = ShadowOutcomes.V1Only, ["1.0.4"] = ShadowOutcomes.V2Only }, late);
+        Assert.Equal(0, c.Tracked);   // pending means not compared yet
         c.Observe(D(ShadowSide.V1, "promote", release: "1.0.5", native: "promoted", at: T0.AddMinutes(7)));
         Assert.Equal(ShadowOutcomes.V1Only, Assert.Single(c.Compare(T0.AddMinutes(13))).Outcome);
     }
@@ -240,15 +241,33 @@ public class DeliveryShadowTests
     public async Task TheGate_IsMetAfterFourHours_OrThreeReleases()
     {
         var r = new Rig();
-        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.2", [], ["x"], T0));
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "promote", "1.0.2", [], [], T0));
+        r.Now = T0.AddMinutes(6);
+        await r.Shadow.Tick(default);   // stored: the first stored comparison starts the hours
         Assert.False((bool)r.Shadow.Status()["gate"]!["met"]!);
-        r.Now = T0.AddHours(4).AddMinutes(1);
+        r.Now = T0.AddHours(4).AddMinutes(7);
         Assert.True((bool)r.Shadow.Status()["gate"]!["met"]!);
+    }
+
+    [Fact]
+    public async Task TheLiveGate_CountsWhatTheStoredGateCounts_NotWhatWasObserved()
+    {
         var s = new Rig();
-        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) s.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", v, [], ["x"], T0));
-        var report = await s.Shadow.Report(10, null, default);
-        Assert.True((bool)report["live"]!["gate"]!["met"]!);
-        Assert.Equal(3, (int)report["live"]!["gate"]!["releases"]!);
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) s.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = v, environment = "Uat" }));
+        var before = await s.Shadow.Report(10, null, default);
+        Assert.Equal(3, (int)before["live"]!["pending"]!);
+        Assert.Equal(0, (int)before["live"]!["gate"]!["releases"]!);   // observed, not stored: the gate has seen nothing
+        Assert.False((bool)before["live"]!["gate"]!["met"]!);
+        s.Now = T0.AddMinutes(6);
+        await s.Shadow.Tick(default);   // the waits nobody answered become v1-only rows
+        var after = await s.Shadow.Report(10, null, default);
+        Assert.Equal(3, (int)after["summary"]!["total"]!);
+        Assert.Equal(3, (int)after["summary"]!["counts"]!["v1-only"]!);
+        Assert.Equal(0, (int)after["live"]!["pending"]!);
+        Assert.Equal(3, (int)after["summary"]!["gate"]!["releases"]!);
+        Assert.Equal(after["summary"]!["gate"]!.ToJsonString(), after["live"]!["gate"]!.ToJsonString());
+        Assert.Equal(3, (int)s.Shadow.Status()["gate"]!["releases"]!);
+        Assert.True((bool)after["live"]!["gate"]!["met"]!);
     }
 
     [Fact]
