@@ -155,11 +155,13 @@ public sealed class DeliveryShadowGatewayTests
             ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Started, A));
             ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Succeeded, A));
             // the train judges 1.0.2 for uat: the tdd app has not been Healthy long enough yet, so it waits
-            Assert.True(await Until(async () => (await Get(host, "/api/v1/status")).Json?["deliveryShadow"]?["v2"]?["decisions"]?.GetValue<long>() >= 1, 60), "the train decided nothing");
+            // (the uat train's own decision for 1.0.2, not any decision: the train says "following" while the tdd deployment still runs, and its other trains decide earlier)
+            const string uatWaiting = "SELECT COUNT(*) FROM factory.DeliveryTrains WHERE [Key] LIKE '%/uat' AND StateJson LIKE '%waiting|1.0.2|%'";
+            Assert.True(await Until(async () => (await Rows(cs, uatWaiting))[0] == "1", 60), "the uat train did not wait for 1.0.2: " + string.Join(" // ", await Rows(cs, "SELECT [Key] + ' ' + LEFT(StateJson, 200) + CAST(Revision AS varchar) FROM factory.DeliveryTrains")));
             // v1's pass (its AutoPromoter hands the actions of the verb auto-promote over) says the same
             var holder = host.Services.GetRequiredService<DeliveryShadowHolder>();
             holder.Shadow!.ObserveV1(new JsonArray(new JsonObject { ["item"] = 7, ["action"] = "promotion-waiting", ["release"] = "1.0.2", ["environment"] = "uat", ["items"] = new JsonArray(7), ["reasons"] = new JsonArray("the tdd app has not been Healthy long enough yet") }));
-            Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.DeliveryShadowComparisons WHERE Release = '1.0.2' AND Outcome = 'match'"))[0] == "1", 60), "no comparison was stored");
+            Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.DeliveryShadowComparisons WHERE Release = '1.0.2' AND Outcome = 'match'"))[0] == "1", 60), "no comparison was stored: " + holder.Shadow.Status().ToJsonString() + " // " + string.Join(" // ", await Rows(cs, "SELECT Outcome + ' ' + Release + ' ' + V1Action + '/' + V2Action + ' ' + LEFT(Reason, 300) FROM factory.DeliveryShadowComparisons")));
             // the report: an authenticated read of the stored comparisons
             var report = await Get(host, "/api/v1/delivery-shadow?limit=5");
             Assert.Equal(200, report.Status);
