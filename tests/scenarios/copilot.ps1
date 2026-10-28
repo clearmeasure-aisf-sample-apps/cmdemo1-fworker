@@ -604,6 +604,11 @@ $CopilotScenarios = [ordered]@{
         [void](Mcp-Call 'session_end' @{ reason = 'done' } $w)
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
         Check 'its session ends' (Wait-Until -Seconds 30 { (Cop-Status).running -eq 0 })
+        # The end counts the execution out of 'running' at its start; its claim release (a rule script that reads the item's state and saves it) and
+        # its revoke follow for a few seconds (#376). The state written below must come after them and between two sweeps (issue 415): an edit that a
+        # script of the end or a sweep read before and saves after is lost, and then master is never seen red and the task is never resumed.
+        Check 'the end of its execution has run to its last step' (Wait-Until -Seconds 60 { Cop-EndsSettled })
+        Wait-SweepGap -Fresh 1.0
         # the item was merged (here: written as the settle leaves it) and master went red for the merge commit
         [void](Fake 'move' @{ number = $n; column = 'Release Queue' })
         $sha = 'abcdef1' + ('0' * 33)
@@ -614,6 +619,7 @@ $CopilotScenarios = [ordered]@{
         Start-Sleep -Seconds 25
         Check 'once per merge commit' (@((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and  "$($_.body.prompt)" -match 'master is red' }).Count -eq 1)
         Check 'not done while master is red' ((Cop-Comments $n '*Owner done:*').Count -eq 0 -and @((Cop-Status).owned | Where-Object { $_.item -eq $n }).Count -eq 1)
+        Wait-SweepGap -Fresh 1.0   # (the edits in the gap after a sweep: none reads the state before them and saves it after)
         Set-ItemState $n { param($st) $st.merge.green_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = 'release-candidate'; $st.merge.rc_deadline = (Get-Date).ToUniversalTime().AddHours(1).ToString('o'); $st.Remove('park') }
         Set-ItemState $n { param($st) $st.merge.done_at = (Get-Date).ToUniversalTime().ToString('o'); $st.merge.awaiting = $null }
         Check 'delivered to production: the owner is done' (Wait-Until -Seconds 60 { (Cop-Comments $n '*Owner done:** Copilot task*').Count -eq 1 }) (Cop-Brief $n)

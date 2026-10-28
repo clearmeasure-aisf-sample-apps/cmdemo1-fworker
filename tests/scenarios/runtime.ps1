@@ -228,13 +228,21 @@ $RuntimeScenarios['runtime: a failed execution: its item is taken back, its clai
         $e = (Rt-Execs $n)[0]; $name = "$($e.worker)"; [void](Rt-Launch $e)
         $r = Rt-Own $name $n; CheckExit 'its worker owns the item' $r 0
         Check 'the plant names it owner' (Wait-Until -Seconds 10 { (Rt-Owner $n) -eq $name })
+        # The execution fails right after a sweep has ended, not across one (issue 415). The runtime ends the execution about a second later and the plant
+        # takes the item back at once; a sweep that read the board before that and applies its plan after it names the board's claim holder as the owner
+        # again (Plan(owners)), and only the owner grace of the messaging settings (60 s in this suite) drops that owner. The next sweep starts a few
+        # seconds after the last one ended, so an end within the first second of the gap cannot meet a sweep's read.
+        Wait-SweepGap -Fresh 1.0
         $armed = Fake 'arm-exec' @{ worker = $name; status = 'Failed' }
         Check 'the platform fails the execution' ($armed.ok -eq $true) ($armed | ConvertTo-Json -Compress)
-        $tb = Wait-Until -Seconds 45 { (Rt-Owner $n) -ne $name }
+        # The failure is counted first when the execution ends (RuntimeManager.End), before the plant takes the item back: read it now, before the next
+        # execution can age past its 15 s ack window (unlaunched, it would end never-registered and count a second failure). The take-back is waited for
+        # longer than that window, so this read must not come after it.
+        Check 'status: one failure counted for the item and phase' (Wait-Until -Seconds 10 { @((Rt-Status).failures | Where-Object { $_.item -eq $n -and $_.count -eq 1 }).Count -eq 1 }) ((Rt-Status).failures | ConvertTo-Json -Compress)
+        # 90 s: the owner grace of 60 s and the two sweeps that must omit the item, for the case that a sweep did name the owner again; 1 to 3 s otherwise
+        $tb = Wait-Until -Seconds 90 { (Rt-Owner $n) -ne $name }
         $diag = if ($tb) { '' } else { "arm=$((Rt-Arm).executions | Where-Object { $_.worker -eq $name } | ConvertTo-Json -Compress -Depth 2) log=$(@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch $name | Select-Object -Last 15 | ForEach-Object { $_.Line }) -join ' | ')" }
         Check 'the item is taken back from the failed execution' $tb $diag
-        # read before the next execution can age past its 15 s ack window: unlaunched, it would end never-registered and count a second failure
-        Check 'status: one failure counted for the item and phase' (Wait-Until -Seconds 10 { @((Rt-Status).failures | Where-Object { $_.item -eq $n -and $_.count -eq 1 }).Count -eq 1 }) ((Rt-Status).failures | ConvertTo-Json -Compress)
         Check 'its claim ends' (Wait-Until -Seconds 20 { -not (Get-ItemState $n).ContainsKey('claim') })
         Check 'the take-back is journalled' (Wait-Until -Seconds 20 { (Rt-Journal $n 'plant event=reassigned ') -ge 1 })
         Check 'a new execution is started for the item' (Wait-Until -Seconds 30 { @((Rt-Execs $n) | Where-Object { $_.worker -ne $name }).Count -ge 1 })
