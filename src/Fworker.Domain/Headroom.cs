@@ -63,7 +63,9 @@ public static class BurstAdmission
         var s = settings ?? HeadroomSettings.Defaults;
         if (footprintMb is null) return BurstVerdict.NoFootprint;
         if ((long)host.MemAvailableMb - s.ReserveMb < footprintMb.Value) return BurstVerdict.Memory;
-        if (host.Load1 + containerCpus > host.Cpus) return BurstVerdict.Cpu;
+        // Written as the negated admit test, not as "> cpus": with an unknown load (NaN, a host report that could not read /proc/loadavg) every comparison
+        // is false, so "> cpus" would admit the host. An unknown load (or container cpus) fails closed.
+        if (!(host.Load1 + containerCpus <= host.Cpus)) return BurstVerdict.Cpu;
         if (host.DiskFreeMb < s.MinDiskMb) return BurstVerdict.Disk;
         return BurstVerdict.Admitted;
     }

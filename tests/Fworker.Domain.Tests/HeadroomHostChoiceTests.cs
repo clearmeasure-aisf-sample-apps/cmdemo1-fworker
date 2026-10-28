@@ -42,6 +42,13 @@ public sealed class HeadroomHostChoiceTests
     public void BurstDefault_EqualToCapacity_MeansNoBurstEver()
         => Assert.Equal(SlotKind.None, Slot(Host("a", running: 2, burst: 2)));
 
+    [Theory]
+    [InlineData(0, SlotKind.Guaranteed)]
+    [InlineData(1, SlotKind.Guaranteed)] // capacity 2, burst 1: the burst is below the capacity and does not lower it
+    [InlineData(2, SlotKind.None)]       // at the effective limit max(2, 1) = 2
+    public void BurstBelowCapacity_IsIgnored_TheLimitIsTheLarger(int running, SlotKind expected)
+        => Assert.Equal(expected, Slot(Host("a", running, capacity: 2, burst: 1)));
+
     [Fact]
     public void AtTheBurstLimit_NoSlot()
         => Assert.Equal(SlotKind.None, Slot(Host("a", running: 3, burst: 3)));

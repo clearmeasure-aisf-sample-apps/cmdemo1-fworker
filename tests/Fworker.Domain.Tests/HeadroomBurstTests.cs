@@ -38,6 +38,16 @@ public sealed class HeadroomBurstTests
         => Assert.Equal(expected, Check(Ok with { Load1 = load1 }));
 
     [Theory]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public void UnknownOrInfiniteLoad_FailsClosed(double load1)
+        => Assert.Equal(BurstVerdict.Cpu, Check(Ok with { Load1 = load1 }));
+
+    [Fact]
+    public void NaNContainerCpus_FailsClosed()
+        => Assert.Equal(BurstVerdict.Cpu, BurstAdmission.Check(Ok, Footprint, double.NaN));
+
+    [Theory]
     [InlineData(4095, BurstVerdict.Disk)]
     [InlineData(4096, BurstVerdict.Admitted)]
     [InlineData(4097, BurstVerdict.Admitted)]

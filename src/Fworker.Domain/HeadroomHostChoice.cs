@@ -39,15 +39,18 @@ public static class HostChoiceRule
 
     /// <summary>
     /// The slot the next session on this host would take. Up to <c>perHostCapacity</c> it is a guaranteed slot with no headroom test at all (no memory
-    /// test, and v1's behavior is unchanged). Above it and up to <c>perHostBurst</c> it is a burst slot, only when <see cref="BurstAdmission.Check"/>
+    /// test, and v1's behavior is unchanged), also when <c>perHostBurst</c> is lower than the capacity (the limit is max(capacity, burst)). Above it and up to <c>perHostBurst</c> it is a burst slot, only when <see cref="BurstAdmission.Check"/>
     /// admits. Otherwise none (also while the host is blocked).
     /// </summary>
     public static SlotKind SlotFor(HostState host, double containerCpus, DateTimeOffset now, HeadroomSettings? settings = null)
     {
         if (IsBlocked(host, now, settings)) return SlotKind.None;
         var next = host.Running + 1;
+        // The effective limit is max(capacity, burst): a burst configured below the capacity never lowers the guaranteed slots (capacity is the floor,
+        // v1's behavior), it only means there is no burst. Stated here so the order of the two tests below is not what decides it.
+        var limit = Math.Max(host.PerHostCapacity, host.PerHostBurst);
+        if (next > limit) return SlotKind.None;
         if (next <= host.PerHostCapacity) return SlotKind.Guaranteed;
-        if (next > host.PerHostBurst) return SlotKind.None;
         var footprint = Footprint.P95(host.FootprintSamples, settings);
         return BurstAdmission.Check(host.Metrics, footprint, containerCpus, settings) == BurstVerdict.Admitted ? SlotKind.Burst : SlotKind.None;
     }
