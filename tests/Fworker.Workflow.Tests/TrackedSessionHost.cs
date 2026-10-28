@@ -51,7 +51,25 @@ public sealed class TrackedSessionHost : IAsyncDisposable
         }
         ConnectionString = new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = dbName }.ConnectionString;
         await using (var db = Open()) await db.Database.MigrateAsync();
-        host = await new HostBuilder()
+        host = await BuildHost(configure);
+    }
+
+    /// <summary>
+    /// Kills the host as a crash does: whatever a handler was doing is abandoned, then a new
+    /// host starts on the same database with <paramref name="configure"/>. What was in the durable inbox and outbox stays there; the in-memory state of the old host is gone.
+    /// </summary>
+    public async Task RestartAsync(Action<WolverineOptions>? configure = null)
+    {
+        var old = host; host = null;
+        // a crash does not wait for the handler it interrupts: the old host is stopped in the background and its abandoned handlers never come back
+        if (old != null) _ = Task.Run(async () => { try { await old.StopAsync(); } catch { } try { old.Dispose(); } catch { } });
+        SqlConnection.ClearAllPools();
+        host = await BuildHost(configure);
+    }
+
+    async Task<IHost> BuildHost(Action<WolverineOptions>? configure)
+    {
+        return await new HostBuilder()
             .ConfigureLogging(l => l.SetMinimumLevel(LogLevel.Critical))
             .ConfigureServices(s => s.AddSingleton(Probe).AddSingleton(this))
             .UseWolverine(w =>
