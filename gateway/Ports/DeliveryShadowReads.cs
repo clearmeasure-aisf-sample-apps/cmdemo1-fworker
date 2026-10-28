@@ -13,7 +13,8 @@ using Fworker.Workflows.Delivery;
 // a work item's settled merge is kept (Find-CommitItem's commit cache), a commit that is none is not looked at again for ten minutes, an item that is no candidate is read once a minute at
 // most, and the train itself spaces its probes of the app (the policy's read gap). The answers' rate-limit headers go to the gateway's GitHub budget.
 // An answer that cannot change is kept for good (bounded by MaxKept): a compare of two fixed commits, and a commit that is none because it names no pull request or the pull request it names
-// was not merged as it. Without that, one evaluation of a long range (a read per commit) spends the minute's cap before it ends, the train retries it, and the answers it already had expire and are
+// was not merged as it for longer than the ten minutes of the 'none' timer (a read of the pull request right after the merge can still say "not merged" or carry no merge commit: that is
+// kept the short time, read again, and final only when the second read, ten minutes after the first, says the same). Without that, one evaluation of a long range (a read per commit) spends the minute's cap before it ends, the train retries it, and the answers it already had expire and are
 // read again. A 'none' that depends on item state (no candidate item's state names the commit yet) and a 'waiting' keep their lifetimes: a longer one would put v2's decision behind v1's.
 sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceName, IMergeFactsReader facts, ItemGateConfig gates, IDeliveryPolicies policies,
     Action<string, string?, string?, string?>? observe = null, Func<DateTimeOffset>? clock = null, Func<bool>? budgetLow = null) : ITrainReads
@@ -32,6 +33,7 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
     readonly Dictionary<string, (DateTimeOffset At, MergedPullRequest Pull)> pulls = [];
     readonly Dictionary<string, CommitItemLookup> settled = [];
     readonly Dictionary<string, DateTimeOffset> none = [];
+    readonly Dictionary<string, DateTimeOffset> unmergedSince = [];   // when a read of the pull request first said "not merged as this commit": final only after NoneKeep
     readonly Dictionary<string, (DateTimeOffset At, CommitItemLookup Found)> waiting = [];
     readonly Dictionary<string, (DateTimeOffset At, ItemMergedGates? Gates)> gateReads = [];
 
@@ -69,11 +71,19 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
             if (none.TryGetValue(key, out var at) && now() - at < NoneKeep) return new CommitItemLookup(0, "");
             if (waiting.TryGetValue(key, out var w) && now() - w.At < WaitingKeep) return w.Found;
         }
-        var (found, final) = await Find(repository, commit, ct);
+        var (found, verdict) = await Find(repository, commit, ct);
         lock (gate)
         {
+            // the pull request read says "not merged as this commit": it may be a stale read right after the merge, so it is final only when it still says so NoneKeep after it first did
+            var final = verdict == Finality.Yes;
+            if (verdict == Finality.AfterGrace)
+            {
+                if (!unmergedSince.TryGetValue(key, out var since)) { Trim(unmergedSince); unmergedSince[key] = since = now(); }
+                final = now() - since >= NoneKeep;
+            }
+            else unmergedSince.Remove(key);
             if (found.Item > 0 && found.Gap.Length == 0) { Trim(settled); settled[key] = found; }
-            else if (found.Item == 0 && found.Gap.Length == 0 && final) { if (neverItem.Count >= MaxKept) foreach (var k in neverItem.Take(MaxKept / 4).ToList()) neverItem.Remove(k); neverItem.Add(key); }
+            else if (found.Item == 0 && found.Gap.Length == 0 && final) { unmergedSince.Remove(key);  if (neverItem.Count >= MaxKept) foreach (var k in neverItem.Take(MaxKept / 4).ToList()) neverItem.Remove(k); neverItem.Add(key); }
             else if (found.Item == 0 && found.Gap.Length == 0) { Trim(none); none[key] = now(); }
             else if (found.Gap.Length > 0) { Trim(waiting); waiting[key] = (now(), found); }
         }
@@ -84,11 +94,13 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
     /// Find-CommitItemUncached: the pull request the squash message names, merged as this commit, and the item of it whose state records the merge. Final: a none that cannot change
     /// (no pull request number in the subject, or the pull request is not merged as this commit), as against a none that waits for an item's state.
     /// </summary>
-    async Task<(CommitItemLookup Lookup, bool Final)> Find(RepoId repository, RangeCommit commit, CancellationToken ct)
+    enum Finality { No, Yes, AfterGrace }
+
+    async Task<(CommitItemLookup Lookup, Finality Final)> Find(RepoId repository, RangeCommit commit, CancellationToken ct)
     {
         var first = (commit.Message ?? "").Split('\n')[0];
         var m = Regex.Match(first, @"\(#(\d+)\)\s*$");
-        if (!m.Success) return (new CommitItemLookup(0, ""), true);
+        if (!m.Success) return (new CommitItemLookup(0, ""), Finality.Yes);
         var number = int.Parse(m.Groups[1].Value);
         // A merged pull request that names this commit is kept for CompareKeep: the read of its item's state may be refused by the minute's cap, and the
         // retry then does not read the pull request again (that read is a call of v1's token too).
@@ -100,8 +112,8 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
             pull = await facts.ReadPullRequest(repository, number, ct);
             if (pull is { Merged: true } && string.Equals(pull.MergeCommit, commit.Sha, StringComparison.OrdinalIgnoreCase)) lock (gate) { Trim(pulls); pulls[pullKey] = (now(), pull); }
         }
-        if (pull is null) return (new CommitItemLookup(0, ""), false);   // a 404 may be a permission or a lag, not a fact about the commit
-        if (!pull.Merged || !string.Equals(pull.MergeCommit, commit.Sha, StringComparison.OrdinalIgnoreCase)) return (new CommitItemLookup(0, ""), true);
+        if (pull is null) return (new CommitItemLookup(0, ""), Finality.No);   // a 404 may be a permission or a lag, not a fact about the commit
+        if (!pull.Merged || !string.Equals(pull.MergeCommit, commit.Sha, StringComparison.OrdinalIgnoreCase)) return (new CommitItemLookup(0, ""), Finality.AfterGrace);
         var short7 = commit.Sha.Length >= 7 ? commit.Sha[..7] : commit.Sha;
         foreach (var n in ContentGate.CandidateItems(pull.Number, pull.HeadRef, pull.Title, pull.Body))
         {
@@ -112,13 +124,13 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
             {
                 var awaiting = merge["awaiting"]?.ToString() ?? "";
                 var done = merge["done_at"] is { } d && d.ToString().Length > 0;
-                if (awaiting == "release-queue" || (awaiting.Length == 0 && done)) return (new CommitItemLookup(n, ""), false);
-                return (new CommitItemLookup(n, $"#{n}'s merge ({short7}) is not settled yet" + (awaiting.Length > 0 ? $" (awaiting {awaiting})" : "")), false);
+                if (awaiting == "release-queue" || (awaiting.Length == 0 && done)) return (new CommitItemLookup(n, ""), Finality.No);
+                return (new CommitItemLookup(n, $"#{n}'s merge ({short7}) is not settled yet" + (awaiting.Length > 0 ? $" (awaiting {awaiting})" : "")), Finality.No);
             }
             var ownPr = state["verdict"]?["pr"]?.ToString() == pull.Number.ToString() || state["pr"]?["number"]?.ToString() == pull.Number.ToString();
-            if (ownPr) return (new CommitItemLookup(n, $"#{n}'s merge of PR #{pull.Number} ({short7}) is not picked up by the gateway yet"), false);
+            if (ownPr) return (new CommitItemLookup(n, $"#{n}'s merge of PR #{pull.Number} ({short7}) is not picked up by the gateway yet"), Finality.No);
         }
-        return (new CommitItemLookup(0, ""), false);
+        return (new CommitItemLookup(0, ""), Finality.No);
     }
 
     /// <summary>The gateway's state comment of an item (the first comment with its marker), or null.</summary>

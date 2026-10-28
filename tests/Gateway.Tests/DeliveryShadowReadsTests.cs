@@ -181,8 +181,36 @@ public sealed class DeliveryShadowReadsTests
         now += TimeSpan.FromMinutes(2);
         foreach (var c in new[] { waits, notMerged, direct }) await reads.LookupCommit(Home, c, default);
         Assert.Equal(2, gh.Count($"/issues/{ItemOf(5)}/comments"));   // read again after ten minutes
-        Assert.Equal(1, facts.Pulls[PullOf(4)]);                        // the pull request that is not merged as the commit stays none
+        Assert.Equal(2, facts.Pulls[PullOf(4)]);                        // the pull request that is not merged as the commit is read again after the ten minutes (it may have been a stale read)
         Assert.False(facts.Pulls.ContainsKey(PullOf(0)));
+        // ... and when that second read, ten minutes after the first, says the same, it is final
+        now += TimeSpan.FromMinutes(11);
+        foreach (var c in new[] { waits, notMerged, direct }) await reads.LookupCommit(Home, c, default);
+        now += TimeSpan.FromHours(3);
+        foreach (var c in new[] { waits, notMerged, direct }) await reads.LookupCommit(Home, c, default);
+        Assert.Equal(2, facts.Pulls[PullOf(4)]);
+    }
+
+    [Theory]
+    [InlineData(false, "")]           // a read right after the merge: not merged yet
+    [InlineData(true, "")]            // merged, but no merge commit in the read yet
+    [InlineData(true, "different")]   // merged, a merge commit that is not this one yet
+    public async Task APullRequestReadThatSaysNotMerged_IsNotFinalAtOnce_ItCanBeAStaleReadRightAfterTheMerge(bool merged, string mergeCommit)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var sha = ShaOf(2);
+        var stale = true;
+        var facts = new Facts(n => new MergedPullRequest(Home, n, stale ? merged : true, "master", $"me/{ItemOf(2)}-x", "Thing 2 (#1002)", "", stale ? (mergeCommit.Length == 0 ? null : mergeCommit) : sha));
+        var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, DateTimeOffset.UtcNow, "acme", Home, null, [new RepositoryEntry(Home, [new DeployableEntry("ui", Home, null, null, null, null, false)])], []);
+        var gh = new Handler { Answer = Comments };
+        var reads = new HttpTrainReads(new HttpClient(gh) { BaseAddress = new Uri("https://api.example/") }, new HttpClient(new Handler()), "factory-worker", facts, new ItemGateConfig("Auto Merge", "video"), new CatalogDeliveryPolicies(() => snapshot, _ => null), null, () => now);
+        var commit = new RangeCommit(sha, [ShaOf(1)], "Thing 2 (#1002)");
+        Assert.Equal(0, (await reads.LookupCommit(Home, commit, default)).Item);   // the stale read: no item for now
+        stale = false;                                                             // GitHub caught up
+        now += TimeSpan.FromMinutes(11);
+        var again = await reads.LookupCommit(Home, commit, default);
+        Assert.Equal(ItemOf(2), again.Item);                                       // not stored as 'no item' for good: the commit's item is found, so its merge gate is judged
+        Assert.Equal(2, facts.Pulls[1002]);
     }
 
     [Fact]
