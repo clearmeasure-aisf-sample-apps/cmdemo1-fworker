@@ -12,20 +12,66 @@ namespace Fworker.Workflows.Delivery;
 public enum ShadowSide { V1, V2 }
 
 /// <summary>One decision of one side, normalized. <paramref name="Native"/> is the side's own name for it (promoted, promotion-waiting, ... or the train's action).</summary>
-public sealed record ShadowDecision(ShadowSide Side, string Deployable, string Environment, string Release, string Action, string Native, IReadOnlyList<string> Reasons, IReadOnlyList<string> Items, DateTimeOffset At)
+public sealed record ShadowDecision(ShadowSide Side, string Deployable, string Environment, string Release, string Action, string Native, IReadOnlyList<string> Reasons, IReadOnlyList<string> Items, DateTimeOffset At, bool Replay = false)
 {
     public string Key => $"{Deployable}|{Environment}|{Release}";
+
+    /// <summary>For a wait: what it waits for (<see cref="ShadowReasons.Classify"/>); empty for the other actions, which say nothing more.</summary>
+    public string ReasonClass => Action == ShadowActions.Wait ? ShadowReasons.Classify(Reasons) : "";
 
     /// <summary>Whether the decision changes something outside (a deployment, a Sign-off answer). A one-sided waiting is no finding; a one-sided action is.</summary>
     public bool Actionable => Action is ShadowActions.Promote or ShadowActions.SignOffProceed or ShadowActions.SignOffAbort;
 
     /// <summary>The decision for the stored comparison and the report.</summary>
-    public JsonObject ToJson() => new()
+    public JsonObject ToJson()
     {
-        ["action"] = Action, ["native"] = Native, ["at"] = At.ToString("o"),
-        ["reasons"] = new JsonArray(Reasons.Select(r => (JsonNode?)JsonValue.Create(r)).ToArray()),
-        ["items"] = new JsonArray(Items.Select(r => (JsonNode?)JsonValue.Create(r)).ToArray()),
-    };
+        var o = new JsonObject
+        {
+            ["action"] = Action, ["native"] = Native, ["at"] = At.ToString("o"),
+            ["reasons"] = new JsonArray(Reasons.Select(r => (JsonNode?)JsonValue.Create(r)).ToArray()),
+            ["items"] = new JsonArray(Items.Select(r => (JsonNode?)JsonValue.Create(r)).ToArray()),
+        };
+        if (ReasonClass.Length > 0) o["reasonClass"] = ReasonClass;
+        if (Replay) o["replay"] = true;
+        return o;
+    }
+}
+
+/// <summary>
+/// The class of a wait, so that two waits are compared by what they wait for and not by the words of two implementations: failed (the deployment ended in a failure), none (no deployment to the
+/// previous environment), started (a deployment still running), health (the previous environment's app: version, reads, answer, URL) and gates (everything else: the items' and the content's gates).
+/// When a wait has several reasons the first of this order is its class. v1's wait lists only the release's common reasons (an item's gate is not among them), v2's lists both, so a wait for
+/// gates alone is "gates" on both sides.
+/// </summary>
+public static partial class ShadowReasons
+{
+    public const string Failed = "failed", None = "none", Started = "started", Health = "health", Gates = "gates";
+
+    public static string Classify(IEnumerable<string> reasons)
+    {
+        var best = Gates; var rank = 4;
+        foreach (var r in reasons)
+        {
+            var (c, k) = One(r);
+            if (k < rank) { best = c; rank = k; }
+        }
+        return best;
+    }
+
+    static (string Class, int Rank) One(string r)
+    {
+        if (FailedText().IsMatch(r)) return (Failed, 0);
+        if (r.StartsWith("it has no deployment to ")) return (None, 1);
+        if (StartedText().IsMatch(r)) return (Started, 2);
+        if (r.Contains(" app ") || r.StartsWith("no health URL")) return (Health, 3);
+        return (Gates, 4);
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"\bended (Failed|TimedOut|Canceled)\b|deployment to .+ is (Failed|TimedOut|Canceled) \(")]
+    private static partial System.Text.RegularExpressions.Regex FailedText();
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"deployment to .+ is still ")]
+    private static partial System.Text.RegularExpressions.Regex StartedText();
 }
 
 public static class ShadowActions
@@ -65,7 +111,14 @@ public static class ShadowOutcomes
 }
 
 /// <summary>A settled comparison of the two sides for one release.</summary>
-public sealed record ShadowComparisonResult(DateTimeOffset At, string Deployable, string Environment, string Release, string Outcome, string Reason, ShadowDecision? V1, ShadowDecision? V2);
+public sealed record ShadowComparisonResult(DateTimeOffset At, string Deployable, string Environment, string Release, string Outcome, string Reason, ShadowDecision? V1, ShadowDecision? V2)
+{
+    /// <summary>The train's side is a judgment of the replayed history, not of a live event: stored and shown, not counted by the gate.</summary>
+    public bool Replay => V2?.Replay == true;
+
+    /// <summary>The train's side is a decision on a live event: what the gate counts.</summary>
+    public bool Live => V2 is { Replay: false };
+}
 
 public static class ShadowClassifier
 {
@@ -78,13 +131,16 @@ public static class ShadowClassifier
         if (v1 is null && v2 is null) throw new ArgumentException("a comparison needs a decision of at least one side");
         if (v1 is null) return (ShadowOutcomes.V2Only, $"v2 decided {Describe(v2!)}; v1's pass made no decision for this release");
         if (v2 is null) return (ShadowOutcomes.V1Only, $"v1 decided {Describe(v1)}; the train made no decision for this release");
-        if (v1.Action == v2.Action) return (ShadowOutcomes.Match, "");
+        if (Agree(v1, v2)) return (ShadowOutcomes.Match, "");
         var v1Why = v1.Reasons.Count > 0 ? $" [v1: {string.Join("; ", v1.Reasons)}]" : "";
         var v2Why = v2.Reasons.Count > 0 ? $" [v2: {string.Join("; ", v2.Reasons)}]" : "";
         return (ShadowOutcomes.Differs, $"v1 decided {Describe(v1)}, v2 decided {Describe(v2)}{v1Why}{v2Why}");
     }
 
-    static string Describe(ShadowDecision d) => $"{d.Action} ({d.Native})";
+    /// <summary>The same action, and for a wait the same class of reason (failed, none, started, health, gates): a wait for the wrong thing is a difference.</summary>
+    public static bool Agree(ShadowDecision v1, ShadowDecision v2) => v1.Action == v2.Action && v1.ReasonClass == v2.ReasonClass;
+
+    static string Describe(ShadowDecision d) => d.ReasonClass.Length > 0 ? $"{d.Action} for {d.ReasonClass} ({d.Native})" : $"{d.Action} ({d.Native})";
 }
 
 /// <summary>
@@ -126,6 +182,21 @@ public sealed class ShadowComparer(TimeSpan grace)
         s.V2 = d; s.V2New = true; return true;
     }
 
+    /// <summary>
+    /// The train no longer holds a decision for these releases (delivered, superseded, not judged any more): the pending decision of v2 is dropped, uncompared, and the pair may be reported again
+    /// if the train decides for the release anew. A comparison already made stays stored; v1's decision stays and is compared on its own after the grace (v1-only) unless v1 moves on.
+    /// </summary>
+    public void Retract(string deployable, string environment, IEnumerable<string> releases)
+    {
+        foreach (var release in releases)
+        {
+            var key = $"{deployable}|{environment}|{release}";
+            if (!slots.TryGetValue(key, out var s) || s.V2 is null) continue;
+            s.V2 = null; s.V2New = false; s.LastPair = "";
+            if (s.V1 is null) slots.Remove(key);   // (v1's last decision stays: v1 repeats itself without being new again, and the train may decide for the release anew)
+        }
+    }
+
     static bool Same(ShadowDecision a, ShadowDecision b) => a.Action == b.Action && a.Native == b.Native && a.Reasons.SequenceEqual(b.Reasons) && a.Items.SequenceEqual(b.Items);
 
     /// <summary>The comparisons that can be made at <paramref name="now"/>.</summary>
@@ -139,7 +210,7 @@ public sealed class ShadowComparer(TimeSpan grace)
             ShadowComparisonResult? r = null;
             if (s.V1 is not null && s.V2 is not null)
             {
-                if (s.V1.Action == s.V2.Action || aged) r = Make(s, now);
+                if (ShadowClassifier.Agree(s.V1, s.V2) || aged) r = Make(s, now);
             }
             else if (aged) r = Make(s, now);   // one side only after the grace: v1-only or v2-only, a waiting too (the report counts what each side did, not only what changed something)
             if (r is null) continue;

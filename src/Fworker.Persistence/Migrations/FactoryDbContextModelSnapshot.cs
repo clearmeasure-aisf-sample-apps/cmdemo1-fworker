@@ -142,6 +142,9 @@ namespace Fworker.Persistence.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<bool>("Replay")
+                        .HasColumnType("bit");
+
                     b.Property<string>("V1Action")
                         .IsRequired()
                         .HasMaxLength(32)

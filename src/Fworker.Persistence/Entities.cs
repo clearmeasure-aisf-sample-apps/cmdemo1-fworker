@@ -147,4 +147,6 @@ public class DeliveryShadowComparison
     public string? V2Json { get; set; }
     public DateTimeOffset? V1At { get; set; }
     public DateTimeOffset? V2At { get; set; }
+    /// <summary>The train's side is a judgment of the watcher's replay of history, not of a live event: shown, and not counted by the exit gate.</summary>
+    public bool Replay { get; set; }
 }

@@ -27,6 +27,7 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
     readonly HashSet<string> finished = [];   // deployment ids whose terminal phase is published (or that ended before the watcher began): their task is not read again
     readonly Dictionary<string, Rel> releases = [];
     DateTimeOffset? since;
+    bool replayBegan, replayDone;   // the first poll(s) replay the history; the delivery train decides nothing until the replay is complete
     string? projectId;
     int calls;
 
@@ -81,6 +82,7 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
         var sp = settings.Space;
         try
         {
+            if (!replayBegan) { publish(new OctopusReplayBegan()); replayBegan = true; }   // (a publish that throws is tried again by the next poll)
             projectId ??= (await Read($"api/{sp}/projects/{settings.Project}", ct))?["Id"]?.ToString();
             if (projectId == null) return true;   // no such project: nothing to watch
             var envs = new Dictionary<string, string>();
@@ -121,6 +123,7 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
                             Emit($"octopus:signoff:{iid}", new SignOffRequested(iid, depId, taskId, rel.Id, rel.Version, env, rel.Commit));
                 }
             }
+            if (!replayDone) { publish(new OctopusReplayComplete()); replayDone = true; }   // every window was read in full: the replay is applied
             return true;
         }
         catch (BudgetSpent) { return false; }

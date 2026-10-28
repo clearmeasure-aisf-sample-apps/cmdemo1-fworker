@@ -180,6 +180,35 @@ public sealed class DeliveryShadowGatewayTests
     }
 
     [Fact]
+    public async Task TheWatchersReplay_IsAppliedWithoutADecision_AndJudgedOnceWhenItEnds()
+    {
+        if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
+        await WithShadowGateway(async (cs, host, stub) =>
+        {
+            Assert.True(await Until(async () => (await Get(host, "/api/v1/status")).Json?["wolverine"]?["state"]?.ToString() == "running", 90), "the host did not start");
+            var ingress = host.Services.GetRequiredService<IEventIngress>();
+            long Decisions() => host.Services.GetRequiredService<DeliveryShadowHolder>().Shadow!.Status()["v2"]!["decisions"]!.GetValue<long>();
+            ingress.Ingest(new OctopusReplayBegan());
+            ingress.Ingest(new OctopusReleaseCreated("R-1", "1.0.1", D));
+            foreach (var e in new[] { "tdd", "uat", "prod" })
+            {
+                ingress.Ingest(new OctopusDeploymentChanged($"D-1-{e}", $"T-1-{e}", "R-1", "1.0.1", e, OctopusDeploymentPhase.Started, D));
+                ingress.Ingest(new OctopusDeploymentChanged($"D-1-{e}", $"T-1-{e}", "R-1", "1.0.1", e, OctopusDeploymentPhase.Succeeded, D));
+            }
+            // the newest release is seen first, its deployment to tdd after it, as the watcher publishes a replay
+            ingress.Ingest(new OctopusReleaseCreated("R-2", "1.0.2", A));
+            Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.DeliveryTrains WHERE Revision >= 8"))[0] != "0", 40), "the trains took no input in");
+            ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Started, A));
+            ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Succeeded, A));
+            await Task.Delay(4000);
+            Assert.Equal(0, Decisions());   // the replay is not over: nothing is decided on its partial state
+            ingress.Ingest(new OctopusReplayComplete());
+            Assert.True(await Until(() => Task.FromResult(Decisions() >= 1), 60), "the train did not judge its state at the end of the replay");
+            Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
+        });
+    }
+
+    [Fact]
     public async Task WithoutTheShadow_TheReportRoute_Answers404()
     {
         if (!StubPwsh.Supported) return;

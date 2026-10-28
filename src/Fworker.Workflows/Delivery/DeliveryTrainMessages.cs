@@ -40,7 +40,16 @@ public sealed record TrainWake(string Key, DateTimeOffset? Due = null) : TrainIn
 
 /// <summary>
 /// What the train decided, once per change: <paramref name="Action"/> is one of idle, waiting, promote, following, signoff-waiting, signoff-proceed, signoff-abort, delivered, held,
-/// observing (the train does not act in this environment). The shadow run (W5.2) compares it with v1's promotions and Sign-off answers.
+/// observing (the train does not act in this environment). One decision is per release: "idle" with a release says the release is no longer judged (a decision before it is retracted), "delivered"
+/// retracts the release and the <paramref name="Superseded"/> ones it carried. The shadow run (W5.2) compares it with v1's promotions and Sign-off answers.
 /// </summary>
 [MessageIdentity("delivery.train.decided")]
-public sealed record TrainDecided(string Key, string Action, string Release, IReadOnlyList<string> Items, IReadOnlyList<string> Reasons, DateTimeOffset At) : IEvent;
+public sealed record TrainDecided(string Key, string Action, string Release, IReadOnlyList<string> Items, IReadOnlyList<string> Reasons, DateTimeOffset At,
+    IReadOnlyList<string>? Superseded = null, bool Replay = false) : IEvent;
+
+/// <summary>
+/// The watcher's replay of Octopus's history begins (<paramref name="Active"/> true) or is applied (false). While it runs the train takes its inputs in and decides nothing; the end makes it judge
+/// its state once, and what it decides then is flagged <see cref="TrainDecided.Replay"/> (a judgment of history, not of a live event).
+/// </summary>
+[MessageIdentity("delivery.train.replay")]
+public sealed record TrainReplay(string Key, bool Active) : TrainInput(Key);

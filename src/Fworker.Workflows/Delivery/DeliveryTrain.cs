@@ -40,31 +40,67 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
     public static readonly TimeSpan CommandRetry = TimeSpan.FromMinutes(5);
     /// <summary>A request that shows no deployment in Octopus for this long is dropped and the train judges the releases again.</summary>
     public static readonly TimeSpan RequestExpiry = TimeSpan.FromMinutes(30);
+    /// <summary>A replay that has not ended after this long stops holding the train back (the end marker was lost).</summary>
+    public static readonly TimeSpan ReplayLimit = TimeSpan.FromMinutes(30);
+    /// <summary>When a read of GitHub or of the app is refused or fails, the train looks again after this (the input is already saved).</summary>
+    public static readonly TimeSpan TransientRetry = TimeSpan.FromMinutes(1);
+    /// <summary>A train that waits (a release not promoted, a deployment followed) looks again at least this often, whatever else wakes it.</summary>
+    public static readonly TimeSpan SafetyWake = TimeSpan.FromMinutes(10);
     const int Attempts = 5;
 
+    /// <summary>
+    /// Two phases, so that no input is lost to a read that fails. First the input is applied and saved. Then the state is judged (reads of GitHub and of the app, which can throw): a read that fails
+    /// leaves the saved state as it is and schedules a new look (<see cref="TransientRetry"/>) instead of failing the message. While a replay runs (<see cref="TrainReplay"/>) there is no second phase.
+    /// </summary>
     public async Task<TrainResult> Handle(TrainInput input, CancellationToken ct = default)
     {
         var (deployable, environment) = TrainKey.Split(input.Key);
         var policy = policies.For(deployable, environment);
         if (policy is null) return TrainResult.None;   // the deployable left the catalog
+        var replayEnded = input is TrainReplay { Active: false };
+        if (input is not TrainWake)
+        {
+            var saved = false;
+            for (var attempt = 0; attempt < Attempts && !saved; attempt++)
+            {
+                var rec = await store.Load(input.Key, ct);
+                var state = rec?.State ?? TrainState.New(input.Key);
+                Apply(state, input, policy, clock());
+                state.Sequence++;
+                saved = await store.Save(input.Key, state, rec?.Revision ?? 0, ct);
+            }
+            if (!saved) throw new TrainConflictException(input.Key);
+        }
         for (var attempt = 0; attempt < Attempts; attempt++)
         {
             var rec = await store.Load(input.Key, ct);
-            var state = rec?.State ?? TrainState.New(input.Key);
+            if (rec is null) return TrainResult.None;
+            var state = rec.State;
             var now = clock();
-            var stale = Apply(state, input, policy, now);
-            var run = new TrainRun(state, policy, reads, delivered, now);
-            await run.Evaluate(ct);
-            var wake = run.NextWake(stale);
-            if (wake is { } due && (state.WakeDue is not { } cur || cur <= now || due < cur)) state.WakeDue = due;
+            var stale = false;
+            if (input is TrainWake { Due: { } due }) { if (due == state.WakeDue) state.WakeDue = null; else stale = true; }   // (a timer that is not the pending one only looks again)
+            var gated = state.ReplayingSince is { } since && now - since < ReplayLimit;
+            TrainRun? run = null; DateTimeOffset? wake = null;
+            if (gated) wake = state.ReplayingSince + DeliveryTrainService.ReplayLimit;   // if the end marker is lost, the train looks again when the hold runs out
+            if (!gated)
+            {
+                run = new TrainRun(state, policy, reads, delivered, now, replayEnded);
+                try { await run.Evaluate(ct); }
+                catch (Exception e) when (e is HttpRequestException or TimeoutException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+                {
+                    return new TrainResult([], now + TransientRetry);   // nothing of this look is kept; the input is saved
+                }
+                wake = run.NextWake(stale);
+                if (wake is { } next && (state.WakeDue is not { } cur || cur <= now || next < cur)) state.WakeDue = next;
+            }
             state.Sequence++;
-            if (await store.Save(input.Key, state, rec?.Revision ?? 0, ct)) return new TrainResult(run.Out, wake);
+            if (await store.Save(input.Key, state, rec.Revision, ct)) return new TrainResult(run?.Out ?? [], wake);
         }
         throw new TrainConflictException(input.Key);
     }
 
-    /// <summary>Applies the input to the state. Returns true for a timer that is not the pending one (it only looks again).</summary>
-    static bool Apply(TrainState s, TrainInput input, DeliveryPolicy p, DateTimeOffset now)
+    /// <summary>Applies the input to the state.</summary>
+    static void Apply(TrainState s, TrainInput input, DeliveryPolicy p, DateTimeOffset now)
     {
         switch (input)
         {
@@ -105,11 +141,10 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             case TrainHold h:
                 s.Held = h.Held; s.HeldReason = h.Held ? h.Reason : "";
                 break;
-            case TrainWake w:
-                if (w.Due is not null && w.Due == s.WakeDue) { s.WakeDue = null; return false; }
-                return w.Due is not null;   // a timer that is not the pending one
+            case TrainReplay r:
+                s.ReplayingSince = r.Active ? now : null;
+                break;
         }
-        return false;
     }
 
     static void UpsertRelease(TrainState s, string releaseId, string version, string? commit, DateTimeOffset at)
@@ -121,7 +156,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
 }
 
 /// <summary>One evaluation of one train on its state: the settling of finished deployments, the Sign-offs, the promotion. Short-lived; <see cref="Out"/> is what it decided to publish.</summary>
-sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, DateTimeOffset now)
+sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, DateTimeOffset now, bool replay = false)
 {
     public List<object> Out { get; } = [];
     readonly List<DateTimeOffset> wakes = [];
@@ -136,8 +171,9 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         await Settle(ct);
         if (!p.Acts) return;   // tdd is deployed by the release's lifecycle and an external promoter creates its own deployments: the train observes
         if (s.Held) { Decide("held", "", [], [string.IsNullOrEmpty(s.HeldReason) ? "an incident holds the train" : s.HeldReason]); return; }
-        if (await SignOffs(ct)) return;
-        await Promote(ct);
+        if (!await SignOffs(ct)) await Promote(ct);
+        // a train that waits looks again at least every SafetyWake, whatever else wakes it (an input lost between the save and the outbox, a gap no event lifts)
+        if (s.Decisions.Values.Any(fp => fp.StartsWith("waiting|") || fp.StartsWith("following|") || fp.StartsWith("signoff-waiting|"))) wakes.Add(now.Add(DeliveryTrainService.SafetyWake));
     }
 
     /// <summary>The time of the next timer, or null: none needed, or the pending one still stands. <paramref name="stale"/>: this input was a timer other than the pending one.</summary>
@@ -188,7 +224,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 .OrderBy(r => r.Assembled).Select(r => r.Version).ToList();
             foreach (var v in superseded) s.Superseded[v] = version;
             var reasons = new List<string> { superseded.Count == 0 ? $"delivered in release {version}" : $"delivered in release {version}, superseding {string.Join(", ", superseded)}" };
-            Decide("delivered", version, items, reasons, always: true);
+            Decide("delivered", version, items, reasons, always: true, superseded: superseded);
             s.Requested.Remove(version); s.FirstRequested.Remove(version);
         }
     }
@@ -287,10 +323,15 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         return TimeBound(verdict.Gap);
     }
 
-    /// <summary>A gap that only the clock or the app's recovery can lift needs a look later: the train wakes itself.</summary>
+    /// <summary>
+    /// A gap of the evidence is lifted by the clock or by the app, never by an event the train hears of: the train wakes itself. The app that does not run the release yet and the reads that are not
+    /// old enough look again at the policy's poll; the other kinds (an unhealthy answer, which only a new deployment lifts, and a missing health URL) at the safety interval.
+    /// </summary>
     string TimeBound(string gap)
     {
-        if (gap.Length > 0 && (gap.StartsWith($"the {Previous} app does not run") || gap.Contains("has not been Healthy long enough"))) wakes.Add(now.AddSeconds(p.PollSeconds));
+        if (gap.Length == 0) return gap;
+        var soon = gap.StartsWith($"the {Previous} app does not run") || gap.Contains("has not been Healthy long enough");
+        wakes.Add(soon ? now.AddSeconds(p.PollSeconds) : now.Add(DeliveryTrainService.SafetyWake));
         return gap;
     }
 
@@ -387,8 +428,11 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         // The release is a candidate when it has no successful deployment to this environment. Only a release that succeeded in the previous one can win (the train, delivery-speed.md 12);
         // the newest one that has not says why it waits, as v1 does.
         var open2 = s.Releases.Values.Where(r => s.DeploymentOf(r.Version, env) is not { Succeeded: true } && !s.Superseded.ContainsKey(r.Version)).OrderByDescending(r => r.Assembled).ToList();
-        var judged = new List<ReleaseCandidate>(); var firstWaiting = new List<string>(); string firstRelease = ""; IReadOnlyList<string> firstItems = [];
+        var judged = new List<ReleaseCandidate>(); var notes = new List<(string Version, IReadOnlyList<string> Items, IReadOnlyList<string> Reasons)>();
         Judged? winner = null;
+        // v1 judges every queued release in a pass and says what each waits for, so the train describes every open release (the newest one that qualifies is the one promoted; the others
+        // are described, never chosen). Behind the release that wins or that waits for the clock, at most MaxDescribedBehind more are read.
+        var stop = false; var behind = 0;
         foreach (var r in open2)
         {
             var prev = s.DeploymentOf(r.Version, pk);
@@ -403,48 +447,56 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 Note(r.Version, [], [prev is null ? $"it has no deployment to {p.NameOf(pk)}" : $"its deployment to {p.NameOf(pk)} is {(prev.Completed ? prev.Phase : "still " + prev.Phase)} ({prev.DeploymentId})"]);
                 continue;
             }
+            if (stop && ++behind > MaxDescribedBehind) continue;
             var j = await Judge(r, ct);
             if (j.Content.Skip) continue;   // not newer than what runs here: nothing to promote
             var common = j.Content.Gaps.ToList();
             var evidenceOnly = false;
-            if (j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
+            if (!stop && j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
             var reasons = common.Concat(j.ItemGaps).Distinct().ToList();
+            if (stop) { if (reasons.Count > 0) Note(r.Version, j.Items, reasons); continue; }
             judged.Add(new ReleaseCandidate(r.Version, r.Assembled, reasons.Count == 0));
-            if (reasons.Count == 0) { winner = j; break; }
+            if (reasons.Count == 0) { winner = j; stop = true; continue; }
             Note(r.Version, j.Items, reasons);
             // a release that only waits for the clock or the app is not blocked: the train does not fall back to an older release past it
-            if (evidenceOnly) break;
+            if (evidenceOnly) stop = true;
         }
         var pick = ReleaseChoice.NewestQualifying(judged);
-        if (pick is null || winner is null)
-        {
-            if (firstRelease.Length > 0) Decide("waiting", firstRelease, firstItems, firstWaiting);
-            else if (s.LastDecision.Length > 0) Decide("idle", "", [], []);
-            return;
-        }
+        var mentioned = new HashSet<string>();
+        foreach (var (version, items, reasons) in notes) { mentioned.Add(version); Decide("waiting", version, items, reasons); }
+        if (pick is null || winner is null) { Retract(mentioned); return; }
+        mentioned.Add(pick.Version); Retract(mentioned);
         var release = s.Releases[pick.Version];
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
         Out.Add(PromoteOf(release));
         wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
         Decide("promote", pick.Version, winner.Items, []);
 
-        void Note(string version, IReadOnlyList<string> items, IReadOnlyList<string> reasons)
-        {
-            if (firstRelease.Length > 0) return;
-            firstRelease = version; firstItems = items; firstWaiting = reasons.ToList();
-        }
+        void Note(string version, IReadOnlyList<string> items, IReadOnlyList<string> reasons) => notes.Add((version, items, reasons.ToList()));
     }
+
+    /// <summary>How many open releases behind the one that wins (or waits for the clock) are still read to say what they wait for.</summary>
+    const int MaxDescribedBehind = 10;
 
     PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}", p.Deployable, p.Project, r.Version, env);
 
     // ---- decisions -----------------------------------------------------------------------------------------------------------------------------------------
 
     /// <summary>Publishes a decision once per change (the same decision again is not news); "delivered" is published every time it happens.</summary>
-    void Decide(string action, string release, IReadOnlyList<string> items, IReadOnlyList<string> reasons, bool always = false)
+    void Decide(string action, string release, IReadOnlyList<string> items, IReadOnlyList<string> reasons, bool always = false, IReadOnlyList<string>? superseded = null)
     {
         var fp = $"{action}|{release}|{string.Join(",", items)}|{string.Join("; ", reasons)}";
-        if (!always && fp == s.LastDecision) return;
-        s.LastDecision = fp;
-        Out.Add(new TrainDecided(s.Key, action, release, items, reasons, now));
+        if (!always && s.Decisions.TryGetValue(release, out var last) && last == fp) return;
+        // one decision is kept per release; a release that is delivered, superseded or no longer judged leaves none behind (the shadow retracts what it held for it)
+        if (action is "delivered" or "idle") { s.Decisions.Remove(release); foreach (var v in superseded ?? []) s.Decisions.Remove(v); }
+        else s.Decisions[release] = fp;
+        Out.Add(new TrainDecided(s.Key, action, release, items, reasons, now, superseded, replay));
+    }
+
+    /// <summary>The releases that had a decision and are not judged any more (promoted all the way, not newer than what runs here, gone from the open ones): each is retracted with an "idle" decision.</summary>
+    void Retract(HashSet<string> judged)
+    {
+        foreach (var release in s.Decisions.Keys.Where(k => k.Length > 0 && !judged.Contains(k)).ToList()) Decide("idle", release, [], []);
+        s.Decisions.Remove("");
     }
 }

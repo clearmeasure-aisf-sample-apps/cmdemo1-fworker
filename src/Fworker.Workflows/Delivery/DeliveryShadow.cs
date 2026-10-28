@@ -23,10 +23,11 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
     readonly object gate = new();
     readonly List<ShadowComparisonResult> unsaved = [];
     readonly LinkedList<JsonObject> commands = new();
-    readonly HashSet<string> storedReleases = [];   // the releases of the comparisons stored by this process: what the gate counts, as the stored summary does
+    readonly HashSet<string> storedReleases = [];   // the releases with a live decision of the train among the comparisons stored by this process: what the gate counts, as the stored summary does
     readonly Dictionary<string, int> counts = ShadowOutcomes.All.ToDictionary(o => o, _ => 0);
     DateTimeOffset? firstStored, lastComparison, lastPassAt;
-    long v1Decisions, v2Decisions, commandsRecorded, persisted, persistFailures, v1Passes;
+    long v1Decisions, v2Decisions, commandsRecorded, persisted, persistFailures, v1Passes, retracted, replayComparisons;
+    readonly Dictionary<string, long> v1Undecided = [];   // v1's actions that decide nothing (promotion-deferred, promotion-error) by name: a release v1 did not judge shows here, not as a gap
     string lastError = "";
 
     // ---- v1: what the promotion pass did -------------------------------------------------------------------------------------------------------------------
@@ -38,11 +39,17 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
         {
             var at = clock();
             var found = new List<ShadowDecision>();
+            var undecided = new List<string>();
             foreach (var node in actions)
-                if (node is JsonObject a && V1Decision(a, at) is { } d) found.Add(d);
+                if (node is JsonObject a)
+                {
+                    if (V1Decision(a, at) is { } d) found.Add(d);
+                    else if (Text(a["action"]) is { Length: > 0 } name && ShadowActions.OfV1(name, Text(a["signoff"])) is null) undecided.Add(name);   // promotion-deferred, promotion-error: v1 judged nothing for that release
+                }
             lock (gate)
             {
                 v1Passes++; lastPassAt = at;
+                foreach (var name in undecided) v1Undecided[name] = v1Undecided.GetValueOrDefault(name) + 1;
                 foreach (var d in found) { v1Decisions++; comparer.Observe(d); }
             }
         }
@@ -70,10 +77,17 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
     {
         try
         {
+            var (deployable, environment) = TrainKey.Split(d.Key);
+            // the train says a release is done with (delivered, with those it superseded) or not judged any more (idle): what the shadow held for it is retracted, not compared
+            if (d.Action is "delivered" or "idle")
+            {
+                IEnumerable<string> gone = d.Release.Length > 0 ? [d.Release, .. d.Superseded ?? []] : [];
+                lock (gate) { retracted++; comparer.Retract(deployable, environment, gone); }
+                return;
+            }
             var action = ShadowActions.OfTrain(d.Action);
             if (action is null || d.Release.Length == 0) return;
-            var (deployable, environment) = TrainKey.Split(d.Key);
-            var decision = new ShadowDecision(ShadowSide.V2, deployable, environment, d.Release, action, d.Action, d.Reasons, d.Items, d.At);
+            var decision = new ShadowDecision(ShadowSide.V2, deployable, environment, d.Release, action, d.Action, d.Reasons, d.Items, d.At, d.Replay);
             lock (gate) { v2Decisions++; comparer.Observe(decision); }
         }
         catch (Exception e) { lock (gate) lastError = $"v2 decision: {e.GetType().Name}"; }
@@ -112,7 +126,13 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
             lock (gate)
             {
                 unsaved.RemoveAll(batch.Contains); persisted += batch.Count;
-                foreach (var r in batch) { storedReleases.Add(r.Release); if (firstStored is null || r.At < firstStored) firstStored = r.At; }
+                foreach (var r in batch)
+                {
+                    if (r.Replay) { replayComparisons++; continue; }   // a judgment of replayed history is stored and shown, and counts for nothing
+                    if (!r.Live) continue;   // v1's decision alone is no evidence that the train ran
+                    storedReleases.Add(r.Release);
+                    if (firstStored is null || r.At < firstStored) firstStored = r.At;
+                }
             }
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -131,8 +151,8 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
             var o = new JsonObject
             {
                 ["mode"] = "shadow", ["comparisons"] = Counts(counts), ["pending"] = comparer.Tracked, ["unsaved"] = unsaved.Count,
-                ["v1"] = new JsonObject { ["passes"] = v1Passes, ["decisions"] = v1Decisions, ["lastPass"] = lastPassAt?.ToString("o") },
-                ["v2"] = new JsonObject { ["decisions"] = v2Decisions, ["commandsRecorded"] = commandsRecorded, ["commandsExecuted"] = 0L },
+                ["v1"] = new JsonObject { ["passes"] = v1Passes, ["decisions"] = v1Decisions, ["undecided"] = new JsonObject(v1Undecided.Select(kv => KeyValuePair.Create<string, JsonNode?>(kv.Key, JsonValue.Create(kv.Value)))), ["lastPass"] = lastPassAt?.ToString("o") },
+                ["v2"] = new JsonObject { ["decisions"] = v2Decisions, ["retracted"] = retracted, ["replayComparisons"] = replayComparisons, ["commandsRecorded"] = commandsRecorded, ["commandsExecuted"] = 0L },
                 ["stored"] = persisted, ["storeFailures"] = persistFailures, ["lastComparison"] = lastComparison?.ToString("o"),
                 ["gate"] = Gate(firstStored, storedReleases.Count),
             };
@@ -147,16 +167,19 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
         var summary = await store.Summary(ct);
         var rows = await store.Recent(limit, outcome, ct);
         JsonObject live; JsonArray recentCommands;
-        lock (gate) { live = Status(); live["gate"] = Gate(summary.First, summary.Releases); recentCommands = new JsonArray(commands.Select(c => (JsonNode?)c.DeepClone()).ToArray()); }
+        lock (gate) { live = Status(); live["gate"] = Gate(summary.FirstLive, summary.LiveReleases); recentCommands = new JsonArray(commands.Select(c => (JsonNode?)c.DeepClone()).ToArray()); }
         var counts = ShadowOutcomes.All.ToDictionary(o => o, o => summary.Counts.GetValueOrDefault(o));
         return new JsonObject
         {
             ["ok"] = true,
             ["summary"] = new JsonObject
             {
+                // both are shown: everything stored (the replay of history included) and what the gate counts, the live decisions of the train
                 ["total"] = summary.Total, ["counts"] = Counts(counts), ["releases"] = summary.Releases,
+                ["replay"] = new JsonObject { ["comparisons"] = summary.Replays },
+                ["live"] = new JsonObject { ["comparisons"] = summary.Total - summary.Replays, ["releases"] = summary.LiveReleases, ["first"] = summary.FirstLive?.ToString("o") },
                 ["first"] = summary.First?.ToString("o"), ["last"] = summary.Last?.ToString("o"),
-                ["gate"] = Gate(summary.First, summary.Releases),
+                ["gate"] = Gate(summary.FirstLive, summary.LiveReleases),
             },
             ["live"] = live,
             ["comparisons"] = new JsonArray(rows.Select(r => (JsonNode?)r.ToJson()).ToArray()),
@@ -164,7 +187,7 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
         };
     }
 
-    /// <summary>The exit condition of the shadow run: 4 hours observed or 3 app releases compared.</summary>
+    /// <summary>The exit condition of the shadow run: 4 hours since the first live comparison or 3 app releases with a live decision of the train (the replay of history counts for neither).</summary>
     JsonObject Gate(DateTimeOffset? since, int releaseCount)
     {
         var hours = since is { } s ? Math.Max(0, (clock() - s).TotalHours) : 0;
