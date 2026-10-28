@@ -50,16 +50,16 @@ static class ItemMergedWiring
     /// <summary>The deriver of the gateway; null when it cannot read GitHub (no GH_TOKEN), then the wiring is left out and the merged-items table stays empty.</summary>
     public static ItemMergedDeriver? Make(GatewayComposition c, RepoId home, string connectionString, Func<string, string?> env, HttpClient? http = null)
     {
-        var token = env("GH_TOKEN");
-        if (RevocationOptions.Unset(token)) return null;
+        var tokens = GitHubTokenProvider.FromEnvironment(env);   // GH_TOKEN, else the author App's installation token
+        if (tokens is null) return null;
         var root = c.Instance.Root;
         string Str(string name, string fallback) => root?[name]?.ToString() is { Length: > 0 } s ? s : fallback;
         var holds = (root?["holdLabels"] as JsonArray)?.Select(h => h?.ToString() ?? "").Where(h => h != "").ToList();
         var api = env("GITHUB_API_URL");
-        http ??= new HttpClient { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
+        http ??= new HttpClient(new GitHubAuthHandler(tokens)) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
         var budget = c.GitHubBudget;
         var gates = new ItemGateConfig(Str("autoMergeLabel", "Auto Merge"), Str("videoLabel", "video"), holds);
-        var reader = new HttpMergeFactsReader(http, new StaticCredentialSource([], new GitHubCredential("gateway", token!.Trim())), Str("name", "factory-worker"), gates.VideoLabel,
+        var reader = new HttpMergeFactsReader(http, new ProviderCredentialSource(tokens), Str("name", "factory-worker"), gates.VideoLabel,
             (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } }));
         var store = new SqlMergedItemStore(() => Open(connectionString));
         var branch = Str("defaultBranch", "master");
