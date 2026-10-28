@@ -16,6 +16,10 @@
     <PackageReference Include="WolverineFx.SqlServer" Version="6.56.0" />
   </ItemGroup>
   <ItemGroup>
+    <!-- tdd's recorded Octopus history (RecordedOctopusHistoryTests): read only from Octopus, no secret in it -->
+    <None Include="../fixtures/octopus-tdd-2026-10-28/octopus-history.json" Link="fixtures/octopus-tdd-2026-10-28/octopus-history.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../../src/Fworker.Workflows/Fworker.Workflows.csproj" />
     <ProjectReference Include="../../src/Fworker.Persistence/Fworker.Persistence.csproj" />
     <ProjectReference Include="../../src/Fworker.Integrations/Fworker.Integrations.csproj" />
