@@ -1,0 +1,22 @@
+# The suites and scenarios that v2 claims: the job "Tier 1 (v2)" of .github/workflows/tests.yml runs each line below with
+# `run.ps1 -Engine v2 -Tier full` (FACTORY_ENVIRONMENT v2ci, engine.v2Environments naming it, FACTORY_DB_CONNECTION a SQL Server
+# of its own), after the same line has run on the v1 engine in the Tier 1 shards. A claim is the proof that the engine produces
+# what v1 produces: the checks and the golden writes of the scenario are the oracle for both (tests/scenarios/golden; where v2
+# writes differently on purpose, the difference is declared in golden/v2-differences.txt).
+#
+# One claim per line:
+#   <suite>               every scenario of the suite (run.ps1 -Suite <suite>)
+#   <suite> | <regex>     the scenarios of the suite whose name matches the regular expression (run.ps1 -Suite <suite> -Only <regex>)
+# A line that starts with # and a blank line are comments. A claim must name a suite of `run.ps1 -ListSuites` and match at least one
+# scenario of it: the job fails on a claim that lists none, so a renamed scenario cannot leave a claim empty.
+#
+# The list grows per wave (docs/design/fworker-wolverine-implementation.md: the gate of each wave names the suites it claims).
+# A suite that depends on FACTORY_ENVIRONMENT being tdd (copilot, promote, envscope) cannot be claimed as it is: the engine run
+# names the environment v2ci and replaces what a suite sets.
+
+# W3 gate: the journal as a v2 command (Add-Journal's ledger: dedup keys, the 30-line cap, folds by comment id). The journal-fold
+# scenarios are part of the owner suite; this runs them alone, on the owner suite's gateway settings.
+owner | ^journal fold:
+
+# W3 gate: runtime start and stop, and runbook runs, against the fake Octopus.
+octopus
