@@ -199,6 +199,35 @@ public class DeliveryShadowTests
     }
 
     [Fact]
+    public async Task WhileTheTrainStillReplays_V1sDecisionsAreHeld_NoV1OnlyRows_UntilTheTrainDecides()
+    {
+        var r = new Rig();
+        r.Shadow.ReplayBegan();
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.3", environment = "Uat", items = new[] { 9 }, reasons = new[] { "it has no deployment to Tdd" } }));
+        r.Now = T0.AddMinutes(10);   // far past the grace
+        await r.Shadow.Tick(default);
+        Assert.Empty(r.Store.All);
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.3", ["acme/orders#9"], ["it has no deployment to Tdd"], r.Now, null, true));
+        await r.Shadow.Tick(default);
+        var row = Assert.Single(r.Store.All);
+        Assert.Equal(ShadowOutcomes.Match, row.Outcome);
+    }
+
+    [Fact]
+    public async Task ATrainThatDecidesNothingAfterTheReplay_ShowsAsV1OnlyRows_OnceTheHoldHasPassed()
+    {
+        var r = new Rig();
+        r.Shadow.ReplayBegan(); r.Shadow.ReplayBegan();   // (a second call keeps the first time)
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.3", environment = "Uat", items = new[] { 9 }, reasons = new[] { "it has no deployment to Tdd" } }));
+        r.Now = T0.AddMinutes(29);
+        await r.Shadow.Tick(default);
+        Assert.Empty(r.Store.All);
+        r.Now = T0.AddMinutes(31);
+        await r.Shadow.Tick(default);
+        Assert.Equal(ShadowOutcomes.V1Only, Assert.Single(r.Store.All).Outcome);
+    }
+
+    [Fact]
     public async Task ATrainRun_FeedsTheShadow_AndAgreesWithV1_OnThePromotion()
     {
         var r = new Rig(); var f = r.Fx;

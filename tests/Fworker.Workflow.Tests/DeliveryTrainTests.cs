@@ -141,6 +141,45 @@ public class DeliveryTrainTests
     }
 
     [Fact]
+    public async Task AReleaseWhoseReadsFail_DoesNotTakeTheDecisionsOfTheOtherReleasesWithIt()
+    {
+        // tdd 1.0.833: the newest release that succeeded in tdd needed a long range from GitHub, the shadow's reads were refused, and the look was thrown away: no release got a decision
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a');
+        await f.Merge(7, 'a');
+        f.Reads.Fail = new HttpRequestException("the shadow run's reads of this minute are spent");
+        await f.Release("1.0.2", 'a');
+        await f.Deploy("1.0.2", "Tdd", "Started"); await f.Deploy("1.0.2", "Tdd", "Succeeded");
+        f.Now = f.Now.AddMinutes(1);
+        await f.Release("1.0.3", 'b');   // newer, and it has no deployment to Tdd: a decision that needs no read
+        Assert.Contains(f.Of<TrainDecided>(), d => d.Release == "1.0.3" && d.Reasons.Any(r => r.Contains("no deployment to Tdd")));
+        Assert.Empty(f.Of<PromoteRelease>());
+        f.All.Clear();
+        // the unread release is looked at again soon, and decided once its reads work
+        var wake = await f.Wake();
+        Assert.NotNull(wake.WakeAt);
+        Assert.True(wake.WakeAt <= f.Now.AddMinutes(1));
+        f.Reads.Fail = null;
+        await f.After(TimeSpan.FromSeconds(20));
+        Assert.Contains(f.Of<TrainDecided>(), d => d.Release == "1.0.2");
+    }
+
+    [Fact]
+    public async Task AnOlderReleaseWhoseReadFails_DoesNotHoldBackThePromotionOfTheNewerOneThatQualifies()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a', 'b');
+        await f.Merge(7, 'a'); await f.Merge(8, 'b');
+        f.Reads.Running["tdd"] = "1.0.3";
+        await f.ReleaseInPrevious("1.0.2", 'a');
+        f.Now = f.Now.AddMinutes(1);
+        await f.ReleaseInPrevious("1.0.3", 'b');
+        f.Reads.FailCompareOf.Add(Sha('a'));   // (the older release's own range cannot be read; the newer one's can)
+        await f.Mature();
+        Assert.Single(f.Of<PromoteRelease>(), p => p.Version == "1.0.3");
+    }
+
+    [Fact]
     public async Task AFailedDeploymentToTheTarget_BlocksThatRelease()
     {
         var f = await OneRelease();
