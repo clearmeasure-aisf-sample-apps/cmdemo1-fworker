@@ -1,0 +1,112 @@
+{
+  "deployable": "fworker",
+  "version": "1.0.806",
+  "generated": "2026-10-28T05:47:53Z",
+  "kind": "container image",
+  "process": "dotnet FactoryWorker.Gateway.dll",
+  "entry": "FactoryWorker.Gateway",
+  "assemblies": [
+    {
+      "name": "FactoryWorker.Gateway",
+      "entry": true,
+      "references": [
+        "Fworker.Contracts",
+        "Fworker.Domain",
+        "Fworker.Integrations",
+        "Fworker.Persistence",
+        "Fworker.Workflows"
+      ],
+      "packages": [
+        {
+          "name": "Azure.Identity",
+          "version": "1.21.0"
+        },
+        {
+          "name": "Azure.Monitor.OpenTelemetry.Exporter",
+          "version": "1.10.0"
+        },
+        {
+          "name": "ModelContextProtocol.AspNetCore",
+          "version": "1.0.0"
+        },
+        {
+          "name": "OpenTelemetry.Extensions.Hosting",
+          "version": "1.20.1"
+        },
+        {
+          "name": "OpenTelemetry.Instrumentation.AspNetCore",
+          "version": "1.20.1"
+        },
+        {
+          "name": "WolverineFx.Http",
+          "version": "6.56.0"
+        },
+        {
+          "name": "WolverineFx.RuntimeCompilation",
+          "version": "6.56.0"
+        },
+        {
+          "name": "WolverineFx.SqlServer",
+          "version": "6.56.0"
+        }
+      ]
+    },
+    {
+      "name": "Fworker.Contracts",
+      "entry": false,
+      "references": [],
+      "packages": []
+    },
+    {
+      "name": "Fworker.Domain",
+      "entry": false,
+      "references": [
+        "Fworker.Contracts"
+      ],
+      "packages": []
+    },
+    {
+      "name": "Fworker.Integrations",
+      "entry": false,
+      "references": [
+        "Fworker.Contracts",
+        "Fworker.Domain",
+        "Fworker.Persistence"
+      ],
+      "packages": []
+    },
+    {
+      "name": "Fworker.Persistence",
+      "entry": false,
+      "references": [
+        "Fworker.Contracts"
+      ],
+      "packages": [
+        {
+          "name": "Microsoft.EntityFrameworkCore.SqlServer",
+          "version": "10.0.14"
+        },
+        {
+          "name": "WolverineFx.EntityFrameworkCore",
+          "version": "6.56.0"
+        }
+      ]
+    },
+    {
+      "name": "Fworker.Workflows",
+      "entry": false,
+      "references": [
+        "Fworker.Contracts",
+        "Fworker.Domain",
+        "Fworker.Persistence"
+      ],
+      "packages": [
+        {
+          "name": "WolverineFx",
+          "version": "6.56.0"
+        }
+      ]
+    }
+  ],
+  "truncated": false
+}
