@@ -9,6 +9,12 @@ namespace Fworker.Integrations.GitHub;
 // check status of the head, the migration collision, the state comment. This command is the GitHub side: the merge call itself with the PASS head, the
 // mergeability wait, the update of a branch that is behind, the refusals that mean out of date, and the merge queue limit.
 // v1 keeps Verbs.Merge.ps1 until W9.11; nothing registers this yet.
+//
+// Declared scope limit: only mergePolicy 'auto' (the policy of config/instance.json and of the docs plan, W6.6) is implemented. Under 'auto' the PASS covers one head and the merge
+// sends exactly that head. 'peer-approved' merges the CURRENT head after the approval of that head (and, via the QC gate, a QC run and a human approval) and updates that head as it
+// moves; none of that is here, so this command is NOT a replacement of Verb_merge for peer-approved items: they stay on v1 (the script) until a plan needs them.
+// Also not here, on purpose: the pull request being ready is the caller's (a draft comes back Blocked 'pr-draft'; marking it ready is a GraphQL mutation of its own command), and the
+// belongs-to-the-item check is done when the caller names the item (<see cref="MergePullRequest.Item"/>).
 
 /// <summary>
 /// Squash-merges <see cref="PullRequest"/> of <see cref="Repository"/> with <c>sha = <see cref="PassHeadSha"/></c>, the head the PASS verdict covers: GitHub itself
@@ -22,10 +28,13 @@ namespace Fworker.Integrations.GitHub;
 /// <param name="UpdatedTo">The commit that update named, when GitHub named one: the accepted head must be exactly that one.</param>
 /// <param name="UpdatesSoFar">How many updates of this verdict were made (timing.outOfDateMergeAttempts bounds them): the count of the item state, so the calls add up to the same limit as the script's loop.</param>
 /// <param name="MaxUpdates">timing.outOfDateMergeAttempts.</param>
+/// <param name="Item">The work item the pull request must belong to (Test-PrBelongs of the script); 0 leaves that check to the caller.</param>
+/// <param name="RecordedPullRequest">The pull request number the item state records, which makes a copilot/* branch belong to the item as in the script.</param>
 public sealed record MergePullRequest(
     string IdempotencyKey, RepoId Repository, int PullRequest, string PassHeadSha,
     int MergeQueueDepth = 0, int QueueBusy = 0, bool DocsOnly = false,
-    bool UpdateWhenBehind = false, string UpdatedFrom = "", string UpdatedTo = "", int UpdatesSoFar = 0, int MaxUpdates = 4) : IntegrationCommand(IdempotencyKey)
+    bool UpdateWhenBehind = false, string UpdatedFrom = "", string UpdatedTo = "", int UpdatesSoFar = 0, int MaxUpdates = 4,
+    int Item = 0, int RecordedPullRequest = 0) : IntegrationCommand(IdempotencyKey)
 {
     public override string Name => "MergePullRequest";
     public override CommandTarget Target => CommandTarget.GitHub;
@@ -49,11 +58,15 @@ public enum MergeStatus
 }
 
 /// <summary>
-/// The answer of <see cref="MergeDirect"/>. <see cref="Reason"/> is a stable code: for Blocked the script's wait codes (merge-queue, mergeability-unknown, checks-pending,
-/// branch-updated, merge-async), for HeadMoved stale-head, for Failed not-mergeable, pr-not-found, pr-not-open, github-forbidden, merge-refused, merge-no-sha,
-/// update-refused, merge-out-of-date. <see cref="NewHead"/> is the head of GitHub's own update of the branch (branch-updated), which the caller records as the head the PASS covers.
+/// The answer of <see cref="MergeDirect"/>. <see cref="Reason"/> is a stable code: for Merged merged or already-merged, for Blocked the script's wait codes (merge-queue, mergeability-unknown,
+/// checks-pending, branch-updated, merge-async) and pr-draft, for HeadMoved stale-head, for Failed not-mergeable, pr-not-found, pr-not-open, pr-mismatch, github-forbidden, merge-refused,
+/// merge-no-sha, update-refused, merge-out-of-date, rate-limited. <see cref="NewHead"/> is the head of GitHub's own update of the branch (branch-updated), which the caller records as the head the PASS covers.
+/// <see cref="Updated"/> says that THIS call had GitHub update the branch (not that it recognised an update an earlier call made); <see cref="UpdatesAdded"/> is how much the caller adds to the
+/// update count of the verdict (item state <c>verdict.updates</c>): like the script, only an update made after a refusal of the merge counts, the one before the merge does not.
 /// </summary>
-public sealed record MergeOutcome(MergeStatus Status, string Reason, string Detail = "", string Sha = "", string NewHead = "", FailureKind Kind = FailureKind.None, TimeSpan? RetryAfter = null)
+public sealed record MergeOutcome(
+    MergeStatus Status, string Reason, string Detail = "", string Sha = "", string NewHead = "", FailureKind Kind = FailureKind.None, TimeSpan? RetryAfter = null,
+    bool Updated = false, int UpdatesAdded = 0)
 {
     public bool Merged => Status == MergeStatus.Merged;
     public static MergeOutcome MergedAs(string sha, string reason = "merged") => new(MergeStatus.Merged, reason, "", sha);
@@ -61,34 +74,42 @@ public sealed record MergeOutcome(MergeStatus Status, string Reason, string Deta
     public static MergeOutcome Blocked(string reason, string detail = "", string newHead = "") => new(MergeStatus.Blocked, reason, detail, NewHead: newHead, Kind: FailureKind.Transient);
     public static MergeOutcome Failed(string reason, string detail, FailureKind kind = FailureKind.Permanent, TimeSpan? retryAfter = null) => new(MergeStatus.Failed, reason, detail, Kind: kind, RetryAfter: retryAfter);
 
-    // The ledger and the outbox store a CommandResult; the outcome travels in it: Execution = merge commit (or the new head of a blocked one),
-    // Error = "merge/<status>/<reason>: <detail>". A permanent outcome (merged, head moved, refused) is recorded; a blocked one runs again with the same key.
+    // The ledger and the outbox store a CommandResult, which has no field for most of the outcome. So the whole outcome travels in Error as "merge/" and one JSON object (an unambiguous
+    // format: a detail may be empty or contain any text), and Execution holds the merge commit (Merged) or the new head (Blocked), as a reader of the plain result expects.
+    // A permanent outcome (merged, head moved, a refusal that stays) is recorded; a blocked, transient or rate-limited one runs again with the same key.
     const string Prefix = "merge/";
 
-    internal CommandResult ToResult() => Status == MergeStatus.Merged
-        ? CommandResult.Success(Sha)
-        : new CommandResult(false, Kind, $"{Prefix}{Status}/{Reason}: {Detail}", NewHead);
+    sealed record Wire(string Status, string Reason, string Detail, string Sha, string NewHead, double? RetryAfterSeconds, bool Updated, int UpdatesAdded);
 
-    internal static MergeOutcome From(CommandResult r)
+    public CommandResult ToResult()
     {
-        if (r.Ok) return MergedAs(r.Execution, "merged");
+        var wire = Prefix + System.Text.Json.JsonSerializer.Serialize(new Wire(Status.ToString(), Reason, Detail, Sha, NewHead, RetryAfter?.TotalSeconds, Updated, UpdatesAdded));
+        return Status == MergeStatus.Merged ? new CommandResult(true, FailureKind.None, wire, Sha) : new CommandResult(false, Kind, wire, NewHead);
+    }
+
+    public static MergeOutcome From(CommandResult r)
+    {
         if (r.Error.StartsWith(Prefix, StringComparison.Ordinal))
         {
-            var rest = r.Error[Prefix.Length..];
-            var slash = rest.IndexOf('/');
-            var split = rest.IndexOf(": ", StringComparison.Ordinal);
-            if (slash > 0 && split > slash && Enum.TryParse<MergeStatus>(rest[..slash], out var status))
-                return new MergeOutcome(status, rest[(slash + 1)..split], rest[(split + 2)..], "", r.Execution, r.Failure);
+            try
+            {
+                var w = System.Text.Json.JsonSerializer.Deserialize<Wire>(r.Error[Prefix.Length..]);
+                if (w is not null && Enum.TryParse<MergeStatus>(w.Status, out var status))
+                    return new MergeOutcome(status, w.Reason, w.Detail ?? "", w.Sha ?? "", w.NewHead ?? "", r.Failure,
+                        w.RetryAfterSeconds is { } s ? TimeSpan.FromSeconds(s) : null, w.Updated, w.UpdatesAdded);
+            }
+            catch (System.Text.Json.JsonException) { }
         }
+        if (r.Ok) return MergedAs(r.Execution, "merged");
         // not made by MergeDirect: no idempotency key, a transport failure classified by the base handler
         return new MergeOutcome(MergeStatus.Failed, "command-failed", r.Error, Kind: r.Failure);
     }
 }
 
-/// <summary>The waits of the script (config timing.*), in the gateway's short form: no step sleeps longer than the caller can afford.</summary>
+/// <summary>The waits of the script (config timing.*), in the gateway's short form: no step sleeps longer than the caller can afford. The mergeability wait polls at a fixed interval, as the script does.</summary>
 public sealed record MergeTiming(
     TimeSpan MergeabilityWait, TimeSpan MergeabilityPoll, TimeSpan UpdatedHeadWait, TimeSpan UpdatedHeadPoll, TimeSpan AsyncMergeWait, TimeSpan AsyncMergePoll)
 {
-    /// <summary>mergeabilityWaitSeconds 90 and mergeabilityPollSeconds 4 (config/instance.json), the update wait capped at 12 seconds and the stack merge wait at 30, as the script does under -Gateway.</summary>
-    public static MergeTiming Default { get; } = new(TimeSpan.FromSeconds(90), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(3));
+    /// <summary>mergeabilityWaitSeconds (90 in config/instance.json) capped at 12 and mergeabilityPollSeconds 4, the update wait capped at 12 seconds and the stack merge wait at 30, as the script does under -Gateway (Math.Min(..., 12)).</summary>
+    public static MergeTiming Default { get; } = new(TimeSpan.FromSeconds(12), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(12), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(3));
 }

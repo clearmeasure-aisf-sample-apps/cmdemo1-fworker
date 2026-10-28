@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -10,7 +9,7 @@ namespace Fworker.Integrations.GitHub;
 /// <summary>
 /// W6.2: the direct merge of Verb_merge (plugin/scripts/lib/Verbs.Merge.ps1) under the gateway, one step per call. The steps, in the script's order:
 /// the pull request is read (merged already: done; not open: refused; another head than the PASS head: head moved); the merge queue limit; the mergeability wait
-/// (<c>mergeable</c> null is read again with a growing pause, up to timing.mergeabilityWaitSeconds); a branch that is behind is brought up to date by GitHub's update-branch when the
+/// (<c>mergeable</c> null is read again at the fixed poll interval for the short wait of the gateway form, 12 seconds at most); a branch that is behind is brought up to date by GitHub's update-branch when the
 /// caller asks; then <c>PUT pulls/{n}/merge</c> with <c>merge_method squash</c> and <c>sha</c> the PASS head. A refusal that says out of date or behind is answered with the update of the branch
 /// (counted, bounded); the head GitHub's update made is verified (two parents, the first the PASS head, GitHub's own signature, the second reachable from the base) before
 /// it is offered as the new head; any other head is "head moved". A required check that has not passed is "blocked: checks-pending", a pull request GitHub says it cannot merge is "failed: not-mergeable".
@@ -20,6 +19,7 @@ public sealed class MergeDirect
 {
     static readonly Regex OutOfDate = new("out of date|out-of-date|Head branch was modified|behind", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     static readonly Regex StatusCheck = new("status check", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    static readonly Regex Draft = new("\\bdraft\\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     static readonly Regex StackMerge = new("stack|asynchronous", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     readonly GitHubClientFactory _clients;
@@ -48,6 +48,9 @@ public sealed class MergeDirect
         if (!read.Ok) return Unexpected(read, $"read of PR #{n}");
         var pr = read.Json!;
 
+        // the pull request must be the item's (Test-PrBelongs of the script); a caller that names no item has checked it itself
+        if (cmd.Item > 0 && !Belongs(pr, cmd)) return MergeOutcome.Failed("pr-mismatch", $"PR #{n} (branch '{pr["head"]?["ref"]}') is not a pull request belonging to work item #{cmd.Item}; refusing to merge");
+
         // merged before (an earlier call, the sweep, a person): nothing to do, whatever the queue holds
         if (pr["merged"]?.GetValue<bool>() == true) return MergeOutcome.MergedAs(Lower(pr["merge_commit_sha"]?.ToString()), "already-merged");
         if (!string.Equals(pr["state"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase)) return MergeOutcome.Failed("pr-not-open", $"PR #{n} is {pr["state"]}, not open; refusing to merge");
@@ -55,16 +58,19 @@ public sealed class MergeDirect
         // under mergePolicy auto the PASS covers the head it was given for and no other
         if (!SameSha(Head(pr), cmd.PassHeadSha)) return await HeadDiffers(client, cmd, pr, ct);
 
+        // GitHub merges no draft; making it ready is the caller's (a command of its own), and a draft is a wait, not a refusal the ledger would keep
+        if (pr["draft"]?.GetValue<bool>() == true) return DraftBlock(n);
+
         // the Release workflow keeps only one queued run: merge only while fewer than N other merged items still wait for master CI or their release candidate; a documentation-only change never waits
         if (cmd.MergeQueueDepth > 0 && !cmd.DocsOnly && cmd.QueueBusy >= cmd.MergeQueueDepth)
             return MergeOutcome.Blocked("merge-queue", $"the merge queue is full ({cmd.QueueBusy} of {cmd.MergeQueueDepth}): an earlier merge still waits for its release candidate");
 
-        // mergeable is null while GitHub computes it: read again with a growing pause
-        var waited = TimeSpan.Zero; var pause = _timing.MergeabilityPoll;
+        // mergeable is null while GitHub computes it: read again at the fixed interval of the script, for the short wait it has under the gateway (never a long one: one step per call)
+        var waited = TimeSpan.Zero;
         while (pr["mergeable"] is null && waited < _timing.MergeabilityWait)
         {
-            var d = pause < _timing.MergeabilityWait - waited ? pause : _timing.MergeabilityWait - waited;
-            await _delay(d, ct); waited += d; pause = Min(pause * 2, TimeSpan.FromSeconds(30));
+            var d = _timing.MergeabilityPoll < _timing.MergeabilityWait - waited ? _timing.MergeabilityPoll : _timing.MergeabilityWait - waited;
+            await _delay(d, ct); waited += d;
             read = await Get(client, $"pulls/{n}", ct);
             if (!read.Ok) return Unexpected(read, $"read of PR #{n}");
             pr = read.Json!;
@@ -77,8 +83,10 @@ public sealed class MergeDirect
         // the branch is behind its base: GitHub's update branch makes the one head a PASS accepts without a new verdict; the checks of the new head run before the next merge
         if (cmd.UpdateWhenBehind && await BehindBy(client, pr, ct) > 0)
         {
-            var update = await UpdateBranch(client, cmd, n, cmd.PassHeadSha, ct);
-            if (update.Accepted) return await AfterUpdate(client, cmd, update, ct);
+            var update = await UpdateBranch(client, n, cmd.PassHeadSha, ct);
+            if (update.Stop is not null) return update.Stop;   // rate limited: asked again later (a 5xx or a dropped connection threw)
+            // this update does not count against the limit of updates after refusals, as in the script
+            if (update.Accepted) return (await AfterUpdate(client, cmd, update, ct)) with { Updated = true };
             // GitHub could not update it (the head moved, a conflict it saw only now): merged as it is, as before; a conflict is refused by the merge itself
         }
 
@@ -92,7 +100,7 @@ public sealed class MergeDirect
         var r = await Send(client, HttpMethod.Put, $"pulls/{n}/merge", body, ct);
 
         // a pull request that is (or was) part of a stack merges only through the asynchronous endpoint
-        if (r.Status == 403 && StackMerge.IsMatch(r.Message))
+        if (r.Status == 403 && !RateLimited(r) && StackMerge.IsMatch(r.Message))
         {
             var asyncBody = new JsonObject { ["merge_method"] = "squash", ["sha"] = cmd.PassHeadSha, ["merge_action"] = "direct_merge" };
             var ar = await Send(client, HttpMethod.Put, $"pulls/{n}/merge-async", asyncBody, ct);
@@ -117,13 +125,18 @@ public sealed class MergeDirect
             var sha = Lower(r.Json?["sha"]?.ToString());
             return r.Json?["merged"]?.GetValue<bool>() == true && sha != "" ? MergeOutcome.MergedAs(sha) : MergeOutcome.Failed("merge-no-sha", $"merge of PR #{n} returned no merge SHA");
         }
-        if (r.Status == 403) return MergeOutcome.Failed("github-forbidden", $"GitHub refused the merge of PR #{n} (403): {r.Message}");
+        // a 403 is a refusal of the credential only when it is not a rate limit (primary, secondary, Retry-After): those are rescheduled by the classifier like any other answer
+        if (r.Status == 403)
+            return RateLimited(r) ? Unexpected(r, $"merge of PR #{n}") : MergeOutcome.Failed("github-forbidden", $"GitHub refused the merge of PR #{n} (403): {r.Message}");
         if (r.Status is 405 or 409 or 422)
         {
             var msg = r.Message;
             if (OutOfDate.IsMatch(msg)) return await OutOfDateAfterRefusal(client, cmd, msg, ct);
             if (r.Status == 405 && StatusCheck.IsMatch(msg)) return MergeOutcome.Blocked("checks-pending", msg);
-            return MergeOutcome.Failed("merge-refused", $"HTTP {r.Status}: {msg}");
+            if (Draft.IsMatch(msg)) return DraftBlock(n);
+            // Transient on purpose: such a refusal can clear without a new head (approval added, base rules changed, a person's change of the pull request), and the ledger keeps a
+            // permanent outcome by its key (pull request, PASS head, updates), which would freeze it. The caller bounds the asking by the verdict timeout, as the script parks a PASS that stays unmerged.
+            return MergeOutcome.Failed("merge-refused", $"HTTP {r.Status}: {msg}", FailureKind.Transient);
         }
         return Unexpected(r, $"merge of PR #{n}");
     }
@@ -138,21 +151,28 @@ public sealed class MergeDirect
         if (!SameSha(Head(look.Json), cmd.PassHeadSha)) return await HeadDiffers(client, cmd, look.Json, ct);
         // bounded: the updates of one verdict are counted by the caller, so the calls add up to the same limit as the script's loop
         if (cmd.UpdatesSoFar >= cmd.MaxUpdates) return MergeOutcome.Failed("merge-out-of-date", $"PR #{n} kept falling behind its base after {cmd.MaxUpdates} updates ({message})");
-        var update = await UpdateBranch(client, cmd, n, cmd.PassHeadSha, ct);
-        if (!update.Accepted) return MergeOutcome.Failed("update-refused", $"could not update PR #{n}: {update.Message}");
-        return await AfterUpdate(client, cmd, update, ct);
+        var update = await UpdateBranch(client, n, cmd.PassHeadSha, ct);
+        if (update.Stop is not null) return update.Stop;   // rate limited: nothing was updated, so nothing is counted
+        // the script counts the update of a verdict before it asks GitHub, accepted or not: the caller adds one to the count of the verdict either way
+        if (!update.Accepted) return MergeOutcome.Failed("update-refused", $"could not update PR #{n}: {update.Message}") with { UpdatesAdded = 1 };
+        return (await AfterUpdate(client, cmd, update, ct)) with { Updated = true, UpdatesAdded = 1 };
     }
 
-    sealed record Update(bool Accepted, string From, string Expected, string Message);
+    sealed record Update(bool Accepted, string From, string Expected, string Message, MergeOutcome? Stop = null);
 
-    async Task<Update> UpdateBranch(GitHubRepoClient client, MergePullRequest cmd, int n, string from, CancellationToken ct)
+    // A transport failure or a 5xx throws (the handler classifies it as transient: asked again, never cached as a refusal). Only GitHub's own refusals are one: 409 (the head moved) and 422
+    // (a conflict, or up to date already); a rate limit stops the call to be asked again later; any other answer is a refusal the caller reads in the message.
+    async Task<Update> UpdateBranch(GitHubRepoClient client, int n, string from, CancellationToken ct)
     {
-        Answer u;
-        try { u = await Send(client, HttpMethod.Put, $"pulls/{n}/update-branch", new JsonObject { ["expected_head_sha"] = from }, ct); }
-        catch (HttpRequestException e) { return new(false, from, "", e.Message); }
+        var u = await Send(client, HttpMethod.Put, $"pulls/{n}/update-branch", new JsonObject { ["expected_head_sha"] = from }, ct);
         // GitHub answers 202 (accepted; the merge commit is made in the background), 409 (the head moved) or 422 (a conflict, or up to date already)
-        if (u.Status != 202) return new(false, from, "", u.Message != "" ? u.Message : $"HTTP {u.Status}");
-        return new(true, from, Lower(u.Json?["sha"]?.ToString()), "");
+        if (u.Status == 202) return new(true, from, Lower(u.Json?["sha"]?.ToString()), "");
+        if (u.Status is not (409 or 422))
+        {
+            var other = Unexpected(u, $"update of the branch of PR #{n}");   // throws for a transient one
+            if (other.Kind == FailureKind.RateLimited) return new(false, from, "", other.Detail, other);
+        }
+        return new(false, from, "", u.Message != "" ? u.Message : $"HTTP {u.Status}");
     }
 
     // The update was accepted: GitHub makes the merge commit in the background. Wait a short while for the head to change; the head it made is the one head a PASS accepts without a new
@@ -230,15 +250,25 @@ public sealed class MergeDirect
         var text = await resp.Content.ReadAsStringAsync(ct);
         JsonNode? json = null;
         if (text.Length > 0) { try { json = JsonNode.Parse(text); } catch (System.Text.Json.JsonException) { } }
-        static string? H(HttpResponseMessage r, string h) => r.Headers.TryGetValues(h, out var v) ? v.FirstOrDefault() : null;
-        var reset = long.TryParse(H(resp, "x-ratelimit-reset"), NumberStyles.None, CultureInfo.InvariantCulture, out var rs) ? DateTimeOffset.FromUnixTimeSeconds(rs) : (DateTimeOffset?)null;
-        int? remaining = int.TryParse(H(resp, "x-ratelimit-remaining"), NumberStyles.None, CultureInfo.InvariantCulture, out var rem) ? rem : null;
-        return new Answer((int)resp.StatusCode, json, text, new HttpOutcome((int)resp.StatusCode, text, resp.Headers.RetryAfter?.Delta, reset, remaining));
+        return new Answer((int)resp.StatusCode, json, text, GitHubResponses.ToOutcome(resp, text));
+    }
+
+    // a 403 that is a rate limit (Retry-After, an exhausted primary limit, a secondary limit message): the classifier reschedules it, so it is no refusal
+    static bool RateLimited(Answer a) => ErrorClassifier.Classify(a.Outcome, idempotentCommand: false).Action == ErrorAction.Reschedule;
+
+    static MergeOutcome DraftBlock(int n) => MergeOutcome.Blocked("pr-draft", $"PR #{n} is still a draft; GitHub merges no draft until it is marked ready for review");
+
+    // Test-PrBelongs of the script: the branch is the item's (".../<item>-..."), or a copilot/* branch of the pull request the item state records, or the title names the item (#12 is not #123)
+    static bool Belongs(JsonNode pr, MergePullRequest cmd)
+    {
+        var branch = pr["head"]?["ref"]?.ToString() ?? "";
+        if (branch.Contains($"/{cmd.Item}-", StringComparison.Ordinal)) return true;
+        if (branch.StartsWith("copilot/", StringComparison.Ordinal) && cmd.RecordedPullRequest == cmd.PullRequest) return true;
+        return Regex.IsMatch(pr["title"]?.ToString() ?? "", $"(^|[^0-9])#{cmd.Item}([^0-9]|$)", RegexOptions.CultureInvariant);
     }
 
     static string Head(JsonNode pr) => pr["head"]?["sha"]?.ToString() ?? "";
     static bool SameSha(string? a, string? b) => !string.IsNullOrEmpty(a) && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     static string Lower(string? s) => (s ?? "").ToLowerInvariant();
     static string Short(string sha) => sha.Length <= 7 ? sha : sha[..7];
-    static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
 }

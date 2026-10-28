@@ -24,8 +24,8 @@ public class MergeTests
     sealed class Fake : HttpMessageHandler
     {
         public readonly List<Sent> Requests = [];
-        readonly Dictionary<string, Queue<(HttpStatusCode, string)>> _routes = new();
-        public Fake On(string route, HttpStatusCode code, string json) { if (!_routes.TryGetValue(route, out var q)) _routes[route] = q = new(); q.Enqueue((code, json)); return this; }
+        readonly Dictionary<string, Queue<(HttpStatusCode, string, (string, string)[])>> _routes = new();
+        public Fake On(string route, HttpStatusCode code, string json, params (string Name, string Value)[] headers) { if (!_routes.TryGetValue(route, out var q)) _routes[route] = q = new(); q.Enqueue((code, json, headers)); return this; }
         public IEnumerable<Sent> To(string method, string pathEnd) => Requests.Where(r => r.Method == method && r.Path.EndsWith(pathEnd, StringComparison.Ordinal));
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -33,14 +33,16 @@ public class MergeTests
             var path = request.RequestUri!.AbsolutePath.TrimStart('/');
             Requests.Add(new(request.Method.Method, path + request.RequestUri.Query, body));
             if (!_routes.TryGetValue($"{request.Method.Method} {path}", out var q) || q.Count == 0) return Respond(HttpStatusCode.NotFound, """{"message":"Not Found"}""");
-            var (code, json) = q.Count > 1 ? q.Dequeue() : q.Peek();
-            return Respond(code, json);
+            var (code, json, headers) = q.Count > 1 ? q.Dequeue() : q.Peek();
+            var resp = Respond(code, json);
+            foreach (var (name, value) in headers) resp.Headers.TryAddWithoutValidation(name, value);
+            return resp;
         }
         static HttpResponseMessage Respond(HttpStatusCode code, string json) => new(code) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
     }
 
-    static string Pr(string head = Pass, string mergeable = "true", string state = "open", bool merged = false, string mergeCommit = "null") =>
-        $$$"""{"state":"{{{state}}}","merged":{{{(merged ? "true" : "false")}}},"merge_commit_sha":{{{mergeCommit}}},"mergeable":{{{mergeable}}},"mergeable_state":"clean","base":{"ref":"master"},"head":{"sha":"{{{head}}}","ref":"bot/7-x"}}""";
+    static string Pr(string head = Pass, string mergeable = "true", string state = "open", bool merged = false, string mergeCommit = "null", bool draft = false, string title = "x") =>
+        $$$"""{"state":"{{{state}}}","draft":{{{(draft ? "true" : "false")}}},"title":"{{{title}}}","merged":{{{(merged ? "true" : "false")}}},"merge_commit_sha":{{{mergeCommit}}},"mergeable":{{{mergeable}}},"mergeable_state":"clean","base":{"ref":"master"},"head":{"sha":"{{{head}}}","ref":"bot/7-x"}}""";
 
     const string PrPath = "repos/acme/orders/pulls/9";
     const string Merge = "PUT " + PrPath + "/merge";
@@ -79,25 +81,28 @@ public class MergeTests
     }
 
     [Fact]
-    public async Task Merge_MergeableNull_IsReadAgainWithGrowingPauses_ThenMerges()
+    public async Task Merge_MergeableNull_IsReadAgainAtTheFixedInterval_ThenMerges()
     {
         var fake = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(mergeable: "null")).On("GET " + PrPath, HttpStatusCode.OK, Pr(mergeable: "null")).On("GET " + PrPath, HttpStatusCode.OK, Pr())
             .On(Merge, HttpStatusCode.OK, $$"""{"sha":"{{MergeSha}}","merged":true}""");
         var (direct, pauses) = Direct(fake);
         var o = await direct.Run(Cmd());
         Assert.Equal(MergeStatus.Merged, o.Status);
-        Assert.Equal([TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(8)], pauses);
+        Assert.Equal([TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(4)], pauses);
         Assert.Equal(3, fake.To("GET", "/pulls/9").Count());
     }
 
     [Fact]
-    public async Task Merge_MergeableStaysNull_IsBlocked_AndDoesNotWaitLongerThanTheLimit()
+    public async Task Merge_MergeableStaysNull_IsBlocked_AndWaitsNoLongerThanTheGatewayForm12Seconds()
     {
         var fake = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(mergeable: "null"));
         var (direct, pauses) = Direct(fake);
         var o = await direct.Run(Cmd());
         Assert.Equal((MergeStatus.Blocked, "mergeability-unknown"), (o.Status, o.Reason));
-        Assert.Equal(TimeSpan.FromSeconds(90), pauses.Aggregate(TimeSpan.Zero, (a, b) => a + b));
+        // the script under -Gateway: Math.Min(mergeabilityWaitSeconds, 12) at the fixed mergeabilityPollSeconds (4), not the 90 seconds of a session's own call
+        Assert.Equal(TimeSpan.FromSeconds(12), pauses.Aggregate(TimeSpan.Zero, (a, b) => a + b));
+        Assert.Equal([TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(4)], pauses);
+        Assert.Equal(TimeSpan.FromSeconds(12), MergeTiming.Default.MergeabilityWait);
         Assert.Empty(fake.To("PUT", "/merge"));
     }
 
@@ -155,12 +160,19 @@ public class MergeTests
     }
 
     [Fact]
-    public async Task Merge_405NotMergeable_IsAFailureWithGitHubsMessage()
+    public async Task Merge_405NotMergeable_IsATransientRefusalWithGitHubsMessage_NotFrozenByTheLedger()
     {
         var fake = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On(Merge, HttpStatusCode.MethodNotAllowed, """{"message":"Pull Request is not mergeable"}""");
         var o = await Direct(fake).Item1.Run(Cmd());
-        Assert.Equal((MergeStatus.Failed, "merge-refused", FailureKind.Permanent), (o.Status, o.Reason, o.Kind));
+        Assert.Equal((MergeStatus.Failed, "merge-refused", FailureKind.Transient), (o.Status, o.Reason, o.Kind));
         Assert.Contains("405", o.Detail); Assert.Contains("not mergeable", o.Detail);
+
+        // a refusal that clears without a new head (an approval added, a rule changed) must not be cached by the key of the same head: the second call asks GitHub again and merges
+        var fake2 = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On(Merge, HttpStatusCode.MethodNotAllowed, """{"message":"At least 1 approving review is required by reviewers with write access."}""")
+            .On(Merge, HttpStatusCode.OK, $$"""{"sha":"{{MergeSha}}","merged":true}""");
+        var h = new MergePullRequestHandler(new InMemoryIdempotencyLedger(), Direct(fake2).Item1);
+        Assert.Equal("merge-refused", (await h.Process(Cmd())).Reason);
+        Assert.True((await h.Process(Cmd())).Merged);
     }
 
     [Fact]
@@ -306,5 +318,140 @@ public class MergeTests
         Assert.Equal((MergeStatus.Failed, "rate-limited", FailureKind.RateLimited), (o.Status, o.Reason, o.Kind));
         // MergeDirect itself says how long to wait (Retry-After, the reset, or 30 seconds for a bare 429); a CommandResult has no field for it, so the caller of the handler reschedules by its own policy
         Assert.Equal(TimeSpan.FromSeconds(30), (await Direct(fake).Item1.Run(Cmd())).RetryAfter);
+    }
+
+    // ---- review findings of W6.2 -------------------------------------------------------------------------------------------------------
+
+    static string OkMerge => $$"""{"sha":"{{MergeSha}}","merged":true}""";
+
+    [Fact]
+    public async Task Merge_403RateLimit_IsRescheduled_NotCachedAsForbidden_ButARealForbiddenIs()
+    {
+        var limited = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr())
+            .On(Merge, HttpStatusCode.Forbidden, """{"message":"You have exceeded a secondary rate limit."}""", ("Retry-After", "45"))
+            .On(Merge, HttpStatusCode.OK, OkMerge);
+        var h = new MergePullRequestHandler(new InMemoryIdempotencyLedger(), Direct(limited).Item1);
+        var o = await h.Process(Cmd());
+        Assert.Equal((MergeStatus.Failed, "rate-limited", FailureKind.RateLimited), (o.Status, o.Reason, o.Kind));
+        Assert.Equal(TimeSpan.FromSeconds(45), o.RetryAfter);   // carried through the CommandResult of the handler
+        Assert.True((await h.Process(Cmd())).Merged);   // not recorded: the same key merges once the limit is over
+
+        // primary limit: 403 with remaining 0 and a reset in the future
+        var reset = DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds().ToString();
+        var primary = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On(Merge, HttpStatusCode.Forbidden, """{"message":"API rate limit exceeded"}""", ("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", reset));
+        Assert.Equal(FailureKind.RateLimited, (await Direct(primary).Item1.Run(Cmd())).Kind);
+
+        var forbidden = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On(Merge, HttpStatusCode.Forbidden, """{"message":"Resource not accessible by integration"}""");
+        var f = await Direct(forbidden).Item1.Run(Cmd());
+        Assert.Equal((MergeStatus.Failed, "github-forbidden", FailureKind.Permanent), (f.Status, f.Reason, f.Kind));
+    }
+
+    [Fact]
+    public async Task Merge_UpdateBranchTransportOrServerError_IsTransient_NotACachedUpdateRefused()
+    {
+        MergePullRequest Behind() => Cmd(with: c => c with { UpdateWhenBehind = true });
+        Fake Pre(HttpStatusCode code, params (string Name, string Value)[] headers) => new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr())
+            .On($"GET repos/acme/orders/compare/master...{Pass}", HttpStatusCode.OK, """{"behind_by":2}""").On(UpdateBranch, code, """{"message":"boom"}""", headers);
+
+        // a 502 on the update before the merge: the call throws, the handler classifies it as transient and records nothing; the merge is not tried "as it is"
+        var f502 = Pre(HttpStatusCode.BadGateway);
+        await Assert.ThrowsAsync<HttpRequestException>(() => Direct(f502).Item1.Run(Behind()));
+        Assert.Empty(f502.To("PUT", "/merge"));
+        var ledger = new InMemoryIdempotencyLedger();
+        var o = await new MergePullRequestHandler(ledger, Direct(f502).Item1).Process(Behind());
+        Assert.Equal((MergeStatus.Failed, FailureKind.Transient), (o.Status, o.Kind));
+        Assert.Null(ledger.TryGet(Behind().IdempotencyKey));
+
+        // a 429 is rescheduled with its Retry-After; nothing was updated, nothing is counted
+        var limited = await Direct(Pre(HttpStatusCode.TooManyRequests, ("Retry-After", "20"))).Item1.Run(Behind());
+        Assert.Equal((MergeStatus.Failed, FailureKind.RateLimited, TimeSpan.FromSeconds(20), 0), (limited.Status, limited.Kind, limited.RetryAfter!.Value, limited.UpdatesAdded));
+
+        // the same two answers after a refused merge
+        Fake After(HttpStatusCode code) => new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On(Merge, HttpStatusCode.Conflict, """{"message":"Head branch was modified."}""").On(UpdateBranch, code, "{}");
+        await Assert.ThrowsAsync<HttpRequestException>(() => Direct(After(HttpStatusCode.ServiceUnavailable)).Item1.Run(Cmd()));
+        Assert.Equal("rate-limited", (await Direct(After(HttpStatusCode.TooManyRequests)).Item1.Run(Cmd())).Reason);
+
+        // a 422 before the merge is GitHub's refusal: merged as it is, as the script does
+        var f422 = Pre(HttpStatusCode.UnprocessableEntity).On(Merge, HttpStatusCode.OK, OkMerge);
+        Assert.True((await Direct(f422).Item1.Run(Behind())).Merged);
+    }
+
+    [Fact]
+    public async Task Merge_Draft_IsAWaitNotARefusal_AndTheItemIsChecked()
+    {
+        var draft = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(draft: true));
+        var h = new MergePullRequestHandler(new InMemoryIdempotencyLedger(), Direct(draft).Item1);
+        var o = await h.Process(Cmd());
+        Assert.Equal((MergeStatus.Blocked, "pr-draft", FailureKind.Transient), (o.Status, o.Reason, o.Kind));
+        Assert.Empty(draft.To("PUT", "/merge"));
+        Assert.Equal("pr-draft", (await h.Process(Cmd())).Reason);   // asked again: not cached
+        Assert.Equal(2, draft.To("GET", "/pulls/9").Count());
+
+        // a draft that turned up between the read and the merge: GitHub's 422 says so
+        var late = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On(Merge, HttpStatusCode.UnprocessableEntity, """{"message":"Pull request is still a draft"}""");
+        var d = await Direct(late).Item1.Run(Cmd());
+        Assert.Equal((MergeStatus.Blocked, "pr-draft"), (d.Status, d.Reason));
+
+        // Test-PrBelongs: branch "bot/7-x" belongs to item 7, not to 8; the title can name the item; a copilot branch belongs by the recorded pull request
+        var fake = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(title: "Fix the thing (#12)")).On(Merge, HttpStatusCode.OK, OkMerge);
+        Assert.Equal("pr-mismatch", (await Direct(fake).Item1.Run(Cmd(with: c => c with { Item = 8 }))).Reason);
+        Assert.Empty(fake.To("PUT", "/merge"));
+        Assert.True((await Direct(fake).Item1.Run(Cmd(with: c => c with { Item = 7 }))).Merged);
+        Assert.True((await Direct(fake).Item1.Run(Cmd(with: c => c with { Item = 12 }))).Merged);
+        Assert.Equal("pr-mismatch", (await Direct(fake).Item1.Run(Cmd(with: c => c with { Item = 1 }))).Reason);   // #12 is not #1
+        var copilot = Pr().Replace("bot/7-x", "copilot/fix-it");
+        Assert.True((await Direct(new Fake().On("GET " + PrPath, HttpStatusCode.OK, copilot).On(Merge, HttpStatusCode.OK, OkMerge)).Item1.Run(Cmd(with: c => c with { Item = 5, RecordedPullRequest = 9 }))).Merged);
+        Assert.Equal("pr-mismatch", (await Direct(new Fake().On("GET " + PrPath, HttpStatusCode.OK, copilot)).Item1.Run(Cmd(with: c => c with { Item = 5, RecordedPullRequest = 3 }))).Reason);
+    }
+
+    [Fact]
+    public async Task Outcome_CarriesAlreadyMerged_Sha_RetryAfter_AndAnEmptyDetail_ThroughTheHandler()
+    {
+        var merged = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(state: "closed", merged: true, mergeCommit: $"\"{MergeSha}\""));
+        var a = await new MergePullRequestHandler(new InMemoryIdempotencyLedger(), Direct(merged).Item1).Process(Cmd());
+        Assert.Equal((MergeStatus.Merged, "already-merged", MergeSha), (a.Status, a.Reason, a.Sha));
+
+        // the result of the ledger (a replay) answers the same
+        var h = new MergePullRequestHandler(new InMemoryIdempotencyLedger(), Direct(merged).Item1);
+        await h.Process(Cmd()); var replay = await h.Process(Cmd());
+        Assert.Equal(("already-merged", MergeSha), (replay.Reason, replay.Sha));
+
+        // an empty detail (a trimmed ": ") and a detail with ": " and "/" in it are not read wrong: Blocked stays Blocked, with every field
+        foreach (var o in new[] { MergeOutcome.Blocked("checks-pending", "", "abc"), MergeOutcome.Blocked("checks-pending", "a: b/c: d"), MergeOutcome.HeadMoved(""),
+                                  MergeOutcome.Failed("rate-limited", "x", FailureKind.RateLimited, TimeSpan.FromSeconds(7)) with { Updated = true, UpdatesAdded = 1 },
+                                  MergeOutcome.MergedAs(MergeSha, "already-merged") })
+            Assert.Equal(o, MergeOutcome.From(o.ToResult()));
+        var plain = MergeOutcome.From(CommandResult.Failed(FailureKind.Transient, "SendAsync: boom"));
+        Assert.Equal((MergeStatus.Failed, "command-failed", FailureKind.Transient), (plain.Status, plain.Reason, plain.Kind));
+        // the plain result of the merge keeps the merge commit as Execution and a blocked update its new head
+        Assert.Equal(MergeSha, MergeOutcome.MergedAs(MergeSha).ToResult().Execution);
+        Assert.Equal("abc", MergeOutcome.Blocked("branch-updated", "", "abc").ToResult().Execution);
+    }
+
+    [Fact]
+    public async Task Outcome_SaysWhetherThisCallUpdatedTheBranch_AndOnlyTheUpdateAfterARefusalIsCounted()
+    {
+        // before the merge: updated, not counted
+        var pre = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On("GET " + PrPath, HttpStatusCode.OK, Pr()).On("GET " + PrPath, HttpStatusCode.OK, Pr(head: Update))
+            .On($"GET repos/acme/orders/compare/master...{Pass}", HttpStatusCode.OK, """{"behind_by":3}""").On(UpdateBranch, HttpStatusCode.Accepted, "{}")
+            .On($"GET repos/acme/orders/commits/{Update}", HttpStatusCode.OK, UpdateCommit()).On($"GET repos/acme/orders/compare/master...{BaseHead}", HttpStatusCode.OK, """{"status":"behind"}""");
+        var a = await Direct(pre).Item1.Run(Cmd(with: c => c with { UpdateWhenBehind = true }));
+        Assert.Equal(("branch-updated", true, 0), (a.Reason, a.Updated, a.UpdatesAdded));
+
+        // after a refusal: updated and counted (also when GitHub refuses the update: the script counts before it asks)
+        var post = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On("GET " + PrPath, HttpStatusCode.OK, Pr()).On("GET " + PrPath, HttpStatusCode.OK, Pr(head: Update))
+            .On(Merge, HttpStatusCode.Conflict, """{"message":"Head branch was modified."}""").On(UpdateBranch, HttpStatusCode.Accepted, "{}")
+            .On($"GET repos/acme/orders/commits/{Update}", HttpStatusCode.OK, UpdateCommit()).On($"GET repos/acme/orders/compare/master...{BaseHead}", HttpStatusCode.OK, """{"status":"behind"}""");
+        var b = await Direct(post).Item1.Run(Cmd());
+        Assert.Equal(("branch-updated", true, 1), (b.Reason, b.Updated, b.UpdatesAdded));
+        var refused = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On(Merge, HttpStatusCode.Conflict, """{"message":"Head branch was modified."}""").On(UpdateBranch, HttpStatusCode.UnprocessableEntity, """{"message":"conflict"}""");
+        var r = await Direct(refused).Item1.Run(Cmd());
+        Assert.Equal(("update-refused", false, 1), (r.Reason, r.Updated, r.UpdatesAdded));
+
+        // recognising the update of an earlier call is neither
+        var seen = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(head: Update)).On($"GET repos/acme/orders/commits/{Update}", HttpStatusCode.OK, UpdateCommit())
+            .On($"GET repos/acme/orders/compare/master...{BaseHead}", HttpStatusCode.OK, """{"status":"identical"}""");
+        var c2 = await Direct(seen).Item1.Run(Cmd(with: c => c with { UpdatedFrom = Pass }));
+        Assert.Equal(("branch-updated", false, 0), (c2.Reason, c2.Updated, c2.UpdatesAdded));
     }
 }
