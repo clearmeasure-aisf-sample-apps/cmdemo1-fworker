@@ -129,7 +129,7 @@ sealed class DeliveryShadowService(DeliveryShadowHolder holder, TimeSpan interva
 
 static class DeliveryShadowWiring
 {
-    public const string TrainQueue = "delivery-train";
+    public const string TrainQueue = DeliveryTopology.TrainQueue;
 
     /// <summary>The shadow run's parts for a gateway in shadow with a home repository and a database; null when the environment cannot read GitHub (no GH_TOKEN): the train is left out then.</summary>
     public static DeliveryShadowParts? Make(GatewayComposition c, ISystemCatalog catalog, string connectionString, Func<string, string?> env, HttpClient? github = null, HttpClient? app = null)
@@ -175,10 +175,8 @@ static class DeliveryShadowWiring
             w.Discovery.IncludeType(typeof(DeliveryTrainHandlers));
             w.Discovery.IncludeType(typeof(DeliveryTrainRouting));
             w.Discovery.IncludeType(typeof(DeliveryShadowHandlers));
-            // the inputs of the trains run one at a time: a burst of the watcher's events (one poll publishes a dozen) would otherwise move the same train from several threads and exhaust its retries
-            // (TrainConflictException). One queue for all trains is the shadow's stand-in for a queue per key; it is durable, so a timer or input survives a restart.
-            foreach (var t in typeof(TrainInput).Assembly.GetTypes().Where(t => !t.IsAbstract && typeof(TrainInput).IsAssignableFrom(t))) w.PublishMessage(t).ToLocalQueue(TrainQueue);
-            w.LocalQueue(TrainQueue).UseDurableInbox().Sequential();
+            // the Octopus events and the trains' inputs each travel one queue, one at a time and in order (DeliveryTopology says why)
+            DeliveryTopology.Route(w);
             // The train keeps a failed read from losing an input (it saves the input first and looks again by itself), so this is the backstop for one that still escapes: GitHub or the app
             // not answering is tried again with growing pauses and then scheduled again every few minutes; it never goes to the dead letters, because an input lost there is lost for good.
             w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5));
