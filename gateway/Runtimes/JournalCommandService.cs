@@ -84,12 +84,12 @@ sealed class LazyJournalStore(Func<CancellationToken, Task<IJournalStore>> make)
 // W3.2: the one place the journal command is wired, and only where the engine mode is V2.
 static class JournalCommandWiring
 {
-    public static JournalCommandSink Attach(WolverineHostService host, GatewayComposition c, Func<string, string?>? env = null, HttpClient? http = null)
+    public static JournalCommandSink Attach(WolverineHostService host, GatewayComposition c, Func<string, string?>? env = null, HttpClient? http = null, IIdempotencyLedger? ledger = null)
     {
         env ??= Environment.GetEnvironmentVariable;
         var settings = Settings(c, env);
         var store = new LazyJournalStore(ct => Task.FromResult<IJournalStore>(new GitHubJournalStore(Client(c, env, http), Identity(c, env, http))));
-        var service = new JournalCommandService(new WriteJournalLineHandler(new InMemoryIdempotencyLedger(), new JournalLedger(store, settings)));
+        var service = new JournalCommandService(new WriteJournalLineHandler(ledger ?? new InMemoryIdempotencyLedger(), new JournalLedger(store, settings)));
         var previous = host.RuntimeCommands;
         host.RuntimeCommands = (services, w) =>
         {

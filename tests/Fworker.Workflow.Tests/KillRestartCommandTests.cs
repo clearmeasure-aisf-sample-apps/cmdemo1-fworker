@@ -104,6 +104,22 @@ public class KillRestartCommandTests
         w.OnException<CommandRetryException>().RetryTimes(5);
     };
 
+    // the gateway's wiring of a database (SqlCommandStores): the ledger and the reservations in SQL, new objects in every process on the same database
+    static Func<string, Action<WolverineOptions>> WireCopilot(GitHubTasks github, Received received, Func<ICommandPort> inner, TimeSpan? minAge = null) => cs =>
+    {
+        var stores = new SqlCommandStores(cs);
+        ICommandPort port = new CopilotLaunchPort(inner(), stores.Reservations, new CopilotReconciler(stores.Reservations, github), minAge: minAge ?? TimeSpan.Zero);
+        return w =>
+        {
+            w.AddMessageHandler(new StartHandler(new StartRuntimeSessionHandler(stores.Ledger, port)));
+            w.AddMessageHandler(new ResultHandler<RuntimeSessionStarted>(received));
+            w.AddMessageHandler(new ResultHandler<RuntimeStartFailed>(received));
+            w.AddMessageHandler(new ResultHandler<IntegrationFailed>(received));
+            Route<StartRuntimeSession>(w); Route<RuntimeSessionStarted>(w); Route<RuntimeStartFailed>(w); Route<IntegrationFailed>(w);
+            w.OnException<CommandRetryException>().RetryTimes(5);
+        };
+    };
+
     static StartRuntimeSession Start(string runtime, string worker, int item = 7) => new(RuntimeKeys.Start(runtime, worker), runtime, worker, item, "Development", "prof", "nonce");
 
     static async Task Publish(TrackedSessionHost h, object message)
@@ -316,21 +332,19 @@ public class KillRestartCommandTests
     public async Task CopilotLaunch_KilledAfterTheTaskWasCreated_IsSettledByTheReconciler_AndOneTaskExists()
     {
         if (NoServer) return;
-        // the reservations stand for a store that survives the process (the gateway's InMemoryCopilotReservations does not: reported with this scenario)
-        var github = new GitHubTasks(); var reservations = new InMemoryCopilotReservations(); var received = new Received(); var hang = new Hang();
-        ICommandPort Port(ICommandPort inner) => new CopilotLaunchPort(inner, reservations, new CopilotReconciler(reservations, github), minAge: TimeSpan.Zero);
+        var github = new GitHubTasks(); var received = new Received(); var hang = new Hang();
         try
         {
-            await using var h = await TrackedSessionHost.StartAsync(WireRuntime(Port(new LaunchPort(github, after: hang.Die)), received));
+            await using var h = await TrackedSessionHost.StartAsync(WireCopilot(github, received, () => new LaunchPort(github, after: hang.Die)));
             await Publish(h, Start(CopilotLaunchPort.Runtime, "kill-cop", item: 11));
             await hang.Reached;
             Assert.Equal(1, github.Count);
-            Assert.Equal(ReservationState.Reserved, reservations.Get(11, "Development")!.State);   // the outcome was never recorded
-            await h.RestartAsync(WireRuntime(Port(new LaunchPort(github)), received));
+            Assert.Equal(ReservationState.Reserved, new SqlCommandStores(h.ConnectionString).Reservations.Get(11, "Development")!.State);   // the outcome was never recorded
+            await h.RestartAsync(WireCopilot(github, received, () => new LaunchPort(github)));   // new stores on the same database: the reservation is read back
             await Until(() => received.Count<RuntimeSessionStarted>() == 1, "the result of the launch");
             Assert.Equal(1, github.Count);   // the reservation was settled against GitHub, not launched again
             Assert.Equal("task-1", Assert.IsType<RuntimeSessionStarted>(Assert.Single(received.Messages)).Execution);
-            Assert.Equal(ReservationState.Launched, reservations.Get(11, "Development")!.State);
+            Assert.Equal(ReservationState.Launched, new SqlCommandStores(h.ConnectionString).Reservations.Get(11, "Development")!.State);
             await Settled(h);
         }
         finally { hang.Cleanup(); }
@@ -340,19 +354,63 @@ public class KillRestartCommandTests
     public async Task CopilotLaunch_KilledBeforeTheTaskWasCreated_IsLaunchedOnceAfterTheRestart()
     {
         if (NoServer) return;
-        var github = new GitHubTasks(); var reservations = new InMemoryCopilotReservations(); var received = new Received(); var hang = new Hang();
-        ICommandPort Port(ICommandPort inner) => new CopilotLaunchPort(inner, reservations, new CopilotReconciler(reservations, github), minAge: TimeSpan.Zero);
+        var github = new GitHubTasks(); var received = new Received(); var hang = new Hang();
         try
         {
-            await using var h = await TrackedSessionHost.StartAsync(WireRuntime(Port(new LaunchPort(github, before: hang.Die)), received));
+            await using var h = await TrackedSessionHost.StartAsync(WireCopilot(github, received, () => new LaunchPort(github, before: hang.Die)));
             await Publish(h, Start(CopilotLaunchPort.Runtime, "kill-cop2", item: 12));
             await hang.Reached;
             Assert.Equal(0, github.Count);
-            await h.RestartAsync(WireRuntime(Port(new LaunchPort(github)), received));
+            await h.RestartAsync(WireCopilot(github, received, () => new LaunchPort(github)));
             await Until(() => received.Count<RuntimeSessionStarted>() == 1, "the result of the launch");
             Assert.Equal(1, github.Count);   // the reconciler found no task, released the reservation, the launch ran
             await Settled(h);
         }
         finally { hang.Cleanup(); }
+    }
+
+    // #481: the case the in-memory reservations lost. The task exists, the old process died before it recorded anything, the new process has empty memory, and the
+    // reconciler has not settled the reservation yet (too young): the launch must wait for it, not create a second task.
+    [Fact]
+    public async Task CopilotLaunch_LostInMemory_AfterTheSideEffect_DoesNotCreateASecondTask()
+    {
+        if (NoServer) return;
+        var github = new GitHubTasks(); var received = new Received(); var hang = new Hang();
+        try
+        {
+            await using var h = await TrackedSessionHost.StartAsync(WireCopilot(github, received, () => new LaunchPort(github, after: hang.Die)));
+            await Publish(h, Start(CopilotLaunchPort.Runtime, "kill-cop3", item: 13));
+            await hang.Reached;
+            Assert.Equal(1, github.Count);
+            await h.RestartAsync(WireCopilot(github, received, () => new LaunchPort(github), minAge: TimeSpan.FromHours(1)));
+            await Task.Delay(3000);   // the command is delivered again and finds the reservation of the dead process
+            Assert.Equal(1, github.Count);
+            Assert.Equal(0, received.Count<RuntimeSessionStarted>());
+            var reservation = new SqlCommandStores(h.ConnectionString).Reservations.Get(13, "Development")!;
+            Assert.Equal((ReservationState.Reserved, "kill-cop3"), (reservation.State, reservation.Worker));
+        }
+        finally { hang.Cleanup(); }
+    }
+
+    // ---- the SQL stores themselves ----
+    [Fact]
+    public async Task SqlReservations_TryReserve_IsAtomic_AndALedgerKeepsItsFirstResult()
+    {
+        if (NoServer) return;
+        await using var h = await TrackedSessionHost.StartAsync();
+        var stores = new SqlCommandStores(h.ConnectionString);
+        var at = DateTime.UtcNow;
+        var wins = Enumerable.Range(0, 12).Select(i => Task.Run(() => stores.Reservations.TryReserve(new CopilotReservation(21, "Development", "w" + i, ReservationState.Reserved, at)))).ToArray();
+        Assert.Equal(1, (await Task.WhenAll(wins)).Count(x => x));
+        Assert.Single(stores.Reservations.Reserved());
+        stores.Reservations.Put(stores.Reservations.Get(21, "Development")! with { State = ReservationState.Released });
+        Assert.True(stores.Reservations.TryReserve(new CopilotReservation(21, "Development", "next", ReservationState.Reserved, at)));   // a released one can be taken again
+        Assert.Equal("next", new SqlCommandStores(h.ConnectionString).Reservations.Get(21, "Development")!.Worker);
+
+        Assert.Null(stores.Ledger.TryGet("k1"));
+        stores.Ledger.Record("k1", CommandResult.Success("exec-1", "http://page/1"));
+        stores.Ledger.Record("k1", CommandResult.Failed(FailureKind.Permanent, "later"));
+        var got = new SqlCommandStores(h.ConnectionString).Ledger.TryGet("k1")!;
+        Assert.Equal((true, "exec-1", "http://page/1"), (got.Ok, got.Execution, got.Url));
     }
 }

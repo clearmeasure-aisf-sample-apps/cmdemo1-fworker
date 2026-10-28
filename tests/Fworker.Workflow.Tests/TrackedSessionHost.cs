@@ -41,7 +41,16 @@ public sealed class TrackedSessionHost : IAsyncDisposable
         return h;
     }
 
-    async Task InitAsync(Action<WolverineOptions>? configure)
+    /// <summary>As <see cref="StartAsync(Action{WolverineOptions}?)"/>, for a configuration that needs the connection string of the new database (the SQL stores of the gateway's wiring).</summary>
+    public static async Task<TrackedSessionHost> StartAsync(Func<string, Action<WolverineOptions>> configureFor)
+    {
+        var h = new TrackedSessionHost();
+        try { await h.InitAsync(null, configureFor); }
+        catch { await h.DisposeAsync(); throw; }
+        return h;
+    }
+
+    async Task InitAsync(Action<WolverineOptions>? configure, Func<string, Action<WolverineOptions>>? configureFor = null)
     {
         await using (var master = new SqlConnection(new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = "master" }.ConnectionString))
         {
@@ -51,7 +60,7 @@ public sealed class TrackedSessionHost : IAsyncDisposable
         }
         ConnectionString = new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = dbName }.ConnectionString;
         await using (var db = Open()) await db.Database.MigrateAsync();
-        host = await BuildHost(configure);
+        host = await BuildHost(configureFor?.Invoke(ConnectionString) ?? configure);
     }
 
     /// <summary>
@@ -66,6 +75,9 @@ public sealed class TrackedSessionHost : IAsyncDisposable
         SqlConnection.ClearAllPools();
         host = await BuildHost(configure);
     }
+
+    /// <summary>The restart for a configuration that needs the connection string (a new process: new stores on the same database).</summary>
+    public Task RestartAsync(Func<string, Action<WolverineOptions>> configureFor) => RestartAsync(configureFor(ConnectionString));
 
     async Task<IHost> BuildHost(Action<WolverineOptions>? configure)
     {
