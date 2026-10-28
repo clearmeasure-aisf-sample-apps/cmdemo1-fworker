@@ -18,5 +18,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Fworker.Workflows/Fworker.Workflows.csproj" />
     <ProjectReference Include="../../src/Fworker.Persistence/Fworker.Persistence.csproj" />
+    <ProjectReference Include="../../src/Fworker.Integrations/Fworker.Integrations.csproj" />
   </ItemGroup>
 </Project>

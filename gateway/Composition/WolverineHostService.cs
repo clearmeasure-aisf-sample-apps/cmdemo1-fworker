@@ -33,7 +33,9 @@ sealed class WolverineHostService : IHostedService
     bool shuttingDown;
 
     /// <summary>Builds the host to start; replaceable by a test (the real one needs SQL Server).</summary>
-    public Func<string, WolverineHostOptions, IHost> HostFactory { get; set; } = BuildHost;
+    public Func<string, WolverineHostOptions, IHost> HostFactory { get; set; }
+    /// <summary>W3.1: set only where the engine mode is V2. Adds the runtime commands' service, handlers and queue to the host; null leaves the host as W2.3 made it.</summary>
+    public Action<IServiceCollection, WolverineOptions>? RuntimeCommands { get; set; }
     /// <summary>Applies the migrations; replaceable by a test.</summary>
     public Func<string, CancellationToken, Task> Migrate { get; set; }
 
@@ -42,6 +44,7 @@ sealed class WolverineHostService : IHostedService
         connectionString = database.ConnectionString ?? throw new InvalidOperationException("the Wolverine host needs FACTORY_DB_CONNECTION");
         this.options = options; leadership = leader;
         Migrate = (cs, ct) => MigrateAsync(cs, options.ConnectTimeoutSeconds, ct);
+        HostFactory = (cs, o) => BuildHost(cs, o, RuntimeCommands);
         // LeadershipService sets leader.OnSuperseded and OnReacquired when it is built, and the registration builds it first (GatewayWolverineExtensions); they are
         // wrapped here: its hand-over runs first, then the node leaves; a standby that takes the lease again brings the node back
         var superseded = leader.OnSuperseded; var reacquired = leader.OnReacquired;
@@ -186,9 +189,10 @@ sealed class WolverineHostService : IHostedService
         await db.Database.MigrateAsync(ct);
     }
 
-    static IHost BuildHost(string connectionString, WolverineHostOptions o)
+    static IHost BuildHost(string connectionString, WolverineHostOptions o, Action<IServiceCollection, WolverineOptions>? runtimeCommands = null)
     {
         var cs = WithConnectTimeout(connectionString, o.ConnectTimeoutSeconds);
+        WolverineOptions? wolverine = null;
         return new HostBuilder()
             // errors only: a SqlClient message can name the server
             .ConfigureLogging(l => l.SetMinimumLevel(LogLevel.Error).AddConsole())
@@ -215,7 +219,10 @@ sealed class WolverineHostService : IHostedService
                 d.ScheduledJobPollingTime = o.ScheduledJobPollingTime; d.ScheduledJobFirstExecution = o.ScheduledJobFirstExecution;
                 d.OrphanedMessageSweepPollingTime = o.OrphanedMessageSweepPollingTime; d.HandledMessageCleanupPollingTime = o.HandledMessageCleanupPollingTime;
                 d.DeduplicationCleanupPollingTime = o.DeduplicationCleanupPollingTime; d.MetricsCollectionSamplingInterval = o.MetricsCollectionSamplingInterval;
+                wolverine = w;
             })
+            // after UseWolverine, whose callback has run by now: the runtime commands add their service, handlers and queue to the same options
+            .ConfigureServices(s => { if (runtimeCommands != null && wolverine != null) runtimeCommands(s, wolverine); })
             .Build();
     }
 }
