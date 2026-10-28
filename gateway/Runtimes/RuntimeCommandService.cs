@@ -2,6 +2,7 @@ using Fworker.Contracts.Commands;
 using Fworker.Integrations.Commands;
 using Wolverine;
 using Wolverine.ErrorHandling;
+using Fworker.Contracts.Seams;
 
 // W3.1: the host side of the runtime integration commands. The commands (StartRuntimeSession, StopRuntimeSession, RunRunbook) are published to the durable local
 // queue "runtime-commands" by the RuntimeManager when the engine mode is V2; the handlers below run them through the command base of Fworker.Integrations
@@ -92,5 +93,33 @@ static class RuntimeCommandWiring
     {
         public Task<CommandResult> RunAsync(RunRunbook command, CancellationToken ct) =>
             runtime == null ? Task.FromResult(CommandResult.Failed(FailureKind.Permanent, "runtime off: octopus")) : runtime.RunCommand(command, ct);
+    }
+}
+
+// W3.3: the Copilot launch under a reservation (src/Fworker.Integrations/Commands/CopilotLaunch.cs). The port wraps the adapters' port for the Copilot runtime only;
+// the lookup asks GitHub's agent tasks for the task of an item whose launch outcome is unknown. The reservations are in memory: a restart forgets an unsettled
+// one, and the owner record of the plant (one task owns an item) is what then stops a second launch.
+sealed class CopilotTaskLookup(RuntimeRegistry runtimes) : ICopilotTaskLookup
+{
+    public async Task<(string TaskId, string Url)?> FindAsync(int item, string phase, DateTime since, CancellationToken ct) =>
+        runtimes.CopilotRuntime == null ? null : await runtimes.CopilotRuntime.TaskForItem(item, since, ct);
+}
+
+sealed class CopilotReconcileService(CopilotReconciler reconciler) : BackgroundService
+{
+    public static readonly TimeSpan MinAge = TimeSpan.FromMinutes(2), Every = TimeSpan.FromMinutes(1);
+    protected override async Task ExecuteAsync(CancellationToken stop)
+    {
+        using var timer = new PeriodicTimer(Every);
+        while (await timer.WaitForNextTickAsync(stop))
+        {
+            try
+            {
+                foreach (var r in await reconciler.Run(MinAge, stop))
+                    Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "copilot-reservation", ["item"] = r.Item, ["phase"] = r.Phase, ["outcome"] = r.Outcome.ToString() }.ToJsonString());
+            }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+            catch (Exception e) { Console.Error.WriteLine($"copilot reconcile: {e.GetType().Name}"); }
+        }
     }
 }
