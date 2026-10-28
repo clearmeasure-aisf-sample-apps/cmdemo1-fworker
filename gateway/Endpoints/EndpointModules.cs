@@ -56,6 +56,7 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEventIngress>(sp =>
         {
             var v1 = new V1EventIngress(sp.GetRequiredService<EventHub>());
+            if (sp.GetService<IngressInboxPort>() is { } inbox) return new InboxEventIngress(v1, inbox);   // W4.1: where the engine acts, events also go to the durable inbox
             return sp.GetService<IShadowHistory>() is { } shadow ? new ShadowEventIngress(v1, shadow) : v1;   // W2.3: shadow history records after v1 has done its part
         });
         services.AddSingleton<IEndpointModule, WebhookEndpoints>();
