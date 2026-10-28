@@ -14,9 +14,11 @@ public sealed class RuntimeCommandService
     readonly StopRuntimeSessionHandler stop;
     readonly RunRunbookHandler runbook;
     readonly Func<string, IRuntimeManager?> managerOf;
+    readonly Action<string, string, int>? onStarted;   // W4.1: (runtime, execution, item) for the correlation map
 
-    internal RuntimeCommandService(StartRuntimeSessionHandler start, StopRuntimeSessionHandler stop, RunRunbookHandler runbook, Func<string, IRuntimeManager?> managerOf)
-    { this.start = start; this.stop = stop; this.runbook = runbook; this.managerOf = managerOf; }
+    internal RuntimeCommandService(StartRuntimeSessionHandler start, StopRuntimeSessionHandler stop, RunRunbookHandler runbook, Func<string, IRuntimeManager?> managerOf,
+        Action<string, string, int>? onStarted = null)
+    { this.start = start; this.stop = stop; this.runbook = runbook; this.managerOf = managerOf; this.onStarted = onStarted; }
 
     public Task RunStart(StartRuntimeSession c, IMessageBus bus, CancellationToken ct) => Deliver(c, start.Process(c, ct), bus);
     public Task RunStop(StopRuntimeSession c, IMessageBus bus, CancellationToken ct) => Deliver(c, stop.Process(c, ct), bus);
@@ -31,7 +33,12 @@ public sealed class RuntimeCommandService
         if (o.Message != null) await bus.PublishAsync(o.Message);
     }
 
-    public Task Started(RuntimeSessionStarted m) => managerOf(m.Runtime)?.CompleteStart(m.WorkerName, m.Item, m.Phase, new ProvisionResult(true, m.Execution, "", m.Url)) ?? Task.CompletedTask;
+    public Task Started(RuntimeSessionStarted m)
+    {
+        try { onStarted?.Invoke(m.Runtime, m.Execution, m.Item); } catch { }   // the map is best effort; the start is already done
+        return StartedCore(m);
+    }
+    Task StartedCore(RuntimeSessionStarted m) => managerOf(m.Runtime)?.CompleteStart(m.WorkerName, m.Item, m.Phase, new ProvisionResult(true, m.Execution, "", m.Url)) ?? Task.CompletedTask;
     public Task StartFailed(RuntimeStartFailed m) => managerOf(m.Runtime)?.CompleteStart(m.WorkerName, m.Item, m.Phase, new ProvisionResult(false, "", m.Error)) ?? Task.CompletedTask;
     public void Stopped(RuntimeSessionStopped m) => managerOf(m.Runtime)?.CompleteStop(m.WorkerName, m.Ok, m.Error);
 }
@@ -55,7 +62,7 @@ public static class RuntimeCommandHandlers
 // The idempotency ledger is the SQL one the gateway passes (#481); in memory only without a database (tests).
 static class RuntimeCommandWiring
 {
-    public static void Attach(WolverineHostService host, RuntimeRegistry runtimes, Fworker.Contracts.Seams.ICommandPort adapters, IIdempotencyLedger? ledger = null)
+    public static void Attach(WolverineHostService host, RuntimeRegistry runtimes, Fworker.Contracts.Seams.ICommandPort adapters, IIdempotencyLedger? ledger = null, Action<string, string, int>? onStarted = null)
     {
         foreach (var m in runtimes.Managers)
         {
@@ -65,7 +72,7 @@ static class RuntimeCommandWiring
         }
         ledger ??= new InMemoryIdempotencyLedger();   // SQL where the gateway has its database (SqlCommandStores)
         IRunbookRunner runner = new OctopusRunner(runtimes.OctopusRuntime);
-        var service = new RuntimeCommandService(new StartRuntimeSessionHandler(ledger, adapters), new StopRuntimeSessionHandler(ledger, adapters), new RunRunbookHandler(ledger, runner), kind => runtimes.ByKind(kind));
+        var service = new RuntimeCommandService(new StartRuntimeSessionHandler(ledger, adapters), new StopRuntimeSessionHandler(ledger, adapters), new RunRunbookHandler(ledger, runner), kind => runtimes.ByKind(kind), onStarted);
         host.RuntimeCommands = (services, w) =>
         {
             services.AddSingleton(service);

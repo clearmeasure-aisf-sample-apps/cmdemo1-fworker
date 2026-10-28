@@ -12,6 +12,7 @@ static class GatewayWolverineExtensions
         // built after LeadershipService, whose hand-over callbacks it wraps (the order of the callbacks is the order of the stop: hand-over, then the node leaves)
         JournalCommandSink? journalSink = null;
         CopilotReconciler? copilotReconciler = null;
+        IngressCorrelations? correlations = null; IngressInboxPort? inboxPort = null;
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
@@ -23,8 +24,18 @@ static class GatewayWolverineExtensions
                 var stores = new SqlCommandStores(WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds));
                 var reservations = stores.Reservations;
                 copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()));
-                RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler), stores.Ledger);
+                RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler), stores.Ledger,
+                    (runtime, execution, item) => correlations?.FromRuntime(runtime, execution, item));   // W4.1: the task or agent id finds its item later
                 journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands
+                if (c.Instance.Home is { } home)
+                {
+                    // W4.1: webhook events into the durable inbox, deduplicated, with the correlation map (also written by the verbs and the runtimes)
+                    var cs = WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
+                    var map = new Fworker.Integrations.Correlation.SqlCorrelationMap(cs);
+                    IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(new Fworker.Integrations.Correlation.SqlIngressDedup(cs), map, home));
+                    correlations = new IngressCorrelations(map, home);
+                    inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
+                }
                 RecurringJobSlots.Attach(host);   // W4.0: the slots of the board reconciler and the catalog re-read (W4.3), empty
             }
             return host;
@@ -32,6 +43,15 @@ static class GatewayWolverineExtensions
         if (c.Engine.V2Acts) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return new CopilotReconcileService(copilotReconciler!); });
         // W3.2: the plant's journal delegate publishes through this (AddGatewayPlant); resolving it builds the host first, which makes the sink
         if (c.Engine.V2Acts) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return journalSink!; });
+        // W4.1: resolving these builds the host first, which makes them (null without a home repository)
+        if (c.Engine.V2Acts)
+        {
+            if (c.Instance.Home != null)
+            {
+                services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return correlations!; });
+                services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return inboxPort!; });
+            }
+        }
         // W2.3: shadow history, only where the environment is a shadow environment (v2 acting records its own history, later)
         if (c.Engine.ShadowRuns)
             services.AddSingleton<IShadowHistory>(sp => new ShadowHistory(r => sp.GetRequiredService<WolverineHostService>().PublishAsync(r), c.Instance.Home));
