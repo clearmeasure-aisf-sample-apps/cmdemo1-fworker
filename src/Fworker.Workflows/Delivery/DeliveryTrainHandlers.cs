@@ -40,23 +40,27 @@ public static class DeliveryTrainHandlers
 
 /// <summary>
 /// The router: which trains a fact concerns. A merged item is a candidate of every train (each environment) of the deployables built from its repository; an Octopus event reaches every train of
-/// the deployables that have an Octopus project (the watcher watches one project and the events name none). The time of an event is the time the router receives it.
+/// the deployables that have an Octopus project (the watcher watches one project and the events name none). The time of an event is the time Octopus gave it (At), never later than the router's clock;
+/// an event without one (a reader that has no time, a message from before At existed) is stamped with the time the router receives it.
 /// </summary>
 public sealed class DeliveryTrainRouter(IDeliveryPolicies policies, Func<DateTimeOffset>? clock = null)
 {
     readonly Func<DateTimeOffset> clock = clock ?? (() => DateTimeOffset.UtcNow);
 
+    /// <summary>The time of an event: its own, clamped so that it is never in the future (clock skew between Octopus and the gateway must not put a fact ahead of the train's clock); the router's clock when it has none.</summary>
+    DateTimeOffset TimeOf(DateTimeOffset? at) { var now = clock(); return at is { } t && t < now ? t : now; }
+
     public IReadOnlyList<TrainInput> Route(ItemMerged m)
         => policies.ForRepository(m.Item.Repository).Select(p => (TrainInput)new TrainCandidateAdded(TrainKey.Of(p.Deployable, p.Environment), m)).ToList();
 
     public IReadOnlyList<TrainInput> Route(OctopusReleaseCreated e)
-        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReleaseSeen(TrainKey.Of(p.Deployable, p.Environment), e.ReleaseId, e.Version, e.Commit, clock())).ToList();
+        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReleaseSeen(TrainKey.Of(p.Deployable, p.Environment), e.ReleaseId, e.Version, e.Commit, TimeOf(e.At))).ToList();
 
     public IReadOnlyList<TrainInput> Route(ReleaseCommitResolved e)
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReleaseSeen(TrainKey.Of(p.Deployable, p.Environment), e.ReleaseId, e.Version, e.Commit, clock())).ToList();
 
     public IReadOnlyList<TrainInput> Route(OctopusDeploymentChanged e)
-        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainDeploymentSeen(TrainKey.Of(p.Deployable, p.Environment), e.DeploymentId, e.TaskId, e.ReleaseId, e.Version, e.Environment, e.Phase.ToString(), e.Commit, clock())).ToList();
+        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainDeploymentSeen(TrainKey.Of(p.Deployable, p.Environment), e.DeploymentId, e.TaskId, e.ReleaseId, e.Version, e.Environment, e.Phase.ToString(), e.Commit, TimeOf(e.At))).ToList();
 
     public IReadOnlyList<TrainInput> Route(OctopusReplayBegan e)
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReplay(TrainKey.Of(p.Deployable, p.Environment), true)).ToList();
@@ -65,7 +69,7 @@ public sealed class DeliveryTrainRouter(IDeliveryPolicies policies, Func<DateTim
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReplay(TrainKey.Of(p.Deployable, p.Environment), false)).ToList();
 
     public IReadOnlyList<TrainInput> Route(SignOffRequested e)
-        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainSignOffAsked(TrainKey.Of(p.Deployable, p.Environment), e.InterruptionId, e.DeploymentId, e.TaskId, e.ReleaseId, e.Version, e.Environment, e.Commit, clock())).ToList();
+        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainSignOffAsked(TrainKey.Of(p.Deployable, p.Environment), e.InterruptionId, e.DeploymentId, e.TaskId, e.ReleaseId, e.Version, e.Environment, e.Commit, TimeOf(e.At))).ToList();
 }
 
 /// <summary>The router's handlers: each fact becomes the inputs of its trains, published through the outbox. Public because Wolverine's generated code refers to them.</summary>

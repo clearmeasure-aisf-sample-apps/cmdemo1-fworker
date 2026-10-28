@@ -46,7 +46,7 @@ public sealed class TrainDeployment
     public string TaskId { get; set; } = "";
     /// <summary>"Started", "Succeeded" or "Failed".</summary>
     public string Phase { get; set; } = "Started";
-    /// <summary>When the train saw it start and finish (Octopus events carry no times; the finish time is the health evidence's start).</summary>
+    /// <summary>When the deployment started and finished in Octopus (the time of the event, #496; the router's clock when the event has none). The finish time is the health evidence's start.</summary>
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset? FinishedAt { get; set; }
     public bool Completed => Phase != "Started";
