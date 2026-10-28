@@ -52,6 +52,24 @@ public class IngressInboxTrackedTests
     }
 
     [Fact]
+    public async Task W43_ReRunAndCardPolls_AreTakenIn_AndThePurgeForgetsOldClaims()
+    {
+        if (!TrackedSessionHost.Available) return;
+        var outcomes = new List<string>();
+        await using var h = await TrackedSessionHost.StartAsync(Wire(outcomes));
+        string Ci(string run, string d) => new JsonObject { ["provider"] = "github", ["event"] = "build.branch_completed", ["item"] = 7, ["ref"] = d, ["sha"] = "abc123", ["conclusion"] = "failure", ["run_id"] = 5, ["run_attempt"] = run }.ToJsonString();
+        string Card(string col) => new JsonObject { ["provider"] = "github", ["event"] = "board.card", ["item"] = 7, ["repository"] = "acme/orders", ["column"] = col, ["ref"] = $"poll:board:acme/orders#7:{col}:open" }.ToJsonString();
+        await h.TrackSend(new IngressInboxMessage("webhook", Ci("1", "d-1")));
+        await h.TrackSend(new IngressInboxMessage("webhook", Ci("2", "d-2")));
+        await h.TrackSend(new IngressInboxMessage("poll", Card("Doing")));
+        await h.TrackSend(new IngressInboxMessage("poll", Card("Doing")));   // the pass publishes a card only when it moved; the inbox does not hide a repeat
+        Assert.Equal(["accepted", "accepted", "accepted", "accepted"], outcomes);
+        Assert.Equal(2, await h.Count("SELECT COUNT(*) FROM factory.IngressDedup WHERE Layer = 'fact'"));
+        Assert.Equal(4, new SqlIngressDedup(h.ConnectionString).Purge(TimeSpan.Zero));   // two deliveries and two facts
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM factory.IngressDedup"));
+    }
+
+    [Fact]
     public async Task ARedeliveryOfOneMessage_PassesTheClaims_AndADifferentMessageDoesNot()
     {
         if (!TrackedSessionHost.Available) return;

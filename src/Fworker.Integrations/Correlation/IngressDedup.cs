@@ -23,13 +23,27 @@ public static class IngressKeys
         return string.IsNullOrEmpty(r) || r.StartsWith("poll:", StringComparison.Ordinal) ? null : $"{Str(ev["provider"]) ?? "github"}|{r}";
     }
 
-    /// <summary>"event|item|pr|sha", or null when the event names no pull request or commit to tell two occurrences apart (an item.complete may happen again) (then only its delivery deduplicates it).</summary>
+    /// <summary>
+    /// The fact: "event|item|pr|sha" plus what tells two occurrences of one commit apart, or null when the event cannot be told apart (then only its delivery deduplicates it).
+    /// A sha is required (a pull request number alone is not a fact: it is drafted, reopened, closed again). A CI event (build.*) needs its run id and carries the attempt,
+    /// so a re-run of the same commit is a new fact; a review carries its author and state; any event carries its conclusion or status when it has one (W4.1 follow-up, #485).
+    /// </summary>
     public static string? Business(JsonObject ev)
     {
         var name = Str(ev["event"]); if (string.IsNullOrEmpty(name)) return null;
-        var item = Num(ev["item"]); var pr = Num(ev["pr"]); var sha = Str(ev["sha"]) ?? "";
-        return pr == "" && sha == "" ? null : $"{name}|{item}|{pr}|{sha.ToLowerInvariant()}";
+        var sha = (Str(ev["sha"]) ?? "").ToLowerInvariant();
+        if (sha == "") return null;
+        var run = Scalar(ev["run_id"]);
+        if (name.StartsWith("build.", StringComparison.Ordinal) && run == "") return null;   // a CI event without its run: a re-run would look like the first
+        var key = $"{name}|{Num(ev["item"])}|{Num(ev["pr"])}|{sha}";
+        foreach (var f in Discriminators)
+            if (Scalar(ev[f]) is { Length: > 0 } v) key += $"|{f}={v.ToLowerInvariant()}";
+        return key;
     }
+
+    static readonly string[] Discriminators = ["run_id", "run_attempt", "conclusion", "status", "state", "login", "workflow"];
+
+    static string Scalar(JsonNode? n) => n is JsonValue v ? (v.TryGetValue<string>(out var s) ? s : v.ToString()) : "";
 
     static string? Str(JsonNode? n) => n is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
     static string Num(JsonNode? n) => n is JsonValue v && v.TryGetValue<int>(out var i) && i > 0 ? i.ToString() : "";

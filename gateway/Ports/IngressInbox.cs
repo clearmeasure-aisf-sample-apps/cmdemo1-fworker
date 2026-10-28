@@ -41,7 +41,9 @@ public static class IngressInboxHandler
         var ev = JsonNode.Parse(message.EventJson) as JsonObject;
         var name = ev?["event"]?.ToString() is { Length: > 0 } n ? n : "unknown";
         var item = ev?["item"] is JsonValue v && v.TryGetValue<int>(out var i) && i > 0 ? i : 0;
-        var key = item > 0 ? new ItemId(processor.Home, item).ToString() : "board";
+        // a poll's card names its repository (W4.3: the reconciler reads the cards of every repository of the catalog); a webhook event is the home repository's
+        var repo = ev?["repository"]?.ToString() is { } rs && Fworker.Contracts.Ids.RepoId.TryParse(rs, out var rid) ? rid : processor.Home;
+        var key = item > 0 ? new ItemId(repo, item).ToString() : "board";
         return new ShadowHistoryRecord(key, $"ingress.inbox.{message.Source}.{(name.Length <= 100 ? name : name[..100])}", message.EventJson.Length <= ShadowHistory.MaxDetailChars ? message.EventJson : message.EventJson[..ShadowHistory.MaxDetailChars], DateTimeOffset.UtcNow);
     }
 }

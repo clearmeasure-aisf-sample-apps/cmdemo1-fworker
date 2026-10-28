@@ -1,9 +1,13 @@
+using Fworker.Contracts.Catalog;
 using Fworker.Integrations.Commands;
 // The Wolverine host's registration (task W2.2, docs/design/wolverine-host.md). Nothing is registered without a connection string (FACTORY_DB_CONNECTION):
 // no service, no hosted service, no database call, and the gateway is v1 exactly as before. With one, the services below join the graph and
 // the hosted service is added by AddGatewayBackground (the only place hosted services are registered), after LeadershipService (the node leaves with the lease, so it starts and stops beside it).
 static class GatewayWolverineExtensions
 {
+    /// <summary>How long a claim of the ingress deduplication is kept: longer than any redelivery of a webhook.</summary>
+    public static readonly TimeSpan IngressDedupRetention = TimeSpan.FromDays(7);
+
     public static IServiceCollection AddGatewayWolverine(this IServiceCollection services, GatewayComposition c)
     {
         if (!c.WolverineHost) return services;
@@ -13,6 +17,7 @@ static class GatewayWolverineExtensions
         JournalCommandSink? journalSink = null;
         CopilotReconciler? copilotReconciler = null;
         IngressCorrelations? correlations = null; IngressInboxPort? inboxPort = null;
+        var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null;
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
@@ -32,11 +37,17 @@ static class GatewayWolverineExtensions
                     // W4.1: webhook events into the durable inbox, deduplicated, with the correlation map (also written by the verbs and the runtimes)
                     var cs = WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
                     var map = new Fworker.Integrations.Correlation.SqlCorrelationMap(cs);
-                    IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(new Fworker.Integrations.Correlation.SqlIngressDedup(cs), map, home));
+                    var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
+                    IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
                     correlations = new IngressCorrelations(map, home);
                     inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
+                    // W4.1 follow-up (#485): the claims of the deduplication do not live for ever
+                    jobs.Add(RecurringJobSlots.IngressDedupPurge, _ => { dedup.Purge(IngressDedupRetention); return Task.CompletedTask; });
+                    // W4.3: the board reconciler publishes what the board shows into the inbox as source "poll", the message a webhook sends
+                    if (BoardReconcilerJob.Make(c, sp.GetRequiredService<ISystemCatalog>(), inboxPort, Environment.GetEnvironmentVariable) is { } reconcile) jobs.Add(RecurringJobSlots.BoardReconciler, reconcile);
                 }
-                RecurringJobSlots.Attach(host);   // W4.0: the slots of the board reconciler and the catalog re-read (W4.3), empty
+                if (c.Catalog.Enabled) jobs.Add(RecurringJobSlots.CatalogReread, async ct => { await sp.GetRequiredService<ISystemCatalog>().RefreshAsync(ct); });   // W4.3 (the loader keeps the last good snapshot on a failed read)
+                recurring = RecurringJobSlots.Attach(host, jobs);   // W4.0 slots, filled by W4.3
             }
             return host;
         });
@@ -52,6 +63,9 @@ static class GatewayWolverineExtensions
                 services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return inboxPort!; });
             }
         }
+        // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
+        if (c.Engine.V2Acts && c.Instance.Home != null)
+            services.AddSingleton(sp => { var h = sp.GetRequiredService<WolverineHostService>(); return new RecurringJobScheduler(recurring!, jobs, r => h.PublishAsync(r), () => c.Leader.MayAct); });
         // W2.3: shadow history, only where the environment is a shadow environment (v2 acting records its own history, later)
         if (c.Engine.ShadowRuns)
             services.AddSingleton<IShadowHistory>(sp => new ShadowHistory(r => sp.GetRequiredService<WolverineHostService>().PublishAsync(r), c.Instance.Home));
