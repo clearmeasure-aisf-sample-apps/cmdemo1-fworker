@@ -18,7 +18,54 @@ public class DeliveryShadowTests
     public void TheSameAction_IsAMatch_AndAWaitIsAMatchWhateverItsWords()
     {
         Assert.Equal((ShadowOutcomes.Match, ""), ShadowClassifier.Classify(D(ShadowSide.V1, "promote", native: "promoted"), D(ShadowSide.V2, "promote")));
-        Assert.Equal(ShadowOutcomes.Match, ShadowClassifier.Classify(D(ShadowSide.V1, "wait", reasons: ["it has no deployment to tdd"]), D(ShadowSide.V2, "wait", reasons: ["no tdd deployment"])).Outcome);
+        Assert.Equal(ShadowOutcomes.Match, ShadowClassifier.Classify(D(ShadowSide.V1, "wait", reasons: ["it has no deployment to Tdd"]), D(ShadowSide.V2, "wait", reasons: ["it has no deployment to Tdd (and more words)"])).Outcome);
+    }
+
+    // ---- defect 5: a wait is compared by what it waits for ----------------------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("its deployment to Uat ended Failed (Deployments-9); the operator deploys it again, or the item goes back to Development", "failed")]
+    [InlineData("its deployment to Uat ended Canceled (Deployments-9); the operator deploys it again", "failed")]
+    [InlineData("its deployment to Tdd is Failed (Deployments-9)", "failed")]
+    [InlineData("it has no deployment to Tdd", "none")]
+    [InlineData("its deployment to Tdd is still Executing (Deployments-9)", "started")]
+    [InlineData("its deployment to Tdd is still Started (D-1.0.2-Tdd)", "started")]
+    [InlineData("the tdd app does not run release 2.4.1 yet (/_build: 2.4.0)", "health")]
+    [InlineData("the tdd app has not been Healthy long enough yet (two Healthy reads 5 min apart, the later 10 min after the deployment finished)", "health")]
+    [InlineData("the tdd app answered Unhealthy on /h at 2026-10-28T10:02:00.000Z, after its deployment of 1 finished: the release waits for a new deployment there", "health")]
+    [InlineData("no health URL for tdd (octopus.tddUrl is empty)", "health")]
+    [InlineData("#7 carries the 'hold:owner' label", "gates")]
+    [InlineData("commit abc1234 in the release is not the merge commit of a factory work item", "gates")]
+    public void AWaitsReasonText_IsClassified(string reason, string expected) => Assert.Equal(expected, ShadowReasons.Classify([reason]));
+
+    [Fact]
+    public void AWaitWithSeveralReasons_IsClassifiedByTheFirstOfTheOrder_AndNoReasonIsGates()
+    {
+        Assert.Equal("none", ShadowReasons.Classify(["#7 carries the 'hold:owner' label", "it has no deployment to Tdd"]));
+        Assert.Equal("failed", ShadowReasons.Classify(["it has no deployment to Tdd", "its deployment to Uat ended Failed (D)"]));
+        Assert.Equal("gates", ShadowReasons.Classify([]));   // v1 lists only the common reasons: a wait for an item's gate has none
+    }
+
+    [Fact]
+    public void TwoWaitsForDifferentThings_Differ_AndTheReasonNamesTheClasses()
+    {
+        var v1 = D(ShadowSide.V1, "wait", native: "promotion-waiting", reasons: ["its deployment to Tdd is still Started (D-1)"]);
+        var v2 = D(ShadowSide.V2, "wait", native: "waiting", reasons: ["it has no deployment to Tdd"]);
+        var (outcome, reason) = ShadowClassifier.Classify(v1, v2);
+        Assert.Equal(ShadowOutcomes.Differs, outcome);
+        Assert.Contains("v1 decided wait for started (promotion-waiting)", reason);
+        Assert.Contains("v2 decided wait for none (waiting)", reason);
+        // the comparer waits for the grace on such a pair, as for any difference, and then reports it
+        var c = new ShadowComparer(TimeSpan.FromMinutes(5));
+        c.Observe(v1); c.Observe(v2);
+        Assert.Empty(c.Compare(T0.AddMinutes(1)));
+        Assert.Equal(ShadowOutcomes.Differs, Assert.Single(c.Compare(T0.AddMinutes(6))).Outcome);
+    }
+
+    [Fact]
+    public void AWaitForGatesAlone_V1SaysNothingOf_StillMatches()
+    {
+        Assert.Equal(ShadowOutcomes.Match, ShadowClassifier.Classify(D(ShadowSide.V1, "wait", native: "promotion-waiting"), D(ShadowSide.V2, "wait", reasons: ["#7 carries the 'hold:owner' label"])).Outcome);
     }
 
     [Fact]
@@ -26,7 +73,7 @@ public class DeliveryShadowTests
     {
         var (outcome, reason) = ShadowClassifier.Classify(D(ShadowSide.V1, "promote", native: "promoted"), D(ShadowSide.V2, "wait", native: "waiting", reasons: ["the uat app has not been Healthy long enough"]));
         Assert.Equal(ShadowOutcomes.Differs, outcome);
-        Assert.Equal("v1 decided promote (promoted), v2 decided wait (waiting) [v2: the uat app has not been Healthy long enough]", reason);
+        Assert.Equal("v1 decided promote (promoted), v2 decided wait for health (waiting) [v2: the uat app has not been Healthy long enough]", reason);
     }
 
     [Fact]
@@ -141,7 +188,7 @@ public class DeliveryShadowTests
             new { item = 7, action = "promotion-error", release = "1.0.5", environment = "Uat" },
             new { item = 7, action = "promoted", release = "1.0.6", environment = "Staging" }));                          // an environment of no chain
         r.Shadow.ObserveV2(new TrainDecided("orders/uat", "promote", "1.0.2", ["acme/orders#7", "acme/orders#8"], [], T0));
-        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.3", ["acme/orders#9"], ["no tdd deployment"], T0));
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.3", ["acme/orders#9"], ["it has no deployment to Tdd"], T0));
         r.Now = T0.AddSeconds(5);
         await r.Shadow.Tick(default);
         var rows = r.Store.All.OrderBy(x => x.Release).ToList();
@@ -190,7 +237,7 @@ public class DeliveryShadowTests
         r.Now = f.Now.AddMinutes(6);
         await r.Shadow.Tick(default);
         var row = Assert.Single(r.Store.All, x => x.Outcome == ShadowOutcomes.Differs);
-        Assert.Contains("v1 decided wait (promotion-waiting)", row.Reason);
+        Assert.Contains("v1 decided wait for health (promotion-waiting)", row.Reason);
         Assert.Contains("v2 decided promote (promote)", row.Reason);
         Assert.Contains("[v1: the tdd app has not been Healthy long enough yet]", row.Reason);
     }
@@ -254,15 +301,16 @@ public class DeliveryShadowTests
     {
         var s = new Rig();
         foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) s.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = v, environment = "Uat" }));
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) s.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", v, [], ["#7 carries the 'hold:owner' label"], T0));
         var before = await s.Shadow.Report(10, null, default);
         Assert.Equal(3, (int)before["live"]!["pending"]!);
         Assert.Equal(0, (int)before["live"]!["gate"]!["releases"]!);   // observed, not stored: the gate has seen nothing
         Assert.False((bool)before["live"]!["gate"]!["met"]!);
         s.Now = T0.AddMinutes(6);
-        await s.Shadow.Tick(default);   // the waits nobody answered become v1-only rows
+        await s.Shadow.Tick(default);
         var after = await s.Shadow.Report(10, null, default);
         Assert.Equal(3, (int)after["summary"]!["total"]!);
-        Assert.Equal(3, (int)after["summary"]!["counts"]!["v1-only"]!);
+        Assert.Equal(3, (int)after["summary"]!["counts"]!["match"]!);
         Assert.Equal(0, (int)after["live"]!["pending"]!);
         Assert.Equal(3, (int)after["summary"]!["gate"]!["releases"]!);
         Assert.Equal(after["summary"]!["gate"]!.ToJsonString(), after["live"]!["gate"]!.ToJsonString());
@@ -289,5 +337,114 @@ public class DeliveryShadowTests
         Assert.Equal("1.0.4", (string)all["comparisons"]![0]!["release"]!);
         var narrow = await r.Shadow.Report(10, ShadowOutcomes.V2Only, default);
         Assert.Single((JsonArray)narrow["comparisons"]!);
+    }
+
+    // ---- defect 2: a later outcome of the train retracts what it said before ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task AWaitingThatTheTrainWithdrew_IsNeverReported_IdleRetractsIt()
+    {
+        var r = new Rig();
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.2", [], ["the tdd app has not been Healthy long enough yet"], T0));
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "idle", "1.0.2", [], [], T0.AddMinutes(1)));
+        r.Now = T0.AddMinutes(10);
+        await r.Shadow.Tick(default);
+        Assert.Empty(r.Store.All);   // it would have been a stale v2-only row
+        Assert.Equal(0, (int)r.Shadow.Status()["pending"]!);
+    }
+
+    [Fact]
+    public async Task ADeliveredRelease_RetractsItselfAndTheOnesItSuperseded()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) r.Shadow.ObserveV2(new TrainDecided("orders/uat", "following", v, [], ["a deployment"], T0));
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "delivered", "1.0.4", ["acme/orders#7"], ["delivered in release 1.0.4, superseding 1.0.2, 1.0.3"], T0.AddMinutes(1), ["1.0.2", "1.0.3"]));
+        r.Now = T0.AddMinutes(10);
+        await r.Shadow.Tick(default);
+        Assert.Empty(r.Store.All);
+    }
+
+    [Fact]
+    public async Task ARetractionKeepsV1sSide_SoTheReleaseDecidedAgainIsComparedWithIt()
+    {
+        var r = new Rig();
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.2", environment = "Uat", reasons = new[] { "it has no deployment to Tdd" } }));
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.2", [], ["it has no deployment to Tdd"], T0));
+        r.Now = T0.AddSeconds(5);
+        await r.Shadow.Tick(default);
+        Assert.Equal(ShadowOutcomes.Match, Assert.Single(r.Store.All).Outcome);
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "idle", "1.0.2", [], [], T0.AddMinutes(1)));
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.2", environment = "Uat", reasons = new[] { "it has no deployment to Tdd" } }));   // v1 repeats itself
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.2", [], ["it has no deployment to Tdd"], T0.AddMinutes(2)));
+        r.Now = T0.AddMinutes(3);
+        await r.Shadow.Tick(default);
+        Assert.Equal(2, r.Store.All.Count);   // reported again, against v1's decision (not as a v2-only row)
+        Assert.All(r.Store.All, x => Assert.Equal(ShadowOutcomes.Match, x.Outcome));
+    }
+
+    [Fact]
+    public async Task AnIdleWithoutARelease_RetractsNothing()
+    {
+        var r = new Rig();
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.2", [], ["x"], T0));
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "idle", "", [], [], T0.AddMinutes(1)));
+        Assert.Equal(1, (int)r.Shadow.Status()["pending"]!);
+    }
+
+    // ---- defect 6: the gate counts live decisions, not the replay -----------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ReplayRows_AreStoredAndFlagged_AndTheGateCountsOnlyLiveOnes()
+    {
+        var r = new Rig();
+        // the replay: three old releases judged once, 40 days after the first of them
+        foreach (var v in new[] { "2.4.1", "2.4.2", "2.4.3" }) r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", v, [], ["x"], T0, null, Replay: true));
+        r.Now = T0.AddMinutes(6);
+        await r.Shadow.Tick(default);
+        Assert.Equal(3, r.Store.All.Count);
+        Assert.All(r.Store.All, x => Assert.True(x.Replay));
+        Assert.True((bool)r.Store.All[0].V2!["replay"]!);
+        var status = r.Shadow.Status();
+        Assert.Equal(0, (int)status["gate"]!["releases"]!);
+        Assert.False((bool)status["gate"]!["met"]!);
+        Assert.Equal(3L, (long)status["v2"]!["replayComparisons"]!);
+        r.Now = T0.AddDays(2);
+        Assert.False((bool)r.Shadow.Status()["gate"]!["met"]!);   // the hours run from the first live comparison, not from the replay's
+        // one live decision: one release, the hours start now
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "promote", "2.4.4", [], [], r.Now));
+        r.Now = r.Now.AddMinutes(6);
+        await r.Shadow.Tick(default);
+        Assert.Equal(1, (int)r.Shadow.Status()["gate"]!["releases"]!);
+        var report = await r.Shadow.Report(10, null, default);
+        Assert.Equal(4, (int)report["summary"]!["total"]!);
+        Assert.Equal(3, (int)report["summary"]!["replay"]!["comparisons"]!);
+        Assert.Equal(1, (int)report["summary"]!["live"]!["releases"]!);
+        Assert.Equal(4, (int)report["summary"]!["releases"]!);
+        Assert.Equal(1, (int)report["summary"]!["gate"]!["releases"]!);
+        Assert.False((bool)report["summary"]!["gate"]!["met"]!);
+        r.Now = r.Now.AddHours(4);
+        Assert.True((bool)(await r.Shadow.Report(10, null, default))["summary"]!["gate"]!["met"]!);
+    }
+
+    [Fact]
+    public async Task AV1OnlyRow_IsNoEvidenceThatTheTrainRan()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = v, environment = "Uat" }));
+        r.Now = T0.AddMinutes(6);
+        await r.Shadow.Tick(default);
+        Assert.Equal(3, r.Store.All.Count(x => x.Outcome == ShadowOutcomes.V1Only));
+        Assert.Equal(0, (int)r.Shadow.Status()["gate"]!["releases"]!);
+        Assert.Equal(0, (int)(await r.Shadow.Report(10, null, default))["summary"]!["gate"]!["releases"]!);
+    }
+
+    [Fact]
+    public void V1sUndecidedActions_AreCountedByName_NotLostSilently()
+    {
+        var r = new Rig();
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-deferred", release = "1.0.2", reason = "sweep-budget" }, new { item = 7, action = "promotion-error", release = "1.0.3", environment = "Uat" }, new { item = 7, action = "promotion-deferred", release = "1.0.4", reason = "sweep-budget" }));
+        var undecided = (JsonObject)r.Shadow.Status()["v1"]!["undecided"]!;
+        Assert.Equal(2L, (long)undecided["promotion-deferred"]!);
+        Assert.Equal(1L, (long)undecided["promotion-error"]!);
     }
 }

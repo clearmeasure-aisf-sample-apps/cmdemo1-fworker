@@ -70,6 +70,9 @@ public class DeliveryShadowTrackedTests
         w.AddMessageHandler(new InputHandler<TrainSignOffAsked>(svc));
         w.AddMessageHandler(new InputHandler<TrainHold>(svc));
         w.AddMessageHandler(new InputHandler<TrainWake>(svc));
+        w.AddMessageHandler(new InputHandler<TrainReplay>(svc));
+        w.AddMessageHandler(new RouteHandler<OctopusReplayBegan>(router.Route));
+        w.AddMessageHandler(new RouteHandler<OctopusReplayComplete>(router.Route));
         w.AddMessageHandler(new RouteHandler<ItemMerged>(router.Route));
         w.AddMessageHandler(new RouteHandler<OctopusReleaseCreated>(router.Route));
         w.AddMessageHandler(new RouteHandler<ReleaseCommitResolved>(router.Route));
@@ -80,7 +83,7 @@ public class DeliveryShadowTrackedTests
         w.AddMessageHandler(new RecordHandler<PromoteRelease>(m => DeliveryShadowHandlers.Handle(m, shadow)));
         w.AddMessageHandler(new RecordHandler<AnswerSignOff>(m => DeliveryShadowHandlers.Handle(m, shadow)));
         w.AddMessageHandler(new DeliveredHandler(delivered));
-        foreach (var t in new[] { typeof(TrainCandidateAdded), typeof(TrainGatesChanged), typeof(TrainReleaseSeen), typeof(TrainDeploymentSeen), typeof(TrainSignOffAsked), typeof(TrainHold), typeof(TrainWake),
+        foreach (var t in new[] { typeof(TrainCandidateAdded), typeof(TrainGatesChanged), typeof(TrainReleaseSeen), typeof(TrainDeploymentSeen), typeof(TrainSignOffAsked), typeof(TrainHold), typeof(TrainWake), typeof(TrainReplay), typeof(OctopusReplayBegan), typeof(OctopusReplayComplete),
                      typeof(ItemMerged), typeof(OctopusReleaseCreated), typeof(ReleaseCommitResolved), typeof(OctopusDeploymentChanged), typeof(SignOffRequested),
                      typeof(PromoteRelease), typeof(AnswerSignOff), typeof(TrainDecided), typeof(DeliveredTo) })
             w.PublishMessage(t).ToLocalQueue("train");
@@ -111,6 +114,16 @@ public class DeliveryShadowTrackedTests
 
     static JsonArray V1(object action) => new(JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(action)));
 
+    static async Task NoDeadLetters(TrackedSessionHost h)
+    {
+        await using var c = new Microsoft.Data.SqlClient.SqlConnection(h.ConnectionString); await c.OpenAsync();
+        await using var cmd = new Microsoft.Data.SqlClient.SqlCommand("SELECT message_type, exception_type, LEFT(exception_message, 300) FROM wolverine.wolverine_dead_letters", c);
+        await using var r = await cmd.ExecuteReaderAsync();
+        var rows = new List<string>();
+        while (await r.ReadAsync()) rows.Add($"{r.GetValue(0)} {r.GetValue(1)} {r.GetValue(2)}");
+        Assert.True(rows.Count == 0, string.Join(" // ", rows.Distinct()));
+    }
+
     static long Recorded(DeliveryShadow s) => (long)s.Status()["v2"]!["commandsRecorded"]!;
 
     [Fact]
@@ -139,10 +152,68 @@ public class DeliveryShadowTrackedTests
         var summary = await store.Summary(default);
         Assert.True(summary.Counts[ShadowOutcomes.Match] >= 1);
         Assert.True(summary.Releases >= 1);
-        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
+        await NoDeadLetters(h);
         var report = await shadow.Report(10, null, default);
         Assert.Equal("PromoteRelease", (string)report["recentCommands"]![0]!["command"]!);
         Assert.False((bool)report["recentCommands"]![0]!["executed"]!);
+    }
+
+    /// <summary>The events of the watcher's replay as it publishes them (Watcher.Poll): every release first, every deployment after, Started then Succeeded, an old release deployed to uat among newer ones.</summary>
+    [Fact]
+    public async Task AReplayShapedLikeTdds_IsAppliedWithoutDecisions_JudgedOnce_AndItsRowsAreFlaggedAndNotCounted()
+    {
+        if (!TrackedSessionHost.Available) return;
+        var fx = Fixture(); DeliveryShadow? shadow = null;
+        await using var h = await TrackedSessionHost.StartAsync(Wire(fx, s => shadow = s));
+        await Baseline(h);
+        char[] commits = ['a', 'b', 'e', 'f', 'g'];
+        fx.Range('d', 'a'); fx.Range('d', 'a', 'b'); fx.Range('d', 'a', 'b', 'e'); fx.Range('e', 'f'); fx.Range('e', 'f', 'g');
+        fx.Reads.Running["tdd"] = "1.0.6";
+        var decided0 = (long)shadow!.Status()["v2"]!["decisions"]!; var reads0 = fx.Reads.Probes + fx.Reads.Compares;   // (the baseline is not part of the replay)
+        await h.TrackSend(new OctopusReplayBegan());
+        for (var i = 0; i < commits.Length; i++)
+            await h.TrackSend(new ItemMerged(new ItemId(Repo, 2 + i), Sha(commits[i]), 102 + i, new ItemMergedGates(true, "", true, false, false, []), [], "poll"));
+        for (var i = 0; i < commits.Length; i++) await h.TrackSend(new OctopusReleaseCreated($"R-{2 + i}", $"1.0.{2 + i}", Sha(commits[i])));
+        for (var i = 0; i < commits.Length; i++)
+        {
+            await h.TrackSend(new OctopusDeploymentChanged($"D-{2 + i}-Tdd", $"T-{2 + i}-Tdd", $"R-{2 + i}", $"1.0.{2 + i}", "Tdd", OctopusDeploymentPhase.Started, Sha(commits[i])));
+            await h.TrackSend(new OctopusDeploymentChanged($"D-{2 + i}-Tdd", $"T-{2 + i}-Tdd", $"R-{2 + i}", $"1.0.{2 + i}", "Tdd", OctopusDeploymentPhase.Succeeded, Sha(commits[i])));
+        }
+        await h.TrackSend(new OctopusDeploymentChanged("D-4-Uat", "T-4-Uat", "R-4", "1.0.4", "Uat", OctopusDeploymentPhase.Started, Sha('e')));
+        await h.TrackSend(new OctopusDeploymentChanged("D-4-Uat", "T-4-Uat", "R-4", "1.0.4", "Uat", OctopusDeploymentPhase.Succeeded, Sha('e')));
+        Assert.Equal(decided0, (long)shadow!.Status()["v2"]!["decisions"]!);   // nothing is decided on the partial state
+        Assert.Equal(reads0, fx.Reads.Probes + fx.Reads.Compares);
+        await h.TrackSend(new OctopusReplayComplete());
+        Assert.True(await Until(() => Task.FromResult((long)shadow.Status()["v2"]!["decisions"]! > decided0)), "the train did not judge its state at the end of the replay");
+        // v1's pass says the same of the newest release; the pair is stored at once and flagged
+        shadow.ObserveV1(V1(new { item = 6, action = "promotion-waiting", release = "1.0.6", environment = "Uat", items = new[] { 6 }, reasons = new[] { "the tdd app has not been Healthy long enough yet" } }));
+        await shadow.Tick(default);
+        Assert.True(await h.Count("SELECT COUNT(*) FROM factory.DeliveryShadowComparisons WHERE Replay = 1") >= 1);
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM factory.DeliveryShadowComparisons WHERE Replay = 0 AND V2Action <> ''"));
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM factory.DeliveryShadowComparisons WHERE Reason LIKE '%no deployment to%'"));
+        var report = await shadow.Report(20, null, default);
+        Assert.Equal(0, (int)report["summary"]!["gate"]!["releases"]!);
+        Assert.False((bool)report["summary"]!["gate"]!["met"]!);
+        Assert.True((int)report["summary"]!["replay"]!["comparisons"]! >= 1);
+        await NoDeadLetters(h);
+    }
+
+    [Fact]
+    public async Task AReadThatFails_LosesNoInput_TheMessageIsHandled_AndNothingGoesToTheDeadLetters()
+    {
+        if (!TrackedSessionHost.Available) return;
+        var fx = Fixture(); DeliveryShadow? shadow = null;
+        await using var h = await TrackedSessionHost.StartAsync(Wire(fx, s => shadow = s));
+        await Baseline(h);
+        fx.Range('d', 'a'); fx.Reads.Running["tdd"] = "1.0.2";
+        fx.Reads.Fail = new HttpRequestException("the read budget is low: the shadow run does not read");
+        await h.TrackSend(new ItemMerged(new ItemId(Repo, 7), Sha('a'), 107, new ItemMergedGates(true, "", true, false, false, []), [], "webhook"));
+        await h.TrackSend(new OctopusReleaseCreated("R-2", "1.0.2", Sha('a')));
+        await h.TrackSend(new OctopusDeploymentChanged("D-2-Tdd", "T-2-Tdd", "R-2", "1.0.2", "Tdd", OctopusDeploymentPhase.Started, Sha('a')));
+        await h.TrackSend(new OctopusDeploymentChanged("D-2-Tdd", "T-2-Tdd", "R-2", "1.0.2", "Tdd", OctopusDeploymentPhase.Succeeded, Sha('a')));   // judged: the read fails
+        Assert.True(await h.Count("SELECT COUNT(*) FROM factory.DeliveryTrains WHERE [Key] = 'orders/uat' AND StateJson LIKE '%\"1.0.2\"%' AND StateJson LIKE '%Succeeded%'") == 1, "the input was lost with the failed read");
+        await NoDeadLetters(h);
+        Assert.NotNull(shadow);
     }
 
     [Fact]

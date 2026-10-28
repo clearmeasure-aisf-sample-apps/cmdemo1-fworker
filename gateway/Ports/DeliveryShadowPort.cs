@@ -5,6 +5,7 @@ using Fworker.Contracts.Seams;
 using Fworker.Domain;
 using Fworker.Workflows.Delivery;
 using Wolverine;
+using Wolverine.ErrorHandling;
 
 // W5.2 (docs/design/fworker-wolverine-implementation.md W5): the delivery train in the gateway, in SHADOW only (Engine.ShadowRuns: tdd until the cutover). It is fed what v1 leaves visible:
 // ItemMerged (derived from the merge webhook and the board poll by W5.0) and the events of the Octopus watcher (W4.2, read only). It decides as the train would and publishes TrainDecided,
@@ -50,28 +51,53 @@ static class DeliveryShadowSettings
 /// S3 for the shadow run: v1's ingress did its part, and the events of the Octopus watcher are also published to the shadow host, where the router turns them into the trains' inputs. A problem with
 /// the host never reaches the watcher.
 /// </summary>
-sealed class OctopusShadowIngress : IEventIngress
+sealed class OctopusShadowIngress : IEventIngress, IDisposable
 {
-    readonly IEventIngress inner;
-    // one consumer, in the order the watcher published: a poll's release, commit and deployment events must reach the host in that order
-    readonly System.Threading.Channels.Channel<IngressEvent> queue = System.Threading.Channels.Channel.CreateBounded<IngressEvent>(new System.Threading.Channels.BoundedChannelOptions(2000) { FullMode = System.Threading.Channels.BoundedChannelFullMode.DropWrite, SingleReader = true });
+    public const int DefaultCapacity = 10000;
+    public static readonly TimeSpan RetryFirst = TimeSpan.FromSeconds(1), RetryMax = TimeSpan.FromSeconds(30);
 
-    public OctopusShadowIngress(IEventIngress inner, ShadowOctopusPort port)
+    readonly IEventIngress inner;
+    readonly ShadowOctopusPort port;
+    readonly CancellationTokenSource stop = new();
+    // one consumer, in the order the watcher published: a poll's release, commit and deployment events must reach the host in that order
+    readonly System.Threading.Channels.Channel<IngressEvent> queue;
+
+    public OctopusShadowIngress(IEventIngress inner, ShadowOctopusPort port, int capacity = DefaultCapacity, TimeSpan? retryFirst = null, TimeSpan? retryMax = null)
     {
-        this.inner = inner;
+        this.inner = inner; this.port = port;
+        queue = System.Threading.Channels.Channel.CreateBounded<IngressEvent>(new System.Threading.Channels.BoundedChannelOptions(capacity) { FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait, SingleReader = true });
+        var first = retryFirst ?? RetryFirst; var max = retryMax ?? RetryMax;
         _ = Task.Run(async () =>
         {
-            await foreach (var ev in queue.Reader.ReadAllAsync())
-                try { await port.Publish(ev); }
-                catch (Exception e) { Console.Error.WriteLine($"delivery shadow: {e.GetType().Name} publishing {ev.GetType().Name}"); }
+            try
+            {
+                await foreach (var ev in queue.Reader.ReadAllAsync(stop.Token))
+                {
+                    // an event is handed to the host or tried again with growing pauses (a host that is restarting, a database that does not answer); the next event waits for it, so the order holds
+                    for (var pause = first; !stop.IsCancellationRequested; pause = TimeSpan.FromTicks(Math.Min(max.Ticks, pause.Ticks * 2)))
+                    {
+                        try { if (await port.Publish(ev)) break; Console.Error.WriteLine($"delivery shadow: the host is not up, {ev.GetType().Name} is tried again"); }
+                        catch (Exception e) { Console.Error.WriteLine($"delivery shadow: {e.GetType().Name} publishing {ev.GetType().Name}, tried again"); }
+                        await Task.Delay(pause, stop.Token);
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
         });
     }
 
+    /// <summary>
+    /// Hands the event on. A queue that is full is not a silent drop: the exception reaches the watcher, which has not marked the event published and offers it again at its next poll (v1's part of
+    /// this call is idempotent by the event's key).
+    /// </summary>
     public void Ingest(IngressEvent ev)
     {
         inner.Ingest(ev);
-        if (ev is OctopusReleaseCreated or ReleaseCommitResolved or OctopusDeploymentChanged or SignOffRequested) queue.Writer.TryWrite(ev);
+        if (!port.Enabled || ev is not (OctopusReleaseCreated or ReleaseCommitResolved or OctopusDeploymentChanged or SignOffRequested or OctopusReplayBegan or OctopusReplayComplete)) return;
+        if (!queue.Writer.TryWrite(ev)) throw new InvalidOperationException($"the delivery shadow's queue is full ({queue.Reader.Count} events): {ev.GetType().Name} is offered again at the next poll");
     }
+
+    public void Dispose() => stop.Cancel();
 }
 
 /// <summary>The comparison tick of the shadow run (a hosted service of AddGatewayBackground): compares and stores every <c>interval</c>, and keeps the ingress deduplication short.</summary>
@@ -153,6 +179,9 @@ static class DeliveryShadowWiring
             // (TrainConflictException). One queue for all trains is the shadow's stand-in for a queue per key; it is durable, so a timer or input survives a restart.
             foreach (var t in typeof(TrainInput).Assembly.GetTypes().Where(t => !t.IsAbstract && typeof(TrainInput).IsAssignableFrom(t))) w.PublishMessage(t).ToLocalQueue(TrainQueue);
             w.LocalQueue(TrainQueue).UseDurableInbox().Sequential();
+            // The train keeps a failed read from losing an input (it saves the input first and looks again by itself), so this is the backstop for one that still escapes: GitHub or the app
+            // not answering is tried again with growing pauses and then scheduled again every few minutes; it never goes to the dead letters, because an input lost there is lost for good.
+            w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5));
         };
     }
 
@@ -163,6 +192,8 @@ static class DeliveryShadowWiring
         ReleaseCommitResolved e => host.PublishAsync(e),
         OctopusDeploymentChanged e => host.PublishAsync(e),
         SignOffRequested e => host.PublishAsync(e),
+        OctopusReplayBegan e => host.PublishAsync(e),
+        OctopusReplayComplete e => host.PublishAsync(e),
         _ => Task.FromResult(false),
     };
 }

@@ -19,6 +19,7 @@ public static class DeliveryTrainHandlers
     public static Task<OutgoingMessages> Handle(TrainDeploymentSeen m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainSignOffAsked m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainHold m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(TrainReplay m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainWake m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
 
     public static async Task<OutgoingMessages> Run(TrainInput input, DeliveryTrainService svc, CancellationToken ct)
@@ -57,6 +58,12 @@ public sealed class DeliveryTrainRouter(IDeliveryPolicies policies, Func<DateTim
     public IReadOnlyList<TrainInput> Route(OctopusDeploymentChanged e)
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainDeploymentSeen(TrainKey.Of(p.Deployable, p.Environment), e.DeploymentId, e.TaskId, e.ReleaseId, e.Version, e.Environment, e.Phase.ToString(), e.Commit, clock())).ToList();
 
+    public IReadOnlyList<TrainInput> Route(OctopusReplayBegan e)
+        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReplay(TrainKey.Of(p.Deployable, p.Environment), true)).ToList();
+
+    public IReadOnlyList<TrainInput> Route(OctopusReplayComplete e)
+        => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReplay(TrainKey.Of(p.Deployable, p.Environment), false)).ToList();
+
     public IReadOnlyList<TrainInput> Route(SignOffRequested e)
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainSignOffAsked(TrainKey.Of(p.Deployable, p.Environment), e.InterruptionId, e.DeploymentId, e.TaskId, e.ReleaseId, e.Version, e.Environment, e.Commit, clock())).ToList();
 }
@@ -69,6 +76,8 @@ public static class DeliveryTrainRouting
     public static OutgoingMessages Handle(ReleaseCommitResolved m, DeliveryTrainRouter r) => All(r.Route(m));
     public static OutgoingMessages Handle(OctopusDeploymentChanged m, DeliveryTrainRouter r) => All(r.Route(m));
     public static OutgoingMessages Handle(SignOffRequested m, DeliveryTrainRouter r) => All(r.Route(m));
+    public static OutgoingMessages Handle(OctopusReplayBegan m, DeliveryTrainRouter r) => All(r.Route(m));
+    public static OutgoingMessages Handle(OctopusReplayComplete m, DeliveryTrainRouter r) => All(r.Route(m));
 
     static OutgoingMessages All(IReadOnlyList<TrainInput> inputs)
     {

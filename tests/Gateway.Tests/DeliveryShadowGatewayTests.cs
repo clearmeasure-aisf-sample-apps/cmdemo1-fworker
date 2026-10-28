@@ -155,11 +155,13 @@ public sealed class DeliveryShadowGatewayTests
             ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Started, A));
             ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Succeeded, A));
             // the train judges 1.0.2 for uat: the tdd app has not been Healthy long enough yet, so it waits
-            Assert.True(await Until(async () => (await Get(host, "/api/v1/status")).Json?["deliveryShadow"]?["v2"]?["decisions"]?.GetValue<long>() >= 1, 60), "the train decided nothing");
+            // (the uat train's own decision for 1.0.2, not any decision: the train says "following" while the tdd deployment still runs, and its other trains decide earlier)
+            const string uatWaiting = "SELECT COUNT(*) FROM factory.DeliveryTrains WHERE [Key] LIKE '%/uat' AND StateJson LIKE '%waiting|1.0.2|%'";
+            Assert.True(await Until(async () => (await Rows(cs, uatWaiting))[0] == "1", 60), "the uat train did not wait for 1.0.2: " + string.Join(" // ", await Rows(cs, "SELECT [Key] + ' ' + LEFT(StateJson, 200) + CAST(Revision AS varchar) FROM factory.DeliveryTrains")));
             // v1's pass (its AutoPromoter hands the actions of the verb auto-promote over) says the same
             var holder = host.Services.GetRequiredService<DeliveryShadowHolder>();
             holder.Shadow!.ObserveV1(new JsonArray(new JsonObject { ["item"] = 7, ["action"] = "promotion-waiting", ["release"] = "1.0.2", ["environment"] = "uat", ["items"] = new JsonArray(7), ["reasons"] = new JsonArray("the tdd app has not been Healthy long enough yet") }));
-            Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.DeliveryShadowComparisons WHERE Release = '1.0.2' AND Outcome = 'match'"))[0] == "1", 60), "no comparison was stored");
+            Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.DeliveryShadowComparisons WHERE Release = '1.0.2' AND Outcome = 'match'"))[0] == "1", 60), "no comparison was stored: " + holder.Shadow.Status().ToJsonString() + " // " + string.Join(" // ", await Rows(cs, "SELECT Outcome + ' ' + Release + ' ' + V1Action + '/' + V2Action + ' ' + LEFT(Reason, 300) FROM factory.DeliveryShadowComparisons")));
             // the report: an authenticated read of the stored comparisons
             var report = await Get(host, "/api/v1/delivery-shadow?limit=5");
             Assert.Equal(200, report.Status);
@@ -175,6 +177,35 @@ public sealed class DeliveryShadowGatewayTests
             // and nothing was executed: no command of the train left the process
             var live = (await Get(host, "/api/v1/status")).Json!["deliveryShadow"]!;
             Assert.Equal(0, live["v2"]!["commandsExecuted"]!.GetValue<long>());
+            Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
+        });
+    }
+
+    [Fact]
+    public async Task TheWatchersReplay_IsAppliedWithoutADecision_AndJudgedOnceWhenItEnds()
+    {
+        if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
+        await WithShadowGateway(async (cs, host, stub) =>
+        {
+            Assert.True(await Until(async () => (await Get(host, "/api/v1/status")).Json?["wolverine"]?["state"]?.ToString() == "running", 90), "the host did not start");
+            var ingress = host.Services.GetRequiredService<IEventIngress>();
+            long Decisions() => host.Services.GetRequiredService<DeliveryShadowHolder>().Shadow!.Status()["v2"]!["decisions"]!.GetValue<long>();
+            ingress.Ingest(new OctopusReplayBegan());
+            ingress.Ingest(new OctopusReleaseCreated("R-1", "1.0.1", D));
+            foreach (var e in new[] { "tdd", "uat", "prod" })
+            {
+                ingress.Ingest(new OctopusDeploymentChanged($"D-1-{e}", $"T-1-{e}", "R-1", "1.0.1", e, OctopusDeploymentPhase.Started, D));
+                ingress.Ingest(new OctopusDeploymentChanged($"D-1-{e}", $"T-1-{e}", "R-1", "1.0.1", e, OctopusDeploymentPhase.Succeeded, D));
+            }
+            // the newest release is seen first, its deployment to tdd after it, as the watcher publishes a replay
+            ingress.Ingest(new OctopusReleaseCreated("R-2", "1.0.2", A));
+            Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.DeliveryTrains WHERE Revision >= 8"))[0] != "0", 40), "the trains took no input in");
+            ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Started, A));
+            ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Succeeded, A));
+            await Task.Delay(4000);
+            Assert.Equal(0, Decisions());   // the replay is not over: nothing is decided on its partial state
+            ingress.Ingest(new OctopusReplayComplete());
+            Assert.True(await Until(() => Task.FromResult(Decisions() >= 1), 60), "the train did not judge its state at the end of the replay");
             Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
         });
     }

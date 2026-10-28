@@ -90,8 +90,11 @@ sealed class ShadowHistory(Func<ShadowHistoryRecord, Task<bool>> publish, RepoId
 }
 
 /// <summary>S3 with shadow history: v1's ingress does its part first, then the event is recorded. A recording problem never reaches the caller.</summary>
-sealed class ShadowEventIngress(IEventIngress v1, IShadowHistory shadow) : IEventIngress
+sealed class ShadowEventIngress(IEventIngress v1, IShadowHistory shadow) : IEventIngress, IDisposable
 {
+    /// <summary>The container disposes only the ingress it built; the one wrapped inside (the shadow run's retry loop) stops with it.</summary>
+    public void Dispose() => (v1 as IDisposable)?.Dispose();
+
     public void Ingest(IngressEvent ev)
     {
         v1.Ingest(ev);

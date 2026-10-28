@@ -14,8 +14,10 @@ using Wolverine;
 sealed class IngressInboxPort(Func<IngressInboxMessage, Task<bool>> publish) { public Task<bool> Publish(IngressInboxMessage m) => publish(m); }
 
 /// <summary>S3 with the inbox: v1's ingress first, then the event goes to the durable inbox. A problem with the inbox never reaches the caller.</summary>
-sealed class InboxEventIngress(IEventIngress v1, IngressInboxPort inbox) : IEventIngress
+sealed class InboxEventIngress(IEventIngress v1, IngressInboxPort inbox) : IEventIngress, IDisposable
 {
+    public void Dispose() => (v1 as IDisposable)?.Dispose();
+
     public void Ingest(IngressEvent ev)
     {
         v1.Ingest(ev);

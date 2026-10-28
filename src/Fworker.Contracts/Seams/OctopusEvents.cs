@@ -24,6 +24,18 @@ public sealed record OctopusDeploymentChanged(string DeploymentId, string TaskId
     public string Key => $"octopus:deployment:{DeploymentId}:{Phase}";
 }
 
+/// <summary>The watcher's first read of Octopus (a replay of the history inside its lookback) begins: the delivery train applies what follows without deciding.</summary>
+public sealed record OctopusReplayBegan : IngressEvent
+{
+    public string Key => "octopus:replay:began";
+}
+
+/// <summary>The first read of Octopus ended without running out of its call budget: the replay is applied, a train judges its state once.</summary>
+public sealed record OctopusReplayComplete : IngressEvent
+{
+    public string Key => "octopus:replay:complete";
+}
+
 /// <summary>A running deployment waits at a manual intervention (the Sign-off step). <paramref name="InterruptionId"/> identifies the wait.</summary>
 public sealed record SignOffRequested(string InterruptionId, string DeploymentId, string TaskId, string ReleaseId, string Version, string Environment, string? Commit) : IngressEvent
 {

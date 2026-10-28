@@ -17,10 +17,13 @@ sealed class FakeTrainReads : ITrainReads
     public readonly Dictionary<string, string> Status = [];
     public Func<DateTimeOffset> Clock = () => DateTimeOffset.UtcNow;
     public int Probes, Compares;
+    /// <summary>When set, every read throws it (GitHub or the app does not answer).</summary>
+    public Exception? Fail;
 
     public Task<CompareRange?> Compare(RepoId repository, string deployedCommit, string releaseCommit, CancellationToken ct)
     {
         Compares++;
+        if (Fail is not null) throw Fail;
         return Task.FromResult(Ranges.TryGetValue((deployedCommit, releaseCommit), out var r) ? r : null);
     }
 
@@ -32,6 +35,7 @@ sealed class FakeTrainReads : ITrainReads
     public Task<EnvProbe> Probe(string deployable, string environment, CancellationToken ct)
     {
         Probes++;
+        if (Fail is not null) throw Fail;
         return Task.FromResult(new EnvProbe($"https://{environment}.example", Running.GetValueOrDefault(environment), Status.GetValueOrDefault(environment, "Healthy"), Clock()));
     }
 }

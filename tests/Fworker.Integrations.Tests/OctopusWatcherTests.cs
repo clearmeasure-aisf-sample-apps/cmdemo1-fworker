@@ -35,7 +35,71 @@ public sealed class OctopusWatcherTests
     static (OctopusWatcher w, List<IngressEvent> got) Make(FakeOctopus o, int budget = 60)
     {
         var got = new List<IngressEvent>();
-        return (new OctopusWatcher(o, got.Add, new OctopusWatchSettings("Spaces-1", "ui", MaxCallsPerPoll: budget), () => T0), got);
+        // (the replay markers are the subject of their own tests below)
+        return (new OctopusWatcher(o, e => { if (e is not (OctopusReplayBegan or OctopusReplayComplete)) got.Add(e); }, new OctopusWatchSettings("Spaces-1", "ui", MaxCallsPerPoll: budget), () => T0), got);
+    }
+
+    static (OctopusWatcher w, List<IngressEvent> all) MakeAll(FakeOctopus o, int budget = 60, Func<IngressEvent, bool>? refuse = null)
+    {
+        var all = new List<IngressEvent>();
+        return (new OctopusWatcher(o, e => { if (refuse?.Invoke(e) == true) throw new InvalidOperationException("the ingress is full"); all.Add(e); }, new OctopusWatchSettings("Spaces-1", "ui", MaxCallsPerPoll: budget), () => T0), all);
+    }
+
+    [Fact]
+    public async Task TheFirstPollIsAReplay_BeganBeforeItsEvents_CompleteAfter_AndOnlyOnce()
+    {
+        var (w, all) = MakeAll(Server("Success"));
+        Assert.True(await w.Poll());
+        Assert.IsType<OctopusReplayBegan>(all[0]);
+        Assert.IsType<OctopusReplayComplete>(all[^1]);
+        Assert.Equal(1, all.OfType<OctopusReplayComplete>().Count());
+        Assert.Contains(all, e => e is OctopusDeploymentChanged);
+        await w.Poll();
+        Assert.Equal(1, all.OfType<OctopusReplayBegan>().Count());
+        Assert.Equal(1, all.OfType<OctopusReplayComplete>().Count());
+    }
+
+    [Fact]
+    public async Task AReplayThatRanOutOfBudget_IsNotComplete_UntilAPollReadsEverything()
+    {
+        var (w, all) = MakeAll(Server("Success"), budget: 4);   // the project, the environments, the releases and the deployments: no call left for the tasks
+        Assert.False(await w.Poll());
+        Assert.Empty(all.OfType<OctopusReplayComplete>());
+        Assert.Single(all.OfType<OctopusReplayBegan>());
+        Assert.True(await MakeAllSamePoll(w, all));
+    }
+
+    static async Task<bool> MakeAllSamePoll(OctopusWatcher w, List<IngressEvent> all)
+    {
+        var ok = false;
+        for (var i = 0; i < 5 && !ok; i++) ok = await w.Poll();
+        return ok && all.OfType<OctopusReplayComplete>().Count() == 1 && all.OfType<OctopusReplayBegan>().Count() == 1;
+    }
+
+    [Fact]
+    public async Task AMarkerThatTheIngressRefuses_IsPublishedAgainByTheNextPoll()
+    {
+        var refuse = true;
+        var (w, all) = MakeAll(Server("Success"), refuse: e => refuse && e is OctopusReplayBegan);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => w.Poll());
+        Assert.Empty(all);
+        refuse = false;
+        Assert.True(await w.Poll());
+        Assert.IsType<OctopusReplayBegan>(all[0]);
+        Assert.IsType<OctopusReplayComplete>(all[^1]);
+    }
+
+    [Fact]
+    public async Task AnEventThatTheIngressRefuses_IsForgotten_AndOfferedAgain()
+    {
+        var refuse = true;
+        var (w, all) = MakeAll(Server("Success"), refuse: e => refuse && e is OctopusDeploymentChanged);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => w.Poll());
+        Assert.Empty(all.OfType<OctopusReplayComplete>());   // the replay is not complete: the deployment is missing
+        refuse = false;
+        await w.Poll();
+        Assert.Contains(all, e => e is OctopusDeploymentChanged { Phase: OctopusDeploymentPhase.Started });
+        Assert.Single(all.OfType<OctopusReplayComplete>());
     }
 
     static string KeyOf(IngressEvent e) => e switch { OctopusReleaseCreated r => r.Key, ReleaseCommitResolved c => c.Key, OctopusDeploymentChanged d => d.Key, SignOffRequested s => s.Key, _ => "" };

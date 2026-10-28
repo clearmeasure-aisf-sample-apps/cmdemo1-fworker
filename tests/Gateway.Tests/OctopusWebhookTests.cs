@@ -73,6 +73,8 @@ public sealed class OctopusWebhookTests
         var shadow = await FirstPoll(shadow: true);
         Assert.Contains(shadow, e => e is OctopusReleaseCreated { Version: "2.4.1288" });
         Assert.Contains(shadow, e => e is OctopusDeploymentChanged { Environment: "tdd", Phase: OctopusDeploymentPhase.Succeeded });
-        Assert.Empty(await FirstPoll(shadow: false));   // the acting watcher keeps its 15 minute lookback
+        Assert.IsType<OctopusReplayBegan>(shadow[0]);   // the train decides nothing between these two
+        Assert.IsType<OctopusReplayComplete>(shadow[^1]);
+        Assert.Empty((await FirstPoll(shadow: false)).Where(e => e is not (OctopusReplayBegan or OctopusReplayComplete)));   // the acting watcher keeps its 15 minute lookback
     }
 }

@@ -113,8 +113,10 @@ public sealed class TrainState
     public string HeldReason { get; set; } = "";
     /// <summary>When the one pending timer is due (null: none). A timer that fires with another due time is stale and clears nothing.</summary>
     public DateTimeOffset? WakeDue { get; set; }
-    /// <summary>The fingerprint of the last decision published: a decision is published once per change.</summary>
-    public string LastDecision { get; set; } = "";
+    /// <summary>The fingerprint of the last decision published for each release ("" for those about none): a decision is published once per change.</summary>
+    public Dictionary<string, string> Decisions { get; set; } = [];
+    /// <summary>Set while the watcher's replay of Octopus's history is being applied: the train takes inputs in and decides nothing (it ends with the replay, or after <see cref="DeliveryTrainService.ReplayLimit"/>).</summary>
+    public DateTimeOffset? ReplayingSince { get; set; }
     public long Sequence { get; set; }
 
     static readonly JsonSerializerOptions Json = new() { WriteIndented = false };

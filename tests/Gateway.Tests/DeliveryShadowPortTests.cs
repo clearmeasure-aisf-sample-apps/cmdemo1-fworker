@@ -231,11 +231,74 @@ public sealed class DeliveryShadowPortTests
     public async Task APortThatIsOff_OrThatFails_NeverReachesTheWatcher()
     {
         var inner = new Rec();
-        new OctopusShadowIngress(inner, new ShadowOctopusPort(_ => throw new InvalidOperationException("boom"), true)).Ingest(new OctopusReleaseCreated("R", "1", null));
-        new OctopusShadowIngress(inner, new ShadowOctopusPort(_ => Task.FromResult(true), false)).Ingest(new OctopusReleaseCreated("R", "1", null));
+        using var failing = new OctopusShadowIngress(inner, new ShadowOctopusPort(_ => throw new InvalidOperationException("boom"), true));
+        failing.Ingest(new OctopusReleaseCreated("R", "1", null));
+        using var off = new OctopusShadowIngress(inner, new ShadowOctopusPort(_ => Task.FromResult(true), false));
+        off.Ingest(new OctopusReleaseCreated("R", "1", null));
         await Task.Delay(100);
         Assert.Equal(2, inner.Got.Count);
         Assert.False(await new ShadowOctopusPort(_ => Task.FromResult(true), false).Publish(new object()));
+    }
+
+    [Fact]
+    public async Task APublishThatFails_IsTriedAgain_AndTheEventsBehindItWaitForIt()
+    {
+        var attempts = 0; var got = new List<string>();
+        var port = new ShadowOctopusPort(ev =>
+        {
+            if (ev is OctopusReleaseCreated && Interlocked.Increment(ref attempts) < 3) throw new HttpRequestException("the database does not answer");
+            lock (got) got.Add(ev.GetType().Name);
+            return Task.FromResult(true);
+        }, true);
+        using var ingress = new OctopusShadowIngress(new Rec(), port, retryFirst: TimeSpan.FromMilliseconds(5), retryMax: TimeSpan.FromMilliseconds(20));
+        ingress.Ingest(new OctopusReleaseCreated("R", "1", null));
+        ingress.Ingest(new OctopusDeploymentChanged("D", "T", "R", "1", "tdd", OctopusDeploymentPhase.Started, Sha1));
+        for (var i = 0; i < 300 && got.Count < 2; i++) await Task.Delay(10);
+        Assert.Equal(3, attempts);   // two failures, then it went through
+        Assert.Equal(["OctopusReleaseCreated", "OctopusDeploymentChanged"], got);   // in order
+    }
+
+    [Fact]
+    public async Task AHostThatIsNotUpYet_IsWaitedFor_NotDroppedOn()
+    {
+        var up = false; var got = new List<object>();
+        var port = new ShadowOctopusPort(ev => { if (!up) return Task.FromResult(false); lock (got) got.Add(ev); return Task.FromResult(true); }, true);
+        using var ingress = new OctopusShadowIngress(new Rec(), port, retryFirst: TimeSpan.FromMilliseconds(5), retryMax: TimeSpan.FromMilliseconds(20));
+        ingress.Ingest(new OctopusReplayBegan());
+        await Task.Delay(100);
+        Assert.Empty(got);
+        up = true;
+        for (var i = 0; i < 300 && got.Count < 1; i++) await Task.Delay(10);
+        Assert.IsType<OctopusReplayBegan>(Assert.Single(got));
+    }
+
+    [Fact]
+    public async Task AFullQueue_IsNoSilentDrop_TheWatcherIsTold_AndOffersTheEventAgain()
+    {
+        var gate = new TaskCompletionSource(); var got = new List<string>();
+        var port = new ShadowOctopusPort(async ev => { await gate.Task; lock (got) got.Add(((OctopusDeploymentChanged)ev).DeploymentId); return true; }, true);
+        using var ingress = new OctopusShadowIngress(new Rec(), port, capacity: 2);
+        OctopusDeploymentChanged D(string id) => new(id, "T", "R", "1", "tdd", OctopusDeploymentPhase.Started, Sha1);
+        ingress.Ingest(D("D1"));
+        await Task.Delay(50);   // D1 is in the consumer's hands, the queue holds two more
+        ingress.Ingest(D("D2")); ingress.Ingest(D("D3"));
+        var full = Assert.Throws<InvalidOperationException>(() => ingress.Ingest(D("D4")));
+        Assert.Contains("offered again", full.Message);
+        gate.SetResult();
+        for (var i = 0; i < 300 && got.Count < 3; i++) await Task.Delay(10);
+        ingress.Ingest(D("D4"));   // what the watcher does at its next poll
+        for (var i = 0; i < 300 && got.Count < 4; i++) await Task.Delay(10);
+        Assert.Equal(["D1", "D2", "D3", "D4"], got);
+    }
+
+    [Fact]
+    public async Task TheReplayMarkers_GoToTheHost_AndV1TakesThemWithoutComplaint()
+    {
+        var published = new List<object>();
+        using var ingress = new OctopusShadowIngress(new V1EventIngress(new EventHub()), new ShadowOctopusPort(ev => { lock (published) published.Add(ev); return Task.FromResult(true); }, true));
+        ingress.Ingest(new OctopusReplayBegan()); ingress.Ingest(new OctopusReplayComplete());
+        for (var i = 0; i < 200 && published.Count < 2; i++) await Task.Delay(10);
+        Assert.IsType<OctopusReplayBegan>(published[0]); Assert.IsType<OctopusReplayComplete>(published[1]);
     }
 
     [Fact]

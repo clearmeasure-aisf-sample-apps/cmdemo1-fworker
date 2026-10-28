@@ -1,0 +1,276 @@
+using Fworker.Contracts.Commands;
+using Fworker.Contracts.Ids;
+using Fworker.Contracts.Messaging;
+using Fworker.Workflows.Delivery;
+using Xunit;
+using static Fworker.Workflow.Tests.TrainFixture;
+
+namespace Fworker.Workflow.Tests;
+
+/// <summary>
+/// Issue 500 (W5 shadow analysis on tdd): the train must not decide on a replay's partial state, must say one decision per open release and retract it when the release is done with, must not lose
+/// an input to a read that fails, and must look again by itself. One test per defect, written to fail on the code before the fix.
+/// </summary>
+public class DeliveryTrainShadowDefectTests
+{
+    static readonly string[] HoldGap = ["#8 carries the 'hold:owner' label"];
+
+    /// <summary>uat train, baseline 1.0.1 (commit d) everywhere, item #7 merged as commit a, release 1.0.2 built from a and finished in tdd.</summary>
+    static async Task<TrainFixture> OneRelease(string[]? gaps = null)
+    {
+        var f = new TrainFixture();
+        await f.Baseline();
+        f.Range('d', 'a');
+        await f.Merge(7, 'a', gaps);
+        f.Reads.Running["tdd"] = "1.0.2";
+        await f.ReleaseInPrevious("1.0.2", 'a');
+        return f;
+    }
+
+    // ---- defect 1: no decision on a replay's partial state ----------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The shape of tdd's replay: the watcher publishes every release first and every deployment after (Watcher.Poll), the deployments of a release as Started then Succeeded, an old release
+    /// deployed to uat among newer ones that are not.
+    /// </summary>
+    static async Task<TrainFixture> TddShapedReplay(bool markers, Func<TrainFixture, string, Task>? after = null)
+    {
+        var f = new TrainFixture();
+        await f.Baseline();
+        char[] commits = ['a', 'b', 'e', 'f', 'g'];   // 1.0.2 .. 1.0.6, a chain on top of the baseline commit d
+        f.Range('d', 'a'); f.Range('d', 'a', 'b'); f.Range('d', 'a', 'b', 'e');
+        f.Range('e', 'f'); f.Range('e', 'f', 'g');
+        f.Reads.Running["tdd"] = "1.0.6";
+        if (markers) await f.Send(new TrainReplay(f.Key, true));
+        for (var i = 0; i < commits.Length; i++) { f.Now += TimeSpan.FromMinutes(1); await f.Merge(2 + i, commits[i]); }
+        for (var i = 0; i < commits.Length; i++) { f.Now += TimeSpan.FromMinutes(1); await f.Release($"1.0.{2 + i}", commits[i]); }
+        if (after is not null) await after(f, "releases");
+        for (var i = 0; i < commits.Length; i++)
+        {
+            var v = $"1.0.{2 + i}";
+            f.Now += TimeSpan.FromMinutes(1);
+            await f.Deploy(v, "Tdd", "Started"); await f.Deploy(v, "Tdd", "Succeeded");
+        }
+        if (after is not null) await after(f, "tdd");
+        f.Now += TimeSpan.FromMinutes(1);
+        await f.Deploy("1.0.4", "Uat", "Started"); await f.Deploy("1.0.4", "Uat", "Succeeded");
+        if (after is not null) await after(f, "uat");
+        if (markers) await f.Send(new TrainReplay(f.Key, false));
+        return f;
+    }
+
+    [Fact]
+    public async Task WithoutTheReplayMarkers_TheTrainDecidesOnPartialState_TheDefect()
+    {
+        string? firstWaiting = null;
+        await TddShapedReplay(false, (f, stage) =>
+        {
+            if (stage == "releases" && f.Of<TrainDecided>().FirstOrDefault(d => d.Action == "waiting") is { } w) firstWaiting = w.Reasons[0];
+            return Task.CompletedTask;
+        });
+        // every release was seen, no deployment yet: the train says the newest release has no deployment to tdd, and v1 says no such thing
+        Assert.Equal("it has no deployment to Tdd", firstWaiting);
+    }
+
+    [Fact]
+    public async Task WhileTheReplayIsApplied_TheTrainDecidesNothingAndReadsNothing_ThenJudgesOnce()
+    {
+        var seen = new List<string>();
+        var f = await TddShapedReplay(true, (fx, stage) =>
+        {
+            Assert.Empty(fx.Of<TrainDecided>());
+            Assert.Empty(fx.Of<PromoteRelease>());
+            Assert.Empty(fx.Of<DeliveredTo>());
+            Assert.Equal(0, fx.Reads.Probes + fx.Reads.Compares);
+            seen.Add(stage);
+            return Task.CompletedTask;
+        });
+        Assert.Equal(["releases", "tdd", "uat"], seen);
+        // the end of the replay: one judgment of the whole state
+        var decided = f.Of<TrainDecided>().ToList();
+        Assert.NotEmpty(decided);
+        Assert.All(decided, d => Assert.True(d.Replay));
+        var delivered = Assert.Single(decided, d => d.Action == "delivered");
+        Assert.Equal("1.0.4", delivered.Release);
+        Assert.Equal(["1.0.2", "1.0.3"], delivered.Superseded!.Order());
+        Assert.Equal(["acme/orders#2", "acme/orders#3", "acme/orders#4"], f.Of<DeliveredTo>().Select(d => d.Item.ToString()).Order());
+        // only the open releases are described, and none of them as having no deployment to tdd
+        Assert.DoesNotContain(decided, d => d.Reasons.Any(r => r.Contains("no deployment")));
+        Assert.Contains(decided, d => d is { Action: "waiting", Release: "1.0.6" });
+        Assert.Null(f.State.ReplayingSince);
+    }
+
+    [Fact]
+    public async Task ADecisionAfterTheReplay_IsLive()
+    {
+        var f = await TddShapedReplay(true);
+        f.All.Clear();
+        await f.After(TimeSpan.FromMinutes(5)); await f.After(TimeSpan.FromMinutes(5)); await f.After(TimeSpan.FromMinutes(5));
+        Assert.Contains(f.Of<TrainDecided>(), d => d.Action == "promote" && !d.Replay);
+    }
+
+    [Fact]
+    public async Task AReplayWhoseEndNeverComes_StopsHoldingTheTrainBack()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        await f.Send(new TrainReplay(f.Key, true));
+        f.Range('d', 'a'); await f.Merge(7, 'a'); f.Reads.Running["tdd"] = "1.0.2";
+        await f.ReleaseInPrevious("1.0.2", 'a');
+        Assert.Empty(f.Of<TrainDecided>());
+        f.Now += DeliveryTrainService.ReplayLimit + TimeSpan.FromMinutes(1);
+        await f.Wake();
+        Assert.NotEmpty(f.Of<TrainDecided>());
+    }
+
+    // ---- defect 2: a later outcome clears what the train said about a release -----------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ADeliveredRelease_SaysWhichReleasesItSuperseded_SoTheShadowCanRetractThem()
+    {
+        var f = await OneRelease();
+        f.Range('d', 'a', 'b');
+        f.Now += TimeSpan.FromMinutes(1);
+        await f.Merge(8, 'b', HoldGap);
+        f.Reads.Running["tdd"] = "1.0.3";
+        await f.ReleaseInPrevious("1.0.3", 'b');
+        Assert.Contains("1.0.2", f.State.Decisions.Keys); Assert.Contains("1.0.3", f.State.Decisions.Keys);
+        // 1.0.3 reaches uat by a person
+        await f.Deploy("1.0.3", "Uat", "Started"); await f.Deploy("1.0.3", "Uat", "Succeeded");
+        var delivered = f.Of<TrainDecided>().Last(d => d.Action == "delivered");
+        Assert.Equal("1.0.3", delivered.Release);
+        Assert.Equal(["1.0.2"], delivered.Superseded);
+        Assert.Empty(f.State.Decisions);   // nothing is left to say about either
+    }
+
+    [Fact]
+    public async Task AReleaseThatIsNotJudgedAnyMore_IsRetractedWithAnIdle()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a'); await f.Merge(7, 'a', ["#7 has no 'Auto Merge' label"]);
+        // 1.0.1b is assembled first and deployed later; 1.0.2 is built from the same commit
+        f.Now += TimeSpan.FromMinutes(1); await f.Release("1.0.1b", 'a');
+        f.Now += TimeSpan.FromMinutes(1); f.Reads.Running["tdd"] = "1.0.2"; await f.ReleaseInPrevious("1.0.2", 'a');
+        Assert.Equal("waiting", f.LastDecision!.Action);
+        Assert.Equal("1.0.2", f.LastDecision.Release);
+        f.All.Clear();
+        await f.Deploy("1.0.1b", "Uat", "Started"); await f.Deploy("1.0.1b", "Uat", "Succeeded");   // uat now runs the commit 1.0.2 was built from
+        var idle = Assert.Single(f.Of<TrainDecided>(), d => d.Action == "idle");
+        Assert.Equal("1.0.2", idle.Release);
+        Assert.DoesNotContain("1.0.2", f.State.Decisions.Keys);
+        // and it is said once
+        f.All.Clear(); await f.After(TimeSpan.FromMinutes(1));
+        Assert.DoesNotContain(f.Of<TrainDecided>(), d => d.Action == "idle");
+    }
+
+    // ---- defect 3: one decision for every open release v1 would judge ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task EveryOpenRelease_GetsItsOwnDecision_NotOnlyTheNewestBlockedOne()
+    {
+        var f = await OneRelease(["#7 carries the 'hold:owner' label"]);
+        f.Range('d', 'a', 'b');
+        f.Now += TimeSpan.FromMinutes(1);
+        await f.Merge(8, 'b', HoldGap);
+        f.Reads.Running["tdd"] = "1.0.3";
+        await f.ReleaseInPrevious("1.0.3", 'b');
+        var waiting = f.Of<TrainDecided>().Where(d => d.Action == "waiting").GroupBy(d => d.Release).ToDictionary(g => g.Key, g => g.Last());
+        Assert.Contains("1.0.3", waiting.Keys);
+        Assert.Contains("1.0.2", waiting.Keys);   // v1 names this one too (uat 2.4.1261 was v1-only)
+        Assert.Contains("#7 carries the 'hold:owner' label", waiting["1.0.2"].Reasons);
+    }
+
+    [Fact]
+    public async Task ABlockedNewerRelease_IsDescribed_WhileTheOlderOneIsPromoted()
+    {
+        var f = await OneRelease();
+        f.Range('d', 'a', 'b');
+        f.Now += TimeSpan.FromMinutes(1);
+        await f.Merge(8, 'b', HoldGap);
+        f.Reads.Running["tdd"] = "1.0.3";
+        await f.ReleaseInPrevious("1.0.3", 'b');
+        f.Reads.Running["tdd"] = "1.0.2";
+        await f.Mature();
+        var decided = f.Of<TrainDecided>().ToList();
+        Assert.Contains(decided, d => d is { Action: "waiting", Release: "1.0.3" });
+        Assert.Contains(decided, d => d is { Action: "promote", Release: "1.0.2" });
+    }
+
+    // ---- defect 4: no lost input ---------------------------------------------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(typeof(HttpRequestException))]
+    [InlineData(typeof(TaskCanceledException))]
+    [InlineData(typeof(TimeoutException))]
+    public async Task AReadThatFails_DoesNotLoseTheInput_TheTrainLooksAgainByItself(Type failure)
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a'); await f.Merge(7, 'a');
+        f.Reads.Running["tdd"] = "1.0.2";
+        f.Reads.Fail = (Exception)Activator.CreateInstance(failure, "the read budget is low")!;
+        var seen = await f.Release("1.0.2", 'a');
+        var tdd = await f.Deploy("1.0.2", "Tdd", "Started");
+        var done = await f.Deploy("1.0.2", "Tdd", "Succeeded");   // the evaluation needs a read now, and fails
+        // nothing is thrown, the facts are kept, and a wake is asked for
+        Assert.Contains("1.0.2", f.State.Releases.Keys);
+        Assert.True(f.State.Deployments["1.0.2"]["tdd"].Succeeded);
+        Assert.Equal(f.Now + DeliveryTrainService.TransientRetry, done.WakeAt);
+        Assert.Empty(done.Messages);
+        // the read answers again: the wake judges the state the saved inputs made
+        f.Reads.Fail = null;
+        await f.After(DeliveryTrainService.TransientRetry);
+        Assert.Contains(f.Of<TrainDecided>(), d => d is { Action: "waiting", Release: "1.0.2" });
+        Assert.NotNull(seen); Assert.NotNull(tdd);
+    }
+
+    [Fact]
+    public async Task AFailureThatIsNoReadFailure_StillFailsTheMessage_ButTheInputIsSaved()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        f.Range('d', 'a'); await f.Merge(7, 'a');
+        f.Reads.Running["tdd"] = "1.0.2";
+        f.Reads.Fail = new InvalidOperationException("a defect");
+        await f.Release("1.0.2", 'a');   // (no deployment to tdd: no read)
+        await f.Deploy("1.0.2", "Tdd", "Started");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => f.Deploy("1.0.2", "Tdd", "Succeeded"));
+        Assert.True(f.State.Deployments["1.0.2"]["tdd"].Succeeded);
+    }
+
+    // ---- defect 7: the timers ----------------------------------------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task AWaitingTrain_LooksAgainAtLeastEveryTenMinutes_EvenWhenNoGapIsTimeBound()
+    {
+        var f = await OneRelease(["#7 carries the 'hold:owner' label"]);
+        var r = await f.After(TimeSpan.FromMinutes(1));   // the hold lifts only by a label change the train may not hear of
+        Assert.Equal(f.Now + DeliveryTrainService.SafetyWake, r.WakeAt);
+        // and again after that, as long as it waits
+        var again = await f.After(DeliveryTrainService.SafetyWake);
+        Assert.Equal(f.Now + DeliveryTrainService.SafetyWake, again.WakeAt);
+    }
+
+    [Fact]
+    public async Task ATrainWithNothingToWaitFor_AsksForNoTimer()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        var r = await f.After(TimeSpan.FromMinutes(1));
+        Assert.Null(r.WakeAt);
+        Assert.Empty(f.Of<TrainDecided>());
+    }
+
+    [Fact]
+    public async Task EveryKindOfHealthGap_WakesTheTrain()
+    {
+        // the app does not run the release yet, and the reads are too young: the poll
+        var f = await OneRelease();
+        f.Reads.Running["tdd"] = "1.0.1";
+        var notRunning = await f.After(TimeSpan.FromMinutes(1));
+        Assert.Contains("does not run release 1.0.2", f.LastDecision!.Reasons[0]);
+        Assert.True(notRunning.WakeAt <= f.Now + TimeSpan.FromSeconds(120));
+        // an unhealthy answer after the deployment finished: only a new deployment lifts it, so the safety interval
+        f.Reads.Running["tdd"] = "1.0.2"; f.Reads.Status["tdd"] = "Unhealthy";
+        var unhealthy = await f.After(TimeSpan.FromMinutes(1));
+        Assert.StartsWith("the tdd app answered Unhealthy", f.LastDecision!.Reasons[0]);
+        Assert.NotNull(unhealthy.WakeAt);
+        Assert.True(unhealthy.WakeAt <= f.Now + DeliveryTrainService.SafetyWake);
+    }
+}
