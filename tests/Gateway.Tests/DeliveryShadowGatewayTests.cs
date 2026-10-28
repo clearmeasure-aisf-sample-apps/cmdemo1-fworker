@@ -93,7 +93,15 @@ public sealed class DeliveryShadowGatewayTests
         return false;
     }
 
-    static async Task WithShadowGateway(Func<string, GatewayHost, Stub, Task> body)
+    static Task WithShadowGateway(Func<string, GatewayHost, Stub, Task> body) => WithShadowDatabase(async (cs, stub, start) =>
+    {
+        var host = start();
+        try { await body(cs, host, stub); }
+        finally { await host.DisposeAsync(); }
+    });
+
+    /// <summary>The database, the stub and the environment of a shadow gateway; <c>start</c> makes a gateway on them, and a second one after the first is disposed is a restart on the same database.</summary>
+    static async Task WithShadowDatabase(Func<string, Stub, Func<GatewayHost>, Task> body)
     {
         var sql = WolverineHostTestSupport.Sql!;
         var db = "fw_w52_" + Guid.NewGuid().ToString("N")[..10];
@@ -114,16 +122,12 @@ public sealed class DeliveryShadowGatewayTests
             cfg["delivery"] = new JsonObject { ["autoPromote"] = new JsonObject { ["enabled"] = true, ["environments"] = new JsonArray("uat", "prod"), ["gatewayEnvironment"] = "tdd" } };
         };
         env.Apply();
-        var host = new GatewayHost(); var disposed = false;
         try
         {
-            _ = host.Server;
-            await body(cs, host, stub);
-            await host.DisposeAsync(); disposed = true;
+            await body(cs, stub, () => { var host = new GatewayHost(); _ = host.Server; return host; });
         }
         finally
         {
-            if (!disposed) await host.DisposeAsync();
             SqlConnection.ClearAllPools();
             try { await Rows(master, $"ALTER DATABASE [{db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{db}]"); } catch { }
         }
@@ -209,6 +213,53 @@ public sealed class DeliveryShadowGatewayTests
             ingress.Ingest(new OctopusReplayComplete());
             Assert.True(await Until(() => Task.FromResult(Decisions() >= 1), 60), "the train did not judge its state at the end of the replay");
             Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
+        });
+    }
+
+    [Fact]
+    public async Task ARestartOnTheSameDatabase_PublishesTheTrainsDecisionsAgain_AfterTheSecondReplay()
+    {
+        // tdd 1.0.838 and 1.0.839: the state of the first process held the fingerprint of every decision, so the second one replayed, judged, found nothing new and published nothing; its shadow stayed empty
+        if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
+        await WithShadowDatabase(async (cs, stub, start) =>
+        {
+            async Task Replay(GatewayHost host)
+            {
+                Assert.True(await Until(async () => (await Get(host, "/api/v1/status")).Json?["wolverine"]?["state"]?.ToString() == "running", 90), "the host did not start");
+                var ingress = host.Services.GetRequiredService<IEventIngress>();
+                ingress.Ingest(new OctopusReplayBegan());
+                ingress.Ingest(new OctopusReleaseCreated("R-1", "1.0.1", D));
+                foreach (var e in new[] { "tdd", "uat", "prod" })
+                {
+                    ingress.Ingest(new OctopusDeploymentChanged($"D-1-{e}", $"T-1-{e}", "R-1", "1.0.1", e, OctopusDeploymentPhase.Started, D));
+                    ingress.Ingest(new OctopusDeploymentChanged($"D-1-{e}", $"T-1-{e}", "R-1", "1.0.1", e, OctopusDeploymentPhase.Succeeded, D));
+                }
+                ingress.Ingest(new OctopusReleaseCreated("R-2", "1.0.2", A));
+                ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Started, A));
+                ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Succeeded, A));
+                ingress.Ingest(new OctopusReplayComplete());
+            }
+            long V2Decisions(GatewayHost host) => host.Services.GetRequiredService<DeliveryShadowHolder>().Shadow!.Status()["v2"]!["decisions"]!.GetValue<long>();
+            const string uatWaiting = "SELECT COUNT(*) FROM factory.DeliveryTrains WHERE [Key] LIKE '%/uat' AND StateJson LIKE '%waiting|1.0.2|%'";
+            var first = start();
+            try
+            {
+                await Replay(first);
+                Assert.True(await Until(() => Task.FromResult(V2Decisions(first) >= 1), 60), "the first process published no decision");
+                Assert.Equal("1", (await Rows(cs, uatWaiting))[0]);   // (and the train's state holds what it said)
+            }
+            finally { await first.DisposeAsync(); }
+            // the second process: the database has the train's state with its decisions; the shadow in memory is new
+            var second = start();
+            try
+            {
+                Assert.Equal(0, V2Decisions(second));
+                await Replay(second);
+                Assert.True(await Until(() => Task.FromResult(V2Decisions(second) >= 1), 60), "the restarted train published no decision after its replay: " + second.Services.GetRequiredService<DeliveryShadowHolder>().Shadow!.Status().ToJsonString());
+                Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
+                Assert.All(stub.Seen, r => Assert.Equal("GET", r.Method));   // still read only
+            }
+            finally { await second.DisposeAsync(); }
         });
     }
 

@@ -122,6 +122,75 @@ public class DeliveryTrainShadowDefectTests
         Assert.NotEmpty(f.Of<TrainDecided>());
     }
 
+    // ---- defect 5 (tdd 1.0.838 and 1.0.839): after a restart the train decided nothing, because nothing had changed ------------------------------------------------
+
+    /// <summary>Two open releases with a decision each, published and saved: 1.0.2 waits for its item's gate, 1.0.3 has no deployment to Tdd.</summary>
+    static async Task<TrainFixture> TwoDecisions()
+    {
+        var f = await OneRelease(HoldGap);
+        f.Now += TimeSpan.FromMinutes(1);
+        await f.Release("1.0.3", 'b');
+        Assert.Contains(f.Of<TrainDecided>(), d => d.Release == "1.0.2" && d.Action == "waiting");
+        Assert.Contains(f.Of<TrainDecided>(), d => d.Release == "1.0.3" && d.Action == "waiting");
+        f.All.Clear();
+        return f;
+    }
+
+    static string[] Released(TrainFixture f) => f.Of<TrainDecided>().Select(d => d.Release).Distinct().OrderBy(r => r).ToArray();
+
+    [Fact]
+    public async Task AfterARestartsReplay_EveryCurrentDecisionIsPublishedAgain_ThoughNothingChanged()
+    {
+        var f = await TwoDecisions();
+        // a restart: the watcher replays Octopus's history (the state already has all of it), and whoever listens to the decisions starts with none
+        await f.Send(new TrainReplay(f.Key, true));
+        await f.Release("1.0.2", 'a'); await f.Release("1.0.3", 'b');
+        Assert.Empty(f.Of<TrainDecided>());
+        await f.Send(new TrainReplay(f.Key, false));
+        var again = f.Of<TrainDecided>().ToList();
+        Assert.Equal(["1.0.2", "1.0.3"], again.Select(d => d.Release).OrderBy(r => r).ToArray());
+        Assert.All(again, d => { Assert.Equal("waiting", d.Action); Assert.True(d.Replay); Assert.NotEmpty(d.Reasons); });
+        Assert.False(f.State.RepublishPending);
+        // and only once: the next look, with nothing changed, says nothing
+        f.All.Clear();
+        await f.After(TimeSpan.FromMinutes(1));
+        Assert.Empty(f.Of<TrainDecided>());
+    }
+
+    [Fact]
+    public async Task ADecisionSavedBeforeTheDetailsWereKept_IsDecidedAfreshAfterARestart()
+    {
+        var f = await TwoDecisions();
+        var rec = (await f.Store.Load(f.Key, default))!;
+        rec.State.DecisionDetails.Clear();   // (what the deployed state looks like: fingerprints only)
+        Assert.True(await f.Store.Save(f.Key, rec.State, rec.Revision, default));
+        await f.Send(new TrainReplay(f.Key, true));
+        await f.Send(new TrainReplay(f.Key, false));
+        Assert.Equal(["1.0.2", "1.0.3"], Released(f));
+    }
+
+    [Fact]
+    public async Task AReleaseThatCannotBeReadAtTheRestartsReplayEnd_KeepsItsDecision_AndIsPublishedWithTheOthers()
+    {
+        var f = await TwoDecisions();
+        f.Reads.Fail = new HttpRequestException("the shadow run's reads of this minute are spent");   // 1.0.2's range cannot be read: it is not judged again, its decision stands
+        await f.Send(new TrainReplay(f.Key, true));
+        await f.Send(new TrainReplay(f.Key, false));
+        Assert.Equal(["1.0.2", "1.0.3"], Released(f));
+        Assert.Contains(f.Of<TrainDecided>(), d => d.Release == "1.0.2" && d.Reasons.Any(r => r.Contains("hold:owner")));
+        Assert.False(f.State.RepublishPending);
+    }
+
+    [Fact]
+    public async Task AReplayWhoseEndNeverComes_PublishesTheDecisionsAgainWhenTheHoldRunsOut()
+    {
+        var f = await TwoDecisions();
+        await f.Send(new TrainReplay(f.Key, true));
+        f.Now += DeliveryTrainService.ReplayLimit + TimeSpan.FromMinutes(1);
+        await f.Wake();
+        Assert.Equal(["1.0.2", "1.0.3"], Released(f));
+    }
+
     // ---- defect 2: a later outcome clears what the train said about a release -----------------------------------------------------------------------------------
 
     [Fact]

@@ -82,6 +82,15 @@ public sealed class TrainRead
     public string Status { get; set; } = "";
 }
 
+/// <summary>What was published for a release with its fingerprint: enough to publish the same decision again (after a restart the shadow holds none of them).</summary>
+public sealed class TrainDecisionDetail
+{
+    public string Action { get; set; } = "";
+    public List<string> Items { get; set; } = [];
+    public List<string> Reasons { get; set; } = [];
+    public List<string>? Superseded { get; set; }
+}
+
 public sealed class TrainState
 {
     public string Key { get; set; } = "";
@@ -115,6 +124,13 @@ public sealed class TrainState
     public DateTimeOffset? WakeDue { get; set; }
     /// <summary>The fingerprint of the last decision published for each release ("" for those about none): a decision is published once per change.</summary>
     public Dictionary<string, string> Decisions { get; set; } = [];
+    /// <summary>The decision itself behind each fingerprint of <see cref="Decisions"/> (a state saved before this existed has none for its releases).</summary>
+    public Dictionary<string, TrainDecisionDetail> DecisionDetails { get; set; } = [];
+    /// <summary>
+    /// Set when the watcher's replay ends (and when a lost end marker lets the hold run out): the next completed evaluation publishes the current decision of every release again. The listener of the
+    /// decisions (the shadow) lives in memory and holds none after a restart, while a decision is otherwise published only when it changes.
+    /// </summary>
+    public bool RepublishPending { get; set; }
     /// <summary>Set while the watcher's replay of Octopus's history is being applied: the train takes inputs in and decides nothing (it ends with the replay, or after <see cref="DeliveryTrainService.ReplayLimit"/>).</summary>
     public DateTimeOffset? ReplayingSince { get; set; }
     public long Sequence { get; set; }
