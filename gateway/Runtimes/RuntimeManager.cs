@@ -54,7 +54,25 @@ interface IItemOwners
     Task CloseOwner(int item);
 }
 
-sealed class RuntimeManager
+// The runtime manager as the v2 side sees it (W3.1): the handlers of the result messages call these, and the plant's start and stop go through them.
+// Under the v1 engine RuntimeManager calls the adapters itself; under v2 Provision and Deprovision dispatch a command through the outbox and the
+// result message comes back as CompleteStart or CompleteStop.
+interface IRuntimeManager
+{
+    string Kind { get; }
+    bool On { get; }
+    (bool Ok, string Code) CanStart();
+    RuntimeManager.Ticket Begin(int item, string phase, string profile, string role = "");
+    Task Provision(RuntimeManager.Ticket t);
+    Task Deprovision(string name, string reason);
+    void Registered(string name);
+    bool IsRuntimeWorker(string name);
+    // v2: the start command of the ticket ended (the result message of the handler): the same settling as a v1 start that returned this result
+    Task CompleteStart(string name, int item, string phase, ProvisionResult result);
+    void CompleteStop(string name, bool ok, string error);
+}
+
+sealed class RuntimeManager : IRuntimeManager
 {
     public static readonly ActivitySource Source = new("FactoryWorker.Gateway.Runtimes");
     static readonly Meter MeterOf = new("FactoryWorker.Gateway.Runtimes");
@@ -185,13 +203,34 @@ sealed class RuntimeManager
     void Roll() { var d = DateTime.UtcNow.Date; if (d != day) { day = d; today = 0; } }
 
     // ---- outside the plant's lock -----------------------------------------------------------------------------------------------------------
+    // v2 (W3.1): set where the engine mode is V2. The start and the stop are then commands dispatched through the Wolverine outbox, and their results come
+    // back as CompleteStart and CompleteStop; null is v1, which calls the adapter here and is unchanged.
+    public Func<Ticket, Task>? DispatchStart { get; set; }
+    public Func<string, string, Task>? DispatchStop { get; set; }
+
     public async Task Provision(Ticket t)
     {
         // the plant's place for the launched line is given up however the start call ends (RuntimeLaunched fills it first when it writes one)
-        try { await ProvisionCore(t); }
-        finally { try { Plant?.RuntimeLaunchDone(t.Name); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
+        var dispatched = false;
+        try { dispatched = await ProvisionCore(t); }
+        finally { if (!dispatched) LaunchDone(t); }
     }
-    async Task ProvisionCore(Ticket t)
+    void LaunchDone(Ticket t) { try { Plant?.RuntimeLaunchDone(t.Name); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
+
+    // v2: the result of the start command. The launched line's place is given up as in v1, however it ends.
+    public async Task CompleteStart(string name, int item, string phase, ProvisionResult r)
+    {
+        Ticket? t; lock (gate) t = execs.TryGetValue(name, out var e) && !e.Ended ? new Ticket(name, item, phase, "", "") : null;
+        // the execution was settled meanwhile (stopped, lapsed, a restart): a start that succeeded is stopped, one that failed has nothing to settle
+        if (t == null) { if (r.Ok) { try { await cae.Deprovision(name, "ended-during-start", CancellationToken.None); } catch (Exception x) { Log("deprovision-failed", name, item, x.Message); } } return; }
+        try { using var span = Source.StartActivity("runtime.provision.result"); await Settle(t, r, span); }
+        finally { LaunchDone(t); }
+    }
+
+    public void CompleteStop(string name, bool ok, string error) => Log(ok ? "deprovision" : "deprovision-failed", name, 0, error);
+
+    // true: the start was dispatched as a command, the rest happens in CompleteStart
+    async Task<bool> ProvisionCore(Ticket t)
     {
         using var span = Source.StartActivity("runtime.provision");
         span?.SetTag("fworker.runtime", cae.Kind); span?.SetTag("fworker.worker", t.Name); span?.SetTag("fworker.item", t.Item); span?.SetTag("fworker.phase", t.Phase);
@@ -203,11 +242,24 @@ sealed class RuntimeManager
             lock (gate) { today = Math.Max(0, today - 1); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
             Log("provision-fenced", t.Name, t.Item, "lease-lost: this process no longer holds the leader lease; nothing was started");
             await End(t.Name, "fenced", failed: false, startFailure: false);
-            return;
+            return false;
+        }
+        if (DispatchStart != null)
+        {
+            // the command carries the ticket's nonce and the idempotency key of the worker name; the outbox holds it until the transaction commits
+            try { await DispatchStart(t); Log("provision-dispatched", t.Name, t.Item, cae.Kind); return true; }
+            catch (Exception e) { await Settle(t, new ProvisionResult(false, "", "start-error: " + e.GetType().Name), span); return false; }
         }
         ProvisionResult r;
         try { r = await cae.Provision(new ProvisionRequest(t.Name, t.Item, t.Phase, t.Profile, t.Nonce, t.Role, cfg.Launch), CancellationToken.None); }
         catch (Exception e) { r = new ProvisionResult(false, "", "start-error: " + (e is HttpRequestException { Message: var m } && m.StartsWith("octopus ", StringComparison.Ordinal) ? m : e.GetType().Name)); }
+        await Settle(t, r, span);
+        return false;
+    }
+
+    // what a start's result does to the records, the plant and the item: the same for v1's direct call and v2's result message
+    async Task Settle(Ticket t, ProvisionResult r, Activity? span)
+    {
         Log("provision", t.Name, t.Item, r.Ok ? r.Execution : r.Error);
         if (r.Ok)
         {
@@ -253,6 +305,12 @@ sealed class RuntimeManager
         span?.SetTag("fworker.runtime", cae.Kind); span?.SetTag("fworker.worker", name); span?.SetTag("fworker.reason", reason);
         lock (gate) { if (!execs.TryGetValue(name, out var e) || e.Ended) return; e.StopReason = reason; }
         nonces.Forget(name);
+        if (DispatchStop != null)
+        {
+            try { await DispatchStop(name, reason); Log("deprovision-dispatched", name, 0, reason); }
+            catch (Exception e) { span?.SetStatus(ActivityStatusCode.Error, e.Message); Log("deprovision-failed", name, 0, e.Message); }
+            return;
+        }
         try { await cae.Deprovision(name, reason, CancellationToken.None); Log("deprovision", name, 0, reason); }
         catch (Exception e) { span?.SetStatus(ActivityStatusCode.Error, e.Message); Log("deprovision-failed", name, 0, e.Message); }
     }

@@ -317,6 +317,22 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
         return new(true, task, "", url);
     }
 
+    // W3.1: a runbook run as a v2 integration command (RunRunbook). Limited to the configured project and environment, the ones the service account may run.
+    // The answer is classified as every integration answer is (5xx and 408 transient, 429 rate limited, the rest permanent).
+    public async Task<Fworker.Contracts.Commands.CommandResult> RunCommand(Fworker.Contracts.Commands.RunRunbook c, CancellationToken ct)
+    {
+        if (c.Project != cfg.Project || c.Environment != cfg.Environment)
+            return Fworker.Contracts.Commands.CommandResult.Failed(Fworker.Contracts.Commands.FailureKind.Permanent, "runbook runs are limited to the configured project and environment");
+        await EnsureRebuilt(ct);
+        var books = await Runbooks(ct);
+        if (!books.TryGetValue(c.Runbook, out var rb) || rb.Snapshot == "")
+            return Fworker.Contracts.Commands.CommandResult.Failed(Fworker.Contracts.Commands.FailureKind.Permanent, "runbook-not-published");
+        var (status, task, why) = await Run(c.Runbook, rb.Snapshot, null, c.Variables.ToDictionary(kv => kv.Key, kv => kv.Value), ct);
+        if (status is 200 or 201 && task != "") return Fworker.Contracts.Commands.CommandResult.Success(task, $"{cfg.ServerUrl}/app#/{cfg.SpaceId}/tasks/{task}");
+        var cls = Fworker.Integrations.Commands.ErrorClassifier.Classify(new Fworker.Integrations.Commands.HttpOutcome(status), false);
+        return Fworker.Contracts.Commands.CommandResult.Failed(cls.Kind == Fworker.Contracts.Commands.FailureKind.None ? Fworker.Contracts.Commands.FailureKind.Permanent : cls.Kind, $"runbook-run-{status}{why}");
+    }
+
     // Started through the Executions API (POST runbook-runs/create/v1, what the octopus CLI uses): names, not ids, and prompted values by
     // variable name. The legacy POST runbookRuns refuses a RunbookRunCreate scoped to project and environment.
     // why: the permission Octopus names in a refusal ("Missing permission: X"), never any other text of the answer

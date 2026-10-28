@@ -12,7 +12,9 @@ static class GatewayWolverineExtensions
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
-            return new WolverineHostService(sp.GetRequiredService<DatabaseOptions>(), sp.GetRequiredService<WolverineHostOptions>(), sp.GetRequiredService<GatewayLeader>());
+            var host = new WolverineHostService(sp.GetRequiredService<DatabaseOptions>(), sp.GetRequiredService<WolverineHostOptions>(), sp.GetRequiredService<GatewayLeader>());
+            if (c.Engine.V2Acts) RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>());
+            return host;
         });
         // W2.3: shadow history, only where the environment is a shadow environment (v2 acting records its own history, later)
         if (c.Engine.ShadowRuns)
