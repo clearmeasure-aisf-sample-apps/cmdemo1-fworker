@@ -434,7 +434,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         Judged? winner = null;
         // v1 judges every queued release in a pass and says what each waits for, so the train describes every open release (the newest one that qualifies is the one promoted; the others
         // are described, never chosen). Behind the release that wins or that waits for the clock, at most MaxDescribedBehind more are read.
-        var stop = false; var behind = 0;
+        var stop = false; var behind = 0; var unread = new HashSet<string>(); var blocked = false;
         foreach (var r in open2)
         {
             var prev = s.DeploymentOf(r.Version, pk);
@@ -450,11 +450,21 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 continue;
             }
             if (stop && ++behind > MaxDescribedBehind) continue;
-            var j = await Judge(r, ct);
-            if (j.Content.Skip) continue;   // not newer than what runs here: nothing to promote
-            var common = j.Content.Gaps.ToList();
-            var evidenceOnly = false;
-            if (!stop && j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
+            Judged j; List<string> common; var evidenceOnly = false;
+            try
+            {
+                j = await Judge(r, ct);
+                if (j.Content.Skip) continue;   // not newer than what runs here: nothing to promote
+                common = j.Content.Gaps.ToList();
+                if (!stop && j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
+            }
+            catch (Exception e) when (e is HttpRequestException or TimeoutException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+            {
+                // A read of GitHub or the app failed for this one release (a long range is read commit by commit, within the shadow's budget per minute). It must not take the decisions of the
+                // other releases with it: they are published as they are, this release keeps the decision it had, nothing is promoted past it, and the train looks again soon.
+                if (!stop) blocked = true; unread.Add(r.Version); stop = true; wakes.Add(now.Add(DeliveryTrainService.TransientRetry));
+                continue;
+            }
             var reasons = common.Concat(j.ItemGaps).Distinct().ToList();
             if (stop) { if (reasons.Count > 0) Note(r.Version, j.Items, reasons); continue; }
             judged.Add(new ReleaseCandidate(r.Version, r.Assembled, reasons.Count == 0));
@@ -466,6 +476,9 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         var pick = ReleaseChoice.NewestQualifying(judged);
         var mentioned = new HashSet<string>();
         foreach (var (version, items, reasons) in notes) { mentioned.Add(version); Decide("waiting", version, items, reasons); }
+        mentioned.UnionWith(unread);   // (a release not read keeps what was decided for it)
+        // nothing is promoted while a release that could be newer than the winner could not be judged; one behind a winner (read only to describe it) does not hold the promotion back
+        if (blocked) { mentioned.UnionWith(open2.Select(x => x.Version)); Retract(mentioned); return; }
         if (pick is null || winner is null) { Retract(mentioned); return; }
         mentioned.Add(pick.Version); Retract(mentioned);
         var release = s.Releases[pick.Version];

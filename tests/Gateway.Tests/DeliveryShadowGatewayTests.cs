@@ -26,6 +26,7 @@ public sealed class DeliveryShadowGatewayTests
         readonly List<(string Method, string Path)> seen = [];
         readonly CancellationTokenSource stop = new();
         public int Port { get; }
+        public volatile bool FailCompare;   // GitHub's compare answers 500: the read of a release's range fails
         public string Base => $"http://127.0.0.1:{Port}";
 
         public Stub()
@@ -52,9 +53,10 @@ public sealed class DeliveryShadowGatewayTests
             }
         }
 
-        static (int, string) Answer(string method, string path)
+        (int, string) Answer(string method, string path)
         {
             if (method != "GET") return (405, "{}");
+            if (FailCompare && path.Contains("/compare/")) return (500, "{}");
             var repo = $"/repos/{Owner}/{Repo}";
             if (path == repo + "/pulls/12")
                 return (200, new JsonObject { ["number"] = 12, ["merged"] = true, ["base"] = new JsonObject { ["ref"] = "master" }, ["head"] = new JsonObject { ["ref"] = "someone/7-thing" }, ["title"] = "Thing (#12)", ["body"] = "Closes #7", ["merge_commit_sha"] = A }.ToJsonString());
@@ -207,6 +209,37 @@ public sealed class DeliveryShadowGatewayTests
             ingress.Ingest(new OctopusReplayComplete());
             Assert.True(await Until(() => Task.FromResult(Decisions() >= 1), 60), "the train did not judge its state at the end of the replay");
             Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
+        });
+    }
+
+    [Fact]
+    public async Task ARangeThatCannotBeRead_DoesNotSilenceTheTrain_TheOtherReleasesAreStillDecided()
+    {
+        // tdd 1.0.833: the replay ended with a release that succeeded in tdd whose range GitHub would not give (the shadow's reads are limited per minute); the whole look was thrown away and the train decided nothing
+        if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
+        await WithShadowGateway(async (cs, host, stub) =>
+        {
+            stub.FailCompare = true;
+            Assert.True(await Until(async () => (await Get(host, "/api/v1/status")).Json?["wolverine"]?["state"]?.ToString() == "running", 90), "the host did not start");
+            var ingress = host.Services.GetRequiredService<IEventIngress>();
+            ingress.Ingest(new OctopusReplayBegan());
+            ingress.Ingest(new OctopusReleaseCreated("R-1", "1.0.1", D));
+            foreach (var e in new[] { "tdd", "uat", "prod" })
+            {
+                ingress.Ingest(new OctopusDeploymentChanged($"D-1-{e}", $"T-1-{e}", "R-1", "1.0.1", e, OctopusDeploymentPhase.Started, D));
+                ingress.Ingest(new OctopusDeploymentChanged($"D-1-{e}", $"T-1-{e}", "R-1", "1.0.1", e, OctopusDeploymentPhase.Succeeded, D));
+            }
+            // 1.0.3 failed in tdd (a decision needs no read), 1.0.2 succeeded there (its range is unreadable)
+            var c = new string('c', 40);
+            ingress.Ingest(new OctopusReleaseCreated("R-3", "1.0.3", c));
+            ingress.Ingest(new OctopusDeploymentChanged("D-3-tdd", "T-3-tdd", "R-3", "1.0.3", "tdd", OctopusDeploymentPhase.Started, c));
+            ingress.Ingest(new OctopusDeploymentChanged("D-3-tdd", "T-3-tdd", "R-3", "1.0.3", "tdd", OctopusDeploymentPhase.Failed, c));
+            ingress.Ingest(new OctopusReleaseCreated("R-2", "1.0.2", A));
+            ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Started, A));
+            ingress.Ingest(new OctopusDeploymentChanged("D-2-tdd", "T-2-tdd", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Succeeded, A));
+            ingress.Ingest(new OctopusReplayComplete());
+            // the uat train keeps the decision it published for each release in its state: 1.0.3's (a wait that needs no read) must be there although 1.0.2 could not be judged
+            Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.DeliveryTrains WHERE [Key] LIKE '%/uat' AND StateJson LIKE '%\"Decisions\":{%\"1.0.3\":%'"))[0] != "0", 60), "the uat train decided nothing for 1.0.3 at the end of the replay");
         });
     }
 

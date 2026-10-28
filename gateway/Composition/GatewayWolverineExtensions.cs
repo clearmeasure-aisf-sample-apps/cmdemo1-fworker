@@ -1,3 +1,4 @@
+using Fworker.Contracts.Seams;
 using Fworker.Contracts.Catalog;
 using Fworker.Integrations.Commands;
 // The Wolverine host's registration (task W2.2, docs/design/wolverine-host.md). Nothing is registered without a connection string (FACTORY_DB_CONNECTION):
@@ -70,7 +71,7 @@ static class GatewayWolverineExtensions
                     DeliveryShadowWiring.Attach(host, parts);
                     shadowHolder.Shadow = parts.Shadow;
                 }
-                octopusPort = new ShadowOctopusPort(ev => DeliveryShadowWiring.Publish(host, ev), shadowHolder.Shadow is not null);
+                octopusPort = new ShadowOctopusPort(ev => { if (ev is OctopusReplayBegan) shadowHolder.Shadow?.ReplayBegan(); return DeliveryShadowWiring.Publish(host, ev); }, shadowHolder.Shadow is not null);
             }
             return host;
         });

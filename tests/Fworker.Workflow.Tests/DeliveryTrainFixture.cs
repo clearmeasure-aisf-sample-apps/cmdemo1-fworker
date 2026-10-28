@@ -19,11 +19,14 @@ sealed class FakeTrainReads : ITrainReads
     public int Probes, Compares;
     /// <summary>When set, every read throws it (GitHub or the app does not answer).</summary>
     public Exception? Fail;
+    /// <summary>Release commits whose compare fails (the range of that release alone cannot be read).</summary>
+    public readonly HashSet<string> FailCompareOf = [];
 
     public Task<CompareRange?> Compare(RepoId repository, string deployedCommit, string releaseCommit, CancellationToken ct)
     {
         Compares++;
         if (Fail is not null) throw Fail;
+        if (FailCompareOf.Contains(releaseCommit)) throw new HttpRequestException("the range cannot be read");
         return Task.FromResult(Ranges.TryGetValue((deployedCommit, releaseCommit), out var r) ? r : null);
     }
 

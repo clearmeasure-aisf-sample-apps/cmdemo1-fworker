@@ -29,6 +29,13 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
     long v1Decisions, v2Decisions, commandsRecorded, persisted, persistFailures, v1Passes, retracted, replayComparisons;
     readonly Dictionary<string, long> v1Undecided = [];   // v1's actions that decide nothing (promotion-deferred, promotion-error) by name: a release v1 did not judge shows here, not as a gap
     string lastError = "";
+    DateTimeOffset? replayingSince;   // the train replays Octopus's history after a restart: v1's decisions are held, not compared, until the train has decided something (or ReplayHold has passed)
+
+    /// <summary>Longest a restart's replay holds the comparison back (the train's own ReplayLimit): a train that decides nothing must show as v1-only rows in the end.</summary>
+    public static readonly TimeSpan ReplayHold = DeliveryTrainService.ReplayLimit;
+
+    /// <summary>The watcher begins to replay Octopus's history (a restart). Idempotent: the first call counts.</summary>
+    public void ReplayBegan() { lock (gate) replayingSince ??= clock(); }
 
     // ---- v1: what the promotion pass did -------------------------------------------------------------------------------------------------------------------
 
@@ -78,6 +85,7 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
         try
         {
             var (deployable, environment) = TrainKey.Split(d.Key);
+            lock (gate) replayingSince = null;   // the train has judged its state: v1's decisions can be compared with it
             // the train says a release is done with (delivered, with those it superseded) or not judged any more (idle): what the shadow held for it is retracted, not compared
             if (d.Action is "delivered" or "idle")
             {
@@ -115,7 +123,9 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
         lock (gate)
         {
             var now = clock();
-            foreach (var r in comparer.Compare(now)) { unsaved.Add(r); counts[r.Outcome]++; lastComparison = now; }
+            if (replayingSince is { } since && now - since >= ReplayHold) replayingSince = null;
+            // while the train still replays, a missing v2 side is not "the train made no decision": v1's decisions wait (no v1-only rows)
+            foreach (var r in replayingSince is null ? comparer.Compare(now) : []) { unsaved.Add(r); counts[r.Outcome]++; lastComparison = now; }
             if (unsaved.Count > MaxUnsaved) unsaved.RemoveRange(0, unsaved.Count - MaxUnsaved);
             batch = unsaved.ToList();
         }
