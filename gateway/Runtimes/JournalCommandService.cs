@@ -69,7 +69,7 @@ sealed class JournalCommandSink
     }
 }
 
-// The store is made at the first line: a gateway without a GitHub token (or one whose identity is an App, whose installation token is not minted in C# yet) starts
+// The store is made at the first line: a gateway without a GitHub token (neither GH_TOKEN nor the author App) starts
 // all the same, and every journal command then fails for good with the reason, instead of the host failing to start.
 sealed class LazyJournalStore(Func<CancellationToken, Task<IJournalStore>> make) : IJournalStore
 {
@@ -88,7 +88,7 @@ static class JournalCommandWiring
     {
         env ??= Environment.GetEnvironmentVariable;
         var settings = Settings(c, env);
-        var store = new LazyJournalStore(ct => Task.FromResult<IJournalStore>(new GitHubJournalStore(Client(c, env, http), Identity(c, env, http))));
+        var store = new LazyJournalStore(ct => Task.FromResult<IJournalStore>(MakeStore(c, env, http)));
         var service = new JournalCommandService(new WriteJournalLineHandler(ledger ?? new InMemoryIdempotencyLedger(), new JournalLedger(store, settings)));
         var previous = host.RuntimeCommands;
         host.RuntimeCommands = (services, w) =>
@@ -126,23 +126,30 @@ static class JournalCommandWiring
         return new JournalSettings(minutes, patterns);
     }
 
-    static HttpClient Http(Func<string, string?> env, HttpClient? http)
+    // The client of the store keeps one HttpClient for its life: the self-made one sets the bearer per request from the provider, so an App token that expires is minted again.
+    // An injected client (the tests) is used as it is; the credential then carries the token of the provider at the time the store is made.
+    static HttpClient Http(Func<string, string?> env, HttpClient? http, GitHubTokenProvider tokens)
     {
         if (http != null) return http;
         var api = env("GITHUB_API_URL");
-        return new HttpClient { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/") };
+        return new HttpClient(new GitHubAuthHandler(tokens)) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/") };
     }
 
-    static GitHubRepoClient Client(GatewayComposition c, Func<string, string?> env, HttpClient? http)
+    static GitHubJournalStore MakeStore(GatewayComposition c, Func<string, string?> env, HttpClient? http)
+    {
+        var tokens = GitHubTokenProvider.FromEnvironment(env) ?? throw new JournalRefusedException("the journal command needs GH_TOKEN or the author App (FACTORY_APP_AUTHOR_ID, _INSTALLATION, _KEY)");
+        var client = Client(c, env, http, tokens);
+        return new GitHubJournalStore(client, Identity(c, env, http, tokens));
+    }
+
+    static GitHubRepoClient Client(GatewayComposition c, Func<string, string?> env, HttpClient? http, GitHubTokenProvider tokens)
     {
         var repo = c.Instance.Home ?? throw new JournalRefusedException("the journal command needs owner and repo in the instance configuration");
-        var token = env("GH_TOKEN");
-        if (RevocationOptions.Unset(token)) throw new JournalRefusedException("the journal command needs GH_TOKEN (an App installation token is not minted in C# yet)");
-        var factory = new GitHubClientFactory(Http(env, http), new StaticCredentialSource([], new GitHubCredential("gateway", token!.Trim())), new Fworker.Integrations.GitHub.GitHubBudget());
+        var factory = new GitHubClientFactory(Http(env, http, tokens), new ProviderCredentialSource(tokens), new Fworker.Integrations.GitHub.GitHubBudget());
         return factory.For(repo).GetAwaiter().GetResult();
     }
 
-    static JournalIdentity Identity(GatewayComposition c, Func<string, string?> env, HttpClient? http)
+    static JournalIdentity Identity(GatewayComposition c, Func<string, string?> env, HttpClient? http, GitHubTokenProvider tokens)
     {
         var root = c.Instance.Root;
         var name = root?["name"]?.ToString() ?? "";
@@ -151,11 +158,13 @@ static class JournalCommandWiring
         return new JournalIdentity(name, async ct =>
         {
             if (!string.IsNullOrEmpty(login)) return login;
+            // an installation token cannot read /user: the App's login is its slug plus [bot]
+            if (tokens.AppLogin is { } bot) return login = bot;
             using var req = new HttpRequestMessage(HttpMethod.Get, "user");
-            req.Headers.Authorization = new("Bearer", env("GH_TOKEN")!.Trim());
+            req.Headers.Authorization = new("Bearer", await tokens.Token(ct));
             req.Headers.Accept.ParseAdd("application/vnd.github+json");
             req.Headers.UserAgent.ParseAdd("factory-worker-gateway");
-            using var resp = await Http(env, http).SendAsync(req, ct);
+            using var resp = await Http(env, http, tokens).SendAsync(req, ct);
             resp.EnsureSuccessStatusCode();
             login = JsonNode.Parse(await resp.Content.ReadAsStringAsync(ct))?["login"]?.ToString() ?? throw new JournalRefusedException("GitHub did not name the gateway's login");
             return login;

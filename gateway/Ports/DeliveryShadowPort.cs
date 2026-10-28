@@ -108,16 +108,15 @@ static class DeliveryShadowWiring
     /// <summary>The shadow run's parts for a gateway in shadow with a home repository and a database; null when the environment cannot read GitHub (no GH_TOKEN): the train is left out then.</summary>
     public static DeliveryShadowParts? Make(GatewayComposition c, ISystemCatalog catalog, string connectionString, Func<string, string?> env, HttpClient? github = null, HttpClient? app = null)
     {
-        var token = env("GH_TOKEN");
-        if (RevocationOptions.Unset(token) || c.Instance.Home is not { } home) return null;
+        var tokens = Fworker.Integrations.GitHub.GitHubTokenProvider.FromEnvironment(env);   // GH_TOKEN, else the author App's installation token
+        if (tokens is null || c.Instance.Home is not { } home) return null;
         var root = c.Instance.Root;
         string Str(string name, string fallback) => root?[name]?.ToString() is { Length: > 0 } s ? s : fallback;
         var holds = (root?["holdLabels"] as JsonArray)?.Select(h => h?.ToString() ?? "").Where(h => h != "").ToList();
         var api = env("GITHUB_API_URL");
         if (github is null)
         {
-            github = new HttpClient { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
-            github.DefaultRequestHeaders.Authorization = new("Bearer", token!.Trim());
+            github = new HttpClient(new Fworker.Integrations.GitHub.GitHubAuthHandler(tokens)) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
             github.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
             github.DefaultRequestHeaders.UserAgent.ParseAdd("factory-worker-gateway");
         }
@@ -125,7 +124,7 @@ static class DeliveryShadowWiring
         var budget = c.GitHubBudget;
         void Observe(string resource, string? remaining, string? reset, string? limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
         var gates = new ItemGateConfig(Str("autoMergeLabel", "Auto Merge"), Str("videoLabel", "video"), holds);
-        var facts = new Fworker.Integrations.GitHub.HttpMergeFactsReader(github, new Fworker.Integrations.GitHub.StaticCredentialSource([], new Fworker.Integrations.GitHub.GitHubCredential("gateway", token!.Trim())), Str("name", "factory-worker"), gates.VideoLabel,
+        var facts = new Fworker.Integrations.GitHub.HttpMergeFactsReader(github, new Fworker.Integrations.GitHub.ProviderCredentialSource(tokens), Str("name", "factory-worker"), gates.VideoLabel,
             (resource, remaining, reset, limit) => Observe(resource, remaining, reset, limit));
         var policies = new CatalogDeliveryPolicies(() => catalog.Current, DeliveryShadowSettings.For(c.Instance, () => catalog.Current));
         var reads = new HttpTrainReads(github, app, Str("name", "factory-worker"), facts, gates, policies, Observe, null, () => budget.Low().Low);
