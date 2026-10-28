@@ -8,7 +8,8 @@ namespace Fworker.Integrations.GitHub;
 /// W6.3: the labels of an item as a versioned projection, through REST. The projection owns a set of label names (<c>managed</c>: the factory's own, such as the env and
 /// priority labels) and never touches another: it reads the issue's labels and adds only what is missing from <c>desired</c>, removes only a managed label that is no
 /// longer wanted. Add-ItemLabels and Remove-ItemLabel of Board.ps1 are the calls: one POST with the names to add, one DELETE per name to remove (a 404 is no failure).
-/// Names compare case-insensitively, as GitHub's do.
+/// Names compare case-insensitively, as GitHub's do. A label the issue carries already is never written again, so it keeps the casing GitHub has for it even when <c>desired</c>
+/// spells it differently: the casing belongs to the repository's label (renaming it is a label PATCH, not a projection of an item), which is a deliberate limit.
 /// </summary>
 public sealed class LabelProjection(GitHubRepoClient client, IProjectionVersions versions, ProjectionEcho echo, Func<DateTimeOffset>? now = null)
 {
@@ -28,11 +29,17 @@ public sealed class LabelProjection(GitHubRepoClient client, IProjectionVersions
         {
             var after = current.Where(l => !remove.Contains(l, cmp)).Concat(add).ToList();
             // the echo is recorded before the writes: the first label event can arrive before the last write has answered
-            echo.Record(key, ProjectionTargets.Labels, version, ProjectionEcho.LabelsFingerprint(after));
-            if (add.Count > 0)
-                await Call(HttpMethod.Post, $"issues/{item.Number}/labels", new JsonObject { ["labels"] = new JsonArray(add.Select(l => (JsonNode)JsonValue.Create(l)!).ToArray()) }, false, ct);
-            foreach (var l in remove)
-                await Call(HttpMethod.Delete, $"issues/{item.Number}/labels/{Uri.EscapeDataString(l)}", null, true, ct);
+            // a failure part way (the POST done, a DELETE refused) takes the record back: the labels are then neither the old nor the planned set, and whatever event arrives is
+            // processed once (the reads are idempotent) instead of a later human change to the planned set being dropped as an echo
+            var mark = echo.Record(key, ProjectionTargets.Labels, version, ProjectionEcho.LabelsFingerprint(after));
+            try
+            {
+                if (add.Count > 0)
+                    await Call(HttpMethod.Post, $"issues/{item.Number}/labels", new JsonObject { ["labels"] = new JsonArray(add.Select(l => (JsonNode)JsonValue.Create(l)!).ToArray()) }, false, ct);
+                foreach (var l in remove)
+                    await Call(HttpMethod.Delete, $"issues/{item.Number}/labels/{Uri.EscapeDataString(l)}", null, true, ct);
+            }
+            catch { echo.Unrecord(mark); throw; }
         }
         await versions.Advance(key, ProjectionTargets.Labels, version, now(), ct);
         return changed ? ProjectionOutcome.Applied : ProjectionOutcome.Unchanged;

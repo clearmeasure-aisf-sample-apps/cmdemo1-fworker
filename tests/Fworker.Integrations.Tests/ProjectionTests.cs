@@ -33,6 +33,8 @@ public sealed class ProjectionTests
         public readonly List<string> Calls = [];
         public readonly List<JsonObject> GraphQl = [];
         public Action? AfterListing;   // a write by another process lands here, between the read and the save
+        public Action<string>? OnCommentWrite;   // the webhook for a comment write: called with the body, while the write's own answer is still on its way
+        public bool FailMutation, FailDelete, FailCommentWrite;
         long nextId = 1000;
         // the board
         public string Column = "Technical Design";
@@ -59,6 +61,8 @@ public sealed class ProjectionTests
                     AfterListing?.Invoke();
                     return Task.FromResult(r);
                 }
+                if (FailCommentWrite) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.UnprocessableEntity));
+                OnCommentWrite?.Invoke(JsonNode.Parse(body)!["body"]!.ToString());
                 return Task.FromResult(Ok(Json(Add(Login, JsonNode.Parse(body)!["body"]!.ToString())), HttpStatusCode.Created));
             }
             m = Regex.Match(path, @"^/repos/o/r/issues/comments/(\d+)$");
@@ -66,7 +70,8 @@ public sealed class ProjectionTests
             {
                 var id = long.Parse(m.Groups[1].Value); var c = Comments.FirstOrDefault(x => x.Id == id);
                 if (c == null) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
-                if (req.Method == HttpMethod.Patch) { Replace(id, JsonNode.Parse(body)!["body"]!.ToString()); c = Comments.First(x => x.Id == id); }
+                if (req.Method == HttpMethod.Patch && FailCommentWrite) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.UnprocessableEntity));
+                if (req.Method == HttpMethod.Patch) { OnCommentWrite?.Invoke(JsonNode.Parse(body)!["body"]!.ToString()); Replace(id, JsonNode.Parse(body)!["body"]!.ToString()); c = Comments.First(x => x.Id == id); }
                 return Task.FromResult(Ok(Json(c)));
             }
             if (path == "/repos/o/r/issues/7/labels")
@@ -82,6 +87,7 @@ public sealed class ProjectionTests
             m = Regex.Match(path, @"^/repos/o/r/issues/7/labels/(.+)$");
             if (m.Success && req.Method == HttpMethod.Delete)
             {
+                if (FailDelete) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.UnprocessableEntity));
                 var name = Uri.UnescapeDataString(m.Groups[1].Value);
                 return Task.FromResult(Labels.RemoveAll(l => string.Equals(l, name, StringComparison.OrdinalIgnoreCase)) > 0 ? Ok(new JsonArray()) : new HttpResponseMessage(HttpStatusCode.NotFound));
             }
@@ -114,6 +120,7 @@ public sealed class ProjectionTests
                         ["id"] = "card_7", ["project"] = new JsonObject { ["id"] = "PVT_1" }, ["fieldValueByName"] = new JsonObject { ["name"] = Column },
                     }] : [(JsonNode)new JsonObject { ["id"] = "card_other", ["project"] = new JsonObject { ["id"] = "PVT_other" } }]) },
                 } } } });
+            if (query.StartsWith("mutation(") && FailMutation) return new HttpResponseMessage(HttpStatusCode.UnprocessableEntity);
             if (query.StartsWith("mutation(")) { Column = Columns.First(c => "opt_" + c.Replace(' ', '_') == v["o"]!.ToString()); return Ok(new JsonObject { ["data"] = new JsonObject() }); }
             return new HttpResponseMessage(HttpStatusCode.BadRequest);
         }
@@ -458,5 +465,77 @@ public sealed class ProjectionTests
         Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Labels, ProjectionEcho.ColumnFingerprint("done")));   // (the targets are apart)
         r.Echo.Forget(Key);
         Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("done")));
+    }
+
+    [Fact]
+    public async Task TheWebhookOfTheStateWrite_ThatArrivesBeforeSaveReturns_IsRecognizedAsTheEcho_ForAnUpdateAndForACreate()
+    {
+        var r = new Rig();
+        var echoes = new List<bool>();
+        r.Api.OnCommentWrite = body => echoes.Add(r.Echo.IsStateCommentEcho(Key, body).GetAwaiter().GetResult());
+        await r.State.Apply(Item, 1, s => s["x"] = 1);   // creates the comment (revision 1)
+        await r.State.Apply(Item, 2, s => s["x"] = 2);   // updates it (revision 2)
+        Assert.Equal([true, true], echoes);
+    }
+
+    [Fact]
+    public async Task AStateSaveThatFails_TakesItsEchoRecordBack_ARealEditWithThatRevisionIsNews()
+    {
+        var r = new Rig();
+        r.Api.FailCommentWrite = true;
+        await Assert.ThrowsAnyAsync<Exception>(() => r.State.Apply(Item, 1, s => s["x"] = 1));
+        var planned = ItemStateComment.Body(Name, 7, new JsonObject { ["item"] = 7, ["rev"] = 1, ["x"] = 1 });
+        Assert.False(await r.Echo.IsStateCommentEcho(Key, planned));
+        Assert.Equal(0, await r.Versions.Applied(Key, ProjectionTargets.Comment));
+    }
+
+    [Fact]
+    public async Task ABoardMoveThatFails_TakesItsEchoRecordBack_AndRestoresTheEarlierOne()
+    {
+        var r = new Rig();
+        await r.Board.Move(Item, 1, "Done");
+        r.Api.FailMutation = true;
+        await Assert.ThrowsAsync<ProjectionRefusedException>(() => r.Board.Move(Item, 2, "Backlog"));
+        Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Backlog")));   // a person's later move to Backlog is news
+        Assert.True(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Done")));   // the earlier write is still the newest applied
+        Assert.Equal(1, await r.Versions.Applied(Key, ProjectionTargets.Card));
+    }
+
+    [Fact]
+    public async Task ALabelWriteThatIsHalfDone_TakesItsEchoRecordBack()
+    {
+        var r = new Rig();
+        r.Api.Labels.AddRange(["bug", "priority:high"]);
+        r.Api.FailDelete = true;   // the POST of env:tdd goes through, the DELETE of priority:high is refused
+        await Assert.ThrowsAsync<ProjectionRefusedException>(() => r.Labels.Apply(Item, 1, ["env:tdd"], ["env:tdd", "priority:high"]));
+        Assert.Contains("env:tdd", r.Api.Labels);
+        Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Labels, ProjectionEcho.LabelsFingerprint(["bug", "env:tdd"])));   // the planned set, as a person could reach it later
+        Assert.Equal(0, await r.Versions.Applied(Key, ProjectionTargets.Labels));
+    }
+
+    [Fact]
+    public async Task AnOlderApplyThatComesLate_NeverReplacesTheRecordOfANewerOne()
+    {
+        var r = new Rig();
+        var newer = r.Echo.Record(Key, ProjectionTargets.Card, 5, ProjectionEcho.ColumnFingerprint("Done"));
+        var older = r.Echo.Record(Key, ProjectionTargets.Card, 3, ProjectionEcho.ColumnFingerprint("Backlog"));
+        Assert.True(newer.Taken); Assert.False(older.Taken);
+        Assert.True(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Done")));
+        Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Backlog")));
+        r.Echo.Unrecord(older);   // (a mark that was not taken changes nothing)
+        Assert.True(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Done")));
+        // the same version again (a retry after a failure) does take the record, and a newer one then replaces it
+        Assert.True(r.Echo.Record(Key, ProjectionTargets.Card, 5, ProjectionEcho.ColumnFingerprint("Backlog")).Taken);
+        Assert.True(r.Echo.Record(Key, ProjectionTargets.Card, 6, ProjectionEcho.ColumnFingerprint("Technical Design")).Taken);
+    }
+
+    [Fact]
+    public async Task ALabelThatIsThereWithOtherCasing_KeepsTheCasingItHas_NothingIsWritten()
+    {
+        var r = new Rig();
+        r.Api.Labels.Add("auto merge");
+        Assert.Equal(ProjectionOutcome.Unchanged, await r.Labels.Apply(Item, 1, ["Auto Merge"], ["auto merge"]));
+        Assert.Equal(["auto merge"], r.Api.Labels);
+        Assert.All(r.Api.Calls, c => Assert.StartsWith("GET", c));
     }
 }

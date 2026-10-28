@@ -71,22 +71,54 @@ public sealed class InMemoryProjectionVersions : IProjectionVersions
 /// </summary>
 public sealed class ProjectionEcho(IProjectionVersions versions)
 {
-    readonly ConcurrentDictionary<(string, string), (long Version, string Fingerprint)> last = new();
+    readonly object gate = new();
+    readonly Dictionary<(string, string), (long Version, string Fingerprint)> last = [];
+
+    /// <summary>What <see cref="Record"/> did, for <see cref="Unrecord"/>: whether the record was taken and what it replaced.</summary>
+    public readonly record struct Mark(string ItemKey, string Target, long Version, string Fingerprint, bool Taken, bool HadPrevious, long PreviousVersion, string? PreviousFingerprint);
 
     /// <summary>The state comment's fingerprint: its revision counter.</summary>
-    public static string StateFingerprint(System.Text.Json.Nodes.JsonObject state) => $"rev:{ItemStateComment.RevOf(state)}";
+    public static string StateFingerprint(System.Text.Json.Nodes.JsonObject state) => RevisionFingerprint(ItemStateComment.RevOf(state));
+    /// <summary>The same for a revision number: a projection knows the revision it is about to write before the write has answered.</summary>
+    public static string RevisionFingerprint(int rev) => $"rev:{rev}";
     /// <summary>The labels' fingerprint: the names, case-insensitive and in any order.</summary>
     public static string LabelsFingerprint(IEnumerable<string> labels) => string.Join('\n', labels.Select(l => l.ToLowerInvariant()).Distinct().Order(StringComparer.Ordinal));
     /// <summary>The card's fingerprint: the column name, case-insensitive.</summary>
     public static string ColumnFingerprint(string column) => column.ToLowerInvariant();
 
-    /// <summary>Called by a projection right after its write, before the version is recorded (an event can arrive in between).</summary>
-    public void Record(string itemKey, string target, long version, string fingerprint) => last[(itemKey, target)] = (version, fingerprint);
+    /// <summary>
+    /// Called by a projection BEFORE its write goes out (the event of the write can arrive before the write's own answer does). A record of a newer version is kept: an older
+    /// apply that comes late never replaces it (compare and set; the returned mark says <c>Taken: false</c>). When the write then fails or is half done the projection hands the
+    /// mark to <see cref="Unrecord"/>, so a later real change that happens to look like the planned write is not mistaken for an echo.
+    /// </summary>
+    public Mark Record(string itemKey, string target, long version, string fingerprint)
+    {
+        lock (gate)
+        {
+            var had = last.TryGetValue((itemKey, target), out var cur);
+            if (had && cur.Version > version) return new Mark(itemKey, target, version, fingerprint, false, false, 0, null);
+            last[(itemKey, target)] = (version, fingerprint);
+            return new Mark(itemKey, target, version, fingerprint, true, had, had ? cur.Version : 0, had ? cur.Fingerprint : null);
+        }
+    }
+
+    /// <summary>The write the mark was taken for did not (completely) happen: the record goes back to what it was, unless another apply has replaced it since.</summary>
+    public void Unrecord(Mark mark)
+    {
+        if (!mark.Taken) return;
+        lock (gate)
+        {
+            var k = (mark.ItemKey, mark.Target);
+            if (!last.TryGetValue(k, out var cur) || cur.Version != mark.Version || cur.Fingerprint != mark.Fingerprint) return;
+            if (mark.HadPrevious) last[k] = (mark.PreviousVersion, mark.PreviousFingerprint!); else last.Remove(k);
+        }
+    }
 
     /// <summary>Is the event (the target's state as GitHub now reports it) the echo of the projection's own newest write?</summary>
     public async Task<bool> IsEcho(string itemKey, string target, string fingerprint, CancellationToken ct = default)
     {
-        if (!last.TryGetValue((itemKey, target), out var mine) || mine.Fingerprint != fingerprint) return false;
+        (long Version, string Fingerprint) mine;
+        lock (gate) { if (!last.TryGetValue((itemKey, target), out mine) || mine.Fingerprint != fingerprint) return false; }
         return mine.Version >= await versions.Applied(itemKey, target, ct);
     }
 
@@ -95,7 +127,7 @@ public sealed class ProjectionEcho(IProjectionVersions versions)
         ItemStateComment.Parse(commentBody) is { } s ? IsEcho(itemKey, ProjectionTargets.Comment, StateFingerprint(s), ct) : Task.FromResult(false);
 
     /// <summary>The item is finished: its record goes.</summary>
-    public void Forget(string itemKey) { foreach (var k in last.Keys.Where(k => k.Item1 == itemKey)) last.TryRemove(k, out _); }
+    public void Forget(string itemKey) { lock (gate) foreach (var k in last.Keys.Where(k => k.Item1 == itemKey).ToList()) last.Remove(k); }
 }
 
 /// <summary>The REST and GraphQL calls of the projections, answered with Invoke-Gh's rules (Core.ps1): 2xx the body, an allowed 404 null, a worth-a-retry answer an HttpRequestException, any other refusal a ProjectionRefusedException.</summary>

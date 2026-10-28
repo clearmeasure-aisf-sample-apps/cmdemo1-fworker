@@ -27,10 +27,12 @@ public sealed class StateCommentProjection(IJournalStore store, IProjectionVersi
         {
             var holder = await store.Read(item.Number, ct);
             mutate(holder.State);
+            // the echo is recorded BEFORE the save: the comment's webhook can arrive before Save returns. The revision Save writes is known beforehand (Save-State: the revision
+            // read, or the state's own when it was not read, plus one). A save that fails takes the record back.
+            var mark = echo.Record(key, ProjectionTargets.Comment, version, ProjectionEcho.RevisionFingerprint((holder.Rev ?? ItemStateComment.RevOf(holder.State)) + 1));
             try { await store.Save(item.Number, holder, ct); }
-            catch (StateConflictException) when (i < tries) { continue; }
-            // the echo is recorded after the write but before the version: the comment's webhook can arrive between the write and the record
-            echo.Record(key, ProjectionTargets.Comment, version, ProjectionEcho.StateFingerprint(holder.State));
+            catch (StateConflictException) when (i < tries) { echo.Unrecord(mark); continue; }
+            catch { echo.Unrecord(mark); throw; }
             await versions.Advance(key, ProjectionTargets.Comment, version, now(), ct);
             return ProjectionOutcome.Applied;
         }

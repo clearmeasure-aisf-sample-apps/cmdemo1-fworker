@@ -47,10 +47,15 @@ public sealed class BoardColumnProjection(HttpClient http, IGitHubCredentialSour
         var changed = !string.Equals(card["fieldValueByName"]?["name"]?.ToString(), option.Name, StringComparison.OrdinalIgnoreCase);
         if (changed)
         {
-            // the echo is recorded before the write: the card's event can arrive before the answer does
-            echo.Record(key, ProjectionTargets.Card, version, ProjectionEcho.ColumnFingerprint(option.Name));
-            await ProjectionHttp.GraphQl(http, cred, MoveMutation,
-                new JsonObject { ["p"] = m.ProjectId, ["i"] = card["id"]!.ToString(), ["f"] = m.FieldId, ["o"] = option.Id }, ct);
+            // the echo is recorded before the write: the card's event can arrive before the answer does; a write that fails takes the record back, so a person's later move to
+            // that column is news and not an echo
+            var mark = echo.Record(key, ProjectionTargets.Card, version, ProjectionEcho.ColumnFingerprint(option.Name));
+            try
+            {
+                await ProjectionHttp.GraphQl(http, cred, MoveMutation,
+                    new JsonObject { ["p"] = m.ProjectId, ["i"] = card["id"]!.ToString(), ["f"] = m.FieldId, ["o"] = option.Id }, ct);
+            }
+            catch { echo.Unrecord(mark); throw; }
         }
         await versions.Advance(key, ProjectionTargets.Card, version, now(), ct);
         return changed ? ProjectionOutcome.Applied : ProjectionOutcome.Unchanged;
