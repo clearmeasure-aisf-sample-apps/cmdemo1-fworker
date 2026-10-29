@@ -85,6 +85,41 @@ public sealed class IngressInboxTests
         Assert.Empty(CorrelationWriters.FromRuntime("copilot", "", 7, Home));
     }
 
+    sealed class Generations(Dictionary<string, int> open) : IItemGenerations
+    {
+        public bool Fail;
+        public int CurrentGeneration(string itemKey) => Fail ? throw new TimeoutException("the database did not answer") : open.GetValueOrDefault(itemKey);
+    }
+
+    sealed class Recording : ICorrelationMap
+    {
+        public readonly List<CorrelationRef> Added = [];
+        public bool TryAdd(CorrelationRef r) { Added.Add(r); return true; }
+        public string? Resolve(string kind, string key) => null;
+    }
+
+    [Fact]
+    public void TheRowsOfTheInbox_CarryTheGenerationOfTheItemsOpenInstance_ZeroWhenItHasNone()
+    {
+        var rec = new Recording();
+        var p = new IngressInboxProcessor(new InMemoryIngressDedup(), new GenerationStampingMap(rec, new Generations(new() { ["acme/orders#7"] = 3 })), Home);
+        p.Process(new("webhook", Ev("pr.opened", 7, 9, "abc", "d-1")), Guid.NewGuid());
+        p.Process(new("webhook", Ev("pr.opened", 8, 10, "def", "d-2")), Guid.NewGuid());   // item 8 has no open instance
+        Assert.Equal([("acme/orders#7", 3), ("acme/orders#7", 3), ("acme/orders#8", 0), ("acme/orders#8", 0)], rec.Added.Select(r => (r.ItemKey, r.Generation)));
+    }
+
+    [Fact]
+    public void AGenerationTheWriterNamed_IsKept_AndALookupThatFails_FailsTheWriteInsteadOfWritingZero()
+    {
+        var rec = new Recording(); var gens = new Generations(new() { ["acme/orders#7"] = 3 });
+        var map = new GenerationStampingMap(rec, gens);
+        map.TryAdd(new("pr", "acme/orders!9", "acme/orders#7", 2, "verb:x"));
+        Assert.Equal(2, rec.Added.Single().Generation);
+        gens.Fail = true;
+        Assert.Throws<TimeoutException>(() => map.TryAdd(new("pr", "acme/orders!10", "acme/orders#7", 0, "webhook")));
+        Assert.Single(rec.Added);   // the transient fault is not written as "no instance": the caller retries
+    }
+
     [Fact]
     public void AnEventWithoutAnItem_WritesNoCorrelation() =>
         Assert.Empty(CorrelationWriters.FromEvent(JsonNode.Parse(Ev("base.merged", 0, 9, "abc"))!.AsObject(), Home, "webhook"));

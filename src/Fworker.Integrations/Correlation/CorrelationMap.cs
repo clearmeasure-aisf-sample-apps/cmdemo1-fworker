@@ -19,6 +19,37 @@ public interface ICorrelationMap
     string? Resolve(string kind, string key);
 }
 
+/// <summary>The generation of the instance an item is in now (OpenInstances, kept by the WorkItemSaga's store, W6.1).</summary>
+public interface IItemGenerations
+{
+    /// <summary>The generation of the item's open instance; <see cref="CorrelationWriters.GenerationUnknown"/> (0) when the item has none open (no saga owns it, or it is complete).</summary>
+    int CurrentGeneration(string itemKey);
+}
+
+/// <summary>
+/// The map with the generation filled in (#485): the writers do not know it (they leave <see cref="CorrelationWriters.GenerationUnknown"/>), the item's open instance does. A mapping that
+/// names a generation already keeps it. A lookup that fails throws, and so does the write: the callers retry, and a transient fault is never written as generation 0. A mapping
+/// written while the item has no open instance keeps 0 for good (the map never overwrites a row): 0 reads as "no instance when it was written".
+/// </summary>
+public sealed class GenerationStampingMap(ICorrelationMap inner, IItemGenerations generations) : ICorrelationMap
+{
+    public bool TryAdd(CorrelationRef r)
+        => inner.TryAdd(r.Generation == CorrelationWriters.GenerationUnknown ? r with { Generation = generations.CurrentGeneration(r.ItemKey) } : r);
+
+    public string? Resolve(string kind, string key) => inner.Resolve(kind, key);
+}
+
+public sealed class SqlItemGenerations(string connectionString) : IItemGenerations
+{
+    public int CurrentGeneration(string itemKey)
+    {
+        using var c = new SqlConnection(connectionString); c.Open();
+        using var cmd = new SqlCommand("SELECT Generation FROM factory.OpenInstances WHERE ItemKey = @item AND ClosedAt IS NULL", c);
+        cmd.Parameters.Add("@item", SqlDbType.NVarChar, 300).Value = itemKey;
+        return cmd.ExecuteScalar() is int g && g > 0 ? g : CorrelationWriters.GenerationUnknown;
+    }
+}
+
 public sealed class InMemoryCorrelationMap : ICorrelationMap
 {
     readonly ConcurrentDictionary<(string, string), CorrelationRef> rows = new();

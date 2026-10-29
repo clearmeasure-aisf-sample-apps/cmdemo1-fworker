@@ -33,7 +33,7 @@ static class GatewayWolverineExtensions
                 var reservations = stores.Reservations;
                 copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()));
                 RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler), stores.Ledger,
-                    (runtime, execution, item) => correlations?.FromRuntime(runtime, execution, item));   // W4.1: the task or agent id finds its item later
+                    (runtime, execution, item) => { _ = correlations?.FromRuntime(runtime, execution, item); });   // W4.1: the task or agent id finds its item later
                 journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands
                 // W6.0, W6.1: the WorkItemSaga of the hybrid composition: v1's plant still offers the sessions, the saga decides the items it has started, and v1's sweep leaves those items alone (V2Ownership)
                 var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds));
@@ -43,7 +43,8 @@ static class GatewayWolverineExtensions
                 {
                     // W4.1: webhook events into the durable inbox, deduplicated, with the correlation map (also written by the verbs and the runtimes)
                     var cs = WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                    var map = new Fworker.Integrations.Correlation.SqlCorrelationMap(cs);
+                    // (#485: the rows carry the generation of the item's open instance, which the WorkItemSaga's store keeps)
+                    var map = new Fworker.Integrations.Correlation.GenerationStampingMap(new Fworker.Integrations.Correlation.SqlCorrelationMap(cs), new Fworker.Integrations.Correlation.SqlItemGenerations(cs));
                     var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
                     IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item

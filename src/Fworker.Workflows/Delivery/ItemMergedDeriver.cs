@@ -38,24 +38,25 @@ public sealed partial class ItemMergedDeriver(IMergeFactsReader reader, IMergedI
         var repo = ev["repository"]?.ToString() is { } rs && RepoId.TryParse(rs, out var r) ? r : home;
         var number = Int(ev["item"]); var pr = Int(ev["pr"]);
         MergedPullRequest? pull;
+        // The claim is per (item, merge commit), never per commit alone: a message that took some items of a pull request in and then failed must not hide the others from the second source (#494).
+        // What the event alone can answer is answered before any read of GitHub; the rest is checked item by item before that item's reads.
         switch (ev["event"]!.ToString())
         {
             case "base.merged":
-                // the merge commit is in the event: a commit another message took in needs no read
+                // names the pull request and the merge commit but no item: the pull request is read once, and each of its items is checked before its own reads
                 var sha = (ev["sha"]?.ToString() ?? "").ToLowerInvariant();
                 if (pr <= 0 || !Sha40().IsMatch(sha)) return new([], "no-pull-request-or-commit");
-                if (await store.CommitTakenByOther(sha, messageId, ct)) return new([], "duplicate-commit");
                 pull = await reader.ReadPullRequest(repo, pr, ct);
                 break;
             case "pr.merged":
                 if (pr <= 0) return new([], "no-pull-request");
+                // names the item (from the branch) and the pull request, which merges once: a row of that item for it that another message holds answers before any read
+                if (number > 0 && await store.PullRequestTakenByOther(new ItemId(repo, number).ToString(), pr, messageId, ct)) return new([], "duplicate-item");
                 pull = await reader.ReadPullRequest(repo, pr, ct);
-                if (pull?.MergeCommit is { } c && await store.CommitTakenByOther(c, messageId, ct)) return new([], "duplicate-commit");
                 break;
-            default:   // board.card, closed
+            default:   // board.card, closed: it names only the item, and a reopened item can merge again, so the merged pull request is found first (the one read that cannot move)
                 if (number <= 0) return new([], "no-item");
                 pull = await reader.FindMergedPullRequest(new ItemId(repo, number), ct);
-                if (pull?.MergeCommit is { } c2 && await store.CommitTakenByOther(c2, messageId, ct)) return new([], "duplicate-commit");
                 break;
         }
         if (pull is null) return new([], "pull-request-not-found");
@@ -67,10 +68,12 @@ public sealed partial class ItemMergedDeriver(IMergeFactsReader reader, IMergedI
         var commit = (pull.MergeCommit ?? "").ToLowerInvariant();
         if (!pull.Merged || !Sha40().IsMatch(commit)) return new([], "not-merged");
         if (!string.Equals(pull.BaseRef, defaultBranch(), StringComparison.OrdinalIgnoreCase)) return new([], "not-the-default-branch");
-        var merged = new List<ItemMerged>();
+        // Every read comes before the first claim: a GitHub failure on a later item (it throws, and the message is retried) leaves no earlier item claimed for a message that may never come back.
+        var derived = new List<(MergedItem Row, ItemMerged Message)>(); var taken = 0;
         foreach (var n in ContentGate.CandidateItems(pull.Number, pull.HeadRef, pull.Title, pull.Body))
         {
             var id = new ItemId(pull.Repository, n);
+            if (await store.TakenByOther(id.ToString(), commit, messageId, ct)) { taken++; continue; }   // the other source got this item first: no read
             var facts = await reader.ReadItem(id, ct);
             if (facts is not { IsFactoryItem: true }) continue;
             var message = Build(id, commit, pull.Number, facts, source);
@@ -79,9 +82,12 @@ public sealed partial class ItemMergedDeriver(IMergeFactsReader reader, IMergedI
                 ItemKey = id.ToString(), Commit = commit, PullRequest = pull.Number, Source = source, MergedAt = now(), MessageId = messageId,
                 GatesJson = JsonSerializer.Serialize(message.Gates), DependenciesJson = JsonSerializer.Serialize(message.Dependencies.Select(d => d.ToString())),
             };
-            if (await store.TryRecord(row, ct)) merged.Add(message);   // false: the other source got there first
+            derived.Add((row, message));
         }
-        return new(merged, merged.Count > 0 ? "derived" : "no-new-item");
+        // one transaction for the items of the pull request; an item another message claimed since the look is left to it
+        var mine = (await store.TryRecordAll(derived.Select(d => d.Row).ToList(), ct)).Select(r => r.ItemKey).ToHashSet();
+        var merged = derived.Where(d => mine.Contains(d.Row.ItemKey)).Select(d => d.Message).ToList();
+        return new(merged, merged.Count > 0 ? "derived" : taken > 0 && derived.Count == 0 ? "duplicate-item" : "no-new-item");
     }
 
     ItemMerged Build(ItemId id, string commit, int pr, ItemMergeFacts facts, string source)

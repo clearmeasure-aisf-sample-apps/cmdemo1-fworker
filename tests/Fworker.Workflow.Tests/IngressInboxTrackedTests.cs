@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
 using Fworker.Integrations.Correlation;
+using Microsoft.EntityFrameworkCore;
 using Wolverine;
 using Wolverine.Runtime;
 using Wolverine.Runtime.Handlers;
@@ -28,7 +29,7 @@ public class IngressInboxTrackedTests
 
     static Func<string, Action<WolverineOptions>> Wire(List<string> outcomes) => cs => w =>
     {
-        w.AddMessageHandler(new InboxHandler(new IngressInboxProcessor(new SqlIngressDedup(cs), new SqlCorrelationMap(cs), Home), outcomes));
+        w.AddMessageHandler(new InboxHandler(new IngressInboxProcessor(new SqlIngressDedup(cs), new GenerationStampingMap(new SqlCorrelationMap(cs), new SqlItemGenerations(cs)), Home), outcomes));
         w.PublishMessage<IngressInboxMessage>().ToLocalQueue("harness");
     };
 
@@ -67,6 +68,28 @@ public class IngressInboxTrackedTests
         Assert.Equal(2, await h.Count("SELECT COUNT(*) FROM factory.IngressDedup WHERE Layer = 'fact'"));
         Assert.Equal(4, new SqlIngressDedup(h.ConnectionString).Purge(TimeSpan.Zero));   // two deliveries and two facts
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM factory.IngressDedup"));
+    }
+
+    [Fact]
+    public async Task TheRowsCarryTheGenerationOfTheOpenInstance_ZeroForAnItemWithNone_AndForOneThatIsComplete()
+    {
+        if (!TrackedSessionHost.Available) return;
+        var outcomes = new List<string>();
+        await using var h = await TrackedSessionHost.StartAsync(Wire(outcomes));
+        await using (var db = new Fworker.Persistence.FactoryDbContext(new DbContextOptionsBuilder<Fworker.Persistence.FactoryDbContext>().UseSqlServer(h.ConnectionString).Options))
+        {
+            db.OpenInstances.Add(new Fworker.Persistence.OpenInstance { ItemKey = "acme/orders#7", Generation = 2, OpenedAt = DateTimeOffset.UtcNow });
+            db.OpenInstances.Add(new Fworker.Persistence.OpenInstance { ItemKey = "acme/orders#8", Generation = 1, OpenedAt = DateTimeOffset.UtcNow.AddHours(-1), ClosedAt = DateTimeOffset.UtcNow });
+            await db.SaveChangesAsync();
+        }
+        string Ev(int item, int pr, string d) => new JsonObject { ["provider"] = "github", ["event"] = "pr.opened", ["item"] = item, ["ref"] = d, ["pr"] = pr, ["sha"] = "abc" + item }.ToJsonString();
+        await h.TrackSend(new IngressInboxMessage("webhook", Ev(7, 9, "d-1")));
+        await h.TrackSend(new IngressInboxMessage("webhook", Ev(8, 10, "d-2")));   // its instance is complete
+        await h.TrackSend(new IngressInboxMessage("webhook", Ev(9, 11, "d-3")));   // no instance at all
+        Assert.Equal(2, await h.Count("SELECT COUNT(*) FROM factory.Correlations WHERE ItemKey = 'acme/orders#7' AND Generation = 2"));
+        Assert.Equal(4, await h.Count("SELECT COUNT(*) FROM factory.Correlations WHERE ItemKey IN ('acme/orders#8', 'acme/orders#9') AND Generation = 0"));
+        var gens = new SqlItemGenerations(h.ConnectionString);
+        Assert.Equal((2, 0, 0), (gens.CurrentGeneration("acme/orders#7"), gens.CurrentGeneration("acme/orders#8"), gens.CurrentGeneration("acme/orders#99")));
     }
 
     [Fact]
