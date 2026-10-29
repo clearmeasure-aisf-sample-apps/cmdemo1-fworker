@@ -45,6 +45,21 @@ sealed class JournalCommandSink
     public JournalCommandSink(Func<WriteJournalLine, Task<bool>> publish, double waitingMinutes, Func<DateTime>? utcNow = null)
     { this.publish = publish; this.waitingMinutes = waitingMinutes; this.utcNow = utcNow ?? (() => DateTime.UtcNow); }
 
+    /// <summary>
+    /// W7.3: told when the plant journals that the session holding an item is gone (a "reassigned" line with the code session-gone): the item's slot ends in the scheduler and its saga asks again. Set by the gateway's wiring
+    /// of the saga; unset, nothing is told. A fault of it is logged and does not stop the line from being written.
+    /// </summary>
+    public Func<int, string, Task>? OnSessionGone { get; set; }
+
+    /// <summary>
+    /// The plant's word for a journal line (Plant.JournalCoded): the code is taken off the line's fields before the journal delegate is called, so it never reaches <see cref="Send"/>.
+    /// </summary>
+    public async Task Coded(int item, string ev, string code, string key)
+    {
+        if (ev == "reassigned" && code == "session-gone" && OnSessionGone is { } gone)
+            await gone(item, key);
+    }
+
     public async Task Send(int item, string ev, JsonObject fields, string key)
     {
         var now = utcNow();

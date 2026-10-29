@@ -6,10 +6,11 @@ sealed record RecurringJobSlot(string Name, TimeSpan Every);
 
 sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
 {
-    public const string BoardReconciler = "board-reconciler", CatalogReread = "catalog-reread", IngressDedupPurge = "ingress-dedup-purge", DocsIntake = "docs-intake";
+    public const string BoardReconciler = "board-reconciler", CatalogReread = "catalog-reread", IngressDedupPurge = "ingress-dedup-purge", DocsIntake = "docs-intake", FeatureChecks = "feature-checks";
     public IReadOnlyList<RecurringJobSlot> Slots { get; } = slots;
+    // W7.3: the watcher of the checks of the feature items runs every minute too, and is filled only when the engine carries the feature plan
     // W6.6: the intake of docs items is the one slot that runs every minute, as v1's sweep pulls an item when a session is free; it is filled only when intake names the docs plan
-    public static RecurringJobSlots Default() => new([new(BoardReconciler, TimeSpan.FromMinutes(5)), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1))]);
+    public static RecurringJobSlots Default() => new([new(BoardReconciler, TimeSpan.FromMinutes(5)), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1)), new(FeatureChecks, TimeSpan.FromMinutes(1))]);
 
     /// <summary>Adds the slots and the registry of their jobs to the host's services and the queue the runs travel on. Returns the slots registered.</summary>
     public static RecurringJobSlots Attach(WolverineHostService host, RecurringJobRegistry? registry = null)

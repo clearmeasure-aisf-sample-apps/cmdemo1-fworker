@@ -155,6 +155,8 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
         // to that session (Board.ps1 Add-Comment). Never a token: the page of the gateway, or the runtime's own page of the agent or task.
         authorized.Remove("_session");
         if (ctx.Caller().SessionLinkOf(who) is { } sl) authorized["_session"] = sl;
+        // W7.3: the flag that lets Functional Testing start beside pending checks (Verbs.Item.ps1 `complete`) is the gateway's own to give, and only its v2 feed (V2VerbFeed, below this route) does: a caller's is taken out, in v1 as in v2
+        V2VerbFeed.TakeOutFlag(authorized);
         var (code, output) = await engine.RunAsync(verb, authorized.ToJsonString(), timeout);
         if (mgrTicket != null)
         {   // the plant's part of an item action of the plant manager, after its rule script changed the item (Manager.cs)

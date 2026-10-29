@@ -1866,10 +1866,21 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
             // issue 144: a reassigned line says why (a code, never the journal's text); the code is for the operator stream only, not the journal
             var why = fields["opCode"]?.ToString() ?? ""; fields.Remove("opCode");
             if (ev is "matched" or "offered" or "reassigned") OperatorPlantEvent(ev, item, fields["worker"]?.ToString() ?? "", fields["column"]?.ToString() ?? "", ev == "reassigned" ? why : "");
-            Chain(item, () => WriteJournal(item, ev, fields, key), repeat ? () => waitingQueued.Remove(item) : null);
+            Chain(item, () => WriteJournal(item, ev, fields, key, why), repeat ? () => waitingQueued.Remove(item) : null);
         }
     }
-    async Task WriteJournal(int item, string ev, JsonObject fields, string key) { try { await journal(item, ev, fields, key); } catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); } }
+    // W7.3: told, in the item's chain and before its line is written, of a journal line that carries a code (the code is taken off the fields above, so the journal delegate never sees it and v1's
+    // journal text is unchanged): the v2 engine's saga learns from it that the session of an item is gone. Unset in v1; a fault of it is logged and does not stop the line.
+    public Func<int, string, string, string, Task>? JournalCoded { get; set; }
+    async Task WriteJournal(int item, string ev, JsonObject fields, string key, string code = "")
+    {
+        if (code.Length > 0 && JournalCoded is { } coded)
+        {
+            try { await coded(item, ev, code, key); }
+            catch (Exception e) { Console.Error.WriteLine($"journal code {code} of {ev} for #{item}: {e.GetType().Name}"); }
+        }
+        try { await journal(item, ev, fields, key); } catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
+    }
     // under gate: one more link of the item's chain; after runs (under gate) once it has ended
     void Chain(int item, Func<Task> write, Action? after = null)
     {

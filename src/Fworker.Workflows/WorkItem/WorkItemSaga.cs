@@ -52,6 +52,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         var replay = ReplayKeyOf(input);
         if (replay.Length > 0 && replay == existing.LastKey) return Reemit(existing, state);
         state.MergeRequestEmitted = false;   // (set again by the step that asks for a merge call in this transition)
+        state.Outbox = [];                    // (what this transition asks of the scheduler and the merge line is added by the steps)
         if (!state.IsOpen) return Nothing(existing, WorkItemOutcome.NotFound, "the instance is completed");
         if (input is IGenerationInput g && g.Generation != 0 && g.Generation != state.Generation) return Nothing(existing, WorkItemOutcome.NotFound, $"the item is on generation {state.Generation}");
         if (input is IKeyedInput { Key.Length: > 0 } keyed && state.Keys.Contains(keyed.Key)) return Nothing(existing, WorkItemOutcome.Duplicate, "the key was applied");
@@ -72,13 +73,13 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 if (state.Parked) return StepAnswer.Refused("the item is parked");
                 if (state.Status == WorkItemStatus.Settling) return StepAnswer.Refused("the item is inside its settle window");
                 if (state.Step == StepKind.Deliver) return StepAnswer.Refused("the deliver step ends with the delivery, not with a report");
-                if (Steps.For(c.Plan, state.Step).Gate(c) is { } gate) return gate;
+                if (c.StepOf(state.Step).Gate(c) is { } gate) return gate;
                 c.Advance($"{state.Step} done");
                 return StepAnswer.Applied;
             case BudgetSpent b: return Budget(c, b);
             case LeaseRenewed:
                 if (state.Parked || state.LeaseDue is null) return StepAnswer.Refused("the step has no lease to renew");
-                state.LeaseDue = c.Now + (Steps.For(c.Plan, state.Step).Lease(policy) ?? TimeSpan.Zero);
+                state.LeaseDue = c.Now + (c.StepOf(state.Step).Lease(policy) ?? TimeSpan.Zero);
                 c.TimerChanged = true;
                 return StepAnswer.Applied;
             case PhaseLeaseExpired l: return LeaseExpired(c, l);
@@ -96,15 +97,19 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 return StepAnswer.Applied;
             case StartWorkItem or ReopenWorkItem:
                 return StepAnswer.Refused("the item is open");
+            case ChecksObserved o: return FeatureFlow.Checks(c, o);
+            case SlotAssigned a: return FeatureFlow.Assigned(c, a);
+            case SlotHeld h: return FeatureFlow.Held(c, h);
+            case SessionLost l: return FeatureFlow.Lost(c, l);
             case ReviewRecorded:
                 if (state.Parked) return StepAnswer.Refused("the item is parked");
-                return Steps.For(c.Plan, state.Step).Handle(c, input);
+                return c.StepOf(state.Step).Handle(c, input);
         }
         var home = Steps.HomeOf(input);
         if (home is null) return StepAnswer.Refused("no step takes the message");
         // a message about the item's progress is not taken while it is parked, except the facts that happened outside (the merge, a delivery, the pull request)
         if (state.Parked && input is DesignRecorded) return StepAnswer.Refused("the item is parked");
-        return Steps.For(c.Plan, home.Value).Handle(c, input);
+        return c.StepOf(home.Value).Handle(c, input);
     }
 
     StepAnswer Budget(StepContext c, BudgetSpent b)
@@ -155,7 +160,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         c.Decide(WorkItemActions.LeaseExpired, $"{phase} had no sign of life by {l.Due:O}");
         state.Failures[phase] = state.FailuresOf(state.Step) + 1;
         if (FailuresSpent(state.Failures[phase]) is { } spent) c.Park($"{spent}: {state.Failures[phase]} failures in {phase} (lease expired)");
-        else c.Enter(state.Step, "lease expired");
+        else { c.EndSession(); c.Enter(state.Step, "lease expired"); }   // (the session that gave no sign of life is over: its slot goes back to the scheduler, the step asks again)
         return StepAnswer.Applied;
     }
 
@@ -229,10 +234,25 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
     }
 
     /// <summary>The commands the last applied input asked for (the merge call of the docs plan): sent with its decisions, and again with them when the input is redelivered.</summary>
-    public static IReadOnlyList<object> CommandsOf(WorkItemState state) =>
-        state.MergeRequestEmitted && state.MergeRequest is { } m && state.Status == WorkItemStatus.Open && !state.Parked
-            ? [new MergeRequested(state.ItemId, state.Generation, state.ArmId, m.Attempt, m.PullRequest, m.Head, m.UpdatesSoFar, m.UpdatedFrom)]
-            : [];
+    public static IReadOnlyList<object> CommandsOf(WorkItemState state)
+    {
+        var commands = new List<object>();
+        var item = state.ItemId;
+        // what the item asks of the scheduler and the merge line (W7.3), in the order the steps asked: an end of a session before the request that replaces it
+        foreach (var c in state.Outbox)
+            commands.Add(c switch
+            {
+                AskSlot a => new SlotWanted(item, state.Generation, a.ArmId, a.Key, a.Phase, a.Resume, a.ColumnDepth, a.Footprint, a.FromPullRequest, a.At),
+                EndSession e => new Capacity.SessionEnded(item, e.Key, e.SlotId),
+                ClearSlot x => new Capacity.ClearItem(item, x.Key, x.Reason),
+                ChangeFootprint f => new Capacity.FootprintChanged(item, f.Key, f.Files),
+                LeaveTrain l => new Merge.MergeTrainLeft(item.Repository.ToString(), item, l.Reason),
+                _ => throw new InvalidOperationException($"no message for the command {c.GetType().Name}"),
+            });
+        if (state.MergeRequestEmitted && state.MergeRequest is { } m && state.Status == WorkItemStatus.Open && !state.Parked)
+            commands.Add(new MergeRequested(state.ItemId, state.Generation, state.ArmId, m.Attempt, m.PullRequest, m.Head, m.UpdatesSoFar, m.UpdatedFrom, state.Plan));
+        return commands;
+    }
 
     WorkItemTransition Reemit(WorkItemState saved, WorkItemState copy)
     {

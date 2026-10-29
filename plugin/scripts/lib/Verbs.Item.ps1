@@ -492,7 +492,10 @@ function Verb_complete($a) {
     }
     $s.pr = @{ number = $pr.number; branch = $pr.head.ref; url = $pr.html_url }
     if ($null -ne $rerun) { $s.pr.rerun = $rerun }
-    if ($chk.status -eq 'pending' -or $ciWait) {
+    # delivery-speed.md 5.1: Functional Testing starts at the push and CI runs alongside. The gateway asks for it (ftWithPendingChecks) for an item whose saga watches the checks (the feature plan of the v2 engine): checks that are
+    # still running, or that the CI rule is still ruling on, do not park the item; it moves on to Functional Testing and the answer says so (continue, next_column, checks: pending). A head that is red for good is refused above, as always.
+    $alongside = ($chk.status -eq 'pending' -or $ciWait) -and (Test-Has $a 'ftWithPendingChecks') -and "$($a.ftWithPendingChecks)" -in 'True', 'true', '1'
+    if (($chk.status -eq 'pending' -or $ciWait) -and -not $alongside) {
         $s.awaiting_checks = @{ pr = $pr.number; sha = $prd.head.sha; comment = $comment; since = ConvertTo-Iso (Get-UtcNow); column = $col }
         Set-Park $s 'development:awaiting-checks' $c.timing.awaitingChecksParkMinutes
         if (Test-OwnedClaim $s) { Save-State $n $st } else { $s.Remove('claim'); Save-State $n $st; Remove-ClaimRef $n }
@@ -500,9 +503,13 @@ function Verb_complete($a) {
         Add-Comment $n "PR #$($pr.number) $why; the gateway is watching them and will advance the item when green. Stay connected while the checks run."
         Reject 21 'accepted-checks-pending' "pull request $why; the gateway is watching them and will advance the item when they are green. Stay connected while the checks run: do not end the session. The gateway advances the item when the checks are green." @{ prNumber = $pr.number; checks = (Get-PublicChecks $chk) }
     }
-    $s.Remove('fix_forward_rounds'); $s.Remove('master_defect')
-    if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
-    return Finish-ColumnExit $n $info $st "$comment" @{ prNumber = $pr.number; build_owed = -not ($docsOnly -and (Test-ItemDocsOnly $s $info)) }
+    $extra = @{ prNumber = $pr.number; build_owed = -not ($docsOnly -and (Test-ItemDocsOnly $s $info)) }
+    if ($alongside) { $extra.checks = 'pending'; $extra.ci = 'alongside' }
+    else {
+        $s.Remove('fix_forward_rounds'); $s.Remove('master_defect')
+        if ((Test-Has $s 'pr') -and (Test-Has $s.pr 'rejection')) { $s.pr.Remove('rejection') }
+    }
+    return Finish-ColumnExit $n $info $st "$comment" $extra
 }
 
 # Escalate earlier (enhancement 10). The acceptance criteria a review or a FAIL verdict cites: every `criterion "<text>"` quote (the

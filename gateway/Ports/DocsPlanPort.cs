@@ -24,15 +24,26 @@ using Microsoft.EntityFrameworkCore;
 /// <summary>What the docs plan reads of config/instance.json.</summary>
 public sealed record DocsPlanSettings(
     string AutoMergeLabel, IReadOnlyList<string> HoldLabels, int MergeQueueDepth, bool UpdateBranchWhenBehind, int MaxUpdates,
-    IReadOnlyDictionary<StepKind, string> Columns, string DoneColumn, string DocsMarker, string DesignSection, DocsPlanRules Rules, IReadOnlyList<string> CarriedPlans)
+    IReadOnlyDictionary<StepKind, string> Columns, string DoneColumn, string DocsMarker, string DesignSection, DocsPlanRules Rules, IReadOnlyList<string> CarriedPlans,
+    string ReleaseColumn = "", string FinalEnvironment = "prod", bool FeatureSlots = true, string SlotRuntime = "")
 {
     /// <summary>The card of an item on that step; null when the step has none of its own (the merge happens in the validation column).</summary>
     public string? ColumnOf(StepKind step) => Columns.TryGetValue(step, out var c) ? c : null;
 
     public bool IsHold(string label) => label.StartsWith("hold:", StringComparison.OrdinalIgnoreCase) || HoldLabels.Contains(label, StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The policy of the saga with these rules; a plan list that is empty carries every plan (the saga is not wired by it then).</summary>
-    public WorkItemPolicy Policy => WorkItemPolicy.Default with { Docs = Rules, CarriedPlans = CarriedPlans.Count == 0 ? null : CarriedPlans };
+    /// <summary>
+    /// The policy of the saga with these rules; a plan list that is empty carries every plan (the saga is not wired by it then). Where the engine carries the feature plan (W7.3) the policy has its rules: the plan's steps,
+    /// and the slots of the scheduler unless <c>scheduler.featureSlots</c> is off. The last environment an item is delivered to is <c>delivery.finalEnvironment</c> (prod; a tdd-only factory names tdd).
+    /// </summary>
+    public WorkItemPolicy Policy => WorkItemPolicy.Default with
+    {
+        Docs = Rules, CarriedPlans = CarriedPlans.Count == 0 ? null : CarriedPlans, FinalEnvironment = FinalEnvironment,
+        FeatureRules = CarriedPlans.Contains(WorkPlans.Feature, StringComparer.OrdinalIgnoreCase) ? new FeaturePlanRules(FeatureSlots) : null,
+    };
+
+    /// <summary>Whether the engine carries the feature plan: its steps run, its items are pulled by the intake and its checks are watched.</summary>
+    public bool CarriesFeature => CarriedPlans.Contains(WorkPlans.Feature, StringComparer.OrdinalIgnoreCase);
 }
 
 public static class DocsPlanSettingsReader
@@ -55,10 +66,12 @@ public static class DocsPlanSettingsReader
         var rules = new DocsPlanRules(Int(timing, "maxReviewRounds") ?? 3, Int(timing, "docsOnlyMaxReviewRounds") ?? 2, ReviewedSteps: reviewedSteps);
         var policyAuto = (Text(root, "mergePolicy") ?? "auto") == "auto";
         var autoUpdate = false; try { autoUpdate = root?["baseUpdate"]?["autoUpdateBranch"] is JsonValue v && v.TryGetValue<bool>(out var b) && b; } catch { }
-        var intake = Node(root, "intake");
+        var intake = Node(root, "intake"); var scheduler = Node(root, "scheduler");
+        var featureSlots = true; try { if (scheduler?["featureSlots"] is JsonValue fv && fv.TryGetValue<bool>(out var fb)) featureSlots = fb; } catch { }
         return new DocsPlanSettings(Text(root, "autoMergeLabel") ?? "Auto Merge", Strings(root, "holdLabels"), Int(root, "mergeQueueDepth") ?? 0, policyAuto && autoUpdate,
             Int(timing, "outOfDateMergeAttempts") ?? 4, columns, Text(root?["columns"], "done") ?? "Done", Text(root, "docsOnlyMarker") ?? "<!-- aisf:docs-only -->", section ?? "", rules,
-            Strings(intake, "v2Plans").Select(p => p.ToLowerInvariant()).ToList());
+            Strings(intake, "v2Plans").Select(p => p.ToLowerInvariant()).ToList(),
+            Strings(Node(root, "columns"), "hold").FirstOrDefault() ?? "", Text(Node(root, "delivery"), "finalEnvironment") ?? "prod", featureSlots, Text(scheduler, "runtime") ?? "");
     }
 
     static JsonNode? Node(JsonNode? n, string name) { try { return n?[name]; } catch { return null; } }
@@ -77,7 +90,7 @@ public static class DocsPlanSettingsReader
 /// <see cref="MergeResult"/>. It never throws for a fault: GitHub or the network failing is a transient answer (the saga asks again after a pause), because an exception would end in Wolverine's retries or dead letters and
 /// the answer the saga waits for would not come.
 /// </summary>
-public sealed class DocsMergePort(MergePullRequestHandler? merge, IMergeFactsReader? reader, DocsPlanSettings settings, Func<bool>? budgetLow = null)
+public sealed class DocsMergePort(MergePullRequestHandler? merge, IMergeFactsReader? reader, DocsPlanSettings settings, Func<bool>? budgetLow = null, Func<MergeRequested, CancellationToken, Task<int>>? queueBusy = null)
 {
     /// <summary>The merge of a request as the saga asked, and its answer for the saga. <paramref name="firstTurn"/> says whether a branch that is behind is brought up to date first; unset, it is the saga's first attempt (the direct strategy).</summary>
     public async Task<MergeAttempted> Run(MergeRequested m, CancellationToken ct, bool? firstTurn = null) => MergeTrain.Attempted(m, await Answer(m, firstTurn ?? m.Attempt == 1, ct));
@@ -105,9 +118,12 @@ public sealed class DocsMergePort(MergePullRequestHandler? merge, IMergeFactsRea
             return new MergeResult(MergeResultKind.Blocked, "no-auto-merge-label", $"{m.Item} does not carry '{settings.AutoMergeLabel}': a person merges it", Transient: true);
         if (facts.Labels.FirstOrDefault(settings.IsHold) is { } hold)
             return new MergeResult(MergeResultKind.Blocked, "hold", $"{m.Item} carries the hold '{hold}'", Transient: true);
-        // a documentation change builds no release, so the merge queue never holds it (DocsOnly); GitHub's update of a branch that is behind is asked once per merge arm, as the script does once per verdict
+        // a documentation change builds no release, so the merge queue never holds it (DocsOnly); a code change (the feature plan, W7.3) waits while mergeQueueDepth merged items still wait for their release candidate: the
+        // count is the saga's own items in that state (a read that fails is a fault, which the caller turns into a transient answer). GitHub's update of a branch that is behind is asked once per merge arm, as the script does once per verdict
+        var docsOnly = string.Equals(m.Plan, WorkPlans.Docs, StringComparison.OrdinalIgnoreCase);
+        var busy = !docsOnly && settings.MergeQueueDepth > 0 && queueBusy is not null ? await queueBusy(m, ct) : 0;
         var cmd = new MergePullRequest(MergePullRequest.KeyFor(m.Item.Repository, m.PullRequest, m.Head, m.UpdatesSoFar), m.Item.Repository, m.PullRequest, m.Head,
-            MergeQueueDepth: settings.MergeQueueDepth, QueueBusy: 0, DocsOnly: true,
+            MergeQueueDepth: settings.MergeQueueDepth, QueueBusy: busy, DocsOnly: docsOnly,
             UpdateWhenBehind: settings.UpdateBranchWhenBehind && firstTurn && m.UpdatedFrom.Length == 0, UpdatedFrom: m.UpdatedFrom, UpdatesSoFar: m.UpdatesSoFar, MaxUpdates: settings.MaxUpdates,
             Item: m.Item.Number, RecordedPullRequest: m.PullRequest);
         return Map(await merge.Process(cmd, ct));
@@ -172,9 +188,13 @@ public sealed class DocsProjection(Func<BoardColumnProjection?> boardOf, DocsPla
     /// <summary>The column a decision puts the card in, or null for a decision that moves nothing.</summary>
     public string? ColumnFor(WorkItemDecided d)
     {
-        if (!string.Equals(d.Plan, WorkPlans.Docs, StringComparison.OrdinalIgnoreCase)) return null;
+        var docs = string.Equals(d.Plan, WorkPlans.Docs, StringComparison.OrdinalIgnoreCase);
+        var feature = string.Equals(d.Plan, WorkPlans.Feature, StringComparison.OrdinalIgnoreCase) && settings.CarriesFeature;
+        if (!docs && !feature) return null;
         return d.Action switch
         {
+            // the feature plan's merged item waits in the release queue (a hold column) for its delivery, as v1's settle puts it there; Done follows the settle window
+            WorkItemActions.StepEntered when feature && d.Step == nameof(StepKind.Deliver) => settings.ReleaseColumn.Length > 0 ? settings.ReleaseColumn : null,
             WorkItemActions.StepEntered when d.Step is { } step && Enum.TryParse<StepKind>(step, out var kind) => settings.ColumnOf(kind),
             WorkItemActions.Completed => settings.DoneColumn,
             _ => null,
@@ -216,6 +236,27 @@ public sealed class PullRequestHeads(GitHubClientFactory clients)
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception) { return ""; }
     }
+
+    /// <summary>The paths the pull request changes (W7.3: the footprint of the file-overlap rule after the first push), three pages of a hundred at most, or null when they cannot be read: the footprint then stays what it was.</summary>
+    public async Task<IReadOnlyList<string>?> FilesOf(RepoId repository, int pullRequest, CancellationToken ct)
+    {
+        try
+        {
+            var client = await clients.For(repository, ct);
+            var files = new List<string>();
+            for (var page = 1; page <= 3; page++)
+            {
+                using var resp = await client.Send(HttpMethod.Get, $"pulls/{pullRequest}/files?per_page=100&page={page}", null, ct);
+                if (!resp.IsSuccessStatusCode) return null;
+                if (JsonNode.Parse(await resp.Content.ReadAsStringAsync(ct)) is not JsonArray array) return null;
+                foreach (var f in array) if (f?["filename"]?.ToString() is { Length: > 0 } name) files.Add(name);
+                if (array.Count < 100) break;
+            }
+            return files;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception) { return null; }
+    }
 }
 
 /// <summary>The handler of the saga's decisions for the board. Public because Wolverine's generated code refers to it.</summary>
@@ -252,7 +293,9 @@ public sealed class DocsIntakeJob(IBoardReader boards, IMergeFactsReader items, 
             if (facts is null) continue;
             // the item's own body decides the plan it starts on; a body that names what it depends on is left to v1's intake, which checks the dependencies
             var body = facts.Body ?? "";
-            candidates.Add(new IntakeCandidate(id, true, true, facts.Labels, !Dependency.IsMatch(body), body.Contains(settings.DocsMarker, StringComparison.Ordinal) ? WorkPlans.Docs : null));
+            // (an item that names no marker is known to be a code change only when the engine carries the feature plan; otherwise v1's own intake takes it)
+            var plan = body.Contains(settings.DocsMarker, StringComparison.Ordinal) ? WorkPlans.Docs : settings.CarriesFeature ? WorkPlans.Feature : null;
+            candidates.Add(new IntakeCandidate(id, true, true, facts.Labels, !Dependency.IsMatch(body), plan));
         }
         var d = await intake.Run(candidates, freeSlots(), designWaiting(), inFlight, ct);
         return d.Pull is { Engine: IntakeEngine.V2 } pull ? $"started {pull.Item}" : d.Reason;

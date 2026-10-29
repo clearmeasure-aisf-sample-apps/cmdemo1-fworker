@@ -40,10 +40,23 @@ static class GatewayWolverineExtensions
                 journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands
                 // W6.0, W6.1: the WorkItemSaga of the hybrid composition: v1's plant still offers the sessions, the saga decides the items it has started, and v1's sweep leaves those items alone (V2Ownership)
                 // W6.6: the docs plan's steps run in it; the board it moves cards on is the catalog's, read when the first card moves
-                var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), boardRef: () => sp.GetService<ISystemCatalog>()?.Current.Board);
+                // W7.3: a fix-forward round of the feature plan reaches the owner session as the trigger v1's sweep sends (the plant is resolved when the trigger is sent, not here: building the plant needs the host)
+                var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), boardRef: () => sp.GetService<ISystemCatalog>()?.Current.Board,
+                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; });
                 WorkItemWiring.Attach(host, workItems);
                 workItemParts = workItems;
                 v2Ownership = workItems.Ownership;
+                // W7.3: a session of an item the saga owns that is gone ends its slot in the scheduler and tells the saga (the plant's own word for it, the journal's session-gone line)
+                if (journalSink is not null && c.Instance.Home is { } sessionHome)
+                    journalSink.OnSessionGone = async (item, key) =>
+                    {
+                        if (workItems.Ownership?.Owns(item) != true) return;
+                        var id = new Fworker.Contracts.Ids.ItemId(sessionHome, item);
+                        var at = DateTimeOffset.UtcNow;
+                        // (a host that is not up takes neither: the slot then ends at its time limit, which the scheduler tells the saga as a lost session)
+                        if (!await host.PublishAsync(new Fworker.Workflows.Capacity.SessionEnded(id, $"ended|{key}", "")) || !await host.PublishAsync(new SessionLost(id, 0, $"gone|{key}", "", "the session that held the item is gone", at)))
+                            throw new InvalidOperationException("the Wolverine host did not take the end of the session");
+                    };
                 // W7.0, W7.1: the CapacityScheduler, the slot ledger of the sessions the v2 engine starts; it shares the runtimes' limits with the plant's manager (no flag: it exists where the engine acts)
                 CapacityWiring.Attach(host, CapacityWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), CapacityWiring.OutsideOf(sp.GetRequiredService<RuntimeRegistry>()), CapacityWiring.OnOf(sp.GetRequiredService<RuntimeRegistry>())));
                 CapacityWiring.ConnectHostReports(sp.GetRequiredService<RuntimeRegistry>().OctopusRuntime, host);   // W7.4: the host reports (metrics, running containers) are the scheduler's HostReported
@@ -66,6 +79,13 @@ static class GatewayWolverineExtensions
                             () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low);
                         if (docsIntake is not null)
                             jobs.Add(RecurringJobSlots.DocsIntake, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["docsIntake"] = await docsIntake.Run(ct) }.ToJsonString()));
+                    }
+                    // W7.3: the watcher of CI alongside Functional Testing (every minute, on the leader), for the feature items; the checks are read through the rule script's own verbs, so its CI rule stays the script's
+                    if (workItems.Docs.Settings.CarriesFeature)
+                    {
+                        var runner = sp.GetRequiredService<Runner>();
+                        var watcher = new FeatureChecksJob(workItems.Store, home, new PullRequestChecks(async (verb, stdin, timeout) => await runner.RunAsync(verb, stdin, timeout)), m => host.PublishAsync(m), () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low);
+                        jobs.Add(RecurringJobSlots.FeatureChecks, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["featureChecks"] = await watcher.Run(ct) }.ToJsonString()));
                     }
                     correlations = new IngressCorrelations(map, home);
                     inboxPort = new IngressInboxPort(m => host.PublishAsync(m));

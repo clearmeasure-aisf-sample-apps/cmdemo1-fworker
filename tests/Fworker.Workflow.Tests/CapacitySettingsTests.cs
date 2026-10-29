@@ -53,7 +53,8 @@ public class CapacitySettingsTests
     {
         var cfg = Source();
         var scheduler = (JsonObject)cfg["scheduler"]!;
-        Assert.Equal(["slotMaxMinutes", "hostReportMaxMinutes", "safetyWakeMinutes", "toolchains"], scheduler.Select(kv => kv.Key));
+        // (W7.3 adds two settings of the feature plan's use of it: featureSlots, a switch of that plan's slots, and the runtime its requests name; neither turns the scheduler on or off)
+        Assert.Equal(["slotMaxMinutes", "hostReportMaxMinutes", "safetyWakeMinutes", "toolchains", "featureSlots", "runtime"], scheduler.Select(kv => kv.Key));
         Assert.DoesNotContain(cfg["engine"]!.AsObject().Select(kv => kv.Key), k => k is "scheduler" or "merge");
         Assert.Equal(0, (int)cfg["runtimes"]!["octopus"]!["perHostBurst"]!);   // 0: no burst, the limit is perHostCapacity
         Assert.False((bool)cfg["schedule"]!["fileOverlap"]!["enabled"]!);

@@ -74,7 +74,7 @@ public sealed class DocsDevelopStep : DevelopStep
     }
 }
 
-public sealed class DocsVerifyStep : VerifyStep
+public class DocsVerifyStep : VerifyStep
 {
     public override StepAnswer? Gate(StepContext c) => StepAnswer.Refused("use-validation-verdict: the Verify step is left by a validation verdict, not by a completion");
 
@@ -115,7 +115,7 @@ public sealed class DocsVerifyStep : VerifyStep
     static string Clip(string text) => text.Length <= 300 ? text : text[..300];
 }
 
-public sealed class DocsMergeStep : MergeStep
+public class DocsMergeStep : MergeStep
 {
     public override StepAnswer? Gate(StepContext c) => StepAnswer.Refused("the merge step ends with the merge, not with a report");
 
@@ -150,7 +150,7 @@ static class MergeSteps
         }
         s.MergeAttempt++;
         s.MergeRequest = new MergeRequestState { Attempt = s.MergeAttempt, PullRequest = s.PullRequest, Head = s.VerdictHead, UpdatesSoFar = s.MergeUpdates, UpdatedFrom = s.MergeUpdatedFrom };
-        s.MergeRetryAt = null; s.MergeRequestEmitted = true;
+        s.MergeRetryAt = null; s.MergeRequestEmitted = true; s.TrainEntered = true;
         c.TimerChanged = true;
         c.Decide(WorkItemActions.MergeRequested, $"attempt {s.MergeAttempt}", $"PR #{s.PullRequest} at {Short(s.VerdictHead)}");
     }
@@ -197,7 +197,7 @@ static class MergeSteps
             c.Park($"merge-blocked: {s.MergeAttempt} merge calls without a merge ({r.Reason})");
             return StepAnswer.Applied;
         }
-        if (Steps.For(c.Plan, s.Step).Lease(c.Policy) is { } lease) s.LeaseDue = c.Now + lease;
+        if (c.StepOf(s.Step).Lease(c.Policy) is { } lease) s.LeaseDue = c.Now + lease;
         s.MergeRetryAt = c.Now + (r.RetryAfter is { } after && after > TimeSpan.Zero ? after : c.Policy.DocsRules.Retry);
         c.TimerChanged = true;
         if (s.MergeBlockedReason != r.Reason) { s.MergeBlockedReason = r.Reason; c.Decide(WorkItemActions.MergeBlocked, r.Reason, r.Detail); }
