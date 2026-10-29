@@ -536,7 +536,7 @@ jobs:
   # The image starts without a database (issue 459, the kill-switch case of W2.0): the image of the Dockerfile is built here (the Build's own
   # image job is a sibling of this workflow's caller, not an input of it) and run with no FACTORY_DB_CONNECTION, as the uat and prod gateways run;
   # /ready must answer 200 within two minutes, or the job fails with the container's log. No GitHub credential: GH_TOKEN is the vault placeholder
-  # unset, so the gateway has no GitHub identity and does not wait for revocations. The two secrets it requires at start are made here at run time.
+  # unset, so the gateway has no GitHub identity and does not wait for revocations. The secrets it requires at start, and owner mode (the deployed settings need it), are given here; the secrets are made at run time.
   image-start:
     name: Image starts without a database
     runs-on: ubuntu-24.04
@@ -550,10 +550,12 @@ jobs:
       - name: Run it without FACTORY_DB_CONNECTION; /ready answers 200
         run: |
           set -euo pipefail
-          dev_token="$(openssl rand -hex 24)"; webhook_secret="$(openssl rand -hex 24)"
-          echo "::add-mask::$dev_token"; echo "::add-mask::$webhook_secret"
+          dev_token="$(openssl rand -hex 24)"; webhook_secret="$(openssl rand -hex 24)"; token_secret="$(openssl rand -hex 24)"
+          echo "::add-mask::$dev_token"; echo "::add-mask::$webhook_secret"; echo "::add-mask::$token_secret"
+          # FACTORY_OWNER_MODE=1 and FACTORY_TOKEN_SECRET are what the deployed app is given (system.json): the image's configuration turns messaging and
+          # the manager on, and the gateway refuses to start for either without owner mode (MessagingSettings.Load), and owner mode without a token secret
           docker run --detach --name fworker-start --publish 18080:8080 \
-            -e FACTORY_DEV_TOKEN="$dev_token" -e FACTORY_WEBHOOK_SECRET="$webhook_secret" -e GH_TOKEN=unset \
+            -e FACTORY_DEV_TOKEN="$dev_token" -e FACTORY_WEBHOOK_SECRET="$webhook_secret" -e FACTORY_TOKEN_SECRET="$token_secret" -e FACTORY_OWNER_MODE=1 -e GH_TOKEN=unset \
             fworker-start-check:ci
           container_env="$(docker exec fworker-start env 2>/dev/null || true)"
           if grep -q '^FACTORY_DB_CONNECTION=' <<<"$container_env"; then echo "::error::the container has FACTORY_DB_CONNECTION set"; exit 1; fi
