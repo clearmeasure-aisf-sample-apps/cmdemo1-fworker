@@ -195,7 +195,7 @@ sealed class VerbPipeline(GatewayOptions gateway, MessagingSettings messaging, K
         if (ownerMode && code == 0) { try { plant.OnVerb(verb, authorized, who, (JsonNode.Parse(output) as JsonObject) ?? new JsonObject()); } catch (Exception e) { Console.Error.WriteLine($"plant hook {verb}: {e.Message}"); } }
         // W4.1: a pull request or branch the verb names finds its item later (only where the engine acts; best effort)
         if (code == 0 && services.GetService<IngressCorrelations>() is { } correlations && int.TryParse(authorized["item"]?.ToString(), out var corrItem))
-        { try { if (JsonNode.Parse(output) is JsonObject co) correlations.FromVerb(verb, corrItem, co); } catch { } }
+        { try { if (JsonNode.Parse(output) is JsonObject co) _ = correlations.FromVerb(verb, corrItem, co); } catch { } }
         if (accepting) plant.EndAccept(who.Assignment);
         // issue 31: a session that calls a verb successfully is answering: its count of lapsed offers starts again. Issue 100: not the accept its stream
         // client makes by itself (accepted_by client): a blocked session's client accepts every offer, and that is no sign that the session works

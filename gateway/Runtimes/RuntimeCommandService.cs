@@ -20,17 +20,44 @@ public sealed class RuntimeCommandService
         Action<string, string, int>? onStarted = null)
     { this.start = start; this.stop = stop; this.runbook = runbook; this.managerOf = managerOf; this.onStarted = onStarted; }
 
-    public Task RunStart(StartRuntimeSession c, IMessageBus bus, CancellationToken ct) => Deliver(c, start.Process(c, ct), bus);
-    public Task RunStop(StopRuntimeSession c, IMessageBus bus, CancellationToken ct) => Deliver(c, stop.Process(c, ct), bus);
-    public Task RunRunbook(RunRunbook c, IMessageBus bus, CancellationToken ct) => Deliver(c, runbook.Process(c, ct), bus);
+    // The pauses of Wolverine's rule for CommandRetryException (RuntimeCommandWiring.Attach): the first run and one run after each pause. #475: the run after the last pause
+    // is the last one, and a command that still fails then settles as a failed result instead of going to the dead letters, where nothing would ever tell the manager.
+    public static readonly TimeSpan[] RetryPauses = [TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60)];
+    public static int MaxAttempts => RetryPauses.Length + 1;
 
-    // A failure that is tried again throws, and Wolverine's rule for CommandRetryException retries the envelope; otherwise the result message goes back through the outbox.
-    static async Task Deliver(IntegrationCommand c, Task<RuntimeOutcome> run, IMessageBus bus)
+    // attempts: the number of this run, from 1 (Envelope.Attempts)
+    public Task RunStart(StartRuntimeSession c, IMessageBus bus, int attempts, CancellationToken ct) => Deliver(StartMessages(c, attempts, ct), bus);
+    public Task RunStop(StopRuntimeSession c, IMessageBus bus, int attempts, CancellationToken ct) => Deliver(StopMessages(c, attempts, ct), bus);
+    public Task RunRunbook(RunRunbook c, IMessageBus bus, int attempts, CancellationToken ct) => Deliver(RunbookMessages(c, attempts, ct), bus);
+
+    internal Task<IReadOnlyList<object>> StartMessages(StartRuntimeSession c, int attempts, CancellationToken ct) => Outcome(c, () => start.Process(c, ct), e => StartRuntimeSessionHandler.Exhausted(c, e), attempts);
+    internal Task<IReadOnlyList<object>> StopMessages(StopRuntimeSession c, int attempts, CancellationToken ct) => Outcome(c, () => stop.Process(c, ct), e => StopRuntimeSessionHandler.Exhausted(c, e), attempts);
+    internal Task<IReadOnlyList<object>> RunbookMessages(RunRunbook c, int attempts, CancellationToken ct) => Outcome(c, () => runbook.Process(c, ct), e => RunRunbookHandler.Exhausted(c, e), attempts);
+
+    // A failure that is tried again throws (inside the messages), and Wolverine's rule for CommandRetryException retries the envelope; otherwise the result messages go back through the outbox.
+    static async Task Deliver(Task<IReadOnlyList<object>> messages, IMessageBus bus)
     {
-        var o = await run;
-        if (o.Retry) throw new CommandRetryException($"{c.Name}: {o.Result.Failure} {o.Result.Error}");
-        if (o.Failed != null) await bus.PublishAsync(o.Failed);
-        if (o.Message != null) await bus.PublishAsync(o.Message);
+        foreach (var m in await messages) await bus.PublishAsync(m);
+    }
+
+    // The messages to publish for this run; throws CommandRetryException when the command is to be tried again. Apart from a cancellation (the host is stopping and
+    // the envelope stays in the inbox), anything the run throws is treated as a failure that is tried again: the handlers classify what the runtime throws, so what
+    // escapes is the idempotency ledger's database or a defect, and neither may leave a start unsettled.
+    internal static async Task<IReadOnlyList<object>> Outcome(IntegrationCommand c, Func<Task<RuntimeOutcome>> run, Func<string, RuntimeOutcome> exhausted, int attempts)
+    {
+        RuntimeOutcome o;
+        try { o = await run(); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception e) { o = new RuntimeOutcome(CommandResult.Failed(FailureKind.Transient, $"{c.Name}: {e.GetType().Name}"), null, null); }   // the type only: a database error's message can carry the connection string
+        if (o.Retry)
+        {
+            if (attempts < MaxAttempts) throw new CommandRetryException($"{c.Name}: {o.Result.Failure} {o.Result.Error}");
+            o = exhausted(o.Result.Error);
+        }
+        var messages = new List<object>(2);
+        if (o.Failed != null) messages.Add(o.Failed);
+        if (o.Message != null) messages.Add(o.Message);
+        return messages;
     }
 
     public Task Started(RuntimeSessionStarted m)
@@ -46,9 +73,9 @@ public sealed class RuntimeCommandService
 public static class RuntimeCommandHandlers
 {
     public const string Queue = "runtime-commands";
-    public static Task Handle(StartRuntimeSession m, RuntimeCommandService s, IMessageBus bus, CancellationToken ct) => s.RunStart(m, bus, ct);
-    public static Task Handle(StopRuntimeSession m, RuntimeCommandService s, IMessageBus bus, CancellationToken ct) => s.RunStop(m, bus, ct);
-    public static Task Handle(RunRunbook m, RuntimeCommandService s, IMessageBus bus, CancellationToken ct) => s.RunRunbook(m, bus, ct);
+    public static Task Handle(StartRuntimeSession m, RuntimeCommandService s, IMessageBus bus, Envelope envelope, CancellationToken ct) => s.RunStart(m, bus, envelope.Attempts, ct);
+    public static Task Handle(StopRuntimeSession m, RuntimeCommandService s, IMessageBus bus, Envelope envelope, CancellationToken ct) => s.RunStop(m, bus, envelope.Attempts, ct);
+    public static Task Handle(RunRunbook m, RuntimeCommandService s, IMessageBus bus, Envelope envelope, CancellationToken ct) => s.RunRunbook(m, bus, envelope.Attempts, ct);
     public static Task Handle(RuntimeSessionStarted m, RuntimeCommandService s) => s.Started(m);
     public static Task Handle(RuntimeStartFailed m, RuntimeCommandService s) => s.StartFailed(m);
     public static void Handle(RuntimeSessionStopped m, RuntimeCommandService s) => s.Stopped(m);
@@ -86,8 +113,8 @@ static class RuntimeCommandWiring
             w.PublishMessage<RunbookRunFinished>().ToLocalQueue(RuntimeCommandHandlers.Queue);
             w.PublishMessage<IntegrationFailed>().ToLocalQueue(RuntimeCommandHandlers.Queue);
             w.LocalQueue(RuntimeCommandHandlers.Queue).UseDurableInbox();
-            // a transient or rate-limited command is tried again with growing pauses, then dead-lettered
-            w.Policies.OnException<CommandRetryException>().RetryWithCooldown(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60)).Then.MoveToErrorQueue();
+            // a transient command is tried again with growing pauses; the run after the last pause settles as a failed result (#475), so the dead letters are the fallback only
+            w.Policies.OnException<CommandRetryException>().RetryWithCooldown(RuntimeCommandService.RetryPauses).Then.MoveToErrorQueue();
         };
     }
 

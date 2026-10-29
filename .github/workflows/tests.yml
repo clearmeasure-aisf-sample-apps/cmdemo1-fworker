@@ -16,7 +16,14 @@
 # Every scenario's writes to the fake GitHub are recorded (TEST_WRITES_DIR) and compared with tests/scenarios/golden where a golden file
 # exists; each Tier 1 job uploads its records as the artifact writes-<job>-<attempt> (tests/scenarios/golden/README.md says how to re-record).
 # The jobs unit (tests/Gateway.Tests, the gateway in process: routes and their guards, start and stop, in 4 shards) and src (the smoke test and the
-# test projects of src/) run the quick tests in minutes. SQL Server is a service of those two only: Tier 1 does not pass a connection to the gateway.
+# test projects of src/) run the quick tests in minutes. SQL Server is a service of those two and of the job v2 below: the Tier 1 shards do not pass
+# a connection to the gateway.
+# The job "Tier 1 (v2)" (v2 below) is a second engine, not a shard: it runs the suites and scenarios of tests/scenarios/v2-claims.txt once more with
+# run.ps1 -Engine v2 (FACTORY_ENVIRONMENT v2ci, engine.v2Environments naming it, FACTORY_DB_CONNECTION a SQL Server of its own), through
+# tests/ci/run-v2-claims.py. Those scenarios also run, as before, in the shards; the job names no suites: line, so "Every scenario is in exactly one shard"
+# does not read it, and it uploads v2-results-*, not suite-results-*, so "Tests result" does not count its scenarios a second time. Until its first green run on
+# master it is reported by "Tests result" and does not fail it (V2_BLOCKING there). The job "Image starts without a database" builds the image and starts it with
+# no FACTORY_DB_CONNECTION (the kill-switch case of W2.0): /ready must answer 200.
 name: Tests
 
 on:
@@ -423,6 +430,151 @@ jobs:
             dotnet test "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false
           done
 
+  # Tier 1 on the v2 engine (issue 467, W2.4a): the claims of tests/scenarios/v2-claims.txt, one run.ps1 -Engine v2 each, one after the other
+  # (tests/ci/run-v2-claims.py: a claim that lists no scenario fails; all claims run even when one fails). The gateway under test runs with
+  # FACTORY_ENVIRONMENT v2ci and engine.v2Environments naming it, so Engine.V2Acts is true: the Wolverine host, the journal sink, the runtime
+  # commands, the recurring jobs and the ingress start, against a database of its own on the SQL Server service (FACTORY_TEST_SQL; run.ps1 adds the
+  # database name per process). This is a second engine over the same scenarios and goldens, not a shard: it has no `suites:` entry above, and its
+  # result files are v2-results-*, which "Tests result" does not add to the suites. Own jobs timeout: the claims take minutes; the rest leaves the uploads their time.
+  v2:
+    name: Tier 1 (v2)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
+    services:
+      sql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB
+          MSSQL_MEMORY_LIMIT_MB: "1024"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' -b"
+          --health-interval 5s --health-timeout 5s --health-retries 30 --health-start-period 10s
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: PowerShell ${{ env.PWSH_VERSION }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pwsh"
+          curl -fsSL "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" | tar -xz -C "$RUNNER_TEMP/pwsh"
+          chmod +x "$RUNNER_TEMP/pwsh/pwsh"
+          echo "$RUNNER_TEMP/pwsh" >> "$GITHUB_PATH"
+
+      # the service container's health check passed before the steps started (the job waits for it); this proves the port answers from the runner
+      - name: SQL Server is reachable
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/1433) 2>/dev/null; then echo "SQL Server answers on 127.0.0.1:1433"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::the SQL Server service container does not answer on port 1433"; exit 1
+
+      - name: Build the gateway and the fake GitHub
+        run: |
+          set -euo pipefail
+          pwsh --version
+          for project in tests/FakeGitHub gateway; do
+            dotnet build "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --verbosity quiet
+          done
+
+      # (the claims' ports are the slots of their suites, 6100 to 8999: below the ephemeral range, which the shards move for their group ports)
+      - name: The claims of v2-claims.txt on the v2 engine
+        timeout-minutes: 22
+        env:
+          # the fake writes each scenario's record here and the golden files are compared, as in the shards (TEST_GOLDEN unset: compare)
+          TEST_WRITES_DIR: ${{ runner.temp }}/v2-writes
+          # the suites' work directories (their gateway logs) are under it, for the upload of a failed run
+          TMPDIR: ${{ runner.temp }}/v2-work
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/v2-results" "$TMPDIR"
+          python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt "$RUNNER_TEMP/v2-results"
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2-results
+          path: ${{ runner.temp }}/v2-results
+          if-no-files-found: warn
+          retention-days: 7
+
+      # the gateway and fake logs of the claims (the fixtures of the tests only), as for the shards
+      - name: Keep the logs of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2-logs-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/v2-work/**/gateway*.out
+            ${{ runner.temp }}/v2-work/**/gateway*.err
+            ${{ runner.temp }}/v2-work/**/fake.out
+            ${{ runner.temp }}/v2-work/**/fake.err
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Keep the records of the writes
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: writes-v2-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/v2-writes
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The image starts without a database (issue 459, the kill-switch case of W2.0): the image of the Dockerfile is built here (the Build's own
+  # image job is a sibling of this workflow's caller, not an input of it) and run with no FACTORY_DB_CONNECTION, as the uat and prod gateways run;
+  # /ready must answer 200 within two minutes, or the job fails with the container's log. No GitHub credential: GH_TOKEN is the vault placeholder
+  # unset, so the gateway has no GitHub identity and does not wait for revocations. The secrets it requires at start, and owner mode (the deployed settings need it), are given here; the secrets are made at run time.
+  image-start:
+    name: Image starts without a database
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - name: Build the image
+        run: docker build --file Dockerfile --build-arg VERSION=0.0.0 --tag fworker-start-check:ci .
+
+      - name: Run it without FACTORY_DB_CONNECTION; /ready answers 200
+        run: |
+          set -euo pipefail
+          dev_token="$(openssl rand -hex 24)"; webhook_secret="$(openssl rand -hex 24)"; token_secret="$(openssl rand -hex 24)"
+          echo "::add-mask::$dev_token"; echo "::add-mask::$webhook_secret"; echo "::add-mask::$token_secret"
+          # FACTORY_OWNER_MODE=1 and FACTORY_TOKEN_SECRET are what the deployed app is given (system.json): the image's configuration turns messaging and
+          # the manager on, and the gateway refuses to start for either without owner mode (MessagingSettings.Load), and owner mode without a token secret
+          docker run --detach --name fworker-start --publish 18080:8080 \
+            -e FACTORY_DEV_TOKEN="$dev_token" -e FACTORY_WEBHOOK_SECRET="$webhook_secret" -e FACTORY_TOKEN_SECRET="$token_secret" -e FACTORY_OWNER_MODE=1 -e GH_TOKEN=unset \
+            fworker-start-check:ci
+          container_env="$(docker exec fworker-start env 2>/dev/null || true)"
+          if grep -q '^FACTORY_DB_CONNECTION=' <<<"$container_env"; then echo "::error::the container has FACTORY_DB_CONNECTION set"; exit 1; fi
+          code=000
+          for i in $(seq 1 60); do
+            if [ "$(docker inspect --format '{{.State.Running}}' fworker-start)" != "true" ]; then echo "::error::the container stopped before it was ready"; break; fi
+            code="$(curl -s -o "$RUNNER_TEMP/ready.json" -w '%{http_code}' http://127.0.0.1:18080/ready || true)"
+            if [ "$code" = "200" ]; then break; fi
+            sleep 2
+          done
+          echo "/ready: $code"; cat "$RUNNER_TEMP/ready.json" 2>/dev/null || true; echo
+          if [ "$code" != "200" ]; then echo "::error::/ready did not answer 200 within 2 minutes (last answer: $code)"; docker logs fworker-start 2>&1 | tail -n 80; exit 1; fi
+          curl -fsS http://127.0.0.1:18080/_build; echo
+          curl -fsS -o /dev/null http://127.0.0.1:18080/health
+
+      - name: Stop the container
+        if: always()
+        run: docker rm --force fworker-start || true
+
   # Every scenario of every suite runs in exactly one shard: the scenarios each matrix entry lists (run.ps1 -ListScenarios -Suite s, with
   # -Groups n -Group g for a shard, every group of an @all/n), added up, are exactly those of run.ps1 -ListScenarios (the full tier), none
   # twice. Its list of scenarios is what "Tests result" compares the results with.
@@ -502,7 +654,7 @@ jobs:
   # shard that ended early without failing.
   result:
     name: Tests result
-    needs: [tier1, coverage, unit, src]
+    needs: [tier1, coverage, unit, src, v2, image-start]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -591,9 +743,20 @@ jobs:
           COVERAGE_RESULT: ${{ needs.coverage.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
           SRC_RESULT: ${{ needs.src.result }}
+          IMAGE_START_RESULT: ${{ needs.image-start.result }}
+          V2_RESULT: ${{ needs.v2.result }}
+          # The job "Tier 1 (v2)" is reported here and does not fail this job until it has run green on master (issue 467): a flake of the new engine
+          # must not block other merges. Then set this to "true" (a pull request, protected area: workflows) and "Build result" needs it.
+          V2_BLOCKING: "false"
         run: |
-          echo "tier1: ${TIER1_RESULT}, coverage: ${COVERAGE_RESULT}, unit: ${UNIT_RESULT}, src: ${SRC_RESULT}"
+          echo "tier1: ${TIER1_RESULT}, coverage: ${COVERAGE_RESULT}, unit: ${UNIT_RESULT}, src: ${SRC_RESULT}, image-start: ${IMAGE_START_RESULT}, v2: ${V2_RESULT} (blocking: ${V2_BLOCKING})"
+          if [ "${V2_RESULT}" != "success" ]; then
+            echo "::warning title=Tier 1 (v2)::the job Tier 1 (v2) ended ${V2_RESULT}; it is not required yet (V2_BLOCKING in tests.yml)"
+            echo "**Tier 1 (v2) ended ${V2_RESULT}.** It is reported and not required yet (\`V2_BLOCKING\` in tests.yml)." >> "$GITHUB_STEP_SUMMARY"
+            if [ "${V2_BLOCKING}" = "true" ]; then exit 1; fi
+          fi
           test "${TIER1_RESULT}" = "success"
           test "${COVERAGE_RESULT}" = "success"
           test "${UNIT_RESULT}" = "success"
           test "${SRC_RESULT}" = "success"
+          test "${IMAGE_START_RESULT}" = "success"

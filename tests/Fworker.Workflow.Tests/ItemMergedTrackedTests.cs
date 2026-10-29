@@ -104,6 +104,62 @@ public class ItemMergedTrackedTests
     }
 
     [Fact]
+    public async Task TheSqlStore_ClaimsPerItemAndCommit_InOneTransaction_AndAnItemTheOtherMessageHoldsDoesNotHideTheOthers()
+    {
+        if (!TrackedSessionHost.Available) return;
+        await using var h = await TrackedSessionHost.StartAsync((Action<WolverineOptions>?)null);
+        var store = new SqlMergedItemStore(() => Open(h.ConnectionString));
+        MergedItem Row(int item, Guid by, string commit = ItemMergedDeriverTests.Sha) => new() { ItemKey = $"acme/orders#{item}", Commit = commit, PullRequest = 9, Source = "webhook", MessageId = by, GatesJson = "{}", DependenciesJson = "[]", MergedAt = DateTimeOffset.UtcNow };
+        Guid first = Guid.NewGuid(), second = Guid.NewGuid();
+        Assert.Single(await store.TryRecordAll([Row(7, first)], default));
+        Assert.True(await store.TakenByOther("acme/orders#7", ItemMergedDeriverTests.Sha, second, default));
+        Assert.False(await store.TakenByOther("acme/orders#7", ItemMergedDeriverTests.Sha, first, default));
+        Assert.False(await store.TakenByOther("acme/orders#8", ItemMergedDeriverTests.Sha, second, default));   // the commit is not the claim, the item is
+        Assert.True(await store.PullRequestTakenByOther("acme/orders#7", 9, second, default));
+        Assert.False(await store.PullRequestTakenByOther("acme/orders#7", 10, second, default));
+        Assert.False(await store.PullRequestTakenByOther("acme/orders#8", 9, second, default));
+        // the second message records 7 (held by the first: left out) and 8 (new) together; a redelivery of the first gets 7 back
+        Assert.Equal(["acme/orders#8"], (await store.TryRecordAll([Row(7, second), Row(8, second)], default)).Select(r => r.ItemKey));
+        Assert.Equal(["acme/orders#7"], (await store.TryRecordAll([Row(7, first)], default)).Select(r => r.ItemKey));
+        Assert.Equal(2, await h.Count("SELECT COUNT(*) FROM factory.MergedItems"));
+        // another message claims item 12 between this one's look and its save: the key violation fails the whole transaction, then the rows go one by one and the holder of each decides
+        var third = Guid.NewGuid(); var racer = Guid.NewGuid(); var raced = false;
+        var racing = new SqlMergedItemStore(() => new RacingDb(h.ConnectionString, () =>
+        {
+            if (raced) return; raced = true;
+            using var other = Open(h.ConnectionString); other.MergedItems.Add(Row(12, racer)); other.SaveChanges();
+        }));
+        var kept = await racing.TryRecordAll([Row(11, third), Row(12, third)], default);
+        Assert.Equal(["acme/orders#11"], kept.Select(r => r.ItemKey));
+        Assert.Equal(1, await h.Count($"SELECT COUNT(*) FROM factory.MergedItems WHERE ItemKey = 'acme/orders#12' AND MessageId = '{racer}'"));
+        Assert.Equal(4, await h.Count("SELECT COUNT(*) FROM factory.MergedItems"));
+    }
+
+    /// <summary>A context whose first save is preceded by the call of <paramref name="before"/>: another writer getting in between.</summary>
+    sealed class RacingDb(string cs, Action before) : FactoryDbContext(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer(cs).Options)
+    {
+        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) { before(); return base.SaveChangesAsync(cancellationToken); }
+    }
+
+    [Fact]
+    public async Task OnTheSqlStore_AMessageThatFailedBeforeItsClaim_LeavesEveryItemToTheOtherSource()
+    {
+        if (!TrackedSessionHost.Available) return;
+        await using var h = await TrackedSessionHost.StartAsync((Action<WolverineOptions>?)null);
+        var reader = ItemMergedDeriverTests.Reader();
+        reader.Pulls[9] = reader.Pulls[9] with { Body = "Closes #7\nCloses #8" };
+        reader.Items[8] = ItemMergedDeriverTests.Facts(8);
+        reader.FailingItems.Add(8);
+        var d = new ItemMergedDeriver(reader, new SqlMergedItemStore(() => Open(h.ConnectionString)), ItemMergedDeriverTests.Home, () => "master", new("Auto Merge", "video", ["hold:owner"]));
+        await Assert.ThrowsAsync<HttpRequestException>(() => d.Derive("webhook", ItemMergedDeriverTests.BaseMerged(), Guid.NewGuid(), default));
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM factory.MergedItems"));
+        reader.FailingItems.Clear();
+        var r = await d.Derive("poll", ItemMergedDeriverTests.ClosedCard(), Guid.NewGuid(), default);
+        Assert.Equal(["acme/orders#7", "acme/orders#8"], r.Merged.Select(m => m.Item.ToString()).Order());
+        Assert.Equal(2, await h.Count("SELECT COUNT(*) FROM factory.MergedItems WHERE Source = 'poll'"));
+    }
+
+    [Fact]
     public async Task TheDeliveredToTable_FollowsDeliveredToAndUndelivered_AndAnswersTheDependenciesSlot()
     {
         if (!TrackedSessionHost.Available) return;

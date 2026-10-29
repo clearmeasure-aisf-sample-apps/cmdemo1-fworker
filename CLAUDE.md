@@ -67,6 +67,10 @@ Rules of the runners:
 - `run-all.ps1` without `-NoBuild` builds with `--no-restore`: on a fresh clone run the two `dotnet build` commands above first.
 - A new suite is appended at the END of `$SuiteDefs` in `tests/scenarios/run.ps1` (the position is its port slot) and added to a job of
   `.github/workflows/tests.yml` (the workflow fails when one is missing). A scenario tagged ` [full]` in its name is left out of the fast tier.
+- The v2 engine has a second Tier 1 job, `Tier 1 (v2)` of `tests.yml`: it runs the suites and scenarios named in `tests/scenarios/v2-claims.txt` again with
+  `run.ps1 -Engine v2` (`FACTORY_ENVIRONMENT` v2ci, `engine.v2Environments` naming it, `FACTORY_DB_CONNECTION` a database of its own on the SQL Server of
+  `FACTORY_TEST_SQL`; CI only, a machine without one exits 2). It is not a shard: the coverage check ignores it. `Tests result` reports it and does not
+  fail on it until `V2_BLOCKING` there is set to true. The job `Image starts without a database` runs the built image with no `FACTORY_DB_CONNECTION`.
 - `run-all.ps1` rewrites `tests/scenarios/suite-times.json` (and a full run `scenario-stats.json`): commit them only when the timings
   really changed.
 

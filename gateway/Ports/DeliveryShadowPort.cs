@@ -97,7 +97,7 @@ sealed class OctopusShadowIngress : IEventIngress, IDisposable
         if (!queue.Writer.TryWrite(ev)) throw new InvalidOperationException($"the delivery shadow's queue is full ({queue.Reader.Count} events): {ev.GetType().Name} is offered again at the next poll");
     }
 
-    public void Dispose() => stop.Cancel();
+    public void Dispose() { stop.Cancel(); (inner as IDisposable)?.Dispose(); }   // the ingress inside (the inbox's retry loop) stops with it
 }
 
 /// <summary>The comparison tick of the shadow run (a hosted service of AddGatewayBackground): compares and stores every <c>interval</c>, and keeps the ingress deduplication short.</summary>

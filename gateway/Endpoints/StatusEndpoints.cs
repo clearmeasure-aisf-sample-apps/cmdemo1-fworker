@@ -82,6 +82,22 @@ sealed class StatusQuery
         return o;
     }
 
+    // W6.7: the items of the v2 engine, grouped by repository, only where the engine acts and has a database (V2ItemViews is registered there; elsewhere the answer is what it was).
+    // The read is the database's, so these two are the asynchronous forms of Status and Dashboard.
+    public async Task<JsonObject> StatusAsync(CancellationToken ct)
+    {
+        var o = Status();
+        if (services.GetService<V2ItemViews>() is { } v2) o["v2Items"] = V2ItemViews.StatusBlock(await v2.Read(ct));
+        return o;
+    }
+
+    public async Task<JsonObject> DashboardAsync(HostString host, CancellationToken ct)
+    {
+        var o = Dashboard(host);
+        if (services.GetService<V2ItemViews>() is { } v2) o["v2Items"] = V2ItemViews.DashboardBlock(await v2.Read(ct));
+        return o;
+    }
+
     // GET /api/v1/dashboard: what the operator's page shows. host: the request's host, the page's address when FACTORY_PUBLIC_URL is not set.
     public JsonObject Dashboard(HostString host)
     {
@@ -144,9 +160,9 @@ sealed class StatusEndpoints(StatusQuery status) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes)
     {
-        routes.MapGet("/api/v1/status", (HttpContext c) => Results.Text(status.Status().ToJsonString(), "application/json"))
+        routes.MapGet("/api/v1/status", async (HttpContext c) => { return Results.Text((await status.StatusAsync(c.RequestAborted)).ToJsonString(), "application/json"); })
             .Admin(CallerView.Admitted);
-        routes.MapGet("/api/v1/dashboard", (HttpContext c) => Results.Text(status.Dashboard(c.Request.Host).ToJsonString(), "application/json"))
+        routes.MapGet("/api/v1/dashboard", async (HttpContext c) => { return Results.Text((await status.DashboardAsync(c.Request.Host, c.RequestAborted)).ToJsonString(), "application/json"); })
             .Admin(CallerView.Who);
     }
 }
