@@ -21,7 +21,13 @@ public sealed class BoardReconciler(IBoardReader reader, Func<CatalogSnapshot> c
     readonly Dictionary<string, (string? Column, bool Open)> seen = [];
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
 
-    public async Task<BoardReconcileResult> Run(CancellationToken ct)
+    public Task<BoardReconcileResult> Run(CancellationToken ct) => Run(ct, null, false);
+
+    /// <summary>
+    /// W9.8, the verb <c>sync-board</c> on v2: the same pass on demand. <paramref name="only"/> limits it to those item numbers of the home repository (v1's <c>items</c>: an incremental pass; the cards that are not named are
+    /// left as they were, and nothing is forgotten); <paramref name="dry"/> publishes nothing and remembers nothing, and counts what a pass would have published (v1's <c>dry</c>).
+    /// </summary>
+    public async Task<BoardReconcileResult> Run(CancellationToken ct, IReadOnlySet<int>? only, bool dry)
     {
         if (!mayAct()) return new("not-leader", 0, 0);
         if (budgetLow?.Invoke() == true) return new("budget-low", 0, 0);
@@ -35,14 +41,16 @@ public sealed class BoardReconciler(IBoardReader reader, Func<CatalogSnapshot> c
         {
             ct.ThrowIfCancellationRequested();
             if (!repos.Contains(card.Repository) || card.Number <= 0) continue;
+            if (only is not null && (card.Repository != snap.Home || !only.Contains(card.Number))) continue;
             var key = new ItemId(card.Repository, card.Number).ToString();
             current.Add(key);
             var known = seen.TryGetValue(key, out var prev);
             if (known && prev == (card.Column, card.Open)) continue;
-            if (!known && !card.Open) { seen[key] = (card.Column, card.Open); continue; }   // a closed card seen for the first time is history, not news
+            if (!known && !card.Open) { if (!dry) seen[key] = (card.Column, card.Open); continue; }   // a closed card seen for the first time is history, not news
+            if (dry) { published++; continue; }
             if (await publish(Event(card))) { seen[key] = (card.Column, card.Open); published++; }
         }
-        foreach (var gone in seen.Keys.Where(k => !current.Contains(k)).ToList()) seen.Remove(gone);   // off the board: forgotten, so a card that returns is news
+        if (only is null && !dry) foreach (var gone in seen.Keys.Where(k => !current.Contains(k)).ToList()) seen.Remove(gone);   // off the board: forgotten, so a card that returns is news
         return new("ok", cards.Count, published);
     }
 

@@ -13,9 +13,11 @@ static class GatewayWolverineExtensions
     public static IServiceCollection AddGatewayWolverine(this IServiceCollection services, GatewayComposition c)
     {
         // always registered, so that /ready and /api/v1/status can take it; Required is false where there is no Wolverine host
-        services.AddSingleton(new FactorySchemaStatus(required: c.WolverineHost));
+        var schemaStatus = new FactorySchemaStatus(required: c.WolverineHost);
+        services.AddSingleton(schemaStatus);
         if (!c.WolverineHost) return services;
         services.AddSingleton(c.Database);
+        BoardWiring.Register(services, c, schemaStatus);   // W9.8: the transcripts in the database, the board verbs (only where the engine acts)
         services.AddSingleton(WolverineHostOptions.From(c.Instance));
         // built after LeadershipService, whose hand-over callbacks it wraps (the order of the callbacks is the order of the stop: hand-over, then the node leaves)
         JournalCommandSink? journalSink = null;
