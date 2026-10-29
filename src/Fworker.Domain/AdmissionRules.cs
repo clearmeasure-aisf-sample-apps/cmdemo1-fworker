@@ -2,7 +2,7 @@ using Fworker.Contracts.Ids;
 
 namespace Fworker.Domain;
 
-/// <summary>The defaults of the admission rules, as constants of a settings record. No config keys yet: W7.0 moves them into config/instance.json.</summary>
+/// <summary>The defaults of the admission rules, as constants of a settings record. The CapacityScheduler (W7.0) reads them from config/instance.json: schedule.fileOverlap.maxHoldMinutes and runtimes.octopus.hostFullSeconds.</summary>
 /// <param name="MaxHoldMinutes">schedule.fileOverlap.maxHoldMinutes (delivery-speed.md 14: 120): a file-overlap hold ends after this many minutes.</param>
 /// <param name="HostFullSeconds">runtimes.octopus.hostFullSeconds (delivery-speed.md 14: 30): how long a host that answered host-full stays blocked.</param>
 public sealed record AdmissionSettings(int MaxHoldMinutes = AdmissionSettings.DefaultMaxHoldMinutes, int HostFullSeconds = AdmissionSettings.DefaultHostFullSeconds)

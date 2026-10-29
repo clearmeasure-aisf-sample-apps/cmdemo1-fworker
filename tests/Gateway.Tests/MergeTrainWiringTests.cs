@@ -91,7 +91,7 @@ public sealed class MergeTrainInertTests
     [Fact]
     public void OnlyTheWorkItemWiring_AttachesTheTrain_AndTheGatewayCallsThatOnlyWhereTheEngineActs()
     {
-        var mentions = Sources().Where(s => Regex.IsMatch(s.Text, @"\bMergeTrain(Topology|Handlers|Routing|PortHandler|HistoryHandler)\b")).Select(s => s.Path).ToList();
+        var mentions = Sources().Where(s => Regex.IsMatch(s.Text, @"\bMergeTrain(Topology|Handlers|Routing|PortHandler|HistoryHandler)\b")).Select(s => s.Path).Order(StringComparer.Ordinal).ToList();   // (Directory.EnumerateFiles has no order: the runner's file system gave WorkItemPort first)
         Assert.Equal(["gateway/Ports/DocsPlanPort.cs", "gateway/Ports/WorkItemPort.cs"], mentions);   // (the port's handler is declared beside the port; WorkItemPort attaches it)
         var callers = Sources().Where(s => s.Text.Contains("WorkItemWiring.Attach(")).ToList();
         var caller = Assert.Single(callers);

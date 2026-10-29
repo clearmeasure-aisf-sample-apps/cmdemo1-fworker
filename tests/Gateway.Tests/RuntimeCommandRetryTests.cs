@@ -173,4 +173,77 @@ public sealed class RuntimeCommandRetryTests
         var messages = await s.StopMessages(c, RuntimeCommandService.MaxAttempts, CancellationToken.None);
         foreach (var msg in messages.OfType<RuntimeSessionStopped>()) s.Stopped(msg);
     }
+
+    // ---- #522: the manager's records know the execution as soon as the start command's run exists --------------------------------------------
+
+    static StartRuntimeSession StartOf(RuntimeManager.Ticket t) => new(RuntimeKeys.Start("cursor-cloud", t.Name), "cursor-cloud", t.Name, t.Item, t.Phase, t.Profile, t.Nonce, t.Role);
+
+    [Fact]
+    public async Task ASuccessfulStart_TellsTheManagerTheExecution_BeforeTheResultMessageIsDelivered()
+    {
+        var m = Manager(new Rt()); m.DispatchStart = _ => Task.CompletedTask;
+        var t = m.Begin(7, "Development", "prof"); await m.Provision(t);
+        var port = new Port { Answer = (_, _) => CommandResult.Success("exec-1", "http://page") };
+        var messages = await Service(port, manager: m).StartMessages(StartOf(t), 1, CancellationToken.None);
+        Assert.IsType<RuntimeSessionStarted>(Assert.Single(messages));
+        Assert.Equal("exec-1", m.ExecutionOf(t.Name)); Assert.Equal("http://page", m.UrlOf(t.Name));   // CompleteStart has not run: the message was not delivered
+    }
+
+    [Fact]
+    public async Task AStartThatIsRetried_AndOneThatWaitsForCapacity_TellTheManagerNothing()
+    {
+        var m = Manager(new Rt()); m.DispatchStart = _ => Task.CompletedTask;
+        var t = m.Begin(7, "Development", "prof"); await m.Provision(t);
+        var port = new Port { Answer = (_, _) => CommandResult.Failed(FailureKind.Transient, "start-error: x") };
+        var s = Service(port, manager: m);
+        await Assert.ThrowsAsync<CommandRetryException>(() => s.StartMessages(StartOf(t), 1, CancellationToken.None));
+        Assert.Equal("", m.ExecutionOf(t.Name));
+        var port2 = new Port { Answer = (_, _) => CommandResult.Failed(FailureKind.RateLimited, "no capacity") };
+        await Service(port2, manager: m).StartMessages(StartOf(t), 1, CancellationToken.None);
+        Assert.Equal("", m.ExecutionOf(t.Name));
+    }
+
+    [Fact]
+    public async Task ATransientFault_ThatClears_ThenTellsTheManager_NothingFailedWasCached()
+    {
+        var m = Manager(new Rt()); m.DispatchStart = _ => Task.CompletedTask;
+        var t = m.Begin(7, "Development", "prof"); await m.Provision(t);
+        var port = new Port { Answer = (_, n) => n < 2 ? CommandResult.Failed(FailureKind.Transient, "start-error: x") : CommandResult.Success("exec-2", "http://page") };
+        var s = Service(port, manager: m);
+        await Assert.ThrowsAsync<CommandRetryException>(() => s.StartMessages(StartOf(t), 1, CancellationToken.None));
+        Assert.Equal("", m.ExecutionOf(t.Name));
+        Assert.IsType<RuntimeSessionStarted>(Assert.Single(await s.StartMessages(StartOf(t), 2, CancellationToken.None)));
+        Assert.Equal("exec-2", m.ExecutionOf(t.Name)); Assert.Equal(2, port.Calls);
+    }
+
+    sealed class ThrowingManager : IRuntimeManager
+    {
+        public string Kind => "cursor-cloud"; public bool On => true;
+        public (bool Ok, string Code) CanStart() => (true, "");
+        public RuntimeManager.Ticket Begin(int item, string phase, string profile, string role = "") => throw new NotSupportedException();
+        public Task Provision(RuntimeManager.Ticket t) => Task.CompletedTask;
+        public Task Deprovision(string name, string reason) => Task.CompletedTask;
+        public void Registered(string name) { }
+        public bool IsRuntimeWorker(string name) => true;
+        public Task CompleteStart(string name, int item, string phase, ProvisionResult result) => Task.CompletedTask;
+        public void CompleteStop(string name, bool ok, string error) { }
+        public void NoteStarted(string name, string execution, string url) => throw new InvalidOperationException("the records are not available");
+    }
+
+    [Fact]
+    public async Task AManagerThatFailsToNote_DoesNotTurnAStartedSessionIntoAFailure()
+    {
+        var port = new Port { Answer = (_, _) => CommandResult.Success("exec-3", "") };
+        var ledger = new InMemoryIdempotencyLedger();
+        var s = new RuntimeCommandService(new StartRuntimeSessionHandler(ledger, port), new StopRuntimeSessionHandler(ledger, port), new RunRunbookHandler(ledger, new NoRunner()), _ => new ThrowingManager());
+        var started = Assert.IsType<RuntimeSessionStarted>(Assert.Single(await s.StartMessages(Start("w3"), 1, CancellationToken.None)));
+        Assert.Equal("exec-3", started.Execution); Assert.Equal(1, port.Calls);
+    }
+
+    [Fact]
+    public async Task AStartForARuntimeWithoutAManager_StillStarts()
+    {
+        var port = new Port { Answer = (_, _) => CommandResult.Success("exec-4", "") };
+        Assert.IsType<RuntimeSessionStarted>(Assert.Single(await Service(port).StartMessages(Start("w4"), 1, CancellationToken.None)));
+    }
 }

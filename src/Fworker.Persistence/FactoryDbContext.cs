@@ -24,6 +24,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<DeliveryShadowComparison> DeliveryShadowComparisons => Set<DeliveryShadowComparison>();
     public DbSet<WorkItemRow> WorkItems => Set<WorkItemRow>();
     public DbSet<MergeTrainRow> MergeTrains => Set<MergeTrainRow>();
+    public DbSet<CapacityLedgerRow> CapacityLedgers => Set<CapacityLedgerRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -156,6 +157,16 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.Property(x => x.Key).HasMaxLength(200);
             e.Property(x => x.StateJson).IsRequired();
             // the train's state is read and written by its key; a stale writer loses (the handler retries on the new state)
+            e.Property(x => x.Revision).IsConcurrencyToken();
+        });
+
+        b.Entity<CapacityLedgerRow>(e =>
+        {
+            e.ToTable("CapacityLedgers");
+            e.HasKey(x => x.Key);
+            e.Property(x => x.Key).HasMaxLength(100);
+            e.Property(x => x.StateJson).IsRequired();
+            // the ledger is read and written by its key; a stale writer loses (the handler runs again on the new state)
             e.Property(x => x.Revision).IsConcurrencyToken();
         });
 

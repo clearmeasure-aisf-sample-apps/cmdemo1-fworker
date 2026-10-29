@@ -23,6 +23,7 @@ if (-not $NoBuild -and -not $ListSuites -and -not $ListScenarios) {
     foreach ($proj in 'tests/FakeGitHub', 'gateway') { Push-Location (Join-Path $root $proj); dotnet build -c Release -v q 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "  build $proj : $_" }; Pop-Location }
 }
 . (Join-Path $PSScriptRoot 'lib.ps1')
+$script:GoldenEngine = $Engine   # (lib.ps1: with v2 the writes are compared with the golden files with golden/v2-differences.txt applied; v1 reads the golden files as they are)
 . (Join-Path $PSScriptRoot 'scenarios.ps1')
 . (Join-Path $PSScriptRoot 'owner.ps1')
 . (Join-Path $PSScriptRoot 'author.ps1')
@@ -366,6 +367,7 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
         $script:V2Seen = @{ mode = ''; state = ''; wolverine = '(not asked)' }
         [void](Wait-Until -Seconds 120 -Message 'the Wolverine host' { $script:V2Seen = Get-V2State; $script:V2Seen.state -eq 'running' })
         Check 'engine v2: the status names the engine v2 and the Wolverine host runs' ($script:V2Seen.mode -eq 'v2' -and $script:V2Seen.state -eq 'running') "(engine mode '$($script:V2Seen.mode)'; wolverine: $($script:V2Seen.wolverine))"
+        Initialize-V2Golden   # the declared differences of v2 (golden/v2-differences.txt) applied to the golden files, and checked against them
     }
     try {
         Write-Host "scenarios (merge policy: $Policy, tier: $Tier)"

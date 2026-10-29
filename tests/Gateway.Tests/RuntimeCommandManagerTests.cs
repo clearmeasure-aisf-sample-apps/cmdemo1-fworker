@@ -101,4 +101,129 @@ public sealed class RuntimeCommandManagerTests
         await m.Deprovision(t.Name, "done");
         Assert.Equal((t.Name, "done"), sent); Assert.Empty(rt.Stops);
     }
+
+    // ---- #522: the start of v2 answers like v1's -------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task ProvisionAndWait_WithoutDispatch_IsV1sCall_TheExecutionIsKnownWhenItAnswers()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        var t = m.Begin(7, "Development", "prof");
+        Assert.True(await m.ProvisionAndWait(t, TimeSpan.FromSeconds(30)));
+        Assert.Equal(1, rt.Provisions); Assert.Equal("exec-v1", m.ExecutionOf(t.Name)); Assert.Equal("http://v1", m.UrlOf(t.Name));
+    }
+
+    [Fact]
+    public async Task V2_ProvisionAndWait_AnswersWhenTheResultHasSettledTheStart_NotBefore()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = _ => Task.CompletedTask;
+        var t = m.Begin(7, "Development", "prof");
+        var wait = m.ProvisionAndWait(t, TimeSpan.FromSeconds(30));
+        await Task.Delay(150);
+        Assert.False(wait.IsCompleted);   // dispatched, no result yet: v1 would not have answered either
+        Assert.Equal("", m.ExecutionOf(t.Name));
+        await m.CompleteStart(t.Name, 7, "Development", new ProvisionResult(true, "exec-v2", "", "http://v2"));
+        Assert.True(await wait.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("exec-v2", m.ExecutionOf(t.Name)); Assert.Equal("http://v2", m.UrlOf(t.Name)); Assert.True(m.Alive(t.Name));
+    }
+
+    [Fact]
+    public async Task V2_ProvisionAndWait_AResultThatComesBackBeforeTheDispatchReturns_IsNotMissed()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = async t => await m.CompleteStart(t.Name, t.Item, t.Phase, new ProvisionResult(true, "exec-fast", "", "http://fast"));
+        var t = m.Begin(7, "Development", "prof");
+        Assert.True(await m.ProvisionAndWait(t, TimeSpan.FromSeconds(10)));
+        Assert.Equal("exec-fast", m.ExecutionOf(t.Name));
+    }
+
+    [Fact]
+    public async Task V2_ProvisionAndWait_AStartThatFailed_AnswersToo_AndTheItemIsTakenBack()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = _ => Task.CompletedTask;
+        var t = m.Begin(7, "Development", "prof");
+        var wait = m.ProvisionAndWait(t, TimeSpan.FromSeconds(30));
+        await m.CompleteStart(t.Name, 7, "Development", new ProvisionResult(false, "", "no capacity"));
+        Assert.True(await wait.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal("", m.ExecutionOf(t.Name)); Assert.False(m.Alive(t.Name)); Assert.False(m.Exhausted(7, "Development"));
+    }
+
+    [Fact]
+    public async Task V2_ProvisionAndWait_AResultForAnExecutionThatWasStoppedMeanwhile_AnswersToo_AndStopsWhatItStarted()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = _ => Task.CompletedTask;
+        var t = m.Begin(7, "Development", "prof");
+        var wait = m.ProvisionAndWait(t, TimeSpan.FromSeconds(30));
+        await m.Deprovision(t.Name, "revoked");
+        await m.CompleteStart(t.Name, 7, "Development", new ProvisionResult(true, "exec-v2", "", ""));
+        Assert.True(await wait.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Contains(rt.Stops, s => s.Item1 == t.Name && s.Item2 == "ended-during-start");
+    }
+
+    [Fact]
+    public async Task V2_ProvisionAndWait_ADispatchThatThrows_AnswersAtOnce_AsAStartFailure()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = _ => throw new InvalidOperationException("the Wolverine host is not up");
+        var t = m.Begin(7, "Development", "prof");
+        Assert.True(await m.ProvisionAndWait(t, TimeSpan.FromSeconds(30)).WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.False(m.Alive(t.Name));
+    }
+
+    [Fact]
+    public async Task V2_ProvisionAndWait_AFencedProcess_AnswersAtOnce_NothingIsDispatched()
+    {
+        var rt = new Rt(); var m = Manager(rt); m.MayAct = () => false;
+        var dispatched = false; m.DispatchStart = _ => { dispatched = true; return Task.CompletedTask; };
+        var t = m.Begin(7, "Development", "prof");
+        Assert.True(await m.ProvisionAndWait(t, TimeSpan.FromSeconds(30)).WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.False(dispatched); Assert.False(m.Alive(t.Name));
+    }
+
+    [Fact]
+    public async Task V2_ProvisionAndWait_AResultThatStaysOut_ReturnsFalseAtTheBound_AndALateResultStillSettlesTheStart()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = _ => Task.CompletedTask;
+        var t = m.Begin(7, "Development", "prof");
+        Assert.False(await m.ProvisionAndWait(t, TimeSpan.FromMilliseconds(100)));   // the bound is the answer, no exception; the command's own retries go on
+        Assert.True(m.Alive(t.Name)); Assert.Equal("", m.ExecutionOf(t.Name));
+        await m.CompleteStart(t.Name, 7, "Development", new ProvisionResult(true, "exec-late", "", "http://late"));
+        Assert.Equal("exec-late", m.ExecutionOf(t.Name)); Assert.True(m.Alive(t.Name));
+    }
+
+    [Fact]
+    public async Task NoteStarted_GivesTheRecordsTheExecutionBeforeTheResultMessageArrives_AndTheResultSettlesItAsBefore()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = _ => Task.CompletedTask;
+        var t = m.Begin(7, "Development", "prof");
+        await m.Provision(t);
+        m.NoteStarted(t.Name, "exec-noted", "http://noted");
+        Assert.Equal("exec-noted", m.ExecutionOf(t.Name)); Assert.Equal("http://noted", m.UrlOf(t.Name)); Assert.True(m.Alive(t.Name));
+        await m.CompleteStart(t.Name, 7, "Development", new ProvisionResult(true, "exec-noted", "", "http://noted"));
+        Assert.Equal("exec-noted", m.ExecutionOf(t.Name)); Assert.True(m.Alive(t.Name));
+    }
+
+    [Fact]
+    public async Task NoteStarted_TouchesNeitherAnEndedExecutionNorAnUnknownName_NorMovesASettledExecution()
+    {
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = _ => Task.CompletedTask;
+        m.NoteStarted("never-begun", "x", "y");   // no record, no exception
+        Assert.Equal("", m.ExecutionOf("never-begun"));
+        var t = m.Begin(7, "Development", "prof");
+        await m.Provision(t);
+        await m.CompleteStart(t.Name, 7, "Development", new ProvisionResult(true, "exec-1", "", "http://1"));
+        m.NoteStarted(t.Name, "exec-2", "http://2");   // a replayed result must not move a settled execution
+        Assert.Equal("exec-1", m.ExecutionOf(t.Name)); Assert.Equal("http://1", m.UrlOf(t.Name));
+        var t2 = m.Begin(8, "Development", "prof");
+        await m.Provision(t2);
+        await m.CompleteStart(t2.Name, 8, "Development", new ProvisionResult(false, "", "runtime off"));   // ended as a failed start
+        m.NoteStarted(t2.Name, "exec-3", "http://3");
+        Assert.Equal("", m.ExecutionOf(t2.Name));
+    }
 }

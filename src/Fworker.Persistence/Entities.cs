@@ -187,3 +187,17 @@ public class MergeTrainRow
     public string StateJson { get; set; } = "";
     public DateTimeOffset UpdatedAt { get; set; }
 }
+
+/// <summary>
+/// The capacity scheduler's ledger (W7.0 and W7.1, wolverine-factory.md 3.2): one row per factory, the key "factory". The state is a JSON document owned by Fworker.Workflows.Capacity (the slots granted per runtime
+/// and host, the waiting requests, the items in flight with their footprints, the file-overlap holds, the hosts as last reported), saved with a revision so that two writers cannot both win. One writer at a time is
+/// the design (the scheduler's queue is sequential); the revision is the backstop while a node changes.
+/// </summary>
+public class CapacityLedgerRow
+{
+    public string Key { get; set; } = "";
+    /// <summary>Counts the saves; the concurrency token: a writer that read an older revision fails and runs again on the new state.</summary>
+    public int Revision { get; set; }
+    public string StateJson { get; set; } = "";
+    public DateTimeOffset UpdatedAt { get; set; }
+}

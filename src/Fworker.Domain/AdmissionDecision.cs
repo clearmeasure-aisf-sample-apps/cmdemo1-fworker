@@ -2,8 +2,8 @@ namespace Fworker.Domain;
 
 // Admission (D1): the rules that decide whether the plan may start a session for a ranked item, beyond `Depends on` (docs/design/delivery-speed.md 3.2,
 // 4.2 and 6; wolverine-factory.md 3.2 CapacityScheduler; system-gateway.md H4 and H8). Specification tests: v1 has the runtime limits in
-// RuntimeManager.CanStart and the rest not at all. Pure values (no clock, no I/O, no config): the caller passes the facts and the settings. Nothing calls
-// this yet; the CapacityScheduler of W7.1 will. `Depends on` is rule 1 of the chain and stays where it is (Test-DependencyMet, then the item saga).
+// RuntimeManager.CanStart and the rest not at all. Pure values (no clock, no I/O, no config): the caller passes the facts and the settings. The CapacityScheduler (W7.1,
+// Fworker.Workflows.Capacity) calls this where the engine acts. `Depends on` is rule 1 of the chain and stays where it is (Test-DependencyMet, then the item saga).
 
 /// <summary>The waiting codes of the admission rules. They are the strings the plan journals when an item's wait changes (delivery-speed.md 3.2).</summary>
 public static class AdmissionCodes
