@@ -604,13 +604,17 @@ $CopilotScenarios = [ordered]@{
         [void](Mcp-Call 'session_end' @{ reason = 'done' } $w)
         [void](Fake 'copilot-task' @{ id = $t.id; state = 'completed'; headRef = $br })
         Check 'its session ends' (Wait-Until -Seconds 30 { (Cop-Status).running -eq 0 })
+        # The item leaves its worker column at once, as it did before issue 415: the end takes the item back to the plan, and a sweep that still reads
+        # it in Technical Design offers it to the next worker, whose launch is a running execution of the item. The owner watch skips an item while
+        # one runs, so the master-fix resume (and later the delivery) never came: both runs of the pull request of #415 failed on that offer, one on
+        # 'resumed' and one on 'the owner is done' (Brief: "ended ... offered to cop-... ... task-...#N" for Technical Design).
+        [void](Fake 'move' @{ number = $n; column = 'Release Queue' })
         # The end counts the execution out of 'running' at its start; its claim release (a rule script that reads the item's state and saves it) and
         # its revoke follow for a few seconds (#376). The state written below must come after them and between two sweeps (issue 415): an edit that a
         # script of the end or a sweep read before and saves after is lost, and then master is never seen red and the task is never resumed.
         Check 'the end of its execution has run to its last step' (Wait-Until -Seconds 60 { Cop-EndsSettled })
         Wait-SweepGap -Fresh 1.0
         # the item was merged (here: written as the settle leaves it) and master went red for the merge commit
-        [void](Fake 'move' @{ number = $n; column = 'Release Queue' })
         $sha = 'abcdef1' + ('0' * 33)
         Set-ItemState $n { param($st) $st.Remove('claim'); $st.pr = @{ number = $d.number; branch = $br }; $st.merge = @{ sha = $sha; merged_at = (Get-Date).ToUniversalTime().ToString('o'); awaiting = 'master-broken'; rerun_attempted = $true }; $st.park = (New-TestPark 'master-broken' @{ failed = @('Build result'); sha = $sha }) }
         Check 'the owner task is resumed on its pull request to fix master forward' (Wait-Until -Seconds 60 { @((Cop-State).tasks | Where-Object { $_.task -eq $t.id -and $_.via -eq 'comment' -and $_.pr -eq $d.number -and "$($_.body.prompt)" -match 'master is red' }).Count -eq 1 }) ((Cop-State).tasks | ConvertTo-Json -Compress -Depth 4)
