@@ -182,6 +182,18 @@ sealed class WolverineHostService : IHostedService
         return b.ConnectionString;
     }
 
+    /// <summary>The command timeout of Wolverine's own connection. Wolverine reads its whole schema at every start (Weasel's one catalog batch); on a small DTU tier
+    /// (S0, 10 DTU) that batch runs longer than SqlClient's default 30 s, so the host never started (tdd, 2026-10-29). A longer timeout lets the start finish.</summary>
+    internal const int WolverineCommandTimeoutSeconds = 300;
+
+    /// <summary>The connection string Wolverine's message store uses: the connect timeout, and a command timeout long enough for its start-up schema read.</summary>
+    internal static string ForMessageStore(string connectionString, int connectTimeoutSeconds)
+    {
+        var b = new SqlConnectionStringBuilder(WithConnectTimeout(connectionString, connectTimeoutSeconds));
+        if (b.CommandTimeout < WolverineCommandTimeoutSeconds) b.CommandTimeout = WolverineCommandTimeoutSeconds;
+        return b.ConnectionString;
+    }
+
     static async Task MigrateAsync(string connectionString, int connectTimeoutSeconds, CancellationToken ct)
     {
         var cs = WithConnectTimeout(connectionString, connectTimeoutSeconds);
@@ -217,7 +229,7 @@ sealed class WolverineHostService : IHostedService
                 // some and compiles otherwise (the WolverineFx.RuntimeCompilation package, added with W2.3)
                 w.Discovery.IncludeType(typeof(ShadowHistoryHandler));
                 ConfigureCodeGeneration(w);
-                w.PersistMessagesWithSqlServer(cs, o.Schema);
+                w.PersistMessagesWithSqlServer(ForMessageStore(connectionString, o.ConnectTimeoutSeconds), o.Schema);
                 // shadow history: a durable local queue, so a record is stored in the database (wolverine schema) before it is handled; a database that does not
                 // answer is retried with growing pauses, then the record goes to the dead letters
                 w.PublishMessage<ShadowHistoryRecord>().ToLocalQueue("shadow-history");

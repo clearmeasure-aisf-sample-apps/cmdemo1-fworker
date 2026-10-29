@@ -229,6 +229,17 @@ public sealed class WolverineHostServiceTests
     }
 
     [Fact]
+    public void TheMessageStore_GetsACommandTimeoutLongEnoughForWolverinesStartUpSchemaRead_AndTheConnectTimeout()
+    {
+        var b = new SqlConnectionStringBuilder(WolverineHostService.ForMessageStore("Server=s;Database=d;Connect Timeout=15", 90));
+        Assert.Equal(90, b.ConnectTimeout);
+        Assert.Equal(WolverineHostService.WolverineCommandTimeoutSeconds, b.CommandTimeout);
+        Assert.True(WolverineHostService.WolverineCommandTimeoutSeconds >= 300);
+        // a longer command timeout already in the connection string is kept
+        Assert.Equal(600, new SqlConnectionStringBuilder(WolverineHostService.ForMessageStore("Server=s;Database=d;Command Timeout=600", 90)).CommandTimeout);
+    }
+
+    [Fact]
     public void Options_AreLongerThanTheDatabaseIdlePause_AndStaleOutlastsTheHeartbeat()
     {
         var o = new WolverineHostOptions();
