@@ -50,9 +50,10 @@ public sealed class OctopusWebhookTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r, CancellationToken ct)
         {
             var p = r.RequestUri!.PathAndQuery;
+            var week = DateTimeOffset.UtcNow.AddDays(-7).ToString("o");   // (older than a 15 minute lookback, inside 30 days, whenever the test runs)
             // tdd's case: the releases waiting for promotion are days old when the gateway (restarted by its own deployment) polls for the first time
-            var body = p.Contains("/releases?") ? """{"Items":[{"Id":"Releases-5","Version":"2.4.1288","Assembled":"2026-10-20T11:59:00Z","ReleaseNotes":"built 0123456789abcdef0123456789abcdef01234567"}]}"""
-                : p.Contains("/deployments?") ? """{"Items":[{"Id":"Deployments-9","TaskId":"ServerTasks-9","ReleaseId":"Releases-5","EnvironmentId":"Environments-1","Created":"2026-10-20T12:00:00Z"}]}"""
+            var body = p.Contains("/releases?") ? $$"""{"Items":[{"Id":"Releases-5","Version":"2.4.1288","Assembled":"{{week}}","ReleaseNotes":"built 0123456789abcdef0123456789abcdef01234567"}]}"""
+                : p.Contains("/deployments?") ? $$"""{"Items":[{"Id":"Deployments-9","TaskId":"ServerTasks-9","ReleaseId":"Releases-5","EnvironmentId":"Environments-1","Created":"{{week}}"}]}"""
                 : p.Contains("/environments") ? """{"Items":[{"Id":"Environments-1","Name":"tdd"}]}"""
                 : p.Contains("/tasks/") ? """{"State":"Success"}"""
                 : p.Contains("/projects/ui") ? """{"Id":"Projects-1"}""" : "{}";
@@ -75,6 +76,15 @@ public sealed class OctopusWebhookTests
         Assert.Contains(shadow, e => e is OctopusDeploymentChanged { Environment: "tdd", Phase: OctopusDeploymentPhase.Succeeded });
         Assert.IsType<OctopusReplayBegan>(shadow[0]);   // the train decides nothing between these two
         Assert.IsType<OctopusReplayComplete>(shadow[^1]);
-        Assert.Empty((await FirstPoll(shadow: false)).Where(e => e is not (OctopusReplayBegan or OctopusReplayComplete)));   // the acting watcher keeps its 15 minute lookback
+    }
+
+    [Fact] public async Task TheActingWatcherReplaysTheSameWindow_SoARestartLosesNothingOfAnOutageAndTheTrainOfTheCutoverStartsWithTheHistory()
+    {
+        var acting = await FirstPoll(shadow: false);
+        Assert.Contains(acting, e => e is OctopusReleaseCreated { Version: "2.4.1288" });
+        Assert.Contains(acting, e => e is OctopusDeploymentChanged { Environment: "tdd", Phase: OctopusDeploymentPhase.Succeeded });
+        Assert.IsType<OctopusReplayBegan>(acting[0]);
+        Assert.IsType<OctopusReplayComplete>(acting[^1]);
+        Assert.Equal(TimeSpan.FromDays(30), OctopusWatchService.Lookback);
     }
 }
