@@ -37,6 +37,14 @@ public sealed record RunbookRunFinished(string IdempotencyKey, string Project, s
 public sealed record RuntimeOutcome(CommandResult Result, object? Message, IntegrationFailed? Failed)
 {
     public bool Retry => Message == null && !Result.Ok;
+
+    /// <summary>
+    /// #475: the caller's retries ran out (the command kept failing in a way that is tried again). The failure is final now, so it is told like any other final one:
+    /// Transient says it was not the runtime's answer, and the error starts with <see cref="ExhaustedPrefix"/> so it never equals a reason that the manager reads
+    /// ("no capacity", "quota", "settled") and the start counts as a failure of the item.
+    /// </summary>
+    public static CommandResult ExhaustedResult(string error) => CommandResult.Failed(FailureKind.Transient, ExhaustedPrefix + error);
+    public const string ExhaustedPrefix = "retries exhausted: ";
 }
 
 public sealed class StartRuntimeSessionHandler : IntegrationCommandHandler<StartRuntimeSession>
@@ -55,6 +63,13 @@ public sealed class StartRuntimeSessionHandler : IntegrationCommandHandler<Start
         var failed = FailureMessage(c, r);
         return new(r, failed == null ? null : new RuntimeStartFailed(c.IdempotencyKey, c.Runtime, c.WorkerName, c.Item, c.Phase, r.Failure, r.Error), failed);
     }
+
+    /// <summary>#475: the start kept failing and the caller gave up: a failed start for the manager (CompleteStart with a failed result), so the item is taken back as in v1, and the saga's message.</summary>
+    public static RuntimeOutcome Exhausted(StartRuntimeSession c, string error)
+    {
+        var r = RuntimeOutcome.ExhaustedResult(error);
+        return new(r, new RuntimeStartFailed(c.IdempotencyKey, c.Runtime, c.WorkerName, c.Item, c.Phase, r.Failure, r.Error), IntegrationFailed.From(c, r));
+    }
 }
 
 public sealed class StopRuntimeSessionHandler : IntegrationCommandHandler<StopRuntimeSession>
@@ -70,6 +85,13 @@ public sealed class StopRuntimeSessionHandler : IntegrationCommandHandler<StopRu
         var failed = FailureMessage(c, r);
         return new(r, r.Ok || failed != null ? new RuntimeSessionStopped(c.IdempotencyKey, c.Runtime, c.WorkerName, r.Ok, r.Error) : null, failed);
     }
+
+    /// <summary>#475: the stop kept failing and the caller gave up: a failed stop for the manager (CompleteStop logs it), and the saga's message.</summary>
+    public static RuntimeOutcome Exhausted(StopRuntimeSession c, string error)
+    {
+        var r = RuntimeOutcome.ExhaustedResult(error);
+        return new(r, new RuntimeSessionStopped(c.IdempotencyKey, c.Runtime, c.WorkerName, false, r.Error), IntegrationFailed.From(c, r));
+    }
 }
 
 public sealed class RunRunbookHandler : IntegrationCommandHandler<RunRunbook>
@@ -84,6 +106,13 @@ public sealed class RunRunbookHandler : IntegrationCommandHandler<RunRunbook>
         var r = await Handle(c, ct);
         var failed = FailureMessage(c, r);
         return new(r, r.Ok || failed != null ? new RunbookRunFinished(c.IdempotencyKey, c.Project, c.Runbook, r.Ok, r.Execution, r.Url, r.Failure, r.Error) : null, failed);
+    }
+
+    /// <summary>#475: the run kept failing and the caller gave up: a finished-with-failure message and the saga's message, instead of a dead letter.</summary>
+    public static RuntimeOutcome Exhausted(RunRunbook c, string error)
+    {
+        var r = RuntimeOutcome.ExhaustedResult(error);
+        return new(r, new RunbookRunFinished(c.IdempotencyKey, c.Project, c.Runbook, false, "", "", r.Failure, r.Error), IntegrationFailed.From(c, r));
     }
 }
 

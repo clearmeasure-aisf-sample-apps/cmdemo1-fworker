@@ -38,6 +38,20 @@ public class RuntimeCommandTrackedTests
         }
     }
 
+    // #475: the gateway's handler (RuntimeCommandService.Outcome): the run after the last cooldown of the rule settles as a failed start instead of throwing again
+    sealed class ExhaustingStartHandler(StartRuntimeSessionHandler handler, int maxAttempts, List<int> attemptsSeen) : MessageHandler<StartRuntimeSession>
+    {
+        protected override async Task HandleAsync(StartRuntimeSession m, MessageContext context, CancellationToken cancellation)
+        {
+            var attempts = context.Envelope!.Attempts; lock (attemptsSeen) attemptsSeen.Add(attempts);
+            var o = await handler.Process(m, cancellation);
+            if (o.Retry && attempts >= maxAttempts) o = StartRuntimeSessionHandler.Exhausted(m, o.Result.Error);
+            if (o.Retry) throw new CommandRetryException(o.Result.Error);
+            if (o.Failed != null) await context.PublishAsync(o.Failed);
+            if (o.Message != null) await context.PublishAsync(o.Message);
+        }
+    }
+
     sealed class ResultHandler<T>(Received received) : MessageHandler<T> where T : class
     {
         protected override Task HandleAsync(T m, MessageContext context, CancellationToken cancellation) { lock (received.Messages) received.Messages.Add(m); return Task.CompletedTask; }
@@ -54,6 +68,20 @@ public class RuntimeCommandTrackedTests
         w.PublishMessage<RuntimeStartFailed>().ToLocalQueue("harness");
         w.PublishMessage<IntegrationFailed>().ToLocalQueue("harness");
         w.OnException<CommandRetryException>().RetryTimes(5);
+    };
+
+    static Action<WolverineOptions> WireExhausting(FakeAdapters adapters, Received received, List<int> attemptsSeen, int pauses) => w =>
+    {
+        w.AddMessageHandler(new ExhaustingStartHandler(new StartRuntimeSessionHandler(new InMemoryIdempotencyLedger(), adapters), pauses + 1, attemptsSeen));
+        w.AddMessageHandler(new ResultHandler<RuntimeSessionStarted>(received));
+        w.AddMessageHandler(new ResultHandler<RuntimeStartFailed>(received));
+        w.AddMessageHandler(new ResultHandler<IntegrationFailed>(received));
+        w.PublishMessage<StartRuntimeSession>().ToLocalQueue("harness");
+        w.PublishMessage<RuntimeSessionStarted>().ToLocalQueue("harness");
+        w.PublishMessage<RuntimeStartFailed>().ToLocalQueue("harness");
+        w.PublishMessage<IntegrationFailed>().ToLocalQueue("harness");
+        // the gateway's rule with short pauses: the retries, then the dead letters as the fallback
+        w.OnException<CommandRetryException>().RetryWithCooldown(Enumerable.Repeat(TimeSpan.FromMilliseconds(20), pauses).ToArray()).Then.MoveToErrorQueue();
     };
 
     static StartRuntimeSession Start(string worker) => new(RuntimeKeys.Start("octopus", worker), "octopus", worker, 7, "Development", "prof", "nonce");
@@ -81,6 +109,34 @@ public class RuntimeCommandTrackedTests
         await h.TrackSend(Start("tracked-2"));
         Assert.Equal(3, adapters.Calls);
         Assert.Equal("exec-3", Assert.IsType<RuntimeSessionStarted>(Assert.Single(received.Messages)).Execution);
+    }
+
+    [Fact]
+    public async Task Start_ThatExhaustsItsRetries_SettlesAsAFailedStart_NotADeadLetter()
+    {
+        if (NoServer) return;
+        var adapters = new FakeAdapters { Answer = _ => CommandResult.Failed(FailureKind.Transient, "start-error: HttpRequestException") };
+        var received = new Received(); var attempts = new List<int>();
+        await using var h = await TrackedSessionHost.StartAsync(WireExhausting(adapters, received, attempts, pauses: 4));
+        await h.TrackSend(Start("tracked-exhausted"));
+        Assert.Equal(5, adapters.Calls);                       // the first run and one after each of the 4 pauses
+        Assert.Equal([1, 2, 3, 4, 5], attempts);               // Envelope.Attempts counts from 1: the 5th is the last the rule gives
+        var failed = Assert.IsType<RuntimeStartFailed>(Assert.Single(received.Messages, x => x is RuntimeStartFailed));
+        Assert.Equal("tracked-exhausted", failed.WorkerName); Assert.StartsWith(RuntimeOutcome.ExhaustedPrefix, failed.Error);
+        Assert.Contains(received.Messages, x => x is IntegrationFailed { CommandName: "StartRuntimeSession" });
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
+    }
+
+    [Fact]
+    public async Task Start_ThatClearsOnTheLastRun_IsAStart_NotAFailure()
+    {
+        if (NoServer) return;
+        var adapters = new FakeAdapters { Answer = n => n < 5 ? CommandResult.Failed(FailureKind.Transient, "start-error: x") : CommandResult.Success("exec-5", "") };
+        var received = new Received(); var attempts = new List<int>();
+        await using var h = await TrackedSessionHost.StartAsync(WireExhausting(adapters, received, attempts, pauses: 4));
+        await h.TrackSend(Start("tracked-last"));
+        Assert.Equal("exec-5", Assert.IsType<RuntimeSessionStarted>(Assert.Single(received.Messages)).Execution);
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
     [Fact]

@@ -146,4 +146,47 @@ public class RuntimeCommandTests
         var o = await h.Process(Book());
         Assert.False(Assert.IsType<RunbookRunFinished>(o.Message).Ok); Assert.Equal("RunRunbook", o.Failed!.CommandName);
     }
+
+    // #475: the caller's retries ran out; the failure is final and is told like one, never left to the dead letters
+
+    [Fact]
+    public void Start_Exhausted_IsAFailedStartForTheManager_AndTheSagasMessage_NotARetry()
+    {
+        var o = StartRuntimeSessionHandler.Exhausted(Start("w9"), "StartRuntimeSession: start-error: HttpRequestException");
+        var m = Assert.IsType<RuntimeStartFailed>(o.Message);
+        Assert.Equal(("octopus", "w9", 7, "Development", FailureKind.Transient), (m.Runtime, m.WorkerName, m.Item, m.Phase, m.Kind));
+        Assert.StartsWith(RuntimeOutcome.ExhaustedPrefix, m.Error); Assert.Contains("HttpRequestException", m.Error);
+        Assert.False(o.Retry); Assert.False(o.Result.Ok);
+        Assert.Equal(("StartRuntimeSession", RuntimeKeys.Start("octopus", "w9"), FailureKind.Transient), (o.Failed!.CommandName, o.Failed.IdempotencyKey, o.Failed.Kind));
+    }
+
+    [Theory]
+    [InlineData("no capacity")]
+    [InlineData("quota")]
+    [InlineData("settled")]
+    public void Exhausted_NeverReadsAsAReasonTheManagerTreatsAsNoFailure(string error)
+    {
+        // an exhausted start with the text of a reason that gives the slot back must still count as a failure of the item
+        var m = Assert.IsType<RuntimeStartFailed>(StartRuntimeSessionHandler.Exhausted(Start(), error).Message);
+        Assert.NotEqual(error, m.Error);
+    }
+
+    [Fact]
+    public void Stop_Exhausted_IsAFailedStop_AndTheSagasMessage()
+    {
+        var c = new StopRuntimeSession(RuntimeKeys.Stop("octopus", "w1"), "octopus", "w1", "done");
+        var o = StopRuntimeSessionHandler.Exhausted(c, "stop-error");
+        var m = Assert.IsType<RuntimeSessionStopped>(o.Message);
+        Assert.False(m.Ok); Assert.Equal("w1", m.WorkerName); Assert.StartsWith(RuntimeOutcome.ExhaustedPrefix, m.Error);
+        Assert.False(o.Retry); Assert.Equal("StopRuntimeSession", o.Failed!.CommandName);
+    }
+
+    [Fact]
+    public void Runbook_Exhausted_IsAFinishedWithFailure_AndTheSagasMessage()
+    {
+        var o = RunRunbookHandler.Exhausted(Book(), "timeout");
+        var m = Assert.IsType<RunbookRunFinished>(o.Message);
+        Assert.False(m.Ok); Assert.Equal("Start worker", m.Runbook); Assert.StartsWith(RuntimeOutcome.ExhaustedPrefix, m.Error);
+        Assert.False(o.Retry); Assert.Equal("RunRunbook", o.Failed!.CommandName);
+    }
 }
