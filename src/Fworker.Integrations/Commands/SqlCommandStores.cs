@@ -6,8 +6,8 @@ namespace Fworker.Integrations.Commands;
 
 // W3 follow-up (#481): the idempotency ledger and the Copilot reservations in the Wolverine database (schema "factory", beside the tables of Fworker.Persistence).
 // The in-memory ones forget everything at a restart: a command replayed after a kill between its side effect and its recorded result would run the side effect
-// again, and a Copilot launch whose reservation was lost could create a second task. Here a key and a reservation outlive the process. The tables are created
-// when first used (CREATE TABLE if missing; the gateway's database user has db_ddladmin), so no migration has to run before the first command. Both interfaces
+// again, and a Copilot launch whose reservation was lost could create a second task. Here a key and a reservation outlive the process. The tables are built by script 009 of
+// Fworker.Database (DbUp), which the gateway applies at start before the Wolverine host and everything that reads them. Both interfaces
 // are synchronous, as the in-memory ones are: a call is one short statement.
 
 /// <summary>The stores a gateway with a database wires: the ledger and the reservations on the same connection string and schema step.</summary>
@@ -24,40 +24,14 @@ public sealed class SqlCommandStores
     }
 }
 
-/// <summary>Opens connections and makes sure the two tables exist; a failed attempt is made again by the next call.</summary>
+/// <summary>Opens connections to the database. The two tables (factory.IdempotencyLedger and factory.CopilotReservations) are built by script 009 of Fworker.Database, which the gateway
+/// applies at start before anything uses them; nothing here creates a table.</summary>
 public sealed class SqlCommandSchema(string connectionString)
 {
-    const string Ddl = """
-        IF SCHEMA_ID(N'factory') IS NULL EXEC(N'CREATE SCHEMA [factory]');
-        IF OBJECT_ID(N'factory.IdempotencyLedger', N'U') IS NULL
-            CREATE TABLE factory.IdempotencyLedger (
-                [Key] nvarchar(400) NOT NULL CONSTRAINT PK_IdempotencyLedger PRIMARY KEY,
-                Ok bit NOT NULL, Failure int NOT NULL, Error nvarchar(max) NOT NULL, Execution nvarchar(max) NOT NULL, Url nvarchar(max) NOT NULL,
-                RecordedAt datetime2 NOT NULL);
-        IF OBJECT_ID(N'factory.CopilotReservations', N'U') IS NULL
-            CREATE TABLE factory.CopilotReservations (
-                Item int NOT NULL, Phase nvarchar(100) NOT NULL, Worker nvarchar(200) NOT NULL, State int NOT NULL, At datetime2 NOT NULL,
-                TaskId nvarchar(200) NOT NULL, Url nvarchar(max) NOT NULL,
-                CONSTRAINT PK_CopilotReservations PRIMARY KEY (Item, Phase));
-        """;
-    readonly object gate = new();
-    bool ready;
-
     public SqlConnection Open()
     {
         var c = new SqlConnection(connectionString);
         c.Open();
-        if (!ready)
-        {
-            lock (gate)
-            {
-                if (!ready)
-                {
-                    try { using var cmd = new SqlCommand(Ddl, c); cmd.ExecuteNonQuery(); ready = true; }
-                    catch { c.Dispose(); throw; }
-                }
-            }
-        }
         return c;
     }
 }

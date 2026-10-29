@@ -19,9 +19,12 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../gateway/Gateway.csproj" />
+    <ProjectReference Include="../../src/Fworker.Database/Fworker.Database.csproj" />
   </ItemGroup>
   <ItemGroup>
     <!-- texts recorded from master that a refactoring must reproduce byte for byte (RuntimePromptTests) -->
     <None Include="Pins/*.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- the SQL the 8 EF migrations ran on tdd before DbUp took over (LegacyDatabaseGatewayTests) -->
+    <None Include="../fixtures/ef-migrations-2026-10-29/ef-migrations.sql" Link="fixtures/ef-migrations-2026-10-29/ef-migrations.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

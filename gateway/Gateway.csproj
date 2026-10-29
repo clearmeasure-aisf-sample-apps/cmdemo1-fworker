@@ -22,6 +22,7 @@
     <ProjectReference Include="../src/Fworker.Contracts/Fworker.Contracts.csproj" />
     <ProjectReference Include="../src/Fworker.Domain/Fworker.Domain.csproj" />
     <ProjectReference Include="../src/Fworker.Persistence/Fworker.Persistence.csproj" />
+    <ProjectReference Include="../src/Fworker.Database/Fworker.Database.csproj" />
     <ProjectReference Include="../src/Fworker.Integrations/Fworker.Integrations.csproj" />
     <ProjectReference Include="../src/Fworker.Workflows/Fworker.Workflows.csproj" />
   </ItemGroup>
