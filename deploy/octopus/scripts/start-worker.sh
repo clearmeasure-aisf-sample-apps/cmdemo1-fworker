@@ -77,8 +77,8 @@ done < <(docker ps -a --filter name='^fw-' --filter status=exited --filter statu
 # FWORKER_PROC_DIR moves them to a fixture in the tests; on a host it is /proc.
 procDir=${FWORKER_PROC_DIR:-/proc}
 running_count() {   # every running fw-* container, one that is exiting included
-    local n=0 cname cstate
-    while IFS=$'\t' read -r cname cstate; do
+    local n=0 cstate
+    while IFS=$'\t' read -r _ cstate; do
         case "$cstate" in running|restarting|paused) n=$((n + 1)) ;; esac
     done < <(docker ps -a --filter name='^fw-' --format '{{.Names}}\t{{.State}}')
     printf '%s' "$n"
