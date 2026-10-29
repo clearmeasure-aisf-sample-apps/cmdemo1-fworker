@@ -14,6 +14,10 @@ The registration API key is prompted without echo (or taken from `OCTOPUS_API_KE
 The script installs Docker if missing, the Tentacle from Octopus's package repository, creates the service user `octopus`
 (member of `docker`), registers the polling instance `fworker` once, and runs the service as that user. Running it again is safe.
 
+Capabilities (W7.4): `FWORKER_CAPABILITIES=dotnet,browser` registers the host with the extra target tags `fworker-cap-dotnet` and `fworker-cap-browser`.
+A host registered earlier gets its tags in Octopus (Infrastructure > Deployment Targets > the machine > Roles, or the machines API). The runbooks still
+target `fworker-host` only; the gateway reads the capability tags together with the machine and shows them in `/api/v1/status` under the host.
+
 The machine name in Octopus (`FWORKER_HOST_NAME`, default the short host name) is the `host` the gateway's desired list is keyed by.
 
 Size: each worker container gets `Fworker.Cpus` (2) and `Fworker.Memory` (8g) by default; plan the host for the number of concurrent
