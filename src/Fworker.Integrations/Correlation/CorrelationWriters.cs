@@ -6,7 +6,8 @@ namespace Fworker.Integrations.Correlation;
 /// <summary>
 /// The writers of the correlation map, as pure functions from what a source knows to the mappings it implies (W4.1). Three sources: a webhook or poll event
 /// (the rule verb ingest-event's object: item, pr, sha), a verb's answer (a pull request or branch the verb opened) and a runtime (the task or agent id a
-/// start returned). Keys are qualified: "owner/repo!N", "owner/repo@sha", "owner/repo:branch"; the generation is not known to these sources (0).
+/// start returned). Keys are qualified: "owner/repo!N", "owner/repo@sha", "owner/repo:branch"; the generation is not known to these sources (0), the map
+/// the gateway uses fills it in from the item's open instance (<see cref="GenerationStampingMap"/>).
 /// </summary>
 public static class CorrelationWriters
 {

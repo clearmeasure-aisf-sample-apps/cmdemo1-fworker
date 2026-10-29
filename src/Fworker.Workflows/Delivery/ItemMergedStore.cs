@@ -5,25 +5,66 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Fworker.Workflows.Delivery;
 
-/// <summary>The merged-items table of the delivery train (W5.0): the claim that makes the webhook's and the reconciler's derivations one.</summary>
+/// <summary>The merged-items table of the delivery train (W5.0): the claim that makes the webhook's and the reconciler's derivations one. The claim is per item and merge commit, never per commit alone.</summary>
 public interface IMergedItemStore
 {
-    /// <summary>True when a message other than <paramref name="messageId"/> already recorded a row for the commit: the derivation skips the reads.</summary>
-    Task<bool> CommitTakenByOther(string commit, Guid messageId, CancellationToken ct);
+    /// <summary>True when a message other than <paramref name="messageId"/> already recorded the row of (item, commit): this item needs no read. The other items of the commit are not affected.</summary>
+    Task<bool> TakenByOther(string itemKey, string commit, Guid messageId, CancellationToken ct);
 
-    /// <summary>True when the row is new or was recorded by the same message (a redelivery goes on); false when another message holds the (item, commit).</summary>
-    Task<bool> TryRecord(MergedItem row, CancellationToken ct);
+    /// <summary>
+    /// True when a message other than <paramref name="messageId"/> recorded a row of the item for the pull request: for an event that names the item and the pull request but not the merge commit
+    /// (the pr.merged webhook), so that it is answered before any read of GitHub. A pull request merges once, so the pair stands for (item, commit).
+    /// </summary>
+    Task<bool> PullRequestTakenByOther(string itemKey, int pullRequest, Guid messageId, CancellationToken ct);
+
+    /// <summary>
+    /// Records the rows of one derivation together and returns those that are this message's: new, or recorded by the same message before (a redelivery goes on). A row another message holds is left
+    /// out. The rows are written in one transaction, so a derivation that fails leaves none of its items claimed for a message that may never come back.
+    /// </summary>
+    Task<IReadOnlyList<MergedItem>> TryRecordAll(IReadOnlyList<MergedItem> rows, CancellationToken ct);
 }
 
 public sealed class SqlMergedItemStore(Func<FactoryDbContext> open) : IMergedItemStore
 {
-    public async Task<bool> CommitTakenByOther(string commit, Guid messageId, CancellationToken ct)
+    public async Task<bool> TakenByOther(string itemKey, string commit, Guid messageId, CancellationToken ct)
     {
         await using var db = open();
-        return await db.MergedItems.AnyAsync(x => x.Commit == commit && x.MessageId != messageId, ct);
+        return await db.MergedItems.AnyAsync(x => x.ItemKey == itemKey && x.Commit == commit && x.MessageId != messageId, ct);
     }
 
-    public async Task<bool> TryRecord(MergedItem row, CancellationToken ct)
+    public async Task<bool> PullRequestTakenByOther(string itemKey, int pullRequest, Guid messageId, CancellationToken ct)
+    {
+        await using var db = open();
+        return await db.MergedItems.AnyAsync(x => x.ItemKey == itemKey && x.PullRequest == pullRequest && x.MessageId != messageId, ct);
+    }
+
+    public async Task<IReadOnlyList<MergedItem>> TryRecordAll(IReadOnlyList<MergedItem> rows, CancellationToken ct)
+    {
+        if (rows.Count == 0) return [];
+        var mine = new HashSet<(string, string)>();
+        await using (var db = open())
+        {
+            var added = new List<MergedItem>();
+            foreach (var row in rows)
+            {
+                if (await db.MergedItems.FindAsync([row.ItemKey, row.Commit], ct) is { } held) { if (held.MessageId == row.MessageId) mine.Add((row.ItemKey, row.Commit)); continue; }
+                db.MergedItems.Add(row); added.Add(row);
+            }
+            try
+            {
+                await db.SaveChangesAsync(ct);
+                foreach (var row in added) mine.Add((row.ItemKey, row.Commit));
+                return rows.Where(r => mine.Contains((r.ItemKey, r.Commit))).ToList();
+            }
+            catch (DbUpdateException) { }
+        }
+        // another message recorded one of the rows between the look and the save (the primary key): one by one, and whoever holds each row decides
+        var kept = new List<MergedItem>();
+        foreach (var row in rows) if (await TryRecord(row, ct)) kept.Add(row);
+        return kept;
+    }
+
+    async Task<bool> TryRecord(MergedItem row, CancellationToken ct)
     {
         await using var db = open();
         if (await db.MergedItems.FindAsync([row.ItemKey, row.Commit], ct) is { } held) return held.MessageId == row.MessageId;
@@ -43,18 +84,31 @@ public sealed class InMemoryMergedItemStore : IMergedItemStore
     readonly Dictionary<(string, string), MergedItem> rows = [];
     public IReadOnlyCollection<MergedItem> Rows { get { lock (rows) return rows.Values.ToList(); } }
 
-    public Task<bool> CommitTakenByOther(string commit, Guid messageId, CancellationToken ct)
+    /// <summary>A test control: called before each batch is recorded; it may throw to stand for a database that fails.</summary>
+    public Action<IReadOnlyList<MergedItem>>? BeforeRecord { get; set; }
+
+    public Task<bool> TakenByOther(string itemKey, string commit, Guid messageId, CancellationToken ct)
     {
-        lock (rows) return Task.FromResult(rows.Values.Any(x => x.Commit == commit && x.MessageId != messageId));
+        lock (rows) return Task.FromResult(rows.TryGetValue((itemKey, commit), out var held) && held.MessageId != messageId);
     }
 
-    public Task<bool> TryRecord(MergedItem row, CancellationToken ct)
+    public Task<bool> PullRequestTakenByOther(string itemKey, int pullRequest, Guid messageId, CancellationToken ct)
     {
+        lock (rows) return Task.FromResult(rows.Values.Any(x => x.ItemKey == itemKey && x.PullRequest == pullRequest && x.MessageId != messageId));
+    }
+
+    public Task<IReadOnlyList<MergedItem>> TryRecordAll(IReadOnlyList<MergedItem> batch, CancellationToken ct)
+    {
+        BeforeRecord?.Invoke(batch);
         lock (rows)
         {
-            if (rows.TryGetValue((row.ItemKey, row.Commit), out var held)) return Task.FromResult(held.MessageId == row.MessageId);
-            rows[(row.ItemKey, row.Commit)] = row;
-            return Task.FromResult(true);
+            var kept = new List<MergedItem>();
+            foreach (var row in batch)
+            {
+                if (rows.TryGetValue((row.ItemKey, row.Commit), out var held)) { if (held.MessageId == row.MessageId) kept.Add(row); continue; }
+                rows[(row.ItemKey, row.Commit)] = row; kept.Add(row);
+            }
+            return Task.FromResult<IReadOnlyList<MergedItem>>(kept);
         }
     }
 }

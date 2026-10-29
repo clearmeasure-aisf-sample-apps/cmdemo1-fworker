@@ -9,6 +9,8 @@ using Fworker.Persistence;
 using Fworker.Workflows.Delivery;
 using Microsoft.EntityFrameworkCore;
 using Wolverine;
+using Wolverine.ErrorHandling;
+using Wolverine.Runtime.Handlers;
 
 // W5.0 (docs/design/fworker-wolverine-implementation.md W5): ItemMerged in the Wolverine host. Where the engine acts (Engine.V2Acts) and, since W5.2, in the shadow run of the delivery train (tdd: DeliveryShadowWiring); v1 registers none of it, and
 // v1 emits nothing: no `delivery` flag, no change to Verbs.Merge.ps1 or Verbs.Delivery.ps1. The message is derived from what the ingress inbox takes in, a merge webhook
@@ -19,6 +21,17 @@ using Wolverine;
 /// <summary>Derives ItemMerged from an inbox message. A second handler of IngressInboxMessage beside <see cref="IngressInboxHandler"/>: it needs no accepted event, the merged-items table is its own deduplication. Public because Wolverine's generated code refers to it.</summary>
 public static class ItemMergedDerivationHandler
 {
+    /// <summary>
+    /// A GitHub that does not answer (a network fault, a 5xx or a rate limit, which the reader throws as <see cref="MergeFactsException"/>) is tried again with growing pauses and then every few minutes, for
+    /// this handler only: the merge is derived from the message or from nothing (the poll publishes a closed card once), so a transient fault must not end in the dead letters after three quick attempts
+    /// (#494). A permanent one (an app that is not installed) is not in the list, and the last step is the dead letters, where it can be seen.
+    /// </summary>
+    public static void Configure(HandlerChain chain)
+    {
+        chain.OnException<HttpRequestException>().Or<MergeFactsException>().Or<TaskCanceledException>().Or<TimeoutException>()
+            .RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5)).Then.ScheduleRetry(TimeSpan.FromMinutes(15)).Then.ScheduleRetry(TimeSpan.FromHours(1)).Then.MoveToErrorQueue();
+    }
+
     public static async Task<OutgoingMessages> Handle(IngressInboxMessage message, ItemMergedDeriver deriver, Envelope envelope, CancellationToken ct)
     {
         var outgoing = new OutgoingMessages();

@@ -13,20 +13,65 @@ using Wolverine;
 /// <summary>The way into the host's inbox queue; registered only where the engine acts.</summary>
 sealed class IngressInboxPort(Func<IngressInboxMessage, Task<bool>> publish) { public Task<bool> Publish(IngressInboxMessage m) => publish(m); }
 
-/// <summary>S3 with the inbox: v1's ingress first, then the event goes to the durable inbox. A problem with the inbox never reaches the caller.</summary>
-sealed class InboxEventIngress(IEventIngress v1, IngressInboxPort inbox) : IEventIngress, IDisposable
+/// <summary>
+/// S3 with the inbox: v1's ingress first, then the event goes to the durable inbox. A problem with the inbox never reaches the caller. The publish happens after the webhook was answered, so it
+/// is tried again (#485): an event waits in a bounded queue, one at a time in the order it came, and is offered to the host with growing pauses (a host that is restarting, a leader change,
+/// a database that does not answer) until it is stored or <c>maxAttempts</c> are spent; then it is dropped with a line in the log, and the board poll (W4.3) is the backstop for a merge. Once
+/// <see cref="IngressInboxPort.Publish"/> answers true the event is in the host's durable inbox; what is still lost is an event that was waiting in this queue when the process died.
+/// </summary>
+sealed class InboxEventIngress : IEventIngress, IDisposable
 {
-    public void Dispose() => (v1 as IDisposable)?.Dispose();
+    public const int DefaultCapacity = 1000, DefaultAttempts = 12;
+    public static readonly TimeSpan RetryFirst = TimeSpan.FromSeconds(1), RetryMax = TimeSpan.FromSeconds(30);
+
+    readonly IEventIngress v1;
+    readonly CancellationTokenSource stop = new();
+    readonly System.Threading.Channels.Channel<string> queue;
+    long stored, dropped;
+
+    public InboxEventIngress(IEventIngress v1, IngressInboxPort inbox, int capacity = DefaultCapacity, TimeSpan? retryFirst = null, TimeSpan? retryMax = null, int maxAttempts = DefaultAttempts)
+    {
+        this.v1 = v1;
+        queue = System.Threading.Channels.Channel.CreateBounded<string>(new System.Threading.Channels.BoundedChannelOptions(capacity) { FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait, SingleReader = true });
+        var first = retryFirst ?? RetryFirst; var max = retryMax ?? RetryMax;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await foreach (var json in queue.Reader.ReadAllAsync(stop.Token))
+                {
+                    var done = false; var pause = first;
+                    for (var attempt = 1; !done && attempt <= maxAttempts && !stop.IsCancellationRequested; attempt++)
+                    {
+                        try
+                        {
+                            if (await inbox.Publish(new IngressInboxMessage("webhook", json))) { done = true; Interlocked.Increment(ref stored); break; }
+                            Console.Error.WriteLine($"ingress inbox: host not up, event not stored yet (attempt {attempt} of {maxAttempts})");
+                        }
+                        catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"ingress inbox: {e.GetType().Name} (attempt {attempt} of {maxAttempts})"); }
+                        if (attempt == maxAttempts) break;
+                        await Task.Delay(pause, stop.Token);
+                        pause = TimeSpan.FromTicks(Math.Min(max.Ticks, pause.Ticks * 2));
+                    }
+                    if (!done && !stop.IsCancellationRequested) { Interlocked.Increment(ref dropped); Console.Error.WriteLine("ingress inbox: event dropped after its attempts, the board poll is the backstop"); }
+                }
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
+    /// <summary>Events stored in the host's inbox, and events given up (attempts spent, or the queue full).</summary>
+    public long Stored => Interlocked.Read(ref stored);
+    public long Dropped => Interlocked.Read(ref dropped);
+
+    public void Dispose() { stop.Cancel(); (v1 as IDisposable)?.Dispose(); }
 
     public void Ingest(IngressEvent ev)
     {
         v1.Ingest(ev);
         if (ev is not WebhookEventIngested w) return;   // a sweep request is the sweeper's, not an event of an item
-        _ = Task.Run(async () =>
-        {
-            try { if (!await inbox.Publish(new IngressInboxMessage("webhook", w.Json))) Console.Error.WriteLine("ingress inbox: host not up, event not stored"); }
-            catch (Exception e) { Console.Error.WriteLine($"ingress inbox: {e.GetType().Name}"); }
-        });
+        // a full queue (a host that has been down for long) drops the event; v1 has done its part and the poll finds the merge again
+        if (!queue.Writer.TryWrite(w.Json)) { Interlocked.Increment(ref dropped); Console.Error.WriteLine($"ingress inbox: queue full ({queue.Reader.Count} events), event not stored"); }
     }
 }
 
@@ -66,20 +111,39 @@ static class IngressInboxWiring
     }
 }
 
-/// <summary>The correlation-map writers of the verbs and the runtimes (W4.1). Best effort and off the caller's thread: a database that does not answer drops the row, never the verb.</summary>
-sealed class IngressCorrelations(ICorrelationMap map, RepoId home)
+/// <summary>
+/// The correlation-map writers of the verbs and the runtimes (W4.1). Off the caller's thread: a database that does not answer never fails the verb. A failed write is tried again with growing
+/// pauses (#485), each mapping on its own, until it is stored or the attempts are spent (the log says so); a pull request mapping that stays unwritten is written again when the inbox takes in the
+/// next event that names it, the other kinds are not. The returned task ends when the rows are stored or given up (the callers let it run).
+/// </summary>
+sealed class IngressCorrelations(ICorrelationMap map, RepoId home, Func<TimeSpan, Task>? delay = null, int maxAttempts = IngressCorrelations.DefaultAttempts)
 {
-    public void FromVerb(string verb, int item, JsonObject output) => Write(CorrelationWriters.FromVerb(verb, item, output, home));
-    public void FromRuntime(string runtime, string execution, int item) => Write(CorrelationWriters.FromRuntime(runtime, execution, item, home));
+    public const int DefaultAttempts = 8;
+    readonly Func<TimeSpan, Task> wait = delay ?? (t => Task.Delay(t));
 
-    void Write(IReadOnlyList<CorrelationRef> rows)
+    public Task FromVerb(string verb, int item, JsonObject output) => Write(CorrelationWriters.FromVerb(verb, item, output, home));
+    public Task FromRuntime(string runtime, string execution, int item) => Write(CorrelationWriters.FromRuntime(runtime, execution, item, home));
+
+    Task Write(IReadOnlyList<CorrelationRef> rows)
     {
-        if (rows.Count == 0) return;
-        _ = Task.Run(() =>
+        if (rows.Count == 0) return Task.CompletedTask;
+        return Task.Run(async () =>
         {
-            foreach (var r in rows)
-                try { map.TryAdd(r); }
-                catch (Exception e) { Console.Error.WriteLine($"correlation {r.Kind}: {e.GetType().Name}"); }
+            foreach (var r in rows) await WriteOne(r);
         });
+    }
+
+    async Task WriteOne(CorrelationRef r)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try { map.TryAdd(r); return; }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"correlation {r.Kind}: {e.GetType().Name} (attempt {attempt} of {maxAttempts})");
+                if (attempt >= maxAttempts) return;
+            }
+            await wait(TimeSpan.FromSeconds(Math.Min(60, 1 << Math.Min(attempt - 1, 6))));
+        }
     }
 }
