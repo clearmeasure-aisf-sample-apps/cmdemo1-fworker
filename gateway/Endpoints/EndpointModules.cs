@@ -75,7 +75,14 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule, DemoEndpoints>();
         // C7d: the verb route and its pipeline (seam S1); the GitHub budget is the composition's, not (yet) a service of its own
         // S1 (W1.4): the engine the environment is composed with; v1 is the only one
-        services.AddSingleton<IVerbRouter>(sp => VerbRouterFactory.For(sp.GetRequiredService<EngineOptions>(), sp.GetRequiredService<Runner>()));
+        services.AddSingleton<IVerbRouter>(sp =>
+        {
+            var v1 = VerbRouterFactory.For(sp.GetRequiredService<EngineOptions>(), sp.GetRequiredService<Runner>());
+            // W6.6: where the engine acts, the decision verbs of the items the saga owns also tell the saga what the script did (V2VerbFeed); every other call is v1's alone
+            if (!c.Engine.V2Acts || c.Instance.Home is not { } home || sp.GetService<WorkItemParts>() is not { Ownership: { } ownership } parts) return v1;
+            var host = sp.GetRequiredService<WolverineHostService>();
+            return new V2VerbFeed(v1, ownership, parts.Store, home, parts.Docs.Settings, m => host.PublishAsync(m), parts.Docs.Heads);
+        });
         services.AddSingleton(sp => new VerbPipeline(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(), sp.GetRequiredService<KeeperSettings>(),
             sp.GetRequiredService<Plant>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<IVerbRouter>(), sp.GetRequiredService<IEventIngress>(),
             c.GitHubBudget, sp));

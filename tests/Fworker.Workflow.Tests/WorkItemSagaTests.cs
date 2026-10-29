@@ -119,7 +119,8 @@ public class WorkItemSagaTests
         var fx = new SagaFixture();
         await fx.Start(plan: "docs");
         await fx.WalkTo(StepKind.Merge);
-        var r = await fx.Done();
+        Assert.Equal(WorkItemOutcome.Refused, (await fx.Done()).Decision.Outcome);   // (the merge ends with the merge, not with a report)
+        var r = await fx.Attempted(new MergeResult(MergeResultKind.Merged, "merged", Commit: "abc1234"));
         Assert.Equal(WorkItemStatus.Completed, fx.State.Status);
         Assert.Equal(WorkItemActions.Completed, r.Decisions.Last().Action);
         Assert.Null(r.Decision.Step);
@@ -182,6 +183,7 @@ public class WorkItemSagaTests
         Assert.Equal("feature", fx.State.Plan);
         Assert.Equal(false, fx.State.DesignMarker);
         await fx.Design(marker: true);
+        await fx.Review();   // (the docs plan leaves the design only after a COMPLETE review)
         await fx.Done();
         Assert.Equal(("docs", StepKind.Develop, true), (fx.State.Plan, fx.State.Step, fx.State.DesignMarker));
     }
@@ -213,7 +215,7 @@ public class WorkItemSagaTests
     {
         var fx = new SagaFixture();
         await fx.Start(plan: "docs");
-        await fx.Done();
+        await fx.Advance();
         Assert.Equal(StepKind.Develop, fx.State.Step);
         fx.Docs.Files = null;   // the port cannot tell
         var unknown = await fx.Send(new PullRequestChanged(Item, 0, "pr-1", 11, "aaa", ["src/App.cs"]));

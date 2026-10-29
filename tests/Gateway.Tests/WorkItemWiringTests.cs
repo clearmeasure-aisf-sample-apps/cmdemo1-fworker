@@ -122,6 +122,7 @@ public sealed class V2OwnershipTests
         public Task<WorkItemRecord?> Load(string itemKey, CancellationToken ct) => inner.Load(itemKey, ct);
         public Task<bool> Save(string itemKey, WorkItemState state, int expectedRevision, CancellationToken ct) => inner.Save(itemKey, state, expectedRevision, ct);
         public Task<IReadOnlyList<string>> OwnedItems(CancellationToken ct) => Down ? throw new InvalidOperationException("the database does not answer") : inner.OwnedItems(ct);
+        public Task<IReadOnlyList<WorkItemState>> OwnedStates(CancellationToken ct) => Down ? throw new InvalidOperationException("the database does not answer") : inner.OwnedStates(ct);
         public Task<IReadOnlyDictionary<string, int>> InFlightByRepository(CancellationToken ct) => inner.InFlightByRepository(ct);
     }
 
@@ -261,7 +262,7 @@ public sealed class WorkItemWiringTests
             File.WriteAllText(Path.Combine(env.Dir, "answer-sync-board.json"), new JsonObject
             {
                 ["ok"] = true, ["actions"] = new JsonArray(),
-                ["offers"] = new JsonArray(new JsonObject { ["item"] = 701, ["column"] = "Technical Design", ["reason"] = "x" }, new JsonObject { ["item"] = 702, ["column"] = "Technical Design", ["reason"] = "x" }),
+                ["offers"] = new JsonArray(new JsonObject { ["item"] = 701, ["column"] = "Development", ["reason"] = "x" }, new JsonObject { ["item"] = 702, ["column"] = "Technical Design", ["reason"] = "x" }),
             }.ToJsonString() + "\n");
             var cfg = JsonNode.Parse(File.ReadAllText(Path.Combine(env.Dir, "instance.test.json")))!;
             var home = RepoId.Parse($"{cfg["owner"]}/{cfg["repo"]}");
@@ -278,17 +279,22 @@ public sealed class WorkItemWiringTests
             Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.ItemHistory WHERE ItemKey = '" + item + "' AND Type = 'workitem.decided'"))[0] == "2", 60), "the decisions did not reach the history");
             Assert.Equal("1", (await Rows(cs, "SELECT COUNT(*) FROM factory.OpenInstances WHERE ItemKey = '" + item + "' AND ClosedAt IS NULL"))[0]);
 
-            // v1's next plans hold only the item the saga does not own
+            // v1's sweep still says 701 waits in Development, but the plant is offered the item by the saga, in the column of the step the saga entered (W6.6): v1's offer of it is dropped
+            var plant = gateway.Services.GetRequiredService<Plant>();
+            string? ColumnOf(int n) => plant.UnownedJson().OfType<JsonObject>().FirstOrDefault(r => r["item"]?.GetValue<int>() == n)?["column"]?.ToString();
+            Assert.True(await Until(() => Task.FromResult(ColumnOf(701) == "Technical Design"), 60), "the plant was not offered the saga's item in its design column: " + plant.UnownedJson().ToJsonString());
             var before = WaitingOfSweeps(env).Count;
-            Assert.True(await Until(() => Task.FromResult(WaitingOfSweeps(env).Skip(before).Count(w => w == 1) >= 2), 60), "v1's sweep went on offering the saga's item: " + string.Join(",", WaitingOfSweeps(env)));
+            Assert.True(await Until(() => Task.FromResult(WaitingOfSweeps(env).Skip(before).Count(w => w == 2) >= 2), 60), "the plan lost an offer: " + string.Join(",", WaitingOfSweeps(env)));
+            Assert.Equal("Technical Design", ColumnOf(701));   // (v1's offer for the column Development never came back)
+            Assert.Equal("Technical Design", ColumnOf(702));
             var owned = gateway.Services.GetRequiredService<V2Ownership>();
             Assert.True(owned.Owns(701)); Assert.False(owned.Owns(702));
+            Assert.Equal([(701, "Technical Design")], owned.Offers);
 
             // the merge completes a docs item; it is v1's again, the plan holds both offers
             Assert.True(await wolverine.PublishAsync(new MergeSeen(item, "merged|1", new string('a', 40), 9)));
             Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.WorkItems WHERE ItemKey = '" + item + "' AND Status = 'completed'"))[0] == "1", 60), "the merge did not complete the item");
-            var after = WaitingOfSweeps(env).Count;
-            Assert.True(await Until(() => Task.FromResult(WaitingOfSweeps(env).Skip(after).Count(w => w == 2) >= 1), 60), "the completed item was not v1's again: " + string.Join(",", WaitingOfSweeps(env)));
+            Assert.True(await Until(() => Task.FromResult(ColumnOf(701) == "Development"), 60), "the completed item was not v1's again: " + plant.UnownedJson().ToJsonString());
             Assert.Equal("0", (await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]);
         }
         finally

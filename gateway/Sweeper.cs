@@ -76,6 +76,13 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         }
     }
 
+    // W6.6: a pass over items that all have a saga: nothing to read for v1, the plant takes the saga's offers for exactly those items (scope), as it takes the offers of an incremental pass
+    void PlanV2Offers(List<int> mine)
+    {
+        try { plant.Plan(new JsonArray(V2!.OfferNodes(plant.HasOwner, mine).ToArray()), null, null, null, mine, null, DateTime.UtcNow, mine, null, null); }
+        catch (Exception e) { Console.Error.WriteLine($"v2 offers: {e.GetType().Name}"); }
+    }
+
     // One pass of sync-board: the whole board (items null) or the given items. Returns the items it saw for the first time in their column (unconfirmed).
     readonly HashSet<int> ownerHolds = new(); bool holdsComplete;
     async Task<List<int>> SweepOnce(List<int>? items)
@@ -84,7 +91,13 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         if (V2 != null)
         {
             await V2.RefreshAsync();
-            if (items != null) { items = items.Where(i => !V2.Owns(i)).ToList(); if (items.Count == 0) return unconfirmedOut; }
+            if (items != null)
+            {
+                var mine = items.Where(V2.Owns).ToList();
+                items = items.Where(i => !V2.Owns(i)).ToList();
+                // W6.6: the pass named only the saga's items. v1 has nothing to read for them, but the plant still takes the saga's offers for them (an item whose step just began waits for a session)
+                if (items.Count == 0) { if (ownerMode && mine.Count > 0) PlanV2Offers(mine); return unconfirmedOut; }
+            }
         }
         var low = Budget?.Low().Low == true;
         var args = new JsonObject();
@@ -121,7 +134,14 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 if (items != null) foreach (var i in items) hub.RequestSweep(i);
                 return unconfirmedOut;
             }
-            if (V2 != null && V2.Count > 0) SweepV2Filter.Apply(j, V2.Owns);
+            if (V2 != null && V2.Count > 0)
+            {
+                SweepV2Filter.Apply(j, V2.Owns);
+                // W6.6: the offers for the saga's items come from the saga's state, for the items the pass read (an incremental pass named none of them: it never offers an item it did not read)
+                if (ownerMode && j["offers"] is JsonArray planned)
+                    foreach (var offer in V2.OfferNodes(plant.HasOwner, items))
+                        planned.Add(offer);
+            }
             foreach (var x in j["unconfirmed"] as JsonArray ?? new JsonArray()) if (x is JsonValue uv && uv.TryGetValue<int>(out var ui) && ui > 0) unconfirmedOut.Add(ui);
             var acts = j["actions"]!.AsArray();
             // A full sweep whose item loop ran out of its budget (issue 429, `partial`) names the items it read (`viewed`): it is taken like an

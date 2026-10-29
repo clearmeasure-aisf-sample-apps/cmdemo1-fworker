@@ -28,6 +28,10 @@ public static class WorkItemHandlers
     public static Task<OutgoingMessages> Handle(ResumeWorkItem m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(PhaseLeaseExpired m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(SettleWindowElapsed m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(ReviewRecorded m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(VerdictRecorded m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(MergeAttempted m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(MergeRetryDue m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
 
     public static async Task<OutgoingMessages> Run(WorkItemInput input, WorkItemService svc, CancellationToken ct)
     {
@@ -35,11 +39,12 @@ public static class WorkItemHandlers
         return Outgoing(result);
     }
 
-    /// <summary>The messages of a result: the decisions, then each timer scheduled for its due time.</summary>
+    /// <summary>The messages of a result: the decisions, the commands (the merge call), then each timer scheduled for its due time.</summary>
     public static OutgoingMessages Outgoing(WorkItemResult result)
     {
         var o = new OutgoingMessages();
         foreach (var d in result.Decisions) o.Add(d);
+        foreach (var command in result.Sent) o.Add(command);
         foreach (var t in result.Timers) o.Add(t.Message.ScheduledAt(t.Due));
         return o;
     }

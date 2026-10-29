@@ -30,6 +30,7 @@ public class WorkItemTrackedTests
             if (around != null) { await around(m); return; }
             var r = await svc.Handle(m, cancellation);
             foreach (var d in r.Decisions) await context.PublishAsync(d);
+            foreach (var c in r.Sent) await context.PublishAsync(c);
             foreach (var t in r.Timers) await context.PublishAsync(t.Message, new DeliveryOptions { ScheduledTime = t.Due });
         }
     }
@@ -42,6 +43,7 @@ public class WorkItemTrackedTests
             // the first attempt saves and dies before it publishes; Wolverine runs the message again
             if (attempts.AddOrUpdate(m.Item.ToString(), 1, (_, n) => n + 1) == 1) throw new HarnessTransientException("died after the save, before the publish");
             foreach (var d in r.Decisions) await context.PublishAsync(d);
+            foreach (var c in r.Sent) await context.PublishAsync(c);
             foreach (var t in r.Timers) await context.PublishAsync(t.Message, new DeliveryOptions { ScheduledTime = t.Due });
         }
     }
@@ -59,12 +61,19 @@ public class WorkItemTrackedTests
         }
     }
 
+    /// <summary>The merge calls the saga asked for, as the gateway's handler would receive them.</summary>
+    sealed class MergeCalls : MessageHandler<MergeRequested>
+    {
+        public readonly ConcurrentQueue<MergeRequested> Seen = new();
+        protected override Task HandleAsync(MergeRequested m, MessageContext context, CancellationToken cancellation) { Seen.Enqueue(m); return Task.CompletedTask; }
+    }
+
     static FactoryDbContext Open(string cs) => new(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer(cs).Options);
 
     static WorkItemPolicy Quick(TimeSpan? design = null) => new(new Dictionary<StepKind, TimeSpan?> { [StepKind.Design] = design ?? TimeSpan.FromHours(1), [StepKind.Develop] = TimeSpan.FromHours(1) });
 
     /// <summary>The host's wiring: the saga on the database of the host, all inputs partitioned by item, the facts routed, the decisions written to the history. <paramref name="handlerFor"/> replaces an input's handler.</summary>
-    static Func<string, Action<WolverineOptions>> Wire(WorkItemPolicy? policy = null, IDocsOnlyPort? docs = null, Func<WorkItemService, Type, object?>? handlerFor = null) => cs => w =>
+    static Func<string, Action<WolverineOptions>> Wire(WorkItemPolicy? policy = null, IDocsOnlyPort? docs = null, Func<WorkItemService, Type, object?>? handlerFor = null, MergeCalls? merges = null) => cs => w =>
     {
         var store = new SqlWorkItemStore(() => Open(cs));
         var svc = new WorkItemService(store, new WorkItemSaga(docs ?? new FakeDocsPort(), policy));
@@ -74,11 +83,12 @@ public class WorkItemTrackedTests
             w.AddMessageHandler(t, (IMessageHandler)handler);
         }
         w.AddMessageHandler(new DecidedHandler(new WorkItemHistory(() => Open(cs))));
+        if (merges is not null) w.AddMessageHandler(merges);
         w.AddMessageHandler(new FactHandler<ItemMerged>((m, _) => WorkItemRouting.Handle(m)));
         w.AddMessageHandler(new FactHandler<DeliveredTo>((m, _) => WorkItemRouting.Handle(m)));
         w.AddMessageHandler(new FactHandler<Undelivered>((m, e) => WorkItemRouting.Handle(m, e)));
         WorkItemTopology.Route(w);
-        foreach (var t in new[] { typeof(WorkItemDecided), typeof(ItemMerged), typeof(DeliveredTo), typeof(Undelivered) }) w.PublishMessage(t).ToLocalQueue("workitem-side");
+        foreach (var t in new[] { typeof(WorkItemDecided), typeof(ItemMerged), typeof(DeliveredTo), typeof(Undelivered), typeof(MergeRequested) }) w.PublishMessage(t).ToLocalQueue("workitem-side");
         w.LocalQueue("workitem-side").UseDurableInbox();
         w.Durability.ScheduledJobPollingTime = TimeSpan.FromMilliseconds(500);
     };
@@ -180,6 +190,54 @@ public class WorkItemTrackedTests
         Assert.Equal(1, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_incoming_envelopes WHERE status = 'Scheduled'"));   // the lease timer was published by the second attempt
     }
 
+    // ---- the docs plan's merge (W6.6) ----------------------------------------------------------------------------------------------------
+
+    static Task<bool> SeedAtVerify(TrackedSessionHost h) =>
+        new SqlWorkItemStore(() => Open(h.ConnectionString)).Save(A.ToString(), new WorkItemState
+        {
+            Item = A.ToString(), Generation = 1, Plan = "docs", Step = StepKind.Verify, ArmId = "1.3", ArmSeq = 3, StartedAt = DateTimeOffset.UtcNow, PullRequest = 11, Head = new string('a', 40), LeaseDue = DateTimeOffset.UtcNow.AddHours(3),
+        }, 0, default);
+
+    [Fact]
+    public async Task APassAsksForTheMerge_ThroughTheOutbox_AndACrashBetweenTheSaveAndThePublishStillAsksOnce()
+    {
+        if (!TrackedSessionHost.Available) return;
+        var attempts = new ConcurrentDictionary<string, int>(); var calls = new MergeCalls();
+        await using var h = await TrackedSessionHost.StartAsync(Wire(handlerFor: (svc, t) => t == typeof(VerdictRecorded) ? new CrashOnceHandler<VerdictRecorded>(svc, attempts) : null, merges: calls));
+        Assert.True(await SeedAtVerify(h));
+        await h.TrackSend(new VerdictRecorded(A, 1, "1.3", "verdict-1", true, 11, new string('a', 40), "ok"));
+        Assert.True(attempts["acme/orders#7"] >= 2);
+        Assert.Equal(2, (await Row(h, A))!.Revision);   // saved once by the verdict
+        Assert.True(await Until(() => Task.FromResult(calls.Seen.Count >= 1), 20), "the merge was not asked for");
+        var call = Assert.Single(calls.Seen);
+        Assert.Equal((A, 1, "1.4", 1, 11, new string('a', 40)), (call.Item, call.Generation, call.ArmId, call.Attempt, call.PullRequest, call.Head));
+        Assert.True(await Until(async () => await History(h, "acme/orders#7", "merge-requested") == 1, 20));
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
+    }
+
+    [Fact]
+    public async Task ABlockedMerge_IsAskedAgainByADurableTimer_AndTheAnswerOfTheLastCallMergesTheItem()
+    {
+        if (!TrackedSessionHost.Available) return;
+        var calls = new MergeCalls();
+        var policy = new WorkItemPolicy(new Dictionary<StepKind, TimeSpan?> { [StepKind.Merge] = TimeSpan.FromHours(1) }, Docs: new DocsPlanRules(MergeRetry: TimeSpan.FromSeconds(1)));
+        await using var h = await TrackedSessionHost.StartAsync(Wire(policy, merges: calls));
+        Assert.True(await SeedAtVerify(h));
+        await h.TrackSend(new VerdictRecorded(A, 1, "1.3", "verdict-1", true, 11, new string('a', 40), "ok"));
+        Assert.True(await Until(() => Task.FromResult(calls.Seen.Count >= 1), 20));
+        // the answer: blocked. The saga schedules the next call; it comes by itself, as attempt 2 under the same arm
+        await h.TrackSend(new MergeAttempted(A, 1, "1.4", "merge-attempt|1.4|1", 1, new MergeResult(MergeResultKind.Blocked, "checks-pending", "required checks have not passed", Transient: true)));
+        Assert.True(await Until(() => Task.FromResult(calls.Seen.Count >= 2), 30), "the retry timer did not fire");
+        var second = calls.Seen.ToArray()[1];
+        Assert.Equal((2, "1.4"), (second.Attempt, second.ArmId));
+        // the answer of the second call merges the item
+        await h.TrackSend(new MergeAttempted(A, 1, "1.4", "merge-attempt|1.4|2", 2, new MergeResult(MergeResultKind.Merged, "merged", Commit: new string('c', 40))));
+        var done = (await Row(h, A))!.State;
+        Assert.Equal((WorkItemStatus.Completed, new string('c', 40)), (done.Status, done.MergeCommit));
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM factory.OpenInstances WHERE ItemKey = 'acme/orders#7' AND ClosedAt IS NULL"));
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
+    }
+
     // ---- partitioning ---------------------------------------------------------------------------------------------------------------------
 
     [Fact]
@@ -216,6 +274,9 @@ public class WorkItemTrackedTests
         [
             new PhaseLeaseExpired(A, 1, "1.1", DateTimeOffset.UtcNow), new SettleWindowElapsed(A, 1, "1.5"), new StepCompleted(A, 1, "1.1", "k1"), new MergeSeen(A, "k2", new string('a', 40), 3),
             new DeliverySeen(A, "k3", "prod", "1.0.1"), new DeliveryLost(A, "k4", "prod"), new BudgetSpent(A, 1, "1.1", "k5", BudgetKind.Failure, ""),
+            // the docs plan's (W6.6): a late review, verdict, merge answer or merge timer ends quietly too
+            new ReviewRecorded(A, 1, "1.1", "k6", true), new VerdictRecorded(A, 1, "1.3", "k7", true, 11, new string('a', 40), "ok"),
+            new MergeAttempted(A, 1, "1.4", "k8", 1, new MergeResult(MergeResultKind.Merged, "merged", Commit: new string('b', 40))), new MergeRetryDue(A, 1, "1.4", DateTimeOffset.UtcNow),
         ];
         foreach (var m in late) await h.TrackSend(m);
         await h.TrackSend(new ItemMerged(A, new string('b', 40), 3, new ItemMergedGates(true, "", true, false, false, []), [], "webhook"));

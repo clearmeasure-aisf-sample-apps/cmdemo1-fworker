@@ -19,6 +19,9 @@ public interface IWorkItemStore
     /// <summary>The items with a saga that has not completed (open or inside the settle window), as "owner/repo#N": the items the v2 engine owns.</summary>
     Task<IReadOnlyList<string>> OwnedItems(CancellationToken ct);
 
+    /// <summary>The state of every item with a saga that has not completed: the hand-off to the sweep and the offers of the plant read it.</summary>
+    Task<IReadOnlyList<WorkItemState>> OwnedStates(CancellationToken ct);
+
     /// <summary>The items in flight by repository ("owner/repo"): the open ones, not those inside their settle window. The WIP intake rule counts with it.</summary>
     Task<IReadOnlyDictionary<string, int>> InFlightByRepository(CancellationToken ct);
 }
@@ -73,6 +76,13 @@ public sealed class SqlWorkItemStore(Func<FactoryDbContext> open) : IWorkItemSto
         return await db.WorkItems.AsNoTracking().Where(x => x.Status != WorkItemStatus.Completed).Select(x => x.ItemKey).ToListAsync(ct);
     }
 
+    public async Task<IReadOnlyList<WorkItemState>> OwnedStates(CancellationToken ct)
+    {
+        await using var db = open();
+        var rows = await db.WorkItems.AsNoTracking().Where(x => x.Status != WorkItemStatus.Completed).Select(x => x.StateJson).ToListAsync(ct);
+        return rows.Select(WorkItemState.FromJson).ToList();
+    }
+
     public async Task<IReadOnlyDictionary<string, int>> InFlightByRepository(CancellationToken ct)
     {
         await using var db = open();
@@ -109,6 +119,11 @@ public sealed class InMemoryWorkItemStore : IWorkItemStore
     public Task<IReadOnlyList<string>> OwnedItems(CancellationToken ct)
     {
         lock (rows) return Task.FromResult<IReadOnlyList<string>>(rows.Where(kv => WorkItemState.FromJson(kv.Value.Json).IsOpen).Select(kv => kv.Key).ToList());
+    }
+
+    public Task<IReadOnlyList<WorkItemState>> OwnedStates(CancellationToken ct)
+    {
+        lock (rows) return Task.FromResult<IReadOnlyList<WorkItemState>>(rows.Select(kv => WorkItemState.FromJson(kv.Value.Json)).Where(s => s.IsOpen).ToList());
     }
 
     public Task<IReadOnlyDictionary<string, int>> InFlightByRepository(CancellationToken ct)

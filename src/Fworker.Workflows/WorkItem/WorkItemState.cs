@@ -59,6 +59,33 @@ public sealed class WorkItemState
     public string LastKey { get; set; } = "";
     public List<WorkItemDecided> Emitted { get; set; } = [];
 
+    // ---- the docs plan (W6.6, Plans/DocsSteps.cs): optional fields, absent in a state saved before them ----------------------------------------------------------
+    /// <summary>Review rounds recorded by step name (v1's reviews[column].round); entering the step starts them again.</summary>
+    public Dictionary<string, int> ReviewRounds { get; set; } = [];
+    /// <summary>The steps whose latest review ended REVIEW: COMPLETE (v1's reviews[column].ref); entering the step again clears it, because a new arm is new work.</summary>
+    public List<string> ReviewsComplete { get; set; } = [];
+    /// <summary>FAIL verdicts that sent the item back to Development (v1's demotions), against D5's FailVerdict row.</summary>
+    public int Demotions { get; set; }
+    /// <summary>Merges of master the item needed because its pull request fell out of date (D5's MechanicalFailure row).</summary>
+    public int MechanicalFixes { get; set; }
+    /// <summary>The head the latest PASS verdict covers ("" before one): the merge sends exactly this head.</summary>
+    public string VerdictHead { get; set; } = "";
+    public string VerdictSummary { get; set; } = "";
+    /// <summary>Merge calls asked of the current Merge arm; the count that reaches <see cref="DocsPlanRules.MaxMergeAttempts"/> parks the item.</summary>
+    public int MergeAttempt { get; set; }
+    /// <summary>Updates of the branch made for this verdict (the script's verdict.updates), against timing.outOfDateMergeAttempts in the merge command.</summary>
+    public int MergeUpdates { get; set; }
+    /// <summary>An earlier merge call updated the branch from this head and its new head was not there yet.</summary>
+    public string MergeUpdatedFrom { get; set; } = "";
+    /// <summary>The merge call asked for and not yet answered; the answer (MergeAttempted) names its attempt. Null when none is waiting.</summary>
+    public MergeRequestState? MergeRequest { get; set; }
+    /// <summary>Why the last merge call was blocked: a decision is published when the reason changes, not at every call.</summary>
+    public string MergeBlockedReason { get; set; } = "";
+    /// <summary>When the next merge call is due after a blocked or transient answer (a scheduled MergeRetryDue).</summary>
+    public DateTimeOffset? MergeRetryAt { get; set; }
+    /// <summary>Whether the last applied input asked for the merge call: a redelivery of it asks again (the command is idempotent), a later renewal does not.</summary>
+    public bool MergeRequestEmitted { get; set; }
+
     static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Converters = { new JsonStringEnumConverter() } };
 
     public string ToJson() => JsonSerializer.Serialize(this, Json);
@@ -70,4 +97,14 @@ public sealed class WorkItemState
 
     public int FailuresOf(StepKind step) => Failures.GetValueOrDefault(step.ToString());
     public int LaunchesOf(StepKind step) => Launches.GetValueOrDefault(step.ToString());
+}
+
+/// <summary>A merge call as the saga asked for it: the attempt number names the answer.</summary>
+public sealed class MergeRequestState
+{
+    public int Attempt { get; set; }
+    public int PullRequest { get; set; }
+    public string Head { get; set; } = "";
+    public int UpdatesSoFar { get; set; }
+    public string UpdatedFrom { get; set; } = "";
 }
