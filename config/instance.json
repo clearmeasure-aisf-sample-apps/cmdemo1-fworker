@@ -144,6 +144,9 @@
     "preMergeChecksWaitSeconds": 300,
     "preMergeChecksPollSeconds": 16,
     "outOfDateMergeAttempts": 4,
+    "mergeTrainEntryExpirySeconds": 300,
+    "mergeTrainHeadPatienceSeconds": 900,
+    "mergeTrainWaitSeconds": 0,
     "updatedHeadWaitSeconds": 60,
     "masterGreenTimeoutMinutes": 30,
     "releaseCandidateTimeoutMinutes": 20,
@@ -478,6 +481,7 @@
   "ownerHoldLabel": "hold:owner",
   "priorityLabels": { "top": "priority:top", "high": "priority:high" },
   "mergeQueueDepth": 0,
+  "mergeStrategy": "direct",
   "gatewayMerge": true,
   "catalog": {
     "enabled": false,

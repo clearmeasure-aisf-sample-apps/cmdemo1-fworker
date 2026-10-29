@@ -6,13 +6,15 @@ using Fworker.Contracts.Seams;
 using Fworker.Integrations.GitHub;
 using Fworker.Persistence;
 using Fworker.Workflows.Intake;
+using Fworker.Workflows.Merge;
 using Fworker.Workflows.WorkItem;
 using Microsoft.EntityFrameworkCore;
 
 // W6.6 (#335): the docs plan in the gateway, in the hybrid composition the owner decided on (2026-10-28): v1's plant offers the sessions and v1's verbs do their work; the WorkItemSaga decides the docs items it has started
 // (the steps of Fworker.Workflows.WorkItem.Plans); v1's sweep leaves those items alone. Wired only where the engine acts (Engine.V2Acts); `intake.v2Plans` is empty, so even there nothing starts a saga until the owner names the docs plan.
 // What the gateway adds to the saga, each with the fault it must not turn into a lasting answer:
-//  - DocsMergePort: the merge the saga asks for (MergeRequested) is the C# direct merge of W6.2, after the checks the script does first (the Auto Merge label, a hold). A fault of GitHub or of the call is a transient answer the saga asks
+//  - DocsMergePort: the merge the saga asks for (MergeRequested) goes through the merge train of its repository (W7.2, Fworker.Workflows.Merge: every request at once under the direct strategy, one at a time under train) and
+//    is the C# direct merge of W6.2, after the checks the script does first (the Auto Merge label, a hold). A fault of GitHub or of the call is a transient answer the saga asks
 //    again after; only GitHub's own refusals are permanent, and the ledger of the command keeps those by their key (a blocked or transient answer is not kept).
 //  - DocsProjection: the card follows the saga (a started item to its design column, a merged one to Done) as a versioned projection; a refusal for good is logged, a fault is tried again, and an item that stays behind is read by v1 again
 //    like an item a person merged.
@@ -77,17 +79,21 @@ public static class DocsPlanSettingsReader
 /// </summary>
 public sealed class DocsMergePort(MergePullRequestHandler? merge, IMergeFactsReader? reader, DocsPlanSettings settings, Func<bool>? budgetLow = null)
 {
-    public async Task<MergeAttempted> Run(MergeRequested m, CancellationToken ct)
+    /// <summary>The merge of a request as the saga asked, and its answer for the saga. <paramref name="firstTurn"/> says whether a branch that is behind is brought up to date first; unset, it is the saga's first attempt (the direct strategy).</summary>
+    public async Task<MergeAttempted> Run(MergeRequested m, CancellationToken ct, bool? firstTurn = null) => MergeTrain.Attempted(m, await Answer(m, firstTurn ?? m.Attempt == 1, ct));
+
+    /// <summary>The merge of a turn the merge train granted (W7.2): the answer goes back to the train, which settles its line by it and hands it on to the saga.</summary>
+    public async Task<MergeTrainAnswered> Run(MergeGranted g, CancellationToken ct) => new(g.Key, g.Request, await Answer(g.Request, g.FirstTurn, ct));
+
+    async Task<MergeResult> Answer(MergeRequested m, bool firstTurn, CancellationToken ct)
     {
-        MergeResult result;
-        try { result = await Decide(m, ct); }
+        try { return await Decide(m, firstTurn, ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (NoInstallationException) { result = new MergeResult(MergeResultKind.Failed, "no-installation", "the factory has no GitHub installation for the owner of the repository"); }
-        catch (Exception e) { result = new MergeResult(MergeResultKind.Blocked, "merge-error", e.GetType().Name, Transient: true); }
-        return new MergeAttempted(m.Item, m.Generation, m.ArmId, $"merge-attempt|{m.ArmId}|{m.Attempt}", m.Attempt, result);
+        catch (NoInstallationException) { return new MergeResult(MergeResultKind.Failed, "no-installation", "the factory has no GitHub installation for the owner of the repository"); }
+        catch (Exception e) { return new MergeResult(MergeResultKind.Blocked, "merge-error", e.GetType().Name, Transient: true); }
     }
 
-    async Task<MergeResult> Decide(MergeRequested m, CancellationToken ct)
+    async Task<MergeResult> Decide(MergeRequested m, bool firstTurn, CancellationToken ct)
     {
         if (merge is null || reader is null) return new MergeResult(MergeResultKind.Blocked, "merge-unavailable", "the gateway has no GitHub credential to merge with", Transient: true);
         // below the reserve of the GitHub budget only the essential calls run (GitHubBudget.cs): the merge waits for the reset like every other read
@@ -102,7 +108,7 @@ public sealed class DocsMergePort(MergePullRequestHandler? merge, IMergeFactsRea
         // a documentation change builds no release, so the merge queue never holds it (DocsOnly); GitHub's update of a branch that is behind is asked once per merge arm, as the script does once per verdict
         var cmd = new MergePullRequest(MergePullRequest.KeyFor(m.Item.Repository, m.PullRequest, m.Head, m.UpdatesSoFar), m.Item.Repository, m.PullRequest, m.Head,
             MergeQueueDepth: settings.MergeQueueDepth, QueueBusy: 0, DocsOnly: true,
-            UpdateWhenBehind: settings.UpdateBranchWhenBehind && m.Attempt == 1 && m.UpdatedFrom.Length == 0, UpdatedFrom: m.UpdatedFrom, UpdatesSoFar: m.UpdatesSoFar, MaxUpdates: settings.MaxUpdates,
+            UpdateWhenBehind: settings.UpdateBranchWhenBehind && firstTurn && m.UpdatedFrom.Length == 0, UpdatedFrom: m.UpdatedFrom, UpdatesSoFar: m.UpdatesSoFar, MaxUpdates: settings.MaxUpdates,
             Item: m.Item.Number, RecordedPullRequest: m.PullRequest);
         return Map(await merge.Process(cmd, ct));
     }
@@ -121,10 +127,10 @@ public sealed class DocsMergePort(MergePullRequestHandler? merge, IMergeFactsRea
     }
 }
 
-/// <summary>The handler of MergeRequested; the answer cascades through the outbox to the saga. Public because Wolverine's generated code refers to it.</summary>
-public static class DocsMergeHandler
+/// <summary>The handler of the turn the merge train grants (W7.2); the answer cascades through the outbox to the train, which hands it on to the saga. Public because Wolverine's generated code refers to it.</summary>
+public static class MergeTrainPortHandler
 {
-    public static Task<MergeAttempted> Handle(MergeRequested m, DocsMergePort port, CancellationToken ct) => port.Run(m, ct);
+    public static Task<MergeTrainAnswered> Handle(MergeGranted g, DocsMergePort port, CancellationToken ct) => port.Run(g, ct);
 }
 
 /// <summary>The last version a projection applied, in the table of W2.1 (factory.ProjectionVersions). An advance is one conditional update, so two writers cannot move it backwards.</summary>

@@ -272,6 +272,28 @@ namespace Fworker.Persistence.Migrations
                     b.ToTable("ItemHistory", "factory");
                 });
 
+            modelBuilder.Entity("Fworker.Persistence.MergeTrainRow", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("int");
+
+                    b.Property<string>("StateJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.HasKey("Key");
+
+                    b.ToTable("MergeTrains", "factory");
+                });
+
             modelBuilder.Entity("Fworker.Persistence.MergedItem", b =>
                 {
                     b.Property<string>("ItemKey")

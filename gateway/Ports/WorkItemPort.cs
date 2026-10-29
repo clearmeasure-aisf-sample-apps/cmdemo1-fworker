@@ -7,6 +7,7 @@ using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Fworker.Persistence;
 using Fworker.Workflows.Intake;
+using Fworker.Workflows.Merge;
 using Fworker.Workflows.WorkItem;
 using Microsoft.EntityFrameworkCore;
 using Wolverine;
@@ -115,7 +116,29 @@ static class SweepV2Filter
 }
 
 /// <summary>What the gateway builds for the saga: its service, the history writer, the ownership the sweep reads and the intake settings.</summary>
-sealed record WorkItemParts(WorkItemService Service, WorkItemHistory History, IWorkItemStore Store, V2Ownership? Ownership, IntakeSettings Intake, DocsPlanParts Docs);
+sealed record WorkItemParts(WorkItemService Service, WorkItemHistory History, IWorkItemStore Store, V2Ownership? Ownership, IntakeSettings Intake, DocsPlanParts Docs, MergeTrainParts Merge);
+
+/// <summary>The merge train (W7.2): its service on the database of the host, the history writer of its decisions and the settings it runs with (<c>mergeStrategy</c>: direct or train).</summary>
+sealed record MergeTrainParts(MergeTrainService Service, MergeTrainHistory History, MergeTrainSettings Settings);
+
+/// <summary>The merge train's settings from config/instance.json: <c>mergeStrategy</c> (direct, train) and <c>timing.mergeTrainEntryExpirySeconds</c> / <c>timing.mergeTrainHeadPatienceSeconds</c> / <c>timing.mergeTrainWaitSeconds</c> (0: the saga's own pause).</summary>
+static class MergeTrainSettingsReader
+{
+    public static MergeTrainSettings From(JsonNode? root, Action<string>? warn = null)
+    {
+        string? name = null; JsonNode? timing = null;
+        try { name = root?["mergeStrategy"] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null; } catch { }
+        try { timing = root?["timing"]; } catch { }
+        var (strategy, warning) = MergeTrainSettings.ParseStrategy(name);
+        if (warning is not null) warn?.Invoke(warning);
+        return new MergeTrainSettings(strategy, Seconds(timing, "mergeTrainEntryExpirySeconds"), Seconds(timing, "mergeTrainHeadPatienceSeconds"), Seconds(timing, "mergeTrainWaitSeconds"));
+    }
+
+    static TimeSpan? Seconds(JsonNode? n, string name)
+    {
+        try { return n?[name] is JsonValue v && v.TryGetValue<int>(out var i) && i > 0 ? TimeSpan.FromSeconds(i) : null; } catch { return null; }
+    }
+}
 
 /// <summary>What the docs plan needs of GitHub (W6.6). Every reader is null without a credential (GH_TOKEN or the author App): the merge then answers "merge-unavailable" (a wait), the card stays where it is, nothing is read for the intake.</summary>
 sealed record DocsPlanParts(DocsPlanSettings Settings, DocsMergePort Merge, DocsProjection Projection, IMergeFactsReader? Facts, IBoardReader? Boards, PullRequestHeads? Heads, Func<BoardRef?> Board)
@@ -159,7 +182,9 @@ static class WorkItemWiring
         var store = new SqlWorkItemStore(open);
         var service = new WorkItemService(store, new WorkItemSaga(docs ?? new DomainDocsOnlyPort(DocsOnlySettingsReader.From(root)), settings.Policy));
         var ownership = c.Instance.Home is { } home ? new V2Ownership(store, home, settings.ColumnOf) : null;
-        return new WorkItemParts(service, new WorkItemHistory(open), store, ownership, IntakeSettings.From(root, Environment.GetEnvironmentVariable), MakeDocsPlan(c, settings, open, connectionString, boardRef ?? (() => null), env ?? Environment.GetEnvironmentVariable, http));
+        var train = MergeTrainSettingsReader.From(root, w => Console.Error.WriteLine("merge train: " + w));
+        var merge = new MergeTrainParts(new MergeTrainService(new SqlMergeTrainStore(open), train), new MergeTrainHistory(open), train);
+        return new WorkItemParts(service, new WorkItemHistory(open), store, ownership, IntakeSettings.From(root, Environment.GetEnvironmentVariable), MakeDocsPlan(c, settings, open, connectionString, boardRef ?? (() => null), env ?? Environment.GetEnvironmentVariable, http), merge);
     }
 
     static DocsPlanParts MakeDocsPlan(GatewayComposition c, DocsPlanSettings settings, Func<FactoryDbContext> open, string connectionString, Func<BoardRef?> boardRef, Func<string, string?> env, HttpClient? http)
@@ -198,12 +223,19 @@ static class WorkItemWiring
             // the docs plan's merge (MergeRequested, answered with MergeAttempted) and the card that follows the saga's decisions
             services.AddSingleton(parts.Docs.Merge);
             services.AddSingleton(parts.Docs.Projection);
+            // W7.2: the merge goes through the train of its repository (the request enters it, the turn is granted to the merge port above, the answer comes back through it)
+            services.AddSingleton(parts.Merge.Service);
+            services.AddSingleton(parts.Merge.History);
             w.Discovery.IncludeType(typeof(WorkItemHandlers));
             w.Discovery.IncludeType(typeof(WorkItemRouting));
             w.Discovery.IncludeType(typeof(WorkItemHistoryHandler));
-            w.Discovery.IncludeType(typeof(DocsMergeHandler));
+            w.Discovery.IncludeType(typeof(MergeTrainRouting));
+            w.Discovery.IncludeType(typeof(MergeTrainHandlers));
+            w.Discovery.IncludeType(typeof(MergeTrainPortHandler));
+            w.Discovery.IncludeType(typeof(MergeTrainHistoryHandler));
             w.Discovery.IncludeType(typeof(DocsProjectionHandler));
             WorkItemTopology.Route(w);
+            MergeTrainTopology.Route(w);
         };
     }
 }
