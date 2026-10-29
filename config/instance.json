@@ -70,7 +70,8 @@
       "gatewayEnvironment": "",
       "signoffWaitHours": 2
     },
-    "finalEnvironment": "prod"
+    "finalEnvironment": "prod",
+    "dependenciesDelivered": true
   },
   "plant": {
     "oneItemPerSession": true

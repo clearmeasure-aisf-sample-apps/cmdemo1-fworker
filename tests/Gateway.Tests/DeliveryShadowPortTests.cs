@@ -67,6 +67,36 @@ public sealed class DeliveryShadowPortTests
         Assert.Null(f("nothing"));
     }
 
+    [Fact]
+    public void TheDependenciesDeliveredRule_IsOnOnlyWhereTheEngineActs_AndTheFileTurnsItOn()
+    {
+        var on = Full.Replace("\"delivery\":{", "\"delivery\":{\"dependenciesDelivered\":true,");
+        var off = Full.Replace("\"delivery\":{", "\"delivery\":{\"dependenciesDelivered\":false,");
+        // the shadow run (tdd): whatever the file says, the train holds nothing for a dependency, so that it can be compared with v1's promotions
+        Assert.False(DeliveryShadowSettings.From(Config(on))!.DependenciesDelivered);
+        Assert.False(DeliveryShadowSettings.From(Config(on), engineActs: false)!.DependenciesDelivered);
+        // where the engine acts: on when the file says so, off when it says no or says nothing
+        Assert.True(DeliveryShadowSettings.From(Config(on), engineActs: true)!.DependenciesDelivered);
+        Assert.False(DeliveryShadowSettings.From(Config(off), engineActs: true)!.DependenciesDelivered);
+        Assert.False(DeliveryShadowSettings.From(Config(Full), engineActs: true)!.DependenciesDelivered);
+        Assert.False(DeliveryShadowSettings.From(Config(Full.Replace("\"delivery\":{", "\"delivery\":{\"dependenciesDelivered\":\"yes\",")), engineActs: true)!.DependenciesDelivered);
+        // and the policies of the home repository's deployable carry it
+        var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, DateTimeOffset.UtcNow, "acme", Home, null, [new RepositoryEntry(Home, [new DeployableEntry("ui", Home, null, null, null, null, false)])], []);
+        Assert.All(new CatalogDeliveryPolicies(() => snapshot, DeliveryShadowSettings.For(Config(on), () => snapshot, engineActs: true)).All(), p => Assert.True(p.DependenciesDelivered));
+        Assert.All(new CatalogDeliveryPolicies(() => snapshot, DeliveryShadowSettings.For(Config(on), () => snapshot)).All(), p => Assert.False(p.DependenciesDelivered));
+    }
+
+    [Fact]
+    public void TheShippedDefault_TurnsTheRuleOn_ForTheGatewayWhereTheEngineActs()
+    {
+        var root = AppContext.BaseDirectory;
+        for (var d = new DirectoryInfo(root); d is not null; d = d.Parent)
+            if (File.Exists(Path.Combine(d.FullName, "config", "instance.json"))) { root = d.FullName; break; }
+        var cfg = InstanceConfig.Load(Path.Combine(root, "config", "instance.json"), _ => null);
+        Assert.True(cfg.DependenciesDelivered);
+        // (the source defaults name no Octopus project, so there is no train to give the setting to; the settings of a deployed gateway do)
+    }
+
     // ---- the reads -----------------------------------------------------------------------------------------------------------------------------------------
 
     sealed class Handler : HttpMessageHandler

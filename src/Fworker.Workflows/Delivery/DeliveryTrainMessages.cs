@@ -39,6 +39,13 @@ public sealed record TrainHold(string Key, bool Held, string Reason) : TrainInpu
 public sealed record TrainWake(string Key, DateTimeOffset? Due = null) : TrainInput(Key);
 
 /// <summary>
+/// W7.7: an item the train's candidates may wait for was delivered to the train's environment (a <see cref="DeliveredTo"/> of another item, in this train or in another deployable's): the train looks
+/// again, if one of its candidates "Depends on" that item. It carries no fact the train keeps: the delivered-to table is the evidence, the message only triggers the re-check.
+/// </summary>
+[MessageIdentity("delivery.train.dependency-delivered")]
+public sealed record TrainDependencyDelivered(string Key, string Item, string Environment) : TrainInput(Key);
+
+/// <summary>
 /// What the train decided, once per change: <paramref name="Action"/> is one of idle, waiting, promote, following, signoff-waiting, signoff-proceed, signoff-abort, delivered, held,
 /// observing (the train does not act in this environment). One decision is per release: "idle" with a release says the release is no longer judged (a decision before it is retracted), "delivered"
 /// retracts the release and the <paramref name="Superseded"/> ones it carried. The shadow run (W5.2) compares it with v1's promotions and Sign-off answers.

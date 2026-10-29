@@ -16,13 +16,17 @@ using Wolverine.ErrorHandling;
 /// <summary>The settings of the policy of each deployable, from v1's configuration (delivery.autoPromote and octopus.*): the home repository's deployables are the project v1 promotes.</summary>
 static class DeliveryShadowSettings
 {
-    public static Func<string, DeliveryPolicySettings?> For(InstanceConfig cfg, Func<CatalogSnapshot> catalog)
+    public static Func<string, DeliveryPolicySettings?> For(InstanceConfig cfg, Func<CatalogSnapshot> catalog, bool engineActs = false)
     {
-        var settings = From(cfg);
+        var settings = From(cfg, engineActs);
         return name => catalog().FindDeployable(name) is { } d && cfg.Home is { } home && d.Repository == home ? settings : null;
     }
 
-    public static DeliveryPolicySettings? From(InstanceConfig cfg)
+    /// <summary>
+    /// W7.7: <paramref name="engineActs"/> (Engine.V2Acts) turns the rule dependencies-delivered on, when delivery.dependenciesDelivered is. In the shadow run it stays off whatever the file says: v1 has no
+    /// such rule, so a train that held an item would differ from v1's promotions for a reason that is no defect.
+    /// </summary>
+    public static DeliveryPolicySettings? From(InstanceConfig cfg, bool engineActs = false)
     {
         try
         {
@@ -41,7 +45,7 @@ static class DeliveryShadowSettings
             }
             double Num(JsonNode? n, string name, double fallback) => n?[name] is JsonValue v && v.TryGetValue<double>(out var d) && d > 0 ? d : fallback;
             var window = new HealthWindow(Num(o?["health"], "spacingMinutes", 5), Num(o?["health"], "settleMinutes", 10));
-            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2));
+            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered);
         }
         catch { return null; }
     }
@@ -152,7 +156,7 @@ static class DeliveryShadowWiring
         var gates = new ItemGateConfig(Str("autoMergeLabel", "Auto Merge"), Str("videoLabel", "video"), holds);
         var facts = new Fworker.Integrations.GitHub.HttpMergeFactsReader(github, new Fworker.Integrations.GitHub.ProviderCredentialSource(tokens), Str("name", "factory-worker"), gates.VideoLabel,
             (resource, remaining, reset, limit) => Observe(resource, remaining, reset, limit));
-        var policies = new CatalogDeliveryPolicies(() => catalog.Current, DeliveryShadowSettings.For(c.Instance, () => catalog.Current));
+        var policies = new CatalogDeliveryPolicies(() => catalog.Current, DeliveryShadowSettings.For(c.Instance, () => catalog.Current, c.Engine.V2Acts));
         var reads = new HttpTrainReads(github, app, Str("name", "factory-worker"), facts, gates, policies, Observe, null, () => budget.Low().Low);
         var shadow = new DeliveryShadow(policies, new SqlShadowComparisonStore(() => ItemMergedWiring.Open(connectionString)));
         return new DeliveryShadowParts(shadow, policies, reads, new DeliveredToTable(() => ItemMergedWiring.Open(connectionString)), connectionString);

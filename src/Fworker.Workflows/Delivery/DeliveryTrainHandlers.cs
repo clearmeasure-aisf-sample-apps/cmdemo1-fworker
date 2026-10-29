@@ -20,6 +20,7 @@ public static class DeliveryTrainHandlers
     public static Task<OutgoingMessages> Handle(TrainSignOffAsked m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainHold m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainReplay m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(TrainDependencyDelivered m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainWake m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
 
     public static async Task<OutgoingMessages> Run(TrainInput input, DeliveryTrainService svc, CancellationToken ct)
@@ -53,6 +54,14 @@ public sealed class DeliveryTrainRouter(IDeliveryPolicies policies, Func<DateTim
     public IReadOnlyList<TrainInput> Route(ItemMerged m)
         => policies.ForRepository(m.Item.Repository).Select(p => (TrainInput)new TrainCandidateAdded(TrainKey.Of(p.Deployable, p.Environment), m)).ToList();
 
+    /// <summary>
+    /// W7.7: an item reached an environment: the trains of that environment whose rule dependencies-delivered is on look again (each one only if a candidate of its own waits for the item). Nothing
+    /// where the rule is off, which is every train in the shadow run: a delivery there wakes no train.
+    /// </summary>
+    public IReadOnlyList<TrainInput> Route(DeliveredTo e)
+        => policies.All().Where(p => p.DependenciesDelivered && p.Acts && string.Equals(p.Environment, e.Environment, StringComparison.OrdinalIgnoreCase))
+            .Select(p => (TrainInput)new TrainDependencyDelivered(TrainKey.Of(p.Deployable, p.Environment), e.Item.ToString(), p.Environment)).ToList();
+
     public IReadOnlyList<TrainInput> Route(OctopusReleaseCreated e)
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReleaseSeen(TrainKey.Of(p.Deployable, p.Environment), e.ReleaseId, e.Version, e.Commit, TimeOf(e.At))).ToList();
 
@@ -76,6 +85,17 @@ public sealed class DeliveryTrainRouter(IDeliveryPolicies policies, Func<DateTim
 public static class DeliveryTrainRouting
 {
     public static OutgoingMessages Handle(ItemMerged m, DeliveryTrainRouter r) => All(r.Route(m));
+    /// <summary>
+    /// W7.7: the delivery of an item wakes the trains that may wait for it. The delivered-to row is recorded here before the wake goes out (the gateway's own handler of the message records it too, and the
+    /// two run in either order): a train that looked again before the row existed would find the dependency still missing and wait for its safety timer. Where no train is woken nothing is read or written.
+    /// </summary>
+    public static async Task<OutgoingMessages> Handle(DeliveredTo m, DeliveryTrainRouter r, DeliveredToTable table, CancellationToken ct)
+    {
+        var inputs = r.Route(m);
+        if (inputs.Count > 0) await table.Record(m, DateTimeOffset.UtcNow, ct);
+        return All(inputs);
+    }
+
     public static OutgoingMessages Handle(OctopusReleaseCreated m, DeliveryTrainRouter r) => All(r.Route(m));
     public static OutgoingMessages Handle(ReleaseCommitResolved m, DeliveryTrainRouter r) => All(r.Route(m));
     public static OutgoingMessages Handle(OctopusDeploymentChanged m, DeliveryTrainRouter r) => All(r.Route(m));
