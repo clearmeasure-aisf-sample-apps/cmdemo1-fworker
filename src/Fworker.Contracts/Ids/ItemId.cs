@@ -1,8 +1,10 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json.Serialization;
 
 namespace Fworker.Contracts.Ids;
 
 /// <summary>A repository, <c>owner/repo</c>, lowercased (GitHub treats owner and repository names case-insensitively, hook H1 of docs/design/system-gateway.md 3).</summary>
+[JsonConverter(typeof(RepoIdJsonConverter))]
 public readonly record struct RepoId
 {
     public string Owner { get; }
@@ -37,6 +39,7 @@ public readonly record struct RepoId
 /// <c>owner/repo!N</c> internally. The owner and the repository are lowercased on construction, so equal ids compare equal whatever the case that came in.
 /// A bare <c>#N</c> means the home repository and is parsed only through the overloads that take the home. The default value is not a valid id.
 /// </summary>
+[JsonConverter(typeof(ItemIdJsonConverter))]
 public readonly record struct ItemId
 {
     public RepoId Repository { get; }

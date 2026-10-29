@@ -107,6 +107,36 @@ public class ItemIdTests
         Assert.False(RepoId.TryParse(null, out _));
     }
 
+    // W6.1: the ids survive a message or a state that is saved as JSON (a durable inbox after a restart); the default serializer gave back the default id
+    [Fact]
+    public void IdsRoundTripThroughJsonAsTheTextPeopleRead()
+    {
+        var id = ItemId.Parse("Org/Repo#42");
+        Assert.Equal("\"org/repo#42\"", System.Text.Json.JsonSerializer.Serialize(id));
+        Assert.Equal(id, System.Text.Json.JsonSerializer.Deserialize<ItemId>("\"ORG/repo#42\""));
+        Assert.Equal("\"org/repo\"", System.Text.Json.JsonSerializer.Serialize(id.Repository));
+        Assert.Equal(id.Repository, System.Text.Json.JsonSerializer.Deserialize<RepoId>("\"Org/Repo\""));
+        var message = new ItemOpened(id, "t");
+        var back = System.Text.Json.JsonSerializer.Deserialize<ItemOpened>(System.Text.Json.JsonSerializer.Serialize(message))!;
+        Assert.Equal(message.Item, back.Item);
+    }
+
+    [Fact]
+    public void TheObjectFormTheDefaultSerializerWroteIsStillRead()
+    {
+        Assert.Equal(ItemId.Parse("org/repo#7"), System.Text.Json.JsonSerializer.Deserialize<ItemId>("""{"Repository":{"Owner":"org","Repo":"repo"},"Number":7}"""));
+        Assert.Equal(ItemId.Parse("org/repo#7"), System.Text.Json.JsonSerializer.Deserialize<ItemId>("""{"repository":"org/repo","number":7}"""));
+        Assert.Equal(RepoId.Parse("org/repo"), System.Text.Json.JsonSerializer.Deserialize<RepoId>("""{"Owner":"org","Repo":"repo"}"""));
+    }
+
+    [Theory]
+    [InlineData("\"org/repo\"")]
+    [InlineData("\"#5\"")]
+    [InlineData("5")]
+    [InlineData("""{"Number":7}""")]
+    [InlineData("""{"Repository":{"Owner":"org","Repo":"repo"},"Number":0}""")]
+    public void AnItemThatIsNotOneIsAJsonError(string json) => Assert.Throws<System.Text.Json.JsonException>(() => System.Text.Json.JsonSerializer.Deserialize<ItemId>(json));
+
     [MessageIdentity("test.item-opened")]
     sealed record ItemOpened(ItemId Item, string Title) : ItemEvent(Item);
 
