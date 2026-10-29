@@ -20,10 +20,13 @@ public sealed class GatewayHost : WebApplicationFactory<Program>
     /// <summary>The gateway's service collection, as the host built it.</summary>
     public IServiceCollection? Captured { get; private set; }
 
+    /// <summary>Registrations a test adds after the gateway's own (a fake of a service that exists only where the engine acts).</summary>
+    public Action<IServiceCollection>? Extra { get; set; }
+
     protected override IHost CreateHost(IHostBuilder builder)
     {
         builder.UseDefaultServiceProvider(o => { o.ValidateOnBuild = true; o.ValidateScopes = true; });
-        builder.ConfigureServices(s => Captured = s);
+        builder.ConfigureServices(s => { Captured = s; Extra?.Invoke(s); });
         return base.CreateHost(builder);
     }
 
@@ -188,13 +191,16 @@ public abstract class GatewayFixture : IAsyncLifetime
 
     protected virtual void Configure(GatewayEnvironment env) { }
 
+    /// <summary>Registrations added to the gateway's service collection after its own.</summary>
+    protected virtual void ConfigureServices(IServiceCollection services) { }
+
     public async Task InitializeAsync()
     {
         if (!StubPwsh.Supported) return;
         Configure(Env);
         Env.Apply();
         var sw = Stopwatch.StartNew();
-        Host = new GatewayHost();
+        Host = new GatewayHost { Extra = ConfigureServices };
         _ = Host.Server;   // runs the gateway's top-level statements up to app.Run()
         while (sw.Elapsed < TimeSpan.FromSeconds(20))   // cold JIT of the whole gateway on a CI runner
         {

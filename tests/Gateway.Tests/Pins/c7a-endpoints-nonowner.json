@@ -4,7 +4,7 @@
   "GET /ready": "200 | text/plain; charset=utf-8 | loc= | disp= | ok",
   "GET /": "302 |  | loc=/dashboard | disp= | ",
   "GET /_build": "200 | application/json; charset=utf-8 | loc= | disp= | shape name,version,commit,pluginHash,promptsHash,started,runtime,ownerMode=False,environment",
-  "GET /dashboard": "200 | text/html; charset=utf-8 | loc= | disp= | len=68671 sha256=4bf00ce50b14f5a7dff436866397e608a97256f734364652cdb22ff2ca6ec79f",
+  "GET /dashboard": "200 | text/html; charset=utf-8 | loc= | disp= | len=71126 sha256=ac62c78aee6a5821c75b55d9748e2a1575570ca3548d647acfc4feff99223e55",
   "GET /api/v1/status": "200 | application/json | loc= | disp= | shape started,sweepSeconds,ownerMode=False,subscribers,lastEventId,pendingOffers,lastSweep,plant,runner,github,sweep,transcripts",
   "GET /api/v1/dashboard": "200 | application/json | loc= | disp= | shape environment,ownerMode=False,url,started,lastSweep,plant",
   "GET /api/v1/plugin": "200 | application/gzip | loc= | disp=attachment; filename=factory-worker-plugin.tar.gz; filename*=UTF-8''factory-worker-plugin.tar.gz | last=.plugin-version,.plugin-managed ; factory.ps1=True ; ordinal=True ; noBinObj=True ; formats=Pax ; version=hash,gatewayVersion ; hash64=True ; managed=True",

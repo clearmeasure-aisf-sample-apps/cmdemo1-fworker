@@ -16,8 +16,8 @@ namespace Gateway.Tests;
 /// </summary>
 public sealed class DashboardPageTests(TwoPortGateway gw) : IClassFixture<TwoPortGateway>
 {
-    const int PageLength = 68671;
-    const string PageSha256 = "4bf00ce50b14f5a7dff436866397e608a97256f734364652cdb22ff2ca6ec79f";
+    const int PageLength = 71126;
+    const string PageSha256 = "ac62c78aee6a5821c75b55d9748e2a1575570ca3548d647acfc4feff99223e55";
     const string ConnectPromptSha256 = "0e5e3faabce77ff09204b66265d354b4d85bfb0823f9c0e8d375be21f9f47876";
     const string WorkerPromptSha256 = "90113fc07e21b63f79e3d669318bb306c15c09f664989aa6789c54be87cc2b70";
     const string WorkerMessagingPromptSha256 = "e9a7b6e5d866a5c928b648ab485a7209bd63b22484006b4176ce0cd494d6dcc1";

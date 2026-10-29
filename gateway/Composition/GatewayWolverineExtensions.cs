@@ -1,6 +1,7 @@
 using Fworker.Contracts.Seams;
 using Fworker.Contracts.Catalog;
 using Fworker.Integrations.Commands;
+using Fworker.Workflows.WorkItem;
 // The Wolverine host's registration (task W2.2, docs/design/wolverine-host.md). Nothing is registered without a connection string (FACTORY_DB_CONNECTION):
 // no service, no hosted service, no database call, and the gateway is v1 exactly as before. With one, the services below join the graph and
 // the hosted service is added by AddGatewayBackground (the only place hosted services are registered), after LeadershipService (the node leaves with the lease, so it starts and stops beside it).
@@ -94,6 +95,10 @@ static class GatewayWolverineExtensions
         }
         // W6.1: the items the saga owns, for the sweep (resolving it builds the host first, which makes it; null without a home repository)
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return v2Ownership!; });
+        // W6.7: the views of the items the saga owns (status, dashboard, digest), read from the saga's table and the item history; no host is needed for a read, only the database. Nowhere else is it registered, so
+        // every other environment answers exactly as before
+        if (c.Engine.V2Acts && c.Database.ConnectionString is { } viewsConnection)
+            services.AddSingleton(sp => new V2ItemViews(new SqlWorkItemViewSource(() => WorkItemWiring.Open(WolverineHostService.WithConnectTimeout(viewsConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds)))));
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)
             services.AddSingleton(sp => { var h = sp.GetRequiredService<WolverineHostService>(); return new RecurringJobScheduler(recurring!, jobs, r => h.PublishAsync(r), () => c.Leader.MayAct); });
