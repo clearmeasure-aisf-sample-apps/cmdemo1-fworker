@@ -85,6 +85,17 @@ static class DocsVerbs
 sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore store, Fworker.Contracts.Ids.RepoId home, DocsPlanSettings settings, Func<WorkItemInput, Task<bool>> publish,
     PullRequestHeads? heads = null, Func<TimeSpan, Task>? delay = null, Func<DateTimeOffset>? clock = null) : IVerbRouter
 {
+    /// <summary>The flag of a completion that lets Functional Testing start beside pending checks. The gateway's to give; the script reads it by any spelling of its case (a PowerShell hashtable's keys are case-blind).</summary>
+    public const string FlagName = "ftWithPendingChecks";
+
+    /// <summary>Takes the flag out of a call body whatever the case of its name; true if there was one.</summary>
+    public static bool TakeOutFlag(JsonObject body)
+    {
+        var found = false;
+        foreach (var name in body.Select(p => p.Key).Where(k => string.Equals(k, FlagName, StringComparison.OrdinalIgnoreCase)).ToList()) { body.Remove(name); found = true; }
+        return found;
+    }
+
     static readonly TimeSpan[] Pauses = [TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(1)];
     /// <summary>A sign of life reaches the saga at most this often for an item: the lease is minutes long, the calls of a working session are seconds apart.</summary>
     public static readonly TimeSpan RenewEvery = TimeSpan.FromSeconds(60);
@@ -116,13 +127,13 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
         {
             if (JsonNode.Parse(stdin) is not JsonObject body) return stdin;
             // the flag is the gateway's to give: one a caller sent is taken out, whatever the item
-            var sent = body.Remove("ftWithPendingChecks");
+            var sent = TakeOutFlag(body);
             var give = false;
             if (ownership.Count > 0 && int.TryParse(body["item"]?.ToString(), out var number) && number > 0 && ownership.Owns(number)
                 && (await store.Load(new ItemId(home, number).ToString(), CancellationToken.None))?.State is { } state)
                 give = state.IsOpen && !state.Parked && state.Plan == WorkPlans.Feature && state.Step == StepKind.Develop && settings.CarriesFeature;
             if (!give && !sent) return stdin;
-            if (give) body["ftWithPendingChecks"] = true;
+            if (give) body[FlagName] = true;
             return body.ToJsonString();
         }
         catch (Exception e) { Console.Error.WriteLine($"v2 feed {verb}: {e.GetType().Name}"); return stdin; }

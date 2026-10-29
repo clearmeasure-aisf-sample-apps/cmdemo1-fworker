@@ -275,6 +275,12 @@ function Do-DevComplete([int]$n, [string]$Holder = 'w1') {
     $r = F $Holder @('record-review', '--item', $n, '--column', 'Development', '--role', 'reviewer', '--text-file', (TmpFile "rv-dev$n.md" "Diff matches the plan.`nREVIEW: COMPLETE"))
     return F $Holder @('complete', '--item', $n, '--column', 'Development', '--review-ref', $r.review_ref, '--comment', 'PR open, CI green. REVIEW: COMPLETE')
 }
+# The `complete` rule script run directly, as the gateway's own v2 feed reaches it (the verb route takes ftWithPendingChecks out of every call, so only a direct call can carry it):
+# the body is what the client would send, plus the holder.
+function Script-Complete([hashtable]$Body) {
+    $out = ($Body | ConvertTo-Json -Depth 8 -Compress) | & pwsh -NoProfile -File (Join-Path $script:Root 'plugin/scripts/factory.ps1') --server complete 2>$null
+    $code = $LASTEXITCODE; $j = try { ($out -join "`n") | ConvertFrom-Json -AsHashtable } catch { @{} }; if (-not $j.ContainsKey('exit')) { $j.exit = $code }; return $j
+}
 function Do-Verdict([int]$n, [int]$pr, [string]$Holder = 'w1', [bool]$Passed = $true) {
     $r = F $Holder @('claim-item', '--item', $n, '--column', 'Functional Testing'); CheckExit "FT $n claim" $r 0
     $rv = F $Holder @('record-review', '--item', $n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "rv-ft$n.md" "Criteria exercised.`nREVIEW: COMPLETE"))

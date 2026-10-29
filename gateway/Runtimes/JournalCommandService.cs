@@ -51,13 +51,17 @@ sealed class JournalCommandSink
     /// </summary>
     public Func<int, string, Task>? OnSessionGone { get; set; }
 
+    /// <summary>
+    /// The plant's word for a journal line (Plant.JournalCoded): the code is taken off the line's fields before the journal delegate is called, so it never reaches <see cref="Send"/>.
+    /// </summary>
+    public async Task Coded(int item, string ev, string code, string key)
+    {
+        if (ev == "reassigned" && code == "session-gone" && OnSessionGone is { } gone)
+            await gone(item, key);
+    }
+
     public async Task Send(int item, string ev, JsonObject fields, string key)
     {
-        if (ev == "reassigned" && OnSessionGone is { } gone && fields["opCode"]?.ToString() == "session-gone")
-        {
-            try { await gone(item, key); }
-            catch (Exception e) { Console.Error.WriteLine($"session gone of #{item}: {e.GetType().Name}"); }
-        }
         var now = utcNow();
         // a waiting line has no key of its own (the verb takes the ticks of the write) and is written once per timing.journalWaitingMinutes per item: the ledger decides
         // from the state, this only spares the outbox the repeats of every sweep within the window of the last one it sent

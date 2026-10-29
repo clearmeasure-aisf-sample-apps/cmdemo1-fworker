@@ -719,6 +719,29 @@ public sealed class FeatureFeedTests
         Assert.Equal(sent, other.Calls[0].Stdin);
     }
 
+    // v2: a feature item in Development is given the flag by the feed, once, whatever the spelling of the one the caller sent (the script reads the name without regard to case)
+    [Fact]
+    public async Task TheFeedGivesTheFlagOnce_ToAFeatureItemInDevelopment_WhateverTheCaseOfOneACallerSent()
+    {
+        var rig = new Rig("feature");
+        await rig.Svc.Handle(new ReviewRecorded(Item, 1, "1.1", "r1", true)); await rig.Svc.Handle(new StepCompleted(Item, 1, "1.1", "d1"));
+        var inner = new Inner(0, """{"ok":true,"completed":true}""");
+        var body = JsonNode.Parse(Body(new { column = "Development" }))!.AsObject(); body["FTWITHPENDINGCHECKS"] = false;
+        await rig.Feed(inner).RunAsync("complete", body.ToJsonString(), TimeSpan.FromSeconds(1));
+        var call = JsonNode.Parse(Assert.Single(inner.Calls).Stdin)!.AsObject();
+        Assert.Equal(["ftWithPendingChecks"], call.Select(p => p.Key).Where(k => k.Equals("ftWithPendingChecks", StringComparison.OrdinalIgnoreCase)).ToArray());
+        Assert.True(call["ftWithPendingChecks"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void TakingTheFlagOut_RemovesEverySpellingOfIt_AndNothingElse()
+    {
+        var body = new JsonObject { ["item"] = 7, ["ftWithPendingChecks"] = true, ["FtWithPendingChecks"] = "true", ["ftwithpendingchecks"] = 1, ["comment"] = "x" };
+        Assert.True(V2VerbFeed.TakeOutFlag(body));
+        Assert.Equal(["item", "comment"], body.Select(p => p.Key).ToArray());
+        Assert.False(V2VerbFeed.TakeOutFlag(body));
+    }
+
     [Fact]
     public async Task AFaultWhileAskingForTheFlag_LeavesTheCallAsItCame()
     {
@@ -782,15 +805,100 @@ public sealed class FeatureOfferAndSessionTests
         var sink = new JournalCommandSink(_ => Task.FromResult(true), 30);
         var told = new List<(int, string)>();
         sink.OnSessionGone = (item, key) => { told.Add((item, key)); return Task.CompletedTask; };
-        await sink.Send(7, "reassigned", new JsonObject { ["reason"] = "the session is gone", ["opCode"] = "session-gone" }, "gone|a-1");
-        await sink.Send(7, "reassigned", new JsonObject { ["reason"] = "did not confirm", ["opCode"] = "offer-lapsed" }, "ack|a-1|w1");
-        await sink.Send(7, "matched", new JsonObject { ["trigger"] = "x" }, "m|a-1");
+        // (the plant takes the code off the line and tells the sink beside it: Plant.JournalCoded, tested through the plant below)
+        await sink.Coded(7, "reassigned", "session-gone", "gone|a-1");
+        await sink.Coded(7, "reassigned", "offer-lapsed", "ack|a-1|w1");
+        await sink.Coded(7, "matched", "session-gone", "m|a-1");
+        await sink.Send(7, "reassigned", new JsonObject { ["reason"] = "the session is gone", ["opCode"] = "session-gone" }, "gone|a-3");   // (a line carrying the code tells nothing: it never reaches the sink with one)
         Assert.Equal([(7, "gone|a-1")], told);
-        // a fault of the callback does not stop the line from being written
+        // a fault of the callback does not stop the line from being written: the plant logs it and writes the line (see the next tests)
         var lines = new List<WriteJournalLine>();
         var tough = new JournalCommandSink(c => { lines.Add(c); return Task.FromResult(true); }, 30) { OnSessionGone = (_, _) => throw new InvalidOperationException("host down") };
-        await tough.Send(7, "reassigned", new JsonObject { ["opCode"] = "session-gone" }, "gone|a-2");
-        Assert.Single(lines);
+        var plant = new Plant("secret", tough.Send, 30) { JournalCoded = tough.Coded };
+        plant.Register("w1", "claude", Array.Empty<string>(), 1, new[] { "owner" }, 0);
+        plant.Plan(new JsonArray(new JsonObject { ["item"] = 7, ["column"] = "Development", ["kind"] = "own-item" }), null, null);
+        await Until(() => { lock (lines) return lines.Any(l => l.Event == "offered"); });
+        string assignment; lock (lines) assignment = lines.Single(l => l.Event == "offered").Key.Split('|')[1];
+        plant.OnVerb("accept", new JsonObject { ["item"] = 7 }, new Principal("item", "w1", 7, "owner", assignment), new JsonObject());
+        plant.Plan(new JsonArray(new JsonObject { ["item"] = 7, ["column"] = "Development", ["kind"] = "own-item" }), null, null, sweepStarted: DateTime.UtcNow.AddSeconds(5));
+        await Until(() => { lock (lines) return lines.Any(l => l.Event == "reassigned"); });
+        lock (lines) Assert.Single(lines, l => l.Event == "reassigned");
+    }
+
+    static async Task Until(Func<bool> done)
+    {
+        for (var i = 0; i < 200 && !done(); i++) await Task.Delay(25);
+    }
+
+    // The sink's hook is reached through the plant, as production reaches it: Plant.Journal takes the code off the line's fields before it queues the write, so the delegate (sink.Send) never sees
+    // "opCode"; the plant tells the sink in the chain, before the line, and the line is the one v1 writes (no code in its fields).
+    [Fact]
+    public async Task ASessionThatIsGone_ThroughThePlant_EndsItsSlot_AndTheLineHasNoCode()
+    {
+        var sent = new List<WriteJournalLine>(); var gone = new List<(int Item, string Key)>(); var order = new List<string>();
+        var sink = new JournalCommandSink(c => { lock (order) { sent.Add(c); order.Add("line:" + c.Event); } return Task.FromResult(true); }, 30);
+        sink.OnSessionGone = (item, key) => { lock (order) { gone.Add((item, key)); order.Add("gone"); } return Task.CompletedTask; };
+        var plant = new Plant("secret", (item, ev, fields, key) => sink.Send(item, ev, fields, key), 30) { JournalCoded = sink.Coded };
+        plant.Register("w1", "claude", Array.Empty<string>(), 1, new[] { "owner" }, 0);
+        var offers = new JsonArray(new JsonObject { ["item"] = 7, ["column"] = "Development", ["kind"] = "own-item" });
+        plant.Plan(offers, null, null);
+        await Until(() => { lock (order) return sent.Any(s => s.Event == "offered"); });
+        var assignment = sent.Single(s => s.Event == "offered").Key.Split('|')[1];
+        plant.OnVerb("accept", new JsonObject { ["item"] = 7 }, new Principal("item", "w1", 7, "owner", assignment), new JsonObject());
+        Assert.Empty(gone);
+        // the sweep after the acceptance finds the item in need of an owner again: the session is gone
+        plant.Plan(new JsonArray(new JsonObject { ["item"] = 7, ["column"] = "Development", ["kind"] = "own-item" }), null, null, sweepStarted: DateTime.UtcNow.AddSeconds(5));
+        await Until(() => { lock (order) return gone.Count > 0 && sent.Any(s => s.Event == "reassigned"); });
+        Assert.Equal([(7, "gone|" + assignment)], gone);
+        var line = sent.Single(s => s.Event == "reassigned");
+        Assert.False(line.Fields.ContainsKey("opCode"));
+        Assert.Contains("is gone", line.Fields["reason"]!.ToString());
+        lock (order) Assert.True(order.IndexOf("gone") < order.IndexOf("line:reassigned"));
+    }
+
+    [Fact]
+    public async Task APlantWithoutTheHook_JournalsAGoneSessionAsBefore_AndAFaultOfTheHookDoesNotStopTheLine()
+    {
+        foreach (var hook in new Func<int, string, string, string, Task>?[] { null, (_, _, _, _) => throw new InvalidOperationException("host down") })
+        {
+            var lines = new List<(string Ev, JsonObject Fields, string Key)>();
+            var plant = new Plant("secret", (item, ev, fields, key) => { lock (lines) lines.Add((ev, fields, key)); return Task.CompletedTask; }, 30) { JournalCoded = hook };
+            plant.Register("w1", "claude", Array.Empty<string>(), 1, new[] { "owner" }, 0);
+            plant.Plan(new JsonArray(new JsonObject { ["item"] = 7, ["column"] = "Development", ["kind"] = "own-item" }), null, null);
+            await Until(() => { lock (lines) return lines.Any(l => l.Ev == "offered"); });
+            string assignment; lock (lines) assignment = lines.Single(l => l.Ev == "offered").Key.Split('|')[1];
+            plant.OnVerb("accept", new JsonObject { ["item"] = 7 }, new Principal("item", "w1", 7, "owner", assignment), new JsonObject());
+            plant.Plan(new JsonArray(new JsonObject { ["item"] = 7, ["column"] = "Development", ["kind"] = "own-item" }), null, null, sweepStarted: DateTime.UtcNow.AddSeconds(5));
+            await Until(() => { lock (lines) return lines.Any(l => l.Ev == "reassigned"); });
+            lock (lines)
+            {
+                var line = lines.Single(l => l.Ev == "reassigned");
+                Assert.Equal("gone|" + assignment, line.Key);
+                Assert.Equal(["reason"], line.Fields.Select(f => f.Key).ToArray());   // v1's text of the line: its reason only, never the code
+            }
+        }
+    }
+}
+
+/// <summary>
+/// v1 (the engine of tdd today, no V2VerbFeed): the flag that lets Functional Testing start beside pending checks is not a worker's to send. The verb route takes it out of every call before the
+/// rule script runs, so the item parks at awaiting-checks as it always did.
+/// </summary>
+public sealed class FtWithPendingChecksV1Tests(TwoPortGateway gw) : IClassFixture<TwoPortGateway>
+{
+    [Fact]
+    public async Task AWorkersFlag_NeverReachesTheRuleScript_InV1()
+    {
+        if (!StubPwsh.Supported) return;
+        var token = Auth.MintItemToken(gw.Env.TokenSecret, 7, "owner", "a7", "ft-owner", TimeSpan.FromHours(1));
+        var body = """{"item":7,"column":"Development","comment":"PR open. REVIEW: COMPLETE","ftWithPendingChecks":true,"FTWITHPENDINGCHECKS":"true","ftwithpendingchecks":1}""";
+        var r = await gw.Host.SendAsync("POST", "/api/v1/verbs/complete", GatewayEnvironment.ApiPort, token, body, 60);
+        Assert.Equal(200, r.Status);
+        var seen = StubPwsh.Inputs(gw.Env.StubLog, "complete").Select(i => JsonNode.Parse(i.Text)!.AsObject()).Where(o => o["item"]?.ToString() == "7").ToList();
+        var call = Assert.Single(seen);
+        Assert.DoesNotContain(call, p => p.Key.Equals("ftWithPendingChecks", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("Development", call["column"]!.ToString());   // (the rest of the call is kept)
+        Assert.Contains("REVIEW: COMPLETE", call["comment"]!.ToString());
     }
 }
 
