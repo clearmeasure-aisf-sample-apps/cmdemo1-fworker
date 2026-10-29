@@ -304,6 +304,28 @@ Parallel start: W6.1, W6.2, W6.3; then W6.7; W6.6 last.
 **Gate:** the docs-plan suites green in the v2 Tier 1 job, golden writes unchanged but for declared differences (CI). No window: v2
 does not act in tdd yet.
 
+**Revision of 2026-10-28: the hybrid composition for W6.0 and W6.1 (owner decision).** The revision of 2026-10-26 above removed the
+per-item routing (`intake.v2Plans`, the `engine:v2` label, v1 skipping v2 items). For the docs plan the owner chose the composition
+back, as the way to put the saga to work before the cutover without a second engine switch: **v1's plant still offers the sessions
+and runs every verb v2 does not own yet; v2's `WorkItemSaga` decides the docs-only items it has started; v1's sweep leaves those items
+alone.** It acts only where `Engine.V2Acts`, which tdd (shadow) is not, so nothing of it exists in tdd, uat or prod today. What W6.0
+and W6.1 built, and what is left:
+- **Tables:** `factory.WorkItems` (state as a JSON document with a revision, the `IRevisioned` of the design; the open count per
+  repository is read from its columns) and the existing `OpenInstances` index, written in the same transaction.
+- **The saga** (`Fworker.Workflows.WorkItem`): plans as data (`feature`, `docs`, `hotfix`, `redeliver`), the steps as classes,
+  generation and arm ids, `NotFound` ending quietly, the budgets (failures and launches per phase, idle follow-ups) in the state,
+  leases as scheduled messages, the settle window, decisions published as `WorkItemDecided` with a sequence number, a redelivery after
+  a crash between the save and the publish publishing again, per-item partitioning of the host's local queues. The docs-only test is
+  `IDocsOnlyPort`, whose adapter is D4's `DocsOnly` once D4 is on master (until then the recorded design decides).
+- **Intake:** `IntakeRule` (the rule of `Invoke-Intake` as a pure function, with a WIP limit per repository and the choice of engine
+  by `intake.v2Plans`), `intake.repositoryWipLimits`, `intake.v2Plans` (empty), `intake.v2Label` (`engine:v2`). v1's own intake in
+  `Verbs.Sweep.ps1` is unchanged.
+- **The hand-off in the gateway:** `V2Ownership` reads the saga's table before each sweep and `SweepV2Filter` drops what the sweep
+  says about those items (offers, triggers, holds, parks, owners) before the plant sees it. The rule script itself is not changed.
+- **Left for the integrator and W6.2 to W6.7:** passing the owned items into `sync-board` so the script also stops reading them
+  (`Verbs.Sweep.ps1`); the feeder that reads a Todo item's body and calls `WorkItemIntake`; writing the `engine:v2` label (a
+  projection, W6.3); the decision verbs through S1 (W6.6); D4's adapter; D5's recovery table in place of the budget limits.
+
 ### W7: R7, the feature plan (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |

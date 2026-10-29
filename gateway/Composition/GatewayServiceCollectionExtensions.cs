@@ -203,11 +203,13 @@ static class GatewayServiceCollectionExtensions
         {
             var runner = sp.GetRequiredService<Runner>();
             var shadow = sp.GetService<IShadowHistory>();   // W2.3: only in a shadow environment, with the Wolverine host
-            var journalSink = c.Engine.V2Acts ? sp.GetService<JournalCommandSink>() : null;   // W3.2: only where v2 acts, with the Wolverine host
+            // W3.2: only where v2 acts, with the Wolverine host. Resolved at the first journal line, not here: building the host resolves the leadership, which resolves the plant, so resolving the host while
+            // the plant is built is a circle (the gateway of an environment in v2Environments never finished starting)
+            var journalSink = new Lazy<JournalCommandSink?>(() => c.Engine.V2Acts ? sp.GetService<JournalCommandSink>() : null);
             return new Plant(gw.TokenSecret, async (item, ev, fields, key) =>
             {
                 // v2 acting: the line is a command in the outbox, written by the C# ledger (no `journal` verb); the chain of the plant only publishes
-                if (journalSink != null) { await journalSink.Send(item, ev, fields, key); return; }
+                if (journalSink.Value is { } sink) { await sink.Send(item, ev, fields, key); return; }
                 var posted = false;
                 try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); posted = true; }
                 catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
@@ -261,7 +263,8 @@ static class GatewayServiceCollectionExtensions
         var sweepSeconds = gw.SweepSeconds;
         var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : c.Timing.SweepMinSeconds);
         var githubBudget = c.GitHubBudget; var leaderOn = c.LeaderOn; var sweepGap = c.SweepGap;
-        services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap });
+        var v2Sweep = c.Engine.V2Acts && c.Instance.Home != null;   // W6.1: v1's sweep leaves the items that have a saga alone
+        services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : null });
         // The automatic promotion: a loop of its own after the sweep, its own call (verb auto-promote), timeout and leader gate; it never runs inside the sweep
         var promoteOn = c.Instance.AutoPromoteHere; var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
         services.AddHostedService(sp => new AutoPromoter(sp.GetRequiredService<Runner>(), promoteInterval, promoteOn) { MayAct = () => leader.MayAct, OnActions = actions => sp.GetService<DeliveryShadowHolder>()?.Shadow?.ObserveV1(actions) });
