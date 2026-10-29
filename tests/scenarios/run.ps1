@@ -7,11 +7,15 @@
 #   -ListScenarios  prints suite, scenario and tier, tab separated; with -Suite only what that suite would run (after -Tier and -Only), with -Groups n -Group g only that group's share
 #   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json (owner: contiguous runs in suite order, cut only at its barriers, as its scenarios build on each other); the suites 'qc', 'messaging' and 'manager' default to 4 groups and 'owner' to 2, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
 #   -ListSuites  prints the suite names, one per line, in slot order (slot = line number, from 0)
+#   -Engine v2   the gateway under test runs the v2 engine (the tests.yml job "Tier 1 (v2)", for the suites and scenarios of v2-claims.txt): FACTORY_ENVIRONMENT is the CI-only name
+#                'v2ci' (it replaces what a suite sets), the configuration's engine.v2Environments names it, and FACTORY_DB_CONNECTION is the SQL Server of FACTORY_TEST_SQL with a
+#                database of its own for this process (the gateway migrates it into existence). FACTORY_TEST_SQL is required: without it the run exits 2. The default, v1, changes nothing.
 #   Start guards (guard.ps1): refuses with exit 4 when another run.ps1 or run-all.ps1 is active on this machine, or when the temp filesystem has less than
 #   -MinFreeDiskMb (default 2048) free; with less than -MinAvailableMb (default 1500) of memory a suite runs in half its groups. -Force starts anyway.
-param([string] $Only = '', [switch] $NoBuild, [string] $Suite = '', [switch] $ListSuites, [switch] $ListScenarios, [string] $ResultFile = '', [ValidateSet('full', 'fast')][string] $Tier = 'full', [int] $Groups = 0, [int] $Group = -1, [double] $GroupTimeoutMinutes = 30, [switch] $Force, [int] $MinFreeDiskMb = 2048, [int] $MinAvailableMb = 1500)
+param([string] $Only = '', [switch] $NoBuild, [string] $Suite = '', [switch] $ListSuites, [switch] $ListScenarios, [string] $ResultFile = '', [ValidateSet('full', 'fast')][string] $Tier = 'full', [int] $Groups = 0, [int] $Group = -1, [double] $GroupTimeoutMinutes = 30, [switch] $Force, [int] $MinFreeDiskMb = 2048, [int] $MinAvailableMb = 1500, [ValidateSet('v1', 'v2')][string] $Engine = 'v1')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if ($Engine -eq 'v2' -and -not $ListSuites -and -not $ListScenarios -and -not "$env:FACTORY_TEST_SQL".Trim()) { Write-Host '-Engine v2 needs a SQL Server: FACTORY_TEST_SQL (a connection string without a database) is not set'; exit 2 }
 . (Join-Path $PSScriptRoot 'guard.ps1')
 $lowMemory = $false
 if (-not $ListSuites -and -not $ListScenarios) { $lowMemory = Assert-TestRunMayStart 'run.ps1' ([bool]$Force) $MinFreeDiskMb $MinAvailableMb; $env:FACTORY_TEST_RUN_HELD = "$PID" }
@@ -236,7 +240,7 @@ if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
         try {
             Remove-Item Env:TEST_FAKE_PORT, Env:TEST_API_PORT -ErrorAction SilentlyContinue
             foreach ($g in 0..($Groups - 1)) {
-                $a2 = @('-NoProfile', '-File', $PSCommandPath, '-NoBuild', '-Suite', $Suite, '-Tier', $Tier, '-Groups', $Groups, '-Group', $g, '-ResultFile', (Join-Path $gDir "g$g.json")); if ($Only) { $a2 += @('-Only', $Only) }
+                $a2 = @('-NoProfile', '-File', $PSCommandPath, '-NoBuild', '-Suite', $Suite, '-Tier', $Tier, '-Groups', $Groups, '-Group', $g, '-ResultFile', (Join-Path $gDir "g$g.json")); if ($Only) { $a2 += @('-Only', $Only) }; if ($Engine -eq 'v2') { $a2 += @('-Engine', 'v2') }
                 $env:TEST_PORT_BASE = "$($base0 + 100 * $g)"
                 $kids += ,@{ g = $g; log = (Join-Path $gDir "g$g.log"); err = (Join-Path $gDir "g$g.err"); json = (Join-Path $gDir "g$g.json"); timedOut = $false; proc = (Start-Process pwsh -ArgumentList $a2 -PassThru -RedirectStandardOutput (Join-Path $gDir "g$g.log") -RedirectStandardError (Join-Path $gDir "g$g.err")) }
             }
@@ -288,6 +292,17 @@ foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
     $probeSock = $null; try { $probeSock = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port); $probeSock.Start() } catch { Write-Host "port $port is already in use: another run, or a process outside the tests"; exit 3 } finally { if ($probeSock) { $probeSock.Stop() } }
 }
 
+# -Engine v2: the environment name and the database of this process. The name is in no list of config/instance.json (Run-Suite adds it to engine.v2Environments of the test
+# configuration only), so no deployed gateway can run v2 because of it. The database is new for every process (a suite, or one group of a suite): the gateway migrates it into
+# existence, a run never meets the tables of another, and the CI job's SQL Server container goes with the job. The connection string carries the password: it is never printed.
+$script:V2EnvName = 'v2ci'
+$script:V2Connection = ''
+if ($Engine -eq 'v2' -and $env:FACTORY_TEST_SQL) {
+    $v2Db = 'fworker_v2ci_' + ($label.ToLowerInvariant() -replace '[^a-z0-9]', '_') + '_' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    $script:V2Connection = $env:FACTORY_TEST_SQL.Trim().TrimEnd(';') + ';Initial Catalog=' + $v2Db   # (a keyword given twice takes its last value)
+    Write-Host "engine v2: environment $($script:V2EnvName), database $v2Db on the server of FACTORY_TEST_SQL"
+}
+
 function Get-SuiteEnv([string]$Kind) {
     switch ($Kind) {
         # 8 s: a late accept is refused now (stale-assignment), and a loaded runner takes several seconds per client call
@@ -317,6 +332,17 @@ function Get-SuiteEnv([string]$Kind) {
     return @{}
 }
 
+# -Engine v2: what /api/v1/status says of the engine and of the Wolverine host (its state is running once the migration has created the database and the node has started)
+function Get-V2State {
+    try {
+        $h = (Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 3 -UseBasicParsing).Content | ConvertFrom-Json -AsHashtable
+        $mode = ''; if ($h.ContainsKey('engine') -and $h['engine'] -is [System.Collections.IDictionary] -and $h['engine'].Contains('mode')) { $mode = "$($h['engine']['mode'])" }
+        $state = ''; $text = '(no wolverine block)'
+        if ($h.ContainsKey('wolverine') -and $h['wolverine'] -is [System.Collections.IDictionary]) { $text = $h['wolverine'] | ConvertTo-Json -Compress -Depth 4; if ($h['wolverine'].Contains('state')) { $state = "$($h['wolverine']['state'])" } }
+        return @{ mode = $mode; state = $state; wolverine = $text }
+    } catch { return @{ mode = ''; state = ''; wolverine = "(the status call failed: $($_.Exception.Message))" } }
+}
+
 $script:GwVerbs = 0
 function Count-GatewayVerbs { foreach ($f in Get-ChildItem -Path $script:Work -Filter 'gateway*.out' -ErrorAction SilentlyContinue) { $script:GwVerbs += @(Select-String -Path $f.FullName -Pattern '"verb":"').Count } }
 $script:Skipped = New-Object System.Collections.ArrayList
@@ -331,7 +357,16 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
         return
     }
     $cfg = @{ mergePolicy = $Policy; humanApprovers = @('factory-worker-testperson[bot]') }; foreach ($k in $Extra.Keys) { $cfg[$k] = $Extra[$k] }
+    if ($Engine -eq 'v2') { $cfg['engine'] = @{ v2Environments = @($script:V2EnvName); shadowEnvironments = @() } }   # (no suite sets an engine block of its own)
     Start-TestEnv $cfg
+    if ($Engine -eq 'v2') {
+        # /ready does not wait for the database (the host starts in the background: the migration, which creates the database, then the node), and a journal line before the host is
+        # up is refused ("the Wolverine host is not up"); so no scenario starts before the status says the host runs, and that the engine is v2 (this fails, once, when it is not)
+        $script:Current = "$($script:SuiteName) engine v2"
+        $script:V2Seen = @{ mode = ''; state = ''; wolverine = '(not asked)' }
+        [void](Wait-Until -Seconds 120 -Message 'the Wolverine host' { $script:V2Seen = Get-V2State; $script:V2Seen.state -eq 'running' })
+        Check 'engine v2: the status names the engine v2 and the Wolverine host runs' ($script:V2Seen.mode -eq 'v2' -and $script:V2Seen.state -eq 'running') "(engine mode '$($script:V2Seen.mode)'; wolverine: $($script:V2Seen.wolverine))"
+    }
     try {
         Write-Host "scenarios (merge policy: $Policy, tier: $Tier)"
         foreach ($name in $runNames) { Run-Scenario $name $Set[$name] }
@@ -340,7 +375,7 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
 function Invoke-SuiteDef($Def) {
     $script:SuiteName = $Def.Name
     $script:UseClientHost = $Def.ContainsKey('ClientHost') -and [bool]$Def.ClientHost
-    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; $script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
+    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; if ($Engine -eq 'v2') { $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName; $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection };$script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
     foreach ($k in $envs.Keys) { Set-Item "Env:$k" ([string]$envs[$k]) }
     foreach ($k in $timing.Keys) { Set-Item "Env:FACTORY_TIMING_$k" ([string]$timing[$k]) }
     try { Run-Suite $Def.Policy $Def.Set $(if ($Def.ContainsKey('Extra')) { $Def.Extra } else { @{} }) }
