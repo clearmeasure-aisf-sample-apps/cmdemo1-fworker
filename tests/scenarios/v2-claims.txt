@@ -21,3 +21,9 @@ owner | ^journal fold:
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
+
+# W9.2: the item verbs (claim-item, append-body, record-review, complete, validation-verdict, move-next ...) answer on v2 as the scripts do. Three scenarios of the suite 'auto' that use them (the completion
+# of Development stays the script's until W9.5, and these scenarios run it as such): the gates, the escalation of a repeated criterion with the timing comment, and the docs-only design reviews.
+auto | ^gates refuse what they should
+auto | ^escalate earlier:
+auto | ^docs-only fast path: one design review round

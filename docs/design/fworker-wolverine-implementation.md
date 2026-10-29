@@ -529,6 +529,27 @@ The route files are `gateway/Verbs/Routes/{Item,Merge,Delivery,ReadModels,Keeper
 the transcript verbs in Board; the `qc-*` verbs and the five retired ones are in none) and has an empty `Register(V2VerbRoutes, IServiceProvider)` that its item fills with `routes.Add(Verbs, "verb", handler)`.
 `V2VerbRoutes.Build` calls the seven only where the engine acts (`Engine.V2Acts`) and the composition puts a `V2VerbRouter` in front of the router only when a route exists, so v1 routing, the shadow run and every
 environment are exactly what they were; a verb no group registered still runs on v1.
+**W9.2 as built (#354), the item verbs.** Owner decisions of 2026-10-28 stand (hybrid composition, tdd only, the W7 scope cut). The 18 verbs of `ItemRoutes` (`get-item` to `expire-claim`) are answered by v2 where the engine acts,
+each as the rule script answers it for the same input: the same fields and exit codes, the same writes to GitHub, the board and the state comment, in the same order.
+- **Where:** `src/Fworker.Workflows/WorkItem/Verbs/*` has the verbs as ports of `Verbs.Item.ps1`, `Owner.ps1` and `Verbs.Pr.ps1` against ports (`ItemVerbPorts.cs`: the wire to GitHub, the state comment, the journal, the item lock,
+  the refusals file, the v1 fallback); the handler of a verb is the port of its `Verb_*` function and says which. `gateway/Ports/ItemVerbsPort.cs` is the other side of the ports over what the gateway has (the GitHub wire with the
+  gateway's identity, `GitHubJournalStore` for `Get-State` and `Save-State`, `JournalLedger.AddInHand` for `Add-Journal` into the state in hand, the lock file `item-N.lock` and `refusals.json` of the state directory, so a script
+  of v1 and a verb of v2 exclude each other and the model ladder sees both). `gateway/Verbs/Routes/Item.cs` registers the verbs. The only line outside those files is `JournalLedger.AddInHand`.
+- **The answer is the script's:** the keys are read without regard to case, `_session`, `_cause` and `_lease` are taken out of the arguments, the verb runs under the item's lock unless it is `get-item` or `item-pr`, the answer
+  has `verb`, `ok` and `exit`, a refusal is `ok: false` with its code and reason, an exit 10 of `complete`, `record-review`, `validation-verdict`, `open-pr` or `append-body` is one data point of the model ladder, any other fault is
+  `internal-error` (20). Every request carries the user agent `factory-worker-gateway` (the state comment's and the journal's included) and, in the test mode, the cause id of the request, so the fake's golden recorder tells a write
+  of a verb (`rule`) from the gateway's own loops as it did.
+- **The saga:** the router is wrapped in `V2VerbFeed` (the decision verbs `append-body`, `record-review`, `complete`, `validation-verdict` and the lease renewals, as in W6.6 and W7.3) and `ItemAdminFeed`: `park-item` and
+  `unpark-item` tell the saga of an item it owns (`ParkWorkItem`, `ResumeWorkItem`) so its lease stops at the park and its step is armed again at the unpark.
+- **Left to the script, through `IItemV1` (the runner), before anything is written and after the item's lock is let go:** the `accept` of a QC environment (W9.1), the `complete` of Development with the red-head ruling and the
+  migration check of the CI rule (W9.5), and the pull request of a `copilot/*` branch or an owner task (`open-pr`, `item-pr`; W9.4). A gateway without a v1 answers `v1-unavailable` (30) for them.
+- **Declared difference:** the inline merge of a PASS in `validation-verdict` (`Verb_merge -Gateway`) is not made in the call. The answer says `next: merge` as before; the merge is the sweep's and the saga's right after (a verdict
+  asks for a sweep), and `merge` called by the session still answers `already-merged`. W9.3 (the merge train verbs) closes it. The Tier 1 suite `auto` runs with `gatewayMerge` off, so none of its scenarios sees it.
+- **Not yet routed:** the gateway's own calls of these verbs (`PlantRuleHooks` renew and take-back, the park of the runtime adapters, the unpark and resettle endpoints, `ItemPrLookup`) go through `Runner` and stay the script's
+  until W9.9 moves them to the router.
+- **Proof:** `ItemVerbsTests` (55 cases of the scripts' branches on an in-memory GitHub), `ItemVerbsPortTests`, and `ItemVerbsFakeGitHubTests`/`ItemVerbsReplayTests`, which start the fake GitHub of Tier 1 and compare the writes it
+  records with the golden files the scripts wrote (`auto`: gates refuse what they should, escalate earlier, the docs-only fast path's design reviews; `owner`: update-pr). The three `auto` scenarios are claims of `v2-claims.txt`.
+
 **Cutover gate** (the stabilisation gate's form, on v2): the full Tier 1 on v2 with golden writes; the kill-switch drill first (set
 `FACTORY_V2_OFF`, v1 resumes every item from the state comments and acts for one sweep, unset it, v2 adopts them again); then **one
 measured 8-item batch** on v2 with no regression against the 2026-10-25 baseline (same rule as stage C's gate); after each release
