@@ -13,7 +13,7 @@ namespace Fworker.Workflow.Tests;
 public class CapacityTableTests : IAsyncLifetime
 {
     static readonly string? ServerConnection = Environment.GetEnvironmentVariable("FACTORY_TEST_SQL");
-    readonly string dbName = "fw_capacity_" + Guid.NewGuid().ToString("N");
+    TestDatabase? database;
     string? dbConnection;
 
     static bool NoServer => string.IsNullOrWhiteSpace(ServerConnection);
@@ -23,19 +23,14 @@ public class CapacityTableTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         if (NoServer) return;
-        dbConnection = new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = dbName }.ConnectionString;
-        await using var db = Open();
-        await db.Database.MigrateAsync();
+        database = await TestDatabase.CreateAsync("fw_capacity_");
+        dbConnection = database.ConnectionString;
     }
 
     public async Task DisposeAsync()
     {
         if (NoServer) return;
-        await using var conn = new SqlConnection(new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = "master" }.ConnectionString);
-        await conn.OpenAsync();
-        SqlConnection.ClearAllPools();
-        await using var cmd = new SqlCommand($"IF DB_ID('{dbName}') IS NOT NULL BEGIN ALTER DATABASE [{dbName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{dbName}]; END", conn);
-        await cmd.ExecuteNonQueryAsync();
+        if (database != null) await database.DisposeAsync();
     }
 
     static CapacityState State(int slots) => new() { Day = "2026-10-28", SlotSeq = slots, ExecutionsToday = { ["octopus"] = slots } };

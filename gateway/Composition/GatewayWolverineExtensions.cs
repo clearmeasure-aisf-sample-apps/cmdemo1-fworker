@@ -12,6 +12,8 @@ static class GatewayWolverineExtensions
 
     public static IServiceCollection AddGatewayWolverine(this IServiceCollection services, GatewayComposition c)
     {
+        // always registered, so that /ready and /api/v1/status can take it; Required is false where there is no Wolverine host
+        services.AddSingleton(new FactorySchemaStatus(required: c.WolverineHost));
         if (!c.WolverineHost) return services;
         services.AddSingleton(c.Database);
         services.AddSingleton(WolverineHostOptions.From(c.Instance));
@@ -25,7 +27,7 @@ static class GatewayWolverineExtensions
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
-            var host = new WolverineHostService(sp.GetRequiredService<DatabaseOptions>(), sp.GetRequiredService<WolverineHostOptions>(), sp.GetRequiredService<GatewayLeader>());
+            var host = new WolverineHostService(sp.GetRequiredService<DatabaseOptions>(), sp.GetRequiredService<WolverineHostOptions>(), sp.GetRequiredService<GatewayLeader>(), sp.GetRequiredService<FactorySchemaStatus>());
             if (c.Engine.V2Acts)
             {
                 // W3.3: the Copilot launch runs under a reservation, settled by CopilotReconcileService (a hosted service of AddGatewayBackground)
@@ -83,7 +85,8 @@ static class GatewayWolverineExtensions
                 var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
                 IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, shadowHome));
                 inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
-                shadowHolder.Housekeeping = () => dedup.Purge(IngressDedupRetention);   // (no recurring jobs in the shadow run: the shadow's tick calls this once an hour)
+                var schemaStatus = sp.GetRequiredService<FactorySchemaStatus>();
+                shadowHolder.Housekeeping = () => { if (schemaStatus.IsGood) dedup.Purge(IngressDedupRetention); };   // (the table is the scripts': not before the schema is good; no recurring jobs in the shadow run: the shadow's tick calls this once an hour)
                 var parts = sp.GetService<Fworker.Contracts.Catalog.ISystemCatalog>() is { } catalog ? DeliveryShadowWiring.Make(c, catalog, cs, Environment.GetEnvironmentVariable) : null;
                 var merged = parts is null ? null : ItemMergedWiring.Make(c, shadowHome, cs, Environment.GetEnvironmentVariable);
                 if (parts is not null && merged is not null)
@@ -96,7 +99,7 @@ static class GatewayWolverineExtensions
             }
             return host;
         });
-        if (c.Engine.V2Acts) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return new CopilotReconcileService(copilotReconciler!); });
+        if (c.Engine.V2Acts) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return new CopilotReconcileService(copilotReconciler!, sp.GetRequiredService<FactorySchemaStatus>()); });
         // W3.2: the plant's journal delegate publishes through this (AddGatewayPlant); resolving it builds the host first, which makes the sink
         if (c.Engine.V2Acts) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return journalSink!; });
         // W4.1: resolving these builds the host first, which makes them (null without a home repository)
@@ -117,7 +120,8 @@ static class GatewayWolverineExtensions
         // W6.7: the views of the items the saga owns (status, dashboard, digest), read from the saga's table and the item history; no host is needed for a read, only the database. Nowhere else is it registered, so
         // every other environment answers exactly as before
         if (c.Engine.V2Acts && c.Database.ConnectionString is { } viewsConnection)
-            services.AddSingleton(sp => new V2ItemViews(new SqlWorkItemViewSource(() => WorkItemWiring.Open(WolverineHostService.WithConnectTimeout(viewsConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds)))));
+            services.AddSingleton(sp => new V2ItemViews(new SchemaGatedViewSource(sp.GetRequiredService<FactorySchemaStatus>(),
+                new SqlWorkItemViewSource(() => WorkItemWiring.Open(WolverineHostService.WithConnectTimeout(viewsConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds))))));
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)
             services.AddSingleton(sp => { var h = sp.GetRequiredService<WolverineHostService>(); return new RecurringJobScheduler(recurring!, jobs, r => h.PublishAsync(r), () => c.Leader.MayAct); });
@@ -133,4 +137,11 @@ static class GatewayWolverineExtensions
             services.AddSingleton<IShadowHistory>(sp => new ShadowHistory(r => sp.GetRequiredService<WolverineHostService>().PublishAsync(r), c.Instance.Home));
         return services;
     }
+}
+
+/// <summary>The saga's views answer an empty set until the schema of the database is good: the read can run before the host has applied the scripts (a fresh database has no tables yet).</summary>
+sealed class SchemaGatedViewSource(FactorySchemaStatus schema, IWorkItemViewSource inner) : IWorkItemViewSource
+{
+    public Task<WorkItemViewSet> Read(WorkItemViewQuery query, CancellationToken ct) =>
+        schema.IsGood ? inner.Read(query, ct) : Task.FromResult(new WorkItemViewSet([], false));
 }

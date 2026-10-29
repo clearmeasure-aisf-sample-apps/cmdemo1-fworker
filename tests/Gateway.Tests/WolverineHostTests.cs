@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
+using Fworker.Database;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -43,18 +44,37 @@ public sealed class WolverineHostOffTests(TwoPortGateway gw) : IClassFixture<Two
     }
 
     [Fact]
-    public async Task NoConnectionString_StatusHasNoWolverineBlock()
+    public async Task NoConnectionString_StatusHasNoWolverineBlock_NoSchemaBlock_AndReadyIsWhatItWas()
     {
         if (!StubPwsh.Supported) return;
         var a = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
         Assert.Equal(200, a.Status);
         Assert.Null(a.Json?["wolverine"]);
+        Assert.Null(a.Json?["schema"]);
+        var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
+        Assert.Equal(200, ready.Status);
+        Assert.Equal("ok", ready.Body);
+        // the schema status exists (HealthEndpoints and StatusEndpoints take it) and is not required
+        var status = gw.Host.Services.GetRequiredService<FactorySchemaStatus>();
+        Assert.False(status.Required);
+        Assert.Null(status.Waiting());
+        Assert.Null(status.Status());
+    }
+
+    [Fact]
+    public async Task TheBuildReportsTheHighestScriptNumber()
+    {
+        if (!StubPwsh.Supported) return;
+        var b = await gw.Host.SendAsync("GET", "/_build", GatewayEnvironment.ApiPort);
+        Assert.Equal(200, b.Status);
+        Assert.Equal(Fworker.Database.FactorySchema.LatestVersion.ToString("000"), (string?)b.Json?["schemaVersion"]);
     }
 }
 
-/// <summary>With a connection string and a database that cannot be reached: the gateway starts and is ready anyway, and the host keeps trying in the background.</summary>
+/// <summary>With a connection string and a database that cannot be reached: the gateway starts and works as v1; /ready waits for the schema (503 "schema") and the host keeps trying in the background.</summary>
 public sealed class WolverineHostUnreachableFixture : GatewayFixture
 {
+    protected override string UpPath => "/health";
     protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); }
 }
 
@@ -77,11 +97,18 @@ public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachab
     }
 
     [Fact]
-    public async Task TheGatewayIsReady_AndTheStatusSaysTheHostIsStillTrying_WithoutTheConnectionString()
+    public async Task TheGatewayRuns_ReadyWaitsForTheSchema_AndTheStatusSaysTheHostIsStillTrying_WithoutTheConnectionString()
     {
         if (!StubPwsh.Supported) return;
-        Assert.NotNull(gw.ReadyAfter);
-        Assert.Equal(200, (await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status);
+        Assert.NotNull(gw.ReadyAfter);   // up: /health answers, the start was not held by the database
+        // /ready deliberately waits for the schema where a database is configured (docs/design/fworker-database.md): it names what it waits for, and no connection string
+        var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
+        Assert.Equal(503, ready.Status);
+        Assert.Equal(false, (bool?)ready.Json?["ready"]);
+        Assert.Equal("schema", (string?)ready.Json?["waitingFor"]);
+        Assert.Equal("upgrading", (string?)ready.Json?["state"]);
+        Assert.DoesNotContain("Password", ready.Json!.ToJsonString());
+        Assert.DoesNotContain("127.0.0.1", ready.Json.ToJsonString());
         // the first attempt waits for a database that does not answer for the whole connect timeout (90 s): the start is "starting", not failed, and nothing else waits
         JsonNode? w = null;
         var sw = Stopwatch.StartNew();
@@ -120,9 +147,12 @@ public sealed class WolverineHostServiceTests
 
     static GatewayLeader Leader() => new(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = true }, "0.0.0");
 
-    static WolverineHostService Service(GatewayLeader leader, Func<string, WolverineHostOptions, IHost> factory, Func<string, CancellationToken, Task>? migrate = null) =>
-        new(DatabaseOptions.From(n => n == "FACTORY_DB_CONNECTION" ? WolverineHostTestSupport.Unreachable : null), WolverineHostTestSupport.Fast(), leader)
-        { HostFactory = factory, Migrate = migrate ?? ((_, _) => Task.CompletedTask) };
+    /// <summary>A schema that is good, as the real one reports after it applied the scripts and checked the catalog.</summary>
+    internal static SchemaReport GoodReport => new() { Verified = true, Journaled = FactorySchema.Scripts.Count };
+
+    static WolverineHostService Service(GatewayLeader leader, Func<string, WolverineHostOptions, IHost> factory, Func<string, CancellationToken, Task<SchemaReport>>? schema = null, FactorySchemaStatus? status = null) =>
+        new(DatabaseOptions.From(n => n == "FACTORY_DB_CONNECTION" ? WolverineHostTestSupport.Unreachable : null), WolverineHostTestSupport.Fast(), leader, status)
+        { HostFactory = factory, Schema = schema ?? ((_, _) => Task.FromResult(GoodReport)) };
 
     static async Task Until(Func<bool> c, int seconds = 10)
     {
@@ -136,7 +166,7 @@ public sealed class WolverineHostServiceTests
     {
         var release = new TaskCompletionSource();   // a paused database: the first connection takes its time
         var fake = new FakeHost();
-        var svc = Service(Leader(), (_, _) => fake, async (_, ct) => await release.Task.WaitAsync(ct));
+        var svc = Service(Leader(), (_, _) => fake, async (_, ct) => { await release.Task.WaitAsync(ct); return GoodReport; });
         var sw = Stopwatch.StartNew();
         await svc.StartAsync(CancellationToken.None);
         Assert.True(sw.Elapsed < TimeSpan.FromSeconds(1));
@@ -153,12 +183,102 @@ public sealed class WolverineHostServiceTests
     public async Task AFailingStart_IsRetriedInTheBackground_UntilItWorks()
     {
         var tries = 0; var hosts = new List<FakeHost>();
-        var svc = Service(Leader(), (_, _) => { var h = new FakeHost(); hosts.Add(h); return h; }, (_, _) => ++tries < 3 ? throw new InvalidOperationException("Password=secret") : Task.CompletedTask);
+        var svc = Service(Leader(), (_, _) => { var h = new FakeHost(); hosts.Add(h); return h; }, (_, _) => ++tries < 3 ? throw new InvalidOperationException("Password=secret") : Task.FromResult(GoodReport));
         await svc.StartAsync(CancellationToken.None);
         await Until(() => svc.State == WolverineHostService.Phase.Running);
         Assert.Equal(3, svc.Status()["attempts"]!.GetValue<int>());
         Assert.Null(svc.Status()["lastFailure"]);
         await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ASchemaThatIsBeingApplied_KeepsReadyAt503_AndNothingElseWaits_ThenReadyAndTheHostStarts()
+    {
+        var release = new TaskCompletionSource(); var hostsBuilt = 0;
+        var status = new FactorySchemaStatus(required: true);
+        var svc = Service(Leader(), (_, _) => { hostsBuilt++; return new FakeHost(); }, async (_, ct) => { await release.Task.WaitAsync(ct); return GoodReport; }, status);
+        await svc.StartAsync(CancellationToken.None);
+        await Until(() => status.Waiting() != null && (int)status.Status()!["attempts"]! == 1);
+        var waiting = System.Text.Json.JsonSerializer.SerializeToNode(status.Waiting())!;
+        Assert.Equal((false, "schema", "upgrading", 1), ((bool)waiting["ready"]!, (string)waiting["waitingFor"]!, (string)waiting["state"]!, (int)waiting["attempts"]!));
+        Assert.Null(waiting["failedScript"]);
+        Assert.False(status.IsGood);
+        Assert.Equal(0, hostsBuilt);   // the Wolverine host is not built before the schema is good
+        Assert.Equal("upgrading", (string?)status.Status()!["state"]);
+        release.SetResult();
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        Assert.Null(status.Waiting());
+        Assert.True(status.IsGood);
+        Assert.Equal("good", (string?)status.Status()!["state"]);
+        Assert.Equal(FactorySchema.Scripts.Count, (int)status.Status()!["shipped"]!);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task AScriptThatFails_IsReportedWithItsNameAndTheType_TheHostIsNeverBuilt_AndTheStartIsRetried()
+    {
+        var hostsBuilt = 0; var tries = 0;
+        var status = new FactorySchemaStatus(required: true);
+        var svc = Service(Leader(), (_, _) => { hostsBuilt++; return new FakeHost(); },
+            (_, _) => ++tries < 3 ? throw new SchemaUpgradeException("011_CreateWolverineMessageStore.sql", new InvalidOperationException("Server=db;Password=secret")) : Task.FromResult(GoodReport), status);
+        await svc.StartAsync(CancellationToken.None);
+        await Until(() => status.Waiting() != null && (string?)status.Status()!["state"] == "failed");
+        var waiting = System.Text.Json.JsonSerializer.SerializeToNode(status.Waiting())!;
+        Assert.Equal(("schema", "failed", "011_CreateWolverineMessageStore.sql", "InvalidOperationException"), ((string)waiting["waitingFor"]!, (string)waiting["state"]!, (string)waiting["failedScript"]!, (string)waiting["lastFailure"]!));
+        Assert.DoesNotContain("secret", waiting.ToJsonString());
+        Assert.DoesNotContain("secret", status.Status()!.ToJsonString());
+        Assert.Equal(0, hostsBuilt);
+        await Until(() => svc.State == WolverineHostService.Phase.Running);   // the retry loop got there
+        Assert.Equal(1, hostsBuilt);
+        Assert.Null(status.Waiting());
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ASchemaThatIsNotWhatTheScriptsBuild_StaysFailedAndVisible_ListingObjectNamesOnly()
+    {
+        var hostsBuilt = 0;
+        var status = new FactorySchemaStatus(required: true);
+        var bad = new SchemaReport { Verified = true, Journaled = 11, Differences = Enumerable.Range(0, 25).Select(i => new SchemaDifference($"missing column factory.WorkItems.C{i}")).ToList() };
+        var svc = Service(Leader(), (_, _) => { hostsBuilt++; return new FakeHost(); }, (_, _) => Task.FromResult(bad), status);
+        await svc.StartAsync(CancellationToken.None);
+        await Until(() => (int)status.Status()!["attempts"]! >= 3);   // retried with the backoff, and it does not heal
+        Assert.Equal(0, hostsBuilt);
+        var s = status.Status()!;
+        Assert.Equal("failed", (string?)s["state"]);
+        Assert.Equal("SchemaDifference", (string?)s["lastFailure"]);
+        Assert.Equal(FactorySchemaStatus.MaxDifferences, s["differences"]!.AsArray().Count);
+        Assert.Equal("missing column factory.WorkItems.C0", (string?)s["differences"]![0]);
+        Assert.Equal("schema", (string?)System.Text.Json.JsonSerializer.SerializeToNode(status.Waiting())!["waitingFor"]);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task OnceTheSchemaWasGood_ALaterFailureShowsInTheStatusAndDoesNotFlipReady()
+    {
+        var leader = Leader(); var fail = false;
+        var status = new FactorySchemaStatus(required: true);
+        var svc = Service(leader, (_, _) => new FakeHost(), (_, _) => fail ? throw new SchemaLockTimeoutException() : Task.FromResult(GoodReport), status);
+        await svc.StartAsync(CancellationToken.None);
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        fail = true;
+        await leader.OnSuperseded!(null);
+        await leader.OnReacquired!(null);   // the node begins anew and applies the schema again
+        await Until(() => (string?)status.Status()!["state"] == "failed");
+        Assert.Equal("SchemaLockTimeout", (string?)status.Status()!["lastFailure"]);
+        Assert.Null(status.Waiting());   // /ready stays 200
+        Assert.True(status.IsGood);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public void TheFailureIsDescribedByItsKindAndSqlNumberOnly()
+    {
+        Assert.Equal("SchemaDifference", FactorySchemaStatus.Describe(new SchemaNotGoodException(new SchemaReport()), out var s1));
+        Assert.Null(s1);
+        Assert.Equal("SchemaLockTimeout", FactorySchemaStatus.Describe(new SchemaLockTimeoutException(), out _));
+        Assert.Equal("TimeoutException", FactorySchemaStatus.Describe(new SchemaUpgradeException("003_x.sql", new TimeoutException("Server=x;Password=y")), out var s2));
+        Assert.Equal("003_x.sql", s2);
     }
 
     [Fact]
@@ -195,7 +315,7 @@ public sealed class WolverineHostServiceTests
     public async Task SupersessionWhileStarting_StopsTheStart_AndNoHostIsLeftRunning()
     {
         var leader = Leader(); var fake = new FakeHost();
-        var svc = Service(leader, (_, _) => fake, async (_, ct) => await Task.Delay(Timeout.Infinite, ct));
+        var svc = Service(leader, (_, _) => fake, async (_, ct) => { await Task.Delay(Timeout.Infinite, ct); return GoodReport; });
         await svc.StartAsync(CancellationToken.None);
         await leader.OnSuperseded!(null);
         Assert.Equal(WolverineHostService.Phase.Stopped, svc.State);
@@ -229,13 +349,13 @@ public sealed class WolverineHostServiceTests
     }
 
     [Fact]
-    public void TheMessageStore_GetsACommandTimeoutLongEnoughForWolverinesStartUpSchemaRead_AndTheConnectTimeout()
+    public void TheMessageStore_GetsTheConnectTimeout_AndSqlClientsDefaultCommandTimeout()
     {
+        // the start probes four tables and builds nothing (AutoCreate.None), so the 300 s command timeout of #533 is gone
         var b = new SqlConnectionStringBuilder(WolverineHostService.ForMessageStore("Server=s;Database=d;Connect Timeout=15", 90));
         Assert.Equal(90, b.ConnectTimeout);
-        Assert.Equal(WolverineHostService.WolverineCommandTimeoutSeconds, b.CommandTimeout);
-        Assert.True(WolverineHostService.WolverineCommandTimeoutSeconds >= 300);
-        // a longer command timeout already in the connection string is kept
+        Assert.Equal(30, b.CommandTimeout);
+        // a command timeout already in the connection string is kept
         Assert.Equal(600, new SqlConnectionStringBuilder(WolverineHostService.ForMessageStore("Server=s;Database=d;Command Timeout=600", 90)).CommandTimeout);
     }
 

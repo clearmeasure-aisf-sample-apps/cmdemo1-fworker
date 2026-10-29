@@ -1,0 +1,22 @@
+<!-- The schema of the gateway's database, built by DbUp from plain .sql files (docs/design/fworker-database.md). Depends on nothing of this repository. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Fworker.Database</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- the version cmdemo1-workorders uses; it brings dbup-core. The old "DbUp" 5.x meta-package is not added: dbup-sqlserver 6.x is the provider -->
+    <PackageReference Include="dbup-sqlserver" Version="6.0.16" />
+    <!-- pinned to what EF Core 10.0.14 brings, so that dbup-sqlserver's lower minimum does not resolve an older SqlClient here (it also signs in with "Authentication=Active Directory Managed Identity") -->
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="6.1.7" />
+    <!-- SqlClient 6.1.7 brings Pkcs 9.0.11 (advisories GHSA-846f-f764-76mx and GHSA-2fmv-rv2c-59x7): lifted to the patched version Fworker.Persistence pins -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.14" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the scripts travel inside the assembly (the gateway is one container, no package folder exists at run time); the journal stores the bare file name, as workorders' file-system provider does -->
+    <EmbeddedResource Include="scripts/Update/*.sql" LogicalName="%(Filename)%(Extension)" />
+    <EmbeddedResource Include="schema-manifest.json" LogicalName="schema-manifest.json" />
+  </ItemGroup>
+</Project>

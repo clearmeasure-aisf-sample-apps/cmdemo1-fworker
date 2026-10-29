@@ -40,4 +40,28 @@ public sealed class DatabaseOptionsTests
         Assert.Null(Environment.GetEnvironmentVariable("FACTORY_DB_CONNECTION"));
         Assert.False(DatabaseOptions.From(Environment.GetEnvironmentVariable).Configured);
     }
+
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("0", false)]
+    [InlineData("true", false)]
+    [InlineData("1", true)]
+    [InlineData(" 1 ", true)]
+    public void TheDatabaseIsCreatedOnlyWhenFactoryDbCreateIsOne(string? value, bool expected)
+    {
+        var d = DatabaseOptions.From(n => n == "FACTORY_DB_CREATE" ? value : n == "FACTORY_DB_CONNECTION" ? "Server=db;Database=f" : null);
+        Assert.Equal(expected, d.CreateIfMissing);
+    }
+
+    [Fact]
+    public void TheDeployedConfigurationNeverSetsFactoryDbCreate()
+    {
+        // tdd's identity cannot CREATE DATABASE and bicep creates it: the variable is for tests/scenarios/run.ps1 -Engine v2 only
+        var root = AppContext.BaseDirectory;
+        while (root != null && !File.Exists(Path.Combine(root, "Dockerfile"))) root = Path.GetDirectoryName(root);
+        Assert.NotNull(root);
+        foreach (var f in new[] { "config/instance.json", "config/deploy.overrides.json", "Dockerfile" })
+            Assert.DoesNotContain("FACTORY_DB_CREATE", File.ReadAllText(Path.Combine(root!, f)));
+    }
 }

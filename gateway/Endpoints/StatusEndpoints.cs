@@ -77,6 +77,8 @@ sealed class StatusQuery
             if (services.GetService<IShadowHistory>() is { } shadow) wb["shadowHistory"] = shadow.Status();   // W2.3: counts only
             o["wolverine"] = wb;
         }
+        // the schema of the database (docs/design/fworker-database.md): the scripts applied, the check against them; only where a database is configured and the environment runs the Wolverine host
+        if (services.GetService<FactorySchemaStatus>()?.Status() is { } schema) o["schema"] = schema;
         // the shadow run of the delivery train (W5.2): the comparison counts since this process started; the report endpoint reads the stored ones. Only in the shadow run
         if (services.GetService<DeliveryShadowHolder>()?.Shadow is { } deliveryShadow) o["deliveryShadow"] = deliveryShadow.Status();
         return o;

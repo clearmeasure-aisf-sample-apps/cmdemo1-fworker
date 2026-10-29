@@ -16,6 +16,7 @@ demo system.
 | Path | Content |
 |---|---|
 | `gateway/` | The gateway: `Program.cs` (routes, dashboard, connect prompt), `Plant.cs` (workers, assignments), `Messaging.cs`, `Qc.cs`, `Auth.cs`, `RunnerPool.cs`, `Operator.cs` (the operator session) |
+| `src/Fworker.Database/` | The schema of the gateway's database: plain `.sql` scripts run by DbUp at gateway start (`scripts/Update/NNN_*.sql`, `schema-manifest.json`); see "Database" below |
 | `plugin/` | What a worker downloads from the gateway (`GET /api/v1/plugin`): `scripts/` (`factory.ps1`, `lib/*`), `skills/`, `agents/`, `tools/shot`, `launcher/` (the session loop, `docs/launcher.md`) |
 | `config/instance.json` | The source defaults. The tests run on these: messaging off, supervisor off, `ownerSessions` false |
 | `config/deploy.overrides.json` | The settings of the deployed image, merged over the defaults by `config/apply-overrides.ps1` when the image is built |
@@ -88,6 +89,27 @@ The same image is promoted to uat and prod, so the settings travel with it. Runt
 holds one whole runtimes block per environment, the gateway uses the entry named by `FACTORY_ENVIRONMENT`, and an environment without an
 entry has every runtime off. Only tdd has one today.
 
+## Database
+
+The schema of the gateway's database (tdd and the v2 CI gateways; uat and prod have none) is built by DbUp from plain `.sql` files, numbered and journaled the way
+cmdemo1-workorders does it (journal `dbo.SchemaVersions`). Design: `docs/design/fworker-database.md`. EF Core only maps the tables (`FactoryDbContext`); it creates and migrates nothing.
+Wolverine builds and diffs none of its tables (`AutoCreate.None`); script 011 holds them.
+
+- **Where.** `src/Fworker.Database/scripts/Update/NNN_PascalDescription.sql`, embedded in the assembly. The gateway applies them at start (`WolverineHostService`), under an
+  application lock, before the Wolverine host, and then compares the catalog with `schema-manifest.json`. `/ready` is 503 `waitingFor: schema` until that check passes;
+  `/api/v1/status` `schema` and `/_build` `schemaVersion` say where it stands.
+- **Add a script.** The next free number (unique, no gaps); every CREATE and ALTER guarded (`IF OBJECT_ID(...) IS NULL`, `IF NOT EXISTS (... sys.indexes ...)`, `IF COL_LENGTH(...) IS NULL`),
+  no DROP, TRUNCATE, DELETE or UPDATE, the TRY/CATCH transaction of the other scripts, UTF-8 without BOM. Then rewrite the manifest:
+  `FACTORY_TEST_SQL=... FWORKER_UPDATE_SCHEMA_MANIFEST=1 dotnet test tests/Fworker.Workflow.Tests --filter TheManifestIsWhatTheScriptsBuild`. A change of `FactoryDbContext` needs a script
+  (`SchemaMatchesEfModelTests` fails until it matches). `DatabaseScriptsTests` lints the files without a database.
+- **Generated files.** Script `011_CreateWolverineMessageStore.sql` and `tests/Gateway.Tests/golden/wolverine-storage.sql` are written by
+  `FWORKER_WRITE_WOLVERINE_SQL=1 dotnet test tests/Gateway.Tests --filter TheExportMatchesTheGolden`; never edit them by hand. A Wolverine upgrade that changes the DDL adds a delta script
+  (`FWORKER_WRITE_WOLVERINE_DELTA=<file> dotnet test tests/Gateway.Tests --filter WriteWolverineDelta`; guard its ALTERs by hand; rewrite the golden and the manifest; steps in the design).
+- **Expand, then contract.** Every script is expand-only (add tables, nullable or defaulted columns, indexes): the previous gateway process still runs during the lease hand-over. A script that
+  drops something ships only after no running image uses it, and needs the owner's word. `__EFMigrationsHistory` on tdd stays until then (a revert of the pull request needs it).
+- **Tests need SQL Server.** The SQL-backed tests run where `FACTORY_TEST_SQL` is set (a local container: `docker run -e ACCEPT_EULA=Y -e MSSQL_SA_PASSWORD=... -p 1433:1433 mcr.microsoft.com/mssql/server:2022-latest`);
+  without it they return at once. `tests/scenarios/run.ps1 -Engine v2` sets `FACTORY_DB_CREATE=1` so the gateway creates its per-process database; nothing deployed ever sets it.
+
 ## Release
 
 1. Branch `{user}/{description}` from `master`; never push to `master`.
@@ -101,7 +123,7 @@ entry has every runtime off. Only tdd has one today.
 6. The merge is the release to tdd: Build of `master` (image only), then `release.yml` pushes that image to the registry and creates the
    Octopus release of project `cmdemo1-fworker`, whose lifecycle deploys it to tdd. About 4 minutes from merge to live.
    **A release is done only when both are true**: `curl -s <tdd url>/_build` shows the new version (`1.0.<Build run number>`,
-   `pluginHash`) AND `curl -s -o /dev/null -w '%{http_code}' <tdd url>/ready` answers 200. `/health` 200 is not enough: on 2026-10-13 a
+   `pluginHash`) AND `curl -s -o /dev/null -w '%{http_code}' <tdd url>/ready` answers 200 (it also means the database schema is good; `/api/v1/status` `schema` lists the scripts this start applied and `differences` is empty). `/health` 200 is not enough: on 2026-10-13 a
    release was live and never ready for 49 minutes. A 503 of `/ready` says what the start waits for
    (`{"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."}`); if it has not turned 200 a few minutes after the
    deployment, treat it as an outage: find the cause or roll back.

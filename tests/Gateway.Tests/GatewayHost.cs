@@ -191,6 +191,9 @@ public abstract class GatewayFixture : IAsyncLifetime
 
     protected virtual void Configure(GatewayEnvironment env) { }
 
+    /// <summary>The path that answers 200 when the gateway is up: /ready, unless the fixture's gateway is not ready by design (its database does not answer, so /ready waits for the schema).</summary>
+    protected virtual string UpPath => "/ready";
+
     /// <summary>Registrations added to the gateway's service collection after its own.</summary>
     protected virtual void ConfigureServices(IServiceCollection services) { }
 
@@ -204,7 +207,7 @@ public abstract class GatewayFixture : IAsyncLifetime
         _ = Host.Server;   // runs the gateway's top-level statements up to app.Run()
         while (sw.Elapsed < TimeSpan.FromSeconds(20))   // cold JIT of the whole gateway on a CI runner
         {
-            if ((await Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status == 200) { ReadyAfter = sw.Elapsed; break; }
+            if ((await Host.SendAsync("GET", UpPath, GatewayEnvironment.ApiPort)).Status == 200) { ReadyAfter = sw.Elapsed; break; }
             await Task.Delay(100);
         }
     }

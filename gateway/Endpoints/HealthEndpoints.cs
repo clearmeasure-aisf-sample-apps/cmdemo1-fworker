@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.RegularExpressions;
+using Fworker.Database;
 
 // What /_build says of this process (task C7a): the version and commit built into the assembly, and when the gateway started (made when the routes
 // are mapped, right after Build(), where Program.cs took the time before).
@@ -20,7 +21,7 @@ sealed class BuildInfo
 }
 
 // /health, /alive, /ready, / and /_build: open to every caller (the middleware authenticates /api and /mcp only).
-sealed class HealthEndpoints(BuildInfo build, PluginArchive plugin, PromptStore prompts, GatewayLeader leader, RevocationService revocations, GatewayOptions gateway) : IEndpointModule
+sealed class HealthEndpoints(BuildInfo build, PluginArchive plugin, PromptStore prompts, GatewayLeader leader, RevocationService revocations, GatewayOptions gateway, FactorySchemaStatus schema) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes)
     {
@@ -30,13 +31,18 @@ sealed class HealthEndpoints(BuildInfo build, PluginArchive plugin, PromptStore 
         routes.MapGet("/ready", () => Ready());
         routes.MapGet("/", () => Results.Redirect("/dashboard"));
         routes.MapGet("/_build", () => Results.Json(new { name = "factory-worker-gateway", version = build.Version, commit = build.Commit, pluginHash = plugin.Hash(), promptsHash = prompts.Hash,
-            started = build.Started, runtime = Environment.Version.ToString(), ownerMode = gateway.OwnerMode, environment = gateway.EnvironmentName }));
+            started = build.Started, runtime = Environment.Version.ToString(), ownerMode = gateway.OwnerMode, environment = gateway.EnvironmentName,
+            schemaVersion = FactorySchema.LatestVersion.ToString("000") }));
     }
 
     // readiness: the revoked credentials are read (at once where there is nothing to read), so a session credential is answered without waiting
     // (503 says what the start waits for, how many reads have failed and since when: {"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."});
-    // the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5) are loaded once, and a broken one keeps /ready at 503
+    // the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5) are loaded once, and a broken one keeps /ready at 503;
+    // where a database is configured and the environment runs the Wolverine host, the schema of the database is applied and checked first (FactorySchemaStatus):
+    // {"ready":false,"waitingFor":"schema","state":"upgrading"|"failed","attempts":N,"since":"...","failedScript":...,"lastFailure":...}, until the first good verification of the process
     IResult Ready() => leader.Replaced ? Results.Json(new { ready = false, waitingFor = "nothing", replaced = true, reason = "a newer gateway process holds the lease" }, statusCode: 503)
         : prompts.Errors.Count > 0 ? Results.Json(new { ready = false, waitingFor = "prompts", errors = prompts.Errors }, statusCode: 503)
-        : revocations.IsLoaded ? Results.Text("ok") : Results.Json(new { ready = false, waitingFor = "revocations", attempts = revocations.FailedAttempts, since = revocations.Since.ToString("o") }, statusCode: 503);
+        : !revocations.IsLoaded ? Results.Json(new { ready = false, waitingFor = "revocations", attempts = revocations.FailedAttempts, since = revocations.Since.ToString("o") }, statusCode: 503)
+        : schema.Waiting() is { } waiting ? Results.Json(waiting, statusCode: 503)
+        : Results.Text("ok");
 }

@@ -4,8 +4,9 @@ namespace Fworker.Persistence;
 
 /// <summary>
 /// The gateway's database (docs/design/fworker-wolverine-implementation.md section 4): item history, correlation map, open-instance index,
-/// projection versions, session mailbox and the catalog's last good copy. Saga rows join with the saga (W3). Nothing creates or migrates it yet:
-/// the host is wired in W2.2, and only when a connection string is set (FACTORY_DB_CONNECTION).
+/// projection versions, session mailbox and the catalog's last good copy. Saga rows join with the saga (W3). It maps the tables and builds none:
+/// the scripts of Fworker.Database (DbUp) create them, at the start of the Wolverine host, which exists only when a connection string is set (FACTORY_DB_CONNECTION).
+/// A change of this model needs a new script there; SchemaMatchesEfModelTests fails until the script matches.
 /// Indexes are chosen for point reads and short ranges by key; none exists to support a scan by status, so nothing needs to poll (serverless-friendly).
 /// </summary>
 public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbContext(options)

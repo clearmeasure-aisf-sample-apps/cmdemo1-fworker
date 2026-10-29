@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Fworker.Database;
 
 // How the Wolverine host runs (task W2.2, docs/design/wolverine-host.md). Two profiles, chosen by config/instance.json block "wolverine", key "mode":
 // - "solo" (the default while the host is inert): one node, no node agent, no leader election. Every remaining timer (the durability agent's scheduled-job
@@ -10,8 +11,8 @@ using System.Text.Json.Nodes;
 // The values can be changed in the same block (seconds); a value below its floor, or not a number, leaves the default of the profile.
 sealed record WolverineHostOptions
 {
-    /// <summary>Schema of Wolverine's own tables (the inbox, outbox, nodes, dead letters); the gateway's tables are in "factory" (Fworker.Persistence).</summary>
-    public string Schema { get; init; } = "wolverine";
+    /// <summary>Schema of Wolverine's own tables (the inbox, outbox, nodes, dead letters); the gateway's tables are in "factory". Fixed: script 011 of Fworker.Database writes it as a literal.</summary>
+    public const string Schema = SchemaNames.Wolverine;
     public string ServiceName { get; init; } = "fworker-gateway";
     /// <summary>Balanced mode with Wolverine's leader election; false is Solo.</summary>
     public bool LeaderElection { get; init; }

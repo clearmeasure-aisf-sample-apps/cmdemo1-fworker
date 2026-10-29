@@ -9,7 +9,7 @@
 #   -ListSuites  prints the suite names, one per line, in slot order (slot = line number, from 0)
 #   -Engine v2   the gateway under test runs the v2 engine (the tests.yml job "Tier 1 (v2)", for the suites and scenarios of v2-claims.txt): FACTORY_ENVIRONMENT is the CI-only name
 #                'v2ci' (it replaces what a suite sets), the configuration's engine.v2Environments names it, and FACTORY_DB_CONNECTION is the SQL Server of FACTORY_TEST_SQL with a
-#                database of its own for this process (the gateway migrates it into existence). FACTORY_TEST_SQL is required: without it the run exits 2. The default, v1, changes nothing.
+#                database of its own for this process (the gateway's DbUp creates it, FACTORY_DB_CREATE=1, tests only, and applies the scripts). FACTORY_TEST_SQL is required: without it the run exits 2. The default, v1, changes nothing.
 #   Start guards (guard.ps1): refuses with exit 4 when another run.ps1 or run-all.ps1 is active on this machine, or when the temp filesystem has less than
 #   -MinFreeDiskMb (default 2048) free; with less than -MinAvailableMb (default 1500) of memory a suite runs in half its groups. -Force starts anyway.
 param([string] $Only = '', [switch] $NoBuild, [string] $Suite = '', [switch] $ListSuites, [switch] $ListScenarios, [string] $ResultFile = '', [ValidateSet('full', 'fast')][string] $Tier = 'full', [int] $Groups = 0, [int] $Group = -1, [double] $GroupTimeoutMinutes = 30, [switch] $Force, [int] $MinFreeDiskMb = 2048, [int] $MinAvailableMb = 1500, [ValidateSet('v1', 'v2')][string] $Engine = 'v1')
@@ -294,8 +294,8 @@ foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
 }
 
 # -Engine v2: the environment name and the database of this process. The name is in no list of config/instance.json (Run-Suite adds it to engine.v2Environments of the test
-# configuration only), so no deployed gateway can run v2 because of it. The database is new for every process (a suite, or one group of a suite): the gateway migrates it into
-# existence, a run never meets the tables of another, and the CI job's SQL Server container goes with the job. The connection string carries the password: it is never printed.
+# configuration only), so no deployed gateway can run v2 because of it. The database is new for every process (a suite, or one group of a suite): the gateway's DbUp creates it (FACTORY_DB_CREATE,
+# tests only) and applies the scripts of src/Fworker.Database, a run never meets the tables of another, and the CI job's SQL Server container goes with the job. The connection string carries the password: it is never printed.
 $script:V2EnvName = 'v2ci'
 $script:V2Connection = ''
 if ($Engine -eq 'v2' -and $env:FACTORY_TEST_SQL) {
@@ -377,7 +377,7 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
 function Invoke-SuiteDef($Def) {
     $script:SuiteName = $Def.Name
     $script:UseClientHost = $Def.ContainsKey('ClientHost') -and [bool]$Def.ClientHost
-    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; if ($Engine -eq 'v2') { $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName; $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection };$script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
+    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; if ($Engine -eq 'v2') { $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName; $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection; $envs['FACTORY_DB_CREATE'] = '1' };$script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
     foreach ($k in $envs.Keys) { Set-Item "Env:$k" ([string]$envs[$k]) }
     foreach ($k in $timing.Keys) { Set-Item "Env:FACTORY_TIMING_$k" ([string]$timing[$k]) }
     try { Run-Suite $Def.Policy $Def.Set $(if ($Def.ContainsKey('Extra')) { $Def.Extra } else { @{} }) }

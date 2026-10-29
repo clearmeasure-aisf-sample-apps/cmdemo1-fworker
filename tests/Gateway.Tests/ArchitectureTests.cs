@@ -237,6 +237,7 @@ public class ArchitectureTests
         ["Fworker.Contracts"] = [],
         ["Fworker.Domain"] = ["Fworker.Contracts"],
         ["Fworker.Persistence"] = ["Fworker.Contracts"],
+        ["Fworker.Database"] = [],
         ["Fworker.Integrations"] = ["Fworker.Contracts", "Fworker.Domain", "Fworker.Persistence"],
         ["Fworker.Workflows"] = ["Fworker.Contracts", "Fworker.Domain", "Fworker.Persistence"],
     };
@@ -267,7 +268,9 @@ public class ArchitectureTests
     {
         ["Fworker.Contracts"] = [],
         ["Fworker.Domain"] = [],
-        ["Fworker.Persistence"] = ["Microsoft.EntityFrameworkCore.SqlServer", "WolverineFx.EntityFrameworkCore", "Microsoft.EntityFrameworkCore.Design", "System.Security.Cryptography.Pkcs"],
+        ["Fworker.Persistence"] = ["Microsoft.EntityFrameworkCore.SqlServer", "WolverineFx.EntityFrameworkCore", "System.Security.Cryptography.Pkcs"],
+        // the schema of the gateway's database, built by DbUp from plain .sql files (docs/design/fworker-database.md); it depends on nothing of this repository. Pkcs lifts the one SqlClient brings (advisories)
+        ["Fworker.Database"] = ["dbup-sqlserver", "Microsoft.Data.SqlClient", "System.Security.Cryptography.Pkcs"],
         ["Fworker.Integrations"] = [],
         ["Fworker.Workflows"] = ["WolverineFx"],
     };
@@ -326,6 +329,53 @@ public class ArchitectureTests
         foreach (var dir in Directory.EnumerateDirectories(System.IO.Path.Combine(Root, "src")))
             foreach (var f in Directory.EnumerateFiles(dir, "*.csproj"))
                 Assert.DoesNotContain("Gateway", ProjectReferences(File.ReadAllText(f)));
+    }
+
+    [Fact]
+    public void OnlyTheHostAndTheTestsReferenceTheDatabaseProject()
+    {
+        // nothing in src/ references Fworker.Database: the schema is applied by the host, at start
+        foreach (var dir in Directory.EnumerateDirectories(System.IO.Path.Combine(Root, "src")))
+            foreach (var f in Directory.EnumerateFiles(dir, "*.csproj"))
+                Assert.DoesNotContain("Fworker.Database", ProjectReferences(File.ReadAllText(f)));
+    }
+
+    /// <summary>The schema is built by the scripts of Fworker.Database and by nothing else: no DDL in C#, no EF migrations or EnsureCreated, and nothing that asks Wolverine to build its tables.</summary>
+    static readonly string[] SchemaBuilders = ["CREATE TABLE", "ALTER TABLE", "CREATE INDEX", ".Database.Migrate", "EnsureCreated", "SetupResources(", "ResetResourceState("];
+
+    static IEnumerable<(string Path, string Code)> SourcesOfGatewayAndSrc() =>
+        new[] { GatewayDir, System.IO.Path.Combine(Root, "src") }
+            .SelectMany(d => Directory.EnumerateFiles(d, "*.cs", SearchOption.AllDirectories))
+            .Where(f => !f.Contains($"{System.IO.Path.DirectorySeparatorChar}obj{System.IO.Path.DirectorySeparatorChar}") && !f.Contains($"{System.IO.Path.DirectorySeparatorChar}bin{System.IO.Path.DirectorySeparatorChar}"))
+            .Select(f => (System.IO.Path.GetRelativePath(Root, f).Replace('\\', '/'), Code(File.ReadAllText(f))));
+
+    [Fact]
+    public void SchemaIsBuiltOnlyByTheScripts()
+    {
+        var offenders = new List<string>();
+        foreach (var (path, code) in SourcesOfGatewayAndSrc())
+            foreach (var word in SchemaBuilders)
+                for (var i = code.IndexOf(word, StringComparison.OrdinalIgnoreCase); i >= 0; i = code.IndexOf(word, i + 1, StringComparison.OrdinalIgnoreCase))
+                    offenders.Add($"{path}:{LineOf(code, i)} {word}");
+        Assert.True(offenders.Count == 0, "the schema is built by the scripts of src/Fworker.Database/scripts/Update (DbUp) and by nothing else; found: " + string.Join(", ", offenders));
+    }
+
+    [Fact]
+    public void WolverineNeverBuildsItsStorage()
+    {
+        var code = Code(File.ReadAllText(System.IO.Path.Combine(GatewayDir, "Composition", "WolverineHostService.cs")));
+        Assert.Contains("AutoBuildMessageStorageOnStartup = AutoCreate.None", code);
+        Assert.Contains("OverrideAutoCreateResources(AutoCreate.None)", code);
+        Assert.DoesNotContain("AutoCreate.CreateOrUpdate", code);
+        Assert.DoesNotContain("AutoCreate.All", code);
+    }
+
+    [Fact]
+    public void TheSchemaRulesSeeAViolation_WhenOneIsPlanted()
+    {
+        Assert.Contains(SchemaBuilders, w => Code("var sql = \"CREATE TABLE x (a int)\";").Contains(w, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(SchemaBuilders, w => Code("await db.Database.MigrateAsync();").Contains(w, StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(SchemaBuilders, w => Code("// CREATE TABLE in a comment\nvar x = 1;").Contains(w, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

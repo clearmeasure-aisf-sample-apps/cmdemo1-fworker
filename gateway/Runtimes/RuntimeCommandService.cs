@@ -147,7 +147,7 @@ sealed class CopilotTaskLookup(RuntimeRegistry runtimes) : ICopilotTaskLookup
         runtimes.CopilotRuntime == null ? null : await runtimes.CopilotRuntime.TaskForItem(item, since, ct);
 }
 
-sealed class CopilotReconcileService(CopilotReconciler reconciler) : BackgroundService
+sealed class CopilotReconcileService(CopilotReconciler reconciler, FactorySchemaStatus schema) : BackgroundService
 {
     public static readonly TimeSpan MinAge = TimeSpan.FromMinutes(2), Every = TimeSpan.FromMinutes(1);
     protected override async Task ExecuteAsync(CancellationToken stop)
@@ -157,6 +157,7 @@ sealed class CopilotReconcileService(CopilotReconciler reconciler) : BackgroundS
         {
             try
             {
+                if (!schema.IsGood) continue;   // the reservations are a table of the scripts of Fworker.Database: this pass waits for them
                 foreach (var r in await reconciler.Run(MinAge, stop))
                     Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "copilot-reservation", ["item"] = r.Item, ["phase"] = r.Phase, ["outcome"] = r.Outcome.ToString() }.ToJsonString());
             }

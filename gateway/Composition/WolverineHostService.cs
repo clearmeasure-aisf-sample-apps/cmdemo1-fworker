@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
-using Fworker.Persistence;
+using Fworker.Database;
 using Microsoft.Data.SqlClient;
-using Microsoft.EntityFrameworkCore;
+using JasperFx;
 using JasperFx.CodeGeneration;
 using Wolverine;
 using Wolverine.ErrorHandling;
@@ -9,11 +9,12 @@ using Wolverine.SqlServer;
 
 // The Wolverine host (task W2.2, docs/design/wolverine-host.md), registered only when FACTORY_DB_CONNECTION is set (GatewayWolverineExtensions). It is a second,
 // nested host: Wolverine's own container and hosted services, which this service starts and stops, so that
-// - the gateway's DI graph and its start are what they were (a database that is paused, down or refusing never fails the gateway's start or /ready: the start
-//   below runs in the background and retries),
+// - the gateway's DI graph and its start are what they were (a database that is paused, down or refusing never fails the gateway's start: the start below runs in
+//   the background and retries; /ready waits for the schema only where a database is configured, FactorySchemaStatus, and for nothing else of the database),
 // - the stop is ours: the node leaves when the lease is lost and at the stop of the host, after the hand-over and the transcripts' flush.
-// What it does once up: applies the migrations of Fworker.Persistence (the gateway's tables, schema "factory"), then runs Wolverine against SQL Server with the
-// durable inbox and outbox (schema "wolverine") in Balanced mode, which is Wolverine's leader election: the nodes elect one leader that owns the agents.
+// What it does once up: applies the scripts of Fworker.Database with DbUp and checks that the database is what they build (the gateway's tables, schema "factory", and
+// Wolverine's own, schema "wolverine"), then runs Wolverine against SQL Server with the durable inbox and outbox in Balanced mode, which is Wolverine's leader election:
+// the nodes elect one leader that owns the agents. Wolverine builds and diffs nothing (AutoCreate.None): the scripts own every table (docs/design/fworker-database.md).
 // It is inert: no handler is registered, nothing is published, nothing reads the board. The gateway's lease still decides who acts in v1.
 sealed class WolverineHostService : IHostedService
 {
@@ -36,14 +37,16 @@ sealed class WolverineHostService : IHostedService
     public Func<string, WolverineHostOptions, IHost> HostFactory { get; set; }
     /// <summary>W3.1: set only where the engine mode is V2. Adds the runtime commands' service, handlers and queue to the host; null leaves the host as W2.3 made it.</summary>
     public Action<IServiceCollection, WolverineOptions>? RuntimeCommands { get; set; }
-    /// <summary>Applies the migrations; replaceable by a test.</summary>
-    public Func<string, CancellationToken, Task> Migrate { get; set; }
+    /// <summary>Applies the scripts of Fworker.Database and checks the schema against them; replaceable by a test. The report says whether the schema is good.</summary>
+    public Func<string, CancellationToken, Task<SchemaReport>> Schema { get; set; }
+    readonly FactorySchemaStatus schemaStatus;
 
-    public WolverineHostService(DatabaseOptions database, WolverineHostOptions options, GatewayLeader leader)
+    public WolverineHostService(DatabaseOptions database, WolverineHostOptions options, GatewayLeader leader, FactorySchemaStatus? schemaStatus = null)
     {
         connectionString = database.ConnectionString ?? throw new InvalidOperationException("the Wolverine host needs FACTORY_DB_CONNECTION");
-        this.options = options; leadership = leader;
-        Migrate = (cs, ct) => MigrateAsync(cs, options.ConnectTimeoutSeconds, ct);
+        this.options = options; leadership = leader; this.schemaStatus = schemaStatus ?? new FactorySchemaStatus(required: true);
+        Schema = (cs, ct) => FactorySchema.UpgradeAndVerifyAsync(WithConnectTimeout(cs, options.ConnectTimeoutSeconds),
+            new SchemaRunOptions { CreateDatabase = database.CreateIfMissing, Log = line => { try { Console.WriteLine(line); } catch { } } }, ct);
         HostFactory = (cs, o) => BuildHost(cs, o, RuntimeCommands);
         // LeadershipService sets leader.OnSuperseded and OnReacquired when it is built, and the registration builds it first (GatewayWolverineExtensions); they are
         // wrapped here: its hand-over runs first, then the node leaves; a standby that takes the lease again brings the node back
@@ -57,7 +60,7 @@ sealed class WolverineHostService : IHostedService
     public Task StartAsync(CancellationToken cancellationToken)
     {
         Begin();
-        return Task.CompletedTask;   // never waits for the database: /ready does not depend on it
+        return Task.CompletedTask;   // never waits for the database: /ready waits for the schema (FactorySchemaStatus), which the background start below applies
     }
 
     // the retried start, in the background; one at a time
@@ -81,8 +84,9 @@ sealed class WolverineHostService : IHostedService
             IHost? h = null;
             try
             {
-                lock (gate) attempts++;
-                await Migrate(connectionString, ct);
+                int attempt;
+                lock (gate) attempt = ++attempts;
+                await ApplySchema(attempt, ct);
                 h = HostFactory(connectionString, options);
                 await h.StartAsync(ct);
                 if (ct.IsCancellationRequested)
@@ -112,6 +116,32 @@ sealed class WolverineHostService : IHostedService
             try { await Task.Delay(pause, ct); } catch (OperationCanceledException) { return; }
             pause = TimeSpan.FromTicks(Math.Min(options.RetryMax.Ticks, pause.Ticks * 2));
         }
+    }
+
+    // The scripts, then the check that the catalog is what they build. The Wolverine host is never started on a schema that is not good.
+    async Task ApplySchema(int attempt, CancellationToken ct)
+    {
+        schemaStatus.Upgrading(attempt);
+        SchemaReport report;
+        try
+        {
+            report = await Schema(connectionString, ct);
+            if (!report.Good) throw new SchemaNotGoodException(report);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception e)
+        {
+            schemaStatus.Failed(attempt, e);
+            SchemaLog("failed", FactorySchemaStatus.Describe(e, out var script) + (script == null ? "" : " " + script));
+            throw;
+        }
+        schemaStatus.Good(report);
+        SchemaLog("good", $"applied {report.Applied.Count}, journaled {report.Journaled}, extra {report.Extra}, {(int)report.Duration.TotalMilliseconds} ms");
+    }
+
+    static void SchemaLog(string what, string detail)
+    {
+        try { Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "schema", ["event"] = what, ["detail"] = detail }.ToJsonString()); } catch { }
     }
 
     // The node leaves (the lease is lost): stops what runs and what is being started. Bounded; a standby that takes the lease again begins anew.
@@ -182,24 +212,8 @@ sealed class WolverineHostService : IHostedService
         return b.ConnectionString;
     }
 
-    /// <summary>The command timeout of Wolverine's own connection. Wolverine reads its whole schema at every start (Weasel's one catalog batch); on a small DTU tier
-    /// (S0, 10 DTU) that batch runs longer than SqlClient's default 30 s, so the host never started (tdd, 2026-10-29). A longer timeout lets the start finish.</summary>
-    internal const int WolverineCommandTimeoutSeconds = 300;
-
-    /// <summary>The connection string Wolverine's message store uses: the connect timeout, and a command timeout long enough for its start-up schema read.</summary>
-    internal static string ForMessageStore(string connectionString, int connectTimeoutSeconds)
-    {
-        var b = new SqlConnectionStringBuilder(WithConnectTimeout(connectionString, connectTimeoutSeconds));
-        if (b.CommandTimeout < WolverineCommandTimeoutSeconds) b.CommandTimeout = WolverineCommandTimeoutSeconds;
-        return b.ConnectionString;
-    }
-
-    static async Task MigrateAsync(string connectionString, int connectTimeoutSeconds, CancellationToken ct)
-    {
-        var cs = WithConnectTimeout(connectionString, connectTimeoutSeconds);
-        await using var db = new FactoryDbContext(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer(cs).Options);
-        await db.Database.MigrateAsync(ct);
-    }
+    /// <summary>The connection string Wolverine's message store uses: the connect timeout, and SqlClient's default command timeout (the start probes four tables by existence and builds nothing).</summary>
+    internal static string ForMessageStore(string connectionString, int connectTimeoutSeconds) => WithConnectTimeout(connectionString, connectTimeoutSeconds);
 
     /// <summary>Where Wolverine writes the code it generates: the image's /app is not writable for the gateway's user, so the default (Internal/Generated under the content root) logs "Unable to write code file".</summary>
     internal static string CodegenDirectory => Path.Combine(Path.GetTempPath(), "fworker-wolverine-codegen");
@@ -212,6 +226,16 @@ sealed class WolverineHostService : IHostedService
         try { Directory.CreateDirectory(dir); } catch (Exception) { /* generation still works without a written copy; Wolverine logs it */ }
         w.CodeGeneration.GeneratedCodeOutputPath = dir;
     }
+
+    /// <summary>
+    /// The host as BuildHost makes it, with a connection string that parses and is never opened, built and never started. The golden test of Wolverine's storage reads the DDL of its
+    /// message store from it (WolverineStorageScriptTests), so the exported DDL always comes from the gateway's real options. <paramref name="runtimeCommands"/> adds a durable local
+    /// queue, the one thing the runtime commands' hook adds that touches storage. <paramref name="connectionString"/> is for the test that checks a database against Wolverine's
+    /// own model (TheScriptsBuildWolverinesStorage); the export needs none.
+    /// </summary>
+    internal static IHost BuildHostForSchemaExport(WolverineHostOptions o, bool runtimeCommands, string? connectionString = null) =>
+        BuildHost(connectionString ?? "Server=tcp:export.invalid,1433;Database=export;User Id=export;Password=export;Encrypt=False;TrustServerCertificate=True", o,
+            runtimeCommands ? (_, w) => w.LocalQueue("runtime-commands").UseDurableInbox() : null);
 
     static IHost BuildHost(string connectionString, WolverineHostOptions o, Action<IServiceCollection, WolverineOptions>? runtimeCommands = null)
     {
@@ -229,7 +253,11 @@ sealed class WolverineHostService : IHostedService
                 // some and compiles otherwise (the WolverineFx.RuntimeCompilation package, added with W2.3)
                 w.Discovery.IncludeType(typeof(ShadowHistoryHandler));
                 ConfigureCodeGeneration(w);
-                w.PersistMessagesWithSqlServer(ForMessageStore(connectionString, o.ConnectTimeoutSeconds), o.Schema);
+                // The scripts of Fworker.Database build Wolverine's tables (011); Wolverine neither builds nor diffs them. None skips the Weasel diff at start (it took about 80 s on the
+                // S0 database of tdd) and keeps four cheap existence probes. OverrideAutoCreateResources stops the on-demand paths (IMessageStoreAdmin.MigrateAsync, storage clear-handled).
+                // Never call IHost.SetupResources() or ResetResourceState(): they always migrate with CreateOrUpdate.
+                w.AutoBuildMessageStorageOnStartup = AutoCreate.None;
+                w.PersistMessagesWithSqlServer(ForMessageStore(connectionString, o.ConnectTimeoutSeconds), SchemaNames.Wolverine).OverrideAutoCreateResources(AutoCreate.None);
                 // shadow history: a durable local queue, so a record is stored in the database (wolverine schema) before it is handled; a database that does not
                 // answer is retried with growing pauses, then the record goes to the dead letters
                 w.PublishMessage<ShadowHistoryRecord>().ToLocalQueue("shadow-history");
