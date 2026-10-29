@@ -26,7 +26,7 @@ public sealed record HeadroomSettings(
     public static readonly HeadroomSettings Defaults = new();
 }
 
-public static class Footprint
+public static class HostFootprint
 {
     /// <summary>
     /// The footprint of a session: the p95 of the <c>memPeakMb</c> samples (one per finished session), by the nearest-rank method: the sample at rank

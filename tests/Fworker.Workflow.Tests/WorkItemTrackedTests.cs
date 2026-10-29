@@ -67,7 +67,7 @@ public class WorkItemTrackedTests
     static Func<string, Action<WolverineOptions>> Wire(WorkItemPolicy? policy = null, IDocsOnlyPort? docs = null, Func<WorkItemService, Type, object?>? handlerFor = null) => cs => w =>
     {
         var store = new SqlWorkItemStore(() => Open(cs));
-        var svc = new WorkItemService(store, new WorkItemSaga(docs ?? new RecordedDesignDocsOnly(), policy));
+        var svc = new WorkItemService(store, new WorkItemSaga(docs ?? new FakeDocsPort(), policy));
         foreach (var t in WorkItemTopology.Inputs)
         {
             var handler = handlerFor?.Invoke(svc, t) ?? Activator.CreateInstance(typeof(InputHandler<>).MakeGenericType(t), svc, null)!;
@@ -259,7 +259,7 @@ public class WorkItemTrackedTests
         if (!TrackedSessionHost.Available) return;
         await using var h = await TrackedSessionHost.StartAsync(Wire());
         var store = new SqlWorkItemStore(() => Open(h.ConnectionString));
-        var saga = new WorkItemSaga(new RecordedDesignDocsOnly());
+        var saga = new WorkItemSaga(new FakeDocsPort());
         var t = saga.Apply(null, new StartWorkItem(A, "intake"), DateTimeOffset.UtcNow);
         // two nodes both read "no row" and start the item: one insert wins
         var firsts = await Task.WhenAll(store.Save(A.ToString(), t.State!, 0, default), store.Save(A.ToString(), t.State!, 0, default));

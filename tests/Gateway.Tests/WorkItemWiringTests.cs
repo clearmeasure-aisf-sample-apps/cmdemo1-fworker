@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
+using Fworker.Domain;
 using Fworker.Persistence;
 using Fworker.Workflows.WorkItem;
 using Microsoft.Data.SqlClient;
@@ -62,6 +63,55 @@ public sealed class SweepV2FilterTests
     }
 }
 
+/// <summary>D4 behind the saga's port, with the settings the gateway reads from config/instance.json.</summary>
+public sealed class DocsOnlyPortTests
+{
+    static DocsOnlySettings Source()
+    {
+        var dir = AppContext.BaseDirectory;
+        while (dir != null && !File.Exists(Path.Combine(dir, "config", "instance.json"))) dir = Path.GetDirectoryName(dir);
+        return DocsOnlySettingsReader.From(JsonNode.Parse(File.ReadAllText(Path.Combine(dir!, "config", "instance.json"))));
+    }
+
+    [Fact]
+    public void TheSettings_AreTheOnesTheRuleScriptsRead()
+    {
+        var s = Source();
+        Assert.Equal(4, s.Paths.Count);
+        Assert.Equal("<!-- aisf:docs-only -->", s.Marker);
+        Assert.Equal(new DateTimeOffset(2026, 10, 16, 0, 0, 0, TimeSpan.Zero), s.LegacyBefore);
+        Assert.Equal(["Technical Design"], s.DesignColumns);
+        Assert.Equal("video", s.VideoLabel);
+        Assert.Equal(["Integration Build (SQL container)"], s.MasterCodeChecks);
+    }
+
+    [Fact]
+    public void ABrokenOrMissingConfiguration_GivesTheDefaultsAndNoPaths()
+    {
+        var s = DocsOnlySettingsReader.From(JsonNode.Parse("""{"docsOnlyPaths":"x","timing":{"docsOnlyLegacyBefore":5},"requiredBodySection":[1],"masterCodeChecks":{"a":1}}"""));
+        Assert.Empty(s.Paths); Assert.Empty(s.DesignColumns); Assert.Empty(s.MasterCodeChecks);
+        Assert.Null(s.LegacyBefore);
+        Assert.Equal(("<!-- aisf:docs-only -->", "video"), (s.Marker, s.VideoLabel));
+        Assert.Empty(DocsOnlySettingsReader.From(null).Paths);
+    }
+
+    [Fact]
+    public void ThePort_AnswersWithD4_TheMarkerOfTheDesign_ThePathsOfTheConfiguration_TheBuildOfTheMerge()
+    {
+        var port = new DomainDocsOnlyPort(Source());
+        Assert.True(port.ItemIsDocsOnly(true));
+        Assert.False(port.ItemIsDocsOnly(false));
+        Assert.True(port.FilesAreDocumentation(["docs/design/a.md", "README.md"]));
+        Assert.False(port.FilesAreDocumentation(["docs/design/a.md", "src/App.cs"]));
+        Assert.False(port.FilesAreDocumentation([]));   // (a pull request with no files proves nothing)
+        // the code check skipped: no code changed (from the build); it ran: the merge is not docs-only; not completed yet: the files decide
+        Assert.Equal(new MergeDocsOnlyVerdict(true, "build"), port.MergeIsDocsOnly([new BuildCheck("integration build (sql container)", "completed", "skipped")], null));
+        Assert.Equal(new MergeDocsOnlyVerdict(false, "build"), port.MergeIsDocsOnly([new BuildCheck("Integration Build (SQL container)", "completed", "success")], ["docs/a.md"]));
+        Assert.Equal(new MergeDocsOnlyVerdict(true, "pr-files"), port.MergeIsDocsOnly([new BuildCheck("Integration Build (SQL container)", "in_progress", null)], ["docs/a.md"]));
+        Assert.Null(port.MergeIsDocsOnly([], null));
+    }
+}
+
 public sealed class V2OwnershipTests
 {
     static readonly RepoId Home = new("acme", "orders");
@@ -81,7 +131,7 @@ public sealed class V2OwnershipTests
     public async Task OwnsTheOpenItemsOfTheHomeRepository_NotTheOtherRepositories_NotTheCompletedOnes()
     {
         var store = new InMemoryWorkItemStore();
-        var svc = new WorkItemService(store, new WorkItemSaga(new RecordedDesignDocsOnly()));
+        var svc = new WorkItemService(store, new WorkItemSaga(new DomainDocsOnlyPort(DocsOnlySettingsReader.From(null))));
         await Start(svc, new ItemId(Home, 7)); await Start(svc, new ItemId(Home, 8), "docs"); await Start(svc, new ItemId("acme", "billing", 9));
         var own = new V2Ownership(store, Home);
         Assert.False(own.Owns(7));   // (nothing is read until the sweep asks)
@@ -97,7 +147,7 @@ public sealed class V2OwnershipTests
     public async Task ADatabaseThatDoesNotAnswer_KeepsTheLastAnswer_SoV1DoesNotTakeAnItemOverDuringAnOutage()
     {
         var store = new FlakyStore(new InMemoryWorkItemStore());
-        var svc = new WorkItemService(store, new WorkItemSaga(new RecordedDesignDocsOnly()));
+        var svc = new WorkItemService(store, new WorkItemSaga(new DomainDocsOnlyPort(DocsOnlySettingsReader.From(null))));
         await Start(svc, new ItemId(Home, 7));
         var own = new V2Ownership(store, Home);
         await own.RefreshAsync();

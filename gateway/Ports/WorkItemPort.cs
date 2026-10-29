@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
+using Fworker.Domain;
 using Fworker.Persistence;
 using Fworker.Workflows.Intake;
 using Fworker.Workflows.WorkItem;
@@ -86,14 +87,37 @@ static class SweepV2Filter
 /// <summary>What the gateway builds for the saga: its service, the history writer, the ownership the sweep reads and the intake settings.</summary>
 sealed record WorkItemParts(WorkItemService Service, WorkItemHistory History, IWorkItemStore Store, V2Ownership? Ownership, IntakeSettings Intake);
 
+/// <summary>The settings of D4's docs-only test (Fworker.Domain.DocsOnly), read from the configuration the rule scripts read: docsOnlyPaths, docsOnlyMarker, timing.docsOnlyLegacyBefore, requiredBodySection, videoLabel, masterCodeChecks.</summary>
+static class DocsOnlySettingsReader
+{
+    public static DocsOnlySettings From(JsonNode? root)
+    {
+        JsonNode? timing = null; try { timing = root?["timing"]; } catch { }
+        DateTimeOffset? legacy = null;
+        try { if (timing?["docsOnlyLegacyBefore"] is JsonValue v && v.TryGetValue<string>(out var text) && DateTimeOffset.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var at)) legacy = at; } catch { }
+        var columns = new List<string>();
+        try { if (root?["requiredBodySection"] is JsonObject sections) columns.AddRange(sections.Select(kv => kv.Key)); } catch { }
+        return new DocsOnlySettings(Strings(root, "docsOnlyPaths"), Text(root, "docsOnlyMarker") ?? "<!-- aisf:docs-only -->", legacy, columns, Text(root, "videoLabel") ?? "video", Strings(root, "masterCodeChecks"));
+    }
+
+    static string? Text(JsonNode? n, string name) { try { return n?[name] is JsonValue v && v.TryGetValue<string>(out var s) && s.Length > 0 ? s : null; } catch { return null; } }
+
+    static List<string> Strings(JsonNode? n, string name)
+    {
+        var l = new List<string>();
+        try { if (n?[name] is JsonArray a) foreach (var x in a) if (x is JsonValue v && v.TryGetValue<string>(out var s) && s.Length > 0) l.Add(s); } catch { }
+        return l;
+    }
+}
+
 static class WorkItemWiring
 {
-    /// <summary>The saga's parts on the database of the host. The docs-only port is D4's adapter once D4 is on master (Fworker.Workflows.WorkItem.DocsOnlyPort); until then the recorded design decides.</summary>
+    /// <summary>The saga's parts on the database of the host. The docs-only test is D4's, with the settings of the configuration.</summary>
     public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null)
     {
         Func<FactoryDbContext> open = () => Open(connectionString);
         var store = new SqlWorkItemStore(open);
-        var service = new WorkItemService(store, new WorkItemSaga(docs ?? new RecordedDesignDocsOnly()));
+        var service = new WorkItemService(store, new WorkItemSaga(docs ?? new DomainDocsOnlyPort(DocsOnlySettingsReader.From(c.Instance.Root))));
         var ownership = c.Instance.Home is { } home ? new V2Ownership(store, home) : null;
         return new WorkItemParts(service, new WorkItemHistory(open), store, ownership, IntakeSettings.From(c.Instance.Root, Environment.GetEnvironmentVariable));
     }

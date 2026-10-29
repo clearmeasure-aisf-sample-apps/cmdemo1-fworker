@@ -1,4 +1,5 @@
 using Fworker.Contracts.Ids;
+using Fworker.Domain;
 using Fworker.Workflows.WorkItem;
 using Xunit;
 using static Fworker.Workflow.Tests.SagaFixture;
@@ -348,10 +349,10 @@ public class WorkItemSagaTests
         var unknown = await fx.Send(new MergeFactsRead(Item, 0, "facts-1", [new BuildCheck("Integration Build (SQL container)", "in_progress", null)], null));
         Assert.Equal("feature", fx.State.Plan);
         Assert.Empty(unknown.Decisions);
-        fx.Docs.Merge = new MergeDocsOnlyAnswer(false, "build");
+        fx.Docs.Merge = new MergeDocsOnlyVerdict(false, "build");
         await fx.Send(new MergeFactsRead(Item, 0, "facts-2", [new BuildCheck("Integration Build (SQL container)", "completed", "success")], null));
         Assert.Equal("feature", fx.State.Plan);
-        fx.Docs.Merge = new MergeDocsOnlyAnswer(true, "build");
+        fx.Docs.Merge = new MergeDocsOnlyVerdict(true, "build");
         var docs = await fx.Send(new MergeFactsRead(Item, 0, "facts-3", [new BuildCheck("Integration Build (SQL container)", "completed", "skipped")], null));
         Assert.Equal([WorkItemActions.PlanSwitched, WorkItemActions.Completed], docs.Decisions.Select(d => d.Action));
         Assert.Equal(("docs", WorkItemStatus.Completed), (fx.State.Plan, fx.State.Status));
@@ -403,7 +404,7 @@ public class WorkItemSagaTests
         var second = await fx.Budget(BudgetKind.Failure);
         var parked = Assert.Single(second.Decisions);
         Assert.Equal(WorkItemActions.Parked, parked.Action);
-        Assert.StartsWith("failures-exhausted: 2 failures in Design", parked.Reasons[0]);
+        Assert.StartsWith("runtime-failed: 2 failures in Design", parked.Reasons[0]);
         Assert.True(fx.State.Parked);
         Assert.Null(fx.State.LeaseDue);
         Assert.Empty(second.Timers);
@@ -464,7 +465,7 @@ public class WorkItemSagaTests
         // a new service on the same store is a restarted process
         var restarted = new WorkItemService(fx.Store, new WorkItemSaga(fx.Docs), () => fx.Now);
         var r = await restarted.Handle(new BudgetSpent(Item, 1, fx.Arm, "after-restart", BudgetKind.Failure, ""));
-        Assert.Contains("failures-exhausted", Assert.Single(r.Decisions).Reasons[0]);
+        Assert.Contains("runtime-failed", Assert.Single(r.Decisions).Reasons[0]);
         Assert.Equal(1, fx.State.LaunchesOf(StepKind.Design));
     }
 
@@ -550,7 +551,7 @@ public class WorkItemSagaTests
     [Fact]
     public async Task APolicy_SetsTheLeasesTheBudgetsAndTheSettleWindow()
     {
-        var policy = new WorkItemPolicy(new Dictionary<StepKind, TimeSpan?> { [StepKind.Design] = TimeSpan.FromMinutes(5) }, MaxFailuresPerPhase: 1, SettleWindow: TimeSpan.FromHours(1), FinalEnvironment: "uat");
+        var policy = new WorkItemPolicy(new Dictionary<StepKind, TimeSpan?> { [StepKind.Design] = TimeSpan.FromMinutes(5) }, Budgets: new RecoverySettings(MaxFailuresPerPhase: 1), SettleWindow: TimeSpan.FromHours(1), FinalEnvironment: "uat");
         var fx = new SagaFixture(policy);
         await fx.Start();
         Assert.Equal(T0.AddMinutes(5), fx.State.LeaseDue);

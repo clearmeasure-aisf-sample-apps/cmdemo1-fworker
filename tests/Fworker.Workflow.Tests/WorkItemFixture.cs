@@ -1,4 +1,5 @@
 using Fworker.Contracts.Ids;
+using Fworker.Domain;
 using Fworker.Workflows.WorkItem;
 
 namespace Fworker.Workflow.Tests;
@@ -7,10 +8,10 @@ namespace Fworker.Workflow.Tests;
 sealed class FakeDocsPort : IDocsOnlyPort
 {
     public bool? Files;
-    public MergeDocsOnlyAnswer? Merge;
+    public MergeDocsOnlyVerdict? Merge;
     public bool ItemIsDocsOnly(bool designMarker) => designMarker;
     public bool? FilesAreDocumentation(IReadOnlyList<string> files) => Files;
-    public MergeDocsOnlyAnswer? MergeIsDocsOnly(IReadOnlyList<BuildCheck> checks, IReadOnlyList<string>? pullRequestFiles) => Merge;
+    public MergeDocsOnlyVerdict? MergeIsDocsOnly(IReadOnlyList<BuildCheck> checks, IReadOnlyList<string>? pullRequestFiles) => Merge;
 }
 
 /// <summary>The saga on an in-memory store with a clock the test moves (W6.1): sends an input like the handler does and keeps every decision and timer it asked for.</summary>

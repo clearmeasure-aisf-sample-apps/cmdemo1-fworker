@@ -1,4 +1,5 @@
 using Fworker.Contracts.Ids;
+using Fworker.Domain;
 
 namespace Fworker.Workflows.WorkItem;
 
@@ -111,7 +112,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 return StepAnswer.Applied;
             case BudgetKind.Failure:
                 state.Failures[phase] = state.FailuresOf(state.Step) + 1;
-                if (state.Failures[phase] >= policy.MaxFailuresPerPhase) c.Park($"failures-exhausted: {state.Failures[phase]} failures in {phase}{Why(b.Reason)}");
+                if (FailuresSpent(state.Failures[phase]) is { } spent) c.Park($"{spent}: {state.Failures[phase]} failures in {phase}{Why(b.Reason)}");
                 return StepAnswer.Applied;
             case BudgetKind.Launch:
                 // the launch is asked for: one that would pass the limit is refused and parks the item (v1: Exhausted is asked before Provision); another phase starting begins the count again
@@ -125,13 +126,20 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 return StepAnswer.Applied;
             case BudgetKind.IdleFollowUp:
                 state.IdleFollowUps++;
-                if (state.IdleFollowUps >= policy.MaxIdleFollowUps) c.Park($"followups-idle: {state.IdleFollowUps} follow-up sessions in a row ended without connecting to the gateway or pushing");
+                if (state.IdleFollowUps >= policy.Recovery.MaxFailuresPerPhase) c.Park($"followups-idle: {state.IdleFollowUps} follow-up sessions in a row ended without connecting to the gateway or pushing");
                 return StepAnswer.Applied;
             default: return StepAnswer.Refused("unknown budget");
         }
     }
 
     static string Why(string reason) => reason.Length == 0 ? "" : $" ({reason})";
+
+    // the recovery table's row for a lost session (D5): while the failures counted so far (this one included) are below the budget the item goes on, once they reach it the item is parked with the table's reason
+    string? FailuresSpent(int failures)
+    {
+        var d = RecoveryPolicy.Decide(RecoveryCause.SessionLost, new RecoveryCounters(SessionFailuresInPhase: failures), policy.Recovery);
+        return d.Action == RecoveryAction.Park ? d.ParkReason : null;
+    }
 
     StepAnswer LeaseExpired(StepContext c, PhaseLeaseExpired l)
     {
@@ -140,7 +148,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         if (state.Parked || state.Status != WorkItemStatus.Open || state.LeaseDue != l.Due) return StepAnswer.Stale("the lease is not the one that ran out");
         c.Decide(WorkItemActions.LeaseExpired, $"{phase} had no sign of life by {l.Due:O}");
         state.Failures[phase] = state.FailuresOf(state.Step) + 1;
-        if (state.Failures[phase] >= policy.MaxFailuresPerPhase) c.Park($"failures-exhausted: {state.Failures[phase]} failures in {phase} (lease expired)");
+        if (FailuresSpent(state.Failures[phase]) is { } spent) c.Park($"{spent}: {state.Failures[phase]} failures in {phase} (lease expired)");
         else c.Enter(state.Step, "lease expired");
         return StepAnswer.Applied;
     }

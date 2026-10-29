@@ -320,7 +320,8 @@ and W6.1 built, and what is left:
   generation and arm ids, `NotFound` ending quietly, the budgets (failures and launches per phase, idle follow-ups) in the state,
   leases as scheduled messages, the settle window, decisions published as `WorkItemDecided` with a sequence number, a redelivery after
   a crash between the save and the publish publishing again, per-item partitioning of the host's local queues. The docs-only test is
-  `IDocsOnlyPort`, whose adapter is D4's `DocsOnly` once D4 is on master (until then the recorded design decides).
+  `IDocsOnlyPort`, whose adapter `DomainDocsOnlyPort` calls D4's `DocsOnly` with the settings of `config/instance.json`; the failures
+  of a phase are counted against D5's recovery table (`RecoveryPolicy`, the lost-session row).
 - **Intake:** `IntakeRule` (the rule of `Invoke-Intake` as a pure function, with a WIP limit per repository and the choice of engine
   by `intake.v2Plans`), `intake.repositoryWipLimits`, `intake.v2Plans` (empty), `intake.v2Label` (`engine:v2`). v1's own intake in
   `Verbs.Sweep.ps1` is unchanged.
@@ -328,7 +329,8 @@ and W6.1 built, and what is left:
   says about those items (offers, triggers, holds, parks, owners) before the plant sees it. The rule script itself is not changed.
 - **Left for the integrator and W6.2 to W6.7:** passing the owned items into `sync-board` so the script also stops reading them
   (`Verbs.Sweep.ps1`); the feeder that reads a Todo item's body and calls `WorkItemIntake`; writing the `engine:v2` label (a
-  projection, W6.3); the decision verbs through S1 (W6.6); D4's adapter; D5's recovery table in place of the budget limits.
+  projection, W6.3); the decision verbs through S1 (W6.6); the other rows of D5's table (demotions, fix-forward rounds, mechanical
+  fixes), which belong to the verify and merge steps of W6.6 and W7.
 
 ### W7: R7, the feature plan (2 to 3 at once)
 
