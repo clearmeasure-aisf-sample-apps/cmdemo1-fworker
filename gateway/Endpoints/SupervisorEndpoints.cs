@@ -6,7 +6,7 @@ using static HttpResultsX;
 // and the supervisor's budgets; and the operator's switch of messaging. Every supervisor route's first guard is SupervisorOn; the operator-only ones
 // then Admin with the reason they always gave. Rules that came in another order stay in their handler: the digest's step budget comes after its
 // own caller rule (a refused call spends no step), and messaging/{action} answers 404 for an unknown action before any guard.
-sealed class SupervisorEndpoints(GatewayOptions gateway, MessagingSettings messaging, Plant plant, Messenger messenger) : IEndpointModule
+sealed class SupervisorEndpoints(GatewayOptions gateway, MessagingSettings messaging, Plant plant, Messenger messenger, IServiceProvider services) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes)
     {
@@ -16,7 +16,7 @@ sealed class SupervisorEndpoints(GatewayOptions gateway, MessagingSettings messa
             .SupervisorOn()
             .Admin(CallerView.Admitted, "a question is answered here by the operator only; the supervisor answers with a message of type answer");
         // GET /digest: the digest of this moment for the active supervisor (after a restart or a compaction; the routine never polls it) and the operator.
-        routes.MapGet("/api/v1/digest", (HttpContext c) => Digest(c))
+        routes.MapGet("/api/v1/digest", async (HttpContext c) => { return await Digest(c); })
             .SupervisorOn();
         routes.MapPost("/api/v1/supervisor/patrol-ack", async (HttpContext c) => { return await PatrolAck(c); })
             .SupervisorOn();
@@ -49,7 +49,7 @@ sealed class SupervisorEndpoints(GatewayOptions gateway, MessagingSettings messa
         return MessagingResults.AsResult(tooLarge ? messenger.TooLarge(who, "operator-note") : messenger.OperatorAnswer(id, text, who.Name));
     }
 
-    IResult Digest(HttpContext ctx)
+    async Task<IResult> Digest(HttpContext ctx)
     {
         var who = ctx.Caller().Admitted;
         if (who.Kind is not ("admin" or "manager")) return Fail(403, "forbidden", "the digest is read by the supervisor and the operator", 30);
@@ -57,7 +57,10 @@ sealed class SupervisorEndpoints(GatewayOptions gateway, MessagingSettings messa
         // for the supervisor it is a step of its hourly budget (3.9), like its read verbs
         if (who.Kind == "manager" && plant.SupervisorStep(false) is { Ok: false } noStep)
             return Results.Json(new { ok = false, code = "step-budget", reason = "the supervisor's step budget of this hour is spent; keep waiting for events and do not work around it", retryAfterSeconds = noStep.RetryAfter, exit = 20 }, statusCode: 429);
-        return Results.Text(new JsonObject { ["ok"] = true, ["digest"] = plant.DigestNow(), ["exit"] = 0 }.ToJsonString(), "application/json");
+        var body = new JsonObject { ["ok"] = true, ["digest"] = plant.DigestNow(), ["exit"] = 0 };
+        // W6.7: where the v2 engine acts, the items it owns that need someone, by repository (beside the digest, outside its schema: v1's digest is exactly what it was)
+        if (services.GetService<V2ItemViews>() is { } v2) body["v2Items"] = V2ItemViews.DigestBlock(await v2.Read(ctx.RequestAborted));
+        return Results.Text(body.ToJsonString(), "application/json");
     }
 
     async Task<IResult> PatrolAck(HttpContext ctx)
