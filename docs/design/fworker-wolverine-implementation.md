@@ -485,6 +485,17 @@ W9 now comes before W8: the cutover needs every verb on v2, and incidents are a 
 | W9.11 | remove v1: the sweep engine, the server rule scripts, the lease, the snapshot, `RunnerPool`, shadow mode and the v1 side of S1 (one subagent, last) | many | the cutover gate | L |
 
 Parallel start: W9.1 to W9.8 after W9.0, three at a time; W9.9 when they are merged; W9.11 after the cutover gate, beside W8.
+
+**W9.0 as built (#352).** No flag moves QC-gated items to v2 (revision of 2026-10-26): the verbs of QC join v2 with W9.1 and the cutover. The schema is DbUp's, so the tables are two new idempotent scripts
+(`fworker-database.md`) and the model that maps them: `012_AddQcEnvironments.sql` (`factory.QcEnvironments`: one row per repository and pull request, the key `owner/repo!N`; the state as a JSON document with a
+revision, beside the columns `Repository`, `ItemKey` and `Status` that "Waiting for PR QC" reads; W9.1) and `013_AddTranscripts.sql` (`factory.Transcripts`: one row per session name with the qualified item, the
+kept lines as a JSON array, a revision; indexes by item and by start for the prune; W9.8). W9.2 to W9.7 need no table: the item verbs use `WorkItems`, the merge verbs `MergeTrains`, the delivery verbs
+`DeliveryTrains`, `MergedItems` and `DeliveredTo`, the read models read GitHub and those tables, the keeper and manager commands are handlers without state, the revocations stay refs of the work-orders
+repository (the durable truth of CLAUDE.md), and `journal` uses `ItemHistory` and `ProjectionVersions`. A table a later item finds missing is a new script `014_` onward, expand-only.
+The route files are `gateway/Verbs/Routes/{Item,Merge,Delivery,ReadModels,Keeper,Services,Board}.cs`: each lists the verbs of its group (the inventory's owners; `auto-promote` is in Delivery, `metrics` in Services,
+the transcript verbs in Board; the `qc-*` verbs and the five retired ones are in none) and has an empty `Register(V2VerbRoutes, IServiceProvider)` that its item fills with `routes.Add(Verbs, "verb", handler)`.
+`V2VerbRoutes.Build` calls the seven only where the engine acts (`Engine.V2Acts`) and the composition puts a `V2VerbRouter` in front of the router only when a route exists, so v1 routing, the shadow run and every
+environment are exactly what they were; a verb no group registered still runs on v1.
 **Cutover gate** (the stabilisation gate's form, on v2): the full Tier 1 on v2 with golden writes; the kill-switch drill first (set
 `FACTORY_V2_OFF`, v1 resumes every item from the state comments and acts for one sweep, unset it, v2 adopts them again); then **one
 measured 8-item batch** on v2 with no regression against the 2026-10-25 baseline (same rule as stage C's gate); after each release

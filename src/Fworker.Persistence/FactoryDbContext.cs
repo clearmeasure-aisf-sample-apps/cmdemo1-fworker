@@ -26,6 +26,8 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<WorkItemRow> WorkItems => Set<WorkItemRow>();
     public DbSet<MergeTrainRow> MergeTrains => Set<MergeTrainRow>();
     public DbSet<CapacityLedgerRow> CapacityLedgers => Set<CapacityLedgerRow>();
+    public DbSet<QcEnvironmentRow> QcEnvironments => Set<QcEnvironmentRow>();
+    public DbSet<TranscriptRow> Transcripts => Set<TranscriptRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -169,6 +171,36 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.Property(x => x.StateJson).IsRequired();
             // the ledger is read and written by its key; a stale writer loses (the handler runs again on the new state)
             e.Property(x => x.Revision).IsConcurrencyToken();
+        });
+
+        b.Entity<QcEnvironmentRow>(e =>
+        {
+            e.ToTable("QcEnvironments");
+            e.HasKey(x => x.PullRequestKey);
+            e.Property(x => x.PullRequestKey).HasMaxLength(300);
+            e.Property(x => x.Repository).HasMaxLength(200).IsRequired();
+            e.Property(x => x.ItemKey).HasMaxLength(300);
+            e.Property(x => x.Status).HasMaxLength(16).IsRequired();
+            e.Property(x => x.StateJson).IsRequired();
+            // the gate's state is read and written by its pull request; a stale writer loses (the handler runs again on the new state)
+            e.Property(x => x.Revision).IsConcurrencyToken();
+            // "Waiting for PR QC" lists the pull requests of one repository that are not over: a read by repository, never a scan of everything
+            e.HasIndex(x => new { x.Repository, x.Status });
+        });
+
+        b.Entity<TranscriptRow>(e =>
+        {
+            e.ToTable("Transcripts");
+            e.HasKey(x => x.Name);
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.ItemKey).HasMaxLength(300);
+            e.Property(x => x.Runtime).HasMaxLength(32).IsRequired();
+            e.Property(x => x.Phase).HasMaxLength(32).IsRequired();
+            e.Property(x => x.LinesJson).IsRequired();
+            e.Property(x => x.Revision).IsConcurrencyToken();
+            // the sessions of one item, and the prune by age
+            e.HasIndex(x => new { x.ItemKey, x.StartedAt });
+            e.HasIndex(x => x.StartedAt);
         });
 
         b.Entity<CatalogCopy>(e =>

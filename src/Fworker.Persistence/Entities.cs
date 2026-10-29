@@ -201,3 +201,51 @@ public class CapacityLedgerRow
     public string StateJson { get; set; } = "";
     public DateTimeOffset UpdatedAt { get; set; }
 }
+
+/// <summary>
+/// The state of one QC gate (W9.0 for W9.1, refactor R9): one row per repository and pull request, the key "owner/repo!N" in lower case. The state is a JSON document owned by Fworker.Workflows.Qc (the
+/// environment record, its attempt and assignment, the verdict), saved with a revision so that two writers cannot both win. The columns beside the document are the ones read without opening it: the pull
+/// requests of one repository that are not over ("Waiting for PR QC") and the item the pull request belongs to.
+/// </summary>
+public class QcEnvironmentRow
+{
+    /// <summary>"owner/repo!N", lowercase (the correlation key of a pull request).</summary>
+    public string PullRequestKey { get; set; } = "";
+    /// <summary>"owner/repo", lowercase.</summary>
+    public string Repository { get; set; } = "";
+    /// <summary>The qualified item, "owner/repo#N", when the pull request is an item's.</summary>
+    public string? ItemKey { get; set; }
+    /// <summary>Counts the saves; the concurrency token: a writer that read an older revision fails and runs again on the new state.</summary>
+    public int Revision { get; set; }
+    /// <summary>The record's state (requested, assigned, ready, passed, failed, torn-down and the like), so that a list of the ones not over opens no document.</summary>
+    public string Status { get; set; } = "";
+    public string StateJson { get; set; } = "";
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>
+/// The transcript of one runtime worker session (W9.0 for W9.8, refactor R9): one row per session name, with the item qualified. The redacted lines the container printed are kept as a JSON array, the last
+/// bytes only (the store's own limit), saved at most once a minute while lines arrive and at once when the session ends. It replaces the ref store of the plant snapshot (a ciphertext commit in a public repository).
+/// </summary>
+public class TranscriptRow
+{
+    /// <summary>The session's name (letters, digits, '.', '_' and '-').</summary>
+    public string Name { get; set; } = "";
+    /// <summary>The qualified item, "owner/repo#N", when the session works one.</summary>
+    public string? ItemKey { get; set; }
+    public string Runtime { get; set; } = "";
+    public string Phase { get; set; } = "";
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset LastLineAt { get; set; }
+    /// <summary>Null while the session runs.</summary>
+    public DateTimeOffset? EndedAt { get; set; }
+    /// <summary>Counts the saves; the concurrency token: a writer that read an older revision fails and runs again on the new state.</summary>
+    public int Revision { get; set; }
+    public long Bytes { get; set; }
+    /// <summary>The lines ever received, and the ones dropped from the front to keep the limit.</summary>
+    public long LinesTotal { get; set; }
+    public long LinesDropped { get; set; }
+    /// <summary>The kept lines as a JSON array of strings.</summary>
+    public string LinesJson { get; set; } = "[]";
+    public DateTimeOffset UpdatedAt { get; set; }
+}
