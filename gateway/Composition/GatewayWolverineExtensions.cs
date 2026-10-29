@@ -20,7 +20,7 @@ static class GatewayWolverineExtensions
         IngressCorrelations? correlations = null; IngressInboxPort? inboxPort = null;
         ShadowOctopusPort? octopusPort = null; var shadowHolder = new DeliveryShadowHolder();
         var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null;
-        V2Ownership? v2Ownership = null;
+        V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null;
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
@@ -36,8 +36,10 @@ static class GatewayWolverineExtensions
                     (runtime, execution, item) => correlations?.FromRuntime(runtime, execution, item));   // W4.1: the task or agent id finds its item later
                 journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands
                 // W6.0, W6.1: the WorkItemSaga of the hybrid composition: v1's plant still offers the sessions, the saga decides the items it has started, and v1's sweep leaves those items alone (V2Ownership)
-                var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds));
+                // W6.6: the docs plan's steps run in it; the board it moves cards on is the catalog's, read when the first card moves
+                var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), boardRef: () => sp.GetService<ISystemCatalog>()?.Current.Board);
                 WorkItemWiring.Attach(host, workItems);
+                workItemParts = workItems;
                 v2Ownership = workItems.Ownership;
                 if (c.Instance.Home is { } home)
                 {
@@ -48,6 +50,16 @@ static class GatewayWolverineExtensions
                     IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item
                     if (ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable) is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));
+                    // W6.6: the intake of docs items (off unless intake is enabled and names the docs plan in intake.v2Plans); the plant's facts are read when the job runs
+                    if (workItems.Intake is { Enabled: true } && workItems.Intake.V2Plans.Count > 0)
+                    {
+                        var intake = new Fworker.Workflows.Intake.WorkItemIntake(workItems.Store, workItems.Intake, async (m, _) => { if (!await host.PublishAsync(m)) throw new InvalidOperationException("the Wolverine host is not up"); });
+                        var docsIntake = workItems.Docs.IntakeJob(intake, home, workItems.Docs.Settings.Columns.Values.ToList(), () => sp.GetRequiredService<Plant>().IntakeSlots(),
+                            () => workItems.Ownership?.Offers.Any(o => o.Column == workItems.Docs.Settings.ColumnOf(Fworker.Workflows.WorkItem.StepKind.Design) && !sp.GetRequiredService<Plant>().HasOwner(o.Item)) == true,
+                            () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low);
+                        if (docsIntake is not null)
+                            jobs.Add(RecurringJobSlots.DocsIntake, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["docsIntake"] = await docsIntake.Run(ct) }.ToJsonString()));
+                    }
                     correlations = new IngressCorrelations(map, home);
                     inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
                     // W4.1 follow-up (#485): the claims of the deduplication do not live for ever
@@ -94,6 +106,10 @@ static class GatewayWolverineExtensions
         }
         // W6.1: the items the saga owns, for the sweep (resolving it builds the host first, which makes it; null without a home repository)
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return v2Ownership!; });
+        // W6.6: the jobs of the recurring slots, for a look at which are filled (resolving it builds the host first, which fills them)
+        if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return jobs; });
+        // W6.6: the saga's parts, for the verbs' feed (S1) (resolving it builds the host first, which makes them)
+        if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return workItemParts!; });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)
             services.AddSingleton(sp => { var h = sp.GetRequiredService<WolverineHostService>(); return new RecurringJobScheduler(recurring!, jobs, r => h.PublishAsync(r), () => c.Leader.MayAct); });

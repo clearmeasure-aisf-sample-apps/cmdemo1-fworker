@@ -2,7 +2,7 @@ namespace Fworker.Workflows.WorkItem;
 
 // W6.1: the steps of a plan (docs/design/wolverine-factory.md 3.1). A step is a class with its lease, what it does when the item enters and leaves it, and the messages it owns: the saga routes each message to the
 // step it belongs to (a fact about the merge belongs to the merge step whichever step the item is on). The rules inside the steps are the core's: the docs-only decisions of the design and the pull request, the
-// merge as a fact, the delivery and the settle window. W6.6 gives the docs plan's steps their commands and checks on top of this.
+// merge as a fact, the delivery and the settle window. W6.6 (Plans/DocsSteps.cs) gives the docs plan's steps their own rules on top of this: Steps.For(plan, kind) picks the step class of the plan.
 
 /// <summary>What a step answered to a message: the outcome and, for a refusal, why.</summary>
 public readonly record struct StepAnswer(WorkItemOutcome Outcome, string Reason = "")
@@ -43,16 +43,17 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.Status = WorkItemStatus.Open;
         State.Parked = false; State.ParkReason = "";
         State.SettleUntil = null;
-        State.LeaseDue = Steps.Of(step).Lease(Policy) is { } lease ? Now + lease : null;
+        State.LeaseDue = Steps.For(Plan, step).Lease(Policy) is { } lease ? Now + lease : null;
+        State.MergeRequest = null; State.MergeRetryAt = null;   // (a merge asked of an earlier arm is no longer waited for)
         TimerChanged = true;
-        Steps.Of(step).OnEnter(this);
         Decide(WorkItemActions.StepEntered, reason);
+        Steps.For(Plan, step).OnEnter(this);   // (after the decision: what the step asks for, it asks for in the step it has entered)
     }
 
     /// <summary>The step is done: the next step of the plan, or the end of the item when it was the last.</summary>
     public void Advance(string reason)
     {
-        Steps.Of(State.Step).OnLeave(this);
+        Steps.For(Plan, State.Step).OnLeave(this);
         if (Plan.After(State.Step) is { } next) Enter(next, reason);
         else Complete(reason);
     }
@@ -62,6 +63,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.Status = WorkItemStatus.Completed;
         State.LeaseDue = null; State.SettleUntil = null; State.Parked = false; State.ParkReason = "";
         State.CompletedAt = Now;
+        State.MergeRequest = null; State.MergeRetryAt = null;
         TimerChanged = true;
         Decide(WorkItemActions.Completed, reason);
     }
@@ -72,14 +74,30 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         var from = State.Plan;
         if (string.Equals(from, to, StringComparison.OrdinalIgnoreCase)) return;
         State.Plan = to;
+        State.MergeRequest = null; State.MergeRetryAt = null;   // (a merge asked of the docs plan is not this plan's)
         Decide(WorkItemActions.PlanSwitched, $"{from} to {to}", reason);
-        if (!Plan.Has(State.Step)) Complete($"the {to} plan has no {State.Step} step");
+        if (!Policy.Carries(to)) HandBack($"the {to} plan is not carried by this engine");
+        else if (!Plan.Has(State.Step)) Complete($"the {to} plan has no {State.Step} step");
+    }
+
+    /// <summary>
+    /// The instance ends without the item being done: v1 takes the item up again (it is no longer owned, so its sweep reads it). Used when the item moves to a plan this engine does not carry; nothing about the board or
+    /// the state comment changes, because v1's verbs kept them in step all along.
+    /// </summary>
+    public void HandBack(string reason)
+    {
+        State.Status = WorkItemStatus.Completed;
+        State.LeaseDue = null; State.SettleUntil = null; State.Parked = false; State.ParkReason = "";
+        State.MergeRequest = null; State.MergeRetryAt = null;
+        State.CompletedAt = Now;
+        TimerChanged = true;
+        Decide(WorkItemActions.HandedBack, reason);
     }
 
     public void Park(string reason)
     {
         State.Parked = true; State.ParkReason = reason;
-        State.LeaseDue = null;
+        State.LeaseDue = null; State.MergeRequest = null; State.MergeRetryAt = null;
         TimerChanged = true;
         Decide(WorkItemActions.Parked, reason);
     }
@@ -107,12 +125,15 @@ public abstract class WorkStep
     public virtual void OnEnter(StepContext c) { }
     public virtual void OnLeave(StepContext c) { }
 
+    /// <summary>A refusal of the report "this step is done" (StepCompleted) when the step's own rule is not met, or null when the step may be left. The core steps leave on a report.</summary>
+    public virtual StepAnswer? Gate(StepContext c) => null;
+
     /// <summary>Handles a message that belongs to this step. The saga has checked the generation, the key and, for an armed message, the arm.</summary>
     public virtual StepAnswer Handle(StepContext c, WorkItemInput input) => StepAnswer.Refused($"the {Kind} step takes no {input.GetType().Name}");
 }
 
 /// <summary>Design. What the latest design section recorded decides the plan: the docs-only marker switches a feature item to the docs plan and the lack of it a docs item back.</summary>
-public sealed class DesignStep : WorkStep
+public class DesignStep : WorkStep
 {
     public override StepKind Kind => StepKind.Design;
 
@@ -132,7 +153,7 @@ public sealed class DesignStep : WorkStep
 }
 
 /// <summary>Develop. The pull request exists from here: its files may show that a docs item changes code.</summary>
-public sealed class DevelopStep : WorkStep
+public class DevelopStep : WorkStep
 {
     public override StepKind Kind => StepKind.Develop;
 
@@ -150,13 +171,13 @@ public sealed class DevelopStep : WorkStep
 }
 
 /// <summary>Verify: CI and the Functional Testing verdict run beside it. The core has no rule of its own for it yet (W6.6 and W7 add them); the lease and the budgets apply.</summary>
-public sealed class VerifyStep : WorkStep
+public class VerifyStep : WorkStep
 {
     public override StepKind Kind => StepKind.Verify;
 }
 
 /// <summary>Merge. The merge is a fact (ItemMerged): it completes this step whichever step the item was on, because a person or the merge queue may have merged it first.</summary>
-public sealed class MergeStep : WorkStep
+public class MergeStep : WorkStep
 {
     public override StepKind Kind => StepKind.Merge;
 
@@ -244,14 +265,21 @@ public static class Steps
 {
     static readonly Dictionary<StepKind, WorkStep> All = new WorkStep[] { new DesignStep(), new DevelopStep(), new VerifyStep(), new MergeStep(), new DeliverStep() }.ToDictionary(s => s.Kind);
 
+    static readonly Dictionary<StepKind, WorkStep> DocsSteps = new WorkStep[] { new DocsDesignStep(), new DocsDevelopStep(), new DocsVerifyStep(), new DocsMergeStep() }.ToDictionary(s => s.Kind);
+
+    /// <summary>The core step of that kind. A plan with rules of its own (the docs plan, W6.6) has its own class: <see cref="For"/>.</summary>
     public static WorkStep Of(StepKind kind) => All[kind];
+
+    /// <summary>The step class of <paramref name="kind"/> on <paramref name="plan"/>.</summary>
+    public static WorkStep For(WorkPlan plan, StepKind kind) => plan.Name == WorkPlans.Docs && DocsSteps.TryGetValue(kind, out var s) ? s : All[kind];
 
     /// <summary>The step a message belongs to, or null for a message of the saga itself (start, completion, budgets, leases, park).</summary>
     public static StepKind? HomeOf(WorkItemInput input) => input switch
     {
         DesignRecorded => StepKind.Design,
         PullRequestChanged => StepKind.Develop,
-        MergeSeen => StepKind.Merge,
+        MergeSeen or MergeAttempted or MergeRetryDue => StepKind.Merge,
+        VerdictRecorded => StepKind.Verify,
         MergeFactsRead or DeliverySeen or DeliveryLost or SettleWindowElapsed => StepKind.Deliver,
         _ => null,
     };

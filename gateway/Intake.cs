@@ -4,6 +4,13 @@
 // session: it held or was offered a work item) and has less owned items and open own-item offers than its capacity. In memory, like the plant.
 sealed partial class Plant
 {
+    // W6.6: whether a session holds the item (an owner, or an accepted own-item assignment). The offers the saga makes for its items (V2Ownership.OfferNodes) go only to an item nobody holds: a held item is offered again
+    // by v1's sweep only when its owner is gone, and the plant takes an offer of an accepted item for a session that is gone
+    public bool HasOwner(int item)
+    {
+        lock (gate) return ownerOf.ContainsKey(item) || assignments.Values.Any(a => a.Item == item && a.Accepted && a.Kind == "own-item" && !IsQc(a));
+    }
+
     public int IntakeSlots()
     {
         lock (gate)

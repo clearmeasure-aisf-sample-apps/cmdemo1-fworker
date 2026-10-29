@@ -1,0 +1,133 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
+using Fworker.Contracts.Ids;
+using Fworker.Contracts.Seams;
+using Fworker.Workflows.WorkItem;
+
+// W6.6 (#335): the decision verbs of an item the WorkItemSaga owns, in the hybrid composition (seam S1, docs/design/fworker-wolverine-refactor.md 4). v1's rule script still does what the verb does (the comment, the
+// state comment, the card, the claim) and answers the session; this router then tells the saga what happened, as the inputs of its docs plan (ReviewRecorded, VerdictRecorded, StepCompleted, ...), which the saga publishes decisions,
+// timers and the merge call for. So the verb's answer is v1's and unchanged (the golden writes of a verb are the script's), the saga is never ahead of the script, and v1 can take the item back at any time with its own state intact
+// (FACTORY_V2_OFF, or the saga handing the item back). What the saga decides on top of the script, it decides alone: the merge, the demotions and parks of D5's rows are the same numbers, so they agree with the script's.
+// An event that cannot be handed to the saga (the host is down) is tried again and then dropped with a log line: the saga's lease runs out and its failure budget parks the item, which is the way a lost session ends too.
+// Only where the engine acts; an item without a saga costs one look at the ownership.
+
+/// <summary>The saga's inputs for a verb call, as pure functions of the call, the script's answer and the saga's state.</summary>
+static class DocsVerbs
+{
+    public static readonly HashSet<string> Handled = ["append-body", "record-review", "complete", "validation-verdict"];
+
+    /// <summary>The calls of a session working on its item that are a sign of life for the step's lease (v1 renews the claim's lease on the owner's calls, Lease.cs), besides the verbs above.</summary>
+    public static readonly HashSet<string> Activity = ["comment", "claim-item", "open-pr", "update-pr", "publish-demo", "private-build", "wait-for-checks"];
+
+    /// <summary>The pull request whose head the inputs need, or 0: the head the verdict was given for (when the call does not name it) and the head of the pull request a development completes with.</summary>
+    public static int PullRequestToRead(string verb, JsonObject body, JsonObject answer, WorkItemState state)
+    {
+        if (!state.IsOpen || state.Plan != WorkPlans.Docs) return 0;
+        if (verb == "validation-verdict" && state.Step == StepKind.Verify && Bool(answer, "recorded") && Text(body, "head_sha").Length == 0) return Int(body, "pr");
+        if (verb == "complete" && state.Step == StepKind.Develop && Bool(answer, "completed")) return Int(answer, "prNumber");
+        return 0;
+    }
+
+    /// <summary>The inputs, in the order to publish them. <paramref name="head"/> is what <see cref="PullRequestToRead"/> asked for ("" when it was not asked for or could not be read).</summary>
+    public static IReadOnlyList<WorkItemInput> Inputs(string verb, JsonObject body, JsonObject answer, WorkItemState state, DocsPlanSettings settings, string head)
+    {
+        if (!state.IsOpen || state.Plan != WorkPlans.Docs || state.Parked) return [];
+        var item = state.ItemId; var gen = state.Generation; var arm = state.ArmId;
+        switch (verb)
+        {
+            case "append-body":
+                // the design section lands in the design column; whether it carries the docs-only marker is what the saga's plan decides on
+                var content = Text(body, "content");
+                if (state.Step != StepKind.Design || !Bool(answer, "appended") || settings.DesignSection.Length == 0 || !content.Contains(settings.DesignSection, StringComparison.OrdinalIgnoreCase)) return [];
+                return [new DesignRecorded(item, gen, arm, $"design|{arm}|{Hash(content)}", content.Contains(settings.DocsMarker, StringComparison.Ordinal))];
+
+            case "record-review":
+                var verdict = Text(answer, "verdict");
+                if (state.Step is not (StepKind.Design or StepKind.Develop) || verdict is not ("COMPLETE" or "FINDINGS")) return [];
+                return [new ReviewRecorded(item, gen, arm, $"review|{arm}|{Int(answer, "round")}|{verdict}", verdict == "COMPLETE")];
+
+            case "complete":
+                // the script parked the item (the worker reported a failure)
+                if (Bool(answer, "parked")) return [new ParkWorkItem(item, gen, $"park|{arm}|{Text(answer, "reason")}", Text(answer, "reason") is { Length: > 0 } r ? r : "worker-failure")];
+                if (!Bool(answer, "completed") || state.Step is not (StepKind.Design or StepKind.Develop)) return [];
+                var inputs = new List<WorkItemInput>();
+                if (state.Step == StepKind.Develop && Int(answer, "prNumber") is > 0 and var pr)
+                    inputs.Add(new PullRequestChanged(item, gen, $"pr|{arm}|{pr}|{head}", pr, head, []));
+                inputs.Add(new StepCompleted(item, gen, arm, $"done|{arm}"));
+                return inputs;
+
+            case "validation-verdict":
+                if (state.Step != StepKind.Verify || !Bool(answer, "recorded")) return [];
+                var passed = Bool(answer, "passed"); var pull = Int(body, "pr");
+                var verdictHead = Text(body, "head_sha") is { Length: > 0 } given ? given : head;
+                // a PASS the script parked (no Auto Merge label) is not a PASS the saga merges: it parks too, and a person's unpark resumes both
+                if (passed && Text(answer, "next") == "parked") return [new ParkWorkItem(item, gen, $"park|{arm}|pass-without-auto-merge", "pass-without-auto-merge")];
+                return [new VerdictRecorded(item, gen, arm, $"verdict|{arm}|{pull}|{verdictHead}|{passed}", passed, pull, verdictHead, Text(body, "summary"))];
+        }
+        return [];
+    }
+
+    static string Hash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..16].ToLowerInvariant();
+    static string Text(JsonObject o, string name) { try { return o[name]?.ToString() ?? ""; } catch { return ""; } }
+    static bool Bool(JsonObject o, string name) { try { return o[name] is JsonValue v && ((v.TryGetValue<bool>(out var b) && b) || (v.TryGetValue<string>(out var s) && string.Equals(s, "true", StringComparison.OrdinalIgnoreCase))); } catch { return false; } }
+    static int Int(JsonObject o, string name) { try { return o[name] is JsonValue v && (v.TryGetValue<int>(out var i) || (v.TryGetValue<string>(out var s) && int.TryParse(s, out i))) ? i : 0; } catch { return 0; } }
+}
+
+sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore store, Fworker.Contracts.Ids.RepoId home, DocsPlanSettings settings, Func<WorkItemInput, Task<bool>> publish,
+    PullRequestHeads? heads = null, Func<TimeSpan, Task>? delay = null, Func<DateTimeOffset>? clock = null) : IVerbRouter
+{
+    static readonly TimeSpan[] Pauses = [TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(1)];
+    /// <summary>A sign of life reaches the saga at most this often for an item: the lease is minutes long, the calls of a working session are seconds apart.</summary>
+    public static readonly TimeSpan RenewEvery = TimeSpan.FromSeconds(60);
+    readonly Func<TimeSpan, Task> wait = delay ?? Task.Delay;
+    readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
+    readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTimeOffset> renewed = new();
+
+    public async Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout)
+    {
+        var answer = await inner.RunAsync(verb, stdin, timeout);
+        // the script's answer is the caller's, whatever the feed does after it
+        if (answer.Code == 0 && ownership.Count > 0 && (DocsVerbs.Handled.Contains(verb) || DocsVerbs.Activity.Contains(verb)))
+        {
+            try { await Feed(verb, stdin, answer.Output); }
+            catch (Exception e) { Console.Error.WriteLine($"v2 feed {verb}: {e.GetType().Name}"); }
+        }
+        return answer;
+    }
+
+    async Task Feed(string verb, string stdin, string output)
+    {
+        if (JsonNode.Parse(stdin) is not JsonObject body || JsonNode.Parse(output) is not JsonObject answer) return;
+        if (!int.TryParse(body["item"]?.ToString(), out var number) || number <= 0 || !ownership.Owns(number)) return;
+        var id = new ItemId(home, number);
+        if ((await store.Load(id.ToString(), CancellationToken.None))?.State is not { } state) return;
+        // the call is the session's sign of life: the lease of the step is renewed (before the inputs that may end the step, so it carries the arm they end)
+        if (state.IsOpen && !state.Parked && state.LeaseDue is not null && Due(number)) await Send(new LeaseRenewed(id, state.Generation, state.ArmId, $"renew|{state.ArmId}|{now().UtcTicks}"));
+        if (!DocsVerbs.Handled.Contains(verb)) return;
+        var head = "";
+        if (heads is not null && DocsVerbs.PullRequestToRead(verb, body, answer, state) is > 0 and var pr) head = await heads.HeadOf(home, pr, CancellationToken.None);
+        foreach (var input in DocsVerbs.Inputs(verb, body, answer, state, settings, head)) await Send(input);
+    }
+
+    // once a minute per item (the first call counts at once)
+    bool Due(int number)
+    {
+        var t = now();
+        var last = renewed.GetValueOrDefault(number);
+        if (last != default && t - last < RenewEvery) return false;
+        renewed[number] = t;
+        return true;
+    }
+
+    async Task Send(WorkItemInput input)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { if (await publish(input)) return; }
+            catch (Exception e) when (attempt < Pauses.Length) { Console.Error.WriteLine($"v2 feed {input.GetType().Name}: {e.GetType().Name}"); }
+            if (attempt >= Pauses.Length) { Console.Error.WriteLine($"v2 feed {input.GetType().Name} for {input.Item} dropped: the Wolverine host did not take it"); return; }
+            await wait(Pauses[attempt]);
+        }
+    }
+}

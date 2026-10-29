@@ -328,9 +328,54 @@ and W6.1 built, and what is left:
 - **The hand-off in the gateway:** `V2Ownership` reads the saga's table before each sweep and `SweepV2Filter` drops what the sweep
   says about those items (offers, triggers, holds, parks, owners) before the plant sees it. The rule script itself is not changed.
 - **Left for the integrator and W6.2 to W6.7:** passing the owned items into `sync-board` so the script also stops reading them
-  (`Verbs.Sweep.ps1`); the feeder that reads a Todo item's body and calls `WorkItemIntake`; writing the `engine:v2` label (a
-  projection, W6.3); the decision verbs through S1 (W6.6); the other rows of D5's table (demotions, fix-forward rounds, mechanical
-  fixes), which belong to the verify and merge steps of W6.6 and W7.
+  (`Verbs.Sweep.ps1`); writing the `engine:v2` label (a projection, W6.3). (The feeder, the decision verbs and the demotion and
+  mechanical rows of D5's table were left to W6.6 here; W6.6 below has them. The fix-forward row, CI red, stays with W7.)
+
+**W6.6, the docs plan's steps (#335, built on W6.1 to W6.3).** Revision 2026-10-26 of the task stands: the steps only, no offer
+filter, no separate runtime, no per-item freeze. What the hybrid composition needs on top, all wired only where `Engine.V2Acts`:
+- **The steps** (`Fworker.Workflows.WorkItem`, `Plans/Docs*`): the docs plan has its own step classes (`Steps.For(plan, kind)`),
+  each applying what v1's verb scripts apply to a docs-only item. *Design:* `ReviewRecorded` counts rounds (`timing.maxReviewRounds`,
+  and `docsOnlyMaxReviewRounds` once the latest design recorded the marker; `Verb_record_review`), and the design is left only after
+  a REVIEW: COMPLETE (`reviewVerdictColumns`). *Develop:* the same review, and a recorded pull request (`no-open-pr`); a pull request
+  with files that are not documentation switches the plan (W6.1). *Verify:* left only by a validation verdict; a PASS covers the head
+  it names (`head-mismatch`, `pass-requires-prNumber`) and moves the item to Merge; a FAIL is D5's FailVerdict row (back to
+  Development twice, then `verdict-failed`). *Merge:* the step asks the gateway to merge (`MergeRequested`, the C# merge of W6.2)
+  and decides each answer (`MergeAttempted`): merged completes the item; blocked and transient answers ask again after
+  `DocsPlanRules.MergeRetry` (60 s, a scheduled `MergeRetryDue`; each answer renews the lease; 60 calls park the item `merge-blocked`); a head
+  that moved sends the item back to Verify for a new verdict; an out-of-date branch is D5's MechanicalFailure row (the owner
+  merges master, 4 times, then `mechanical-exhausted`); any other refusal parks it `merge-failed: <code>`. The command is part of
+  the saga's state (`MergeRequest`, `MergeRetryAt`), so a crash between the save and the publish publishes it again (idempotent on
+  the command's key), and a renewal does not. An item that switches to a plan the engine does not carry (`intake.v2Plans`) is
+  **handed back**: its instance ends with the decision `handed-back` (not `completed`), it is no longer owned, and v1's sweep takes
+  it up from the state comment and the board, which v1's verbs kept in step all along.
+- **The gateway** (`Ports/DocsPlanPort.cs`, `Verbs/V2VerbFeed.cs`): `DocsMergePort` does the checks of the script that are not
+  GitHub's (the Auto Merge label, a hold) and then the merge command; a fault is a transient answer, never an exception and never a
+  recorded refusal. `DocsProjection` moves the card (the design column for a started item, Done for a merged one) by the
+  decision's sequence number; a fault is tried again three times and then left (nothing is recorded as failed, the next decision
+  moves the card; an item that never gets its Done is read by v1 like one a person merged). `V2Ownership` also makes the **offers**:
+  an open, unparked saga item on Design, Develop or Verify is offered to the plant in that step's column, until a session holds it
+  (`Plant.HasOwner`); v1's own offers for owned items are still dropped, so the saga is what says that an item waits for a session
+  and v1's plant and sessions do the rest. `V2VerbFeed` (S1) runs the verb as v1 always did and then tells the saga what happened
+  (`append-body` of the design, `record-review`, `complete`, `validation-verdict`): the script's answer is the caller's, unchanged.
+  `DocsIntakeJob` (recurring slot `docs-intake`, every minute) is the feeder: the next Todo item of the home repository whose body
+  carries the docs-only marker, by the intake rule, starts its saga; it exists only when `intake.enabled` and `intake.v2Plans`
+  names `docs` (empty in `config/instance.json`, so nothing starts a saga until the owner says so).
+- **`FACTORY_V2_OFF`:** unchanged and per environment, as the revision says: the environment goes back to v1 with no host, no
+  ownership, no feed and no saga service; v1's sweep reads every item again. There is no per-item freeze: an item the saga
+  owned when the switch was thrown has its state comment, card and pull request as v1's verbs left them; one the saga merged and
+  whose card had not moved yet is read by v1 as an item a person merged.
+- **Declared differences from the golden writes** (for the v2 Tier 1 job of W2.4; blocks of `v2-differences.txt` are added with
+  that job, because a block must quote the golden lines of a scenario it can compare): for a docs item the saga carries, (1) the
+  merge is the gateway's own call, so the `PUT .../pulls/N/merge` line has the source `gateway` instead of `rule` (same body:
+  `merge_method` and the PASS `sha`); (2) the card moves to the design column at the start and to Done at the merge by the gateway's
+  GraphQL calls (source `gateway`), and Done follows the merge at once, with no wait for master CI, no `merge` record in the state
+  comment (`awaiting: master-green`, `done_at`) and none of the comments of that wait (the docs plan ends at the merge,
+  `wolverine-factory.md` 3.1); (3) no comment on the merge itself: the saga's history (`ItemHistory`, `workitem.decided`) is the
+  record. Every write of the verbs a session calls is the script's and is unchanged.
+- **Not in W6.6, on purpose:** the feature plan's steps (W7: the saga hands those items back), CI red and the fix-forward row (the
+  verbs that run first gate a red head; the merge waits for GitHub's required checks), the `engine:v2` label, the state comment
+  projection of the saga's own transitions (v1's verbs write it), and the unpark and park verbs through the saga (they have
+  endpoints of their own).
 
 ### W7: R7, the feature plan (2 to 3 at once)
 
@@ -507,7 +552,7 @@ owner approval.
 | #332 | W6.4b | removed: no per-item engine |
 | #333 | W6.4c | removed: no per-item engine |
 | #334 | W6.5 | removed: no `engine:v2` label |
-| #335 | W6.6 | reworded: the docs plan's steps only; no offer filter, no separate runtime, no per-item freeze; after W6.1 to W6.3 |
+| #335 | W6.6 | reworded: the docs plan's steps only; no offer filter, no separate runtime, no per-item freeze; after W6.1 to W6.3 (built in the hybrid composition: the saga's items are offered to v1's plant from the saga's state) |
 | #337 | W7.0 | reworded: no `scheduler` or `merge` flags; owner decisions have defaults and stop nothing |
 | #339 | W7.2 | reworded, size M: `MergeTrainSaga` for the v2 engine only; v1's merge is not moved to C# |
 | #342 | W7.5 | removed: v1 does not ask v2's scheduler |

@@ -130,6 +130,14 @@ public static class WorkItemActions
     public const string Undelivered = "undelivered";
     public const string Reopened = "reopened";
     public const string Completed = "completed";
+    /// <summary>The instance ended because the item moved to a plan this engine does not carry; v1 takes the item up again.</summary>
+    public const string HandedBack = "handed-back";
+    // the docs plan (W6.6)
+    public const string Reviewed = "reviewed";
+    public const string Verdict = "verdict";
+    public const string Demoted = "demoted";
+    public const string MergeRequested = "merge-requested";
+    public const string MergeBlocked = "merge-blocked";
 }
 
 /// <summary>What the saga answered to one input.</summary>
@@ -153,8 +161,11 @@ public sealed record WorkItemDecision(WorkItemOutcome Outcome, int Generation, s
 /// <summary>The timers an input made the saga ask for: the message and when it is due.</summary>
 public sealed record WorkItemTimer(object Message, DateTimeOffset Due);
 
-/// <summary>What one input made the saga do: the answer, the decisions to publish and the timers to schedule. Nothing here is sent until the state is saved.</summary>
-public sealed record WorkItemResult(WorkItemDecision Decision, IReadOnlyList<WorkItemDecided> Decisions, IReadOnlyList<WorkItemTimer> Timers)
+/// <summary>What one input made the saga do: the answer, the decisions to publish, the timers to schedule and the commands to send. Nothing here is sent until the state is saved.</summary>
+public sealed record WorkItemResult(WorkItemDecision Decision, IReadOnlyList<WorkItemDecided> Decisions, IReadOnlyList<WorkItemTimer> Timers, IReadOnlyList<object>? Commands = null)
 {
     public static WorkItemResult Quiet(WorkItemDecision d) => new(d, [], []);
+
+    /// <summary>What the transition asks the outside to do (the merge call of the docs plan), published with the decisions after the state is saved.</summary>
+    public IReadOnlyList<object> Sent => Commands ?? [];
 }
