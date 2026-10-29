@@ -151,6 +151,11 @@ public sealed class DocsPlanWiringTests
             var actions = await Rows(cs, $"SELECT JSON_VALUE(Detail, '$.Action') FROM factory.ItemHistory WHERE ItemKey = '{item}' AND Type = 'workitem.decided' ORDER BY CAST(JSON_VALUE(Detail, '$.Sequence') AS int)");
             Assert.Contains("merge-requested", actions);
             Assert.Equal(["merged", "completed"], actions.TakeLast(2));
+            // W7.2: the merge went through the merge train of the repository (direct strategy: let through at once), which recorded the merge and holds no line
+            var train = Fworker.Workflows.Merge.MergeTrainState.FromJson((await Rows(cs, $"SELECT StateJson FROM factory.MergeTrains WHERE [Key] = '{home}'"))[0]);
+            Assert.Empty(train.Line);
+            Assert.Equal([(item.ToString(), MergeSha)], train.Merged.Select(m => (m.Item, m.Commit)));
+            Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.ItemHistory WHERE Type = 'merge.train.decided' AND Detail LIKE '%\"Action\":\"merged\"%'"))[0] == "1", 30), "the train's merge did not reach the history");
             Assert.Equal("0", (await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]);
         }
         finally

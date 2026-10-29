@@ -174,3 +174,16 @@ public class WorkItemRow
     public string StateJson { get; set; } = "";
     public DateTimeOffset UpdatedAt { get; set; }
 }
+
+/// <summary>
+/// The state of one merge train (W7.2, wolverine-factory.md 3.2): one row per repository, the key "owner/repo" in lower case. The state is a JSON document owned by Fworker.Workflows.Merge (the line of
+/// pull requests that asked to be merged, the turn that was granted, the last merges), saved with a revision so that two writers cannot both win.
+/// </summary>
+public class MergeTrainRow
+{
+    public string Key { get; set; } = "";
+    /// <summary>Counts the saves; the concurrency token: a writer that read an older revision fails and runs again on the new state.</summary>
+    public int Revision { get; set; }
+    public string StateJson { get; set; } = "";
+    public DateTimeOffset UpdatedAt { get; set; }
+}

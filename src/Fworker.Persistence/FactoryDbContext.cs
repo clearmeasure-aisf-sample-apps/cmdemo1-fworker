@@ -23,6 +23,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<DeliveryTrainRow> DeliveryTrains => Set<DeliveryTrainRow>();
     public DbSet<DeliveryShadowComparison> DeliveryShadowComparisons => Set<DeliveryShadowComparison>();
     public DbSet<WorkItemRow> WorkItems => Set<WorkItemRow>();
+    public DbSet<MergeTrainRow> MergeTrains => Set<MergeTrainRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -146,6 +147,16 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.Property(x => x.Revision).IsConcurrencyToken();
             // the WIP intake rule counts the items in flight of one repository: a read by repository, never a scan of everything
             e.HasIndex(x => new { x.Repository, x.Status });
+        });
+
+        b.Entity<MergeTrainRow>(e =>
+        {
+            e.ToTable("MergeTrains");
+            e.HasKey(x => x.Key);
+            e.Property(x => x.Key).HasMaxLength(200);
+            e.Property(x => x.StateJson).IsRequired();
+            // the train's state is read and written by its key; a stale writer loses (the handler retries on the new state)
+            e.Property(x => x.Revision).IsConcurrencyToken();
         });
 
         b.Entity<CatalogCopy>(e =>

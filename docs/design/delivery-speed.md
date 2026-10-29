@@ -239,7 +239,7 @@ make. A kit change (Platform Hub) lets that watcher defer to the gateway while t
 - **`direct` (default, today):** the gateway's squash merge with `update-branch` and `mergeQueueDepth`.
 - **`train`:** direct merges, serialized: one item at a time is updated, built and merged, the others wait `merge-train`, so a
   branch is updated at most once per merge ahead of it. Needs no ruleset change.
-- **`queue`:** GitHub's merge queue on master: squash, build concurrency 5, minimum group 1, wait 1 minute, **only merge
+- **`queue`** (deferred by the owner on 2026-10-28; `mergeStrategy: queue` runs `direct`; W7.2 built `direct` and `train` in `Fworker.Workflows.Merge`): GitHub's merge queue on master: squash, build concurrency 5, minimum group 1, wait 1 minute, **only merge
   non-failing pull requests** on. The gateway enqueues with `expectedHeadOid = H` (GraphQL `enqueuePullRequest`) after a PASS
   on H with green checks and follows the group; dequeues map to section 8. "Behind" no longer exists.
 - **Switch together.** Once the ruleset requires the queue, a direct `PUT /pulls/{n}/merge` is refused, so the ruleset change

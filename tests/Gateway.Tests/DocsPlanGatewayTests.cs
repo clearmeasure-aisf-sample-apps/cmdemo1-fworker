@@ -9,6 +9,7 @@ using Fworker.Domain;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Fworker.Workflows.Intake;
+using Fworker.Workflows.Merge;
 using Fworker.Workflows.WorkItem;
 using Xunit;
 
@@ -271,6 +272,30 @@ public sealed class DocsMergePortTests
         var off = Http();
         Assert.Equal(MergeResultKind.Merged, (await Port(new Facts(["Auto Merge"]), off, Settings(c => c["baseUpdate"]!["autoUpdateBranch"] = false)).Item1.Run(Request(), default)).Result.Kind);
         Assert.DoesNotContain(off.Requests, r => r.Path.EndsWith("/update-branch"));
+    }
+
+    [Fact]
+    public async Task ATurnOfTheMergeTrain_IsAnsweredToTheTrain_AndItsFirstTurnDecidesTheUpdateOfABehindBranch()
+    {
+        string Behind() => """{"ahead_by":0,"behind_by":1,"status":"behind"}""";
+        Fake Http() => new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr()).On($"GET repos/acme/orders/compare/master...{Head}", HttpStatusCode.OK, Behind())
+            .On("PUT " + PrPath + "/update-branch", HttpStatusCode.Accepted, "{}").On("PUT " + PrPath + "/merge", HttpStatusCode.OK, $$"""{"sha":"{{MergeSha}}","merged":true}""");
+        // the first turn the train grants updates the branch, although it is the saga's second attempt (the first was a wait of the line)
+        var first = Http();
+        var request = Request(attempt: 2);
+        var answer = await Port(new Facts(["Auto Merge"]), first).Item1.Run(new MergeGranted("acme/orders", request, FirstTurn: true), default);
+        Assert.Equal(("acme/orders", request), (answer.Key, answer.Request));   // (the answer goes back to the train of the repository, with the request it answers)
+        Assert.Equal((MergeResultKind.Blocked, "branch-updated"), (answer.Result.Kind, answer.Result.Reason));
+        Assert.Single(first.Requests, r => r.Path.EndsWith("/update-branch"));
+        // a later turn of the same arm does not look for an update, and merges
+        var later = Http();
+        var merged = await Port(new Facts(["Auto Merge"]), later).Item1.Run(new MergeGranted("acme/orders", Request(attempt: 1), FirstTurn: false), default);
+        Assert.Equal(MergeResultKind.Merged, merged.Result.Kind);
+        Assert.DoesNotContain(later.Requests, r => r.Path.Contains("compare") || r.Path.EndsWith("/update-branch"));
+        // the answer to the saga stays what it was: the first attempt updates, with no train in the way
+        var plain = Http();
+        var direct = await Port(new Facts(["Auto Merge"]), plain).Item1.Run(Request(attempt: 1), default);
+        Assert.Equal((MergeResultKind.Blocked, "branch-updated", "merge-attempt|1.4|1"), (direct.Result.Kind, direct.Result.Reason, direct.Key));
     }
 
     [Fact]
