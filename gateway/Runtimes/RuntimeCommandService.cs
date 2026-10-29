@@ -30,7 +30,15 @@ public sealed class RuntimeCommandService
     public Task RunStop(StopRuntimeSession c, IMessageBus bus, int attempts, CancellationToken ct) => Deliver(StopMessages(c, attempts, ct), bus);
     public Task RunRunbook(RunRunbook c, IMessageBus bus, int attempts, CancellationToken ct) => Deliver(RunbookMessages(c, attempts, ct), bus);
 
-    internal Task<IReadOnlyList<object>> StartMessages(StartRuntimeSession c, int attempts, CancellationToken ct) => Outcome(c, () => start.Process(c, ct), e => StartRuntimeSessionHandler.Exhausted(c, e), attempts);
+    internal async Task<IReadOnlyList<object>> StartMessages(StartRuntimeSession c, int attempts, CancellationToken ct)
+    {
+        var messages = await Outcome(c, () => start.Process(c, ct), e => StartRuntimeSessionHandler.Exhausted(c, e), attempts);
+        // #522: the runbook run exists now. The manager's records know the execution and its page before the result message has made its way through the queue,
+        // as they do in v1 when the adapter answers (a status read or a caller waiting on the start sees them). Best effort: the start is done either way.
+        foreach (var m in messages)
+            if (m is RuntimeSessionStarted s) { try { managerOf(s.Runtime)?.NoteStarted(s.WorkerName, s.Execution, s.Url); } catch { } }
+        return messages;
+    }
     internal Task<IReadOnlyList<object>> StopMessages(StopRuntimeSession c, int attempts, CancellationToken ct) => Outcome(c, () => stop.Process(c, ct), e => StopRuntimeSessionHandler.Exhausted(c, e), attempts);
     internal Task<IReadOnlyList<object>> RunbookMessages(RunRunbook c, int attempts, CancellationToken ct) => Outcome(c, () => runbook.Process(c, ct), e => RunRunbookHandler.Exhausted(c, e), attempts);
 

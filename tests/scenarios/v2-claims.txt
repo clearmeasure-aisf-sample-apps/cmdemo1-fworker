@@ -18,7 +18,6 @@
 # scenarios are part of the owner suite; this runs them alone, on the owner suite's gateway settings.
 owner | ^journal fold:
 
-# W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. Not claimed yet: on v2 the start answers before the
-# runbook run exists (9 checks of 5 scenarios fail, #522). The "Tier 1 (v2)" job is part of "Build result" through the tests
-# workflow, so a claim that fails blocks every merge; put the line back with the fix of #522.
-# octopus
+# W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous
+# answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
+octopus
