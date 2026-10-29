@@ -21,6 +21,9 @@ namespace Fworker.Workflows.Delivery;
 public interface IDeliveredLookup
 {
     Task<IReadOnlyList<ItemId>> NotYetDelivered(IEnumerable<ItemId> dependencies, string environment, CancellationToken ct = default);
+
+    /// <summary>W7.7: those of the items that no merge was recorded for (the merged-items table). A dependency in a repository with nothing to deliver counts as delivered once it is merged (system-gateway.md H5).</summary>
+    Task<IReadOnlyList<ItemId>> NotYetMerged(IEnumerable<ItemId> items, CancellationToken ct = default);
 }
 
 /// <summary>What one input made the train do: the messages to publish (decisions, delivered-to events, commands) and when to wake it.</summary>
@@ -59,7 +62,9 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
         if (policy is null) return TrainResult.None;   // the deployable left the catalog
         var replayEnded = input is TrainReplay { Active: false };
         TrainRecord? carried = null;
-        if (input is not TrainWake)
+        // W7.7: a delivery of an item concerns the train only if one of its candidates waits for that item; for it the input is a wake, nothing to apply
+        if (input is TrainDependencyDelivered waited && (await store.Load(input.Key, ct))?.State.Candidates.Values.Any(c => c.Dependencies.Contains(waited.Item)) is not true) return TrainResult.None;
+        if (input is not (TrainWake or TrainDependencyDelivered))
         {
             var saved = false;
             for (var attempt = 0; attempt < Attempts && !saved; attempt++)
@@ -88,9 +93,9 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             if (!gated)
             {
                 var republish = state.RepublishPending;
-                run = new TrainRun(state, policy, reads, delivered, now, replayEnded || republish);
+                run = new TrainRun(state, policy, reads, delivered, policies, now, replayEnded || republish);
                 try { await run.Evaluate(ct, republish); }
-                catch (Exception e) when (e is HttpRequestException or TimeoutException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+                catch (Exception e) when (IsTransient(e, ct))
                 {
                     return new TrainResult([], now + TransientRetry);   // nothing of this look is kept; the input is saved
                 }
@@ -102,6 +107,9 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
         }
         throw new TrainConflictException(input.Key);
     }
+
+    /// <summary>A fault of a read (GitHub, the app, the delivered-to table's database) that a later look gets past: the input is saved, the look is repeated, and nothing of this look is kept or decided.</summary>
+    internal static bool IsTransient(Exception e, CancellationToken ct) => e is HttpRequestException or TimeoutException or System.Data.Common.DbException || (e is OperationCanceledException && !ct.IsCancellationRequested);
 
     /// <summary>Applies the input to the state.</summary>
     static void Apply(TrainState s, TrainInput input, DeliveryPolicy p, DateTimeOffset now)
@@ -161,7 +169,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
 }
 
 /// <summary>One evaluation of one train on its state: the settling of finished deployments, the Sign-offs, the promotion. Short-lived; <see cref="Out"/> is what it decided to publish.</summary>
-sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, DateTimeOffset now, bool replay = false)
+sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, IDeliveryPolicies policies, DateTimeOffset now, bool replay = false)
 {
     public List<object> Out { get; } = [];
     readonly List<DateTimeOffset> wakes = [];
@@ -308,13 +316,21 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         return new Judged(release.Version, j, items.Distinct().ToList(), itemGaps);
     }
 
-    /// <summary>The slot dependencies-delivered(env), off unless the policy turns it on: a dependency of an item that is not delivered here (and not in the same release) holds it.</summary>
+    /// <summary>
+    /// The slot dependencies-delivered(env), off unless the policy turns it on (W7.7: the configuration turns it on where the engine acts). A dependency of an item that is not delivered here holds the
+    /// item, and with it the release that carries it: the train then judges the release before, as it does for any other gap of an item. A dependency is delivered when it is in the same release, when the
+    /// delivered-to table has its row for this environment (a dependency of another repository is delivered by that repository's train), or when it is merged in a repository that has no deployable,
+    /// which settles without a release (system-gateway.md H5). A fault of the table's database throws: the look is repeated, and an item is never held for a read that failed.
+    /// </summary>
     async Task<IEnumerable<string>> DependencyGaps(TrainCandidate c, IReadOnlyList<int> releaseItems, CancellationToken ct)
     {
         var deps = c.Dependencies.Where(d => ItemId.TryParse(d, out var id) && !(id.Repository == p.Repository && releaseItems.Contains(id.Number))).Select(ItemId.Parse).ToList();
         if (deps.Count == 0) return [];
-        var missing = await delivered.NotYetDelivered(deps, env, ct);
-        return missing.Select(m => $"{c.Item} depends on {m}, which is not yet delivered to {TargetName}");
+        var missing = (await delivered.NotYetDelivered(deps, env, ct)).ToList();
+        var settles = missing.Where(m => policies.ForRepository(m.Repository).Count == 0).ToList();   // (nothing to deliver there)
+        var unmerged = settles.Count == 0 ? [] : (await delivered.NotYetMerged(settles, ct)).ToHashSet();
+        return missing.Select(m => !settles.Contains(m) ? $"{c.Item} depends on {m}, which is not yet delivered to {TargetName}"
+            : unmerged.Contains(m) ? $"{c.Item} depends on {m}, which is not yet merged" : "").Where(g => g.Length > 0).ToList();
     }
 
     // ---- the evidence of the previous environment ------------------------------------------------------------------------------------------------------------
@@ -476,9 +492,9 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 common = j.Content.Gaps.ToList();
                 if (!stop && j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
             }
-            catch (Exception e) when (e is HttpRequestException or TimeoutException || (e is OperationCanceledException && !ct.IsCancellationRequested))
+            catch (Exception e) when (DeliveryTrainService.IsTransient(e, ct))
             {
-                // A read of GitHub or the app failed for this one release (a long range is read commit by commit, within the shadow's budget per minute). It must not take the decisions of the
+                // A read of GitHub or the app (or of the delivered-to table) failed for this one release (a long range is read commit by commit, within the shadow's budget per minute). It must not take the decisions of the
                 // other releases with it: they are published as they are, this release keeps the decision it had, nothing is promoted past it, and the train looks again soon.
                 if (!stop) blocked = true; unread.Add(r.Version); stop = true; wakes.Add(now.Add(DeliveryTrainService.TransientRetry));
                 continue;

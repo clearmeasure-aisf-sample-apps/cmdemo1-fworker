@@ -473,15 +473,15 @@ public class DeliveryTrainTests
     {
         foreach (var on in new[] { false, true })
         {
-            var f = new TrainFixture(dependencies: on); await f.Baseline();
-            f.Range('d', 'a'); await f.Merge(7, 'a', dependencies: ["acme/orders#5", "other/repo#12"]);
+            var f = new TrainFixture(dependencies: on, web: true); await f.Baseline();
+            f.Range('d', 'a'); await f.Merge(7, 'a', dependencies: ["acme/orders#5", "acme/web#12"]);
             f.Reads.Running["tdd"] = "1.0.2"; await f.ReleaseInPrevious("1.0.2", 'a');
-            if (on) Assert.Equal(["acme/orders#7 depends on acme/orders#5, which is not yet delivered to Uat", "acme/orders#7 depends on other/repo#12, which is not yet delivered to Uat"], f.LastDecision!.Reasons);
+            if (on) Assert.Equal(["acme/orders#7 depends on acme/orders#5, which is not yet delivered to Uat", "acme/orders#7 depends on acme/web#12, which is not yet delivered to Uat"], f.LastDecision!.Reasons);
             else Assert.Equal("waiting", f.LastDecision!.Action);   // only the evidence waits
             Assert.DoesNotContain(f.LastDecision.Reasons, r => r.Contains("depends on") && !on);
             if (on)
             {
-                f.Delivered.Rows.Add(("acme/orders#5", "uat")); f.Delivered.Rows.Add(("other/repo#12", "uat"));
+                f.Delivered.Rows.Add(("acme/orders#5", "uat")); f.Delivered.Rows.Add(("acme/web#12", "uat"));
                 await f.Wake();
                 Assert.DoesNotContain(f.LastDecision!.Reasons, r => r.Contains("depends on"));
             }

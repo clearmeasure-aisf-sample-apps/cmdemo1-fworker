@@ -63,6 +63,16 @@ sealed class InstanceConfig
 
     public bool OwnerSessions => Bool("ownerSessions");
 
+    // W7.7: delivery.dependenciesDelivered, the delivery train's rule that holds an item whose "Depends on" items are not delivered to the target environment; absent is off. Used only where the engine acts.
+    public bool DependenciesDelivered
+    {
+        get
+        {
+            try { return Root?["delivery"]?["dependenciesDelivered"] is JsonValue v && v.TryGetValue<bool>(out var b) && b; }
+            catch { return false; }
+        }
+    }
+
     // delivery.autoPromote (Verbs.Promote.ps1): on, and naming this gateway's environment (FACTORY_ENVIRONMENT); the promotion's loop runs only then
     public bool AutoPromoteHere
     {

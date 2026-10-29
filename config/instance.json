@@ -69,7 +69,8 @@
       "environments": ["uat", "prod"],
       "gatewayEnvironment": "",
       "signoffWaitHours": 2
-    }
+    },
+    "dependenciesDelivered": true
   },
   "plant": {
     "oneItemPerSession": true
