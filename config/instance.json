@@ -78,7 +78,10 @@
     "enabled": false,
     "fromColumn": "Todo",
     "wipLimit": 6,
-    "holdLabels": ["Needs Human Review"]
+    "holdLabels": ["Needs Human Review"],
+    "repositoryWipLimits": {},
+    "v2Plans": [],
+    "v2Label": "engine:v2"
   },
   "runner": {
     "pool": 0,

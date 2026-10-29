@@ -22,6 +22,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<DeliveredToEntry> DeliveredTo => Set<DeliveredToEntry>();
     public DbSet<DeliveryTrainRow> DeliveryTrains => Set<DeliveryTrainRow>();
     public DbSet<DeliveryShadowComparison> DeliveryShadowComparisons => Set<DeliveryShadowComparison>();
+    public DbSet<WorkItemRow> WorkItems => Set<WorkItemRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -129,6 +130,22 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             // the report reads the newest first, optionally of one outcome
             e.HasIndex(x => new { x.Outcome, x.At });
             e.HasIndex(x => x.At);
+        });
+
+        b.Entity<WorkItemRow>(e =>
+        {
+            e.ToTable("WorkItems");
+            e.HasKey(x => x.ItemKey);
+            e.Property(x => x.ItemKey).HasMaxLength(300);
+            e.Property(x => x.Repository).HasMaxLength(200).IsRequired();
+            e.Property(x => x.Status).HasMaxLength(16).IsRequired();
+            e.Property(x => x.Plan).HasMaxLength(32).IsRequired();
+            e.Property(x => x.Step).HasMaxLength(32).IsRequired();
+            e.Property(x => x.StateJson).IsRequired();
+            // the state is read and written by the item's key; a stale writer loses (the handler runs again on the new state)
+            e.Property(x => x.Revision).IsConcurrencyToken();
+            // the WIP intake rule counts the items in flight of one repository: a read by repository, never a scan of everything
+            e.HasIndex(x => new { x.Repository, x.Status });
         });
 
         b.Entity<CatalogCopy>(e =>

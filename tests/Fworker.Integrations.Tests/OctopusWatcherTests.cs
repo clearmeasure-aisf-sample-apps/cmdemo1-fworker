@@ -203,4 +203,106 @@ public sealed class OctopusWatcherTests
         var (w, got) = Make(new FakeOctopus());
         Assert.True(await w.Poll()); Assert.Empty(got);
     }
+
+    // ---- #496: the events carry Octopus's own time ------------------------------------------------------------------------------------------------------
+
+    static DateTimeOffset Utc(string s) => DateTimeOffset.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
+
+    [Fact]
+    public async Task TheReleaseIsAtItsAssembledTime_TheRunningDeploymentAtItsStartTime_TheSignOffAtTheInterruptionsCreatedTime()
+    {
+        var o = Server();
+        o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Executing","QueueTime":"2026-10-28T11:58:00+00:00","StartTime":"2026-10-28T11:59:30.5+00:00"}""");
+        o.Set($"{Sp}/interruptions?regarding=ServerTasks-9&pendingOnly=true&take=20", """{"Items":[{"Id":"Interruptions-3","IsPending":true,"Created":"2026-10-28T12:00:00+02:00"}]}""");
+        var (w, got) = Make(o);
+        await w.Poll();
+        Assert.Equal(Utc("2026-10-28T11:59:00Z"), Assert.IsType<OctopusReleaseCreated>(got[0]).At);
+        Assert.Equal(Utc("2026-10-28T11:59:30.5Z"), Assert.IsType<OctopusDeploymentChanged>(got[2]).At);
+        Assert.Equal(Utc("2026-10-28T10:00:00Z"), Assert.IsType<SignOffRequested>(got[3]).At);   // (12:00 at +02:00)
+    }
+
+    [Fact]
+    public async Task ATerminalDeploymentIsAtItsCompletedTime_ItsStartedPhaseAtTheStartTime()
+    {
+        var o = Server("Success");
+        o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Success","QueueTime":"2026-10-28T11:57:00Z","StartTime":"2026-10-28T11:58:00Z","CompletedTime":"2026-10-28T11:59:10Z"}""");
+        var (w, got) = Make(o);
+        await w.Poll();
+        var phases = got.OfType<OctopusDeploymentChanged>().ToList();
+        Assert.Equal([(OctopusDeploymentPhase.Started, Utc("2026-10-28T11:58:00Z")), (OctopusDeploymentPhase.Succeeded, Utc("2026-10-28T11:59:10Z"))], phases.Select(d => (d.Phase, d.At!.Value)));
+    }
+
+    [Theory]
+    [InlineData("""{"State":"Failed","StartTime":"2026-10-28T11:58:00Z"}""", "2026-10-28T11:58:00Z", "2026-10-28T11:58:00Z")]   // no CompletedTime: the StartTime
+    [InlineData("""{"State":"Failed","QueueTime":"2026-10-28T11:57:00Z"}""", "2026-10-28T11:57:00Z", "2026-10-28T11:57:00Z")]   // never started: the QueueTime
+    [InlineData("""{"State":"Failed"}""", "2026-10-28T11:59:00Z", "2026-10-28T11:59:00Z")]   // no task times at all: the deployment's Created
+    [InlineData("""{"State":"Failed","StartTime":"not a time","CompletedTime":""}""", "2026-10-28T11:59:00Z", "2026-10-28T11:59:00Z")]   // times that do not parse are skipped
+    public async Task AMissingTimeFallsBack_StartTime_QueueTime_ThenTheDeploymentsCreated(string task, string started, string finished)
+    {
+        var o = Server("Failed"); o.Set($"{Sp}/tasks/ServerTasks-9", task);
+        var (w, got) = Make(o);
+        await w.Poll();
+        var phases = got.OfType<OctopusDeploymentChanged>().ToList();
+        Assert.Equal([Utc(started), Utc(finished)], phases.Select(d => d.At!.Value));
+    }
+
+    [Fact]
+    public async Task AQueuedDeploymentIsAtItsQueueTime()
+    {
+        var o = Server("Queued"); o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Queued","QueueTime":"2026-10-28T11:58:30Z"}""");
+        var (w, got) = Make(o);
+        await w.Poll();
+        Assert.Equal(Utc("2026-10-28T11:58:30Z"), Assert.Single(got.OfType<OctopusDeploymentChanged>()).At);
+    }
+
+    [Fact]
+    public async Task AReleaseWithoutAnAssembledTimeHasNoTime_AndTheTrainStampsItItself()
+    {
+        var o = Server(); o.Set($"{Sp}/projects/Projects-1/releases?take=30", $$"""{"Items":[{"Id":"Releases-5","Version":"1.0.5","ReleaseNotes":"built {{Sha}}"}]}""");
+        var (w, got) = Make(o);
+        await w.Poll();
+        Assert.Null(Assert.IsType<OctopusReleaseCreated>(got[0]).At);
+    }
+
+    // The events travel through the sequential octopus-events queue as JSON: a message written before At existed must still be read, and a new one must be readable by the old shape.
+    static readonly System.Text.Json.JsonSerializerOptions Web = new(System.Text.Json.JsonSerializerDefaults.Web);
+
+    [Fact]
+    public void TheEventsRoundTripThroughJson_WithAndWithoutAt()
+    {
+        var at = Utc("2026-10-28T09:30:00.25+00:00");
+        IngressEvent[] events =
+        [
+            new OctopusReleaseCreated("R-1", "1.0.1", Sha, at),
+            new OctopusDeploymentChanged("D-1", "T-1", "R-1", "1.0.1", "tdd", OctopusDeploymentPhase.Succeeded, Sha, at),
+            new SignOffRequested("I-1", "D-1", "T-1", "R-1", "1.0.1", "uat", Sha, at),
+            new OctopusReleaseCreated("R-2", "1.0.2", null),
+            new OctopusDeploymentChanged("D-2", "T-2", "R-2", "1.0.2", "tdd", OctopusDeploymentPhase.Started, null),
+            new SignOffRequested("I-2", "D-2", "T-2", "R-2", "1.0.2", "uat", null),
+        ];
+        foreach (var e in events)
+            Assert.Equal(e, System.Text.Json.JsonSerializer.Deserialize(System.Text.Json.JsonSerializer.Serialize(e, e.GetType(), Web), e.GetType(), Web));
+    }
+
+    [Fact]
+    public void AMessageSerializedBeforeAtExisted_StillDeserializes_WithAtNull()
+    {
+        var release = System.Text.Json.JsonSerializer.Deserialize<OctopusReleaseCreated>("""{"releaseId":"R-1","version":"1.0.1","commit":null}""", Web);
+        Assert.Equal(new OctopusReleaseCreated("R-1", "1.0.1", null), release);
+        var dep = System.Text.Json.JsonSerializer.Deserialize<OctopusDeploymentChanged>("""{"deploymentId":"D-1","taskId":"T-1","releaseId":"R-1","version":"1.0.1","environment":"tdd","phase":1,"commit":null,"key":"octopus:deployment:D-1:Succeeded"}""", Web);
+        Assert.Equal(new OctopusDeploymentChanged("D-1", "T-1", "R-1", "1.0.1", "tdd", OctopusDeploymentPhase.Succeeded, null), dep);
+        var so = System.Text.Json.JsonSerializer.Deserialize<SignOffRequested>("""{"interruptionId":"I-1","deploymentId":"D-1","taskId":"T-1","releaseId":"R-1","version":"1.0.1","environment":"uat","commit":null}""", Web);
+        Assert.Null(so!.At);
+    }
+
+    [Fact]
+    public void AMessageWithAtIsReadByTheShapeThatHasNone()
+    {
+        // the previous shape of the record, as an older reader would have it: the unknown 'at' is ignored
+        var json = System.Text.Json.JsonSerializer.Serialize(new OctopusReleaseCreated("R-1", "1.0.1", null, Utc("2026-10-28T09:30:00Z")), Web);
+        Assert.Contains("\"at\":", json);
+        Assert.Equal(new OldRelease("R-1", "1.0.1", null), System.Text.Json.JsonSerializer.Deserialize<OldRelease>(json, Web));
+    }
+
+    sealed record OldRelease(string ReleaseId, string Version, string? Commit);
 }

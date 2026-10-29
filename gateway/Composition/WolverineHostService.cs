@@ -189,6 +189,18 @@ sealed class WolverineHostService : IHostedService
         await db.Database.MigrateAsync(ct);
     }
 
+    /// <summary>Where Wolverine writes the code it generates: the image's /app is not writable for the gateway's user, so the default (Internal/Generated under the content root) logs "Unable to write code file".</summary>
+    internal static string CodegenDirectory => Path.Combine(Path.GetTempPath(), "fworker-wolverine-codegen");
+
+    /// <summary>Auto (not Dynamic, which compiles everything on every start): pre-generated code is loaded when there is some, compiled otherwise, and written to a writable directory.</summary>
+    internal static void ConfigureCodeGeneration(WolverineOptions w)
+    {
+        w.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
+        var dir = CodegenDirectory;
+        try { Directory.CreateDirectory(dir); } catch (Exception) { /* generation still works without a written copy; Wolverine logs it */ }
+        w.CodeGeneration.GeneratedCodeOutputPath = dir;
+    }
+
     static IHost BuildHost(string connectionString, WolverineHostOptions o, Action<IServiceCollection, WolverineOptions>? runtimeCommands = null)
     {
         var cs = WithConnectTimeout(connectionString, o.ConnectTimeoutSeconds);
@@ -204,7 +216,7 @@ sealed class WolverineHostService : IHostedService
                 // W2.3: the one handler is shadow history's (ShadowHistoryHandler), whose code Wolverine generates at its first use: Auto loads pre-generated code when there is
                 // some and compiles otherwise (the WolverineFx.RuntimeCompilation package, added with W2.3)
                 w.Discovery.IncludeType(typeof(ShadowHistoryHandler));
-                w.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
+                ConfigureCodeGeneration(w);
                 w.PersistMessagesWithSqlServer(cs, o.Schema);
                 // shadow history: a durable local queue, so a record is stored in the database (wolverine schema) before it is handled; a database that does not
                 // answer is retried with growing pauses, then the record goes to the dead letters

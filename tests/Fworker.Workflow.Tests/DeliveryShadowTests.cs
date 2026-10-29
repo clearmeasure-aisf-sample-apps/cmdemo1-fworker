@@ -314,7 +314,7 @@ public class DeliveryShadowTests
     }
 
     [Fact]
-    public async Task TheGate_IsMetAfterFourHours_OrThreeReleases()
+    public async Task TheClock_DecidesNothing_TheHoursAreInformation()
     {
         var r = new Rig();
         r.Shadow.ObserveV2(new TrainDecided("orders/uat", "promote", "1.0.2", [], [], T0));
@@ -322,8 +322,157 @@ public class DeliveryShadowTests
         await r.Shadow.Tick(default);   // stored: the first stored comparison starts the hours
         Assert.False((bool)r.Shadow.Status()["gate"]!["met"]!);
         r.Now = T0.AddHours(4).AddMinutes(7);
-        Assert.True((bool)r.Shadow.Status()["gate"]!["met"]!);
+        var gate = r.Shadow.Status()["gate"]!;
+        Assert.False((bool)gate["met"]!);   // four hours and a release the train alone judged: not a gate
+        Assert.True((double)gate["hours"]! >= 4);
+        Assert.Null(gate["needsHours"]);
     }
+
+    // ---- the honest gate: compared releases, and nothing live unexplained --------------------------------------------------------------------------------------------
+
+    static async Task<JsonObject> Gate(Rig r, int minutes = 6)
+    {
+        r.Now = r.Now.AddMinutes(minutes);
+        await r.Shadow.Tick(default);
+        return (JsonObject)(await r.Shadow.Report(50, null, default))["summary"]!["gate"]!;
+    }
+
+    static void BothPromote(Rig r, string release)
+    {
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "promote", release, [], [], r.Now));
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promoted", release, environment = "Uat" }));
+    }
+
+    static JsonNode Declared(JsonObject gate, string id) => ((JsonArray)gate["declared"]!).Single(d => (string)d!["id"]! == id)!;
+
+    [Fact]
+    public async Task ThreeMatchedBothSidedReleases_MeetTheGate()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) BothPromote(r, v);
+        var gate = await Gate(r);
+        Assert.True((bool)gate["met"]!);
+        Assert.Equal(3, (int)gate["comparedReleases"]!);
+        Assert.Equal(0, (int)gate["unexplainedLive"]!);
+        Assert.Equal([0, 0, 0], new[] { (int)gate["liveDiffers"]!, (int)gate["liveV1Only"]!, (int)gate["liveV2Only"]! });
+        var classes = (JsonArray)gate["outcomeClasses"]!;
+        Assert.Equal(3, classes.Count);
+        Assert.All(classes, c => { Assert.Equal("match", (string)c!["outcome"]!); Assert.Equal("promote", (string)c["class"]!); });
+        // the status block (this process) says the same as the stored report
+        Assert.Equal(gate.ToJsonString(), r.Shadow.Status()["gate"]!.ToJsonString());
+        var live = (JsonObject)(await r.Shadow.Report(50, null, default))["summary"]!["live"]!;
+        Assert.Equal(3, (int)live["counts"]!["match"]!);
+        Assert.All((JsonArray)live["seen"]!, x => { Assert.True((bool)x!["v1"]!); Assert.True((bool)x["v2"]!); Assert.True((bool)x["compared"]!); });
+    }
+
+    [Fact]
+    public async Task TwoReleasesCompared_AreNotEnough()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3" }) BothPromote(r, v);
+        var gate = await Gate(r);
+        Assert.False((bool)gate["met"]!);
+        Assert.Equal(2, (int)gate["comparedReleases"]!);
+        Assert.Equal(0, (int)gate["unexplainedLive"]!);
+    }
+
+    [Fact]
+    public async Task ThreeReleasesWhereOneDiffers_AreNotMet_AndOneIsUnexplained()
+    {
+        var r = new Rig();
+        BothPromote(r, "1.0.2"); BothPromote(r, "1.0.3");
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", "1.0.4", [], ["the uat app has not been Healthy long enough"], r.Now));
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promoted", release = "1.0.4", environment = "Uat" }));
+        var gate = await Gate(r);
+        Assert.False((bool)gate["met"]!);
+        Assert.Equal(3, (int)gate["comparedReleases"]!);   // a difference is a comparison too
+        Assert.Equal(1, (int)gate["liveDiffers"]!);
+        Assert.Equal(1, (int)gate["unexplainedLive"]!);
+        var classes = (JsonArray)gate["outcomeClasses"]!;
+        Assert.Equal(2, classes.Count(c => (string)c!["outcome"]! == "match"));
+        var differs = classes.Single(c => (string)c!["outcome"]! == "differs")!;
+        Assert.Equal("1.0.4", (string)differs["release"]!);
+        Assert.Equal("wait:health", (string)differs["class"]!);
+    }
+
+    [Fact]
+    public async Task AV2OnlyRow_ForAReleaseNoQueuedItemNames_IsDeclared_NotCompared()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) BothPromote(r, v);
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "promote", "1.0.9", [], [], r.Now));   // v1's pass never names 1.0.9: no Release Queue item carries it
+        var gate = await Gate(r);
+        Assert.Equal(3, (int)gate["comparedReleases"]!);
+        Assert.Equal(1, (int)gate["liveV2Only"]!);
+        Assert.Equal(0, (int)gate["unexplainedLive"]!);
+        Assert.True((bool)gate["met"]!);
+        var declared = Declared(gate, "queue-only-v1");
+        Assert.Equal(["1.0.9"], ((JsonArray)declared["releases"]!).Select(x => (string)x!));
+        Assert.False(string.IsNullOrEmpty((string)declared["reason"]!));
+        Assert.DoesNotContain(((JsonArray)gate["outcomeClasses"]!), c => (string)c!["release"]! == "1.0.9");
+    }
+
+    [Fact]
+    public async Task AV2OnlyRow_ForAReleaseV1Named_IsNotDeclared()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) BothPromote(r, v);
+        r.Shadow.ObserveV2(new TrainDecided("orders/uat", "promote", "1.0.9", [], [], r.Now));
+        r.Shadow.ObserveV1(V1(new { item = 9, action = "promotion-deferred", release = "1.0.9", reason = "sweep-budget" }));   // v1 had it in its queue and judged nothing
+        var gate = await Gate(r);
+        Assert.Equal(1, (int)gate["liveV2Only"]!);
+        Assert.Equal(1, (int)gate["unexplainedLive"]!);
+        Assert.False((bool)gate["met"]!);
+        Assert.Empty((JsonArray)Declared(gate, "queue-only-v1")["releases"]!);
+    }
+
+    [Fact]
+    public async Task AV1Row_ForAnOlderRelease_ANewerV2DecisionSupersedes_IsDeclared()
+    {
+        var r = new Rig();
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.9", environment = "Uat", reasons = new[] { "it has no deployment to Tdd" } }));   // 1.0.9 is older than 1.0.10 (numbers, not text)
+        foreach (var v in new[] { "1.0.10", "1.0.11", "1.0.12" }) BothPromote(r, v);
+        var gate = await Gate(r);
+        Assert.Equal(1, (int)gate["liveV1Only"]!);
+        Assert.Equal(0, (int)gate["unexplainedLive"]!);
+        Assert.True((bool)gate["met"]!);
+        Assert.Equal(["1.0.9"], ((JsonArray)Declared(gate, "newest-only")["releases"]!).Select(x => (string)x!));
+    }
+
+    [Fact]
+    public async Task AV1Row_ForANewerRelease_ThanAnyV2Decided_IsNotDeclared()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" }) BothPromote(r, v);
+        r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = "1.0.5", environment = "Uat", reasons = new[] { "it has no deployment to Tdd" } }));
+        var gate = await Gate(r);
+        Assert.Equal(1, (int)gate["liveV1Only"]!);
+        Assert.Equal(1, (int)gate["unexplainedLive"]!);
+        Assert.False((bool)gate["met"]!);
+    }
+
+    [Fact]
+    public async Task ReleasesCompared_ByFailedWaits_ShowTheirClass()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "1.0.2", "1.0.3", "1.0.4" })
+        {
+            var why = "its deployment to Tdd ended Failed (Deployments-9)";
+            r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", v, [], [why], r.Now));
+            r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = v, environment = "Uat", reasons = new[] { why } }));
+        }
+        var gate = await Gate(r);
+        Assert.True((bool)gate["met"]!);   // compared and agreeing...
+        Assert.All((JsonArray)gate["outcomeClasses"]!, c => Assert.Equal("wait:failed", (string)c!["class"]!));   // ...but the report shows that every release is in the deployment-failed class
+    }
+
+    [Theory]
+    [InlineData("1.0.9", "1.0.10", -1)]
+    [InlineData("1.0.10", "1.0.9", 1)]
+    [InlineData("1.0.2", "1.0.2", 0)]
+    [InlineData("1.0", "1.0.1", -1)]
+    [InlineData("2.0.0", "1.9.9", 1)]
+    public void ReleaseNames_AreOrderedByTheirNumbers(string a, string b, int expected) => Assert.Equal(expected, Math.Sign(ShadowGate.CompareReleases(a, b)));
 
     [Fact]
     public async Task TheLiveGate_CountsWhatTheStoredGateCounts_NotWhatWasObserved()
@@ -452,7 +601,28 @@ public class DeliveryShadowTests
         Assert.Equal(1, (int)report["summary"]!["gate"]!["releases"]!);
         Assert.False((bool)report["summary"]!["gate"]!["met"]!);
         r.Now = r.Now.AddHours(4);
-        Assert.True((bool)(await r.Shadow.Report(10, null, default))["summary"]!["gate"]!["met"]!);
+        var late = (await r.Shadow.Report(10, null, default))["summary"]!["gate"]!;
+        Assert.False((bool)late["met"]!);   // the hours are information; and nothing live was compared with v1 (the replayed rows are no comparison at all)
+        Assert.True((double)late["hours"]! >= 4);
+        Assert.Equal(0, (int)late["comparedReleases"]!);
+    }
+
+    [Fact]
+    public async Task ReplayedComparisons_AreNotComparedReleases_EvenWhenBothSidesAgree()
+    {
+        var r = new Rig();
+        foreach (var v in new[] { "2.4.1", "2.4.2", "2.4.3" })
+        {
+            r.Shadow.ObserveV2(new TrainDecided("orders/uat", "waiting", v, [], ["x"], T0, null, Replay: true));
+            r.Shadow.ObserveV1(V1(new { item = 7, action = "promotion-waiting", release = v, environment = "Uat" }));
+        }
+        var gate = await Gate(r);
+        Assert.Equal(3, r.Store.All.Count(x => x.Replay && x.Outcome == ShadowOutcomes.Match));
+        Assert.False((bool)gate["met"]!);
+        Assert.Equal(0, (int)gate["comparedReleases"]!);
+        Assert.Equal(0, (int)gate["unexplainedLive"]!);
+        Assert.Empty((JsonArray)gate["outcomeClasses"]!);
+        Assert.Equal(0, (int)((JsonObject)(await r.Shadow.Report(50, null, default))["summary"]!["live"]!["counts"]!)["match"]!);
     }
 
     [Fact]

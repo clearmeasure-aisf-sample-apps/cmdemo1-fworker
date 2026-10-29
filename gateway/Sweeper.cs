@@ -14,6 +14,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     // started a full sweep 2 s later, so a busy plant swept about once a minute.
     public int MinSeconds { get; init; }
     public GitHubBudget? Budget { get; init; }
+    // W6.1 (hybrid composition): the items that have a WorkItemSaga. Set only where the engine acts; the sweep's answer says nothing about them to the plant, and an incremental pass does not ask for them
+    public V2Ownership? V2 { get; init; }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -79,6 +81,11 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     async Task<List<int>> SweepOnce(List<int>? items)
     {
         var unconfirmedOut = new List<int>();
+        if (V2 != null)
+        {
+            await V2.RefreshAsync();
+            if (items != null) { items = items.Where(i => !V2.Owns(i)).ToList(); if (items.Count == 0) return unconfirmedOut; }
+        }
         var low = Budget?.Low().Low == true;
         var args = new JsonObject();
         if (items != null) args["items"] = new JsonArray(items.Select(i => (JsonNode)i).ToArray());
@@ -114,6 +121,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 if (items != null) foreach (var i in items) hub.RequestSweep(i);
                 return unconfirmedOut;
             }
+            if (V2 != null && V2.Count > 0) SweepV2Filter.Apply(j, V2.Owns);
             foreach (var x in j["unconfirmed"] as JsonArray ?? new JsonArray()) if (x is JsonValue uv && uv.TryGetValue<int>(out var ui) && ui > 0) unconfirmedOut.Add(ui);
             var acts = j["actions"]!.AsArray();
             // A full sweep whose item loop ran out of its budget (issue 429, `partial`) names the items it read (`viewed`): it is taken like an

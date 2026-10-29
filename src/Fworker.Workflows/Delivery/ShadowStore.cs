@@ -19,8 +19,11 @@ public sealed record ShadowComparisonRow(long Id, DateTimeOffset At, string Depl
 /// <summary>
 /// What the stored comparisons add up to: a count per outcome, the releases they cover and the span of time. The gate counts the live ones only: <paramref name="LiveReleases"/> are the releases with
 /// a decision of the train on a live event (not the replay of history) and <paramref name="FirstLive"/> the time of the first such comparison; <paramref name="Replays"/> are the replayed ones.
+/// <paramref name="LiveCounts"/> are the live comparisons (everything but the replay) by outcome and <paramref name="LiveSeen"/> what they say of each live release in each environment: the sides seen and
+/// whether the two were compared (what the honest gate is made of, <see cref="ShadowGate"/>).
 /// </summary>
-public sealed record ShadowSummary(IReadOnlyDictionary<string, int> Counts, int Releases, DateTimeOffset? First, DateTimeOffset? Last, int LiveReleases = 0, DateTimeOffset? FirstLive = null, int Replays = 0)
+public sealed record ShadowSummary(IReadOnlyDictionary<string, int> Counts, int Releases, DateTimeOffset? First, DateTimeOffset? Last, int LiveReleases = 0, DateTimeOffset? FirstLive = null, int Replays = 0,
+    IReadOnlyDictionary<string, int>? LiveCounts = null, IReadOnlyList<ShadowLiveRelease>? LiveSeen = null)
 {
     public int Total => Counts.Values.Sum();
 }
@@ -72,7 +75,11 @@ public sealed class SqlShadowComparisonStore(Func<FactoryDbContext> open) : ISha
         var liveReleases = await live.Select(x => x.Release).Distinct().CountAsync(ct);
         DateTimeOffset? firstLive = liveReleases > 0 ? await live.MinAsync(x => (DateTimeOffset?)x.At, ct) : null;
         var replays = await db.DeliveryShadowComparisons.AsNoTracking().CountAsync(x => x.Replay, ct);
-        return new ShadowSummary(counts, releases, first, last, liveReleases, firstLive, replays);
+        // every live comparison, v1-only rows included (the gate must see a release only v1 judged): the rows are few (one per change of a decision of a release)
+        var liveRows = (await db.DeliveryShadowComparisons.AsNoTracking().Where(x => !x.Replay)
+            .Select(x => new { x.Deployable, x.Environment, x.Release, x.Outcome, x.V1Action, x.V2Action, x.V1Json, x.V2Json, x.At }).ToListAsync(ct))
+            .Select(x => ShadowLiveRow.Of(x.Deployable, x.Environment, x.Release, x.Outcome, x.V1Action, x.V2Action, Parse(x.V1Json), Parse(x.V2Json), x.At)).ToList();
+        return new ShadowSummary(counts, releases, first, last, liveReleases, firstLive, replays, liveRows.GroupBy(r => r.Outcome).ToDictionary(g => g.Key, g => g.Count()), ShadowLiveRelease.Fold(liveRows));
     }
 
     static string Clip(string s, int n) => s.Length <= n ? s : s[..n];
@@ -103,10 +110,13 @@ public sealed class InMemoryShadowComparisonStore : IShadowComparisonStore
     {
         lock (rows)
         {
-            var live = rows.Where(r => !r.Replay && r.V2Action != "").ToList();
+            var notReplay = rows.Where(r => !r.Replay).ToList();
+            var live = notReplay.Where(r => r.V2Action != "").ToList();
             return Task.FromResult(new ShadowSummary(rows.GroupBy(r => r.Outcome).ToDictionary(g => g.Key, g => g.Count()), rows.Select(r => r.Release).Distinct().Count(),
                 rows.Count > 0 ? rows.Min(r => r.At) : null, rows.Count > 0 ? rows.Max(r => r.At) : null,
-                live.Select(r => r.Release).Distinct().Count(), live.Count > 0 ? live.Min(r => r.At) : null, rows.Count(r => r.Replay)));
+                live.Select(r => r.Release).Distinct().Count(), live.Count > 0 ? live.Min(r => r.At) : null, rows.Count(r => r.Replay),
+                notReplay.GroupBy(r => r.Outcome).ToDictionary(g => g.Key, g => g.Count()),
+                ShadowLiveRelease.Fold(notReplay.Select(r => ShadowLiveRow.Of(r.Deployable, r.Environment, r.Release, r.Outcome, r.V1Action, r.V2Action, r.V1, r.V2, r.At)))));
         }
     }
 }
