@@ -2,10 +2,10 @@ namespace Fworker.Domain;
 
 // Host headroom and footprint (D7), docs/design/delivery-speed.md section 4.2 (two-level admission). v1 has no such rule: its plan picks the host with
 // the fewest workers and never looks at memory, so these are specification tests, not parity tests. Pure values: no clock (the caller passes "now"), no I/O,
-// no config. Nothing calls this yet; W7 wires it into the scheduler and W7.4 delivers the metrics the host report carries.
+// no config. The CapacityScheduler (W7.1) calls it where the engine acts, and W7.4 delivers the metrics the host report carries.
 
 /// <summary>
-/// The defaults of section 4.2 as constants. They become config keys with W7.0; until then nothing reads config here. <see cref="Defaults"/> is what a
+/// The defaults of section 4.2 as constants; the config keys (runtimes.octopus.reserveMb, minDiskMb, hostFullSeconds, minFootprintSamples) are read by CapacitySettings (W7.0). <see cref="Defaults"/> is what a
 /// caller without settings uses.
 /// </summary>
 public sealed record HeadroomSettings(

@@ -182,6 +182,21 @@ sealed class RuntimeManager : IRuntimeManager
         }
     }
 
+    // W7.1: what this manager runs and has started today, for the v2 CapacityScheduler, which shares the runtime's limits with the plant (the hybrid composition), and the reason CanStart would refuse that is no shortage of
+    // slots (the same order: not counted yet, unhealthy, quota). A short read under the lock; called only where the engine acts.
+    public (int Running, int Today, string? Blocked) Load()
+    {
+        lock (gate)
+        {
+            Roll();
+            string? blocked = null;
+            if (!relisted || (cae is IRunHistory && countedDay != day)) blocked = "runtime-relisting";
+            else if (!healthy) blocked = "runtime-unhealthy";
+            else if (lim.Blocked() is { Length: > 0 } why) blocked = why;
+            return (execs.Values.Count(e => !e.Ended), today, blocked);
+        }
+    }
+
     public Ticket Begin(int item, string phase, string profile, string role = "")
     {
         var name = $"{lim.Prefix}-{item}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant()}";

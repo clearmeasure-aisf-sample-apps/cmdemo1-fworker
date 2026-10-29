@@ -104,7 +104,15 @@
     "staleConfirmMinutes": 3,
     "clientStartMinutes": 5,
     "progressMaxMinutes": 180,
-    "continueMinutes": 3
+    "continueMinutes": 3,
+    "fileOverlap": { "enabled": false, "maxHoldMinutes": 120 },
+    "overlapIgnore": []
+  },
+  "scheduler": {
+    "slotMaxMinutes": 240,
+    "hostReportMaxMinutes": 10,
+    "safetyWakeMinutes": 10,
+    "toolchains": {}
   },
   "engine": {
     "v2Environments": [],
@@ -349,6 +357,12 @@
       "oidcAudience": "api://AzureADTokenExchange",
       "agent": "cursor",
       "perHostCapacity": 2,
+      "perHostBurst": 0,
+      "reserveMb": 2048,
+      "minDiskMb": 4096,
+      "hostFullSeconds": 30,
+      "containerCpus": 2,
+      "minFootprintSamples": 10,
       "overflowRoles": ["plant-manager", "supervisor", "qc", "operator"],
       "overflowMax": 4,
       "maxConcurrent": 0,
