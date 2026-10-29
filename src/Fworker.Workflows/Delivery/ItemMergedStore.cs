@@ -159,4 +159,13 @@ public sealed class DeliveredToTable(Func<FactoryDbContext> open) : IDeliveredLo
         var have = (await db.DeliveredTo.Where(x => x.Environment == env && keys.Contains(x.ItemKey)).Select(x => x.ItemKey).ToListAsync(ct)).ToHashSet();
         return deps.Where(d => !have.Contains(d.ToString())).ToList();
     }
+
+    /// <summary>The items no merge was recorded for, in any commit (W7.7: a dependency that is merged settles without a release where its repository has nothing to deliver).</summary>
+    public async Task<IReadOnlyList<ItemId>> NotYetMerged(IEnumerable<ItemId> items, CancellationToken ct = default)
+    {
+        var list = items.ToList(); var keys = list.Select(d => d.ToString()).ToList();
+        await using var db = open();
+        var have = (await db.MergedItems.Where(x => keys.Contains(x.ItemKey)).Select(x => x.ItemKey).Distinct().ToListAsync(ct)).ToHashSet();
+        return list.Where(d => !have.Contains(d.ToString())).ToList();
+    }
 }

@@ -46,13 +46,31 @@ sealed class FakeTrainReads : ITrainReads
 sealed class FakeDelivered : IDeliveredLookup
 {
     public readonly HashSet<(string Item, string Env)> Rows = [];
+    /// <summary>The items a merge was recorded for (the merged-items table).</summary>
+    public readonly HashSet<string> Merged = [];
+    /// <summary>When set, every lookup throws it (the database does not answer).</summary>
+    public Exception? Fail;
+    public int Lookups;
     public Task<IReadOnlyList<ItemId>> NotYetDelivered(IEnumerable<ItemId> dependencies, string environment, CancellationToken ct = default)
-        => Task.FromResult<IReadOnlyList<ItemId>>(dependencies.Where(d => !Rows.Contains((d.ToString(), environment))).ToList());
+    {
+        Lookups++;
+        if (Fail is not null) throw Fail;
+        return Task.FromResult<IReadOnlyList<ItemId>>(dependencies.Where(d => !Rows.Contains((d.ToString(), environment))).ToList());
+    }
+
+    public Task<IReadOnlyList<ItemId>> NotYetMerged(IEnumerable<ItemId> items, CancellationToken ct = default)
+    {
+        Lookups++;
+        if (Fail is not null) throw Fail;
+        return Task.FromResult<IReadOnlyList<ItemId>>(items.Where(d => !Merged.Contains(d.ToString())).ToList());
+    }
 }
 
 sealed class TrainFixture
 {
     public static readonly RepoId Repo = new("acme", "orders");
+    /// <summary>A second repository with a deployable of its own (the fixture adds it with web: true); any other repository has none.</summary>
+    public static readonly RepoId Web = new("acme", "web");
     public static readonly DateTimeOffset T0 = new(2026, 10, 28, 10, 0, 0, TimeSpan.Zero);
     public static string Sha(char c) => new(c, 40);
 
@@ -66,14 +84,16 @@ sealed class TrainFixture
     public readonly List<object> All = [];
     public string Key => TrainKey.Of("orders", Env);
 
-    public TrainFixture(string env = "uat", Promoter promoter = Promoter.Gateway, string[]? environments = null, bool dependencies = false, double signoffHours = 2, HealthWindow? window = null, int minReadGapSeconds = 30, int pollSeconds = 120)
+    public TrainFixture(string env = "uat", Promoter promoter = Promoter.Gateway, string[]? environments = null, bool dependencies = false, double signoffHours = 2, HealthWindow? window = null, int minReadGapSeconds = 30, int pollSeconds = 120, bool web = false)
     {
         Env = env;
         var settings = new DeliveryPolicySettings("orders-project", promoter, environments ?? ["uat", "prod"],
             new Dictionary<string, string> { ["tdd"] = "Tdd", ["uat"] = "Uat", ["prod"] = "Prod" },
             new Dictionary<string, string> { ["tdd"] = "https://tdd.example", ["uat"] = "https://uat.example", ["prod"] = "https://prod.example" },
             null, window, signoffHours, dependencies);
-        var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, T0, "acme", Repo, null, [new RepositoryEntry(Repo, [new DeployableEntry("orders", Repo, null, null, null, null, false)])], []);
+        var repositories = new List<RepositoryEntry> { new(Repo, [new DeployableEntry("orders", Repo, null, null, null, null, false)]) };
+        if (web) repositories.Add(new(Web, [new DeployableEntry("web", Web, null, null, null, null, false)]));
+        var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, T0, "acme", Repo, null, repositories, []);
         Policies = new DeliveryPolicies(new CatalogDeliveryPolicies(() => snapshot, n => n == "orders" ? settings : null), minReadGapSeconds, pollSeconds);
         Reads.Clock = () => Now;
         Svc = new DeliveryTrainService(Store, Policies, Reads, Delivered, () => Now);
