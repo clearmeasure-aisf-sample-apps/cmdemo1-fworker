@@ -22,43 +22,43 @@ public sealed class HeadroomFootprintTests
 
     [Fact]
     public void NineSamples_NoFootprint()
-        => Assert.Null(Footprint.P95(Samples(9)));
+        => Assert.Null(HostFootprint.P95(Samples(9)));
 
     [Fact]
     public void NoSamples_NoFootprint()
-        => Assert.Null(Footprint.P95(Array.Empty<int>()));
+        => Assert.Null(HostFootprint.P95(Array.Empty<int>()));
 
     [Fact]
     public void TenSamples_FootprintIsTheLargest()
-        => Assert.Equal(1000, Footprint.P95(Samples(10))); // ceil(9.5) = rank 10
+        => Assert.Equal(1000, HostFootprint.P95(Samples(10))); // ceil(9.5) = rank 10
 
     [Fact]
     public void FiftySamples_FootprintIsRank48()
-        => Assert.Equal(4800, Footprint.P95(Samples(50))); // ceil(47.5) = rank 48
+        => Assert.Equal(4800, HostFootprint.P95(Samples(50))); // ceil(47.5) = rank 48
 
     [Fact]
     public void TwentySamples_RankIsExactlyNineteen()
-        => Assert.Equal(1900, Footprint.P95(Samples(20))); // 0.95 * 20 = 19 exactly, no rounding up to 20
+        => Assert.Equal(1900, HostFootprint.P95(Samples(20))); // 0.95 * 20 = 19 exactly, no rounding up to 20
 
     [Fact]
     public void OrderOfTheSamplesDoesNotMatter()
     {
         var shuffled = Samples(50).Reverse().Take(25).Concat(Samples(50).Take(25)).ToArray();
-        Assert.Equal(Footprint.P95(Samples(50)), Footprint.P95(shuffled));
+        Assert.Equal(HostFootprint.P95(Samples(50)), HostFootprint.P95(shuffled));
     }
 
     [Fact]
     public void OneOutlierAmongFifty_IsNotTheFootprint()
     {
         var s = Enumerable.Repeat(3000, 49).Append(9000).ToArray();
-        Assert.Equal(3000, Footprint.P95(s)); // the p95 ignores the top 2 of 50
+        Assert.Equal(3000, HostFootprint.P95(s)); // the p95 ignores the top 2 of 50
     }
 
     [Fact]
     public void MinSamplesFromSettings_IsHonored()
     {
         var s = new HeadroomSettings(MinFootprintSamples: 3);
-        Assert.Null(Footprint.P95(new[] { 1, 2 }, s));
-        Assert.Equal(3, Footprint.P95(new[] { 1, 2, 3 }, s));
+        Assert.Null(HostFootprint.P95(new[] { 1, 2 }, s));
+        Assert.Equal(3, HostFootprint.P95(new[] { 1, 2, 3 }, s));
     }
 }
