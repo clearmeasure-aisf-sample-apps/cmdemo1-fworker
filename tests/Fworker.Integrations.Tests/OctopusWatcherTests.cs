@@ -204,6 +204,139 @@ public sealed class OctopusWatcherTests
         Assert.True(await w.Poll()); Assert.Empty(got);
     }
 
+    // ---- #487: bounded memory, releases whose commit comes late ------------------------------------------------------------------------------------------
+
+    static OctopusWatcher Windowed(FakeOctopus o, List<IngressEvent> got, int window) => new(o, e => { if (e is not (OctopusReplayBegan or OctopusReplayComplete)) got.Add(e); }, new OctopusWatchSettings("Spaces-1", "ui", ReleaseWindow: window, DeploymentWindow: window), () => T0);
+
+    [Fact]
+    public async Task TheMemoryIsBoundedByTheWindows_NotByTheAgeOfTheProcess_AndNothingIsPublishedTwice()
+    {
+        const int window = 5;
+        var o = new FakeOctopus(); var got = new List<IngressEvent>(); var w = Windowed(o, got, window);
+        o.Set($"{Sp}/projects/ui", """{"Id":"Projects-1"}""");
+        o.Set($"{Sp}/environments?take=1000", """{"Items":[{"Id":"Environments-1","Name":"tdd"}]}""");
+        var peak = 0;
+        for (var i = 1; i <= 60; i++)
+        {
+            // the newest `window` releases and deployments; every deployment is still running and waits at its own interruption
+            var ids = Enumerable.Range(Math.Max(1, i - window + 1), Math.Min(i, window)).ToList();
+            var releaseItems = string.Join(",", ids.Select(n => $$"""{"Id":"Releases-{{n}}","Version":"1.0.{{n}}","Assembled":"2026-10-28T11:59:00Z","ReleaseNotes":"{{Sha}}"}"""));
+            var deploymentItems = string.Join(",", ids.Select(n => $$"""{"Id":"Deployments-{{n}}","TaskId":"ServerTasks-{{n}}","ReleaseId":"Releases-{{n}}","EnvironmentId":"Environments-1","Created":"2026-10-28T11:59:00Z"}"""));
+            o.Set($"{Sp}/projects/Projects-1/releases?take={window}", "{\"Items\":[" + releaseItems + "]}");
+            o.Set($"{Sp}/deployments?projects=Projects-1&take={window}", "{\"Items\":[" + deploymentItems + "]}");
+            foreach (var n in ids)
+            {
+                o.Set($"{Sp}/tasks/ServerTasks-{n}", """{"State":"Executing"}""");
+                o.Set($"{Sp}/interruptions?regarding=ServerTasks-{n}&pendingOnly=true&take=20", $$"""{"Items":[{"Id":"Interruptions-{{n}}","IsPending":true}]}""");
+            }
+            Assert.True(await w.Poll());
+            peak = Math.Max(peak, w.Remembered);
+        }
+        // 60 releases, each with its two events, and 60 deployments, each with Started and a sign-off: 240 events, every key once
+        Assert.Equal(240, got.Count);
+        Assert.Equal(got.Count, got.Select(KeyOf).Distinct().Count());
+        Assert.InRange(peak, 1, 4 * window * 2);   // (keys of 5 releases and 5 deployments, the known releases)
+        Assert.InRange(w.Remembered, 1, 4 * window * 2);
+    }
+
+    [Fact]
+    public async Task AWindowThatCouldNotBeRead_ForgetsNothing_SoTheNextPollRepeatsNothing()
+    {
+        var o = Server(); var (w, got) = Make(o);
+        await w.Poll(); var first = got.Count; var remembered = w.Remembered;
+        var releases = o.Answers[$"{Sp}/projects/Projects-1/releases?take=30"]; var deployments = o.Answers[$"{Sp}/deployments?projects=Projects-1&take=30"];
+        o.Answers.Remove($"{Sp}/projects/Projects-1/releases?take=30"); o.Answers.Remove($"{Sp}/deployments?projects=Projects-1&take=30");   // Octopus answers 404 to both: no list, not an empty one
+        await w.Poll();
+        Assert.Equal(remembered, w.Remembered);
+        o.Answers[$"{Sp}/projects/Projects-1/releases?take=30"] = releases; o.Answers[$"{Sp}/deployments?projects=Projects-1&take=30"] = deployments;
+        await w.Poll();
+        Assert.Equal(first, got.Count);
+    }
+
+    [Fact]
+    public async Task AnEmptyWindow_ForgetsWhatLeftIt()
+    {
+        var o = Server(); var (w, _) = Make(o);
+        await w.Poll(); Assert.True(w.Remembered > 0);
+        o.Set($"{Sp}/projects/Projects-1/releases?take=30", """{"Items":[]}"""); o.Set($"{Sp}/deployments?projects=Projects-1&take=30", """{"Items":[]}""");
+        await w.Poll();
+        Assert.Equal(0, w.Remembered);
+    }
+
+    static string ReleaseList(string commitField = "") => """{"Items":[{"Id":"Releases-5","Version":"1.0.5","Assembled":"2026-10-28T11:59:00Z","ReleaseNotes":"none"%FIELD%}]}""".Replace("%FIELD%", commitField);
+
+    static string BuildInfo(string sha) => ",\"BuildInformation\":[{\"VcsCommitNumber\":\"" + sha + "\"}]";
+
+    [Fact]
+    public async Task AReleaseWhoseCommitComesLater_PublishesCommitResolvedOnce_AndNoSecondReleaseCreated()
+    {
+        var o = Server(); o.Set($"{Sp}/projects/Projects-1/releases?take=30", ReleaseList());
+        var (w, got) = Make(o);
+        await w.Poll();
+        Assert.Null(Assert.IsType<OctopusReleaseCreated>(got[0]).Commit);
+        Assert.DoesNotContain(got, e => e is ReleaseCommitResolved);
+        Assert.Null(got.OfType<OctopusDeploymentChanged>().Single().Commit);
+
+        await w.Poll();   // still nothing: nothing new is published, the commit is looked for again
+        Assert.DoesNotContain(got, e => e is ReleaseCommitResolved);
+
+        o.Set($"{Sp}/projects/Projects-1/releases?take=30", ReleaseList(BuildInfo(Sha.ToUpperInvariant())));
+        var calls = o.Paths.Count; await w.Poll();
+        var resolved = Assert.Single(got.OfType<ReleaseCommitResolved>());
+        Assert.Equal(("Releases-5", "1.0.5", Sha), (resolved.ReleaseId, resolved.Version, resolved.Commit));
+        Assert.Single(got.OfType<OctopusReleaseCreated>());
+        Assert.DoesNotContain(o.Paths.Skip(calls), p => p.Contains("/releases/Releases-5"));   // (the list had it: no extra call)
+
+        await w.Poll(); await w.Poll();
+        Assert.Single(got.OfType<ReleaseCommitResolved>());
+        Assert.Equal(got.Count, got.Select(KeyOf).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task ACommitThatComesLater_IsOnTheEventsPublishedAfterIt()
+    {
+        var o = Server(); o.Set($"{Sp}/projects/Projects-1/releases?take=30", ReleaseList());
+        var (w, got) = Make(o);
+        await w.Poll();
+        o.Set($"{Sp}/projects/Projects-1/releases?take=30", ReleaseList(BuildInfo(Sha)));
+        o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Success"}""");
+        await w.Poll();
+        Assert.Equal(Sha, got.OfType<OctopusDeploymentChanged>().Single(d => d.Phase == OctopusDeploymentPhase.Succeeded).Commit);
+    }
+
+    [Fact]
+    public async Task ACommitResolvedThatTheIngressRefuses_IsOfferedAgain()
+    {
+        var o = Server(); o.Set($"{Sp}/projects/Projects-1/releases?take=30", ReleaseList());
+        var refuse = false;
+        var (w, all) = MakeAll(o, refuse: e => refuse && e is ReleaseCommitResolved);
+        await w.Poll();
+        o.Set($"{Sp}/projects/Projects-1/releases?take=30", ReleaseList(BuildInfo(Sha)));
+        refuse = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => w.Poll());
+        refuse = false;
+        await w.Poll();
+        Assert.Single(all.OfType<ReleaseCommitResolved>());
+    }
+
+    [Fact]
+    public async Task AReleaseOutsideTheReleaseWindow_HasItsCommitLookedForAgainWhileItsDeploymentRuns_OncePerPoll()
+    {
+        var o = Server(); o.Set($"{Sp}/projects/Projects-1/releases?take=30", """{"Items":[]}""");
+        o.Set($"{Sp}/releases/Releases-5", """{"Id":"Releases-5","Version":"1.0.5","ReleaseNotes":"none"}""");
+        var (w, got) = Make(o);
+        await w.Poll();
+        Assert.Null(got.OfType<OctopusDeploymentChanged>().Single().Commit);
+        o.Paths.Clear(); await w.Poll();
+        Assert.Single(o.Paths, p => p == $"{Sp}/releases/Releases-5");   // looked at again, once
+        o.Set($"{Sp}/releases/Releases-5", $$"""{"Id":"Releases-5","Version":"1.0.5","ReleaseNotes":"built {{Sha}}"}""");
+        o.Set($"{Sp}/tasks/ServerTasks-9", """{"State":"Success"}""");
+        await w.Poll();
+        Assert.Equal(Sha, got.OfType<OctopusDeploymentChanged>().Single(d => d.Phase == OctopusDeploymentPhase.Succeeded).Commit);
+        o.Paths.Clear(); await w.Poll();
+        Assert.DoesNotContain(o.Paths, p => p.Contains("/releases/Releases-5"));   // finished: not read again
+    }
+
     // ---- #496: the events carry Octopus's own time ------------------------------------------------------------------------------------------------------
 
     static DateTimeOffset Utc(string s) => DateTimeOffset.Parse(s, System.Globalization.CultureInfo.InvariantCulture);

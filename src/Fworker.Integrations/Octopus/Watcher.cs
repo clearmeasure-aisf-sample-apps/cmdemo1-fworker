@@ -16,14 +16,17 @@ public sealed record OctopusWatchSettings(string Space, string Project, int Rele
 /// deployments, a deployment's task, a release by id, the interruptions of a running task) and publishes ReleaseCreated, ReleaseCommitResolved, the phases of a
 /// deployment and SignOffRequested. It never writes: every call is a GET. Budget rules as Invoke-Octo's: the project is read once, a release once, the task of a
 /// deployment only until it is terminal, and a poll makes at most MaxCallsPerPoll calls (the rest waits for the next poll). Nothing is published twice: what was
-/// published is remembered by event key. The memory is the process's; a restart replays only what is inside the lookback, and the ingress deduplicates by the same
-/// keys. Not thread safe: one caller polls.
+/// published is remembered by event key. The memory is the process's and bounded: a key is kept for as long as its release or deployment is in the window the watcher reads
+/// (ReleaseWindow, DeploymentWindow), and forgotten when the item has left it (the window is the newest items, so an item that left does not come back; if it did, the train's
+/// inputs are idempotent and it would be replayed once). A restart replays what is inside the lookback, and the train deduplicates by the same keys. A release whose commit was not
+/// known when it was first seen is looked at again on every poll (the list carries the build information and the notes) and publishes ReleaseCommitResolved when the commit appears.
+/// Not thread safe: one caller polls.
 /// </summary>
 public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> publish, OctopusWatchSettings settings, Func<DateTimeOffset>? clock = null)
 {
     static readonly Regex Sha = new(@"\b[0-9a-fA-F]{40}\b", RegexOptions.Compiled);
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
-    readonly HashSet<string> published = [];
+    readonly Dictionary<string, HashSet<string>> published = [];   // event keys already published, by the release ("R:id") or deployment ("D:id") they belong to, so that they are forgotten with it
     readonly HashSet<string> finished = [];   // deployment ids whose terminal phase is published (or that ended before the watcher began): their task is not read again
     readonly Dictionary<string, Rel> releases = [];
     DateTimeOffset? since;
@@ -35,6 +38,9 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
 
     /// <summary>The calls the last poll made.</summary>
     public int LastCalls => calls;
+
+    /// <summary>How many things the watcher keeps in memory (published keys, finished deployments, known releases): bounded by the windows, never by the age of the process.</summary>
+    public int Remembered => published.Values.Sum(k => k.Count) + finished.Count + releases.Count;
 
     /// <summary>The commit a release was built from: the first 40 hex digit VcsCommitNumber of its build information, else the first 40 hex digit word of its notes; lower case; null when none (Get-ReleaseCommit).</summary>
     public static string? ReleaseCommit(JsonNode? release)
@@ -63,8 +69,27 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
 
     sealed class BudgetSpent : Exception;
 
+    bool Has(string owner, string key) => published.TryGetValue(owner, out var k) && k.Contains(key);
+
+    bool Mark(string owner, string key)
+    {
+        if (!published.TryGetValue(owner, out var k)) published[owner] = k = [];
+        return k.Add(key);
+    }
+
+    void Unmark(string owner, string key)
+    {
+        if (published.TryGetValue(owner, out var k) && k.Remove(key) && k.Count == 0) published.Remove(owner);
+    }
+
     // a publish that throws is forgotten, so the next poll publishes the event again
-    void Emit(string key, IngressEvent ev) { if (!published.Add(key)) return; try { publish(ev); } catch { published.Remove(key); throw; } }
+    void Emit(string owner, string key, IngressEvent ev) { if (!Mark(owner, key)) return; try { publish(ev); } catch { Unmark(owner, key); throw; } }
+
+    /// <summary>Forgets what belongs to a release or a deployment that is no longer in the window just read. Called only with a window that was read and parsed: an empty answer is not "everything left".</summary>
+    void Forget(string prefix, HashSet<string> inWindow)
+    {
+        foreach (var owner in published.Keys.Where(o => o.StartsWith(prefix, StringComparison.Ordinal) && !inWindow.Contains(o[prefix.Length..])).ToList()) published.Remove(owner);
+    }
 
     /// <summary>The first of these Octopus times that parses (Octopus writes ISO 8601 with an offset); null when none does, and the delivery train then stamps the event with its own clock (#496).</summary>
     public static DateTimeOffset? TimeOf(params JsonNode?[] values)
@@ -96,41 +121,68 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
             var envs = new Dictionary<string, string>();
             foreach (var e in (await Read($"api/{sp}/environments?take=1000", ct))?["Items"] as JsonArray ?? []) envs[$"{e?["Id"]}"] = $"{e?["Name"]}".ToLowerInvariant();
 
-            foreach (var r in ((await Read($"api/{sp}/projects/{projectId}/releases?take={settings.ReleaseWindow}", ct))?["Items"] as JsonArray ?? []).OrderBy(x => $"{x?["Assembled"]}"))
+            var releaseItems = (await Read($"api/{sp}/projects/{projectId}/releases?take={settings.ReleaseWindow}", ct))?["Items"] as JsonArray;
+            var windowReleases = releaseItems == null ? null : new HashSet<string>();
+            foreach (var r in (releaseItems ?? []).OrderBy(x => $"{x?["Assembled"]}"))
             {
                 var rel = Known(r); if (rel == null) continue;
-                var key = $"octopus:release:{rel.Id}";
-                if (published.Contains(key)) continue;
-                if (Old(r)) { published.Add(key); published.Add($"octopus:commit:{rel.Id}"); continue; }
-                Emit(key, new OctopusReleaseCreated(rel.Id, rel.Version, rel.Commit, TimeOf(r?["Assembled"])));
-                if (rel.Commit != null) Emit($"octopus:commit:{rel.Id}", new ReleaseCommitResolved(rel.Id, rel.Version, rel.Commit));
+                windowReleases?.Add(rel.Id);
+                // the build information or the notes can come after the release is first seen; the list carries both on every poll, so an unresolved commit is looked at again at no cost
+                if (rel.Commit == null && ReleaseCommit(r) is { } late) releases[rel.Id] = rel = rel with { Commit = late };
+                var owner = $"R:{rel.Id}"; var key = $"octopus:release:{rel.Id}"; var commitKey = $"octopus:commit:{rel.Id}";
+                if (!Has(owner, key))
+                {
+                    if (Old(r)) { Mark(owner, key); Mark(owner, commitKey); continue; }
+                    Emit(owner, key, new OctopusReleaseCreated(rel.Id, rel.Version, rel.Commit, TimeOf(r?["Assembled"])));
+                }
+                if (rel.Commit != null) Emit(owner, commitKey, new ReleaseCommitResolved(rel.Id, rel.Version, rel.Commit));
             }
+            if (windowReleases != null) Forget("R:", windowReleases);
 
-            foreach (var d in ((await Read($"api/{sp}/deployments?projects={projectId}&take={settings.DeploymentWindow}", ct))?["Items"] as JsonArray ?? []).OrderBy(x => $"{x?["Created"]}"))
+            var deploymentItems = (await Read($"api/{sp}/deployments?projects={projectId}&take={settings.DeploymentWindow}", ct))?["Items"] as JsonArray;
+            if (deploymentItems != null)
+            {
+                // what left the windows is forgotten: the keys, the finished deployments and the releases read for them (a release stays while it is in the release window or a deployment of the window names it)
+                var windowDeployments = deploymentItems.Select(d => $"{d?["Id"]}").ToHashSet();
+                Forget("D:", windowDeployments); finished.RemoveWhere(id => !windowDeployments.Contains(id));
+                if (windowReleases != null)
+                {
+                    var keep = deploymentItems.Select(d => $"{d?["ReleaseId"]}").Concat(windowReleases).ToHashSet();
+                    foreach (var id in releases.Keys.Where(id => !keep.Contains(id)).ToList()) releases.Remove(id);
+                }
+            }
+            var refreshed = new HashSet<string>();
+            foreach (var d in (deploymentItems ?? []).OrderBy(x => $"{x?["Created"]}"))
             {
                 var depId = $"{d?["Id"]}"; var taskId = $"{d?["TaskId"]}";
                 if (depId == "" || taskId == "" || finished.Contains(depId)) continue;
                 var task = await Read($"api/{sp}/tasks/{taskId}", ct); if (task == null) continue;   // (gone since the list was read)
                 var state = $"{task["State"]}"; if (PhaseOf(state) is not { } phase) continue;
+                var owner = $"D:{depId}";
                 var startedKey = $"octopus:deployment:{depId}:{OctopusDeploymentPhase.Started}";
-                if (phase != OctopusDeploymentPhase.Started && !published.Contains(startedKey) && Old(d)) { finished.Add(depId); continue; }   // ended before the watcher began
+                if (phase != OctopusDeploymentPhase.Started && !Has(owner, startedKey) && Old(d)) { finished.Add(depId); continue; }   // ended before the watcher began
                 var relId = $"{d?["ReleaseId"]}";
                 if (!releases.TryGetValue(relId, out var rel)) rel = Known(await Read($"api/{sp}/releases/{relId}", ct));
+                else if (rel.Commit == null && windowReleases?.Contains(relId) != true && refreshed.Add(relId))
+                {
+                    // a release outside the release window is not refreshed by the list: its commit is looked for again here, once per poll, while a deployment of it is unfinished
+                    if (ReleaseCommit(await Read($"api/{sp}/releases/{relId}", ct)) is { } late) releases[relId] = rel = rel with { Commit = late };
+                }
                 if (rel == null) continue;
                 var env = envs.GetValueOrDefault($"{d?["EnvironmentId"]}", $"{d?["EnvironmentId"]}");
                 // #496: the times are Octopus's own, so a replay after a restart does not make an old deployment look as if it happened now (the deployment's Created is the last resort)
                 var startedAt = TimeOf(task["StartTime"], task["QueueTime"], d?["Created"]);
-                Emit(startedKey, new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, OctopusDeploymentPhase.Started, rel.Commit, startedAt));
+                Emit(owner, startedKey, new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, OctopusDeploymentPhase.Started, rel.Commit, startedAt));
                 if (phase != OctopusDeploymentPhase.Started)
                 {
-                    Emit($"octopus:deployment:{depId}:{phase}", new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, phase, rel.Commit, TimeOf(task["CompletedTime"], task["StartTime"], task["QueueTime"], d?["Created"])));
+                    Emit(owner, $"octopus:deployment:{depId}:{phase}", new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, phase, rel.Commit, TimeOf(task["CompletedTime"], task["StartTime"], task["QueueTime"], d?["Created"])));
                     finished.Add(depId);
                 }
                 else if (state == "Executing")
                 {
                     foreach (var i in (await Read($"api/{sp}/interruptions?regarding={taskId}&pendingOnly=true&take=20", ct))?["Items"] as JsonArray ?? [])
                         if (i?["IsPending"]?.GetValue<bool>() != false && $"{i?["Id"]}" is { Length: > 0 } iid)
-                            Emit($"octopus:signoff:{iid}", new SignOffRequested(iid, depId, taskId, rel.Id, rel.Version, env, rel.Commit, TimeOf(i?["Created"])));
+                            Emit(owner, $"octopus:signoff:{iid}", new SignOffRequested(iid, depId, taskId, rel.Id, rel.Version, env, rel.Commit, TimeOf(i?["Created"])));
                 }
             }
             if (!replayDone) { publish(new OctopusReplayComplete()); replayDone = true; }   // every window was read in full: the replay is applied
