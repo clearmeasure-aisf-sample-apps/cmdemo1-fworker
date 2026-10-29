@@ -49,7 +49,7 @@ workorders is not added: dbup-sqlserver 6.x is the provider.
 
 | File | Content |
 |---|---|
-| `scripts/Update/001_...sql` to `011_...sql` | The schema |
+| `scripts/Update/001_...sql` to `013_...sql` | The schema |
 | `schema-manifest.json` | What the scripts build, read from the catalog (embedded) |
 | `SchemaNames.cs` | `factory`, `wolverine`, `dbo.SchemaVersions`, the lock resource |
 | `FactorySchema.cs` | `Scripts`, `LatestVersion`, `UpgradeAsync`, `VerifyAsync`, `UpgradeAndVerifyAsync` |
@@ -77,6 +77,8 @@ every added column under `IF COL_LENGTH(...) IS NULL`, every schema created only
 | 009 AddIdempotencyLedgerAndCopilotReservations | The DDL `SqlCommandSchema` ran on first use |
 | 010 AddIngressDedup | The DDL `SqlIngressDedup` ran on first use |
 | 011 CreateWolverineMessageStore | Wolverine's tables, indexes, foreign key, table type and 5 procedures, generated, never written by hand |
+| 012 AddQcEnvironments | QcEnvironments (W9.0 for W9.1: the QC gate per repository and pull request) |
+| 013 AddTranscripts | Transcripts (W9.0 for W9.8: runtime session transcripts) |
 
 The DDL of 001 to 008 is what `dotnet ef migrations script <previous> <this>` printed, with the history inserts removed and guards added. Column types,
 lengths, nullability, identity, key names (`PK_<Table>`), index names, filters and the default are exactly EF's, so the tables EF built on tdd match.
@@ -87,7 +89,7 @@ Script 011 is `ToDatabaseScript()` of Wolverine's message store, built (not star
 `CREATE OR ALTER PROCEDURE` must start its batch. Idempotence replaces the transaction: a script is journaled only after it succeeded, so a partial run
 is completed by the next one. The text of the procedures contains DELETE and UPDATE (Wolverine's own statements); no script changes a row.
 
-Future scripts: `012_` onward, the next free number. Every future script is expand-only (add tables, add nullable or defaulted columns, add indexes), so
+Future scripts: `014_` onward, the next free number. Every future script is expand-only (add tables, add nullable or defaulted columns, add indexes), so
 that the previous gateway process, still running during the lease hand-over, keeps working. A contraction (dropping a column or table) is a later
 script, shipped once no running image uses the object.
 
@@ -150,7 +152,7 @@ The manifest is generated from a database built by the scripts (`FWORKER_UPDATE_
   only and as the owner asked. Container Apps has no probe on `/ready`, so traffic is unaffected; the release rule (`/ready` 200) now proves the schema.
 - `/api/v1/status`: a block `schema` next to `wolverine`, only where required: `state`, `journal`, `shipped`, `latest`, `applied`, `pending`, `ahead`,
   `differences` (at most 20), `extra`, `attempts`, `since`, `verifiedAt`, `durationMs`, `failedScript`, `lastFailure`.
-- `/_build`: `schemaVersion` (`"011"`), the highest number the image ships, like workorders' `databaseVersion`.
+- `/_build`: `schemaVersion` (`"013"` today), the highest number the image ships, like workorders' `databaseVersion`.
 - A failure is a type, a SQL error number and a script name, never a message. One JSON line is logged: `{"gateway":"schema","event":"failed","detail":"<type> <script>"}`.
 - The Wolverine host is never started on a bad schema, so v2 and shadow work waits. The v1 gateway (sweep, workers, plant) keeps running. A difference
   does not heal on retry: it stays failed and visible, which the release rule treats as an outage (find the missing script, or revert the pull request).
@@ -187,7 +189,7 @@ tests run with `AutoCreate.None`, so every test runs on tables the scripts built
 | `SchemaManifestTests` | The manifest is what the scripts build; the scripts run twice with no error and no change; drift (dropped column, index, table, altered procedure, removed journal row) is found, an extra table is tolerated; two or three processes in parallel journal each script once; a failing script is not journaled; the log never has the connection string; the database is created only on request |
 | `LegacyDatabaseUpgradeTests` | The rehearsal of tdd: EF migrations as they ran, the old runtime DDL of one table, Wolverine's tables built by Weasel, with rows; the scripts succeed, journal all, create the two missing tables, keep every row and leave a schema equal to the fresh one |
 | `WolverineStorageScriptTests` | `TheExportMatchesTheGolden` (no SQL): the export for the solo and balanced profiles, with and without the runtime commands, is the same and equals `tests/Gateway.Tests/golden/wolverine-storage.sql`; script 011 is that golden with its header; `TheScriptsBuildWolverinesStorage` (SQL): Weasel's full diff of its model against a database built by the scripts is empty |
-| `WolverineHostSqlServerTests`, `WolverineHostTests` | The journal holds exactly the scripts; no `__EFMigrationsHistory`; the 16 factory tables and Wolverine's; `/ready`, `/api/v1/status` and `/_build` as above; a blocking schema keeps `/ready` at 503 `upgrading`, a failing one gives `failed` with the script and the host is never built; the default command timeout |
+| `WolverineHostSqlServerTests`, `WolverineHostTests` | The journal holds exactly the scripts; no `__EFMigrationsHistory`; the 18 factory tables and Wolverine's; `/ready`, `/api/v1/status` and `/_build` as above; a blocking schema keeps `/ready` at 503 `upgrading`, a failing one gives `failed` with the script and the host is never built; the default command timeout |
 | `ArchitectureTests` | The project table; `SchemaIsBuiltOnlyByTheScripts`; `WolverineNeverBuildsItsStorage` |
 
 Rewrite switches: `FWORKER_WRITE_WOLVERINE_SQL=1` (golden and script 011), `FWORKER_UPDATE_SCHEMA_MANIFEST=1` (manifest).

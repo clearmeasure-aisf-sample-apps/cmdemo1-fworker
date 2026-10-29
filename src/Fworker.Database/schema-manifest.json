@@ -1040,6 +1040,94 @@
         }
       }
     },
+    "factory.QcEnvironments": {
+      "columns": {
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "PullRequestKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Repository": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Revision": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "StateJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Status": {
+          "type": "nvarchar",
+          "maxLength": 32,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "UpdatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_QcEnvironments_Repository_Status": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "Repository",
+            "Status"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "PK_QcEnvironments": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "PullRequestKey"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
     "factory.SessionMailbox": {
       "columns": {
         "CreatedAt": {
@@ -1140,6 +1228,157 @@
           "primary": true,
           "keys": [
             "Id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.Transcripts": {
+      "columns": {
+        "Bytes": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "EndedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "LastLineAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "LinesDropped": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "LinesJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "LinesTotal": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Name": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Phase": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Revision": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Runtime": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "StartedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "UpdatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_Transcripts_ItemKey_StartedAt": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "ItemKey",
+            "StartedAt"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "IX_Transcripts_StartedAt": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "StartedAt"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "PK_Transcripts": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Name"
           ],
           "included": [],
           "filter": null

@@ -107,9 +107,9 @@ public sealed class WolverineHostSqlServerTests
             // the journal holds exactly the scripts of this build, and the EF migrations are gone
             Assert.Equal(FactorySchema.Scripts, await Rows(cs, "SELECT ScriptName FROM dbo.SchemaVersions ORDER BY ScriptName"));
             Assert.Equal(0, await Count(cs, "SELECT COUNT(*) FROM sys.tables WHERE name='__EFMigrationsHistory'"));
-            // the 16 tables of schema factory and Wolverine's storage (inbox, outbox, nodes, dead letters) in its own schema
-            Assert.Equal(16, await Count(cs, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='factory'"));
-            foreach (var t in new[] { "ItemHistory", "Correlations", "OpenInstances", "ProjectionVersions", "SessionMailbox", "CatalogCopies", "IdempotencyLedger", "CopilotReservations", "IngressDedup", "WorkItems", "MergeTrains", "CapacityLedgers" })
+            // the 18 tables of schema factory and Wolverine's storage (inbox, outbox, nodes, dead letters) in its own schema
+            Assert.Equal(18, await Count(cs, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='factory'"));
+            foreach (var t in new[] { "ItemHistory", "Correlations", "OpenInstances", "ProjectionVersions", "SessionMailbox", "CatalogCopies", "IdempotencyLedger", "CopilotReservations", "IngressDedup", "WorkItems", "MergeTrains", "CapacityLedgers", "QcEnvironments", "Transcripts" })
                 Assert.Equal(1, await Count(cs, $"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='factory' AND TABLE_NAME='{t}'"));
             foreach (var t in new[] { "wolverine_incoming_envelopes", "wolverine_outgoing_envelopes", "wolverine_dead_letters", "wolverine_nodes" })
                 Assert.Equal(1, await Count(cs, $"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='wolverine' AND TABLE_NAME='{t}'"));
