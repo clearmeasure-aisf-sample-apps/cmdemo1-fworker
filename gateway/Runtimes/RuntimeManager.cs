@@ -70,6 +70,9 @@ interface IRuntimeManager
     // v2: the start command of the ticket ended (the result message of the handler): the same settling as a v1 start that returned this result
     Task CompleteStart(string name, int item, string phase, ProvisionResult result);
     void CompleteStop(string name, bool ok, string error);
+    // v2: the start command made the execution (its handler has the answer of the adapter) and its result message is still on its way to CompleteStart: the
+    // records know the execution and its page from now on, as they do in v1 the moment the adapter answers
+    void NoteStarted(string name, string execution, string url);
 }
 
 sealed class RuntimeManager : IRuntimeManager
@@ -208,17 +211,61 @@ sealed class RuntimeManager : IRuntimeManager
     public Func<Ticket, Task>? DispatchStart { get; set; }
     public Func<string, string, Task>? DispatchStop { get; set; }
 
-    public async Task Provision(Ticket t)
+    public async Task Provision(Ticket t) => await ProvisionDispatched(t);
+
+    // true: the start was dispatched as a command (v2) and CompleteStart settles it
+    async Task<bool> ProvisionDispatched(Ticket t)
     {
         // the plant's place for the launched line is given up however the start call ends (RuntimeLaunched fills it first when it writes one)
         var dispatched = false;
         try { dispatched = await ProvisionCore(t); }
         finally { if (!dispatched) LaunchDone(t); }
+        return dispatched;
+    }
+
+    // #522: v1's Provision answers when the adapter has answered, so its caller reads the execution at once. A caller that needs that under v2 (the test hook of the
+    // octopus runtime) starts here: the start is dispatched, and the call answers when the result message has settled it (CompleteStart), or when the bound has passed.
+    // v1's call is bounded by the adapters' HTTP timeouts (30 s a request; a start makes up to four), so the bound is the same order. False: the bound passed and the
+    // result is still on its way (a transient fault is retried with pauses of up to a minute); the start settles when it arrives, nothing is lost. Without a dispatch
+    // (v1, a fenced process, a dispatch that failed) this is Provision.
+    public static readonly TimeSpan StartAnswerBound = TimeSpan.FromSeconds(120);
+
+    public async Task<bool> ProvisionAndWait(Ticket t, TimeSpan bound)
+    {
+        TaskCompletionSource? done = null;
+        if (DispatchStart != null)
+        {
+            // registered before the dispatch: the result can come back before the dispatch call returns
+            done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (gate) startWaiters[t.Name] = done;
+        }
+        bool dispatched;
+        try { dispatched = await ProvisionDispatched(t); }
+        catch { ForgetWaiter(t.Name); throw; }
+        if (!dispatched || done == null) { ForgetWaiter(t.Name); return true; }
+        try { await done.Task.WaitAsync(bound); return true; }
+        catch (TimeoutException) { ForgetWaiter(t.Name); return false; }
+    }
+
+    readonly Dictionary<string, TaskCompletionSource> startWaiters = new(StringComparer.Ordinal);
+    void ForgetWaiter(string name) { lock (gate) startWaiters.Remove(name); }
+    void StartAnswered(string name) { TaskCompletionSource? w; lock (gate) startWaiters.Remove(name, out w); w?.TrySetResult(); }
+
+    public void NoteStarted(string name, string execution, string url)
+    {
+        // only into a live execution that has none yet: CompleteStart (Settle) sets the same values and the status, and decides about an execution that ended meanwhile
+        lock (gate) { if (execs.TryGetValue(name, out var e) && !e.Ended && e.Execution == "") { e.Execution = execution; e.Url = url; } }
     }
     void LaunchDone(Ticket t) { try { Plant?.RuntimeLaunchDone(t.Name); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
 
     // v2: the result of the start command. The launched line's place is given up as in v1, however it ends.
     public async Task CompleteStart(string name, int item, string phase, ProvisionResult r)
+    {
+        try { await CompleteStartCore(name, item, phase, r); }
+        finally { StartAnswered(name); }   // however it ended: a caller of ProvisionAndWait stops waiting
+    }
+
+    async Task CompleteStartCore(string name, int item, string phase, ProvisionResult r)
     {
         Ticket? t; lock (gate) t = execs.TryGetValue(name, out var e) && !e.Ended ? new Ticket(name, item, phase, "", "") : null;
         // the execution was settled meanwhile (stopped, lapsed, a restart): a start that succeeded is stopped, one that failed has nothing to settle

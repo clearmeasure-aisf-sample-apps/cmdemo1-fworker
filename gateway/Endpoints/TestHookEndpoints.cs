@@ -60,7 +60,8 @@ sealed class TestHookEndpoints(GatewayOptions gateway, MessagingSettings messagi
         var octopusManager = runtimes.Octopus;
         if (octopusManager == null) return Fail(404, "no-runtime", "the octopus runtime is not switched on", 12);
         var t = octopusManager.Begin(int.TryParse(b["item"]?.ToString(), out var ti) ? ti : 0, b["phase"]?.ToString() ?? "", "", b["role"]?.ToString() ?? "");
-        await octopusManager.Provision(t);
+        // #522: v1 answers when the adapter has; under v2 the start is a command, so the hook waits for its result (the same call, bounded)
+        await octopusManager.ProvisionAndWait(t, RuntimeManager.StartAnswerBound);
         return Results.Json(new { ok = true, name = t.Name, execution = octopusManager.ExecutionOf(t.Name) });
     }
 
