@@ -150,3 +150,27 @@ public class DeliveryShadowComparison
     /// <summary>The train's side is a judgment of the watcher's replay of history, not of a live event: shown, and not counted by the exit gate.</summary>
     public bool Replay { get; set; }
 }
+
+/// <summary>
+/// The state of one work item instance (W6.0 and W6.1, wolverine-factory.md 3.1): one row per item, holding its current generation. The state is a JSON document owned by Fworker.Workflows.WorkItem, saved
+/// with a revision so that two writers cannot both win (the saga's <c>IRevisioned</c>). A completed item keeps its row (a reopened item takes the next generation and replaces the state); the columns beside
+/// the document are the ones read without opening it: the count in flight per repository (the WIP intake rule) and "where is item X".
+/// </summary>
+public class WorkItemRow
+{
+    /// <summary>The qualified item, "owner/repo#N", lowercase.</summary>
+    public string ItemKey { get; set; } = "";
+    /// <summary>"owner/repo", lowercase: the per-repository WIP count reads by it.</summary>
+    public string Repository { get; set; } = "";
+    /// <summary>The generation of the instance in <see cref="StateJson"/>.</summary>
+    public int Generation { get; set; }
+    /// <summary>Counts the saves; the concurrency token: a writer that read an older revision fails and runs again on the new state.</summary>
+    public int Revision { get; set; }
+    /// <summary>"open", "settling" (delivered, inside the settle window) or "completed".</summary>
+    public string Status { get; set; } = "";
+    /// <summary>The plan the item follows now ("feature", "docs", "hotfix") and its current step.</summary>
+    public string Plan { get; set; } = "";
+    public string Step { get; set; } = "";
+    public string StateJson { get; set; } = "";
+    public DateTimeOffset UpdatedAt { get; set; }
+}

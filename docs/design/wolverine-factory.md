@@ -294,7 +294,8 @@ item by item; this one builds v2 beside v1 and switches an environment as a whol
 ### 6.1 Rules while two engines exist
 
 - **One acting engine per environment,** chosen at start (`engine: { v2Environments, shadowEnvironments }`). No item carries an
-  engine label, and neither engine checks one.
+  engine label, and neither engine checks one. (Exception, owner decision of 2026-10-28: for the docs plan, in an environment where
+  v2 acts, the items the `WorkItemSaga` has started are v2's and v1's sweep leaves them alone; see `fworker-wolverine-implementation.md`, W6.)
 - **Shadow mode before the switch:** in tdd, v2 reads the same events and the board, decides, writes its history, and sends its
   commands to a recording sink, never to GitHub or Octopus; a report compares them with v1's writes. v1 acts meanwhile.
 - **The same oracle for both:** the Tier 1 suites run against either engine, and v2's writes are compared with v1's golden baseline;

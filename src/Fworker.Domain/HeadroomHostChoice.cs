@@ -51,7 +51,7 @@ public static class HostChoiceRule
         var limit = Math.Max(host.PerHostCapacity, host.PerHostBurst);
         if (next > limit) return SlotKind.None;
         if (next <= host.PerHostCapacity) return SlotKind.Guaranteed;
-        var footprint = Footprint.P95(host.FootprintSamples, settings);
+        var footprint = HostFootprint.P95(host.FootprintSamples, settings);
         return BurstAdmission.Check(host.Metrics, footprint, containerCpus, settings) == BurstVerdict.Admitted ? SlotKind.Burst : SlotKind.None;
     }
 
