@@ -45,8 +45,19 @@ sealed class JournalCommandSink
     public JournalCommandSink(Func<WriteJournalLine, Task<bool>> publish, double waitingMinutes, Func<DateTime>? utcNow = null)
     { this.publish = publish; this.waitingMinutes = waitingMinutes; this.utcNow = utcNow ?? (() => DateTime.UtcNow); }
 
+    /// <summary>
+    /// W7.3: told when the plant journals that the session holding an item is gone (a "reassigned" line with the code session-gone): the item's slot ends in the scheduler and its saga asks again. Set by the gateway's wiring
+    /// of the saga; unset, nothing is told. A fault of it is logged and does not stop the line from being written.
+    /// </summary>
+    public Func<int, string, Task>? OnSessionGone { get; set; }
+
     public async Task Send(int item, string ev, JsonObject fields, string key)
     {
+        if (ev == "reassigned" && OnSessionGone is { } gone && fields["opCode"]?.ToString() == "session-gone")
+        {
+            try { await gone(item, key); }
+            catch (Exception e) { Console.Error.WriteLine($"session gone of #{item}: {e.GetType().Name}"); }
+        }
         var now = utcNow();
         // a waiting line has no key of its own (the verb takes the ticks of the write) and is written once per timing.journalWaitingMinutes per item: the ledger decides
         // from the state, this only spares the outbox the repeats of every sweep within the window of the last one it sent

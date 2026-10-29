@@ -6,6 +6,7 @@ using Fworker.Domain;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Fworker.Persistence;
+using Fworker.Workflows.Capacity;
 using Fworker.Workflows.Intake;
 using Fworker.Workflows.Merge;
 using Fworker.Workflows.WorkItem;
@@ -65,7 +66,8 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
             {
                 if (!ItemId.TryParse(state.Item, out var id) || id.Repository != home) continue;
                 set.Add(id.Number);
-                if (state.Status == WorkItemStatus.Open && !state.Parked && state.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && columnOf?.Invoke(state.Step) is { Length: > 0 } column)
+                // (an item that asked the scheduler for a slot (W7.3) is offered only once it holds one: a hold, a full runtime or a runtime that is off keeps the session from being offered)
+                if (state.Status == WorkItemStatus.Open && !state.Parked && !state.SlotAsked && state.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && columnOf?.Invoke(state.Step) is { Length: > 0 } column)
                     wanted.Add((id.Number, column));
             }
             owned = set; offers = wanted;
@@ -116,7 +118,10 @@ static class SweepV2Filter
 }
 
 /// <summary>What the gateway builds for the saga: its service, the history writer, the ownership the sweep reads and the intake settings.</summary>
-sealed record WorkItemParts(WorkItemService Service, WorkItemHistory History, IWorkItemStore Store, V2Ownership? Ownership, IntakeSettings Intake, DocsPlanParts Docs, MergeTrainParts Merge);
+sealed record WorkItemParts(WorkItemService Service, WorkItemHistory History, IWorkItemStore Store, V2Ownership? Ownership, IntakeSettings Intake, DocsPlanParts Docs, MergeTrainParts Merge, FeaturePlanParts Feature);
+
+/// <summary>The feature plan's ports (W7.3, Ports/FeaturePlanPort.cs): the slot request the saga's SlotWanted becomes, the notice of a fix-forward round to the owner session, and the count of the merge queue.</summary>
+sealed record FeaturePlanParts(SlotRequestPort Slots, FeatureNotice Notice, MergeQueueCount Queue, SlotRequestSettings SlotSettings);
 
 /// <summary>The merge train (W7.2): its service on the database of the host, the history writer of its decisions and the settings it runs with (<c>mergeStrategy</c>: direct or train).</summary>
 sealed record MergeTrainParts(MergeTrainService Service, MergeTrainHistory History, MergeTrainSettings Settings);
@@ -174,7 +179,7 @@ static class DocsOnlySettingsReader
 static class WorkItemWiring
 {
     /// <summary>The saga's parts on the database of the host. The docs-only test is D4's, with the settings of the configuration; the docs plan's rules are those of <see cref="DocsPlanSettingsReader"/>.</summary>
-    public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null, Func<BoardRef?>? boardRef = null, Func<string, string?>? env = null, HttpClient? http = null)
+    public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null, Func<BoardRef?>? boardRef = null, Func<string, string?>? env = null, HttpClient? http = null, Func<int, JsonObject, bool>? route = null)
     {
         Func<FactoryDbContext> open = () => Open(connectionString);
         var root = c.Instance.Root;
@@ -184,10 +189,14 @@ static class WorkItemWiring
         var ownership = c.Instance.Home is { } home ? new V2Ownership(store, home, settings.ColumnOf) : null;
         var train = MergeTrainSettingsReader.From(root, w => Console.Error.WriteLine("merge train: " + w));
         var merge = new MergeTrainParts(new MergeTrainService(new SqlMergeTrainStore(open), train), new MergeTrainHistory(open), train);
-        return new WorkItemParts(service, new WorkItemHistory(open), store, ownership, IntakeSettings.From(root, Environment.GetEnvironmentVariable), MakeDocsPlan(c, settings, open, connectionString, boardRef ?? (() => null), env ?? Environment.GetEnvironmentVariable, http), merge);
+        var queue = new MergeQueueCount(store);
+        var docsParts = MakeDocsPlan(c, settings, open, connectionString, boardRef ?? (() => null), env ?? Environment.GetEnvironmentVariable, http, queue);
+        var slotSettings = SlotRequestSettings.From(root, CapacitySettings.From(root, c.Engine.Environment), settings.SlotRuntime);
+        var feature = new FeaturePlanParts(new SlotRequestPort(docsParts.Facts, slotSettings), new FeatureNotice(route ?? ((_, _) => false), settings.ColumnOf(StepKind.Develop) ?? "Development"), queue, slotSettings);
+        return new WorkItemParts(service, new WorkItemHistory(open), store, ownership, IntakeSettings.From(root, Environment.GetEnvironmentVariable), docsParts, merge, feature);
     }
 
-    static DocsPlanParts MakeDocsPlan(GatewayComposition c, DocsPlanSettings settings, Func<FactoryDbContext> open, string connectionString, Func<BoardRef?> boardRef, Func<string, string?> env, HttpClient? http)
+    static DocsPlanParts MakeDocsPlan(GatewayComposition c, DocsPlanSettings settings, Func<FactoryDbContext> open, string connectionString, Func<BoardRef?> boardRef, Func<string, string?> env, HttpClient? http, MergeQueueCount queue)
     {
         var tokens = GitHubTokenProvider.FromEnvironment(env);   // GH_TOKEN, else the author App's installation token (the token of the rule scripts)
         if (tokens is null) return new DocsPlanParts(settings, new DocsMergePort(null, null, settings), new DocsProjection(() => null, settings), null, null, null, boardRef);
@@ -204,7 +213,7 @@ static class WorkItemWiring
         var versions = new SqlProjectionVersions(open); var echo = new ProjectionEcho(versions);
         BoardColumnProjection? card = null;
         BoardColumnProjection? Card() => card ??= boardRef() is { } board ? new BoardColumnProjection(http, creds, board, versions, echo) : null;
-        return new DocsPlanParts(settings, new DocsMergePort(merge, facts, settings, () => budget.Low().Low), new DocsProjection(Card, settings), facts, new HttpBoardReader(http, creds, observe), new PullRequestHeads(clients), boardRef);
+        return new DocsPlanParts(settings, new DocsMergePort(merge, facts, settings, () => budget.Low().Low, queue.Busy), new DocsProjection(Card, settings), facts, new HttpBoardReader(http, creds, observe), new PullRequestHeads(clients), boardRef);
     }
 
     public static FactoryDbContext Open(string connectionString) => new(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer(connectionString).Options);
@@ -223,6 +232,9 @@ static class WorkItemWiring
             // the docs plan's merge (MergeRequested, answered with MergeAttempted) and the card that follows the saga's decisions
             services.AddSingleton(parts.Docs.Merge);
             services.AddSingleton(parts.Docs.Projection);
+            // W7.3: the feature plan's slot requests (the saga's SlotWanted becomes the scheduler's RequestSlot) and the notice of a fix-forward round to the owner session
+            services.AddSingleton(parts.Feature.Slots);
+            services.AddSingleton(parts.Feature.Notice);
             // W7.2: the merge goes through the train of its repository (the request enters it, the turn is granted to the merge port above, the answer comes back through it)
             services.AddSingleton(parts.Merge.Service);
             services.AddSingleton(parts.Merge.History);
@@ -234,6 +246,8 @@ static class WorkItemWiring
             w.Discovery.IncludeType(typeof(MergeTrainPortHandler));
             w.Discovery.IncludeType(typeof(MergeTrainHistoryHandler));
             w.Discovery.IncludeType(typeof(DocsProjectionHandler));
+            w.Discovery.IncludeType(typeof(SlotRequestHandler));
+            w.Discovery.IncludeType(typeof(FeatureNoticeHandler));
             WorkItemTopology.Route(w);
             MergeTrainTopology.Route(w);
         };

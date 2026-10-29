@@ -86,6 +86,37 @@ public sealed class WorkItemState
     /// <summary>Whether the last applied input asked for the merge call: a redelivery of it asks again (the command is idempotent), a later renewal does not.</summary>
     public bool MergeRequestEmitted { get; set; }
 
+    // ---- the feature plan (W7.3, Plans/FeatureSteps.cs): optional fields, absent in a state saved before them ------------------------------------------------------
+    /// <summary>Fix-forward rounds used: CI was red on the head under test (D5's CiRed row, fixForwardMaxRounds). Green CI starts them again, as v1 does.</summary>
+    public int FixForwardRounds { get; set; }
+    /// <summary>The head the latest checks observation was about ("" before one) and what it said: pending, green or red. A new head makes both empty again.</summary>
+    public string ChecksHead { get; set; } = "";
+    public string ChecksState { get; set; } = "";
+    public List<string> ChecksFailed { get; set; } = [];
+    /// <summary>The Merge step waits for green checks on the head the PASS covers before it asks to merge ("the merge still needs both", delivery-speed.md 5.4).</summary>
+    public bool MergeAwaitingChecks { get; set; }
+    /// <summary>A merge request of this arm entered the repository's merge line: leaving the Merge step without a merge releases the place.</summary>
+    public bool TrainEntered { get; set; }
+    /// <summary>The footprint in force (D6): the Technical Design's <c>Files:</c> line, replaced by the pull request's changed files after the first push.</summary>
+    public List<string> Footprint { get; set; } = [];
+    public bool FootprintFromPullRequest { get; set; }
+    /// <summary>The scheduler's slot the item holds ("" when it holds none), where it runs, and whether the item has ever held one (an owned item asks again at rank 2, delivery-speed.md 3.1).</summary>
+    public string SlotId { get; set; } = "";
+    public string SlotRuntime { get; set; } = "";
+    public string SlotHost { get; set; } = "";
+    public bool EverGranted { get; set; }
+    /// <summary>The saga asked for a slot and has none: no session is offered, the step's lease is not running. <see cref="SlotWait"/> is why the scheduler says it waits ("" until it says).</summary>
+    public bool SlotAsked { get; set; }
+    /// <summary>The scheduler may know the item (a slot was asked for and not cleared since): ClearItem is sent once, not at every step the item leaves.</summary>
+    public bool SlotKnown { get; set; }
+    /// <summary>The time of the latest slot event applied (a grant, a wait, a lost session): an older one that arrives later is stale.</summary>
+    public DateTimeOffset SlotStamp { get; set; }
+    /// <summary>The slot requests made, the number in the key of the next: asking again in the same arm (after a lost session) is a new request.</summary>
+    public int AskSeq { get; set; }
+    public string SlotWait { get; set; } = "";
+    /// <summary>The commands the last applied input asked for besides the merge call; kept so a redelivery of the input publishes them again, and emptied by the next input.</summary>
+    public List<StateCommand> Outbox { get; set; } = [];
+
     static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Converters = { new JsonStringEnumConverter() } };
 
     public string ToJson() => JsonSerializer.Serialize(this, Json);

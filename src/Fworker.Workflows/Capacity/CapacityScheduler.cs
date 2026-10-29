@@ -152,6 +152,8 @@ public sealed class CapacityScheduler(CapacitySettings settings, Func<string, Ru
             if (r.Generation != held.Request.Generation && r.Generation != 0 && held.Request.Generation != 0) state.Slots.Remove(item);
             else
             {
+                // W7.3: the holder of a Technical Design slot that asks for a later phase is entering Development in the same session; the file-overlap rule decides it here, in the invoke (delivery-speed.md 7)
+                if (CarryOn(state, held, r, now)) return Answer.Applied;
                 notes.Add(Granted(held, now));
                 return new Answer(CapacityOutcome.Refused, $"the item holds slot {held.SlotId}");
             }
@@ -164,6 +166,33 @@ public sealed class CapacityScheduler(CapacitySettings settings, Func<string, Ru
         }
         state.Queue[item] = request;
         return Answer.Applied;
+    }
+
+    /// <summary>
+    /// The item holds the slot of a Technical Design session and asks for a later phase (an owner session goes from Technical Design to Development without a plan pass, so nothing else would compare it with the items in
+    /// flight). If the file-overlap rule holds it, the slot is given up (the session ends; its execution of the day is given back, the next grant counts again) and the request waits as any request does, its hold published
+    /// with the next plan pass; true. Otherwise the same session goes on and the item becomes a holder of the rule from now on (it is in flight); false. An item that holds a later phase's slot already is never asked again: a holder is never held.
+    /// </summary>
+    bool CarryOn(CapacityState state, LedgerSlot held, RequestSlot r, DateTimeOffset now)
+    {
+        var item = r.Item.ToString();
+        if (string.Equals(r.Phase, CapacityPhases.Design, StringComparison.OrdinalIgnoreCase) || held.Request.PastDesign || state.InFlight.ContainsKey(item)) return false;
+        var peers = state.InFlight.Values.Select(f => (Id: ItemId.Parse(f.Item), f.Footprint)).Where(f => f.Id.Repository == r.Item.Repository).Select(f => new OverlapPeer(f.Id.Number, f.Footprint)).ToList();
+        var existing = state.Holds.TryGetValue(item, out var h) ? new OverlapHold(h.By, h.Since, h.Until) : null;
+        var decision = FileOverlapRule.Check(r.Item.Number, r.Footprint, peers, settings.Overlap, now, existing);
+        if (decision.Held)
+        {
+            state.Slots.Remove(item);
+            if (state.ExecutionsToday.TryGetValue(held.Runtime, out var n)) state.ExecutionsToday[held.Runtime] = Math.Max(0, n - 1);
+            state.Queue[item] = WaitingRequest.Of(r);
+            state.Holds[item] = new HoldRecord { By = decision.Hold!.By, Since = decision.Hold.Since, Until = decision.Hold.Until };
+            return true;
+        }
+        held.Request.Phase = r.Phase;
+        if (!r.Footprint.IsEmpty) held.Request.Footprint = r.Footprint;
+        state.InFlight[item] = new InFlightItem { Item = item, Footprint = held.Request.Footprint, Since = now };
+        held.EnteredFlight = true;
+        return false;
     }
 
     static Answer Clear(CapacityState state, ClearItem c)

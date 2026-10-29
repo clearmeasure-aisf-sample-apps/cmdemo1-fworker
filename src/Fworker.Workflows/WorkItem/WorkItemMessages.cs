@@ -34,10 +34,10 @@ public sealed record ReopenWorkItem(ItemId Item, string Reason, string Key) : Wo
 
 /// <summary>
 /// The design step recorded its design (the latest design section decides): <paramref name="DocsOnlyMarker"/> is whether it carries the docs-only marker. On the feature plan a marker switches the item to
-/// the docs plan, and the absence of one on the docs plan switches it back; the judgment is the D4 port's.
+/// the docs plan, and the absence of one on the docs plan switches it back; the judgment is the D4 port's. <paramref name="Files"/> is the design's <c>Files:</c> line (D6's footprint; null or empty: none), which the feature plan keeps.
 /// </summary>
 [MessageIdentity("workitem.design-recorded")]
-public sealed record DesignRecorded(ItemId Item, int Generation, string ArmId, string Key, bool DocsOnlyMarker) : WorkItemInput(Item), IArmedInput, IKeyedInput;
+public sealed record DesignRecorded(ItemId Item, int Generation, string ArmId, string Key, bool DocsOnlyMarker, IReadOnlyList<string>? Files = null) : WorkItemInput(Item), IArmedInput, IKeyedInput;
 
 /// <summary>The session that holds the arm reports the step done. The saga moves to the next step of the plan (or completes), under a new arm.</summary>
 [MessageIdentity("workitem.step-completed")]
@@ -138,6 +138,13 @@ public static class WorkItemActions
     public const string Demoted = "demoted";
     public const string MergeRequested = "merge-requested";
     public const string MergeBlocked = "merge-blocked";
+    // the feature plan (W7.3)
+    public const string ChecksGreen = "checks-green";
+    public const string ChecksRed = "checks-red";
+    public const string FixForward = "fix-forward";
+    public const string SlotGranted = "slot-granted";
+    public const string Held = "held";
+    public const string SessionLost = "session-lost";
 }
 
 /// <summary>What the saga answered to one input.</summary>

@@ -3,14 +3,17 @@ using System.Text;
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
 using Fworker.Contracts.Seams;
+using Fworker.Domain;
 using Fworker.Workflows.WorkItem;
 
-// W6.6 (#335): the decision verbs of an item the WorkItemSaga owns, in the hybrid composition (seam S1, docs/design/fworker-wolverine-refactor.md 4). v1's rule script still does what the verb does (the comment, the
+// W6.6 (#335), W7.3 (#340): the decision verbs of an item the WorkItemSaga owns, in the hybrid composition (seam S1, docs/design/fworker-wolverine-refactor.md 4). v1's rule script still does what the verb does (the comment, the
 // state comment, the card, the claim) and answers the session; this router then tells the saga what happened, as the inputs of its docs plan (ReviewRecorded, VerdictRecorded, StepCompleted, ...), which the saga publishes decisions,
 // timers and the merge call for. So the verb's answer is v1's and unchanged (the golden writes of a verb are the script's), the saga is never ahead of the script, and v1 can take the item back at any time with its own state intact
 // (FACTORY_V2_OFF, or the saga handing the item back). What the saga decides on top of the script, it decides alone: the merge, the demotions and parks of D5's rows are the same numbers, so they agree with the script's.
 // An event that cannot be handed to the saga (the host is down) is tried again and then dropped with a log line: the saga's lease runs out and its failure budget parks the item, which is the way a lost session ends too.
 // Only where the engine acts; an item without a saga costs one look at the ownership.
+// W7.3 adds the feature plan: its design carries a `Files:` line (the footprint of D6), the pull request of its development completion brings its changed files, and a development completion of a feature item is asked to
+// continue with Functional Testing while CI runs (`ftWithPendingChecks` in the call, which the script reads; delivery-speed.md 5.1), because the saga watches the checks beside the session.
 
 /// <summary>The saga's inputs for a verb call, as pure functions of the call, the script's answer and the saga's state.</summary>
 static class DocsVerbs
@@ -21,18 +24,22 @@ static class DocsVerbs
     public static readonly HashSet<string> Activity = ["comment", "claim-item", "open-pr", "update-pr", "publish-demo", "private-build", "wait-for-checks"];
 
     /// <summary>The pull request whose head the inputs need, or 0: the head the verdict was given for (when the call does not name it) and the head of the pull request a development completes with.</summary>
-    public static int PullRequestToRead(string verb, JsonObject body, JsonObject answer, WorkItemState state)
+    /// <summary>Whether the saga has the item on a plan this feed tells it about: the docs plan (W6.6), or the feature plan (W7.3) where the engine carries its steps (a feature item of an engine that does not is v1's to decide).</summary>
+    public static bool Fed(WorkItemState state, DocsPlanSettings? settings) => state.Plan == WorkPlans.Docs || (state.Plan == WorkPlans.Feature && settings?.CarriesFeature == true);
+
+    public static int PullRequestToRead(string verb, JsonObject body, JsonObject answer, WorkItemState state, DocsPlanSettings? settings = null)
     {
-        if (!state.IsOpen || state.Plan != WorkPlans.Docs) return 0;
+        if (!state.IsOpen || !Fed(state, settings)) return 0;
         if (verb == "validation-verdict" && state.Step == StepKind.Verify && Bool(answer, "recorded") && Text(body, "head_sha").Length == 0) return Int(body, "pr");
         if (verb == "complete" && state.Step == StepKind.Develop && Bool(answer, "completed")) return Int(answer, "prNumber");
         return 0;
     }
 
     /// <summary>The inputs, in the order to publish them. <paramref name="head"/> is what <see cref="PullRequestToRead"/> asked for ("" when it was not asked for or could not be read).</summary>
-    public static IReadOnlyList<WorkItemInput> Inputs(string verb, JsonObject body, JsonObject answer, WorkItemState state, DocsPlanSettings settings, string head)
+    public static IReadOnlyList<WorkItemInput> Inputs(string verb, JsonObject body, JsonObject answer, WorkItemState state, DocsPlanSettings settings, string head, IReadOnlyList<string>? files = null)
     {
-        if (!state.IsOpen || state.Plan != WorkPlans.Docs || state.Parked) return [];
+        if (!state.IsOpen || !Fed(state, settings) || state.Parked) return [];
+        var feature = state.Plan == WorkPlans.Feature;
         var item = state.ItemId; var gen = state.Generation; var arm = state.ArmId;
         switch (verb)
         {
@@ -40,7 +47,8 @@ static class DocsVerbs
                 // the design section lands in the design column; whether it carries the docs-only marker is what the saga's plan decides on
                 var content = Text(body, "content");
                 if (state.Step != StepKind.Design || !Bool(answer, "appended") || settings.DesignSection.Length == 0 || !content.Contains(settings.DesignSection, StringComparison.OrdinalIgnoreCase)) return [];
-                return [new DesignRecorded(item, gen, arm, $"design|{arm}|{Hash(content)}", content.Contains(settings.DocsMarker, StringComparison.Ordinal))];
+                // the feature plan keeps the design's `Files:` line as the item's footprint (D6)
+                return [new DesignRecorded(item, gen, arm, $"design|{arm}|{Hash(content)}", content.Contains(settings.DocsMarker, StringComparison.Ordinal), feature ? Footprint.ParseFilesLine(content) : null)];
 
             case "record-review":
                 var verdict = Text(answer, "verdict");
@@ -53,7 +61,7 @@ static class DocsVerbs
                 if (!Bool(answer, "completed") || state.Step is not (StepKind.Design or StepKind.Develop)) return [];
                 var inputs = new List<WorkItemInput>();
                 if (state.Step == StepKind.Develop && Int(answer, "prNumber") is > 0 and var pr)
-                    inputs.Add(new PullRequestChanged(item, gen, $"pr|{arm}|{pr}|{head}", pr, head, []));
+                    inputs.Add(new PullRequestChanged(item, gen, $"pr|{arm}|{pr}|{head}", pr, head, feature && files is not null ? files : []));
                 inputs.Add(new StepCompleted(item, gen, arm, $"done|{arm}"));
                 return inputs;
 
@@ -86,6 +94,7 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
 
     public async Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout)
     {
+        stdin = await AskForFunctionalTestingAlongside(verb, stdin);
         var answer = await inner.RunAsync(verb, stdin, timeout);
         // the script's answer is the caller's, whatever the feed does after it
         if (answer.Code == 0 && ownership.Count > 0 && (DocsVerbs.Handled.Contains(verb) || DocsVerbs.Activity.Contains(verb)))
@@ -94,6 +103,29 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
             catch (Exception e) { Console.Error.WriteLine($"v2 feed {verb}: {e.GetType().Name}"); }
         }
         return answer;
+    }
+
+    /// <summary>
+    /// A development completion of a feature item the saga owns carries `ftWithPendingChecks` (the flag is the gateway's to give: one a caller sent is taken out of every `complete`): pending checks no longer park the item, the script moves it on to Functional Testing and answers `continue` with the next column and
+    /// `checks: pending` (delivery-speed.md 5.1), because the saga watches the checks beside the session. A red head is still refused by the script. Any fault here leaves the call as it came.
+    /// </summary>
+    async Task<string> AskForFunctionalTestingAlongside(string verb, string stdin)
+    {
+        if (verb != "complete") return stdin;
+        try
+        {
+            if (JsonNode.Parse(stdin) is not JsonObject body) return stdin;
+            // the flag is the gateway's to give: one a caller sent is taken out, whatever the item
+            var sent = body.Remove("ftWithPendingChecks");
+            var give = false;
+            if (ownership.Count > 0 && int.TryParse(body["item"]?.ToString(), out var number) && number > 0 && ownership.Owns(number)
+                && (await store.Load(new ItemId(home, number).ToString(), CancellationToken.None))?.State is { } state)
+                give = state.IsOpen && !state.Parked && state.Plan == WorkPlans.Feature && state.Step == StepKind.Develop && settings.CarriesFeature;
+            if (!give && !sent) return stdin;
+            if (give) body["ftWithPendingChecks"] = true;
+            return body.ToJsonString();
+        }
+        catch (Exception e) { Console.Error.WriteLine($"v2 feed {verb}: {e.GetType().Name}"); return stdin; }
     }
 
     async Task Feed(string verb, string stdin, string output)
@@ -106,8 +138,14 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
         if (state.IsOpen && !state.Parked && state.LeaseDue is not null && Due(number)) await Send(new LeaseRenewed(id, state.Generation, state.ArmId, $"renew|{state.ArmId}|{now().UtcTicks}"));
         if (!DocsVerbs.Handled.Contains(verb)) return;
         var head = "";
-        if (heads is not null && DocsVerbs.PullRequestToRead(verb, body, answer, state) is > 0 and var pr) head = await heads.HeadOf(home, pr, CancellationToken.None);
-        foreach (var input in DocsVerbs.Inputs(verb, body, answer, state, settings, head)) await Send(input);
+        IReadOnlyList<string>? files = null;
+        if (heads is not null && DocsVerbs.PullRequestToRead(verb, body, answer, state, settings) is > 0 and var pr)
+        {
+            head = await heads.HeadOf(home, pr, CancellationToken.None);
+            // the feature plan's footprint after the first push is the pull request's files (D6); docs items bring none
+            if (state.Plan == WorkPlans.Feature && verb == "complete") files = await heads.FilesOf(home, pr, CancellationToken.None);
+        }
+        foreach (var input in DocsVerbs.Inputs(verb, body, answer, state, settings, head, files)) await Send(input);
     }
 
     // once a minute per item (the first call counts at once)

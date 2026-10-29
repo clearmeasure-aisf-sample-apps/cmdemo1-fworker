@@ -46,9 +46,12 @@ public enum MergeResultKind { Merged, Blocked, HeadMoved, Failed }
 /// <summary>The answer of the merge command: the outcome, its stable reason code, the commit it made, the head GitHub's own update made, and whether asking again can help.</summary>
 public sealed record MergeResult(MergeResultKind Kind, string Reason, string Detail = "", string Commit = "", string NewHead = "", bool Transient = false, TimeSpan? RetryAfter = null, int UpdatesAdded = 0, bool Updated = false);
 
-/// <summary>The saga asks the gateway to merge the pull request with the PASS head. The attempt names the answer; sending it again is safe (the merge command is idempotent on its key).</summary>
+/// <summary>
+/// The saga asks the gateway to merge the pull request with the PASS head. The attempt names the answer; sending it again is safe (the merge command is idempotent on its key). <paramref name="Plan"/> is the plan the
+/// item is on: a documentation change builds no release and never waits in the merge queue of <c>mergeQueueDepth</c>, a feature does (W7.3).
+/// </summary>
 [MessageIdentity("workitem.merge-requested")]
-public sealed record MergeRequested(ItemId Item, int Generation, string ArmId, int Attempt, int PullRequest, string Head, int UpdatesSoFar, string UpdatedFrom) : ItemCommand(Item);
+public sealed record MergeRequested(ItemId Item, int Generation, string ArmId, int Attempt, int PullRequest, string Head, int UpdatesSoFar, string UpdatedFrom, string Plan = WorkPlans.Docs) : ItemCommand(Item);
 
 /// <summary>The answer to <see cref="MergeRequested"/>. A merge is also a fact the delivery train derives (ItemMerged → MergeSeen); whichever arrives first ends the step and the other finds the item past its merge.</summary>
 [MessageIdentity("workitem.merge-attempted")]

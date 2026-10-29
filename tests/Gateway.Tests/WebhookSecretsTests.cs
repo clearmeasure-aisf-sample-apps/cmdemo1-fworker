@@ -56,7 +56,7 @@ public sealed class WebhookSecretsTests
         var host = new WolverineHostService(DatabaseOptions.From(n => n == "FACTORY_DB_CONNECTION" ? WolverineHostTestSupport.Unreachable : null), WolverineHostTestSupport.Fast(), leader);
         Assert.Null(host.RuntimeCommands);   // v1 and shadow: Attach is not called, so the host is as W2.3 left it
         var slots = RecurringJobSlots.Attach(host);
-        Assert.Equal([RecurringJobSlots.BoardReconciler, RecurringJobSlots.CatalogReread, RecurringJobSlots.IngressDedupPurge, RecurringJobSlots.DocsIntake], slots.Slots.Select(x => x.Name).ToArray());
+        Assert.Equal([RecurringJobSlots.BoardReconciler, RecurringJobSlots.CatalogReread, RecurringJobSlots.IngressDedupPurge, RecurringJobSlots.DocsIntake, RecurringJobSlots.FeatureChecks], slots.Slots.Select(x => x.Name).ToArray());
         var services = new ServiceCollection();
         host.RuntimeCommands!(services, new WolverineOptions());
         Assert.Same(slots, services.BuildServiceProvider().GetRequiredService<RecurringJobSlots>());

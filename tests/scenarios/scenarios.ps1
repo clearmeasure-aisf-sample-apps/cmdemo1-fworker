@@ -269,6 +269,19 @@ $Scenarios = [ordered]@{
     Check 'the sweep completed the column once checks went green' $ok "column $((Get-FakeIssue $n).column)"
 }
 
+'CI alongside: pending checks do not park Development when the gateway asks for Functional Testing to start beside them [full]' = {
+    # the feature plan of the v2 engine (W7.3, delivery-speed.md 5.1): the gateway adds ftWithPendingChecks to the completion of an item whose saga watches the checks
+    $n = New-Item-Fake 'CI alongside' 'x' $L; Do-TechnicalDesign $n
+    $pr = Do-Development $n @('docs/c.md') 'w1' 'red'
+    $r = Do-DevComplete $n; CheckExit 'a red head is refused as before' $r 10 'checks-not-green'
+    Fake 'push-branch' @{ branch = "factory-worker/$n-development"; files = @('docs/c.md'); profile = 'green'; delaySeconds = 30 } | Out-Null   # long enough that two slow verbs (record-review, complete) under load still find the checks pending
+    $rv = F 'w1' @('record-review', '--item', $n, '--column', 'Development', '--role', 'reviewer', '--text-file', (TmpFile "rv-alongside$n.md" "Diff matches the plan.`nREVIEW: COMPLETE"))
+    $r = F 'w1' @('complete', '--item', $n, '--column', 'Development', '--review-ref', $rv.review_ref, '--comment', 'PR open, CI running. REVIEW: COMPLETE', '--ftWithPendingChecks', 'true')
+    CheckExit 'pending checks are no reason to park: the completion goes through' $r 0
+    Check 'the answer says the checks are pending and CI runs alongside' ("$($r.checks)" -eq 'pending' -and "$($r.ci)" -eq 'alongside' -and "$($r.moved_to)" -eq 'Functional Testing') ($r | ConvertTo-Json -Compress)
+    Check 'the card is in Functional Testing at once' ((Get-FakeIssue $n).column -eq 'Functional Testing') "column $((Get-FakeIssue $n).column)"
+}
+
 'verdict gates and demotion' = {
     $n = New-Item-Fake 'Verdicts' 'x' $L; Do-TechnicalDesign $n
     $pr = Do-Development $n; Do-DevComplete $n | Out-Null

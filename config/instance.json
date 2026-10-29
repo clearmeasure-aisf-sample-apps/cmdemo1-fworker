@@ -69,7 +69,8 @@
       "environments": ["uat", "prod"],
       "gatewayEnvironment": "",
       "signoffWaitHours": 2
-    }
+    },
+    "finalEnvironment": "prod"
   },
   "plant": {
     "oneItemPerSession": true
@@ -112,7 +113,9 @@
     "slotMaxMinutes": 240,
     "hostReportMaxMinutes": 10,
     "safetyWakeMinutes": 10,
-    "toolchains": {}
+    "toolchains": {},
+    "featureSlots": true,
+    "runtime": ""
   },
   "engine": {
     "v2Environments": [],

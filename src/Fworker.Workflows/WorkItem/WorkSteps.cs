@@ -37,23 +37,28 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
     /// <summary>The item enters <paramref name="step"/> under a new arm: the lease starts, a parked item is parked no more.</summary>
     public void Enter(StepKind step, string reason)
     {
+        // an item that leaves the Merge step without a merge gives its place in the repository's line back (the feature plan; a merge elsewhere releases it through ItemMerged)
+        LeaveTrain("left the merge step");
         State.Step = step;
         State.ArmSeq++;
         State.ArmId = $"{State.Generation}.{State.ArmSeq}";
         State.Status = WorkItemStatus.Open;
         State.Parked = false; State.ParkReason = "";
         State.SettleUntil = null;
-        State.LeaseDue = Steps.For(Plan, step).Lease(Policy) is { } lease ? Now + lease : null;
+        State.LeaseDue = StepOf(step).Lease(Policy) is { } lease ? Now + lease : null;
         State.MergeRequest = null; State.MergeRetryAt = null;   // (a merge asked of an earlier arm is no longer waited for)
         TimerChanged = true;
         Decide(WorkItemActions.StepEntered, reason);
-        Steps.For(Plan, step).OnEnter(this);   // (after the decision: what the step asks for, it asks for in the step it has entered)
+        StepOf(step).OnEnter(this);   // (after the decision: what the step asks for, it asks for in the step it has entered)
+        // a step that needs no session gives the slot of the scheduler back; the merge is the end of the item's time in flight there (the feature plan, W7.3)
+        if (step is StepKind.Merge or StepKind.Deliver) EndSession();
+        if (step == StepKind.Deliver) ClearSlot("merged");
     }
 
     /// <summary>The step is done: the next step of the plan, or the end of the item when it was the last.</summary>
     public void Advance(string reason)
     {
-        Steps.For(Plan, State.Step).OnLeave(this);
+        StepOf(State.Step).OnLeave(this);
         if (Plan.After(State.Step) is { } next) Enter(next, reason);
         else Complete(reason);
     }
@@ -66,6 +71,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.MergeRequest = null; State.MergeRetryAt = null;
         TimerChanged = true;
         Decide(WorkItemActions.Completed, reason);
+        LeaveTrain("completed"); EndSession(); ClearSlot("completed");
     }
 
     /// <summary>Switches the plan. The item stays on its step when the new plan has it; when it does not (the docs plan has no Deliver) the item has nothing left to do and completes.</summary>
@@ -76,6 +82,9 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.Plan = to;
         State.MergeRequest = null; State.MergeRetryAt = null;   // (a merge asked of the docs plan is not this plan's)
         Decide(WorkItemActions.PlanSwitched, $"{from} to {to}", reason);
+        // the plans differ in whether they use the scheduler: what the old plan held is given back, and the new plan asks for what its step needs
+        if (Policy.Schedules(from) && !Policy.Schedules(to)) { LeaveTrain("the plan switched"); EndSession(); ClearSlot("plan switched"); State.SlotAsked = false; State.SlotWait = ""; }
+        else if (!Policy.Schedules(from) && Policy.Schedules(to) && State.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && State.Status == WorkItemStatus.Open) AskSlot(State.Step);
         if (!Policy.Carries(to)) HandBack($"the {to} plan is not carried by this engine");
         else if (!Plan.Has(State.Step)) Complete($"the {to} plan has no {State.Step} step");
     }
@@ -92,14 +101,16 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.CompletedAt = Now;
         TimerChanged = true;
         Decide(WorkItemActions.HandedBack, reason);
+        LeaveTrain("handed back"); EndSession(); ClearSlot("handed back");
     }
 
     public void Park(string reason)
     {
         State.Parked = true; State.ParkReason = reason;
-        State.LeaseDue = null; State.MergeRequest = null; State.MergeRetryAt = null;
+        State.LeaseDue = null; State.MergeRequest = null; State.MergeRetryAt = null; State.MergeAwaitingChecks = false;
         TimerChanged = true;
         Decide(WorkItemActions.Parked, reason);
+        LeaveTrain("parked"); EndSession(); ClearSlot("parked");
     }
 
     /// <summary>The settle window starts under a new arm, so its timer is checked like a lease.</summary>
@@ -112,6 +123,56 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.SettleUntil = Now + Policy.Settle;
         TimerChanged = true;
         Decide(WorkItemActions.Settling, reason, $"until {State.SettleUntil:O}");
+    }
+
+    /// <summary>The step class of <paramref name="kind"/> on the item's plan under this policy.</summary>
+    public WorkStep StepOf(StepKind kind) => Steps.For(Plan, kind, Policy);
+
+    // ---- what the item asks of the scheduler and the merge line (W7.3): commands kept in the state until published ---------------------------------------------------
+
+    string ItemKey => State.Item;
+
+    /// <summary>Adds a command to the transition's outbox; it leaves with the transition's decisions and again with them when the input is redelivered.</summary>
+    public void Send(StateCommand command) => State.Outbox.Add(command);
+
+    /// <summary>
+    /// The step needs a session: the item asks the scheduler for a slot (the gateway adds the rank facts). When the item holds one already the session goes on (the lease runs); otherwise the item waits for the grant, no
+    /// session is offered and the lease is not running. A no-op for a plan that does not use the scheduler.
+    /// </summary>
+    public void AskSlot(StepKind step)
+    {
+        if (!Policy.Schedules(Plan.Name)) return;
+        var s = State;
+        var (phase, depth) = step switch { StepKind.Design => ("design", 1), StepKind.Develop => ("develop", 2), _ => ("verify", 3) };
+        s.AskSeq++; s.SlotKnown = true;
+        s.SlotAsked = s.SlotId.Length == 0;
+        if (s.SlotAsked) { s.LeaseDue = null; s.SlotWait = ""; }
+        TimerChanged = true;
+        Send(new AskSlot($"ask|{ItemKey}|{s.Generation}|{s.AskSeq}", s.ArmId, phase, s.EverGranted, depth, [.. s.Footprint], s.FootprintFromPullRequest, Now));
+    }
+
+    /// <summary>The item's session needs no slot any more: the scheduler frees it at once. Nothing when the item holds none.</summary>
+    public void EndSession()
+    {
+        if (State.SlotId.Length > 0) Send(new EndSession($"end|{ItemKey}|{State.SlotId}", State.SlotId));
+        State.SlotId = ""; State.SlotRuntime = ""; State.SlotHost = "";
+    }
+
+    /// <summary>The item is no longer in flight (merged, parked, completed): its request, its footprint and its file-overlap hold go from the scheduler.</summary>
+    public void ClearSlot(string reason)
+    {
+        if (!State.SlotKnown) return;
+        State.SlotKnown = false;
+        Send(new ClearSlot($"clear|{ItemKey}|{State.Generation}|{reason}|{State.Sequence}", reason));
+        State.SlotAsked = false; State.SlotWait = "";
+    }
+
+    /// <summary>The item leaves the Merge step with no merge: its place in the repository's merge line is released.</summary>
+    public void LeaveTrain(string reason)
+    {
+        if (!State.TrainEntered || !Policy.HasFeatureSteps || Plan.Name != WorkPlans.Feature || State.MergeCommit.Length > 0) { State.TrainEntered = false; return; }
+        Send(new LeaveTrain($"leave|{ItemKey}|{State.Generation}|{State.Sequence}", reason));
+        State.TrainEntered = false;
     }
 }
 
@@ -270,8 +331,14 @@ public static class Steps
     /// <summary>The core step of that kind. A plan with rules of its own (the docs plan, W6.6) has its own class: <see cref="For"/>.</summary>
     public static WorkStep Of(StepKind kind) => All[kind];
 
-    /// <summary>The step class of <paramref name="kind"/> on <paramref name="plan"/>.</summary>
+    static readonly Dictionary<StepKind, WorkStep> FeaturePlanSteps = new WorkStep[] { new FeatureDesignStep(), new FeatureDevelopStep(), new FeatureVerifyStep(), new FeatureMergeStep(), new DeliverStep() }.ToDictionary(s => s.Kind);
+
+    /// <summary>The step class of <paramref name="kind"/> on <paramref name="plan"/>, without the feature plan's rules (a policy that has none: the core's steps).</summary>
     public static WorkStep For(WorkPlan plan, StepKind kind) => plan.Name == WorkPlans.Docs && DocsSteps.TryGetValue(kind, out var s) ? s : All[kind];
+
+    /// <summary>The step class of <paramref name="kind"/> on <paramref name="plan"/> under <paramref name="policy"/>: the feature plan has its own steps (W7.3) where the engine carries it, the docs plan has its (W6.6), every other plan the core's.</summary>
+    public static WorkStep For(WorkPlan plan, StepKind kind, WorkItemPolicy policy) =>
+        plan.Name == WorkPlans.Feature && policy.HasFeatureSteps ? FeaturePlanSteps[kind] : For(plan, kind);
 
     /// <summary>The step a message belongs to, or null for a message of the saga itself (start, completion, budgets, leases, park).</summary>
     public static StepKind? HomeOf(WorkItemInput input) => input switch

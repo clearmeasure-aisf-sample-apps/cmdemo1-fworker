@@ -15,7 +15,8 @@ public sealed record WorkItemPolicy(
     string FinalEnvironment = "prod",
     int KeepKeys = 100,
     DocsPlanRules? Docs = null,
-    IReadOnlyList<string>? CarriedPlans = null)
+    IReadOnlyList<string>? CarriedPlans = null,
+    FeaturePlanRules? FeatureRules = null)
 {
     public static readonly WorkItemPolicy Default = new(new Dictionary<StepKind, TimeSpan?>
     {
@@ -36,6 +37,12 @@ public sealed record WorkItemPolicy(
     /// sweep takes it up again from the state comment and the board. Unset: every plan (the saga on its own, as the tests run it).
     /// </summary>
     public bool Carries(string plan) => CarriedPlans is null || CarriedPlans.Contains(plan, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Whether the feature plan has the steps of W7.3 (Plans/FeatureSteps.cs): reviews, the pull request, CI alongside Functional Testing, fix-forward rounds, the scheduler's slots. Unset, the plan's steps are the core's.</summary>
+    public bool HasFeatureSteps => FeatureRules is not null;
+
+    /// <summary>Whether the steps of a plan ask the scheduler for a slot when they need a session.</summary>
+    public bool Schedules(string plan) => FeatureRules is { UseScheduler: true } && string.Equals(plan, WorkPlans.Feature, StringComparison.OrdinalIgnoreCase);
 
     public TimeSpan Settle => SettleWindow ?? TimeSpan.FromHours(24);
 

@@ -39,7 +39,7 @@ DOCS-ONLY FAST PATH (script-verified; target: change to open pull request in a f
    `record-review ... --column Development` with last line `REVIEW: COMPLETE`.
 6. REVIEWER, only on green checks and `REVIEW: COMPLETE`: ONE call
    `factory.ps1 complete --item N --column Development --review-ref <ref> --comment "PR open, CI green - <PR link>. REVIEW: COMPLETE - <one sentence>"`.
-   - exit 0: done. exit 21 (`accepted-checks-pending`, also when the failed checks fail on master too): the gateway watches the checks and advances the item; stay connected while the checks run (owner session: `wait-event`, see `factory-owner-session`), do not end the session.
+   - exit 0: done. When the answer has `checks: "pending"` and `ci: "alongside"` (with `continue: true` and `next_column`), CI is still running: continue with Functional Testing on this head at once and let CI run beside it (`factory-owner-session`, step 3); a red result reaches you as `checks.failed` and is a fix-forward round back here. exit 21 (`accepted-checks-pending`, also when the failed checks fail on master too): the gateway watches the checks and advances the item; stay connected while the checks run (owner session: `wait-event`, see `factory-owner-session`), do not end the session.
    - exit 10: `empty-pr`, `no-open-pr`, `checks-not-green`, `development-docs-only-pr` (the pull request changes only documentation and the item body does not carry `<!-- aisf:docs-only -->`; a docs-only item carries it from its technical design), `reviewer-verdict-missing`: fix the named cause, one more call.
    - exit 11: stop at once.
    - unrecoverable: `complete --succeeded false --comment "<summary>"`.

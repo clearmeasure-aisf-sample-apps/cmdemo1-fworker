@@ -32,6 +32,10 @@ public static class WorkItemHandlers
     public static Task<OutgoingMessages> Handle(VerdictRecorded m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(MergeAttempted m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(MergeRetryDue m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(ChecksObserved m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(SlotAssigned m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(SlotHeld m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(SessionLost m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
 
     public static async Task<OutgoingMessages> Run(WorkItemInput input, WorkItemService svc, CancellationToken ct)
     {
@@ -39,7 +43,7 @@ public static class WorkItemHandlers
         return Outgoing(result);
     }
 
-    /// <summary>The messages of a result: the decisions, the commands (the merge call), then each timer scheduled for its due time.</summary>
+    /// <summary>The messages of a result: the decisions, the commands (the merge call, the slot requests, the releases), then each timer scheduled for its due time.</summary>
     public static OutgoingMessages Outgoing(WorkItemResult result)
     {
         var o = new OutgoingMessages();
@@ -61,6 +65,11 @@ public static class WorkItemRouting
 
     // an Undelivered names no release: the key is the message's own id, so a redelivery of one message repeats a key and a rollback later does not
     public static OutgoingMessages Handle(Undelivered m, Envelope envelope) => new() { new DeliveryLost(m.Item, $"undelivered|{m.Environment}|{envelope.Id}", m.Environment) };
+
+    // W7.3: what the CapacityScheduler says of an item's slot, as inputs of its saga. An item without a saga, or one whose plan does not use the scheduler, answers NotFound or a refusal and nothing more.
+    public static OutgoingMessages Handle(Capacity.SlotGranted m) => new() { new SlotAssigned(m.Item, m.Generation, $"slot|{m.SlotId}", m.SlotId, m.Runtime, m.Host, m.Phase, m.At, m.ExpiresAt) };
+    public static OutgoingMessages Handle(Capacity.Held m) => new() { new SlotHeld(m.Item, m.Generation, $"held|{m.Waiting}|{m.At.UtcTicks}", m.Code, m.Detail, m.By?.ToString(), m.At) };
+    public static OutgoingMessages Handle(Capacity.SlotExpired m) => new() { new SessionLost(m.Item, m.Generation, $"expired|{m.SlotId}", m.SlotId, "the slot ran out of time without an end signal", m.At) };
 }
 
 /// <summary>The item history of the saga's decisions (4.7): one row per envelope, so a message handled twice writes it once. Public because Wolverine's generated code refers to it.</summary>
