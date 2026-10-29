@@ -20,6 +20,8 @@ sealed class OctopusRunbookSettings
 {
     public bool Enabled;
     public string ServerUrl = "https://clearmeasure.octopus.app", SpaceId = "Spaces-355", Project = "cmdemo1-fworker-runtime", Environment = "tdd", HostTag = "fworker-host";
+    // W7.4: a host's capabilities are the Octopus target tags of its machine that start with this prefix (fworker-cap-dotnet is the capability "dotnet"); set on the machine in Octopus (deploy/hosts/install-fworker-host.sh)
+    public string CapabilityTagPrefix = "fworker-cap-";
     public string StartRunbook = "Start worker", OverflowRunbook = "Start worker (overflow)", StopRunbook = "Stop worker";
     public string Agent = "codex";                                   // Fworker.Agent: claude, cursor or codex
     public int PerHostCapacity = 2, OverflowMax = 4, MaxConcurrent, MaxExecutionsPerDay, MaxFailuresPerPhase = 2, UnhealthyAfterFailures = 2;
@@ -44,6 +46,7 @@ sealed class OctopusRunbookSettings
             s.Enabled = c["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var eb) && eb;
             s.ServerUrl = S("serverUrl", s.ServerUrl).TrimEnd('/'); s.SpaceId = S("spaceId", s.SpaceId); s.Project = S("project", s.Project);
             s.Environment = S("environment", s.Environment); s.HostTag = S("hostTag", s.HostTag);
+            s.CapabilityTagPrefix = S("capabilityTagPrefix", s.CapabilityTagPrefix).Trim();
             s.StartRunbook = S("startRunbook", s.StartRunbook); s.OverflowRunbook = S("overflowRunbook", s.OverflowRunbook); s.StopRunbook = S("stopRunbook", s.StopRunbook);
             var agent = S("agent", s.Agent).Trim().ToLowerInvariant(); if (Agents.Contains(agent)) s.Agent = agent;
             s.PerHostCapacity = (int)D("perHostCapacity", 2); s.OverflowMax = (int)D("overflowMax", 4);
@@ -78,11 +81,12 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
         public int Item;
         public DateTime Started = DateTime.UtcNow;
         public DateTime? TaskDone, Ended;
+        public int? MemPeakMb;   // the largest memory peak a host report gave for the container (cgroup memory.peak), the sample of the host's footprint when its session ends
         public bool StopAsked, Adopted, FromReport;   // FromReport: adopted from a host report (no start task of this process; TaskId "adopted:<name>")   // Adopted: read back at a restart, not yet seen in a host report
         public string Status = "Processing";
     }
-    sealed record Container(string Name, int Item, string State, DateTime? StartedAt);
-    sealed record HostReport(DateTime At, Dictionary<string, Container> Containers);
+    sealed record Container(string Name, int Item, string State, DateTime? StartedAt, int? MemPeakMb = null);
+    sealed record HostReport(DateTime At, Dictionary<string, Container> Containers, HostFacts Facts);
     sealed record Host(string Id, string Name);
 
     readonly OctopusRunbookSettings cfg;
@@ -91,6 +95,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
     readonly Dictionary<string, Rec> recs = new(StringComparer.Ordinal);
     readonly Dictionary<string, HostReport> reports = new(StringComparer.OrdinalIgnoreCase);   // by machine id
     readonly Dictionary<string, string> machineNames = new(StringComparer.OrdinalIgnoreCase); // id -> name
+    readonly Dictionary<string, string[]> machineCapabilities = new(StringComparer.OrdinalIgnoreCase); // id -> capability labels of its tags (W7.4)
     readonly Dictionary<string, Dictionary<string, string>> formIds = new(StringComparer.Ordinal); // runbook id -> variable name -> control id
     string projectId = "", environmentId = "", identity = "", identityId = "";
     JsonObject? permissionCheck;
@@ -260,7 +265,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
             // the tag is asked of the server; a server that ignores the filter is checked here too, before the machine is known
             if (m["Roles"] is not JsonArray roles || !roles.Any(r => r?.ToString() == cfg.HostTag)) continue;
             if (m["EnvironmentIds"] is not JsonArray envs || !envs.Any(r => r?.ToString() == environmentId)) continue;
-            lock (gate) machineNames[id] = name;   // disabled and unhealthy hosts may still report
+            lock (gate) { machineNames[id] = name; machineCapabilities[id] = CapabilitiesOf(roles, cfg.CapabilityTagPrefix); }   // disabled and unhealthy hosts may still report
             if (m["IsDisabled"]?.GetValue<bool>() == true) continue;
             if (m["HealthStatus"]?.ToString() is not ("Healthy" or "HasWarnings")) continue;
             list.Add(new Host(id, name));
@@ -542,7 +547,8 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
 
     // what runs on the host: a container that exited or is gone ends its execution at the next reading (List)
     // null: the host is not a known target. Before the records were read back the report is kept but names nothing to stop.
-    public async Task<JsonObject?> Report(string host, JsonArray containers, CancellationToken ct)
+    // W7.4: facts is the host-level part of the body (HostReportFields.Parse); a host whose script does not send it yet passes none. HostReported is told of every accepted report.
+    public async Task<JsonObject?> Report(string host, JsonArray containers, CancellationToken ct, HostFacts? facts = null)
     {
         var ready = true; try { await EnsureRebuilt(ct); } catch { ready = false; }
         string? m; try { m = await Resolve(host, ct); } catch { lock (gate) m = MachineOf(host); }
@@ -554,16 +560,53 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
             if (!Auth.ValidName(name)) continue;
             var state = (c?["state"]?.ToString() ?? "").Trim().ToLowerInvariant();
             d[name] = new Container(name, int.TryParse(c?["item"]?.ToString(), out var it) ? it : 0, state is "running" or "restarting" or "created" ? "running" : state == "exited" ? "exited" : state == "" ? "unknown" : state,
-                DateTime.TryParse(c?["startedAt"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var sa) ? sa : null);
+                DateTime.TryParse(c?["startedAt"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var sa) ? sa : null,
+                HostReportFields.MemPeakMb(c));
         }
+        HostReportEvent evt;
+        JsonObject answer;
         lock (gate)
         {
-            reports[m] = new HostReport(DateTime.UtcNow, d);
+            reports[m] = new HostReport(DateTime.UtcNow, d, facts ?? HostFacts.None);
             if (ready) AdoptReported(m, d);
+            foreach (var c in d.Values) if (c.MemPeakMb is { } peak && recs.TryGetValue(c.Name, out var rec)) rec.MemPeakMb = Math.Max(rec.MemPeakMb ?? 0, peak);
             var desired = recs.Values.Where(x => x.Ended == null && !x.StopAsked && x.Mode == "detached" && string.Equals(x.Machine, m, StringComparison.OrdinalIgnoreCase)).Select(x => x.Name).ToHashSet();
             var stop = ready ? d.Values.Where(c => c.State == "running" && !desired.Contains(c.Name)).Select(c => (JsonNode)c.Name).ToArray() : Array.Empty<JsonNode>();
-            return new JsonObject { ["ok"] = true, ["machine"] = m, ["accepted"] = d.Count, ["stop"] = new JsonArray(stop) };
+            answer = new JsonObject { ["ok"] = true, ["machine"] = m, ["accepted"] = d.Count, ["stop"] = new JsonArray(stop) };
+            evt = new HostReportEvent(m, machineNames.GetValueOrDefault(m, host), d.Values.Count(c => c.State == "running"), facts ?? HostFacts.None, machineCapabilities.GetValueOrDefault(m, []), DateTimeOffset.UtcNow);
         }
+        Notify(evt);
+        return answer;
+    }
+
+    /// <summary>
+    /// W7.4: told of every accepted host report (outside the lock, never awaited by the report): the gateway sets it only where the engine acts (CapacityWiring.ConnectHostReports), to give the CapacityScheduler its
+    /// HostReported input. Null: nobody listens, which is what v1 and the shadow run have.
+    /// </summary>
+    public Func<HostReportEvent, Task>? HostReported { get; set; }
+
+    void Notify(HostReportEvent evt)
+    {
+        var sink = HostReported;
+        if (sink == null) return;
+        // a failure of the listener (the Wolverine host is down, the database does not answer) must not fail the report: the host reports again in five minutes, and a report carries the whole state
+        _ = Task.Run(async () => { try { await sink(evt); } catch (Exception e) { Console.Error.WriteLine($"octopus: the host report of {evt.Host} was not passed on: {e.GetType().Name}"); } });
+    }
+
+    /// <summary>The capability labels in the tags (target roles) of a machine: the tags that start with the prefix, without it, lower case, sorted. An empty prefix means no capability labels.</summary>
+    internal static string[] CapabilitiesOf(JsonArray roles, string prefix)
+        => prefix == "" ? [] : roles.Select(r => r?.ToString() ?? "").Where(r => r.Length > prefix.Length && r.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Select(r => r[prefix.Length..].ToLowerInvariant()).Distinct().Order(StringComparer.Ordinal).ToArray();
+
+    /// <summary>The capability labels of a host (machine id or name), as of the last time the gateway read its machines; empty when none or unknown.</summary>
+    public IReadOnlyList<string> CapabilitiesOfHost(string host)
+    {
+        lock (gate) return MachineOf(host) is { } m ? machineCapabilities.GetValueOrDefault(m, []) : [];
+    }
+
+    /// <summary>The largest memory peak (MB) a host report gave for the worker's container: the sample of the host's footprint (D7) when its session ends. Null when none was reported.</summary>
+    public int? MemPeakMbOf(string worker)
+    {
+        lock (gate) return recs.TryGetValue(worker, out var r) ? r.MemPeakMb : null;
     }
 
     // Under gate. Runs started through runbook-runs/create/v1 keep FormValues {}, so the restart rebuild cannot read their workers back: the host's
@@ -604,8 +647,21 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
             {
                 ["perHostCapacity"] = cfg.PerHostCapacity, ["overflowMax"] = cfg.OverflowMax, ["auth"] = cfg.Auth, ["identity"] = identity, ["permissionCheck"] = permissionCheck?.DeepClone(), ["projectId"] = projectId, ["environmentId"] = environmentId, ["serviceAccountId"] = cfg.ServiceAccountId, ["exchanges"] = exchanges, ["overflowInUse"] = recs.Values.Count(x => x.Ended == null && x.Mode == "held"),
                 ["overflowRoles"] = new JsonArray(cfg.OverflowRoles.Select(x => (JsonNode)x).ToArray()), ["hostTokenSet"] = cfg.HostToken != "",
-                ["hosts"] = new JsonArray(reports.Select(kv => (JsonNode)new JsonObject { ["machine"] = kv.Key, ["name"] = machineNames.GetValueOrDefault(kv.Key, ""), ["reportedAt"] = kv.Value.At.ToString("o"), ["containers"] = kv.Value.Containers.Count }).ToArray())
+                ["hosts"] = new JsonArray(reports.Select(kv => (JsonNode)new JsonObject { ["machine"] = kv.Key, ["name"] = machineNames.GetValueOrDefault(kv.Key, ""), ["reportedAt"] = kv.Value.At.ToString("o"), ["containers"] = kv.Value.Containers.Count,
+                    ["running"] = kv.Value.Containers.Values.Count(c => c.State == "running"), ["metrics"] = HostFactsJson(kv.Value.Facts), ["capabilities"] = new JsonArray(machineCapabilities.GetValueOrDefault(kv.Key, []).Select(x => (JsonNode)x).ToArray()) }).ToArray())
             };
+    }
+
+    // only the values the host reported (a host with an older script has none): the status shows what the scheduler was given, not a zero that means "unknown"
+    static JsonObject HostFactsJson(HostFacts f)
+    {
+        var o = new JsonObject();
+        if (f.MemTotalMb is { } a) o["memTotalMb"] = a;
+        if (f.MemAvailableMb is { } b) o["memAvailableMb"] = b;
+        if (f.Cpus is { } c) o["cpus"] = c;
+        if (f.Load1 is { } l) o["load1"] = l;
+        if (f.DiskFreeMb is { } d) o["diskFreeMb"] = d;
+        return o;
     }
 
     public JsonObject? Detail(string workerName)

@@ -2,13 +2,14 @@
 # A stand-in for `docker` in tests/octopus/runbooks.test.sh. Containers are directories $FAKE_DIR/c/<name> with files state, item, started,
 # log, env (the env file's content at run). Every call's argv is appended to $FAKE_DIR/docker.argv.
 # FAKE_RUN_LOG: the log a started container has (default: a line with "nonce redeemed"); FAKE_RUN_STATE: its state (running);
-# FAKE_HELD_CODE: the exit code of an attached run (0).
+# FAKE_HELD_CODE: the exit code of an attached run (0). `info` answers the data root; a container's id is id-<name>.
 set -u
 d=${FAKE_DIR:?}; mkdir -p "$d/c"
 printf '%s\n' "$*" >> "$d/docker.argv"
 cmd=$1; shift
 case "$cmd" in
     login) cat > "$d/login.stdin"; echo ok ;;
+    info) echo "${FAKE_DOCKER_ROOT:-/var/lib/docker}" ;;
     pull) echo "pulled $*" > "$d/pulled" ;;
     inspect)
         fmt=''; [ "$1" = --format ] && { fmt=$2; shift 2; }
@@ -16,7 +17,8 @@ case "$cmd" in
         case "$fmt" in
             '{{.State.Status}}') cat "$d/c/$c/state" ;;
             '') echo '[{}]' ;;
-            *) printf '/%s\t%s\t%s\t%s\n' "$c" "$(cat "$d/c/$c/item")" "$(cat "$d/c/$c/state")" "$(cat "$d/c/$c/started")" ;;
+            *) it=$(cat "$d/c/$c/item")   # the scripts' template says: or (label) "0", so the field is never empty
+               printf '/%s\t%s\t%s\t%s\t%s\n' "$c" "${it:-0}" "$(cat "$d/c/$c/state")" "$(cat "$d/c/$c/started")" "id-$c" ;;
         esac ;;
     rm) [ "$1" = -f ] && shift; for c in "$@"; do rm -rf "${d:?}/c/$c"; echo "$c" >> "$d/removed"; done ;;
     logs) [ "$1" = --tail ] && shift 2; c=$1; [ -d "$d/c/$c" ] || exit 1; cat "$d/c/$c/log" ;;

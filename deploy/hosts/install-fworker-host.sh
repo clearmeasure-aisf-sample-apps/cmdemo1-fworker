@@ -13,6 +13,9 @@
 #   FWORKER_TARGET_TAG   target tag (fworker-host)          TENTACLE_INSTANCE    tentacle instance name (fworker)
 #   TENTACLE_USER        service user, added to the docker group (octopus)
 #   OCTOPUS_POLLING_PORT polling port of the server (10943)
+#   FWORKER_CAPABILITIES comma separated capabilities of this host (dotnet,browser): each becomes a second target tag fworker-cap-<name> (the gateway reads
+#                        the tags with the machine, runtimes.octopus.capabilityTagPrefix). Used when the instance is registered; for a machine that is
+#                        registered already, add the tags in Octopus (Infrastructure > Deployment Targets > the machine > Roles).
 set -euo pipefail
 
 [ "$(id -u)" = 0 ] || { echo "Run as root (sudo)." >&2; exit 1; }
@@ -35,6 +38,14 @@ instance=${TENTACLE_INSTANCE:-fworker}
 tuser=${TENTACLE_USER:-octopus}
 port=${OCTOPUS_POLLING_PORT:-10943}
 [[ "$hostName" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || { echo "FWORKER_HOST_NAME has characters outside [A-Za-z0-9._-]" >&2; exit 1; }
+capabilityRoles=()
+if [ -n "${FWORKER_CAPABILITIES:-}" ]; then
+    IFS=, read -r -a caps <<< "$FWORKER_CAPABILITIES"
+    for cap in "${caps[@]}"; do
+        [[ "$cap" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]] || { echo "FWORKER_CAPABILITIES: $cap is not ^[a-z0-9][a-z0-9-]{0,39}\$" >&2; exit 1; }
+        capabilityRoles+=(--role "fworker-cap-$cap")
+    done
+fi
 [[ "$instance" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "TENTACLE_INSTANCE has characters outside [A-Za-z0-9_-]" >&2; exit 1; }
 
 if command -v apt-get > /dev/null; then pm=apt; elif command -v dnf > /dev/null; then pm=dnf; else echo "Neither apt-get nor dnf: unsupported distribution." >&2; exit 1; fi
@@ -77,10 +88,10 @@ if [ ! -f "$config" ]; then
     "$tentacle" create-instance --instance "$instance" --config "$config"
     "$tentacle" new-certificate --instance "$instance" --if-blank
     "$tentacle" configure --instance "$instance" --app "$appDir" --noListen "True" --reset-trust
-    echo "Registering $hostName in $OCTOPUS_ENVIRONMENT with target tag $tag (polling)"
+    echo "Registering $hostName in $OCTOPUS_ENVIRONMENT with target tag $tag${capabilityRoles[*]:+ and $(printf '%s' "${capabilityRoles[*]}" | sed 's/--role //g')} (polling)"
     # the key goes to the Tentacle on its command line only for the duration of this call; it is not written to any file here
     "$tentacle" register-with --instance "$instance" --server "$OCTOPUS_SERVER_URL" --apiKey "$OCTOPUS_API_KEY" --space "$OCTOPUS_SPACE" \
-        --name "$hostName" --comms-style "TentacleActive" --server-comms-port "$port" --env "$OCTOPUS_ENVIRONMENT" --role "$tag" --policy "Default Machine Policy"
+        --name "$hostName" --comms-style "TentacleActive" --server-comms-port "$port" --env "$OCTOPUS_ENVIRONMENT" --role "$tag" "${capabilityRoles[@]}" --policy "Default Machine Policy"
     unset OCTOPUS_API_KEY
 else
     echo "Tentacle instance $instance is already configured ($config): registration skipped"

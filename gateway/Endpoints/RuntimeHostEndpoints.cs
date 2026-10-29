@@ -40,10 +40,10 @@ sealed class RuntimeHostEndpoints(GatewayOptions gateway, Plant plant, Revocatio
         if (octopusRuntime == null) return Fail(404, "no-runtime", "the octopus runtime is not switched on", 12);
         if (!octopusRuntime.HostTokenOk(HostBearer(c))) return Fail(401, "unauthorized", "missing or wrong host token", 30);
         var (text, tooLarge) = await ReadBody(c, 65536);
-        JsonObject body; try { body = tooLarge ? throw new FormatException() : Messenger.ParseObject(text); } catch { return Fail(400, "usage", "the body is { \"host\": \"<machine>\", \"containers\": [{ \"name\", \"item\", \"state\", \"startedAt\" }] }", 2); }
+        JsonObject body; try { body = tooLarge ? throw new FormatException() : Messenger.ParseObject(text); } catch { return Fail(400, "usage", "the body is { \"host\": \"<machine>\", \"containers\": [{ \"name\", \"item\", \"state\", \"startedAt\", \"memPeakMb\"? }], \"memTotalMb\"?, \"memAvailableMb\"?, \"cpus\"?, \"load1\"?, \"diskFreeMb\"? }", 2); }
         var host = body["host"]?.ToString().Trim() ?? "";
         if (host.Length is 0 or > 200 || body["containers"] is not JsonArray cs) return Fail(400, "usage", "host and containers are required", 2);
-        var rr = await octopusRuntime.Report(host, cs, c.RequestAborted);
+        var rr = await octopusRuntime.Report(host, cs, c.RequestAborted, HostReportFields.Parse(body));   // (W7.4: the host's metrics, all optional)
         return rr == null ? Fail(404, "unknown-host", "the host is not a deployment target of the runtime", 12) : Results.Text(rr.ToJsonString(), "application/json");
     }
 

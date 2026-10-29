@@ -249,6 +249,25 @@ $OctopusScenarios = [ordered]@{
     Check 'report for a target of another tag' ((Oct-Report 'web-1' @()).status -eq 404)
 }
 
+# W7.4: the host report's metrics and the capability tags of the machine, as the status shows them; a report without metrics (a host with an older script) is just as welcome
+'octopus: a host report carries metrics, and the machine''s capability tags are read; an older host sends none' = {
+    Oct-Up
+    try {
+        Oct-Machines ($OctDefaultMachines + @(@{ id = 'Machines-7'; name = 'host-cap'; roles = @('fworker-host', 'fworker-cap-dotnet', 'FWORKER-CAP-Browser', 'other') }))
+        $r = Oct-Host POST '/api/v1/runtime/octopus/report' @{ host = 'host-cap'; containers = @(@{ name = 'fw-cap-1-abcdef'; item = 1; state = 'running'; startedAt = (Get-Date).ToUniversalTime().ToString('o'); memPeakMb = 1536 }); memTotalMb = 16000; memAvailableMb = 8000; cpus = 4; load1 = 0.52; diskFreeMb = 50000 }
+        Check 'a report with metrics is accepted' ($r.status -eq 200) ($r | ConvertTo-Json -Compress -Depth 4)
+        $h = @((Oct-Status).hosts | Where-Object { $_.name -eq 'host-cap' })
+        Check 'the status shows the metrics of the host' ($h.Count -eq 1 -and $h[0].metrics.memAvailableMb -eq 8000 -and $h[0].metrics.cpus -eq 4 -and $h[0].metrics.diskFreeMb -eq 50000 -and [math]::Abs($h[0].metrics.load1 - 0.52) -lt 0.001 -and $h[0].running -eq 1) ($h | ConvertTo-Json -Compress -Depth 4)
+        Check 'and its capability tags, without the prefix' ($h.Count -eq 1 -and (@($h[0].capabilities) -join ',') -eq 'browser,dotnet') ($h | ConvertTo-Json -Compress -Depth 4)
+        $r2 = Oct-Host POST '/api/v1/runtime/octopus/report' @{ host = 'host-cap'; containers = @(); memAvailableMb = 'lots'; load1 = -3; cpus = $null }
+        Check 'values that are no numbers are no values, the report is still accepted' ($r2.status -eq 200)
+        $h2 = @((Oct-Status).hosts | Where-Object { $_.name -eq 'host-cap' })
+        Check 'a report without usable metrics shows none' ($h2.Count -eq 1 -and @($h2[0].metrics.PSObject.Properties).Count -eq 0 -and $h2[0].running -eq 0) ($h2 | ConvertTo-Json -Compress -Depth 4)
+    } finally {
+        Oct-Machines $OctDefaultMachines
+    }
+}
+
 'octopus: a gateway restart rebuilds the running workers from the project''s tasks; no second run for their items; desired still names them' = {
     Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
     $n = 0
