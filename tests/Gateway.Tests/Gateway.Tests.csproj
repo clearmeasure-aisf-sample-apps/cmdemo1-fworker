@@ -20,6 +20,8 @@
   <ItemGroup>
     <ProjectReference Include="../../gateway/Gateway.csproj" />
     <ProjectReference Include="../../src/Fworker.Database/Fworker.Database.csproj" />
+    <!-- built beside the tests, not referenced: the service verbs' parity tests (ServiceVerbParityTests) run the rule scripts and the C# verbs against it -->
+    <ProjectReference Include="../FakeGitHub/FakeGitHub.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
   <ItemGroup>
     <!-- texts recorded from master that a refactoring must reproduce byte for byte (RuntimePromptTests) -->
