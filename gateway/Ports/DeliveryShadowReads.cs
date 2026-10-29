@@ -12,6 +12,10 @@ using Fworker.Workflows.Delivery;
 // IMergeFactsReader is a GET too). The budget follows v1's rules (Verbs.Promote.ps1): a compare is kept for two minutes (the pass judges every release against the same range), a commit that is
 // a work item's settled merge is kept (Find-CommitItem's commit cache), a commit that is none is not looked at again for ten minutes, an item that is no candidate is read once a minute at
 // most, and the train itself spaces its probes of the app (the policy's read gap). The answers' rate-limit headers go to the gateway's GitHub budget.
+// An answer that cannot change is kept for good (bounded by MaxKept): a compare of two fixed commits, and a commit that is none because it names no pull request or the pull request it names
+// was not merged as it for longer than the ten minutes of the 'none' timer (a read of the pull request right after the merge can still say "not merged" or carry no merge commit: that is
+// kept the short time, read again, and final only when the second read, ten minutes after the first, says the same). Without that, one evaluation of a long range (a read per commit) spends the minute's cap before it ends, the train retries it, and the answers it already had expire and are
+// read again. A 'none' that depends on item state (no candidate item's state names the commit yet) and a 'waiting' keep their lifetimes: a longer one would put v2's decision behind v1's.
 sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceName, IMergeFactsReader facts, ItemGateConfig gates, IDeliveryPolicies policies,
     Action<string, string?, string?, string?>? observe = null, Func<DateTimeOffset>? clock = null, Func<bool>? budgetLow = null) : ITrainReads
 {
@@ -24,15 +28,24 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
     readonly object gate = new();
     readonly Dictionary<string, (DateTimeOffset At, CompareRange? Range)> compares = [];
+    readonly Dictionary<string, CompareRange> fixedCompares = [];
+    readonly HashSet<string> neverItem = [];
+    readonly Dictionary<string, (DateTimeOffset At, MergedPullRequest Pull)> pulls = [];
     readonly Dictionary<string, CommitItemLookup> settled = [];
     readonly Dictionary<string, DateTimeOffset> none = [];
+    readonly Dictionary<string, DateTimeOffset> unmergedSince = [];   // when a read of the pull request first said "not merged as this commit": final only after NoneKeep
     readonly Dictionary<string, (DateTimeOffset At, CommitItemLookup Found)> waiting = [];
     readonly Dictionary<string, (DateTimeOffset At, ItemMergedGates? Gates)> gateReads = [];
 
     public async Task<CompareRange?> Compare(RepoId repository, string deployedCommit, string releaseCommit, CancellationToken ct)
     {
         var key = $"{repository}|{deployedCommit}|{releaseCommit}";
-        lock (gate) if (compares.TryGetValue(key, out var kept) && now() - kept.At < CompareKeep) return kept.Range;
+        var fixedRange = IsSha(deployedCommit) && IsSha(releaseCommit);
+        lock (gate)
+        {
+            if (fixedRange && fixedCompares.TryGetValue(key, out var forever)) return forever;
+            if (compares.TryGetValue(key, out var kept) && now() - kept.At < CompareKeep) return kept.Range;
+        }
         var json = await Get($"repos/{repository}/compare/{deployedCommit}...{releaseCommit}", ct, allow: [HttpStatusCode.NotFound, HttpStatusCode.UnprocessableEntity]);
         CompareRange? range = null;
         if (json is JsonObject o)
@@ -40,7 +53,11 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
             var commits = (o["commits"] as JsonArray ?? []).OfType<JsonObject>().Select(c => new RangeCommit(Lower(c["sha"]), (c["parents"] as JsonArray ?? []).Select(p => Lower(p?["sha"])).ToList(), c["commit"]?["message"]?.ToString())).ToList();
             range = new CompareRange(o["status"]?.ToString(), commits, o["total_commits"] is JsonValue t && t.TryGetValue<int>(out var n) ? n : null);
         }
-        lock (gate) { Trim(compares); compares[key] = (now(), range); }
+        lock (gate)
+        {
+            if (fixedRange && range is not null) { Trim(fixedCompares); fixedCompares[key] = range; }   // two fixed commits: GitHub's answer does not change (a 404 or 422 may, so it is kept the short time)
+            else { Trim(compares); compares[key] = (now(), range); }
+        }
         return range;
     }
 
@@ -50,28 +67,53 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
         lock (gate)
         {
             if (settled.TryGetValue(key, out var s)) return s;
+            if (neverItem.Contains(key)) return new CommitItemLookup(0, "");
             if (none.TryGetValue(key, out var at) && now() - at < NoneKeep) return new CommitItemLookup(0, "");
             if (waiting.TryGetValue(key, out var w) && now() - w.At < WaitingKeep) return w.Found;
         }
-        var found = await Find(repository, commit, ct);
+        var (found, verdict) = await Find(repository, commit, ct);
         lock (gate)
         {
+            // the pull request read says "not merged as this commit": it may be a stale read right after the merge, so it is final only when it still says so NoneKeep after it first did
+            var final = verdict == Finality.Yes;
+            if (verdict == Finality.AfterGrace)
+            {
+                if (!unmergedSince.TryGetValue(key, out var since)) { Trim(unmergedSince); unmergedSince[key] = since = now(); }
+                final = now() - since >= NoneKeep;
+            }
+            else unmergedSince.Remove(key);
             if (found.Item > 0 && found.Gap.Length == 0) { Trim(settled); settled[key] = found; }
+            else if (found.Item == 0 && found.Gap.Length == 0 && final) { unmergedSince.Remove(key);  if (neverItem.Count >= MaxKept) foreach (var k in neverItem.Take(MaxKept / 4).ToList()) neverItem.Remove(k); neverItem.Add(key); }
             else if (found.Item == 0 && found.Gap.Length == 0) { Trim(none); none[key] = now(); }
             else if (found.Gap.Length > 0) { Trim(waiting); waiting[key] = (now(), found); }
         }
         return found;
     }
 
-    /// <summary>Find-CommitItemUncached: the pull request the squash message names, merged as this commit, and the item of it whose state records the merge.</summary>
-    async Task<CommitItemLookup> Find(RepoId repository, RangeCommit commit, CancellationToken ct)
+    /// <summary>
+    /// Find-CommitItemUncached: the pull request the squash message names, merged as this commit, and the item of it whose state records the merge. Final: a none that cannot change
+    /// (no pull request number in the subject, or the pull request is not merged as this commit), as against a none that waits for an item's state.
+    /// </summary>
+    enum Finality { No, Yes, AfterGrace }
+
+    async Task<(CommitItemLookup Lookup, Finality Final)> Find(RepoId repository, RangeCommit commit, CancellationToken ct)
     {
         var first = (commit.Message ?? "").Split('\n')[0];
         var m = Regex.Match(first, @"\(#(\d+)\)\s*$");
-        if (!m.Success) return new CommitItemLookup(0, "");
+        if (!m.Success) return (new CommitItemLookup(0, ""), Finality.Yes);
         var number = int.Parse(m.Groups[1].Value);
-        var pull = await facts.ReadPullRequest(repository, number, ct);
-        if (pull is not { Merged: true } || !string.Equals(pull.MergeCommit, commit.Sha, StringComparison.OrdinalIgnoreCase)) return new CommitItemLookup(0, "");
+        // A merged pull request that names this commit is kept for CompareKeep: the read of its item's state may be refused by the minute's cap, and the
+        // retry then does not read the pull request again (that read is a call of v1's token too).
+        var pullKey = $"{repository}#{number}";
+        MergedPullRequest? pull = null;
+        lock (gate) if (pulls.TryGetValue(pullKey, out var kept) && now() - kept.At < CompareKeep) pull = kept.Pull;
+        if (pull is null)
+        {
+            pull = await facts.ReadPullRequest(repository, number, ct);
+            if (pull is { Merged: true } && string.Equals(pull.MergeCommit, commit.Sha, StringComparison.OrdinalIgnoreCase)) lock (gate) { Trim(pulls); pulls[pullKey] = (now(), pull); }
+        }
+        if (pull is null) return (new CommitItemLookup(0, ""), Finality.No);   // a 404 may be a permission or a lag, not a fact about the commit
+        if (!pull.Merged || !string.Equals(pull.MergeCommit, commit.Sha, StringComparison.OrdinalIgnoreCase)) return (new CommitItemLookup(0, ""), Finality.AfterGrace);
         var short7 = commit.Sha.Length >= 7 ? commit.Sha[..7] : commit.Sha;
         foreach (var n in ContentGate.CandidateItems(pull.Number, pull.HeadRef, pull.Title, pull.Body))
         {
@@ -82,13 +124,13 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
             {
                 var awaiting = merge["awaiting"]?.ToString() ?? "";
                 var done = merge["done_at"] is { } d && d.ToString().Length > 0;
-                if (awaiting == "release-queue" || (awaiting.Length == 0 && done)) return new CommitItemLookup(n, "");
-                return new CommitItemLookup(n, $"#{n}'s merge ({short7}) is not settled yet" + (awaiting.Length > 0 ? $" (awaiting {awaiting})" : ""));
+                if (awaiting == "release-queue" || (awaiting.Length == 0 && done)) return (new CommitItemLookup(n, ""), Finality.No);
+                return (new CommitItemLookup(n, $"#{n}'s merge ({short7}) is not settled yet" + (awaiting.Length > 0 ? $" (awaiting {awaiting})" : "")), Finality.No);
             }
             var ownPr = state["verdict"]?["pr"]?.ToString() == pull.Number.ToString() || state["pr"]?["number"]?.ToString() == pull.Number.ToString();
-            if (ownPr) return new CommitItemLookup(n, $"#{n}'s merge of PR #{pull.Number} ({short7}) is not picked up by the gateway yet");
+            if (ownPr) return (new CommitItemLookup(n, $"#{n}'s merge of PR #{pull.Number} ({short7}) is not picked up by the gateway yet"), Finality.No);
         }
-        return new CommitItemLookup(0, "");
+        return (new CommitItemLookup(0, ""), Finality.No);
     }
 
     /// <summary>The gateway's state comment of an item (the first comment with its marker), or null.</summary>
@@ -166,6 +208,8 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
         if (!resp.IsSuccessStatusCode) throw new HttpRequestException($"GitHub answered {(int)resp.StatusCode} to a read of {path.Split('?')[0]}");
         return JsonNode.Parse(await resp.Content.ReadAsStringAsync(ct));
     }
+
+    static bool IsSha(string s) => s.Length == 40 && s.All(Uri.IsHexDigit);
 
     static string Lower(JsonNode? n) => (n?.ToString() ?? "").ToLowerInvariant();
 

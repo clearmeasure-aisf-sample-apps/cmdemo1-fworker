@@ -66,6 +66,14 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
     // a publish that throws is forgotten, so the next poll publishes the event again
     void Emit(string key, IngressEvent ev) { if (!published.Add(key)) return; try { publish(ev); } catch { published.Remove(key); throw; } }
 
+    /// <summary>The first of these Octopus times that parses (Octopus writes ISO 8601 with an offset); null when none does, and the delivery train then stamps the event with its own clock (#496).</summary>
+    public static DateTimeOffset? TimeOf(params JsonNode?[] values)
+    {
+        foreach (var v in values)
+            if (v is JsonValue j && j.TryGetValue<string>(out var text) && DateTimeOffset.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var t)) return t;
+        return null;
+    }
+
     bool Old(JsonNode? o) => since is { } s && DateTimeOffset.TryParse(o?["Created"]?.ToString() ?? o?["Assembled"]?.ToString(), out var t) && t < s - settings.LookbackOrDefault;
 
     Rel? Known(JsonNode? r)
@@ -94,7 +102,7 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
                 var key = $"octopus:release:{rel.Id}";
                 if (published.Contains(key)) continue;
                 if (Old(r)) { published.Add(key); published.Add($"octopus:commit:{rel.Id}"); continue; }
-                Emit(key, new OctopusReleaseCreated(rel.Id, rel.Version, rel.Commit));
+                Emit(key, new OctopusReleaseCreated(rel.Id, rel.Version, rel.Commit, TimeOf(r?["Assembled"])));
                 if (rel.Commit != null) Emit($"octopus:commit:{rel.Id}", new ReleaseCommitResolved(rel.Id, rel.Version, rel.Commit));
             }
 
@@ -110,17 +118,19 @@ public sealed class OctopusWatcher(IOctopusReader reader, Action<IngressEvent> p
                 if (!releases.TryGetValue(relId, out var rel)) rel = Known(await Read($"api/{sp}/releases/{relId}", ct));
                 if (rel == null) continue;
                 var env = envs.GetValueOrDefault($"{d?["EnvironmentId"]}", $"{d?["EnvironmentId"]}");
-                Emit(startedKey, new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, OctopusDeploymentPhase.Started, rel.Commit));
+                // #496: the times are Octopus's own, so a replay after a restart does not make an old deployment look as if it happened now (the deployment's Created is the last resort)
+                var startedAt = TimeOf(task["StartTime"], task["QueueTime"], d?["Created"]);
+                Emit(startedKey, new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, OctopusDeploymentPhase.Started, rel.Commit, startedAt));
                 if (phase != OctopusDeploymentPhase.Started)
                 {
-                    Emit($"octopus:deployment:{depId}:{phase}", new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, phase, rel.Commit));
+                    Emit($"octopus:deployment:{depId}:{phase}", new OctopusDeploymentChanged(depId, taskId, rel.Id, rel.Version, env, phase, rel.Commit, TimeOf(task["CompletedTime"], task["StartTime"], task["QueueTime"], d?["Created"])));
                     finished.Add(depId);
                 }
                 else if (state == "Executing")
                 {
                     foreach (var i in (await Read($"api/{sp}/interruptions?regarding={taskId}&pendingOnly=true&take=20", ct))?["Items"] as JsonArray ?? [])
                         if (i?["IsPending"]?.GetValue<bool>() != false && $"{i?["Id"]}" is { Length: > 0 } iid)
-                            Emit($"octopus:signoff:{iid}", new SignOffRequested(iid, depId, taskId, rel.Id, rel.Version, env, rel.Commit));
+                            Emit($"octopus:signoff:{iid}", new SignOffRequested(iid, depId, taskId, rel.Id, rel.Version, env, rel.Commit, TimeOf(i?["Created"])));
                 }
             }
             if (!replayDone) { publish(new OctopusReplayComplete()); replayDone = true; }   // every window was read in full: the replay is applied

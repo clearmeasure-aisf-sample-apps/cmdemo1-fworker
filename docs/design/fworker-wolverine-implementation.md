@@ -285,6 +285,10 @@ the replenisher if the board is idle): every board-relevant change in it has its
 | W5.1 | `DeliveryTrainSaga` per deployable and environment: candidates, evidence, newest qualifying release, Sign-off answers, due timers, supersession, the delivered-to table, the `dependencies-delivered` slot (off), policy and promoter per deployable from the catalog (H9) | `src/Fworker.Workflows/Delivery/*` | W5.0 | L |
 | W5.2 | the shadow run against the board: the train's decisions compared with v1's promotions and Sign-off answers, and its report | `src/Fworker.Workflows/Delivery/Shadow*`, `gateway/Endpoints/Admin*` | W5.1 | S |
 
+**W5.1 revision notes:**
+- Hand-written handlers instead of a Wolverine Saga are the accepted design (#491).
+- The item "command or timer lost between save and outbox" moved to W9.9 (#361).
+
 **Gate:** a **tdd shadow run of 4 hours or 3 app releases, whichever ends later**, with zero unexplained differences between the
 train's decisions and v1's. It replaces the 3 shadow releases; there is no batch to prod, and no switch while v1 acts: the train acts
 from the cutover (W9.9), which adopts any pending Sign-off.

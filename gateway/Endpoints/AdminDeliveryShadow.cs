@@ -2,8 +2,9 @@ using System.Text.Json.Nodes;
 using Fworker.Workflows.Delivery;
 
 // W5.2: the report of the shadow run of the delivery train (docs/design/fworker-wolverine-implementation.md W5). GET /api/v1/delivery-shadow?limit=50&outcome=differs lists the newest stored
-// comparisons of the train's decisions with v1's promotion pass (outcome: match, v2-only, v1-only or differs), the summary of all of them, whether the shadow run has run long enough
-// (4 hours or 3 app releases) and the commands the train would have sent (recorded, never executed). The operator's credential only; 404 where the gateway does not run the shadow.
+// comparisons of the train's decisions with v1's promotion pass (outcome: match, v2-only, v1-only or differs), the summary of all of them, the gate of the shadow run (met when
+// 3 releases were compared by both sides and nothing live is left unexplained; summary.live and gate say what was compared, what differs, what only one side judged and which declared differences explain
+// a one-sided row; the hours are information) and the commands the train would have sent (recorded, never executed). The operator's credential only; 404 where the gateway does not run the shadow.
 // The same counts are in /api/v1/status as "deliveryShadow". Read only: it reads the Wolverine database and changes nothing.
 sealed class AdminDeliveryShadowEndpoints(IServiceProvider services) : IEndpointModule
 {

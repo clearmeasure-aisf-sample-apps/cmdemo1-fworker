@@ -106,15 +106,17 @@ public sealed class DeliveryShadowPortTests
         var now = DateTimeOffset.UtcNow;
         var (reads, gh, _, _, _) = Reads(() => now);
         gh.Answer = _ => (HttpStatusCode.OK, CompareBody());
-        var r = await reads.Compare(Home, Sha0, Sha1, default);
+        // refs that are no commits (a branch name) can move: kept the two minutes (a compare of two fixed commits is kept for good, DeliveryShadowReadsTests)
+        const string Moving = "master";
+        var r = await reads.Compare(Home, Sha0, Moving, default);
         Assert.Equal("ahead", r!.Status);
         Assert.Equal(Sha1, r.Commits[0].Sha);   // lower case
         Assert.Equal([Sha0], r.Commits[0].ParentShas);
         Assert.StartsWith("x (#9)", r.Commits[0].Message);
-        await reads.Compare(Home, Sha0, Sha1, default);
+        await reads.Compare(Home, Sha0, Moving, default);
         Assert.Single(gh.Seen);
         now += TimeSpan.FromMinutes(3);
-        await reads.Compare(Home, Sha0, Sha1, default);
+        await reads.Compare(Home, Sha0, Moving, default);
         Assert.Equal(2, gh.Seen.Count);
         Assert.All(gh.Seen, s => Assert.Equal(HttpMethod.Get, s.Method));
     }
@@ -175,6 +177,10 @@ public sealed class DeliveryShadowPortTests
         await reads.LookupCommit(Home, commit, default);
         Assert.Equal(1, facts.Pulls);
         now += TimeSpan.FromSeconds(61);
+        await reads.LookupCommit(Home, commit, default);
+        Assert.Equal(1, facts.Pulls);   // (the merged pull request is kept two minutes: a retry after a refused read does not spend it again)
+        Assert.Equal(2, gh.Seen.Count);   // the item's state is read again after the minute
+        now += TimeSpan.FromMinutes(3);
         await reads.LookupCommit(Home, commit, default);
         Assert.Equal(2, facts.Pulls);
     }
