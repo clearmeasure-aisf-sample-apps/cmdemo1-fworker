@@ -234,4 +234,55 @@ $cyOpen = Get-ItemCycle 6 @{ state = @{ item = 6; flow = @(@{ c = 'Development';
 Check 'flow metrics: an item with no merge time is not measured (no journal either)' ($null -eq $cyOpen)
 $cyOld = Get-ItemCycle 7 @{ state = @{ item = 7; merge = @{ merged_at = '2026-01-01T00:20:00Z' } }; comments = @() } 'bot'
 Check 'flow metrics: a state without flow has an empty flow and the old fields' (@($cyOld.flow).Count -eq 0 -and $cyOld.times.merged -and $cyOld.columns -is [hashtable])
+# The declared differences of v2 (issue #468): tests/scenarios/v2-differences.ps1, the pure functions the Tier 1 harness (lib.ps1) uses for -Engine v2
+'v2 declared differences'
+. (Join-Path $root 'tests/scenarios/v2-differences.ps1')
+$vd = Join-Path ([IO.Path]::GetTempPath()) "v2diff-smoke-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+$vdGolden = Join-Path $vd 'golden'
+New-Item -ItemType Directory -Force -Path (Join-Path $vdGolden 's1'), (Join-Path $vdGolden 's2') | Out-Null
+function Write-VdFile([string]$Path, [string[]]$Lines) { [IO.File]::WriteAllText($Path, (($Lines -join "`n") + "`n"), [Text.UTF8Encoding]::new($false)) }
+# the errors of a declared-differences file (its lines) against the golden files of this test, as one string ('' when there is none)
+function Get-VdErrors([string[]]$Lines) {
+    Write-VdFile (Join-Path $vd 'd.txt') $Lines
+    $r = New-V2EffectiveGolden $vdGolden (Join-Path $vd 'd.txt') (Join-Path $vd "out-$([guid]::NewGuid().ToString('N').Substring(0, 6))")
+    return ($r.errors -join ' | ')
+}
+# the real file is true to the real golden files (a pull request that re-records the baseline or edits the file is checked here, on v1 too)
+$vdReal = New-V2EffectiveGolden (Join-Path $root 'tests/scenarios/golden') (Join-Path $root 'tests/scenarios/golden/v2-differences.txt') (Join-Path $vd 'real')
+Check 'v2 differences: tests/scenarios/golden/v2-differences.txt is valid and true to the golden files' ($vdReal.errors.Count -eq 0)
+$vdA = '= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"a"}'
+$vdL = '= rule PUT /repos/{repo}/issues/{#1}/labels 200 -'
+$vdB = '= rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"b"}'
+$vdS = '+ gateway STATE x #{#1}'
+$vdT = '~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"late"}'
+$vdL2 = '= rule PUT /repos/{repo}/issues/{#1}/labels 204 -'
+$vdX = '= rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"extra"}'
+$vdS2 = '+ gateway STATE y #{#1}'
+$vdT2 = '~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"tail2"}'
+Write-VdFile (Join-Path $vdGolden 's1/a-1.writes.txt') @('# suite: s1', $vdA, $vdL, $vdB, $vdS, $vdT)
+Write-VdFile (Join-Path $vdGolden 's2/b-2.writes.txt') @('# suite: s2', $vdA)
+$vdWhy = '# why: v2 answers 204 on purpose; issue: #468'
+Write-VdFile (Join-Path $vd 'ok.txt') @('# a comment before the first block', '', '@ s1/a-1', "- $vdL", "+ $vdL2", "+ $vdX", "- $vdB", "+ $vdT2", "- $vdS", "+ $vdS2", $vdWhy, '')
+$vdOk = New-V2EffectiveGolden $vdGolden (Join-Path $vd 'ok.txt') (Join-Path $vd 'effective')
+$vdEff = @([IO.File]::ReadAllLines((Join-Path $vdOk.dir 's1/a-1.writes.txt')) | Where-Object { -not $_.StartsWith('# ') })
+Check 'v2 differences: a block applies a change in place, an addition after the last line of its section, a removal and a settled-line change' ($vdOk.errors.Count -eq 0 -and $vdOk.blocks -eq 1 -and $vdOk.dir -ne $vdGolden -and ($vdEff -join "`n") -ceq (@($vdA, $vdL2, $vdX, $vdS2, $vdT, $vdT2) -join "`n"))
+Check 'v2 differences: a golden line no block names stays as it is, so a caused line v2 writes differently and no block declares still fails the comparison' ($vdEff -contains $vdA -and $vdEff -contains $vdT -and $vdEff -notcontains $vdL -and $vdEff -notcontains $vdB)
+Check 'v2 differences: a scenario with no block compares with its golden file unchanged' ([IO.File]::ReadAllText((Join-Path $vdOk.dir 's2/b-2.writes.txt')) -ceq [IO.File]::ReadAllText((Join-Path $vdGolden 's2/b-2.writes.txt')))
+Check 'v2 differences: the golden directory itself is not changed by applying a block' ([IO.File]::ReadAllLines((Join-Path $vdGolden 's1/a-1.writes.txt')) -contains $vdB)
+Write-VdFile (Join-Path $vd 'empty.txt') @('# only comments')
+$vdNone = New-V2EffectiveGolden $vdGolden (Join-Path $vd 'empty.txt') (Join-Path $vd 'none')
+Check 'v2 differences: with no block the golden directory itself is used and nothing is copied' ($vdNone.errors.Count -eq 0 -and $vdNone.blocks -eq 0 -and $vdNone.dir -eq $vdGolden -and -not (Test-Path (Join-Path $vd 'none')))
+Check 'v2 differences: a block without # why: is invalid' ((Get-VdErrors @('@ s1/a-1', "- $vdL", "+ $vdL2")) -like "*no '# why:*")
+$vdBad = New-V2EffectiveGolden $vdGolden (Join-Path $vd 'd.txt') (Join-Path $vd 'bad')
+Check 'v2 differences: a block with an error is applied to nothing (its scenario compares with the golden file as it is)' ($vdBad.errors.Count -gt 0 -and $vdBad.blocks -eq 0 -and $vdBad.dir -eq $vdGolden)
+Check 'v2 differences: a - line that is not in the golden file is invalid' ((Get-VdErrors @('@ s1/a-1', '- = rule POST /nowhere 201 -', $vdWhy)) -like "*the '-' line is not in the golden file*")
+Check 'v2 differences: a block for a scenario with no golden file is invalid' ((Get-VdErrors @('@ s1/zz-9', "+ $vdX", $vdWhy)) -like '*there is no golden file*')
+Check 'v2 differences: a block that declares nothing is invalid' ((Get-VdErrors @('@ s1/a-1', $vdWhy)) -like '*declares no*')
+Check 'v2 differences: a + line equal to its - line declares no difference' ((Get-VdErrors @('@ s1/a-1', "- $vdL", "+ $vdL", $vdWhy)) -like '*declares no difference*')
+Check 'v2 differences: a line that is not understood is invalid' ((Get-VdErrors @('@ s1/a-1', 'foo', $vdWhy)) -like '*not understood*')
+Check 'v2 differences: a - or + line that holds no golden line is invalid' ((Get-VdErrors @('@ s1/a-1', '- hello', $vdWhy)) -like '*does not hold a golden line*')
+Check 'v2 differences: a - or + line outside a block is invalid' ((Get-VdErrors @("+ $vdX")) -like '*outside a block*')
+Check 'v2 differences: a name that is not <suite>/<slug> is invalid' ((Get-VdErrors @('@ S1/a', "+ $vdX", $vdWhy)) -like '*is not <suite>/<slug>*')
+Check 'v2 differences: a scenario with two blocks is invalid' ((Get-VdErrors @('@ s1/a-1', "+ $vdX", $vdWhy, '', '@ s1/a-1', "+ $vdX", $vdWhy)) -like '*has a block already*')
+Remove-Item -Recurse -Force -Path $vd -ErrorAction SilentlyContinue
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }

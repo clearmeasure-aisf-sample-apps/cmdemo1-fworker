@@ -79,7 +79,7 @@ function Assert-GoldenTails([string]$Suite) {
     $mode = Get-GoldenMode
     if ($mode -eq 'off') { return }
     try { Wait-RecordSettled } catch { }
-    $dir = $(if ($mode -eq 'compare') { Join-Path $script:Root 'tests/scenarios/golden' } else { '' })
+    $dir = $(if ($mode -eq 'compare') { Get-GoldenDir } else { '' })
     $script:Current = "$Suite golden tails"
     $res = $null
     try { $res = Fake 'group-check' @{ goldenDir = $dir } }
@@ -291,6 +291,32 @@ $script:SuiteName = ''
 
 # Golden writes (tests/scenarios/golden/README.md): the fake records every scenario's writes (FAKE_RECORD_DIR) and Run-Scenario compares them
 # with tests/scenarios/golden/<suite>/<slug>.writes.txt where that file exists. TEST_GOLDEN: compare (the default), record (never compare), off.
+# The declared differences of the v2 engine (golden/v2-differences.txt, issue #468): v2-differences.ps1 has the pure functions. Only a run with
+# -Engine v2 (run.ps1 sets $script:GoldenEngine) reads them; for v1 the golden directory is the one of the repository, as it always was.
+. (Join-Path $PSScriptRoot 'v2-differences.ps1')
+$script:GoldenEngine = 'v1'
+$script:EffectiveGolden = $null
+# The directory the writes of a scenario are compared with, and the group check reads the tail lines from: v1 the golden directory itself; v2 the
+# golden directory with the declared differences applied (a copy; the directory itself while no block is declared). Built once per suite (Initialize-V2Golden).
+function Get-GoldenDir {
+    if ($script:GoldenEngine -ne 'v2') { return (Join-Path $script:Root 'tests/scenarios/golden') }
+    if ($null -eq $script:EffectiveGolden) { Initialize-V2Golden }
+    return $script:EffectiveGolden.dir
+}
+# -Engine v2, once per suite after its gateway is up (run.ps1): applies golden/v2-differences.txt to the golden files. The check fails when the file is not
+# true to the baseline: a block with no '# why:', a '-' line that is not in its golden file, a block for a scenario with no golden file, a line not understood.
+# A caused ('= ') line that v2 writes and no block declares is not a case of its own: the scenario then differs from the golden file, and fails as in v1.
+function Initialize-V2Golden {
+    $real = Join-Path $script:Root 'tests/scenarios/golden'
+    $script:EffectiveGolden = @{ dir = $real; blocks = 0; errors = @() }
+    if ((Get-GoldenMode) -ne 'compare') { return }
+    $out = Join-Path ([IO.Path]::GetTempPath()) "factory-worker-golden-v2-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    $script:Current = "$($script:SuiteName) v2 declared differences"
+    $res = New-V2EffectiveGolden $real (Join-Path $real 'v2-differences.txt') $out
+    $script:EffectiveGolden = $res
+    Check 'v2 declared differences: valid and true to the golden files' ($res.errors.Count -eq 0) ("`n        " + (@($res.errors | Select-Object -First 5) -join "`n        "))
+    Write-Host "    (v2 declared differences applied: $($res.blocks) block(s))"
+}
 function Get-GoldenMode {
     $m = "$env:TEST_GOLDEN".Trim().ToLowerInvariant()
     if ($m -eq '') { return 'compare' }
@@ -378,7 +404,7 @@ function Compare-GoldenWrites($Rec, [string]$Name, [string]$Mode = (Get-GoldenMo
     if (-not (Get-RecField $Rec 'ok') -or $file -eq '') { Check 'golden writes recorded' $false "(the fake wrote no record: $(Get-RecField $Rec 'reason'))"; return }
     if ($Mode -ne 'compare') { return }
     # the golden file has the record's own suite directory and file name, so the fake's spelling of both is the only one
-    $golden = Join-Path $script:Root (Join-Path 'tests/scenarios/golden' (Join-Path (Split-Path -Leaf (Split-Path -Parent $file)) (Split-Path -Leaf $file)))
+    $golden = Join-Path (Get-GoldenDir) (Join-Path (Split-Path -Leaf (Split-Path -Parent $file)) (Split-Path -Leaf $file))
     if (-not (Test-Path -LiteralPath $golden)) { return }   # no golden file: this scenario is recorded only
     $r = Compare-WritesFiles $golden $file
     $detail = ''
@@ -393,7 +419,10 @@ function Compare-GoldenWrites($Rec, [string]$Name, [string]$Mode = (Get-GoldenMo
             $shown += "    golden    $(if ($null -eq $c.expected) { '(no more writes)' } else { $c.expected })"
             $shown += "    record    $(if ($null -eq $c.actual) { '(no more writes)' } else { $c.actual })"
         }
-        $shown += "golden: $golden"; $shown += "record: $file"; $shown += "raw:    $(Get-RecField $Rec 'raw')"
+        $shown += "golden: $golden"
+        # v2: the golden file above is the effective one, the repository's golden file with the declared differences applied (a temporary copy)
+        if ($script:GoldenEngine -eq 'v2') { $shown += "v2: the repository's golden file is tests/scenarios/golden/$(Split-Path -Leaf (Split-Path -Parent $file))/$(Split-Path -Leaf $file); what v2 writes on purpose is a block of tests/scenarios/golden/v2-differences.txt" }
+        $shown += "record: $file"; $shown += "raw:    $(Get-RecField $Rec 'raw')"
         $detail = "(the writes differ from the golden file: $($why -join '; '))`n        " + ($shown -join "`n        ")
     }
     # caused writes and the format block; a missing settled background line is a quarantined miss of its own (Add-GoldenMiss)
