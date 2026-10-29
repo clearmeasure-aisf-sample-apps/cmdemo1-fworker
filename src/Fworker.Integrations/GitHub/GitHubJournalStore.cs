@@ -110,9 +110,7 @@ public sealed class GitHubJournalStore : IJournalStore
         if (status is >= 200 and < 300) return text;
         if ((status == 404 && allow404) || (status == 410 && allow410)) return null;
         var detail = $"GitHub {status} on {method} {relative}";
-        int? remaining = resp.Headers.TryGetValues("x-ratelimit-remaining", out var rv) && int.TryParse(rv.FirstOrDefault(), out var rem) ? rem : null;
-        DateTimeOffset? reset = resp.Headers.TryGetValues("x-ratelimit-reset", out var sv) && long.TryParse(sv.FirstOrDefault(), out var secs) ? DateTimeOffset.FromUnixTimeSeconds(secs) : null;
-        var c = ErrorClassifier.Classify(new HttpOutcome(status, text, resp.Headers.RetryAfter?.Delta, reset, remaining), idempotentCommand: false);
+        var c = ErrorClassifier.Classify(GitHubResponses.ToOutcome(resp, text), idempotentCommand: false);
         if (c.Action is ErrorAction.Retry or ErrorAction.Reschedule) throw new HttpRequestException(detail, null, (HttpStatusCode)status);
         if (status == 403) throw new GitHubForbiddenException(detail);
         throw new JournalRefusedException(detail);
