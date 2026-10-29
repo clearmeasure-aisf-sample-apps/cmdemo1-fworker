@@ -168,6 +168,7 @@ public sealed class ShadowHistoryKilledTests(ShadowHistoryKilledFixture gw) : IC
 /// <summary>Shadow on, the database unreachable: the gateway is v1 as before, the events are dropped (counted), and the answers do not change.</summary>
 public sealed class ShadowHistoryUnreachableFixture : GatewayFixture
 {
+    protected override string UpPath => "/health";   // /ready waits for the schema, which an unreachable database never gives
     protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); }
 }
 
@@ -190,7 +191,11 @@ public sealed class ShadowHistoryUnreachableTests(ShadowHistoryUnreachableFixtur
         var a = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
         Assert.Equal(200, a.Status);
         Assert.NotNull(a.Json?["wolverine"]?["shadowHistory"]);
-        Assert.Equal(200, (await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status);
+        // /ready waits for the schema where a database is configured (docs/design/fworker-database.md); nothing else of v1 does
+        var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
+        Assert.Equal(503, ready.Status);
+        Assert.Equal("schema", (string?)ready.Json?["waitingFor"]);
+        Assert.Equal(200, (await gw.Host.SendAsync("GET", "/health", GatewayEnvironment.ApiPort)).Status);
     }
 }
 

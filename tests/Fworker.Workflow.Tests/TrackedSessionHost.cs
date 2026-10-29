@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using Fworker.Persistence;
+using JasperFx;
 using JasperFx.CodeGeneration;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -15,8 +16,8 @@ namespace Fworker.Workflow.Tests;
 
 /// <summary>
 /// The harness for Wolverine tracked sessions (W2.4): a database of its own on the SQL Server of FACTORY_TEST_SQL (the service container of tests.yml),
-/// the migrations of Fworker.Persistence applied, and a Wolverine host on it with the durable inbox and outbox (schema "wolverine", Solo mode, as the
-/// gateway's host runs). A test runs a message through the host and waits for everything it causes with <see cref="Track"/>, then reads the database.
+/// the scripts of Fworker.Database applied (DbUp, as the gateway does), and a Wolverine host on it with the durable inbox and outbox (schema "wolverine", Solo mode, as the
+/// gateway's host runs, and building nothing: AutoCreate.None). A test runs a message through the host and waits for everything it causes with <see cref="Track"/>, then reads the database.
 /// Where FACTORY_TEST_SQL is unset (a developer machine) <see cref="Available"/> is false and a test returns at once. Later waves add their handlers
 /// through the configure callback of <see cref="StartAsync"/>; the messages below are the harness's own and belong to no production code.
 /// </summary>
@@ -25,7 +26,7 @@ public sealed class TrackedSessionHost : IAsyncDisposable
     public static readonly string? ServerConnection = Environment.GetEnvironmentVariable("FACTORY_TEST_SQL");
     public static bool Available => !string.IsNullOrWhiteSpace(ServerConnection);
 
-    readonly string dbName = "fw_tracked_" + Guid.NewGuid().ToString("N")[..16];
+    TestDatabase? database;
     IHost? host;
 
     public string ConnectionString { get; private set; } = "";
@@ -52,14 +53,8 @@ public sealed class TrackedSessionHost : IAsyncDisposable
 
     async Task InitAsync(Action<WolverineOptions>? configure, Func<string, Action<WolverineOptions>>? configureFor = null)
     {
-        await using (var master = new SqlConnection(new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = "master" }.ConnectionString))
-        {
-            await master.OpenAsync();
-            await using var create = new SqlCommand($"CREATE DATABASE [{dbName}]", master);
-            await create.ExecuteNonQueryAsync();
-        }
-        ConnectionString = new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = dbName }.ConnectionString;
-        await using (var db = Open()) await db.Database.MigrateAsync();
+        database = await TestDatabase.CreateAsync("fw_tracked_");
+        ConnectionString = database.ConnectionString;
         host = await BuildHost(configureFor?.Invoke(ConnectionString) ?? configure);
     }
 
@@ -103,7 +98,9 @@ public sealed class TrackedSessionHost : IAsyncDisposable
                 w.PublishMessage<HarnessPoison>().ToLocalQueue("harness");
                 w.PublishMessage<HarnessRecord>().ToLocalQueue("harness");
                 w.LocalQueue("harness").UseDurableInbox();
-                w.PersistMessagesWithSqlServer(ConnectionString, "wolverine");
+                // the tables are the scripts' (Fworker.Database 011); Wolverine builds and diffs nothing, as in the gateway
+                w.AutoBuildMessageStorageOnStartup = AutoCreate.None;
+                w.PersistMessagesWithSqlServer(ConnectionString, "wolverine").OverrideAutoCreateResources(AutoCreate.None);
                 w.Durability.Mode = DurabilityMode.Solo;
                 w.Policies.UseDurableLocalQueues();   // the durable inbox and outbox, as the gateway's host
                 // the failure rules the examples prove: a transient failure is retried; a poison one is dead-lettered after three attempts in all
@@ -135,15 +132,7 @@ public sealed class TrackedSessionHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (host != null) { try { await host.StopAsync(TimeSpan.FromSeconds(10)); } catch { } host.Dispose(); }
-        try
-        {
-            SqlConnection.ClearAllPools();
-            await using var conn = new SqlConnection(new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = "master" }.ConnectionString);
-            await conn.OpenAsync();
-            await using var cmd = new SqlCommand($"IF DB_ID('{dbName}') IS NOT NULL BEGIN ALTER DATABASE [{dbName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{dbName}]; END", conn);
-            await cmd.ExecuteNonQueryAsync();
-        }
-        catch { }
+        if (database != null) await database.DisposeAsync();
     }
 }
 

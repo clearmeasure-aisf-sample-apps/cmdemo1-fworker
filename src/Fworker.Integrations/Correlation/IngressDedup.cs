@@ -63,20 +63,9 @@ public sealed class InMemoryIngressDedup : IIngressDedup
 
 public sealed class SqlIngressDedup(string connectionString) : IIngressDedup
 {
-    const string Ddl = """
-        IF SCHEMA_ID(N'factory') IS NULL EXEC(N'CREATE SCHEMA [factory]');
-        IF OBJECT_ID(N'factory.IngressDedup', N'U') IS NULL
-            CREATE TABLE factory.IngressDedup (
-                Layer nvarchar(16) NOT NULL, [Key] nvarchar(400) NOT NULL, MessageId uniqueidentifier NOT NULL, ClaimedAt datetime2 NOT NULL,
-                CONSTRAINT PK_IngressDedup PRIMARY KEY (Layer, [Key]));
-        """;
-    readonly object gate = new();
-    bool ready;
-
     public bool Claim(string layer, string key, Guid messageId)
     {
         using var c = new SqlConnection(connectionString); c.Open();
-        EnsureTable(c);
         using var cmd = new SqlCommand("""
             INSERT INTO factory.IngressDedup (Layer, [Key], MessageId, ClaimedAt)
             SELECT @l, @k, @m, SYSUTCDATETIME()
@@ -93,20 +82,9 @@ public sealed class SqlIngressDedup(string connectionString) : IIngressDedup
     public int Purge(TimeSpan olderThan)
     {
         using var c = new SqlConnection(connectionString); c.Open();
-        EnsureTable(c);
         using var cmd = new SqlCommand("DELETE FROM factory.IngressDedup WHERE ClaimedAt < @t", c);
         cmd.Parameters.Add("@t", SqlDbType.DateTime2).Value = DateTime.UtcNow - olderThan;
         return cmd.ExecuteNonQuery();
-    }
-
-    void EnsureTable(SqlConnection c)
-    {
-        if (ready) return;
-        lock (gate)
-        {
-            if (ready) return;
-            using var cmd = new SqlCommand(Ddl, c); cmd.ExecuteNonQuery(); ready = true;
-        }
     }
 }
 

@@ -6,7 +6,14 @@ sealed class DatabaseOptions
 {
     public const string EnvironmentVariable = "FACTORY_DB_CONNECTION";
 
-    DatabaseOptions(string? connection) { ConnectionString = connection; }
+    /// <summary>FACTORY_DB_CREATE=1 lets the gateway create the database when it is missing. Only tests/scenarios/run.ps1 -Engine v2 sets it; it is never set in config or overrides:
+    /// the identity of a deployed gateway cannot CREATE DATABASE (bicep creates the database).</summary>
+    public const string CreateEnvironmentVariable = "FACTORY_DB_CREATE";
+
+    DatabaseOptions(string? connection, bool createIfMissing) { ConnectionString = connection; CreateIfMissing = createIfMissing; }
+
+    /// <summary>The database is created when it is missing (tests only, see <see cref="CreateEnvironmentVariable"/>).</summary>
+    public bool CreateIfMissing { get; }
 
     /// <summary>A connection string is set.</summary>
     public bool Configured => ConnectionString != null;
@@ -17,7 +24,7 @@ sealed class DatabaseOptions
     public static DatabaseOptions From(Func<string, string?> env)
     {
         var v = env(EnvironmentVariable)?.Trim();
-        return new DatabaseOptions(string.IsNullOrEmpty(v) ? null : v);
+        return new DatabaseOptions(string.IsNullOrEmpty(v) ? null : v, env(CreateEnvironmentVariable)?.Trim() == "1");
     }
 
     public override string ToString() => Configured ? "DatabaseOptions(configured)" : "DatabaseOptions(none)";

@@ -1,0 +1,2046 @@
+{
+  "tables": {
+    "factory.CapacityLedgers": {
+      "columns": {
+        "Key": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Revision": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "StateJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "UpdatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_CapacityLedgers": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Key"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.CatalogCopies": {
+      "columns": {
+        "ContentHash": {
+          "type": "nvarchar",
+          "maxLength": 128,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "FetchedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Json": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Name": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "SourceSha": {
+          "type": "nvarchar",
+          "maxLength": 128,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_CatalogCopies": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Name"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.CopilotReservations": {
+      "columns": {
+        "At": {
+          "type": "datetime2",
+          "maxLength": 8,
+          "precision": 27,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Item": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Phase": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "State": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "TaskId": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Url": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Worker": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_CopilotReservations": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Item",
+            "Phase"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.Correlations": {
+      "columns": {
+        "CreatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Generation": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Key": {
+          "type": "nvarchar",
+          "maxLength": 800,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Kind": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Source": {
+          "type": "nvarchar",
+          "maxLength": 128,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_Correlations_ItemKey_Generation": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "ItemKey",
+            "Generation"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "PK_Correlations": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Kind",
+            "Key"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.DeliveredTo": {
+      "columns": {
+        "DeliveredAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Environment": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Release": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_DeliveredTo": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "ItemKey",
+            "Environment"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.DeliveryShadowComparisons": {
+      "columns": {
+        "At": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Deployable": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Environment": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Id": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": true,
+          "default": null
+        },
+        "Outcome": {
+          "type": "nvarchar",
+          "maxLength": 32,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Reason": {
+          "type": "nvarchar",
+          "maxLength": 4000,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Release": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Replay": {
+          "type": "bit",
+          "maxLength": 1,
+          "precision": 1,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": "CONVERT[bit],0"
+        },
+        "V1Action": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "V1At": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "V1Json": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "V2Action": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "V2At": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "V2Json": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_DeliveryShadowComparisons_At": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "At"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "IX_DeliveryShadowComparisons_Outcome_At": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "Outcome",
+            "At"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "PK_DeliveryShadowComparisons": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.DeliveryTrains": {
+      "columns": {
+        "Key": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Revision": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "StateJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "UpdatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_DeliveryTrains": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Key"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.IdempotencyLedger": {
+      "columns": {
+        "Error": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Execution": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Failure": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Key": {
+          "type": "nvarchar",
+          "maxLength": 800,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Ok": {
+          "type": "bit",
+          "maxLength": 1,
+          "precision": 1,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "RecordedAt": {
+          "type": "datetime2",
+          "maxLength": 8,
+          "precision": 27,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Url": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_IdempotencyLedger": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Key"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.IngressDedup": {
+      "columns": {
+        "ClaimedAt": {
+          "type": "datetime2",
+          "maxLength": 8,
+          "precision": 27,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Key": {
+          "type": "nvarchar",
+          "maxLength": 800,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Layer": {
+          "type": "nvarchar",
+          "maxLength": 32,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "MessageId": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_IngressDedup": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Layer",
+            "Key"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.ItemHistory": {
+      "columns": {
+        "At": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Detail": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "Generation": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Id": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": true,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Kind": {
+          "type": "nvarchar",
+          "maxLength": 32,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "MessageId": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "SessionId": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "Type": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_ItemHistory_At": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "At"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "IX_ItemHistory_ItemKey_Generation_Id": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "ItemKey",
+            "Generation",
+            "Id"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "IX_ItemHistory_MessageId_Kind": {
+          "unique": true,
+          "primary": false,
+          "keys": [
+            "MessageId",
+            "Kind"
+          ],
+          "included": [],
+          "filter": "([MessageId] IS NOT NULL)"
+        },
+        "PK_ItemHistory": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.MergeTrains": {
+      "columns": {
+        "Key": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Revision": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "StateJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "UpdatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_MergeTrains": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Key"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.MergedItems": {
+      "columns": {
+        "Commit": {
+          "type": "nvarchar",
+          "maxLength": 80,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "DependenciesJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "GatesJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "MergedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "MessageId": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "PullRequest": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Source": {
+          "type": "nvarchar",
+          "maxLength": 32,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_MergedItems_Commit": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "Commit"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "PK_MergedItems": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "ItemKey",
+            "Commit"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.OpenInstances": {
+      "columns": {
+        "ClosedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "Generation": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "OpenedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_OpenInstances": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "ItemKey"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.ProjectionVersions": {
+      "columns": {
+        "AppliedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "AppliedVersion": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Target": {
+          "type": "nvarchar",
+          "maxLength": 128,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_ProjectionVersions": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "ItemKey",
+            "Target"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.SessionMailbox": {
+      "columns": {
+        "CreatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "DeliveredAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "ExpiresAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Id": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": true,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "Kind": {
+          "type": "nvarchar",
+          "maxLength": 128,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Payload": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "SessionId": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_SessionMailbox_ExpiresAt": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "ExpiresAt"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "IX_SessionMailbox_SessionId_Id": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "SessionId",
+            "Id"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "PK_SessionMailbox": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.WorkItems": {
+      "columns": {
+        "Generation": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "ItemKey": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Plan": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Repository": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Revision": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "StateJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Status": {
+          "type": "nvarchar",
+          "maxLength": 32,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Step": {
+          "type": "nvarchar",
+          "maxLength": 64,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "UpdatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_WorkItems_Repository_Status": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "Repository",
+            "Status"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "PK_WorkItems": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "ItemKey"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_agent_restrictions": {
+      "columns": {
+        "id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "node": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": "0"
+        },
+        "type": {
+          "type": "varchar",
+          "maxLength": 500,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "uri": {
+          "type": "varchar",
+          "maxLength": 500,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "pkey_wolverine_agent_restrictions_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_control_queue": {
+      "columns": {
+        "body": {
+          "type": "varbinary",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "expires": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "message_type": {
+          "type": "varchar",
+          "maxLength": 500,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "node_id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "posted": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": "getutcdate"
+        }
+      },
+      "indexes": {
+        "pkey_wolverine_control_queue_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_dead_letter_history": {
+      "columns": {
+        "first_failed_at": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "last_replayed_at": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "replay_count": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "idx_wolverine_dead_letter_history_last_replayed_at": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "last_replayed_at"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "pkey_wolverine_dead_letter_history_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_dead_letters": {
+      "columns": {
+        "archived_at": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "body": {
+          "type": "varbinary",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "exception_message": {
+          "type": "varchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "exception_type": {
+          "type": "varchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "execution_time": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": "NULL"
+        },
+        "failed_at": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "failure_group": {
+          "type": "varchar",
+          "maxLength": 100,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "failure_title": {
+          "type": "nvarchar",
+          "maxLength": 1000,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "first_failed_at": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "last_replayed_at": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "message_type": {
+          "type": "varchar",
+          "maxLength": 250,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "received_at": {
+          "type": "varchar",
+          "maxLength": 250,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "replay_count": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "replayable": {
+          "type": "bit",
+          "maxLength": 1,
+          "precision": 1,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "sent_at": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "source": {
+          "type": "varchar",
+          "maxLength": 250,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "idx_wolverine_dead_letters_failure_group": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "failure_group"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "idx_wolverine_dead_letters_replayable": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "replayable"
+          ],
+          "included": [],
+          "filter": "([replayable]=(1))"
+        },
+        "pkey_wolverine_dead_letters_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_incoming_envelopes": {
+      "columns": {
+        "attempts": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": "0"
+        },
+        "body": {
+          "type": "varbinary",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "execution_time": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": "NULL"
+        },
+        "id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "keep_until": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "message_type": {
+          "type": "varchar",
+          "maxLength": 250,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "owner_id": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "received_at": {
+          "type": "varchar",
+          "maxLength": 250,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "status": {
+          "type": "varchar",
+          "maxLength": 25,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "idx_wolverine_incoming_envelopes_keep_until": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "keep_until"
+          ],
+          "included": [],
+          "filter": "([status]=\u0027Handled\u0027)"
+        },
+        "idx_wolverine_incoming_envelopes_owner": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "owner_id"
+          ],
+          "included": [],
+          "filter": "([owner_id]\u003C\u003E(0))"
+        },
+        "idx_wolverine_incoming_envelopes_recover": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "received_at"
+          ],
+          "included": [],
+          "filter": "([status]=\u0027Incoming\u0027 AND [owner_id]=(0))"
+        },
+        "idx_wolverine_incoming_envelopes_scheduled": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "execution_time"
+          ],
+          "included": [],
+          "filter": "([status]=\u0027Scheduled\u0027)"
+        },
+        "pkey_wolverine_incoming_envelopes_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_node_assignments": {
+      "columns": {
+        "id": {
+          "type": "varchar",
+          "maxLength": 500,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "node_id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "started": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": "getutcdate"
+        }
+      },
+      "indexes": {
+        "pkey_wolverine_node_assignments_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_node_records": {
+      "columns": {
+        "description": {
+          "type": "varchar",
+          "maxLength": 1000,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "event_name": {
+          "type": "varchar",
+          "maxLength": 500,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "id": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": true,
+          "default": null
+        },
+        "node_number": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "timestamp": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": "getutcdate"
+        }
+      },
+      "indexes": {
+        "pkey_wolverine_node_records_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_nodes": {
+      "columns": {
+        "capabilities": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "description": {
+          "type": "varchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "health_check": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": "getutcdate"
+        },
+        "id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "node_number": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": true,
+          "default": null
+        },
+        "started": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": "getutcdate"
+        },
+        "uri": {
+          "type": "varchar",
+          "maxLength": 500,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "version": {
+          "type": "varchar",
+          "maxLength": 500,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "pkey_wolverine_nodes_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "wolverine.wolverine_outgoing_envelopes": {
+      "columns": {
+        "attempts": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": "0"
+        },
+        "body": {
+          "type": "varbinary",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "deliver_by": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "destination": {
+          "type": "varchar",
+          "maxLength": 250,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "id": {
+          "type": "uniqueidentifier",
+          "maxLength": 16,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "message_type": {
+          "type": "varchar",
+          "maxLength": 250,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "owner_id": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "idx_wolverine_outgoing_envelopes_owner": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "owner_id"
+          ],
+          "included": [],
+          "filter": "([owner_id]\u003C\u003E(0))"
+        },
+        "idx_wolverine_outgoing_envelopes_recover": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "destination"
+          ],
+          "included": [],
+          "filter": "([owner_id]=(0))"
+        },
+        "pkey_wolverine_outgoing_envelopes_id": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    }
+  },
+  "procedures": {
+    "wolverine.uspDeleteIncomingEnvelopes": "be4d17d7b10f14b97fc83c8f561f0556c3a3c6ed549092edbd59f111fa2180a6",
+    "wolverine.uspDeleteOutgoingEnvelopes": "7ab70e500f68a45b3db4985fff4bb561949db69557bb109e7ec9407db39f9861",
+    "wolverine.uspDiscardAndReassignOutgoing": "815114ae5dbae04997ebd05f9aab666918081278b8e04e5e22475f29a1f4bd61",
+    "wolverine.uspMarkIncomingOwnership": "336fe3137f3e636d00e50fc771556ad2ead506f0fa523a321f4d39723bb5f09c",
+    "wolverine.uspMarkOutgoingOwnership": "a74e2eedebba729ceacd3a39d314ddbcecf38c030364a23f7e7c34dae8cfe4d5"
+  }
+}

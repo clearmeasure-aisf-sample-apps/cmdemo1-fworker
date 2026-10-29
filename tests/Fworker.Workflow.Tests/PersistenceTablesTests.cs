@@ -6,15 +6,15 @@ using Xunit;
 namespace Fworker.Workflow.Tests;
 
 /// <summary>
-/// W2.1: the migration applies to a real SQL Server and every table round-trips a row. FACTORY_TEST_SQL (the service container of tests.yml) names the
+/// W2.1: the scripts of Fworker.Database build the tables on a real SQL Server (DbUp) and every table round-trips a row. FACTORY_TEST_SQL (the service container of tests.yml) names the
 /// server; each test class run gets its own database, dropped at the end. Where FACTORY_TEST_SQL is unset (a developer machine) the database tests
-/// return at once; the model-versus-migration check needs no server.
+/// return at once. That the scripts build what the EF model maps is SchemaMatchesEfModelTests.
 /// </summary>
 public class PersistenceTablesTests : IAsyncLifetime
 {
     static readonly string? ServerConnection = Environment.GetEnvironmentVariable("FACTORY_TEST_SQL");
     static readonly DateTimeOffset T0 = new(2026, 10, 27, 8, 0, 0, TimeSpan.Zero);
-    readonly string dbName = "fw_persist_" + Guid.NewGuid().ToString("N");
+    TestDatabase? database;
     string? dbConnection;
 
     static bool NoServer => string.IsNullOrWhiteSpace(ServerConnection);
@@ -24,27 +24,14 @@ public class PersistenceTablesTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         if (NoServer) return;
-        dbConnection = new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = dbName }.ConnectionString;
-        await using var db = Open();
-        await db.Database.MigrateAsync();
+        database = await TestDatabase.CreateAsync("fw_persist_");
+        dbConnection = database.ConnectionString;
     }
 
     public async Task DisposeAsync()
     {
         if (NoServer) return;
-        await using var conn = new SqlConnection(new SqlConnectionStringBuilder(ServerConnection) { InitialCatalog = "master" }.ConnectionString);
-        await conn.OpenAsync();
-        SqlConnection.ClearAllPools();
-        await using var cmd = new SqlCommand($"IF DB_ID('{dbName}') IS NOT NULL BEGIN ALTER DATABASE [{dbName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{dbName}]; END", conn);
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    [Fact]
-    public void TheMigrationMatchesTheModel()
-    {
-        using var db = new FactoryDbContext(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer("Server=none;Database=none").Options);
-        Assert.False(db.Database.HasPendingModelChanges(), "FactoryDbContext changed without a new migration: dotnet ef migrations add <Name> --project src/Fworker.Persistence --output-dir Migrations");
-        Assert.NotEmpty(db.Database.GetMigrations());
+        if (database != null) await database.DisposeAsync();
     }
 
     [Fact]

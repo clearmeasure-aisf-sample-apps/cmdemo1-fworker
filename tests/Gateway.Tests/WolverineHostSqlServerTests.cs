@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
+using Fworker.Database;
 using Microsoft.Data.SqlClient;
 using Xunit;
 
@@ -71,19 +72,44 @@ public sealed class WolverineHostSqlServerTests
         return w;
     }
 
+    // /ready waits for the schema where a database is configured: the first 200 (a 503 before it says what it waits for)
+    static async Task WaitReady(GatewayHost host, int seconds = 90)
+    {
+        var sw = Stopwatch.StartNew(); var last = await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
+        while (last.Status != 200 && sw.Elapsed < TimeSpan.FromSeconds(seconds))
+        {
+            Assert.Equal(503, last.Status);
+            Assert.Equal("schema", (string?)last.Json?["waitingFor"]);
+            await Task.Delay(100);
+            last = await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
+        }
+        Assert.Equal(200, last.Status);
+    }
+
     [Fact]
-    public async Task Solo_Default_StartsInTheBackground_AppliesTheMigrations_AndHoldsNoSessionOrLock()
+    public async Task Solo_Default_StartsInTheBackground_BuildsTheSchemaWithTheScripts_AndHoldsNoSessionOrLock()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
         await WithGateway(null, async (cs, host, env) =>
         {
-            Assert.Equal(200, (await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort)).Status);
+            await WaitReady(host);   // 503 "schema" until the scripts ran and the catalog was checked, then 200
             var w = await WaitFor(host, n => (string?)n?["state"] == "running", 90);
             Assert.Equal("running", (string?)w?["state"]);
             Assert.Equal("solo", (string?)w?["mode"]);
-            // the migrations of Fworker.Persistence ran, and Wolverine's storage (inbox, outbox, nodes, dead letters) is in its own schema
-            Assert.Equal(1, await Count(cs, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='__EFMigrationsHistory'"));
-            foreach (var t in new[] { "ItemHistory", "Correlations", "OpenInstances", "ProjectionVersions", "SessionMailbox", "CatalogCopies" })
+            // the status says the schema is good, what this start applied, and that nothing differs
+            var schema = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json?["schema"];
+            Assert.Equal("good", (string?)schema?["state"]);
+            Assert.Equal(FactorySchema.Scripts.Count, (int?)schema?["shipped"]);
+            Assert.Equal(FactorySchema.Scripts.Count, schema?["applied"]?.AsArray().Count);
+            Assert.Empty(schema?["pending"]?.AsArray() ?? []);
+            Assert.Empty(schema?["differences"]?.AsArray() ?? []);
+            Assert.Null(schema?["lastFailure"]);
+            // the journal holds exactly the scripts of this build, and the EF migrations are gone
+            Assert.Equal(FactorySchema.Scripts, await Rows(cs, "SELECT ScriptName FROM dbo.SchemaVersions ORDER BY ScriptName"));
+            Assert.Equal(0, await Count(cs, "SELECT COUNT(*) FROM sys.tables WHERE name='__EFMigrationsHistory'"));
+            // the 16 tables of schema factory and Wolverine's storage (inbox, outbox, nodes, dead letters) in its own schema
+            Assert.Equal(16, await Count(cs, "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='factory'"));
+            foreach (var t in new[] { "ItemHistory", "Correlations", "OpenInstances", "ProjectionVersions", "SessionMailbox", "CatalogCopies", "IdempotencyLedger", "CopilotReservations", "IngressDedup", "WorkItems", "MergeTrains", "CapacityLedgers" })
                 Assert.Equal(1, await Count(cs, $"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='factory' AND TABLE_NAME='{t}'"));
             foreach (var t in new[] { "wolverine_incoming_envelopes", "wolverine_outgoing_envelopes", "wolverine_dead_letters", "wolverine_nodes" })
                 Assert.Equal(1, await Count(cs, $"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='wolverine' AND TABLE_NAME='{t}'"));
@@ -112,6 +138,10 @@ public sealed class WolverineHostSqlServerTests
             Assert.Equal(1, await Count(cs, "SELECT COUNT(*) FROM wolverine.wolverine_nodes"));
         }, async cs =>
         {
+            // a second start applies nothing and finds the schema good (the library call the gateway makes)
+            var second = await FactorySchema.UpgradeAndVerifyAsync(cs, new SchemaRunOptions());
+            Assert.Empty(second.Applied);
+            Assert.True(second.Good);
             // after the stop the node has left: no application lock is held (the server drops the session a moment after the connection closes)
             var sw = Stopwatch.StartNew();
             while (sw.Elapsed < TimeSpan.FromSeconds(15) && await Count(cs, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type='APPLICATION'") > 0) await Task.Delay(250);
