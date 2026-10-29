@@ -1,0 +1,34 @@
+@startuml
+!pragma layout smetana
+!include <C4/C4_Component>
+HIDE_STEREOTYPE()
+skinparam wrapWidth 900
+skinparam maxMessageSize 300
+skinparam nodesep 40
+skinparam ranksep 60
+UpdateElementStyle("component", $bgColor="#eceff1", $fontColor="#1c2b33", $borderColor="#455a64")
+UpdateElementStyle("system", $bgColor="#37474f", $fontColor="#ffffff", $borderColor="#263238")
+System(process, "dotnet FactoryWorker.Gateway.dll", "The process the container image starts")
+Boundary(app, "fworker 1.0.887", "Assemblies of the application") {
+  Component(a_FactoryWorker_Gateway, "FactoryWorker.Gateway", $descr="Azure.Identity 1.21.0\nAzure.Monitor.OpenTelemetry.Exporter 1.10.0\nModelContextProtocol.AspNetCore 1.0.0\nOpenTelemetry.Extensions.Hosting 1.20.1\nOpenTelemetry.Instrumentation.AspNetCore 1.20.1\nWolverineFx.Http 6.56.0\nWolverineFx.RuntimeCompilation 6.56.0\nWolverineFx.SqlServer 6.56.0")
+  Component(a_Fworker_Contracts, "Fworker.Contracts", $descr="no NuGet package of its own")
+  Component(a_Fworker_Domain, "Fworker.Domain", $descr="no NuGet package of its own")
+  Component(a_Fworker_Integrations, "Fworker.Integrations", $descr="no NuGet package of its own")
+  Component(a_Fworker_Persistence, "Fworker.Persistence", $descr="Microsoft.EntityFrameworkCore.SqlServer 10.0.14\nWolverineFx.EntityFrameworkCore 6.56.0")
+  Component(a_Fworker_Workflows, "Fworker.Workflows", $descr="WolverineFx 6.56.0")
+}
+Rel(process, a_FactoryWorker_Gateway, "starts")
+Rel(a_FactoryWorker_Gateway, a_Fworker_Contracts, "references")
+Rel(a_FactoryWorker_Gateway, a_Fworker_Domain, "references")
+Rel(a_FactoryWorker_Gateway, a_Fworker_Integrations, "references")
+Rel(a_FactoryWorker_Gateway, a_Fworker_Persistence, "references")
+Rel(a_FactoryWorker_Gateway, a_Fworker_Workflows, "references")
+Rel(a_Fworker_Domain, a_Fworker_Contracts, "references")
+Rel(a_Fworker_Integrations, a_Fworker_Contracts, "references")
+Rel(a_Fworker_Integrations, a_Fworker_Domain, "references")
+Rel(a_Fworker_Integrations, a_Fworker_Persistence, "references")
+Rel(a_Fworker_Persistence, a_Fworker_Contracts, "references")
+Rel(a_Fworker_Workflows, a_Fworker_Contracts, "references")
+Rel(a_Fworker_Workflows, a_Fworker_Domain, "references")
+Rel(a_Fworker_Workflows, a_Fworker_Persistence, "references")
+@enduml
