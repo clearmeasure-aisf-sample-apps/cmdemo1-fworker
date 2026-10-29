@@ -69,6 +69,25 @@ public sealed class ConfigurationTests : IDisposable
     }
 
     [Fact]
+    public void WolverineBlock_SourceDefaultsAreTheHostDefaults_DeployedImagePollsScheduledMessagesEveryMinute()
+    {
+        // the source block repeats the host's defaults, so the tests do not change; the deployed image polls scheduled messages every 60 s (the tdd
+        // database is always on, owner decision 2026-10-29) and leaves every other timer at 4 hours
+        var src = WolverineHostOptions.From(InstanceConfig.Load(BasePath, NoEnv));
+        var dflt = new WolverineHostOptions();
+        Assert.False(src.LeaderElection);
+        Assert.Equal(dflt, src);
+        Assert.Equal(TimeSpan.FromHours(4), src.ScheduledJobPollingTime);
+        Assert.Equal(TimeSpan.FromHours(1), src.ScheduledJobFirstExecution);
+        var merged = Write("wolverine.json", ApplyOverrides.Merge(File.ReadAllText(BasePath), File.ReadAllText(OverridesPath)).ToJsonString());
+        var dep = WolverineHostOptions.From(InstanceConfig.Load(merged, NoEnv));
+        Assert.False(dep.LeaderElection);
+        Assert.Equal(TimeSpan.FromSeconds(60), dep.ScheduledJobPollingTime);
+        Assert.Equal(TimeSpan.FromSeconds(5), dep.ScheduledJobFirstExecution);
+        Assert.Equal(dflt with { ScheduledJobPollingTime = dep.ScheduledJobPollingTime, ScheduledJobFirstExecution = dep.ScheduledJobFirstExecution }, dep);
+    }
+
+    [Fact]
     public async Task DeployOverrides_ScriptAgreesWithThePort()
     {
         // the script itself, where a real PowerShell is on the PATH (the unit job of tests.yml installs it); the stub pwsh of the host fixtures is skipped

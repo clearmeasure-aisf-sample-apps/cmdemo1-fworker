@@ -118,6 +118,11 @@
     "v2Environments": [],
     "shadowEnvironments": []
   },
+  "wolverine": {
+    "mode": "solo",
+    "scheduledJobSeconds": 14400,
+    "firstScheduledJobSeconds": 3600
+  },
   "timing": {
     "assignAckSeconds": 120,
     "plantSnapshotMaxAgeMinutes": 30,
