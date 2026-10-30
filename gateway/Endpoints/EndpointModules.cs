@@ -76,6 +76,8 @@ static class EndpointModuleExtensions
         // C7d: the verb route and its pipeline (seam S1); the GitHub budget is the composition's, not (yet) a service of its own
         // S1 (W1.4): the engine the environment is composed with; v1 is the only one
         // W9.0: the verbs that v2 answers (one route file per verb group, gateway/Verbs/Routes); empty, and Register not called, unless the engine acts
+        // W9.1: the QC service, whose verbs QcRoutes registers there (null without a GitHub identity: the qc-* verbs then stay on v1)
+        if (c.Engine.V2Acts) services.AddSingleton(sp => QcWiring.Make(c, sp)!);
         services.AddSingleton(sp => V2VerbRoutes.Build(c.Engine, sp));
         services.AddSingleton<IVerbRouter>(sp =>
         {

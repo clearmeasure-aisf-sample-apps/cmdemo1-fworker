@@ -155,7 +155,7 @@ sealed class DeliveryVerbHost
             catch (JsonException) { a = new JsonObject(); }
             var session = a["_session"]?.DeepClone();
             foreach (var k in new[] { "_session", "_cause", "_lease" }) a.Remove(k);
-            if (tokens is null) throw new VerbReject(30, "secret-missing", "GH_TOKEN is not set on the gateway");
+            if (tokens is null) throw new Fworker.Workflows.Delivery.Verbs.VerbReject(30, "secret-missing", "GH_TOKEN is not set on the gateway");
             var fenced = Fenced.Contains(verb);
             var transport = new HttpGhTransport(github, uploads, octopus, config, env, fenced ? mayAct : null, observeRate, delay);
             var kit = new RuleKit(transport, new FencedStateStore(await Store(cts.Token), fenced ? mayAct : null), config, board, env).ForSession(session);
@@ -178,7 +178,7 @@ sealed class DeliveryVerbHost
         PublishDemoVerb.Verb => PublishDemoVerb.Run(kit, a, Path.GetTempPath(), ct),
         CopilotSettleVerb.Verb => CopilotSettleVerb.Run(kit, a, openPr, ct),
         SettleVerb.Verb => SettleVerb.Run(kit, a, ct),
-        _ => throw new VerbReject(2, "unknown-verb", $"unknown verb '{verb}'"),
+        _ => throw new Fworker.Workflows.Delivery.Verbs.VerbReject(2, "unknown-verb", $"unknown verb '{verb}'"),
     };
 }
 
@@ -201,19 +201,19 @@ sealed class FencedStateStore(GitHubJournalStore inner, Func<bool>? mayAct) : II
         var native = holder.Tag as ItemState ?? new ItemState();
         native.CommentId = holder.CommentId; native.State = holder.State; native.Rev = holder.Rev;
         try { await inner.Save(item, native, ct); }
-        catch (StateConflictException e) { throw new VerbReject(11, "state-conflict", e.Message, new JsonObject { ["item"] = item, ["retryAfterSeconds"] = 1 }); }
+        catch (StateConflictException e) { throw new Fworker.Workflows.Delivery.Verbs.VerbReject(11, "state-conflict", e.Message, new JsonObject { ["item"] = item, ["retryAfterSeconds"] = 1 }); }
         catch (Exception e) when (e is JournalRefusedException || e.GetType().Name == "GitHubForbiddenException") { throw Refused(e); }
         holder.CommentId = native.CommentId; holder.Rev = native.Rev; holder.Tag = native;
     }
 
     /// <summary>Invoke-Gh's codes for what the state store refused: a 404 is github-not-found (12), a 403 that is no rate limit github-forbidden (30), the state's budget state-too-large (10), anything else github-error (20).</summary>
-    static VerbReject Refused(Exception e)
+    static Fworker.Workflows.Delivery.Verbs.VerbReject Refused(Exception e)
     {
         var detail = e.Message.Length > 400 ? e.Message[..400] : e.Message;
-        if (e.Message.StartsWith("state-too-large", StringComparison.Ordinal)) return new VerbReject(10, "state-too-large", e.Message["state-too-large: ".Length..]);
-        if (e.Message.StartsWith("GitHub 404", StringComparison.Ordinal)) return new VerbReject(12, "github-not-found", e.Message, new JsonObject { ["detail"] = detail });
-        if (e.Message.StartsWith("GitHub 403", StringComparison.Ordinal)) return new VerbReject(30, "github-forbidden", e.Message, new JsonObject { ["status"] = 403, ["detail"] = detail });
-        return new VerbReject(20, "github-error", e.Message, new JsonObject { ["retryAfterSeconds"] = 30 });
+        if (e.Message.StartsWith("state-too-large", StringComparison.Ordinal)) return new Fworker.Workflows.Delivery.Verbs.VerbReject(10, "state-too-large", e.Message["state-too-large: ".Length..]);
+        if (e.Message.StartsWith("GitHub 404", StringComparison.Ordinal)) return new Fworker.Workflows.Delivery.Verbs.VerbReject(12, "github-not-found", e.Message, new JsonObject { ["detail"] = detail });
+        if (e.Message.StartsWith("GitHub 403", StringComparison.Ordinal)) return new Fworker.Workflows.Delivery.Verbs.VerbReject(30, "github-forbidden", e.Message, new JsonObject { ["status"] = 403, ["detail"] = detail });
+        return new Fworker.Workflows.Delivery.Verbs.VerbReject(20, "github-error", e.Message, new JsonObject { ["retryAfterSeconds"] = 30 });
     }
 }
 
@@ -221,7 +221,7 @@ sealed class FencedStateStore(GitHubJournalStore inner, Func<bool>? mayAct) : II
 sealed class HttpGhTransport(HttpClient github, HttpClient uploads, HttpClient octopus, JsonObject config, Func<string, string?> env, Func<bool>? mayAct, Action<JsonObject> observeRate,
     Func<TimeSpan, CancellationToken, Task> delay) : IGhTransport
 {
-    public static VerbReject LeaseLost(string step) =>
+    public static Fworker.Workflows.Delivery.Verbs.VerbReject LeaseLost(string step) =>
         new(20, "lease-lost", $"this gateway no longer holds the leader lease; the step was not performed: {step}", new JsonObject { ["step"] = step, ["retryAfterSeconds"] = 30 });
 
     /// <summary>Test-FencedWrite: any request that is not a read; a GraphQL call only when it is a mutation.</summary>
@@ -272,11 +272,11 @@ sealed class HttpGhTransport(HttpClient github, HttpClient uploads, HttpClient o
             }
             catch (Exception e) when (e is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
             {
-                if (attempt >= tries) throw new VerbReject(20, "github-unreachable", e.Message, new JsonObject { ["retryAfterSeconds"] = 30 });
+                if (attempt >= tries) throw new Fworker.Workflows.Delivery.Verbs.VerbReject(20, "github-unreachable", e.Message, new JsonObject { ["retryAfterSeconds"] = 30 });
                 await delay(TimeSpan.FromSeconds(2 * attempt), ct);
             }
         }
-        throw new VerbReject(20, "github-unreachable", "no attempt was made", new JsonObject { ["retryAfterSeconds"] = 30 });
+        throw new Fworker.Workflows.Delivery.Verbs.VerbReject(20, "github-unreachable", "no attempt was made", new JsonObject { ["retryAfterSeconds"] = 30 });
     }
 
     public async Task<GhResult> UploadFile(string uploadUrl, string contentType, string file, CancellationToken ct)
@@ -297,7 +297,7 @@ sealed class HttpGhTransport(HttpClient github, HttpClient uploads, HttpClient o
     public async Task<JsonNode?> OctopusGet(string path, CancellationToken ct)
     {
         var key = env("OCTOPUS_API_KEY");
-        if (string.IsNullOrEmpty(key)) throw new VerbReject(30, "secret-missing", "OCTOPUS_API_KEY is not set on the gateway");
+        if (string.IsNullOrEmpty(key)) throw new Fworker.Workflows.Delivery.Verbs.VerbReject(30, "secret-missing", "OCTOPUS_API_KEY is not set on the gateway");
         var url = config["octopus"]?["url"]?.ToString() ?? "";
         using var req = new HttpRequestMessage(HttpMethod.Get, $"{url.TrimEnd('/')}/{path.TrimStart('/')}");
         req.Headers.TryAddWithoutValidation("X-Octopus-ApiKey", key);
@@ -310,7 +310,7 @@ sealed class HttpGhTransport(HttpClient github, HttpClient uploads, HttpClient o
             if (code == 404) return null;
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested) { code = 0; }
-        throw new VerbReject(20, "octopus-error", $"Octopus answered {code} to GET {path}", new JsonObject { ["retryAfterSeconds"] = 30 });
+        throw new Fworker.Workflows.Delivery.Verbs.VerbReject(20, "octopus-error", $"Octopus answered {code} to GET {path}", new JsonObject { ["retryAfterSeconds"] = 30 });
     }
 
     public async Task<string> AppActionsPermission(CancellationToken ct)
