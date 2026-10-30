@@ -52,6 +52,7 @@ sealed class V2VerbRoutes
         KeeperRoutes.Register(routes, services);
         ServiceRoutes.Register(routes, services);
         BoardRoutes.Register(routes, services);
+        QcRoutes.Register(routes, services);   // W9.1: the qc-* verbs, in no group above (registered with QC itself)
         return routes;
     }
 }

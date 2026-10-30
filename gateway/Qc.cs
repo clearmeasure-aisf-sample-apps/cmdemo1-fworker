@@ -8,7 +8,8 @@ using System.Text.Json.Nodes;
 
 // PR QC environment, gateway side (design: docs/design/pr-qc-environment.md). Click pages and endpoints, the in-memory half of the QC state
 // (lease, heartbeat, URL, client address, probe result, log tail, page nonces, rate counters) and the checks on a URL a worker reports.
-// The persisted half (the record in the work item's state comment) is written only by the rule scripts (plugin/scripts/lib/Qc.ps1).
+// The persisted half (the record in the work item's state comment) is written only by the rule scripts (plugin/scripts/lib/Qc.ps1) or, where the engine acts (W9.1), by the QcService that does the same
+// (src/Fworker.Workflows/Qc, registered as the routes of gateway/Verbs/Routes/Qc.cs): Ps below runs a verb on whichever answers it.
 
 sealed class QcSettings
 {
@@ -147,9 +148,12 @@ sealed class QcHub : IEndpointModule
     readonly Dictionary<string, List<DateTime>> ipHits = new(), prHits = new();
     public static readonly HashSet<string> Handled = new() { "qc-request", "qc-reset", "qc-teardown", "qc-report", "qc-heartbeat", "qc-reassign", "qc-touch" };
 
-    public QcHub(Runner runner, Plant plant, EventHub events, QcSettings cfg, string publicUrl, string secret)
+    // W9.1: where the engine acts, the persisted half of the verbs below is the QcService's (the routes of V2VerbRoutes, resolved at the first call: they are built after this hub), not the rule script's
+    readonly Func<V2VerbRoutes?>? v2Routes;
+
+    public QcHub(Runner runner, Plant plant, EventHub events, QcSettings cfg, string publicUrl, string secret, Func<V2VerbRoutes?>? v2Routes = null)
     {
-        this.runner = runner; this.plant = plant; this.events = events; this.cfg = cfg; this.publicUrl = publicUrl; this.secret = secret;
+        this.runner = runner; this.plant = plant; this.events = events; this.cfg = cfg; this.publicUrl = publicUrl; this.secret = secret; this.v2Routes = v2Routes;
         plant.OnQcPlaced = Persist;
     }
 
@@ -171,7 +175,9 @@ sealed class QcHub : IEndpointModule
 
     async Task<(int Exit, JsonObject Out)> Ps(string verb, JsonObject body, int seconds = 120)
     {
-        var (code, output) = await runner.RunAsync(verb, body.ToJsonString(), TimeSpan.FromSeconds(seconds));
+        int code; string output;
+        if (v2Routes?.Invoke() is { } routes && routes.TryGet(verb, out var v2)) { var answer = await v2(body.ToJsonString(), TimeSpan.FromSeconds(seconds)); (code, output) = (answer.Code, answer.Output); }
+        else (code, output) = await runner.RunAsync(verb, body.ToJsonString(), TimeSpan.FromSeconds(seconds));
         JsonObject o; try { o = JsonNode.Parse(output) as JsonObject ?? new JsonObject(); } catch { o = new JsonObject { ["ok"] = false, ["code"] = "no-output", ["reason"] = "the rule script produced no output", ["exit"] = code == 0 ? 20 : code }; }
         return (code, o);
     }
