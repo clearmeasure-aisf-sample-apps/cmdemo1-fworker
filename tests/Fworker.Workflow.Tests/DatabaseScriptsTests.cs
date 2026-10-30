@@ -50,8 +50,10 @@ public class DatabaseScriptsTests
         foreach (var n in FactorySchema.Scripts) Assert.Matches(rx, n);
         var numbers = FactorySchema.Scripts.Select(n => int.Parse(rx.Match(n).Groups[1].Value)).ToList();
         Assert.Equal(numbers.Distinct().Count(), numbers.Count);
-        // ascending (the journal and the order of application are the names' ordinal order). The plan reserves a block of numbers per work item (docs/design/fworker-wolverine-implementation.md, W9.10: 130-139, 140-149, 150-159, 160-169), so the numbers are no longer contiguous.
-        Assert.Equal(numbers.Order(), numbers);
+        // the main series 001..099 is contiguous; the parallel waves of the implementation plan each have a reserved block of ten from 100 (W8.1: 100-109, W8.2: 110-119, W8.3: 120-129), which is not
+        var main = numbers.Where(n => n < 100).Order().ToList();
+        Assert.Equal(Enumerable.Range(1, main.Count), main);
+        Assert.All(numbers.Where(n => n >= 100), n => Assert.InRange(n, 100, 999));
         Assert.Equal(numbers.Max(), FactorySchema.LatestVersion);
     }
 

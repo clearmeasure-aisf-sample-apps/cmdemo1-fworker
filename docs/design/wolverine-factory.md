@@ -177,10 +177,11 @@ recurring jobs do not fire), a termination grace long enough to drain listeners,
   forward with a `WorkItemSaga` on the hotfix plan, or escalate; verify health and error rate at baseline for a window; resolve with
   a note built from the history; release the hold.
 - **The hold lets the incident's own work through:** a held train promotes only the incident's hotfix release and performs its
-  rollback. The rollback is a `Rollback(env, to release)` command **to the DeliveryTrain**, which owns deployments and keeps its
+  rollback. The rollback is a `TrainRollback(env, to release)` request **to the DeliveryTrain** (answered with `RollbackAnswered`), which owns deployments and keeps its
   current-release state and evidence; the incident never calls Octopus directly.
 - **Rollback precondition:** cmdemo1's DbUp migrations are forward-only, so redeploying the previous release is a rollback only when
-  no migration was added since it; otherwise fix forward or escalate. Items of a rolled-back release receive `Undelivered(env)` and
+  no migration was added since it; otherwise fix forward or escalate (built in W8.3: the train reads the files the compare lists and escalates on any `scripts/Update` file or on anything it cannot prove; owner decision of 2026-10-29: the tdd
+  train creates this one deployment itself, automatic, tdd only; uat and prod are not configured, see fworker-wolverine-implementation.md W8.3). Items of a rolled-back release receive `Undelivered(env)` and
   return to their Deliver step.
 - **Timeouts at every stage** escalate to the owner; from Escalated the owner chooses rollback, fix or close.
 - **The factory's own failures** (its bus or database down) cannot run on that bus: an Azure Monitor alert on the factory's health

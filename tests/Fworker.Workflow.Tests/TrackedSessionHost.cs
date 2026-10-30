@@ -71,6 +71,12 @@ public sealed class TrackedSessionHost : IAsyncDisposable
         host = await BuildHost(configure);
     }
 
+    /// <summary>
+    /// A second host on the SAME database, running beside the first one (W9.10a: two gateway processes of a release). Solo mode makes every node "node 1", so its start
+    /// releases the rows the other node still owns. The caller stops and disposes it (<see cref="StopAsync"/> does not know it).
+    /// </summary>
+    public Task<IHost> StartSecondHostAsync(Action<WolverineOptions>? configure = null) => BuildHost(configure);
+
     /// <summary>The restart for a configuration that needs the connection string (a new process: new stores on the same database).</summary>
     public Task RestartAsync(Func<string, Action<WolverineOptions>> configureFor) => RestartAsync(configureFor(ConnectionString));
 
