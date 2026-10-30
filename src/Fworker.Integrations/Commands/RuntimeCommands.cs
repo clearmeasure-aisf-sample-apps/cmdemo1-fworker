@@ -50,7 +50,8 @@ public sealed record RuntimeOutcome(CommandResult Result, object? Message, Integ
 public sealed class StartRuntimeSessionHandler : IntegrationCommandHandler<StartRuntimeSession>
 {
     readonly ICommandPort adapters;
-    public StartRuntimeSessionHandler(IIdempotencyLedger ledger, ICommandPort adapters) : base(ledger) { this.adapters = adapters; }
+    /// <param name="lookup">W9.10c: whether a start of this worker name did take effect on its runtime (an Octopus runbook run by worker name); without one a cut-off start is made again, as before.</param>
+    public StartRuntimeSessionHandler(IIdempotencyLedger ledger, ICommandPort adapters, Func<StartRuntimeSession, CancellationToken, Task<EffectLookup>>? lookup = null) : base(ledger, lookup) { this.adapters = adapters; }
 
     protected override Task<CommandResult> Execute(StartRuntimeSession c, CancellationToken ct) => adapters.SendAsync(c, ct);
 
@@ -97,7 +98,8 @@ public sealed class StopRuntimeSessionHandler : IntegrationCommandHandler<StopRu
 public sealed class RunRunbookHandler : IntegrationCommandHandler<RunRunbook>
 {
     readonly IRunbookRunner runner;
-    public RunRunbookHandler(IIdempotencyLedger ledger, IRunbookRunner runner) : base(ledger) { this.runner = runner; }
+    /// <param name="lookup">W9.10c: whether a run of this command did take effect (a runbook run by worker name); without one a cut-off run is made again, as before.</param>
+    public RunRunbookHandler(IIdempotencyLedger ledger, IRunbookRunner runner, Func<RunRunbook, CancellationToken, Task<EffectLookup>>? lookup = null) : base(ledger, lookup) { this.runner = runner; }
 
     protected override Task<CommandResult> Execute(RunRunbook c, CancellationToken ct) => runner.RunAsync(c, ct);
 

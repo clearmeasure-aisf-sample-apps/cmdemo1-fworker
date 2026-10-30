@@ -10,7 +10,7 @@ namespace Fworker.Integrations.GitHub;
 public sealed class MergePullRequestHandler : IntegrationCommandHandler<MergePullRequest>
 {
     readonly MergeDirect _merge;
-    public MergePullRequestHandler(IIdempotencyLedger ledger, MergeDirect merge) : base(ledger) { _merge = merge; }
+    public MergePullRequestHandler(IIdempotencyLedger ledger, MergeDirect merge) : base(ledger, (c, ct) => merge.LookUpMerge(c, ct)) { _merge = merge; }
 
     protected override async Task<CommandResult> Execute(MergePullRequest command, CancellationToken ct) => (await _merge.Run(command, ct)).ToResult();
 

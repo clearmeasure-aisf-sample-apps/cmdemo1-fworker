@@ -107,7 +107,11 @@ static class RuntimeCommandWiring
         }
         ledger ??= new InMemoryIdempotencyLedger();   // SQL where the gateway has its database (SqlCommandStores)
         IRunbookRunner runner = new OctopusRunner(runtimes.OctopusRuntime);
-        var service = new RuntimeCommandService(new StartRuntimeSessionHandler(ledger, adapters), new StopRuntimeSessionHandler(ledger, adapters), new RunRunbookHandler(ledger, runner), kind => runtimes.ByKind(kind), onStarted);
+        // W9.10c: a start or a runbook run whose handling was cut off (its claim ran out) is looked for before it is made again: the Octopus run that carries the worker's name
+        var octopus = runtimes.OctopusRuntime;
+        var startLookup = OctopusLookup<StartRuntimeSession>(octopus, c => c.Runtime == "octopus" ? c.WorkerName : "");
+        var runLookup = OctopusLookup<RunRunbook>(octopus, c => c.Variables.TryGetValue("Fworker.Name", out var n) ? n : "");
+        var service = new RuntimeCommandService(new StartRuntimeSessionHandler(ledger, adapters, startLookup), new StopRuntimeSessionHandler(ledger, adapters), new RunRunbookHandler(ledger, runner, runLookup), kind => runtimes.ByKind(kind), onStarted);
         host.RuntimeCommands = (services, w) =>
         {
             services.AddSingleton(service);
@@ -131,6 +135,15 @@ static class RuntimeCommandWiring
         if (!await host.PublishAsync(command)) throw new InvalidOperationException("the Wolverine host is not up");
     }
 
+    /// <summary>The lookup of an expired claim for a command that starts a worker through Octopus: Found when a Start runbook run carries the worker's name, Absent when none does or the command names no worker.</summary>
+    internal static Func<T, CancellationToken, Task<EffectLookup>>? OctopusLookup<T>(OctopusRunbookRuntime? runtime, Func<T, string> workerOf) =>
+        runtime == null ? null : async (c, ct) =>
+        {
+            var name = workerOf(c);
+            if (name == "") return EffectLookup.Absent;
+            return await runtime.FindStartRunOf(name, DateTime.UtcNow.AddHours(-6), ct) is { } run ? EffectLookup.Found(CommandResult.Success(run.TaskId, run.Url)) : EffectLookup.Absent;
+        };
+
     sealed class OctopusRunner(OctopusRunbookRuntime? runtime) : IRunbookRunner
     {
         public Task<CommandResult> RunAsync(RunRunbook command, CancellationToken ct) =>
@@ -145,6 +158,17 @@ sealed class CopilotTaskLookup(RuntimeRegistry runtimes) : ICopilotTaskLookup
 {
     public async Task<(string TaskId, string Url)?> FindAsync(int item, string phase, DateTime since, CancellationToken ct) =>
         runtimes.CopilotRuntime == null ? null : await runtimes.CopilotRuntime.TaskForItem(item, since, ct);
+
+    // W9.10c: a resume whose call timed out is looked for on the owner's pull request (its @copilot comment and the session it started)
+    public async Task<(string TaskId, string Url)?> FindResumeAsync(int item, string phase, DateTime since, CancellationToken ct) =>
+        runtimes.CopilotRuntime == null ? null : await runtimes.CopilotRuntime.ResumeForItem(item, since, ct);
+}
+
+// W9.10c: the reconciler writes the owner record (the item state's copilot_task) of the task or session it found, so the next worker name resumes that task and posts no second one.
+sealed class CopilotOwnerRecorder(RuntimeRegistry runtimes) : ICopilotOwnerRecorder
+{
+    public Task RecordAsync(CopilotReservation settled, CancellationToken ct) =>
+        runtimes.CopilotRuntime is { } rt ? rt.RecordReconciledOwner(settled.Item, settled.Phase, settled.Mode, settled.TaskId, settled.Url, ct) : Task.CompletedTask;
 }
 
 sealed class CopilotReconcileService(CopilotReconciler reconciler, FactorySchemaStatus schema) : BackgroundService

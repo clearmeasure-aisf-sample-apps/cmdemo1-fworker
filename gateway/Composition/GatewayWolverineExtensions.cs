@@ -34,9 +34,11 @@ static class GatewayWolverineExtensions
             {
                 // W3.3: the Copilot launch runs under a reservation, settled by CopilotReconcileService (a hosted service of AddGatewayBackground)
                 // with the database the host needs, the reservations and the idempotency ledger are in SQL and survive the kill the host is built for (#481)
-                var stores = new SqlCommandStores(WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds));
+                // W9.10c: the claims of the ledger name this process and the epoch of the lease it holds
+                var claimNode = ClaimOwner.ThisProcess().Node; var claimLeader = sp.GetRequiredService<GatewayLeader>();
+                var stores = new SqlCommandStores(WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), owner: () => new ClaimOwner(claimNode, claimLeader.Epoch));
                 var reservations = stores.Reservations;
-                copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()));
+                copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()), owners: new CopilotOwnerRecorder(sp.GetRequiredService<RuntimeRegistry>()));
                 RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler), stores.Ledger,
                     (runtime, execution, item) => { _ = correlations?.FromRuntime(runtime, execution, item); });   // W4.1: the task or agent id finds its item later
                 journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands

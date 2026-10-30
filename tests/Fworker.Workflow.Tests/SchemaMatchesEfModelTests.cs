@@ -12,7 +12,7 @@ namespace Fworker.Workflow.Tests;
 public class SchemaMatchesEfModelTests
 {
     // the tables the gateway's SQL stores use without EF (raw SQL), so no entity maps them
-    static readonly string[] NotMapped = ["IdempotencyLedger", "CopilotReservations", "IngressDedup"];
+    static readonly string[] NotMapped = ["IdempotencyLedger", "IdempotencyClaims", "CopilotReservations", "IngressDedup"];
 
     [Fact]
     public async Task TheScriptsBuildTheEfModel()

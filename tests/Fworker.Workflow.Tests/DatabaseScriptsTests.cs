@@ -43,7 +43,7 @@ public class DatabaseScriptsTests
     static IEnumerable<string> Batches(string code) => Regex.Split(code, @"^\s*GO\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase).Where(b => !string.IsNullOrWhiteSpace(b));
 
     [Fact]
-    public void EveryNameIsNumberedAndDescribed_TheNumbersAreUniqueAndContiguous()
+    public void EveryNameIsNumberedAndDescribed_TheNumbersAreUniqueAndAscending()
     {
         Assert.NotEmpty(FactorySchema.Scripts);
         var rx = new Regex(@"^(\d{3})_[A-Za-z][A-Za-z0-9_]*\.sql$");
