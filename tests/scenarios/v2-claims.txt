@@ -22,6 +22,11 @@ owner | ^journal fold:
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
 
+# W9.6 gate: the keeper's and the manager's verbs (gateway/Verbs/Routes/Keeper.cs, Fworker.Workflows.Keeper) answer on v2 as the rule scripts did: the scenarios that call manager-action, amend-criteria,
+# split-item, create-item, set-priority and link-dependency, with their golden writes. (The replenish scenarios of keeper.ps1 are Replenish.ps1's, not a verb of this group.)
+manager | ^act: (the supervisor unparks|unpark refuses|the supervisor drains|the plan offers)
+manager | ^keeper: (a worker-failure park|split-item)
+
 # W9.2: the item verbs (claim-item, append-body, record-review, complete, validation-verdict, move-next ...) answer on v2 as the scripts do. Three scenarios of the suite 'auto' that use them (the completion
 # of Development stays the script's until W9.5, and these scenarios run it as such): the gates, the escalation of a repeated criterion with the timing comment, and the docs-only design reviews.
 auto | ^gates refuse what they should
