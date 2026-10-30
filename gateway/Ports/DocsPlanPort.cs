@@ -121,7 +121,8 @@ public sealed class DocsMergePort(MergePullRequestHandler? merge, IMergeFactsRea
         // a documentation change builds no release, so the merge queue never holds it (DocsOnly); a code change (the feature plan, W7.3) waits while mergeQueueDepth merged items still wait for their release candidate: the
         // count is the saga's own items in that state (a read that fails is a fault, which the caller turns into a transient answer). GitHub's update of a branch that is behind is asked once per merge arm, as the script does once per verdict
         var docsOnly = string.Equals(m.Plan, WorkPlans.Docs, StringComparison.OrdinalIgnoreCase);
-        var busy = !docsOnly && settings.MergeQueueDepth > 0 && queueBusy is not null ? await queueBusy(m, ct) : 0;
+        // a hotfix of an incident (W8.1) is not held back by the queue either: it ranks first and passes every quality gate, and what waits for a release candidate is what it is meant to overtake
+        var busy = !docsOnly && !string.Equals(m.Plan, WorkPlans.Hotfix, StringComparison.OrdinalIgnoreCase) && settings.MergeQueueDepth > 0 && queueBusy is not null ? await queueBusy(m, ct) : 0;
         var cmd = new MergePullRequest(MergePullRequest.KeyFor(m.Item.Repository, m.PullRequest, m.Head, m.UpdatesSoFar), m.Item.Repository, m.PullRequest, m.Head,
             MergeQueueDepth: settings.MergeQueueDepth, QueueBusy: busy, DocsOnly: docsOnly,
             UpdateWhenBehind: settings.UpdateBranchWhenBehind && firstTurn && m.UpdatedFrom.Length == 0, UpdatedFrom: m.UpdatedFrom, UpdatesSoFar: m.UpdatesSoFar, MaxUpdates: settings.MaxUpdates,
@@ -189,7 +190,7 @@ public sealed class DocsProjection(Func<BoardColumnProjection?> boardOf, DocsPla
     public string? ColumnFor(WorkItemDecided d)
     {
         var docs = string.Equals(d.Plan, WorkPlans.Docs, StringComparison.OrdinalIgnoreCase);
-        var feature = string.Equals(d.Plan, WorkPlans.Feature, StringComparison.OrdinalIgnoreCase) && settings.CarriesFeature;
+        var feature = WorkPlans.IsCode(d.Plan) && settings.CarriesFeature;   // (the hotfix plan of an incident, W8.1, moves its card as the feature plan does)
         if (!docs && !feature) return null;
         return d.Action switch
         {

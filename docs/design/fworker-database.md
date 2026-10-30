@@ -49,7 +49,7 @@ workorders is not added: dbup-sqlserver 6.x is the provider.
 
 | File | Content |
 |---|---|
-| `scripts/Update/001_...sql` to `013_...sql` | The schema |
+| `scripts/Update/001_...sql` to `013_...sql`, `100_...sql` | The schema |
 | `schema-manifest.json` | What the scripts build, read from the catalog (embedded) |
 | `SchemaNames.cs` | `factory`, `wolverine`, `dbo.SchemaVersions`, the lock resource |
 | `FactorySchema.cs` | `Scripts`, `LatestVersion`, `UpgradeAsync`, `VerifyAsync`, `UpgradeAndVerifyAsync` |
@@ -79,6 +79,8 @@ every added column under `IF COL_LENGTH(...) IS NULL`, every schema created only
 | 011 CreateWolverineMessageStore | Wolverine's tables, indexes, foreign key, table type and 5 procedures, generated, never written by hand |
 | 012 AddQcEnvironments | QcEnvironments (W9.0 for W9.1: the QC gate per repository and pull request) |
 | 013 AddTranscripts | Transcripts (W9.0 for W9.8: runtime session transcripts) |
+| 100 AddIncidents | Incidents (W8.0 for W8.1: the incident saga of one application and environment; the timeline is in ItemHistory) |
+| 140 AddIdempotencyClaimsAndReservationMode | IdempotencyClaims (W9.10c: the pending claim of a command key) and the column Mode of CopilotReservations (launch, resume). Numbers 130 to 169 are reserved per work item of W9.10 (the plan), so the numbers are ascending, not contiguous |
 
 The DDL of 001 to 008 is what `dotnet ef migrations script <previous> <this>` printed, with the history inserts removed and guards added. Column types,
 lengths, nullability, identity, key names (`PK_<Table>`), index names, filters and the default are exactly EF's, so the tables EF built on tdd match.
@@ -89,7 +91,7 @@ Script 011 is `ToDatabaseScript()` of Wolverine's message store, built (not star
 `CREATE OR ALTER PROCEDURE` must start its batch. Idempotence replaces the transaction: a script is journaled only after it succeeded, so a partial run
 is completed by the next one. The text of the procedures contains DELETE and UPDATE (Wolverine's own statements); no script changes a row.
 
-Future scripts: `014_` onward, the next free number. Every future script is expand-only (add tables, add nullable or defaulted columns, add indexes), so
+Future scripts: `014_` onward, the next free number, except for the blocks reserved for the parallel waves of the implementation plan (W8.1: 100-109, W8.2: 110-119, W8.3: 120-129; `DatabaseScriptsTests` requires 001-099 to be contiguous and every number to be unique). DbUp runs them in ordinal order of the name, so 013 runs before 100. Every future script is expand-only (add tables, add nullable or defaulted columns, add indexes), so
 that the previous gateway process, still running during the lease hand-over, keeps working. A contraction (dropping a column or table) is a later
 script, shipped once no running image uses the object.
 
@@ -186,8 +188,8 @@ tests run with `AutoCreate.None`, so every test runs on tables the scripts built
 
 | Test | Proves |
 |---|---|
-| `DatabaseScriptsTests` (no SQL) | Names, unique and contiguous numbers; the embedded set is the files; no DROP or TRUNCATE; DELETE or UPDATE only in procedure bodies; every CREATE and ALTER guarded; procedures `CREATE OR ALTER`; UTF-8 without BOM |
-| `SchemaMatchesEfModelTests` | A database built by the scripts equals the one `EnsureCreated` builds from `FactoryDbContext` (columns, keys, indexes); every other table is one of the three raw-SQL tables |
+| `DatabaseScriptsTests` (no SQL) | Names, unique and ascending numbers; the embedded set is the files; no DROP or TRUNCATE; DELETE or UPDATE only in procedure bodies; every CREATE and ALTER guarded; procedures `CREATE OR ALTER`; UTF-8 without BOM |
+| `SchemaMatchesEfModelTests` | A database built by the scripts equals the one `EnsureCreated` builds from `FactoryDbContext` (columns, keys, indexes); every other table is one of the four raw-SQL tables |
 | `SchemaManifestTests` | The manifest is what the scripts build; the scripts run twice with no error and no change; drift (dropped column, index, table, altered procedure, removed journal row) is found, an extra table is tolerated; two or three processes in parallel journal each script once; a failing script is not journaled; the log never has the connection string; the database is created only on request |
 | `LegacyDatabaseUpgradeTests` | The rehearsal of tdd: EF migrations as they ran, the old runtime DDL of one table, Wolverine's tables built by Weasel, with rows; the scripts succeed, journal all, create the two missing tables, keep every row and leave a schema equal to the fresh one |
 | `WolverineStorageScriptTests` | `TheExportMatchesTheGolden` (no SQL): the export for the solo and balanced profiles, with and without the runtime commands, is the same and equals `tests/Gateway.Tests/golden/wolverine-storage.sql`; script 011 is that golden with its header; `TheScriptsBuildWolverinesStorage` (SQL): Weasel's full diff of its model against a database built by the scripts is empty |

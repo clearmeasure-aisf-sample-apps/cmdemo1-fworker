@@ -47,6 +47,12 @@ public static class WorkPlans
 
     public static IReadOnlyList<WorkPlan> All { get; } = [FeaturePlan, DocsPlan, HotfixPlan, RedeliverPlan];
 
+    /// <summary>
+    /// Whether the plan changes code and so builds a release: the feature plan and the hotfix plan (W8.1) share the steps that watch CI, ask for a slot and go through the merge line; the docs plan does not, and the
+    /// redeliver plan has no session step at all.
+    /// </summary>
+    public static bool IsCode(string? plan) => string.Equals(plan, Feature, StringComparison.OrdinalIgnoreCase) || string.Equals(plan, Hotfix, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The plan of that name (any case), or null.</summary>
     public static WorkPlan? Find(string? name) => All.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
 

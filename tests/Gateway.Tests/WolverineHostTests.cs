@@ -174,7 +174,11 @@ public sealed class WolverineHostServiceTests
         public void Dispose() => Disposed++;
     }
 
-    static GatewayLeader Leader() => new(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = true }, "0.0.0");
+    /// <summary>A leader that is not acting yet: the lease is on and has not been taken (W9.10a: the node does not start).</summary>
+    static GatewayLeader WaitingLeader() => new(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = true }, "0.0.0");
+
+    /// <summary>The holder: the lease is taken and the predecessor's snapshot seen, as LeadershipService reports with StartActing.</summary>
+    static GatewayLeader Leader() { var l = WaitingLeader(); l.StartActing(); return l; }
 
     /// <summary>A schema that is good, as the real one reports after it applied the scripts and checked the catalog.</summary>
     internal static SchemaReport GoodReport => new() { Verified = true, Journaled = FactorySchema.Scripts.Count };
@@ -291,8 +295,9 @@ public sealed class WolverineHostServiceTests
         await svc.StartAsync(CancellationToken.None);
         await Until(() => svc.State == WolverineHostService.Phase.Running);
         fail = true;
-        await leader.OnSuperseded!(null);
-        await leader.OnReacquired!(null);   // the node begins anew and applies the schema again
+        await leader.RunBeforeHandOverAsync("superseded");
+        leader.MarkSupersededForTest();
+        leader.StartActing();   // the standby took the lease again: the node begins anew and applies the schema again
         await Until(() => (string?)status.Status()!["state"] == "failed");
         Assert.Equal("SchemaLockTimeout", (string?)status.Status()!["lastFailure"]);
         Assert.Null(status.Waiting());   // /ready stays 200
@@ -322,18 +327,19 @@ public sealed class WolverineHostServiceTests
     }
 
     [Fact]
-    public async Task Supersession_RunsTheHandOverFirst_ThenTheNodeLeaves_AndAStandbyThatTakesTheLeaseAgainBringsItBack()
+    public async Task Supersession_TheNodeLeavesBeforeTheHandOver_AndAStandbyThatTakesTheLeaseAgainBringsItBack()
     {
         var leader = Leader(); var order = new List<string>(); var hosts = new List<FakeHost>();
-        leader.OnSuperseded = _ => { order.Add("hand-over"); return Task.CompletedTask; };   // what LeadershipService sets
         var svc = Service(leader, (_, _) => { var h = new FakeHost(); hosts.Add(h); return h; });
+        // what LeadershipService does: BeforeHandOver first, then the final snapshot and the end of the streams (W9.10a)
+        async Task HandOver() { await leader.RunBeforeHandOverAsync("superseded"); order.Add(hosts[0].Stopped == 1 ? "node-left" : "node-still-up"); order.Add("hand-over"); }
         await svc.StartAsync(CancellationToken.None);
         await Until(() => svc.State == WolverineHostService.Phase.Running);
-        await leader.OnSuperseded!(null);
-        order.Add(hosts[0].Stopped == 1 ? "node-left" : "node-still-up");
-        Assert.Equal(new[] { "hand-over", "node-left" }, order);
+        leader.MarkSupersededForTest();
+        await HandOver();
+        Assert.Equal(new[] { "node-left", "hand-over" }, order);
         Assert.Equal(WolverineHostService.Phase.Stopped, svc.State);
-        await leader.OnReacquired!(null);
+        leader.StartActing();   // the standby took the lease again, the plant is restored
         await Until(() => svc.State == WolverineHostService.Phase.Running);
         Assert.Equal(2, hosts.Count);
         await svc.StopAsync(CancellationToken.None);
@@ -341,14 +347,69 @@ public sealed class WolverineHostServiceTests
     }
 
     [Fact]
-    public async Task SupersessionWhileStarting_StopsTheStart_AndNoHostIsLeftRunning()
+    public async Task TheNodeDoesNotStart_WhileTheLeaseIsNotHeld_AndStartsWhenThisProcessActs()
     {
-        var leader = Leader(); var fake = new FakeHost();
-        var svc = Service(leader, (_, _) => fake, async (_, ct) => { await Task.Delay(Timeout.Infinite, ct); return GoodReport; });
+        var leader = WaitingLeader(); var hosts = new List<FakeHost>();
+        var svc = Service(leader, (_, _) => { var h = new FakeHost(); hosts.Add(h); return h; });
+        await svc.StartAsync(CancellationToken.None);   // the lease is not taken yet: no node, no schema work
+        await Task.Delay(300);
+        Assert.Equal(WolverineHostService.Phase.Idle, svc.State);
+        Assert.Empty(hosts);
+        leader.StartActing();                            // lease taken, predecessor's snapshot seen
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        Assert.Single(hosts);
+        leader.StartActing();                            // again: still one node
+        await Task.Delay(100);
+        Assert.Single(hosts);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task AProcessThatIsStopping_StartsNoNode()
+    {
+        var leader = WaitingLeader(); var built = 0;
+        var svc = Service(leader, (_, _) => { built++; return new FakeHost(); });
         await svc.StartAsync(CancellationToken.None);
-        await leader.OnSuperseded!(null);
+        leader.StartActing();
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        await leader.RunBeforeHandOverAsync("stop");   // the holder's stop: the node leaves first
+        leader.BeginStop();
         Assert.Equal(WolverineHostService.Phase.Stopped, svc.State);
-        Assert.Equal(0, fake.Started);
+        leader.StartActing();                          // a late call after BeginStop (role Stopping) starts nothing
+        await Task.Delay(300);
+        Assert.Equal(1, built);
+        Assert.Equal(WolverineHostService.Phase.Stopped, svc.State);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task WithTheLeaseOff_TheNodeStartsAtTheStartOfTheHost_AsItDid()
+    {
+        var leader = new GatewayLeader(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = false }, "0.0.0");
+        var svc = Service(leader, (_, _) => new FakeHost());
+        await svc.StartAsync(CancellationToken.None);
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task TheOldNodeLeavesInTheHandOver_BeforeASuccessorCouldStartItsOwn()
+    {
+        // the order of a release, in one process for the test: the old holder's hand-over (node leaves, then the snapshot) completes before the successor acts
+        var oldLeader = Leader(); var newLeader = WaitingLeader();
+        var oldHost = new FakeHost(); var newHost = new FakeHost();
+        var oldSvc = Service(oldLeader, (_, _) => oldHost);
+        var newSvc = Service(newLeader, (_, _) => newHost);
+        await oldSvc.StartAsync(CancellationToken.None); await newSvc.StartAsync(CancellationToken.None);
+        await Until(() => oldSvc.State == WolverineHostService.Phase.Running);
+        Assert.Equal(WolverineHostService.Phase.Idle, newSvc.State);   // the new process holds no lease yet: it has no node beside the old one
+        Assert.Equal(0, newHost.Started);
+        await oldLeader.RunBeforeHandOverAsync("superseded");
+        Assert.Equal(1, oldHost.Stopped);
+        newLeader.StartActing();                                         // after the hand-over and the release of the lease
+        await Until(() => newSvc.State == WolverineHostService.Phase.Running);
+        Assert.Equal((1, 1), (oldHost.Stopped, newHost.Started));
+        await oldSvc.StopAsync(CancellationToken.None); await newSvc.StopAsync(CancellationToken.None);
     }
 
     [Fact]

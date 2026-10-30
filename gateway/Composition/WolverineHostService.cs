@@ -11,11 +11,16 @@ using Wolverine.SqlServer;
 // nested host: Wolverine's own container and hosted services, which this service starts and stops, so that
 // - the gateway's DI graph and its start are what they were (a database that is paused, down or refusing never fails the gateway's start: the start below runs in
 //   the background and retries; /ready waits for the schema only where a database is configured, FactorySchemaStatus, and for nothing else of the database),
-// - the stop is ours: the node leaves when the lease is lost and at the stop of the host, after the hand-over and the transcripts' flush.
+// - the node runs only where this process acts (W9.10a): it starts when the lease is held and the predecessor's snapshot is seen (GatewayLeader.OnActing; with the
+//   lease off, at the start of the host), and it stops FIRST in the hand-over (GatewayLeader.BeforeHandOver: when a newer process takes the lease and at the stop of the
+//   holder), before the final snapshot is written and before the lease is let go. Solo mode makes every node "node 1": a starting node clears the node table and releases
+//   the ownership of every row of node 1, so a successor that started beside a running node released the rows the old node was still handling (a command handled twice).
+//   The final stop of the host (StopAsync) is the same drain again and finds nothing to do.
 // What it does once up: applies the scripts of Fworker.Database with DbUp and checks that the database is what they build (the gateway's tables, schema "factory", and
-// Wolverine's own, schema "wolverine"), then runs Wolverine against SQL Server with the durable inbox and outbox in Balanced mode, which is Wolverine's leader election:
-// the nodes elect one leader that owns the agents. Wolverine builds and diffs nothing (AutoCreate.None): the scripts own every table (docs/design/fworker-database.md).
-// It is inert: no handler is registered, nothing is published, nothing reads the board. The gateway's lease still decides who acts in v1.
+// Wolverine's own, schema "wolverine"), then runs Wolverine against SQL Server with the durable inbox and outbox in Solo mode (one node, no node agent, no leader
+// election: the lease of the gateway is the one actor; the Balanced profile of WolverineHostOptions is kept for a test and is not used). Wolverine builds and diffs
+// nothing (AutoCreate.None): the scripts own every table (docs/design/fworker-database.md).
+// It acts only through the handlers and jobs the gateway adds for the environments whose engine is V2; without them the node is the inert one of the shadow run.
 sealed class WolverineHostService : IHostedService
 {
     public enum Phase { Idle, Starting, Running, Stopped }
@@ -48,27 +53,27 @@ sealed class WolverineHostService : IHostedService
         Schema = (cs, ct) => FactorySchema.UpgradeAndVerifyAsync(WithConnectTimeout(cs, options.ConnectTimeoutSeconds),
             new SchemaRunOptions { CreateDatabase = database.CreateIfMissing, Log = line => { try { Console.WriteLine(line); } catch { } } }, ct);
         HostFactory = (cs, o) => BuildHost(cs, o, RuntimeCommands);
-        // LeadershipService sets leader.OnSuperseded and OnReacquired when it is built, and the registration builds it first (GatewayWolverineExtensions); they are
-        // wrapped here: its hand-over runs first, then the node leaves; a standby that takes the lease again brings the node back
-        var superseded = leader.OnSuperseded; var reacquired = leader.OnReacquired;
-        leader.OnSuperseded = async cur => { if (superseded != null) await superseded(cur); await LeaveAsync("superseded"); };
-        leader.OnReacquired = async pred => { if (reacquired != null) await reacquired(pred); Begin(); };
+        // W9.10a: the node starts when this process acts (the lease taken and the predecessor's snapshot seen, also when a standby takes the lease again) and leaves
+        // before the hand-over of the plant (superseded, or the stop of the holder); LeadershipService calls BeforeHandOver first thing
+        leader.OnActing += Begin;
+        var before = leader.BeforeHandOver;
+        leader.BeforeHandOver = async why => { if (before != null) await before(why); await LeaveAsync(why); };
     }
 
     public Phase State { get { lock (gate) return phase; } }
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
-        Begin();
+        Begin();   // only when this process already acts (the lease off, or taken before this service started); otherwise GatewayLeader.OnActing begins it
         return Task.CompletedTask;   // never waits for the database: /ready waits for the schema (FactorySchemaStatus), which the background start below applies
     }
 
-    // the retried start, in the background; one at a time
+    // the retried start, in the background; one at a time; only while this process acts (not while it waits for the lease, nor after it was superseded or began to stop)
     void Begin()
     {
         lock (gate)
         {
-            if (shuttingDown || leadership.Replaced || phase is Phase.Starting or Phase.Running) return;
+            if (shuttingDown || !leadership.MayAct || phase is Phase.Starting or Phase.Running) return;
             phase = Phase.Starting; since = DateTime.UtcNow; attempts = 0; lastFailure = "";
             cts = new CancellationTokenSource();
             var ct = cts.Token;
@@ -90,7 +95,7 @@ sealed class WolverineHostService : IHostedService
                 h = HostFactory(connectionString, options);
                 await h.StartAsync(ct);
                 if (ct.IsCancellationRequested)
-                {   // the node was told to leave while it started: it is stopped here, so that a Balanced leader's lock is not left to the end of the process
+                {   // the node was told to leave while it started: it is stopped here, so that the node's ownership of its rows is not left to the end of the process
                     try { await h.StopAsync(options.StopTimeout); } catch { }
                     throw new OperationCanceledException(ct);
                 }
@@ -144,7 +149,8 @@ sealed class WolverineHostService : IHostedService
         try { Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "schema", ["event"] = what, ["detail"] = detail }.ToJsonString()); } catch { }
     }
 
-    // The node leaves (the lease is lost): stops what runs and what is being started. Bounded; a standby that takes the lease again begins anew.
+    // The node leaves (the hand-over begins: the lease is lost, or the holder stops): stops what runs and what is being started, draining the handlers in flight and releasing the
+    // node's ownership of its rows. Bounded; a standby that takes the lease again begins anew.
     async Task LeaveAsync(string why)
     {
         IHost? h; Task? t; CancellationTokenSource? c;

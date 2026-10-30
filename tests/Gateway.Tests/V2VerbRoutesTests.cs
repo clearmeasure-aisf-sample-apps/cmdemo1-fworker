@@ -94,6 +94,9 @@ public sealed class V2VerbRoutesTests : IDisposable
         Assert.Equal(routes.Count, routes.Verbs.Distinct().Count());
         // W9.3 (#355): the five merge train verbs are registered
         Assert.All(MergeRoutes.Verbs, v => Assert.Contains(v, routes.Verbs));
+        // W9.4: the delivery train's verbs; auto-promote is in the group but is the train's own executor, not a route
+        Assert.Equal(["ci-release", "copilot-owner", "copilot-settle", "private-build", "publish-demo", "settle"], DeliveryRoutes.Verbs.Where(routes.Verbs.Contains).Order().ToArray());
+        Assert.DoesNotContain("auto-promote", routes.Verbs);
     }
 
     [Fact]
@@ -129,7 +132,7 @@ public sealed class V2VerbRoutesTests : IDisposable
     }
 
     [Fact]
-    public void AnEngineThatActs_WithNothingRegistered_KeepsTheRouterItWas()
+    public void TheRouterIsWrappedOnlyWhenARouteExists()
     {
         // EndpointModules wraps the router only when a route exists (a table with none is the stub state of W9.0; the engine that does not act has the shared empty table)
         Assert.Equal(0, V2VerbRoutes.None.Count);

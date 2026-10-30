@@ -45,7 +45,9 @@ static class DeliveryShadowSettings
             }
             double Num(JsonNode? n, string name, double fallback) => n?[name] is JsonValue v && v.TryGetValue<double>(out var d) && d > 0 ? d : fallback;
             var window = new HealthWindow(Num(o?["health"], "spacingMinutes", 5), Num(o?["health"], "settleMinutes", 10));
-            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered);
+            // W8.3: delivery.rollback.migrationPaths, the path fragments that mark a file as a database migration (the rollback's precondition); absent: DbUp's scripts/Update
+            var migrations = (cfg.Root?["delivery"]?["rollback"]?["migrationPaths"] as JsonArray)?.Select(m => m?.ToString() ?? "").Where(m => m != "").ToList();
+            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, migrations);
         }
         catch { return null; }
     }

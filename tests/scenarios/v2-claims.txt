@@ -22,6 +22,13 @@ owner | ^journal fold:
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
 
+# W9.1 gate: the QC verbs on v2 (QcService, #353): the merge gate that reads the record of the run (a PASS that needs a QC run, then a person, then merges: Start, the worker's report, the person's approval, qc-gate) and the lost worker
+# that is relaunched (qc-gate-lease). The state comment is still where v1 reads the record, so the sweep's own QC step and the merge script see what the verbs wrote. This job has 22 minutes for its claims and the other gates take
+# about 17 of them, so the rest of the QC suites (qc-gate: the new head, the reset, the approval by webhook and sweep, the busy lock, the switched-off requirements; qc-gate-race; qc and qc-worker, the same verbs through the click
+# pages and the worker's session) stay with the shards, which run them on the engine each shard has.
+qc-gate | ^qc: gate a non-auto-merge PASS stays on the approval path
+qc-gate-lease
+
 # W9.6 gate: the keeper's and the manager's verbs (gateway/Verbs/Routes/Keeper.cs, Fworker.Workflows.Keeper) answer on v2 as the rule scripts did: the scenarios that call manager-action, amend-criteria,
 # split-item, create-item, set-priority and link-dependency, with their golden writes. (The replenish scenarios of keeper.ps1 are Replenish.ps1's, not a verb of this group.)
 manager | ^act: (the supervisor unparks|unpark refuses|the supervisor drains|the plan offers)
@@ -38,3 +45,11 @@ auto | ^docs-only fast path: one design review round
 auto | ^(push gate|pr-checks|model ladder|testing profile):
 owner | ^owner: pr-checks with an item token
 manager | ^mgr: pr-checks gives the supervisor
+
+# W9.4 gate: the delivery verbs that a session or a scenario calls through the verb route. private-build (the push gate's attestation) and publish-demo (the demo
+# video's release and asset) are answered by v2's own code (gateway/Ports/DeliveryVerbHost.cs) and write what the rule scripts write; no difference is declared.
+# settle, copilot-settle, copilot-owner and ci-release have no scenario that can be claimed here: the sweep's settle is the script's own (sync-board, W9.8), and the
+# copilot suite needs the environment name tdd (run with V2EnvName 'tdd' in run.ps1 by hand, its CI release, owner and settle scenarios pass on v2 with the golden writes unchanged). The unit tests (DeliveryVerbs*Tests) and the gateway tests (DeliveryVerbHostTests) pin them against the scripts.
+auto | ^(push gate|video label):
+# the demo upload endpoint (POST /api/v1/demo/N) reaches publish-demo through the bridge, not the verb route
+owner | ^owner:.the.owner.publishes.the.demo.video

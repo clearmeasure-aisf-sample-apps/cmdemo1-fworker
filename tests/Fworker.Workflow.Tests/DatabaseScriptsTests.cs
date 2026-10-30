@@ -43,14 +43,17 @@ public class DatabaseScriptsTests
     static IEnumerable<string> Batches(string code) => Regex.Split(code, @"^\s*GO\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase).Where(b => !string.IsNullOrWhiteSpace(b));
 
     [Fact]
-    public void EveryNameIsNumberedAndDescribed_TheNumbersAreUniqueAndContiguous()
+    public void EveryNameIsNumberedAndDescribed_TheNumbersAreUniqueAndAscending()
     {
         Assert.NotEmpty(FactorySchema.Scripts);
         var rx = new Regex(@"^(\d{3})_[A-Za-z][A-Za-z0-9_]*\.sql$");
         foreach (var n in FactorySchema.Scripts) Assert.Matches(rx, n);
         var numbers = FactorySchema.Scripts.Select(n => int.Parse(rx.Match(n).Groups[1].Value)).ToList();
         Assert.Equal(numbers.Distinct().Count(), numbers.Count);
-        Assert.Equal(Enumerable.Range(1, numbers.Count), numbers.Order());
+        // the main series 001..099 is contiguous; the parallel waves of the implementation plan each have a reserved block of ten from 100 (W8.1: 100-109, W8.2: 110-119, W8.3: 120-129), which is not
+        var main = numbers.Where(n => n < 100).Order().ToList();
+        Assert.Equal(Enumerable.Range(1, main.Count), main);
+        Assert.All(numbers.Where(n => n >= 100), n => Assert.InRange(n, 100, 999));
         Assert.Equal(numbers.Max(), FactorySchema.LatestVersion);
     }
 
