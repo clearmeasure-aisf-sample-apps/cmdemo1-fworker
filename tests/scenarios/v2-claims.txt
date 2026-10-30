@@ -21,3 +21,10 @@ owner | ^journal fold:
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
+
+# W9.1 gate: the QC verbs on v2 (QcService, #353): Start, Reset, Teardown, the worker's report, the person's approval and the merge gate that reads the record of the run (qc-gate); the lost worker that is relaunched (qc-gate-lease);
+# and a teardown that races the sweep (qc-gate-race). The state comment is still where v1 reads the record, so the sweep's own QC step and the merge script see what the verbs wrote. The suites qc and qc-worker are the
+# same verbs through the click pages and the worker's session; they are left to the shards (about 15 minutes more than this job has).
+qc-gate
+qc-gate-lease
+qc-gate-race
