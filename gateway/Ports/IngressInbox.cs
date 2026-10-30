@@ -91,6 +91,8 @@ public static class IngressInboxHandler
         // a poll's card names its repository (W4.3: the reconciler reads the cards of every repository of the catalog); a webhook event is the home repository's
         var repo = ev?["repository"]?.ToString() is { } rs && Fworker.Contracts.Ids.RepoId.TryParse(rs, out var rid) ? rid : processor.Home;
         var key = item > 0 ? new ItemId(repo, item).ToString() : "board";
+        // W8.2: an incident trigger (an alert) belongs to the incident of its deployable and environment, not to the board: its history reads as the incident's timeline
+        if (item == 0 && name.StartsWith("incident.", StringComparison.Ordinal) && ev?["deployable"]?.ToString() is { Length: > 0 } dep && ev["environment"]?.ToString() is { Length: > 0 } env) key = $"incident:{dep}/{env}";
         return new ShadowHistoryRecord(key, $"ingress.inbox.{message.Source}.{(name.Length <= 100 ? name : name[..100])}", message.EventJson.Length <= ShadowHistory.MaxDetailChars ? message.EventJson : message.EventJson[..ShadowHistory.MaxDetailChars], DateTimeOffset.UtcNow);
     }
 }
