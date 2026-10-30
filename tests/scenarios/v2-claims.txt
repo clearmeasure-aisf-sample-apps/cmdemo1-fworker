@@ -22,12 +22,12 @@ owner | ^journal fold:
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
 
-# W9.1 gate: the QC verbs on v2 (QcService, #353): Start, Reset, Teardown, the worker's report, the person's approval and the merge gate that reads the record of the run (qc-gate); the lost worker that is relaunched (qc-gate-lease);
-# and a teardown that races the sweep (qc-gate-race). The state comment is still where v1 reads the record, so the sweep's own QC step and the merge script see what the verbs wrote. The suites qc and qc-worker are the
-# same verbs through the click pages and the worker's session; they are left to the shards (about 15 minutes more than this job has).
-qc-gate
+# W9.1 gate: the QC verbs on v2 (QcService, #353): the merge gate that reads the record of the run (a PASS that needs a QC run, then a person, then merges: Start, the worker's report, the person's approval, qc-gate) and the lost worker
+# that is relaunched (qc-gate-lease). The state comment is still where v1 reads the record, so the sweep's own QC step and the merge script see what the verbs wrote. This job has 22 minutes for its claims and the other gates take
+# about 17 of them, so the rest of the QC suites (qc-gate: the new head, the reset, the approval by webhook and sweep, the busy lock, the switched-off requirements; qc-gate-race; qc and qc-worker, the same verbs through the click
+# pages and the worker's session) stay with the shards, which run them on the engine each shard has.
+qc-gate | ^qc: gate a non-auto-merge PASS stays on the approval path
 qc-gate-lease
-qc-gate-race
 
 # W9.6 gate: the keeper's and the manager's verbs (gateway/Verbs/Routes/Keeper.cs, Fworker.Workflows.Keeper) answer on v2 as the rule scripts did: the scenarios that call manager-action, amend-criteria,
 # split-item, create-item, set-priority and link-dependency, with their golden writes. (The replenish scenarios of keeper.ps1 are Replenish.ps1's, not a verb of this group.)
