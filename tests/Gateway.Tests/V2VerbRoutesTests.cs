@@ -78,11 +78,21 @@ public sealed class V2VerbRoutesTests : IDisposable
     [InlineData("tdd", "\"prod\"", "", null)]          // v1 acts
     [InlineData("tdd", "", "\"tdd\"", null)]           // the shadow run: v1 acts
     [InlineData("prod", "\"prod\"", "", "1")]          // the kill switch: v1 again
-    [InlineData("prod", "\"prod\"", "", null)]         // v2 acts: the stubs register nothing
-    public void TheStubsRegisterNothing_WhateverTheEngine(string environment, string v2, string shadow, string? off)
+    public void NothingIsRegistered_WhereTheEngineDoesNotAct(string environment, string v2, string shadow, string? off)
     {
         var routes = V2VerbRoutes.Build(Engine(environment, v2, shadow, off), new ServiceCollection().BuildServiceProvider());
         Assert.Equal(0, routes.Count);
+    }
+
+    [Fact]
+    public void WhereTheEngineActs_EachGroupRegistersItsOwnVerbs_AndTheDeliveryGroupItsSix()
+    {
+        var routes = V2VerbRoutes.Build(Engine("prod", "\"prod\""), new ServiceCollection().BuildServiceProvider());
+        var all = V2VerbRoutes.Groups.SelectMany(g => g.Verbs).ToList();
+        Assert.All(routes.Verbs, v => Assert.Contains(v, all));
+        // W9.4: the delivery train's verbs; auto-promote is in the group but is the train's own executor, not a route
+        Assert.Equal(["ci-release", "copilot-owner", "copilot-settle", "private-build", "publish-demo", "settle"], DeliveryRoutes.Verbs.Where(routes.Verbs.Contains).Order().ToArray());
+        Assert.DoesNotContain("auto-promote", routes.Verbs);
     }
 
     [Fact]
@@ -118,11 +128,9 @@ public sealed class V2VerbRoutesTests : IDisposable
     }
 
     [Fact]
-    public void AnEngineThatActs_WithNothingRegistered_KeepsTheRouterItWas()
+    public void TheRouterIsWrappedOnlyWhenARouteExists()
     {
-        // EndpointModules wraps the router only when a route exists; this is the stub state of W9.0
-        var routes = V2VerbRoutes.Build(Engine("prod", "\"prod\""), new ServiceCollection().BuildServiceProvider());
-        Assert.Equal(0, routes.Count);
+        // EndpointModules wraps the router only when a route exists (W9.0: none, W9.4: the delivery group's), and a router with no route is the one it was
         var source = File.ReadAllText(Path.Combine(Root(), "gateway", "Endpoints", "EndpointModules.cs"));
         Assert.Contains("is { Count: > 0 } routes ? new V2VerbRouter(router, routes) : router", source);
     }

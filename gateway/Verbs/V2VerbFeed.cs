@@ -116,6 +116,12 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
         return answer;
     }
 
+    /// <summary>W9.4: a verb answered by a v2 route (not by the script under this router) is a sign of life of the session as well: it renews the step's lease as the calls of the script do.</summary>
+    public async Task Observe(string verb, string stdin, string output)
+    {
+        if (ownership.Count > 0 && DocsVerbs.Activity.Contains(verb)) await Feed(verb, stdin, output);
+    }
+
     /// <summary>
     /// A development completion of a feature item the saga owns carries `ftWithPendingChecks` (the flag is the gateway's to give: one a caller sent is taken out of every `complete`): pending checks no longer park the item, the script moves it on to Functional Testing and answers `continue` with the next column and
     /// `checks: pending` (delivery-speed.md 5.1), because the saga watches the checks beside the session. A red head is still refused by the script. Any fault here leaves the call as it came.

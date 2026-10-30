@@ -21,3 +21,11 @@ owner | ^journal fold:
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
+
+# W9.4 gate: the delivery verbs that a session or a scenario calls through the verb route. private-build (the push gate's attestation) and publish-demo (the demo
+# video's release and asset) are answered by v2's own code (gateway/Ports/DeliveryVerbHost.cs) and write what the rule scripts write; no difference is declared.
+# settle, copilot-settle, copilot-owner and ci-release have no scenario that can be claimed here: the sweep's settle is the script's own (sync-board, W9.8), and the
+# copilot suite needs the environment name tdd (run with V2EnvName 'tdd' in run.ps1 by hand, its CI release, owner and settle scenarios pass on v2 with the golden writes unchanged). The unit tests (DeliveryVerbs*Tests) and the gateway tests (DeliveryVerbHostTests) pin them against the scripts.
+auto | ^(push gate|video label):
+# the demo upload endpoint (POST /api/v1/demo/N) reaches publish-demo through the bridge, not the verb route
+owner | ^owner:.the.owner.publishes.the.demo.video
