@@ -142,9 +142,10 @@ public class DeliveryShadowTrackedTests
         Assert.True(await Until(() => Task.FromResult(Recorded(shadow!) >= 1)), "the train did not decide to promote");
         // v1's pass did the same
         shadow!.ObserveV1(V1(new { item = 7, action = "promoted", release = "1.0.2", environment = "Uat", task = "ServerTasks-9", items = new[] { 7 } }));
-        await shadow.Tick(default);
         var store = new SqlShadowComparisonStore(() => Open(h.ConnectionString));
-        var rows = await store.Recent(20, null, default);
+        // (the train's decision is a message beside the command that was recorded: the comparison is ticked until it has both sides)
+        IReadOnlyList<ShadowComparisonRow> rows = [];
+        Assert.True(await Until(async () => { await shadow.Tick(default); rows = await store.Recent(20, null, default); return rows.Any(r => r.Release == "1.0.2" && r.V2Action == "promote"); }), "the comparison of the promotion was not stored");
         var promote = Assert.Single(rows, r => r.Release == "1.0.2" && r.V2Action == "promote");
         Assert.Equal(ShadowOutcomes.Match, promote.Outcome);
         Assert.Equal("promoted", promote.V1!["native"]!.ToString());

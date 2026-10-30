@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 
 // The gateway's registrations, one method per area (gateway-composition.md 2 and 3 B, task C5a). Program.cs calls them in this order:
 //
@@ -52,6 +53,8 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(transcripts);
         services.AddSingleton<TranscriptService>();
         services.AddSingleton(runner);
+        // W9.10l: the one lock of an item for every port and the journal ledger (gateway/Ports/ItemLocks.cs); the item lock file of the state directory, which the rule scripts lock too
+        services.AddSingleton<IItemLock>(_ => new FileItemLock(RuleStateDirectory.Resolve(Environment.GetEnvironmentVariable)));
         c.GitHubBudget = githubBudget; c.Runner = runner; c.Transcripts = transcripts;
         return services;
     }
@@ -124,8 +127,12 @@ static class GatewayServiceCollectionExtensions
         var cursorPrompts = new CursorPromptBuilder(prompts);
         // the owner record of the task that owns an item (rule verb copilot-owner) and the settle (rule verb copilot-settle), shared by both cloud
         // runtimes as constructor parameters (C5c, gateway/Runtimes/Owner*.cs)
-        var ownerVerbs = new CopilotOwnerVerbs(c.Runner.RunAsync);
-        var settleClient = new CopilotSettleClient(c.Runner.RunAsync);
+        // W9.4: where the engine acts, a v2 route answers these verbs (and publish-demo and ci-release); the bridge sends the gateway's own calls there, and to the runner everywhere else
+        var deliveryBridge = new DeliveryVerbBridge(c.Runner.RunAsync);
+        services.AddSingleton(deliveryBridge);
+        services.AddSingleton<V2ActivityTap>();
+        var ownerVerbs = new CopilotOwnerVerbs(deliveryBridge.RunAsync);
+        var settleClient = new CopilotSettleClient(deliveryBridge.RunAsync);
         var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, cursorPrompts, owners: ownerVerbs, settle: settleClient) : null;
         var cursorManager = cursorRuntime != null
             ? new RuntimeManager(runtimeSettings, cursorRuntime, runtimeNonces,
@@ -259,7 +266,9 @@ static class GatewayServiceCollectionExtensions
             services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct, shadow: shadowTrain));
             services.AddHostedService(sp => sp.GetRequiredService<OctopusWatchService>());
         }
-        if (shadowTrain) services.AddHostedService(sp => new DeliveryShadowService(sp.GetRequiredService<DeliveryShadowHolder>(), DeliveryShadowService.DefaultInterval));   // W5.2: compares and stores
+        // W9.10p: the same tick where the engine acts and v1's AutoPromoter still promotes uat and prod: it compares the train's shadow decisions with the AutoPromoter's and stores the comparison
+        var actingShadow = c.Engine.V2Acts && c.WolverineHost && c.Instance.Home != null && AutoPromoter.Runs(c.Instance, true);
+        if (shadowTrain || actingShadow) services.AddHostedService(sp => new DeliveryShadowService(sp.GetRequiredService<DeliveryShadowHolder>(), DeliveryShadowService.DefaultInterval));   // W5.2: compares and stores
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddHostedService(sp => sp.GetRequiredService<RecurringJobScheduler>());   // W4.3
         services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
         // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)
@@ -269,7 +278,8 @@ static class GatewayServiceCollectionExtensions
         var v2Sweep = c.Engine.V2Acts && c.Instance.Home != null;   // W6.1: v1's sweep leaves the items that have a saga alone
         services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : null });
         // The automatic promotion: a loop of its own after the sweep, its own call (verb auto-promote), timeout and leader gate; it never runs inside the sweep
-        var promoteOn = c.Instance.AutoPromoteHere; var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
+        // W9.4 stopped this loop wherever the engine acts; W9.10p (owner decision 2026-10-30): the app's uat and prod stay with it until the train takes them over (delivery.autoPromote.trainActs, W9.12)
+        var promoteOn = AutoPromoter.Runs(c.Instance, c.Engine.V2Acts); var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
         services.AddHostedService(sp => new AutoPromoter(sp.GetRequiredService<Runner>(), promoteInterval, promoteOn) { MayAct = () => leader.MayAct, OnActions = actions => sp.GetService<DeliveryShadowHolder>()?.Shadow?.ObserveV1(actions) });
         // one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
         // with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
@@ -310,7 +320,7 @@ static class GatewayServiceCollectionExtensions
         var copilotRuntime = rts.CopilotRuntime; var copilotManager = rts.Copilot; var cursorRuntime = rts.CursorRuntime; var cursorManager = rts.Cursor;
         if (copilotManager != null && copilotSettings.CiRelease)
             services.AddHostedService(sp => new CopilotCiReleaseService(rts.CopilotCiRelease, copilotManager, copilotRuntime, sp.GetRequiredService<Plant>(), sp.GetRequiredService<Runner>(),
-                sp.GetRequiredService<ILeadership>(), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds)));
+                sp.GetRequiredService<ILeadership>(), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds), sp.GetRequiredService<DeliveryVerbBridge>()));
         // two registrations of one implementation type: AddSingleton<IHostedService> adds each (AddHostedService would keep only the first, as with RuntimeLoop)
         if (copilotRuntime != null && copilotManager != null)
             services.AddSingleton<IHostedService>(sp =>

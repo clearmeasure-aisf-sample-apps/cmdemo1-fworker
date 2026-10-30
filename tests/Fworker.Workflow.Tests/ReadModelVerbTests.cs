@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using Fworker.Workflows.ReadModels;
 using Xunit;
 
@@ -55,7 +56,7 @@ public sealed class ReadModelVerbTests
     sealed class CountingLock : IItemLock
     {
         public readonly List<int> Items = [];
-        public Task<T> Use<T>(int item, Func<Task<T>> body, CancellationToken ct) { Items.Add(item); return body(); }
+        public Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct) { Items.Add(item); return body(); }
     }
 
     sealed class Octo : IOctopusApi
@@ -471,6 +472,25 @@ public sealed class ReadModelVerbTests
             },
         }, new Dictionary<string, string>()));
         return rig;
+    }
+
+    sealed class BusyLock : IItemLock
+    {
+        public Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct) => throw new ItemBusyException(item);
+    }
+
+    sealed class NoRefusals : IRefusalCounts { public int For(int item) => 0; }
+
+    [Fact]
+    public async Task ABusyItemLock_IsTheScriptsAnswer_Exit20ItemBusy_RetryAfter5()
+    {
+        var rig = OnTheBoard();
+        var busy = new ModelTierReadModel(rig.Reads, rig.State, new BusyLock(), new NoRefusals());
+        var (exit, json) = await VerbReply.Run("model-tier", () => busy.ModelTier(Args("""{"item":7}"""), default));
+        var o = (JsonObject)JsonNode.Parse(json)!;
+        Assert.Equal(20, exit);
+        Assert.Equal(("item-busy", false, 20, 5), (o["code"]!.ToString(), (bool)o["ok"]!, (int)o["exit"]!, (int)o["retryAfterSeconds"]!));
+        Assert.Equal(0, rig.State.Saves);
     }
 
     [Fact]

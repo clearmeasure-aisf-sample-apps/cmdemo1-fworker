@@ -13,7 +13,7 @@ using Fworker.Workflows.WorkItem.Verbs;
 //  - ItemVerbsWire: the REST and GraphQL wire to GitHub with the gateway's identity (GH_TOKEN, else the author App), as Invoke-GhRaw makes it (headers, the three tries, the rate numbers for the shared budget). In the test mode of the golden
 //    writes it sends the cause id of the request, so the writes of a v2 verb are told from the background's as a script's are.
 //  - ItemVerbsState: Get-State and Save-State of the item's state comment, and Add-Journal into the holder in hand, over the journal store and ledger of Fworker.Integrations (the comment is in v1's format, so v1 can take every item back).
-//  - ItemVerbsLock, ItemVerbsRefusals: the lock file of an item and the refusals file of the model ladder, the files the rule scripts use (so a script of v1 that runs beside a v2 verb excludes it, and the ladder sees both).
+//  - ItemVerbsRefusals: the refusals file of the model ladder, a file the rule scripts use (so the ladder sees a script of v1 and a v2 verb). The lock of an item is the gateway's one IItemLock (ItemLocks.cs, W9.10l).
 //  - ItemVerbsV1: the calls that stay the script's for now, through the runner.
 // Only where the engine acts: ItemRoutes.Register builds it, and V2VerbRoutes.Build calls that only for Engine.V2Acts.
 
@@ -97,47 +97,6 @@ sealed class ItemVerbsState(IJournalStore store, Func<CancellationToken, Task<st
         catch (JournalRefusedException e) when (e.Message.StartsWith("state-too-large", StringComparison.Ordinal)) { throw new ItemRefusal(10, "state-too-large", e.Message["state-too-large: ".Length..]); }
         catch (JournalRefusedException e) { throw new ItemRefusal(20, "github-error", e.Message, new JsonObject { ["retryAfterSeconds"] = 30 }); }
         catch (HttpRequestException e) { throw new ItemRefusal(20, "github-error", e.Message, new JsonObject { ["retryAfterSeconds"] = 30 }); }
-    }
-}
-
-/// <summary>The directory the rule scripts keep their state in (Get-FwSubDir 'state' $env:FACTORY_STATE_DIR).</summary>
-static class ItemVerbsFiles
-{
-    public static string StateDir(Func<string, string?> env)
-    {
-        string dir;
-        if (env("FACTORY_STATE_DIR") is { Length: > 0 } s) dir = s;
-        else
-        {
-            string data;
-            if (env("FACTORY_DATA_DIR") is { Length: > 0 } d) data = d;
-            else
-            {
-                var home = env("HOME") ?? env("USERPROFILE") ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                data = !string.IsNullOrEmpty(home) && Directory.Exists(home) ? Path.Combine(home, ".local/share/factory-worker") : Path.Combine(Path.GetTempPath(), "factory-worker");
-            }
-            dir = Path.Combine(data, "state");
-        }
-        Directory.CreateDirectory(dir);
-        return dir;
-    }
-}
-
-/// <summary>Use-ItemLock: the lock file of the item in the state directory, opened for exclusive use. The scripts of v1 take the same file, so a verb of v2 and a script exclude each other.</summary>
-sealed class ItemVerbsLock(string dir) : IItemLock
-{
-    public async Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct)
-    {
-        var path = Path.Combine(dir, $"item-{item}.lock");
-        var deadline = DateTime.UtcNow.AddSeconds(waitSeconds);
-        FileStream? fs;
-        while (true)
-        {
-            try { fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); break; }
-            catch (IOException) when (DateTime.UtcNow <= deadline) { await Task.Delay(300, ct); }
-            catch (IOException) { throw new ItemRefusal(20, "item-busy", $"another operation on item {item} is running", new JsonObject { ["retryAfterSeconds"] = 5 }); }
-        }
-        using (fs) return await body();
     }
 }
 
@@ -247,12 +206,14 @@ static class ItemVerbsWiring
             var factory = new GitHubClientFactory(http, new ProviderCredentialSource(tokens), new Fworker.Integrations.GitHub.GitHubBudget());
             IJournalStore journalStore = new LazyJournalStore(async ct => new GitHubJournalStore(await factory.For(home, ct), new JournalIdentity(cfg.Name, login, cfg.StateAuthors)));
             var minutes = cfg.TimingOrNull("journalWaitingMinutes") ?? 30;
-            var ledger = new JournalLedger(journalStore, new JournalSettings(minutes, SecretPatterns(instance.Root)));
+            var locks = ItemLocks.From(services, env);
+            var ledger = new JournalLedger(journalStore, new JournalSettings(minutes, SecretPatterns(instance.Root)), itemLock: locks);
             var state = new ItemVerbsState(journalStore, login, ledger);
-            var dir = ItemVerbsFiles.StateDir(env);
+            var dir = RuleStateDirectory.Resolve(env);
+            Directory.CreateDirectory(dir);
             var v1 = services.GetService(typeof(Runner)) is Runner runner ? new ItemVerbsV1(runner) : null;
             var board = new ItemBoard(gh, new SystemItemClock());
-            var verbs = new ItemVerbs(gh, board, new ItemPulls(gh, state), state, state, new ItemVerbsLock(dir), new ItemVerbsRefusals(dir), v1);
+            var verbs = new ItemVerbs(gh, board, new ItemPulls(gh, state), state, state, locks, new ItemVerbsRefusals(dir), v1);
             IVerbRouter router = new ItemVerbsRouter(verbs);
             // the saga hears what the script did (the feed of the hybrid composition) and what a person does to a park
             if (services.GetService(typeof(WorkItemParts)) is WorkItemParts { Ownership: { } ownership } parts && services.GetService(typeof(WolverineHostService)) is WolverineHostService host)

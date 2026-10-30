@@ -1,5 +1,6 @@
 using Fworker.Contracts.Ids;
 using Fworker.Persistence;
+using Fworker.Workflows.Faults;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fworker.Workflows.WorkItem;
@@ -26,7 +27,7 @@ public interface IWorkItemStore
     Task<IReadOnlyDictionary<string, int>> InFlightByRepository(CancellationToken ct);
 }
 
-public sealed class SqlWorkItemStore(Func<FactoryDbContext> open) : IWorkItemStore
+public sealed class SqlWorkItemStore(Func<FactoryDbContext> open) : IWorkItemStore, IWorkItemAges
 {
     public async Task<WorkItemRecord?> Load(string itemKey, CancellationToken ct)
     {
@@ -60,7 +61,8 @@ public sealed class SqlWorkItemStore(Func<FactoryDbContext> open) : IWorkItemSto
             await db.SaveChangesAsync(ct);
             return true;
         }
-        catch (DbUpdateException) { return false; }   // the key was taken by another writer first (insert), or the revision moved (update)
+        // the key was taken by another writer first (insert), or the revision moved (update). A database that does not answer is no conflict: it throws, and Wolverine retries the message (SqlFaults, W9.10o).
+        catch (Exception e) when (SqlFaults.IsConflict(e)) { return false; }
     }
 
     static WorkItemRow Fill(WorkItemRow row, WorkItemState state, DateTimeOffset now)
@@ -68,6 +70,13 @@ public sealed class SqlWorkItemStore(Func<FactoryDbContext> open) : IWorkItemSto
         row.Generation = state.Generation; row.Status = state.Status; row.Plan = state.Plan; row.Step = state.Step.ToString();
         row.StateJson = state.ToJson(); row.UpdatedAt = now;
         return row;
+    }
+
+    public async Task<IReadOnlyList<OpenItem>> OpenItems(CancellationToken ct)
+    {
+        await using var db = open();
+        var rows = await db.WorkItems.AsNoTracking().Where(x => x.Status != WorkItemStatus.Completed).Select(x => new { x.StateJson, x.UpdatedAt }).ToListAsync(ct);
+        return rows.Select(r => new OpenItem(WorkItemState.FromJson(r.StateJson), r.UpdatedAt)).ToList();
     }
 
     public async Task<IReadOnlyList<string>> OwnedItems(CancellationToken ct)
@@ -90,9 +99,12 @@ public sealed class SqlWorkItemStore(Func<FactoryDbContext> open) : IWorkItemSto
     }
 }
 
-public sealed class InMemoryWorkItemStore : IWorkItemStore
+public sealed class InMemoryWorkItemStore : IWorkItemStore, IWorkItemAges
 {
     readonly Dictionary<string, (string Json, int Revision)> rows = [];
+    readonly Dictionary<string, DateTimeOffset> savedAt = [];
+    /// <summary>The time a save is stamped with (the row's UpdatedAt); a test sets it.</summary>
+    public Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
     public IReadOnlyDictionary<string, WorkItemState> States { get { lock (rows) return rows.ToDictionary(kv => kv.Key, kv => WorkItemState.FromJson(kv.Value.Json)); } }
     /// <summary>The revision of an item's row (0: none).</summary>
     public int RevisionOf(string itemKey) { lock (rows) return rows.TryGetValue(itemKey, out var r) ? r.Revision : 0; }
@@ -111,9 +123,15 @@ public sealed class InMemoryWorkItemStore : IWorkItemStore
         {
             var have = rows.TryGetValue(itemKey, out var r) ? r.Revision : 0;
             if (have != expectedRevision) return Task.FromResult(false);
-            rows[itemKey] = (state.ToJson(), have + 1);
+            rows[itemKey] = (state.ToJson(), have + 1); savedAt[itemKey] = Clock();
             return Task.FromResult(true);
         }
+    }
+
+    public Task<IReadOnlyList<OpenItem>> OpenItems(CancellationToken ct)
+    {
+        lock (rows)
+            return Task.FromResult<IReadOnlyList<OpenItem>>(rows.Select(kv => new OpenItem(WorkItemState.FromJson(kv.Value.Json), savedAt.GetValueOrDefault(kv.Key))).Where(i => i.State.IsOpen).ToList());
     }
 
     public Task<IReadOnlyList<string>> OwnedItems(CancellationToken ct)

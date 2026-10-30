@@ -1,3 +1,48 @@
+@ octopus/octopus-auth-oidc-the-entra-token-is-exchanged-at-token-v1-for-the-service-accou-14f01b9b
+- ~ rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
+@ octopus/octopus-journal-order-a-worker-that-accepts-before-the-offered-and-launched-line-3ba5007c
+- + rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
+@ octopus/octopus-overflow-runs-a-held-start-worker-overflow-only-for-an-explicit-allowed-6d02a4be
+- ~ rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
+@ octopus/octopus-provision-picks-a-healthy-fworker-host-with-capacity-and-runs-start-work-21a23100
+- + rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
+@ octopus/octopus-session-transcript-the-container-posts-its-lines-with-its-w2-the-start-c-9b8415ec
+- + rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
+@ octopus/octopus-session-transcript-the-start-comment-of-a-new-session-is-posted-even-whe-fb68878c
+- ~ rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
+@ octopus/octopus-the-day-budget-survives-a-restart-a-stopped-worker-s-start-still-counts-9cd0e6f3
+- + rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
+@ octopus/octopus-the-reconcile-endpoints-take-the-host-token-only-desired-names-the-host-8f0cce7b
+- + rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- + rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
+@ octopus/octopus-the-stop-of-a-worker-runs-stop-worker-on-the-machine-it-was-started-on-d-403b9609
+- ~ rule POST /repos/{repo}/git/commits 201 {"message":"fwt1:{blob}","parents":[],"tree":"{sha}"}
+- ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
+# why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
+
 @ saga/saga-a-docs-item-pulled-from-todo-is-designed-built-and-verified-by-its-owner-se-3231c803
 # why: the docs plan on v2 (W6.6): the engine's intake pulls the card and the saga's projection moves it (source gateway), the plant journals through the Wolverine sink (source gateway), the merge is the saga's own call after the PASS (source gateway, no merge comment, no claim-ref delete in the verdict call, the card to Done by the projection, no delivery comments of the rule script's settle), and until W9.10e v1's merge pickup writes a comment of its own; issue: #335, #557
 - = rule PUT /repos/{repo}/pulls/{#2}/merge 200 {"merge_method":"squash","sha":"{sha}"}

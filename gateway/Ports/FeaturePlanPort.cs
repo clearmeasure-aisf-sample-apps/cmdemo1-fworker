@@ -49,7 +49,8 @@ public sealed class SlotRequestPort(IMergeFactsReader? reader, SlotRequestSettin
     {
         var labels = await Labels(m.Item, ct);
         // (the first AI column is the intake column of the plan's order: past intake before intake, delivery-speed.md 3.1)
-        var rank = new Fworker.Domain.PlanRank(settings.IsPinned(labels), settings.PriorityOf(labels), InIntake: string.Equals(m.Phase, CapacityPhases.Design, StringComparison.OrdinalIgnoreCase));
+        // (the hotfix plan of an incident ranks at the top whatever its labels say, W8.1)
+        var rank = new Fworker.Domain.PlanRank(settings.IsPinned(labels), m.TopRank ? "top" : settings.PriorityOf(labels), InIntake: string.Equals(m.Phase, CapacityPhases.Design, StringComparison.OrdinalIgnoreCase));
         var footprint = m.Footprint.Count == 0 ? Footprint.Empty : new Footprint(m.Footprint, m.FootprintFromPullRequest ? FootprintSource.PullRequest : FootprintSource.Design);
         return new RequestSlot(m.Item, m.Key, m.Generation, settings.Runtime, m.Phase, rank, false, m.Resume, m.ColumnDepth, m.RequestedAt, [], footprint);
     }
@@ -141,7 +142,7 @@ public sealed class FeatureChecksJob(IWorkItemStore store, RepoId home, IPullReq
         if (!mayAct()) return "not-leader";
         if (budgetLow()) return "budget-low";
         var watched = (await store.OwnedStates(ct))
-            .Where(s => s.Plan == WorkPlans.Feature && s.Status == WorkItemStatus.Open && !s.Parked && s.Step is StepKind.Verify or StepKind.Merge && s.PullRequest > 0 && ItemId.TryParse(s.Item, out var id) && id.Repository == home).ToList();
+            .Where(s => WorkPlans.IsCode(s.Plan) && s.Status == WorkItemStatus.Open && !s.Parked && s.Step is StepKind.Verify or StepKind.Merge && s.PullRequest > 0 && ItemId.TryParse(s.Item, out var id) && id.Repository == home).ToList();
         var due = watched.OrderBy(s => looked.GetValueOrDefault(s.Item)).ThenBy(s => s.Item, StringComparer.Ordinal).Take(PerRun).ToList();
         var count = 0;
         foreach (var state in due)
@@ -182,7 +183,7 @@ public sealed class FeatureNotice(Func<int, JsonObject, bool> route, string deve
 {
     public bool Notify(WorkItemDecided d)
     {
-        if (d.Action != WorkItemActions.FixForward || !string.Equals(d.Plan, WorkPlans.Feature, StringComparison.OrdinalIgnoreCase)) return false;
+        if (d.Action != WorkItemActions.FixForward || !WorkPlans.IsCode(d.Plan)) return false;
         var trigger = new JsonObject { ["provider"] = "gateway", ["event"] = "checks.failed", ["item"] = d.Item.Number, ["column"] = developmentColumn, ["reason"] = "fix-forward" };
         try { return route(d.Item.Number, trigger); }
         catch (Exception e) { Console.Error.WriteLine($"fix-forward notice for {d.Item}: {e.GetType().Name}"); return false; }

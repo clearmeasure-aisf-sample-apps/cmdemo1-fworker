@@ -73,6 +73,9 @@ public sealed class WorkItemState
     public string VerdictSummary { get; set; } = "";
     /// <summary>Merge calls asked of the current Merge arm; the count that reaches <see cref="DocsPlanRules.MaxMergeAttempts"/> parks the item.</summary>
     public int MergeAttempt { get; set; }
+    /// <summary>Answers of the merge calls of the current Merge arm that were about the pull request (W9.10o): not a failure of the gateway's own reading, no credential, the budget. These, not the calls, are counted against
+    /// <see cref="DocsPlanRules.MaxMergeAttempts"/>; <see cref="MergeAttempt"/> still numbers the calls (the answer names its call) and bounds all of them by <see cref="DocsPlanRules.CallsPerAnswer"/> times the limit.</summary>
+    public int MergeAnswers { get; set; }
     /// <summary>Updates of the branch made for this verdict (the script's verdict.updates), against timing.outOfDateMergeAttempts in the merge command.</summary>
     public int MergeUpdates { get; set; }
     /// <summary>An earlier merge call updated the branch from this head and its new head was not there yet.</summary>

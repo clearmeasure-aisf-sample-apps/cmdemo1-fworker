@@ -136,9 +136,12 @@ public class DeliveryTrainTrackedTests
         // the timer fires by itself (nothing else is sent), reads the app again and, once the window is full, asks for the deployment
         Assert.True(await Until(() => Task.FromResult(cap.Count(cap.Promotes) >= 1)), "the timers did not lead to the promotion");
         var promote = cap.Promotes[0];
-        Assert.Equal(("orders", "1.0.2", "uat", "PromoteRelease|orders|1.0.2|uat"), (promote.Deployable, promote.Version, promote.Environment, promote.IdempotencyKey));
-        Assert.Contains(cap.Decisions, d => d.Key == "orders/uat" && d.Action == "waiting");
-        Assert.Contains(cap.Decisions, d => d.Key == "orders/uat" && d.Action == "promote" && d.Release == "1.0.2");
+        Assert.Equal(("orders", "1.0.2", "uat", "PromoteRelease|orders|1.0.2|uat|1"), (promote.Deployable, promote.Version, promote.Environment, promote.IdempotencyKey));
+        // (the decision travels as a message of its own, beside the command: it is awaited, not assumed to have arrived with it)
+        TrainDecided[] Decided() { lock (cap.Decisions) return [.. cap.Decisions]; }
+        Assert.True(await Until(() => Task.FromResult(Decided().Any(d => d.Key == "orders/uat" && d.Action == "promote" && d.Release == "1.0.2"))),
+            "the train's decision to promote did not arrive: " + string.Join(" / ", Decided().Select(d => $"{d.Key} {d.Action} {d.Release}")));
+        Assert.Contains(Decided(), d => d.Key == "orders/uat" && d.Action == "waiting");
         // the tdd train delivered the item with the tdd deployment (the pipeline's); the prod train has nothing to promote (1.0.2 is not in uat yet)
         Assert.True(await Until(async () => await h.Count("SELECT COUNT(*) FROM factory.DeliveredTo WHERE ItemKey = 'acme/orders#7' AND Environment = 'tdd'") == 1, 10));
         Assert.DoesNotContain(cap.Decisions, d => d.Key == "orders/prod" && d.Action == "promote");

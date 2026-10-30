@@ -45,12 +45,6 @@ public interface IItemJournal
     Task<bool> Add(int item, ItemStateHolder holder, string ev, JsonObject fields, string key, CancellationToken ct);
 }
 
-/// <summary><c>Use-ItemLock</c>: one verb at a time per item. A lock that stays busy is the refusal 20 item-busy.</summary>
-public interface IItemLock
-{
-    Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct);
-}
-
 /// <summary>The refusals a session was given (Models.ps1: refusals.json of the state directory), the model ladder's input.</summary>
 public interface IItemRefusals
 {

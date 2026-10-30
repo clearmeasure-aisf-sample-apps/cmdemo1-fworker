@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using Fworker.Domain;
 
 namespace Fworker.Integrations.Commands;
@@ -8,8 +9,8 @@ namespace Fworker.Integrations.Commands;
 // W3.2: the journal ledger in C#. A port of Add-Journal, Close-JournalFolds, Add-JournalKind and Verb_journal of plugin/scripts/lib/Journal.ps1: the
 // same comment text and marker, the same ledger in the item's state comment (journal.keys, count, kinds, fold, waiting_at, ciReleased), the same folds,
 // the same cap, and the same GitHub calls in the same order (the golden writes see no difference). It does not go through the `journal` verb.
-// Differences, all in failure cases only: the line is written under a per-item lock of this process instead of the item lock file of the rule script
-// (the commands of one item also run one after the other, see JournalCommandWiring); a state conflict reads the state again and repeats the line, and
+// Differences, all in failure cases only: the line is written under the IItemLock it is given (W9.10l: the gateway gives it the one lock of every port, the item lock file that the rule scripts take too, so a journal
+// line, an item verb and a script exclude one another; without one, a lock of this process; the commands of one item also run one after the other, see JournalCommandWiring); a state conflict reads the state again and repeats the line, and
 // the repeat finds a comment that was posted before the conflict by its marker instead of posting it twice; a GitHub failure that is worth a retry is
 // thrown, for the command base to classify, where the script logs it and drops the line.
 
@@ -47,10 +48,11 @@ public sealed class JournalLedger
     readonly JournalSettings settings;
     readonly Func<DateTime> utcNow;
     readonly Action<string> log;
-    readonly ConcurrentDictionary<int, ItemLock> locks = new();
+    readonly IItemLock itemLock;
 
-    public JournalLedger(IJournalStore store, JournalSettings? settings = null, Func<DateTime>? utcNow = null, Action<string>? log = null)
+    public JournalLedger(IJournalStore store, JournalSettings? settings = null, Func<DateTime>? utcNow = null, Action<string>? log = null, IItemLock? itemLock = null)
     {
+        this.itemLock = itemLock ?? new InProcessItemLock();
         this.store = store; this.settings = settings ?? new JournalSettings(); this.utcNow = utcNow ?? (() => DateTime.UtcNow);
         this.log = log ?? (m => Console.Error.WriteLine(m));
     }
@@ -61,10 +63,30 @@ public sealed class JournalLedger
     /// </summary>
     public async Task<JournalOutcome> Append(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
     {
+        (ev, key) = Prepare(ev, key);
+        try { return await itemLock.Use(item, () => AppendLocked(item, ev, fields, key, ct), IItemLock.DefaultWaitSeconds, ct); }
+        catch (ItemBusyException e) { throw new TimeoutException($"journal {ev} for #{item}: {e.Message}", e); }   // worth a retry: the command base classifies a timeout as transient
+    }
+
+    /// <summary>
+    /// <see cref="Append"/> for a caller that already holds the item's lock (W9.10l): the keeper and manager verbs run under it, and the lock is not reentrant, so taking it again would wait for the caller itself.
+    /// </summary>
+    public Task<JournalOutcome> AppendHeld(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
+    {
+        (ev, key) = Prepare(ev, key);
+        return AppendLocked(item, ev, fields, key, ct);
+    }
+
+    (string Event, string Key) Prepare(string ev, string key)
+    {
         if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
         ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
         if (string.IsNullOrEmpty(key) || ev == "waiting") key = utcNow().Ticks.ToString(CultureInfo.InvariantCulture);
-        using var held = await Enter(item, ct);
+        return (ev, key);
+    }
+
+    async Task<JournalOutcome> AppendLocked(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct)
+    {
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -82,15 +104,28 @@ public sealed class JournalLedger
     }
 
     /// <summary>
+    /// W9.10c: whether the line with this event and key was handled already (its key is in the ledger of the item's state comment, which is what Add-Journal checks before it posts): the effect of a handling that was cut off
+    /// before its result was recorded. A 'waiting' line takes the ticks of its write as its key, so it can never be looked up (false).
+    /// </summary>
+    public async Task<bool> Recorded(int item, string ev, string key, CancellationToken ct = default)
+    {
+        if (string.Equals(ev, "waiting", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(key)) return false;
+        var supported = JournalEvents.Supported.FirstOrDefault(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
+        if (supported == null) return false;
+        var st = await store.Read(item, ct);
+        return JournalJson.Strings(Journal(st.State), "keys").Contains($"{supported}|{key}", StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// W9.6: Add-Journal with the caller's holder, the call the keeper and manager verbs make (Verbs.Keeper.ps1, Verbs.Manager.ps1): the line is posted and the ledger updated in <paramref name="holder"/>, which the caller saves
     /// itself together with the state it changed (no save here). False when the line was a repeat or over the cap. Throws for a failure that is worth a retry, as <see cref="Append"/> does; the caller decides what a lost line means.
+    /// The caller holds the item's lock (W9.10l: the verbs run under it and it is not reentrant), so none is taken here.
     /// </summary>
-    public async Task<bool> AddTo(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
+    public Task<bool> AddTo(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
     {
         if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
         ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
-        using var held = await Enter(item, ct);
-        return await AddJournal(item, holder, ev, fields, key, save: false, ct);
+        return AddJournal(item, holder, ev, fields, key, save: false, ct);
     }
 
     /// <summary>
@@ -232,21 +267,6 @@ public sealed class JournalLedger
     }
 
     static bool Truthy(object? v) => v switch { null => false, string s => s.Length > 0, bool b => b, long l => l != 0, int i => i != 0, double d => d != 0, _ => true };
-
-    // ---- the lock of an item: lines of one item are written one after the other -------------------------------------------------------------------
-
-    sealed class ItemLock { public readonly SemaphoreSlim Gate = new(1, 1); public int Users; }
-
-    async Task<IDisposable> Enter(int item, CancellationToken ct)
-    {
-        ItemLock l;
-        lock (locks) { l = locks.GetOrAdd(item, _ => new ItemLock()); l.Users++; }
-        try { await l.Gate.WaitAsync(ct); }
-        catch { lock (locks) { if (--l.Users == 0) locks.TryRemove(item, out _); } throw; }
-        return new Releaser(() => { l.Gate.Release(); lock (locks) { if (--l.Users == 0) locks.TryRemove(item, out _); } });
-    }
-
-    sealed class Releaser(Action release) : IDisposable { int done; public void Dispose() { if (Interlocked.Exchange(ref done, 1) == 0) release(); } }
 
     /// <summary>The fields of a command (json) as the ledger reads them: text, true/false, numbers, null; anything else as its json.</summary>
     public static Dictionary<string, object?> FieldsOf(JsonObject? fields)

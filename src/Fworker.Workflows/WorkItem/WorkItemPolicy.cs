@@ -41,8 +41,8 @@ public sealed record WorkItemPolicy(
     /// <summary>Whether the feature plan has the steps of W7.3 (Plans/FeatureSteps.cs): reviews, the pull request, CI alongside Functional Testing, fix-forward rounds, the scheduler's slots. Unset, the plan's steps are the core's.</summary>
     public bool HasFeatureSteps => FeatureRules is not null;
 
-    /// <summary>Whether the steps of a plan ask the scheduler for a slot when they need a session.</summary>
-    public bool Schedules(string plan) => FeatureRules is { UseScheduler: true } && string.Equals(plan, WorkPlans.Feature, StringComparison.OrdinalIgnoreCase);
+    /// <summary>Whether the steps of a plan ask the scheduler for a slot when they need a session: the code plans (feature, and the hotfix plan of an incident, which asks at the top rank), where the engine carries the feature plan.</summary>
+    public bool Schedules(string plan) => FeatureRules is { UseScheduler: true } && WorkPlans.IsCode(plan);
 
     public TimeSpan Settle => SettleWindow ?? TimeSpan.FromHours(24);
 

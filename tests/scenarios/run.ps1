@@ -399,6 +399,8 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
     }
     $cfg = @{ mergePolicy = $Policy; humanApprovers = @('factory-worker-testperson[bot]') }; foreach ($k in $Extra.Keys) { $cfg[$k] = $Extra[$k] }
     if ($Engine -eq 'v2') { $cfg['engine'] = @{ v2Environments = @($script:V2EnvName); shadowEnvironments = @() } }   # (no suite sets an engine block of its own)
+    # W9.10p: the promote suite names the gateway environment tdd for delivery.autoPromote; the engine run's environment is v2ci, and the AutoPromoter must run there (it promotes uat and prod where the engine acts)
+    if ($Engine -eq 'v2' -and $cfg.ContainsKey('delivery') -and $cfg['delivery'] -is [System.Collections.IDictionary] -and $cfg['delivery'].Contains('autoPromote') -and $cfg['delivery']['autoPromote'] -is [System.Collections.IDictionary]) { $cfg['delivery']['autoPromote']['gatewayEnvironment'] = $script:V2EnvName }
     if ($Engine -eq 'v2') { Start-TestEnv $cfg -Merge $script:V2Profiles[$V2Profile] } else { Start-TestEnv $cfg }
     if ($Engine -eq 'v2') {
         # /ready does not wait for the database (the host starts in the background: the migration, which creates the database, then the node), and a journal line before the host is

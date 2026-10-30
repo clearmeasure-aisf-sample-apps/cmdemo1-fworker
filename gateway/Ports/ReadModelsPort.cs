@@ -145,48 +145,6 @@ sealed class JournalStateStore(Func<IJournalStore> store) : IItemStateStore
     }
 }
 
-/// <summary>Where the rule scripts keep their files (Paths.ps1): FACTORY_STATE_DIR, else the state folder of the data directory.</summary>
-static class RuleStateDirectory
-{
-    public static string Resolve(Func<string, string?> env)
-    {
-        if (env("FACTORY_STATE_DIR") is { Length: > 0 } s) return s;
-        if (env("FACTORY_DATA_DIR") is { Length: > 0 } d) return Path.Combine(d, "state");
-        foreach (var home in new[] { env("HOME"), env("USERPROFILE"), Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) })
-        {
-            if (string.IsNullOrEmpty(home) || !Directory.Exists(home)) continue;
-            var dir = Path.Combine(home, ".local", "share", "factory-worker");
-            try { Directory.CreateDirectory(dir); return Path.Combine(dir, "state"); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
-        }
-        return Path.Combine(Path.GetTempPath(), "factory-worker", "state");
-    }
-}
-
-/// <summary><see cref="IItemLock"/> as <c>Use-ItemLock</c>: the file <c>item-N.lock</c> of the state directory, opened exclusively; the same file the rule scripts lock, so v1 and v2 exclude one another.</summary>
-sealed class FileItemLock(string stateDir, TimeSpan? waitFor = null, Func<TimeSpan, CancellationToken, Task>? pause = null) : IItemLock
-{
-    readonly TimeSpan wait = waitFor ?? TimeSpan.FromSeconds(45);
-    readonly Func<TimeSpan, CancellationToken, Task> sleep = pause ?? ((t, ct) => Task.Delay(t, ct));
-
-    public async Task<T> Use<T>(int item, Func<Task<T>> body, CancellationToken ct)
-    {
-        Directory.CreateDirectory(stateDir);
-        var path = Path.Combine(stateDir, $"item-{item}.lock");
-        var until = DateTime.UtcNow + wait;
-        FileStream fs;
-        while (true)
-        {
-            try { fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); break; }
-            catch (IOException)
-            {
-                if (DateTime.UtcNow > until) throw new VerbRefusal(20, "item-busy", $"another operation on item {item} is running", new JsonObject { ["retryAfterSeconds"] = 5 });
-                await sleep(TimeSpan.FromMilliseconds(300), ct);
-            }
-        }
-        using (fs) return await body();
-    }
-}
-
 /// <summary><see cref="IRefusalCounts"/> from <c>refusals.json</c> of the state directory ({ "12": 3 }); none when the file is missing or cannot be read.</summary>
 sealed class RefusalFile(string stateDir) : IRefusalCounts
 {
@@ -231,7 +189,7 @@ sealed class ReadModelParts
         states ??= journalHttp is null || tokens is null ? new NoStateStore("secret-missing", "GH_TOKEN is not set on the gateway")
             : instance.Home is not { } home ? new NoStateStore("config-missing", "the instance configuration names no owner and repo") : MakeStates(settings, instance, journalHttp, tokens, home, env);
         var reads = new ItemReads(gh, states);
-        locks ??= new FileItemLock(stateDir, null, delay);
+        locks ??= new FileItemLock(stateDir, delay);
         var checks = new ChecksReadModel(reads, states, locks, delay);
         octopusHttp ??= new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         var octopus = new HttpOctopusApi(octopusHttp, settings.Octopus.Url, env);

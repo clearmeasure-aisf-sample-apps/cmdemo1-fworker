@@ -46,6 +46,7 @@ static class EndpointModuleExtensions
         services.AddSingleton<IEndpointModule, MessagingEndpoints>();
         services.AddSingleton<IEndpointModule, SupervisorEndpoints>();
         services.AddSingleton<IEndpointModule>(sp => new OctopusWebhookEndpoints(sp));   // W4.2: answers 404 unless the Octopus watcher is on (v2 acting)
+        services.AddSingleton<IEndpointModule>(sp => new AlertsEndpoints(sp, c.Gateway.EnvironmentName, c.Engine.V2Acts));   // W8.2: answers 404 unless the engine acts (Engine.V2Acts; the shadow run has the inbox but not this route)
         services.AddSingleton<IEndpointModule>(sp => ActivatorUtilities.CreateInstance<TestHookEndpoints>(sp, c.RuntimeNonces));
         // C7b: what is not a service of its own comes from the composition (the runtime nonces; the worker sessions at /mcp, made after the mapping)
         services.AddSingleton<IEndpointModule>(sp => new WorkerAdminEndpoints(sp.GetRequiredService<GatewayOptions>(), sp.GetRequiredService<MessagingSettings>(),
@@ -86,7 +87,9 @@ static class EndpointModuleExtensions
             if (c.Engine.V2Acts && c.Instance.Home is { } home && sp.GetService<WorkItemParts>() is { Ownership: { } ownership } parts)
             {
                 var host = sp.GetRequiredService<WolverineHostService>();
-                router = new V2VerbFeed(router, ownership, parts.Store, home, parts.Docs.Settings, m => host.PublishAsync(m), parts.Docs.Heads);
+                var feed = new V2VerbFeed(router, ownership, parts.Store, home, parts.Docs.Settings, m => host.PublishAsync(m), parts.Docs.Heads);
+                sp.GetService<V2ActivityTap>()?.Connect(feed.Observe);   // W9.4: a verb a v2 route answers is still a sign of life of the session
+                router = feed;
             }
             // W9.0: the verbs a route file registered are answered by v2 and never reach v1; with none registered the router is what it was
             return c.Engine.V2Acts && sp.GetRequiredService<V2VerbRoutes>() is { Count: > 0 } routes ? new V2VerbRouter(router, routes) : router;

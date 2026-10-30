@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Wolverine;
@@ -12,7 +13,10 @@ using Wolverine.ErrorHandling;
 public sealed class JournalCommandService
 {
     readonly WriteJournalLineHandler handler;
-    internal JournalCommandService(WriteJournalLineHandler handler) { this.handler = handler; }
+    readonly Fworker.Workflows.Reconcilers.JournalHistory? history;
+    readonly Fworker.Contracts.Ids.RepoId? home;
+    // W9.8: a line that was handled is also recorded in the item's history (best-effort: JournalHistory never throws)
+    internal JournalCommandService(WriteJournalLineHandler handler, Fworker.Workflows.Reconcilers.JournalHistory? history = null, Fworker.Contracts.Ids.RepoId? home = null) { this.handler = handler; this.history = history; this.home = home; }
 
     // A failure that is tried again throws, and Wolverine's rule for CommandRetryException retries the envelope (the partition holds the item's later lines meanwhile).
     public async Task Run(WriteJournalLine c, IMessageBus bus, CancellationToken ct)
@@ -20,7 +24,12 @@ public sealed class JournalCommandService
         var o = await handler.Process(c, ct);
         if (o.Retry) throw new CommandRetryException($"{c.Name}: {o.Result.Failure} {o.Result.Error}");
         if (o.Failed != null) await bus.PublishAsync(o.Failed);
-        if (o.Message != null) await bus.PublishAsync(o.Message);
+        if (o.Message != null)
+        {
+            if (history != null && home is { } h && c.Item > 0)
+                await history.Record(new Fworker.Workflows.Reconcilers.JournalHistoryLine(new Fworker.Contracts.Ids.ItemId(h, c.Item).ToString(), c.Event, c.Key, o.Message.Posted, o.Message.Reason, o.Message.Reason == "recorded", DateTimeOffset.UtcNow));
+            await bus.PublishAsync(o.Message);
+        }
     }
 }
 
@@ -99,12 +108,15 @@ sealed class LazyJournalStore(Func<CancellationToken, Task<IJournalStore>> make)
 // W3.2: the one place the journal command is wired, and only where the engine mode is V2.
 static class JournalCommandWiring
 {
-    public static JournalCommandSink Attach(WolverineHostService host, GatewayComposition c, Func<string, string?>? env = null, HttpClient? http = null, IIdempotencyLedger? ledger = null)
+    public static JournalCommandSink Attach(WolverineHostService host, GatewayComposition c, Func<string, string?>? env = null, HttpClient? http = null, IIdempotencyLedger? ledger = null, IItemLock? locks = null)
     {
         env ??= Environment.GetEnvironmentVariable;
         var settings = Settings(c, env);
         var store = new LazyJournalStore(ct => Task.FromResult<IJournalStore>(MakeStore(c, env, http)));
-        var service = new JournalCommandService(new WriteJournalLineHandler(ledger ?? new InMemoryIdempotencyLedger(), new JournalLedger(store, settings)));
+        var journal = new JournalLedger(store, settings, itemLock: locks ?? new FileItemLock(RuleStateDirectory.Resolve(env)));
+        c.JournalLedger = journal;   // W9.8: the verb journal writes through this one
+        var history = c.Database.ConnectionString is { } cs && c.Instance.Home is { } home ? new Fworker.Workflows.Reconcilers.JournalHistory(() => WorkItemWiring.Open(cs)) : null;
+        var service = new JournalCommandService(new WriteJournalLineHandler(ledger ?? new InMemoryIdempotencyLedger(), journal), history, c.Instance.Home);
         var previous = host.RuntimeCommands;
         host.RuntimeCommands = (services, w) =>
         {

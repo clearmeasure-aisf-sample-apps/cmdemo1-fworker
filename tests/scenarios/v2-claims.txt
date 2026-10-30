@@ -41,7 +41,7 @@ qc-gate-lifetime
 qc-gate-lease
 qc-gate-waiting
 # promote: the AutoPromoter of v1 still promotes the app to uat and prod where v2 acts (decision 2 of 2026-10-30, W9.10p), so the suite is unchanged on v2: no #496 (newest-only) difference shows in Tier 1,
-# and no block of golden/v2-differences.txt is made for it; the train's own decisions are compared in the shadow run (W5), not here. tdd is its environment: run.ps1 keeps the name.
+# and no block of golden/v2-differences.txt is made for it; the train's own decisions are compared in the shadow run (W5), not here. tdd is its environment: run.ps1 keeps the name, and names it as the gateway environment of delivery.autoPromote so that the AutoPromoter runs where the engine acts (W9.10p).
 promote
 # qc-worker: 330 checks green on v2 in one process (494 s); four shards in the matrix, as in the v1 job
 qc-worker
@@ -91,3 +91,11 @@ v1-only peer-approved | the dropped merge policy peer-approved (decision 4 of 20
 #                          writing the state comment that exists)
 # cursor, cursor-deadline  3 checks of each fail on v2: the runtime status after a failed launch ('the failure was counted against the item', 'the failure shows the launch's HTTP status and Cursor's answer', the ended execution in last[])
 # runtime                  13 checks fail on v2: the runtime status has no 'cae-job' entry in the status block the scenarios read
+
+# W9.4 gate: the delivery verbs that a session or a scenario calls through the verb route. private-build (the push gate's attestation) and publish-demo (the demo
+# video's release and asset) are answered by v2's own code (gateway/Ports/DeliveryVerbHost.cs) and write what the rule scripts write; no difference is declared.
+# settle, copilot-settle, copilot-owner and ci-release have no scenario that can be claimed here: the sweep's settle is the script's own (sync-board, W9.8), and the
+# copilot suite needs the environment name tdd (run with V2EnvName 'tdd' in run.ps1 by hand, its CI release, owner and settle scenarios pass on v2 with the golden writes unchanged). The unit tests (DeliveryVerbs*Tests) and the gateway tests (DeliveryVerbHostTests) pin them against the scripts.
+auto | ^(push gate|video label):
+# the demo upload endpoint (POST /api/v1/demo/N) reaches publish-demo through the bridge, not the verb route
+owner | ^owner:.the.owner.publishes.the.demo.video

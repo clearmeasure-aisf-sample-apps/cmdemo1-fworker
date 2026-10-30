@@ -1,6 +1,7 @@
 using Fworker.Contracts.Ids;
 using Fworker.Contracts.Messaging;
 using Fworker.Persistence;
+using Fworker.Workflows.Faults;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fworker.Workflows.Delivery;
@@ -56,7 +57,7 @@ public sealed class SqlMergedItemStore(Func<FactoryDbContext> open) : IMergedIte
                 foreach (var row in added) mine.Add((row.ItemKey, row.Commit));
                 return rows.Where(r => mine.Contains((r.ItemKey, r.Commit))).ToList();
             }
-            catch (DbUpdateException) { }
+            catch (Exception e) when (SqlFaults.IsConflict(e)) { }   // (a fault of the database is thrown: the message is retried, SqlFaults)
         }
         // another message recorded one of the rows between the look and the save (the primary key): one by one, and whoever holds each row decides
         var kept = new List<MergedItem>();
@@ -70,7 +71,7 @@ public sealed class SqlMergedItemStore(Func<FactoryDbContext> open) : IMergedIte
         if (await db.MergedItems.FindAsync([row.ItemKey, row.Commit], ct) is { } held) return held.MessageId == row.MessageId;
         db.MergedItems.Add(row);
         try { await db.SaveChangesAsync(ct); return true; }
-        catch (DbUpdateException)
+        catch (Exception ex) when (SqlFaults.IsConflict(ex))
         {
             // lost the race to another message (the primary key): whoever holds the row decides
             await using var again = open();
@@ -126,7 +127,7 @@ public sealed class DeliveredToTable(Func<FactoryDbContext> open) : IDeliveredLo
         if (await db.DeliveredTo.FindAsync([key, env], ct) is { } row) { row.Release = e.Release; row.DeliveredAt = at; }
         else db.DeliveredTo.Add(new DeliveredToEntry { ItemKey = key, Environment = env, Release = e.Release, DeliveredAt = at });
         try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException)
+        catch (Exception ex) when (SqlFaults.IsConflict(ex))
         {
             // the same row written by another node at once: update it
             await using var again = open();

@@ -286,7 +286,7 @@ public class DeliveryShadowTests
     public async Task ACommandOfTheTrain_IsRecorded_NeverExecuted_AndReportedAsSuch()
     {
         var r = new Rig();
-        DeliveryShadowHandlers.Handle(new PromoteRelease("PromoteRelease|orders|1.0.2|uat", "orders", "orders-project", "1.0.2", "uat"), r.Shadow);
+        DeliveryShadowHandlers.Handle(new PromoteRelease("PromoteRelease|orders|1.0.2|uat|1", "orders", "orders-project", "1.0.2", "uat"), r.Shadow);
         DeliveryShadowHandlers.Handle(new AnswerSignOff("AnswerSignOff|orders|I-1", "orders", "I-1", "T-1", true, "ok"), r.Shadow);
         var report = await r.Shadow.Report(10, null, default);
         var cmds = (JsonArray)report["recentCommands"]!;

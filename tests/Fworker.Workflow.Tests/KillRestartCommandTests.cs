@@ -107,7 +107,8 @@ public class KillRestartCommandTests
     // the gateway's wiring of a database (SqlCommandStores): the ledger and the reservations in SQL, new objects in every process on the same database
     static Func<string, Action<WolverineOptions>> WireCopilot(GitHubTasks github, Received received, Func<ICommandPort> inner, TimeSpan? minAge = null) => cs =>
     {
-        var stores = new SqlCommandStores(cs);
+        // W9.10c: the killed process left its claim of the key; the restarted one finds it alive for a moment (Pending, retried after a pause) and then expired. The ttl and the pauses are short here.
+        var stores = new SqlCommandStores(cs, claimTtl: TimeSpan.FromMilliseconds(400));
         ICommandPort port = new CopilotLaunchPort(inner(), stores.Reservations, new CopilotReconciler(stores.Reservations, github), minAge: minAge ?? TimeSpan.Zero);
         return w =>
         {
@@ -116,7 +117,7 @@ public class KillRestartCommandTests
             w.AddMessageHandler(new ResultHandler<RuntimeStartFailed>(received));
             w.AddMessageHandler(new ResultHandler<IntegrationFailed>(received));
             Route<StartRuntimeSession>(w); Route<RuntimeSessionStarted>(w); Route<RuntimeStartFailed>(w); Route<IntegrationFailed>(w);
-            w.OnException<CommandRetryException>().RetryTimes(5);
+            w.OnException<CommandRetryException>().RetryWithCooldown(Enumerable.Repeat(TimeSpan.FromMilliseconds(300), 10).ToArray());
         };
     };
 
@@ -314,6 +315,7 @@ public class KillRestartCommandTests
                 return Task.FromResult<(string TaskId, string Url)?>(t.Id == null ? null : (t.Id, "https://github.com/tasks/" + t.Id));
             }
         }
+        public Task<(string TaskId, string Url)?> FindResumeAsync(int item, string phase, DateTime since, CancellationToken ct) => Task.FromResult<(string TaskId, string Url)?>(null);
     }
 
     sealed class LaunchPort(GitHubTasks github, Func<Task>? before = null, Func<Task>? after = null) : ICommandPort

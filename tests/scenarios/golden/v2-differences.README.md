@@ -1,7 +1,7 @@
 # Declared differences of v2 (`v2-differences.txt`)
 
 The golden writes (`README.md` of this directory) are the oracle for both engines: v2 must write what v1 writes. Where v2 writes differently **on
-purpose**, the difference is a block in `v2-differences.txt`, reviewed in a pull request like a golden file. The blocks today are those of the scenarios
+purpose**, the difference is a block in `v2-differences.txt`, reviewed in a pull request like a golden file. The blocks today are those of the octopus scenarios (the transcript, a database row on v2: W9.8) and of the scenarios
 of the suite `saga` (`tests/scenarios/saga.ps1`, W9.10d), the first that start a `WorkItemSaga` on v2: the docs plan (W6.6) and the feature plan (W7.3). The suite runs on both engines
 from one script, its golden files are recorded on v1, and each block says what v2 writes instead: the engine's intake and the saga's projection move the card (source `gateway`), the plant's journal lines
 go through the Wolverine sink (source `gateway`), the docs plan's merge is the saga's own call (source `gateway`, no merge comment, the card to Done by the projection). A block whose `# why:` names #557

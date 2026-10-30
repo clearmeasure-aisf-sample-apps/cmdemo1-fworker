@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Fworker.Contracts.Commands;
+using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Xunit;
@@ -81,13 +82,13 @@ public sealed class JournalLedgerTests
         public JournalLedger Ledger;
         // every read of the clock moves it by a tick, so two lines in the same instant still have the different ticks the script's keys (the ticks of the write) have
         DateTime Clock() { var t = Now; Now = Now.AddTicks(10); return t; }
-        public Rig(double waitingMinutes = 30, IReadOnlyList<string>? patterns = null, IReadOnlyList<string>? stateAuthors = null)
+        public Rig(double waitingMinutes = 30, IReadOnlyList<string>? patterns = null, IReadOnlyList<string>? stateAuthors = null, IItemLock? itemLock = null)
         {
             var http = new HttpClient(Api) { BaseAddress = new Uri("http://fake/") };
             var factory = new GitHubClientFactory(http, new StaticCredentialSource([], new GitHubCredential("t", "token")), new GitHubBudget());
             var client = factory.For(Contracts.Ids.RepoId.Parse("o/r")).GetAwaiter().GetResult();
             var store = new GitHubJournalStore(client, new JournalIdentity(Name, _ => Task.FromResult(Login), stateAuthors ?? []), Clock, Log.Add);
-            Ledger = new JournalLedger(store, new JournalSettings(waitingMinutes, patterns), Clock, Log.Add);
+            Ledger = new JournalLedger(store, new JournalSettings(waitingMinutes, patterns), Clock, Log.Add, itemLock);
         }
 
         public Task<JournalOutcome> Line(int n, string ev, string key, params (string K, object? V)[] f) =>
@@ -110,6 +111,62 @@ public sealed class JournalLedgerTests
     }
 
     static readonly (string, object?)[] Matched = [("column", "Technical Design"), ("reason", "board-move"), ("trigger", "the sweep")];
+
+    // ---- W9.10l: the lock of the item is the one the caller gives ---------------------------------------------------------------------------------
+
+    sealed class RecordingLock(bool busy = false) : IItemLock
+    {
+        public readonly List<(int Item, int Wait)> Calls = [];
+        public Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct)
+        {
+            Calls.Add((item, waitSeconds));
+            return busy ? throw new ItemBusyException(item) : body();
+        }
+    }
+
+    [Fact]
+    public async Task ALineIsWrittenUnderTheItemLockItIsGiven_WithTheWaitOfUseItemLock()
+    {
+        var l = new RecordingLock(); var r = new Rig(itemLock: l);
+        Assert.True((await r.Line(7, "matched", "m1", Matched)).Posted);
+        Assert.Equal([(7, 45)], l.Calls);
+        Assert.Single(r.Plant(7));
+    }
+
+    [Fact]
+    public async Task ABusyItemLock_IsATimeoutTheCommandBaseRetries_AndNothingWasWritten()
+    {
+        var l = new RecordingLock(busy: true); var r = new Rig(itemLock: l);
+        var e = await Assert.ThrowsAsync<TimeoutException>(() => r.Line(7, "matched", "m1", Matched));
+        Assert.Contains("another operation on item 7 is running", e.Message);
+        Assert.Empty(r.Api.Calls);
+        Assert.Equal(Fworker.Integrations.Commands.ErrorAction.Retry, ErrorClassifier.Classify(e).Action);
+    }
+
+    [Fact]
+    public async Task ACallerThatHoldsTheItemLock_WritesWithoutTakingItAgain_TheLockIsNotReentrant()
+    {
+        // the keeper and manager verbs run under the item's lock: a line they write must not wait for the lock they hold
+        var l = new RecordingLock(busy: true); var r = new Rig(itemLock: l);
+        Assert.True((await r.Ledger.AppendHeld(7, "matched", new Dictionary<string, object?>(Matched.ToDictionary(x => x.Item1, x => x.Item2)), "m1")).Posted);
+        var holder = new ItemState { State = new JsonObject { ["schema"] = 1, ["item"] = 7 } };
+        Assert.True(await r.Ledger.AddTo(7, holder, "keeper-action", new Dictionary<string, object?> { ["verb"] = "set-priority", ["policy"] = "p", ["by"] = "b", ["reason"] = "r", ["detail"] = "d" }, "k1"));
+        Assert.Empty(l.Calls);
+    }
+
+    [Fact]
+    public async Task WithoutALock_TheLinesOfOneItemAreWrittenOneAfterTheOther()
+    {
+        var l = new InProcessItemLock();
+        var inside = new TaskCompletionSource(); var release = new TaskCompletionSource();
+        var first = l.Use(3, async () => { inside.SetResult(); await release.Task; return 1; }, 5, default);
+        await inside.Task;
+        Assert.Equal(2, await l.Use(4, () => Task.FromResult(2), 1, default));   // another item is free
+        await Assert.ThrowsAsync<ItemBusyException>(() => l.Use(3, () => Task.FromResult(3), 1, default));
+        release.SetResult();
+        Assert.Equal(1, await first);
+        Assert.Equal(4, await l.Use(3, () => Task.FromResult(4), 1, default));   // released
+    }
 
     // ---- journal-fold.ps1, step by step -------------------------------------------------------------------------------------------------------
 
@@ -481,6 +538,44 @@ public sealed class JournalLedgerTests
         var h2 = new WriteJournalLineHandler(new InMemoryIdempotencyLedger(), r.Ledger);
         var replay = await h2.Process(c);
         Assert.False(replay.Message!.Posted); Assert.Single(r.Plant(70));
+    }
+
+    // W9.10c: two concurrent handlings of one line post one comment; the second waits (Transient) while the first is writing
+    [Fact]
+    public async Task TheCommand_TwoConcurrentHandlings_PostOneComment_TheSecondWaits()
+    {
+        var r = new Rig();
+        var inside = new ManualResetEventSlim(); var release = new ManualResetEventSlim();
+        r.Api.Intercept = req => { if (req.Method == HttpMethod.Post) { inside.Set(); release.Wait(TimeSpan.FromSeconds(10)); } return null; };
+        var h = new WriteJournalLineHandler(new InMemoryIdempotencyLedger(), r.Ledger);
+        var c = Cmd(72, "offered", "off|c1|w1", new JsonObject { ["worker"] = "w1", ["type"] = "persistent-local", ["ackSeconds"] = 120.0 });
+        var first = Task.Run(() => h.Process(c));
+        Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
+        var second = await h.Process(c);
+        Assert.True(second.Retry); Assert.Equal(FailureKind.Transient, second.Result.Failure); Assert.Contains(IntegrationCommandHandler<WriteJournalLine>.PendingError, second.Result.Error);
+        release.Set();
+        Assert.True((await first.WaitAsync(TimeSpan.FromSeconds(10))).Message!.Posted);
+        Assert.True((await h.Process(c)).Message!.Posted);   // answered from the ledger
+        Assert.Single(r.Plant(72));
+    }
+
+    // W9.10c: a claim that ran out is settled by the journal key of the item's state comment: the line is not posted again, whether the earlier handling got as far as its write or not
+    [Fact]
+    public async Task TheCommand_AnExpiredClaim_IsSettledByTheJournalKey()
+    {
+        var r = new Rig();
+        var c = Cmd(73, "offered", "off|d1|w1", new JsonObject { ["worker"] = "w1", ["type"] = "persistent-local", ["ackSeconds"] = 120.0 });
+        Assert.True((await new WriteJournalLineHandler(new InMemoryIdempotencyLedger(), r.Ledger).Process(c)).Message!.Posted);   // the earlier handling wrote the line and died before it recorded the key
+        Assert.True(await r.Ledger.Recorded(73, "offered", "off|d1|w1"));
+        Assert.False(await r.Ledger.Recorded(73, "offered", "off|other"));
+        Assert.False(await r.Ledger.Recorded(73, "waiting", "off|d1|w1"));   // a waiting line takes the ticks of its write: it can never be looked up
+        var now = new DateTime(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
+        var ledger = new InMemoryIdempotencyLedger(claimTtl: TimeSpan.FromMinutes(2), utcNow: () => now);
+        ledger.Claim(c.IdempotencyKey); now = now.AddMinutes(3);
+        var calls = r.Api.Calls.Count(x => x.StartsWith("POST", StringComparison.Ordinal));
+        var o = await new WriteJournalLineHandler(ledger, r.Ledger).Process(c);
+        Assert.True(o.Result.Ok); Assert.Equal("recorded", o.Result.Execution); Assert.Equal(calls, r.Api.Calls.Count(x => x.StartsWith("POST", StringComparison.Ordinal)));
+        Assert.Single(r.Plant(73));
     }
 
     [Fact]
