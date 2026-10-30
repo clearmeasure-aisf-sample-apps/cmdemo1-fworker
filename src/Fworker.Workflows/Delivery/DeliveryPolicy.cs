@@ -49,7 +49,7 @@ public sealed record DeliveryPolicy(
     /// <summary>The train promotes (creates deployments, answers Sign-offs) only for an enabled environment after tdd that the gateway promotes.</summary>
     public bool Acts => Enabled && Promoter == Promoter.Gateway && ReleaseChoice.PreviousEnvironment(Environment) is not null;
 
-    // Shadow (W9.10p): the train decides here, in the engine that acts, but v1's AutoPromoter still promotes (the app's uat and prod until the train's recorded clean live window, W9.12): the decisions are published and
+    // The Shadow parameter (W9.10p): the train decides here, in the engine that acts, but v1's AutoPromoter still promotes (the app's uat and prod until the train's recorded clean live window, W9.12): the decisions are published and
     // compared with v1's, and the commands it would send are wrapped in ShadowCommand, which the shadow records and nothing executes. False for every environment of the shadow run, whose commands
     // are all recorded by the shadow host's handlers anyway, and for an environment the train promotes for real.
 }

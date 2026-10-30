@@ -12,7 +12,8 @@ namespace Fworker.Workflows.Delivery;
 // only at the newest release that succeeded in the previous one and judges it with the rules of D2 (EvidenceComposite) and D3 (ContentGate, ReleaseChoice), falling back to the release
 // before it when the newer is blocked, as the content gate decides today. Where v1 promotes (tdd), v1's decision stays the acting one: the train decides, publishes TrainDecided and, only
 // when its policy lets it act (DeliveryPolicy.Acts) and the engine acts, asks for the deployment with PromoteRelease and answers a Sign-off with AnswerSignOff. Nothing here calls Octopus: both
-// are integration commands that a host without Engine.V2Acts does not execute.
+// are integration commands that a host without Engine.V2Acts does not execute. W9.10p: in an environment v1's AutoPromoter still promotes (DeliveryPolicy.Shadow) the train decides the same and its
+// commands leave as ShadowCommand, which only the shadow records.
 //
 // It is a saga in the sense of the design (state per key, saved with a revision, timers by Wolverine scheduled messages), not Wolverine's Saga base class: that one needs generated handler
 // code per saga type, and the state here is the one JSON document the shadow run compares. Delivery is at least once: every input is applied twice with the same result.

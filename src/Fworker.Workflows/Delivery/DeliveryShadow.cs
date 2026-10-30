@@ -251,8 +251,8 @@ public static class DeliveryShadowHandlers
 }
 
 /// <summary>
-/// W9.10p: the shadow's handlers in a host where the engine acts. The train there promotes for the environments it is given (delivery.autoPromote.trainEnvironments) and decides the others in shadow, because v1's
-/// AutoPromoter still promotes them (the app's uat and prod until W9.12): this records those decisions (compared with the AutoPromoter's actions) and their commands, which the train publishes as
+/// W9.10p: the shadow's handlers in a host where the engine acts. The train there promotes the app's uat and prod only once delivery.autoPromote.trainActs is on (W9.12); until then v1's
+/// AutoPromoter promotes them and the train decides them in shadow: this records those decisions (compared with the AutoPromoter's actions) and their commands, which the train publishes as
 /// <see cref="ShadowCommand"/>. A decision of an environment the train promotes for real is no shadow decision and is left to the history. No handler of <c>PromoteRelease</c> or <c>AnswerSignOff</c> is here:
 /// those are the executor's. Public because Wolverine's generated code refers to it.
 /// </summary>
