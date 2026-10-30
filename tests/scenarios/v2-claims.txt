@@ -22,6 +22,12 @@ owner | ^journal fold:
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
 
+# W9.2: the item verbs (claim-item, append-body, record-review, complete, validation-verdict, move-next ...) answer on v2 as the scripts do. Three scenarios of the suite 'auto' that use them (the completion
+# of Development stays the script's until W9.5, and these scenarios run it as such): the gates, the escalation of a repeated criterion with the timing comment, and the docs-only design reviews.
+auto | ^gates refuse what they should
+auto | ^escalate earlier:
+auto | ^docs-only fast path: one design review round
+
 # W9.5 gate: the read models (pr-checks, wait-for-checks, model-tier) on v2: the detail of a failed check, the baseline, the pages of a log and the artifacts, the item's own pull request, the count of red heads and the one
 # rerun, and the model ladder with the refusals the v1 wrapper counts in the state directory (the files the rule scripts and v2 share). The verbs answer from v2 where the engine acts; the rest of each scenario still runs on v1.
 auto | ^(push gate|pr-checks|model ladder|testing profile):

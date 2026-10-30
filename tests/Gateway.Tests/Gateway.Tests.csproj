@@ -20,6 +20,7 @@
   <ItemGroup>
     <ProjectReference Include="../../gateway/Gateway.csproj" />
     <ProjectReference Include="../../src/Fworker.Database/Fworker.Database.csproj" />
+    <!-- the fake GitHub is started as a process by ItemVerbsFakeGitHubTests: built beside the tests, not referenced by them -->
     <!-- the fake GitHub and Octopus of the Tier 1 suites, built beside the tests, not referenced: the read models' tests (ReadModels*FakeTests) start it as a process of its own, and the service verbs' parity tests (ServiceVerbParityTests) run the rule scripts and the C# verbs against it -->
     <ProjectReference Include="../FakeGitHub/FakeGitHub.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
