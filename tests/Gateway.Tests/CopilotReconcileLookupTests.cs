@@ -110,12 +110,45 @@ public sealed class CopilotReconcileLookupTests
     }
 
     [Fact]
-    public async Task ResumeForItem_WithoutAnOwnerOrAPullRequest_CannotLook_SoItThrows()
+    public async Task ResumeForItem_WithoutAnOwnerOrAPullRequest_CannotLook_SoItThrowsNothingToLookAt()
     {
         var (none, _) = Runtime(_ => null);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => none.ResumeForItem(12, Since, default));
+        await Assert.ThrowsAsync<CopilotNothingToLookAtException>(() => none.ResumeForItem(12, Since, default));
         var (noPr, _) = Runtime(_ => new CopilotOwner { Item = 12, TaskId = "task-1" });
-        await Assert.ThrowsAsync<InvalidOperationException>(() => noPr.ResumeForItem(12, Since, default));
+        await Assert.ThrowsAsync<CopilotNothingToLookAtException>(() => noPr.ResumeForItem(12, Since, default));
+    }
+
+    // the blocker of the W9.10c review: the first launch of an item has no owner, so the resume probe of a reservation of unknown mode (cut off before its mode was stamped) must read as "no resume" and the reservation be released
+    [Fact]
+    public async Task Reconciler_FirstLaunchCutOffBeforeItsModeWasStamped_NoOwner_NoTask_IsReleased_ThroughTheRealLookup()
+    {
+        var (rt, api) = Runtime(_ => null);
+        api.Routes[Tasks] = (HttpStatusCode.OK, List());
+        var store = new InMemoryCopilotReservations();
+        var r = new CopilotReservation(12, "Development", "w1", ReservationState.Reserved, Since.AddMinutes(5));   // Mode "": the process was killed before the mode was stamped
+        store.Put(r);
+        Assert.Equal(ReconcileOutcome.Released, await new CopilotReconciler(store, new RealLookup(rt), () => Since.AddMinutes(10)).Settle(r));
+        Assert.Equal(ReservationState.Released, store.Get(12, "Development")!.State);
+    }
+
+    [Fact]
+    public async Task Reconciler_UnknownMode_GitHubFailingOnTheResumeProbe_StaysReserved()
+    {
+        var (rt, api) = Runtime(_ => new CopilotOwner { Item = 12, TaskId = "task-1", Pr = 40 });
+        api.Routes[Tasks] = (HttpStatusCode.OK, List());
+        api.Routes["/repos/o/r/issues/40/comments"] = (HttpStatusCode.InternalServerError, "{}");
+        var store = new InMemoryCopilotReservations();
+        var r = new CopilotReservation(12, "Development", "w1", ReservationState.Reserved, Since.AddMinutes(5));
+        store.Put(r);
+        Assert.Equal(ReconcileOutcome.Unknown, await new CopilotReconciler(store, new RealLookup(rt), () => Since.AddMinutes(10)).Settle(r));
+        Assert.Equal(ReservationState.Reserved, store.Get(12, "Development")!.State);
+    }
+
+    // what RuntimeCommandService does: the real runtime behind the lookup interface
+    sealed class RealLookup(CopilotCloudRuntime rt) : ICopilotTaskLookup
+    {
+        public Task<(string TaskId, string Url)?> FindAsync(int item, string phase, DateTime since, CancellationToken ct) => rt.TaskForItem(item, since, ct);
+        public Task<(string TaskId, string Url)?> FindResumeAsync(int item, string phase, DateTime since, CancellationToken ct) => rt.ResumeForItem(item, since, ct);
     }
 
     // ---- the owner record of what was found ------------------------------------------------------------------------------------------------

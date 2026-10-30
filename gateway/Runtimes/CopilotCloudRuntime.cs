@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
+using Fworker.Integrations.Commands;
 
 // The api launch mode, v2: the Copilot cloud agent (docs/design/copilot-cloud-agent.md). One agent task per worker and phase: POST
 // /agents/repos/{owner}/{repo}/tasks (GitHub's agent tasks REST API, public preview, X-GitHub-Api-Version 2026-03-10) as the bot user that holds
@@ -484,15 +485,15 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
         return null;
     }
 
-    // W9.10c: the resume a reservation was made for: a "@copilot" comment on the owner's pull request created at or after since, and the session it started. Throws when there is no owner or pull request to look at
-    // or GitHub cannot be asked (the reservation then stays). The execution is "<task>#<session>" as Resume names it; the session number is read from the task's sessions when GitHub has started it.
+    // W9.10c: the resume a reservation was made for: a "@copilot" comment on the owner's pull request created at or after since, and the session it started. Throws CopilotNothingToLookAtException when there is no owner or pull request to look at
+    // and another exception when GitHub cannot be asked (the reservation then stays). The execution is "<task>#<session>" as Resume names it; the session number is read from the task's sessions when GitHub has started it.
     public async Task<(string TaskId, string Url)?> ResumeForItem(int item, DateTime since, CancellationToken ct)
     {
-        var own = await Owner(item, ct) ?? throw new InvalidOperationException($"copilot: no owner task of #{item} to look for a resume of");
+        var own = await Owner(item, ct) ?? throw new CopilotNothingToLookAtException($"copilot: no owner task of #{item} to look for a resume of");
         var pr = own.Pr;
         if (pr <= 0 && itemPr != null && await itemPr.FindAsync(item, ct) is { } ip) pr = ip.Number;
         if (pr <= 0 && own.Branch != "") pr = await PrOfBranch(own.Branch, ct);
-        if (pr <= 0) throw new InvalidOperationException($"copilot: no pull request of #{item} to look for a resume on");
+        if (pr <= 0) throw new CopilotNothingToLookAtException($"copilot: no pull request of #{item} to look for a resume on");
         var (s, j) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/issues/{pr}/comments?since={Uri.EscapeDataString(since.ToUniversalTime().ToString("o"))}&per_page=100", null, ct);
         if (s != 200) throw new HttpRequestException($"copilot comments of #{pr}: {s}");
         var posted = ((j as JsonArray) ?? new JsonArray()).Any(c =>

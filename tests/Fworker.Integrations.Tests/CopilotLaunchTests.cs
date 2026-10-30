@@ -16,11 +16,11 @@ public class CopilotLaunchTests
 
     sealed class Lookup : ICopilotTaskLookup
     {
-        public (string, string)? Found, FoundResume; public bool Fail; public int Calls, ResumeCalls; public DateTime Since;
+        public (string, string)? Found, FoundResume; public bool Fail, NothingToLookAt; public int Calls, ResumeCalls; public DateTime Since;
         public Task<(string TaskId, string Url)?> FindAsync(int item, string phase, DateTime since, CancellationToken ct)
         { Calls++; Since = since; if (Fail) throw new HttpRequestException("down"); return Task.FromResult(Found is { } f ? ((string, string)?)f : null); }
         public Task<(string TaskId, string Url)?> FindResumeAsync(int item, string phase, DateTime since, CancellationToken ct)
-        { ResumeCalls++; Since = since; if (Fail) throw new HttpRequestException("down"); return Task.FromResult(FoundResume is { } f ? ((string, string)?)f : null); }
+        { ResumeCalls++; Since = since; if (NothingToLookAt) throw new CopilotNothingToLookAtException("no owner"); if (Fail) throw new HttpRequestException("down"); return Task.FromResult(FoundResume is { } f ? ((string, string)?)f : null); }
     }
 
     sealed class Recorder : ICopilotOwnerRecorder
@@ -251,6 +251,14 @@ public class CopilotLaunchTests
         Assert.Equal(ReservationState.Reserved, store.Get(7, "Development")!.State);
         recorder.Fail = false;
         Assert.Equal(ReconcileOutcome.Launched, Assert.Single(await reconciler.Run(TimeSpan.FromMinutes(2))).Outcome);
+    }
+
+    [Fact]
+    public async Task Reconciler_UnknownMode_NoOwnerToLookAt_IsAMissOfTheResume_SoAFirstLaunchIsReleased()
+    {
+        await Unknown(); lookup.NothingToLookAt = true; now = T0.AddMinutes(5);   // a first launch cut off before its mode was stamped: the item has no owner
+        Assert.Equal(ReconcileOutcome.Released, Assert.Single(await reconciler.Run(TimeSpan.FromMinutes(2))).Outcome);
+        Assert.Equal(ReservationState.Released, store.Get(7, "Development")!.State);
     }
 
     [Fact]

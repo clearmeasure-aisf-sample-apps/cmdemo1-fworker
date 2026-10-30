@@ -74,6 +74,12 @@ public interface ICopilotOwnerRecorder
     Task RecordAsync(CopilotReservation settled, CancellationToken ct);
 }
 
+/// <summary>
+/// W9.10c: what <see cref="ICopilotTaskLookup.FindResumeAsync"/> throws when there is nothing to look at (the item has no owner task, or its task has no pull request), as opposed to GitHub failing. A resume
+/// can only have been posted on an owner's pull request, so for a reservation of unknown mode this is an answer ("no resume"), not a failure: the first launch of an item has no owner at all.
+/// </summary>
+public sealed class CopilotNothingToLookAtException(string message) : InvalidOperationException(message);
+
 public enum ReconcileOutcome { Launched, Released, Unknown }
 
 public sealed record ReconcileResult(int Item, string Phase, ReconcileOutcome Outcome);
@@ -100,7 +106,7 @@ public sealed class CopilotReconciler
             {
                 found = await lookup.FindAsync(r.Item, r.Phase, since, ct);
                 if (found != null) mode = CopilotReservation.LaunchMode;
-                else if (mode == "" && await lookup.FindResumeAsync(r.Item, r.Phase, since, ct) is { } resumed) { found = resumed; mode = CopilotReservation.ResumeMode; }
+                else if (mode == "" && await ResumeOrNone(r, since, ct) is { } resumed) { found = resumed; mode = CopilotReservation.ResumeMode; }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -119,6 +125,13 @@ public sealed class CopilotReconciler
             return store.Transition(r, launched) ? ReconcileOutcome.Launched : ReconcileOutcome.Unknown;
         }
         return store.Transition(r, r with { State = ReservationState.Released }) ? ReconcileOutcome.Released : ReconcileOutcome.Unknown;
+    }
+
+    // the resume probe of a reservation of unknown mode: an item with no owner task or no pull request has no resume to find (a first launch), which is a miss and not a failure of GitHub
+    async Task<(string TaskId, string Url)?> ResumeOrNone(CopilotReservation r, DateTime since, CancellationToken ct)
+    {
+        try { return await lookup.FindResumeAsync(r.Item, r.Phase, since, ct); }
+        catch (CopilotNothingToLookAtException) { return null; }
     }
 
     /// <summary>One pass: every reservation still Reserved after <paramref name="minAge"/> (a launch in flight is not touched).</summary>
