@@ -93,6 +93,13 @@ public sealed class JournalLedger
         return await AddJournal(item, holder, ev, fields, key, save: false, ct);
     }
 
+    /// <summary>
+    /// W9.2: Add-Journal into a holder the caller has read and will save itself (the item verbs write their journal line and their state together, as the rule scripts do): the line is added to the holder's ledger and posted
+    /// (or folded), nothing is saved here. False when the line was a repeat, over the cap, or already posted. Throws for a failure of GitHub, which the caller treats as the script does (it logs and goes on).
+    /// </summary>
+    public Task<bool> AddInHand(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default) =>
+        AddJournal(item, holder, ev, fields, key, save: false, ct);
+
     // a 'waiting' note is rate-limited: at most one per timing.journalWaitingMinutes per item; the state is read once, and saved here after the line
     async Task<JournalOutcome> AppendWaiting(int item, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct)
     {

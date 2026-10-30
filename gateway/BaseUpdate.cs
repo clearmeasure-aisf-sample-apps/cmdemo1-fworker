@@ -40,7 +40,7 @@ sealed class BaseUpdateSettings
     }
 }
 
-sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool ownerMode) : BackgroundService
+sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool ownerMode, V2VerbRoutes? v2 = null) : BackgroundService
 {
     sealed class PendingUpdate { public int Item, Pr; public string Expected = ""; public DateTime At; public bool Running; }
     readonly object gate = new();
@@ -60,6 +60,13 @@ sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool 
     DateTime? lastTriggerAt;
 
     public bool AutoUpdateBranch { get { lock (gate) return cfg.AutoUpdateBranch; } set { lock (gate) cfg.AutoUpdateBranch = value; } }
+
+    // W9.3: base-watch and base-update-branch are v2's where the engine acts (gateway/Verbs/MergeVerbs.cs answers for the items the saga owns and hands the rest to the script); else the rule script, as before
+    async Task<(int Code, string Output)> Call(string verb, string stdin, TimeSpan timeout)
+    {
+        if (v2 is not null && v2.TryGet(verb, out var handler)) { var answer = await handler(stdin, timeout); return (answer.Code, answer.Output); }
+        return await runner.RunAsync(verb, stdin, timeout);
+    }
 
     // a pull request merged into the default branch (webhook): one trigger for a burst, with the latest head; at most 3 debounce windows late
     public void OnMerged(int pr)
@@ -94,7 +101,7 @@ sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool 
             var input = new JsonObject { ["known"] = k, ["items"] = new JsonArray(owners.Select(o => (JsonNode)o.Item).ToArray()), ["mergedPrs"] = new JsonArray(prs.Select(p => (JsonNode)p).ToArray()) };
             // the conflict modes ask whether each pull request conflicts with master (one read per pull request whose head or master's moved)
             if (!cfg.EveryMove) { input["conflicts"] = true; input["conflictKnown"] = ck; }
-            var (code, output) = await runner.RunAsync("base-watch", input.ToJsonString(), TimeSpan.FromSeconds(120));
+            var (code, output) = await Call("base-watch", input.ToJsonString(), TimeSpan.FromSeconds(120));
             if (code != 0) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"baseUpdate\":\"watch-failed\",\"exit\":{code}}}"); return; }
             var j = JsonNode.Parse(output)!; var head = j["head"]?.ToString() ?? ""; var changed = j["changed"]?.GetValue<bool>() == true;
             var rows = (j["rows"] as JsonArray ?? new JsonArray()).OfType<JsonObject>().ToList();
@@ -188,7 +195,7 @@ sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool 
     {
         try
         {
-            var (code, output) = await runner.RunAsync("base-update-branch", new JsonObject { ["item"] = u.Item, ["pr"] = u.Pr, ["expected"] = u.Expected }.ToJsonString(), TimeSpan.FromSeconds(90));
+            var (code, output) = await Call("base-update-branch", new JsonObject { ["item"] = u.Item, ["pr"] = u.Pr, ["expected"] = u.Expected }.ToJsonString(), TimeSpan.FromSeconds(90));
             var outcome = code == 0 ? JsonNode.Parse(output)?["outcome"]?.ToString() ?? "" : "exit-" + code;
             lock (gate)
             {

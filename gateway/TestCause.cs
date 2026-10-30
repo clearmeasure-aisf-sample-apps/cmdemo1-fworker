@@ -27,6 +27,9 @@ static class TestCause
     /// <summary>The cause id of the request this code runs for, or null.</summary>
     public static string? Current => current.Value?.Value;
 
+    /// <summary>The cause id to send as X-Fake-Cause with a write the gateway makes itself (v2 verbs, as the rule script does): the current one when the test mode is on and it is 1 to 80 characters of [A-Za-z0-9._-]; else null.</summary>
+    public static string? ForWrite => On && Current is { } id && Valid.IsMatch(id) ? id : null;
+
     /// <summary>The rule script's stdin with "_cause" added when the test mode is on and the current request carries a valid id; stdin that is
     /// not a JSON object, and every call without an id, is returned unchanged.</summary>
     public static string Inject(string stdin)

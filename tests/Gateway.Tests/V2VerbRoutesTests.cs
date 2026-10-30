@@ -78,11 +78,22 @@ public sealed class V2VerbRoutesTests : IDisposable
     [InlineData("tdd", "\"prod\"", "", null)]          // v1 acts
     [InlineData("tdd", "", "\"tdd\"", null)]           // the shadow run: v1 acts
     [InlineData("prod", "\"prod\"", "", "1")]          // the kill switch: v1 again
-    [InlineData("prod", "\"prod\"", "", null)]         // v2 acts: the stubs register nothing
-    public void TheStubsRegisterNothing_WhateverTheEngine(string environment, string v2, string shadow, string? off)
+    public void NothingIsRegistered_WhereV1Acts(string environment, string v2, string shadow, string? off)
     {
         var routes = V2VerbRoutes.Build(Engine(environment, v2, shadow, off), new ServiceCollection().BuildServiceProvider());
         Assert.Equal(0, routes.Count);
+    }
+
+    [Fact]
+    public void WhereV2Acts_OnlyTheVerbsOfTheGroupsAreRegistered_AndNoneTwice()
+    {
+        // each group's item fills its own route file (W9.2 to W9.8): what is registered is always some group's verb, once; the QC verbs are in no group
+        var routes = V2VerbRoutes.Build(Engine("prod", "\"prod\""), new ServiceCollection().BuildServiceProvider());
+        var all = V2VerbRoutes.Groups.SelectMany(g => g.Verbs).ToHashSet();
+        Assert.All(routes.Verbs, v => Assert.Contains(v, all));
+        Assert.Equal(routes.Count, routes.Verbs.Distinct().Count());
+        // W9.3 (#355): the five merge train verbs are registered
+        Assert.All(MergeRoutes.Verbs, v => Assert.Contains(v, routes.Verbs));
     }
 
     [Fact]
@@ -120,9 +131,8 @@ public sealed class V2VerbRoutesTests : IDisposable
     [Fact]
     public void AnEngineThatActs_WithNothingRegistered_KeepsTheRouterItWas()
     {
-        // EndpointModules wraps the router only when a route exists; this is the stub state of W9.0
-        var routes = V2VerbRoutes.Build(Engine("prod", "\"prod\""), new ServiceCollection().BuildServiceProvider());
-        Assert.Equal(0, routes.Count);
+        // EndpointModules wraps the router only when a route exists (a table with none is the stub state of W9.0; the engine that does not act has the shared empty table)
+        Assert.Equal(0, V2VerbRoutes.None.Count);
         var source = File.ReadAllText(Path.Combine(Root(), "gateway", "Endpoints", "EndpointModules.cs"));
         Assert.Contains("is { Count: > 0 } routes ? new V2VerbRouter(router, routes) : router", source);
     }
