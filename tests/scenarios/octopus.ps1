@@ -330,6 +330,30 @@ $OctopusScenarios = [ordered]@{
     } finally { [void](Fake 'octo-hold-starts' @{ hold = $false }); Oct-Cleanup @($n) }
 }
 
+# A refused start is a real 'Start worker' server task (every retry of the plant makes one). The day budget counted from the task history (at a restart, at the UTC midnight) must not count the ones the host refused for room
+# (the manager refunds them in process only), or an hour of refusals followed by a restart would use up the daily execution cap and the runtime would start nothing until midnight.
+'octopus: the tasks the host refused for room (exit 75) are not counted by the day budget after a gateway restart; a start that failed for another reason still is' = {
+    Oct-Up
+    $n = 0
+    try {
+        [void](Fake 'octo-hold-starts' @{ hold = $true })
+        $n = New-Item-Fake 'Octopus host full restart' 'x' $OctLabels
+        Check 'a Start worker run is made' (Wait-Until -Seconds 60 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        $first = (Oct-Runs 'Start worker' $n)[0]; $name1 = "$($first.values.Name)"
+        [void](Fake 'octo-task' @{ id = $first.task; state = 'Failed'; error = 'The remote script failed with exit code 75' })
+        Check 'the execution ends as host-full' (Wait-Until -Seconds 60 { @((Oct-Status).last | Where-Object { $_.worker -eq $name1 -and $_.outcome -eq 'host-full' }).Count -eq 1 }) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
+        # the item is closed before the restart, so the plant makes no further run (a retry that was made in the meantime is a run that has not ended: it counts, the refused one does not)
+        Rt-Close $n
+        $running = (Oct-Runs 'Start worker' $n).Count - 1
+        Restart-Gateway
+        Check "after the restart the refused task is not today's ($running)" (Wait-Until -Seconds 20 { $s = Oct-Status; $s.relisted -and $s.today -eq $running }) (Oct-Status | ConvertTo-Json -Compress -Depth 4)
+        # the same task failed for another reason is a launch that was used
+        [void](Fake 'octo-task' @{ id = $first.task; state = 'Failed'; error = 'The remote script failed with exit code 1' })
+        Restart-Gateway
+        Check "a start that failed for another reason counts ($($running + 1))" (Wait-Until -Seconds 20 { $s = Oct-Status; $s.relisted -and $s.today -eq ($running + 1) }) (Oct-Status | ConvertTo-Json -Compress -Depth 4)
+    } finally { [void](Fake 'octo-hold-starts' @{ hold = $false }); Oct-Cleanup @($n) }
+}
+
 # W0.2: the day budget is counted from the server tasks, every Start and overflow run since 00:00 UTC, whether its worker still runs or was stopped.
 'octopus: the day budget survives a restart (a stopped worker''s Start still counts) and a UTC midnight (a Start queued before it does not)' = {
     Oct-Up

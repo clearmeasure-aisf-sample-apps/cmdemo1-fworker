@@ -44,6 +44,23 @@ sealed class SagaInputs(V2Ownership ownership, IWorkItemStore store, RepoId home
     public Task<bool> Resumed(int item, string key) =>
         Send(item, "resume", () => new ResumeWorkItem(new ItemId(home, item), 0, key));
 
+    /// <summary>
+    /// The operator unparks an item whose park only the saga holds (its budget parked it: after a restart the runtime manager's counters start at 0 while the saga's persist, and a fix-forward round clears the manager's launches but
+    /// not the saga's), so the script found no park in v1's state comment. True when the saga was parked and the resume was taken; false for an item the saga does not own, one that is not parked, or a host that is down.
+    /// The key is of the moment of the call: there is no v1 park to name.
+    /// </summary>
+    public async Task<bool> ResumeIfParked(int item, string? key = null)
+    {
+        if (!ownership.Owns(item)) return false;
+        var id = new ItemId(home, item);
+        try
+        {
+            if ((await store.Load(id.ToString(), CancellationToken.None))?.State is not { IsOpen: true, Parked: true }) return false;
+            return await Deliver(id, "resume", new ResumeWorkItem(id, 0, key ?? $"resume|admin|{DateTime.UtcNow.Ticks}"));
+        }
+        catch (Exception e) { Console.Error.WriteLine($"v2 resume feed for {id}: {e.GetType().Name}"); return false; }
+    }
+
     /// <summary>One count against the step's budgets, under the arm of the step the item is on now (a budget message for another arm would be stale). Nothing for an item whose saga is not open.</summary>
     public async Task<bool> Budget(int item, BudgetKind kind, string key, string reason)
     {

@@ -83,6 +83,30 @@ public sealed class SagaInputsTests
     }
 
     [Fact]
+    public async Task ASagaOnlyPark_OfTheBudget_IsLiftedByTheOperatorsUnpark_WhenTheScriptFoundNoPark_AndTheItemIsOfferedAgain()
+    {
+        var rig = new Rig(); await rig.Start();
+        // the runtime manager's counters restarted at 0, the saga's did not: its failure budget parks the item and v1's state comment has no park
+        for (var i = 1; i <= 5 && !rig.State.Parked; i++) await rig.Saga.Budget(7, BudgetKind.Failure, $"failure|oct-7-{i}", "start-failed");
+        Assert.True(rig.State.Parked);
+        await rig.Own.RefreshAsync();
+        Assert.Empty(rig.Own.Offers);
+        // the admin endpoint: unpark-item answered not-parked (exit 10); the saga owns the item and is parked, so it is resumed on a key of its own
+        Assert.True(await rig.Saga.ResumeIfParked(7));
+        var resume = Assert.IsType<ResumeWorkItem>(rig.Published.Last());
+        Assert.StartsWith("resume|admin|", resume.Key);
+        Assert.False(rig.State.Parked);
+        Assert.Empty(rig.State.Failures);   // (the budgets of the phase start afresh)
+        await rig.Own.RefreshAsync();
+        Assert.Equal([(7, "Technical Design")], rig.Own.Offers);
+        // a second unpark finds nothing parked in the saga either: nothing is sent, and the script's refusal stands
+        var before = rig.Published.Count;
+        Assert.False(await rig.Saga.ResumeIfParked(7));
+        Assert.Equal(before, rig.Published.Count);
+        Assert.False(await rig.Saga.ResumeIfParked(8));   // (not the saga's)
+    }
+
+    [Fact]
     public async Task AnItemTheSagaDoesNotOwn_CostsOneLook_AndIsToldNothing()
     {
         var rig = new Rig(); await rig.Start();
@@ -307,4 +331,16 @@ public sealed class HostFullTaskTests
     [InlineData("", "", false)]
     public void TheErrorMessageOrTheLog_SaysWhetherTheHostRefusedTheStartForRoom(string? error, string? log, bool hostFull) =>
         Assert.Equal(hostFull, OctopusRunbookRuntime.IsHostFull(error, log));
+
+    [Fact]
+    public void RepeatedHostFullRefusals_WaitLongerEachTime_UpToFiveMinutes_AndTheFirstWaitIsTheListInterval()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(15), OctopusRunbookRuntime.HostFullWait(1, 5));   // (at least 15 s)
+        Assert.Equal(TimeSpan.FromSeconds(30), OctopusRunbookRuntime.HostFullWait(1, 30));
+        Assert.Equal(TimeSpan.FromSeconds(60), OctopusRunbookRuntime.HostFullWait(2, 30));
+        Assert.Equal(TimeSpan.FromSeconds(120), OctopusRunbookRuntime.HostFullWait(3, 30));
+        Assert.Equal(TimeSpan.FromMinutes(5), OctopusRunbookRuntime.HostFullWait(6, 30));
+        Assert.Equal(TimeSpan.FromMinutes(5), OctopusRunbookRuntime.HostFullWait(500, 30));
+        Assert.Equal(TimeSpan.FromMinutes(5), OctopusRunbookRuntime.HostFullWait(1, 900));   // (a long interval is capped too)
+    }
 }

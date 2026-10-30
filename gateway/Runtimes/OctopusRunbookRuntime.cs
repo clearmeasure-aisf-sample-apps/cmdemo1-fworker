@@ -101,6 +101,10 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
     JsonObject? permissionCheck;
     bool rebuilt;
     DateTime noCapacityUntil = DateTime.MinValue;
+    // repeated host-full refusals of one host: how many in a row and when the last was seen, so the wait grows (HostFullWait) instead of one real 'Start worker' server task every max(listSeconds, 15) s without end
+    readonly Dictionary<string, (int Count, DateTime At)> hostFullRuns = new(StringComparer.OrdinalIgnoreCase);
+    public static readonly TimeSpan HostFullWaitMax = TimeSpan.FromMinutes(5);
+    static readonly TimeSpan HostFullStreakFor = TimeSpan.FromMinutes(15);   // a refusal after a longer quiet time starts a new streak
 
     readonly Func<CancellationToken, Task<string>> entraToken;
     readonly SemaphoreSlim tokenGate = new(1, 1);
@@ -191,6 +195,24 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
     /// <summary>Whether a failed start task is the host's refusal for room: the task's error message or its log says so.</summary>
     public static bool IsHostFull(string? errorMessage, string? log) =>
         (errorMessage is { Length: > 0 } && HostFullText.IsMatch(errorMessage)) || (log is { Length: > 0 } && HostFullText.IsMatch(log));
+
+    /// <summary>The wait after the n-th host-full refusal in a row: the base wait (the list interval, at least 15 s), doubled for each refusal after the first, at most <see cref="HostFullWaitMax"/>.</summary>
+    public static TimeSpan HostFullWait(int refusals, double baseSeconds)
+    {
+        var wait = TimeSpan.FromSeconds(Math.Max(baseSeconds, 15));
+        for (var i = 1; i < refusals && wait < HostFullWaitMax; i++) wait += wait;
+        return wait < HostFullWaitMax ? wait : HostFullWaitMax;
+    }
+
+    // a host-full refusal is seen (under the gate): the wait before the next start grows with the refusals of that host in a row
+    void NoteHostFull(string machine, DateTime now)
+    {
+        hostFullRuns.TryGetValue(machine, out var run);
+        var count = run.Count > 0 && now - run.At < HostFullStreakFor ? run.Count + 1 : 1;
+        hostFullRuns[machine] = (count, now);
+        var until = now + HostFullWait(count, cfg.ListSeconds);
+        if (until > noCapacityUntil) noCapacityUntil = until;
+    }
 
     // a failed start task: its error message first, then its log (a read that fails or finds nothing leaves the failure a failure)
     async Task<bool> StartRefusedForHost(string taskId, JsonNode? task, CancellationToken ct)
@@ -428,7 +450,8 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
             lock (gate)
             {
                 rec.State = state; if (t?["IsCompleted"]?.GetValue<bool>() == true || state is "Success" or "Failed" or "Canceled" or "TimedOut") rec.TaskDone ??= DateTime.UtcNow;
-                if (hostFull) { rec.HostFull = true; noCapacityUntil = DateTime.UtcNow.AddSeconds(Math.Max(cfg.ListSeconds, 15)); }   // (the plant queues the item until the next reading, as after a refusal for capacity)
+                if (hostFull) { rec.HostFull = true; NoteHostFull(rec.Machine, DateTime.UtcNow); }   // (the plant queues the item until the next reading, as after a refusal for capacity; repeated refusals wait longer each time)
+                else if (state == "Success" && rec.Mode == "detached") hostFullRuns.Remove(rec.Machine);   // the host had room again
             }
         }
         var now = DateTime.UtcNow; var list = new List<RuntimeInstance>();
@@ -479,7 +502,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
 
     // W0.2 (IRunHistory): the day budget counted from the server tasks, so a restart does not give the day back. Every Start and overflow run
     // queued since the cutoff counts, whether its worker still runs, was stopped or ended by itself; a start that found no host queued no run and
-    // is not in the history (the manager refunds that one in process too).
+    // is not in the history (the manager refunds that one in process too). A start task that failed with the host's refusal for room (host-full, exit 75) is not counted either: the task list says so in the error message.
     public async Task<int> LaunchesSince(DateTime sinceUtc, CancellationToken ct)
     {
         await Ids(ct);
@@ -499,7 +522,10 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
                 rb = run["RunbookId"]?.ToString() ?? "";
                 lock (gate) runbookOfRun[runId] = rb;
             }
-            if (startIds.Contains(rb)) n++;
+            if (!startIds.Contains(rb)) continue;
+            // a start the host refused for room (exit 75) is refunded in process; counted here it would give back to a restart or the midnight recount what an hour of refusals used up (each retry is a real server task)
+            if (t["State"]?.ToString() == "Failed" && IsHostFull(t["ErrorMessage"]?.ToString(), null)) continue;
+            n++;
         }
         return n;
     }

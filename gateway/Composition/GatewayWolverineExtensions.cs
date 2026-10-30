@@ -78,7 +78,7 @@ static class GatewayWolverineExtensions
                     var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
                     IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
                     // W9.10h: what a person does on GitHub (close, reopen, move the card, a hold label) reaches the saga from the same events; the card projection's echo is consulted first
-                    IngressInboxSagaWiring.Attach(host, new SagaIngress(workItems.Store, home, workItems.Docs.Settings, workItems.Docs.Versions!, workItems.Docs.Echo!, workItems.Docs.Issues));
+                    IngressInboxSagaWiring.Attach(host, new SagaIngress(workItems.Store, home, workItems.Docs.Settings, workItems.Docs.Versions!, workItems.Docs.Echo!, workItems.Docs.Issues, workItems.Docs.Facts));
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item
                     var mergedDeriver = ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable);
                     if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));

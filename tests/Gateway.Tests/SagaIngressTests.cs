@@ -30,6 +30,16 @@ public sealed class SagaIngressTests
         public Task<IReadOnlyList<string>?> ReadPullRequestFiles(RepoId repository, int number, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<string>?>(null);
     }
 
+    sealed class Merges : IMergeFactsReader
+    {
+        public MergedPullRequest? Closing;
+        public Exception? Throw;
+        public int Finds;
+        public Task<MergedPullRequest?> ReadPullRequest(RepoId repository, int number, CancellationToken ct = default) => Task.FromResult<MergedPullRequest?>(null);
+        public Task<MergedPullRequest?> FindMergedPullRequest(ItemId item, CancellationToken ct = default) { Finds++; return Throw is null ? Task.FromResult(Closing) : throw Throw; }
+        public Task<ItemMergeFacts?> ReadItem(ItemId item, CancellationToken ct = default) => Task.FromResult<ItemMergeFacts?>(null);
+    }
+
     sealed class Rig
     {
         public readonly InMemoryWorkItemStore Store = new();
@@ -37,15 +47,16 @@ public sealed class SagaIngressTests
         public readonly InMemoryProjectionVersions Versions = new();
         public readonly ProjectionEcho Echo;
         public readonly Issues Reader = new();
+        public readonly Merges Merged = new();
         public readonly SagaIngress Ingress;
         public DateTimeOffset Now = T0;
         int seq;
 
-        public Rig(bool withReader = true)
+        public Rig(bool withReader = true, bool withMerges = false)
         {
             Svc = new WorkItemService(Store, new WorkItemSaga(new DocsPort()));
             Echo = new ProjectionEcho(Versions, () => Now);
-            Ingress = new SagaIngress(Store, Home, Settings(), Versions, Echo, withReader ? Reader : null);
+            Ingress = new SagaIngress(Store, Home, Settings(), Versions, Echo, withReader ? Reader : null, withMerges ? Merged : null);
         }
 
         public WorkItemState State => Store.States[Item.ToString()];
@@ -99,6 +110,45 @@ public sealed class SagaIngressTests
         Assert.NotEqual(hook.Key, poll.Key);
         var result = await rig.Svc.Handle(hook);
         Assert.Equal((WorkItemOutcome.Applied, WorkItemStatus.Completed), (result.Decision.Outcome, rig.State.Status));
+    }
+
+    static MergedPullRequest MergedPr() => new(Home, 11, true, "master", "factory/7-docs", "Docs", "Closes #7", new string('a', 40));
+
+    [Theory]
+    [InlineData("webhook")]
+    [InlineData("poll")]
+    public async Task TheCloseOfTheIssue_ThatAMergedPullRequestClosed_IsTheMerges_NotAnItemClosed_AndTheMergeIsApplied(string source)
+    {
+        // a person merges 'Closes #7' while the item is on Development: GitHub closes the issue at once, the merge derivation has still to read the pull request
+        var rig = new Rig(withMerges: true); await rig.OnDevelop();
+        rig.Merged.Closing = MergedPr();
+        Assert.Empty(source == "webhook" ? await rig.Webhook("item.closed") : await rig.Poll("board.card", edit: e => { e["open"] = false; e["column"] = "Done"; }));
+        Assert.Equal(1, rig.Merged.Finds);
+        // the merge arrives later and finds the instance open: it is applied (the step is Merge, the commit recorded), not NotFound on a completed instance
+        var seen = await rig.Svc.Handle(new MergeSeen(Item, "merged|" + new string('a', 40), new string('a', 40), 11));
+        Assert.Equal(WorkItemOutcome.Applied, seen.Decision.Outcome);
+        Assert.Equal(new string('a', 40), rig.State.MergeCommit);   // (the docs plan ends with its merge: the instance completes by the merge, and the commit is on it)
+        Assert.Contains(seen.Decisions, d => d.Action == WorkItemActions.Merged);
+        // the race this closes: with the close delivered first, the instance completes without a merge and the merge is refused
+        var raced = new Rig(); await raced.OnDevelop();
+        await raced.Svc.Handle(Assert.IsType<ItemClosed>(Assert.Single(await raced.Webhook("item.closed"))));
+        Assert.Equal("", raced.State.MergeCommit);
+        var late = await raced.Svc.Handle(new MergeSeen(Item, "merged|" + new string('a', 40), new string('a', 40), 11));
+        Assert.Equal(WorkItemOutcome.NotFound, late.Decision.Outcome);
+    }
+
+    [Fact]
+    public async Task ACloseWithoutAMergedPullRequest_IsStillAnItemClosed_AndAFailedReadIsRetried()
+    {
+        var rig = new Rig(withMerges: true); await rig.OnDevelop();
+        Assert.IsType<ItemClosed>(Assert.Single(await rig.Webhook("item.closed")));   // (closed by hand: no merged pull request)
+        rig.Merged.Throw = new HttpRequestException("503");
+        await Assert.ThrowsAsync<HttpRequestException>(() => rig.Webhook("item.closed"));   // the message fails and is tried again; the close is neither lost nor sent unchecked
+        // an item that was merged already costs no read: the saga refuses a close then
+        await rig.Svc.Handle(new MergeSeen(Item, "merged|b", new string('b', 40), 11));
+        rig.Merged.Throw = null; rig.Merged.Finds = 0;
+        Assert.IsType<ItemClosed>(Assert.Single(await rig.Webhook("item.closed")));
+        Assert.Equal(0, rig.Merged.Finds);
     }
 
     [Fact]

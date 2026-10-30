@@ -79,7 +79,21 @@ sealed class ItemAdminEndpoints(MessagingSettings messaging, Plant plant, Runner
             if (saga is not null) await saga.Resumed(n, SagaKeys.ResumeKey(output));
             hub.RequestSweep(n);
         }
+        else if (saga is not null && IsNotParked(output) && await saga.ResumeIfParked(n))
+        {   // v1 has no park, the saga has one (its budget parked the item: a restart zeroes the runtime manager's counters but not the saga's, and a fix-forward round clears the manager's launches only): without this the item would stay
+            // stranded, V2Ownership offers none that the saga parked. The answer says so.
+            if (ownerMode) plant.ClearParks(new[] { n });
+            hub.RequestSweep(n);
+            output = new JsonObject { ["ok"] = true, ["id"] = n, ["unparked"] = true, ["exit"] = 0, ["saga"] = new JsonObject { ["resumed"] = true, ["note"] = "the park was the saga's only; v1 had none" } }.ToJsonString();
+            code = 0;
+        }
         return Results.Text(output, "application/json", Encoding.UTF8, RuleScriptResult.Status(code));
+    }
+
+    static bool IsNotParked(string output)
+    {
+        try { return JsonNode.Parse(output)?["code"]?.ToString() == "not-parked"; }
+        catch (JsonException) { return false; }
     }
 
     // Settle a merged item again (operator token only, issue 114): for an item an older gateway finished or stranded without a release, after a person

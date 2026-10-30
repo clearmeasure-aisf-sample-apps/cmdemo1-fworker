@@ -22,7 +22,7 @@ using Wolverine;
 // Every input carries a key made of the event's delivery and time, so a redelivered message derives the same inputs and the saga applies each once.
 
 /// <summary>Derives the saga's inputs from an inbox event. Public because Wolverine's generated code refers to it (the handler below).</summary>
-public sealed class SagaIngress(IWorkItemStore store, RepoId home, DocsPlanSettings settings, IProjectionVersions versions, ProjectionEcho echo, IItemIssueReader? issues = null)
+public sealed class SagaIngress(IWorkItemStore store, RepoId home, DocsPlanSettings settings, IProjectionVersions versions, ProjectionEcho echo, IItemIssueReader? issues = null, IMergeFactsReader? merges = null)
 {
     /// <summary>A webhook's event for a write of the projection arrives within seconds; this long after a write its event is still the projection's.</summary>
     public static readonly TimeSpan WebhookEchoWindow = TimeSpan.FromMinutes(2);
@@ -44,13 +44,13 @@ public sealed class SagaIngress(IWorkItemStore store, RepoId home, DocsPlanSetti
         switch (name)
         {
             case "item.closed":
-                inputs.Add(new ItemClosed(id, $"closed|{tag}", source));
+                if (!await ClosedByMerge(id, state, ct)) inputs.Add(new ItemClosed(id, $"closed|{tag}", source));
                 break;
             case "item.reopened":
                 if (!state.IsOpen) inputs.Add(new ReopenWorkItem(id, "the issue was reopened", $"reopened|{tag}"));
                 break;
             case "board.card" when ev["open"] is JsonValue o && o.TryGetValue<bool>(out var open) && !open:
-                inputs.Add(new ItemClosed(id, $"closed|{tag}", source));
+                if (!await ClosedByMerge(id, state, ct)) inputs.Add(new ItemClosed(id, $"closed|{tag}", source));
                 break;
             case "board.card" or "item.column_changed":
                 if (ev["column"]?.ToString() is { Length: > 0 } column && await Moved(id, state, column, webhook: name == "item.column_changed", tag, ct) is { } moved) inputs.Add(moved);
@@ -61,6 +61,16 @@ public sealed class SagaIngress(IWorkItemStore store, RepoId home, DocsPlanSetti
                 break;
         }
         return inputs;
+    }
+
+    // A merge closes its own issue ('Closes #N'), and GitHub closes it at once, while ItemMerged has first to be derived from the pull request read (ItemMergedDeriver) and may come later than this event: ItemClosed would then win
+    // the race while MergeCommit is still empty, complete the instance and make the MergeSeen answer NotFound, so no delivery and no settle would follow. So the pull request that closed the issue is looked for first, with the same
+    // reader the deriver uses: when a merged one is found the close is the merge's and the merge input (from the other handler of the same event) decides. A read that fails throws, and the message is retried (the close is
+    // not lost: the retry sends it). Without a reader (no GitHub credential) the merge cannot be derived either, and the close is the saga's as before. The instance that already merged or delivered needs no look: the saga refuses.
+    async Task<bool> ClosedByMerge(ItemId id, WorkItemState state, CancellationToken ct)
+    {
+        if (merges is null || !state.IsOpen || state.MergeCommit.Length > 0 || state.Status != WorkItemStatus.Open) return false;
+        return await merges.FindMergedPullRequest(id, ct) is { Merged: true };
     }
 
     // A person's move of the card, or null: the item is not on a step a card stands for, the column is no step's, the projection has not applied this step's card yet, or the event is the projection's own write.
