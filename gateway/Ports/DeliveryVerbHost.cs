@@ -69,7 +69,9 @@ sealed class DeliveryVerbHost
     readonly GitHubTokenProvider? tokens;
     readonly Func<string, string?> env;
     readonly HttpClient github, uploads, octopus;
-    readonly GitHubJournalStore? store;
+    readonly Fworker.Integrations.GitHub.GitHubClientFactory? clients;
+    readonly Fworker.Contracts.Ids.RepoId? home;
+    readonly JournalIdentity? identity;
     readonly Func<bool> mayAct;
     readonly Action<JsonObject> observeRate;
     readonly BoardMetaCache board = new();
@@ -79,7 +81,7 @@ sealed class DeliveryVerbHost
     readonly Func<TimeSpan, CancellationToken, Task> delay;
 
     public DeliveryVerbHost(JsonObject root, Func<string, string?> env, Func<bool> mayAct, Action<JsonObject> observeRate, VerbCall openPr, V2ActivityTap? tap = null,
-        HttpMessageHandler? inner = null, GitHubTokenProvider? tokens = null, Func<TimeSpan, CancellationToken, Task>? delay = null)
+        HttpMessageHandler? inner = null, GitHubTokenProvider? tokens = null, Func<TimeSpan, CancellationToken, Task>? delay = null, IGitHubCredentialSource? credentials = null)
     {
         config = RuleKit.WithTimingOverrides(root, env); this.env = env; this.mayAct = mayAct; this.observeRate = observeRate; this.openPr = openPr; this.tap = tap;
         this.tokens = tokens ?? GitHubTokenProvider.FromEnvironment(env);
@@ -97,12 +99,19 @@ sealed class DeliveryVerbHost
         github = Make(TimeSpan.FromSeconds(100)); uploads = Make(TimeSpan.FromSeconds(480));
         octopus = new HttpClient(inner ?? new HttpClientHandler()) { Timeout = TimeSpan.FromSeconds(30) };
         octopus.DefaultRequestHeaders.UserAgent.ParseAdd("factory-worker-gateway");
-        if (this.tokens is not null && Home(root) is { } home)
+        // Nothing here reaches GitHub: the construction must not fail on a transient fault, because a host that failed to build would be cached by the route's Lazy. The client of the state comment's repository (and with it
+        // the token mint) is resolved inside Run, per call, where a fault is answered as a retryable exit 20.
+        if (this.tokens is not null && Home(root) is { } h)
         {
-            var client = new GitHubClientFactory(github, new ProviderCredentialSource(this.tokens), new Fworker.Integrations.GitHub.GitHubBudget()).For(home).GetAwaiter().GetResult();
-            store = new GitHubJournalStore(client, Identity(root, env, github, this.tokens));
+            home = h;
+            clients = new GitHubClientFactory(github, credentials ?? new ProviderCredentialSource(this.tokens), new Fworker.Integrations.GitHub.GitHubBudget());
+            identity = Identity(root, env, github, this.tokens);
         }
     }
+
+    /// <summary>The state comment's store, over a client made now (the credential source returns the provider's current token).</summary>
+    async Task<GitHubJournalStore> Store(CancellationToken ct) =>
+        new(await clients!.For(home!.Value, ct), identity!);
 
     static Fworker.Contracts.Ids.RepoId? Home(JsonObject root) =>
         root["owner"]?.ToString() is { Length: > 0 } o && root["repo"]?.ToString() is { Length: > 0 } r ? new Fworker.Contracts.Ids.RepoId(o, r) : null;
@@ -149,7 +158,7 @@ sealed class DeliveryVerbHost
             if (tokens is null) throw new VerbReject(30, "secret-missing", "GH_TOKEN is not set on the gateway");
             var fenced = Fenced.Contains(verb);
             var transport = new HttpGhTransport(github, uploads, octopus, config, env, fenced ? mayAct : null, observeRate, delay);
-            var kit = new RuleKit(transport, new FencedStateStore(store!, fenced ? mayAct : null), config, board, env).ForSession(session);
+            var kit = new RuleKit(transport, new FencedStateStore(await Store(cts.Token), fenced ? mayAct : null), config, board, env).ForSession(session);
             Task<JsonObject> Body() => Dispatch(verb, kit, a, cts.Token);
             if (!NoLock.Contains(verb) && J.Has(a, "item")) return await locks.With(J.I(a["item"]), Body);
             return await Body();

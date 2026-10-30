@@ -123,6 +123,35 @@ public class DeliveryVerbHostTests
         Assert.Equal(("secret-missing", "GH_TOKEN is not set on the gateway"), (Answer(a)["code"]!.ToString(), Answer(a)["reason"]!.ToString()));
     }
 
+    sealed class FlakyCredentials(int failures) : IGitHubCredentialSource
+    {
+        int calls;
+        public int Calls => calls;
+        public ValueTask<GitHubCredential?> For(string owner, CancellationToken ct = default) =>
+            Interlocked.Increment(ref calls) <= failures ? throw new GitHubTokenException("the installation token could not be minted (503)") : new((GitHubCredential?)new GitHubCredential("test", "tok"));
+    }
+
+    [Fact]
+    public async Task ATransientFaultOnTheFirstCall_IsARetryableExit20_AndTheNextCallSucceeds()
+    {
+        // the client of the state comment (and the token mint behind it) is resolved inside Run: the construction of the host reaches nothing, so a fault is not kept by the route's Lazy
+        var gh = new FakeGitHub();
+        var credentials = new FlakyCredentials(failures: 1);
+        var host = new DeliveryVerbHost(Config, n => n == "FACTORY_SERVER_LOGIN" ? "factory-bot" : null, () => true, _ => { }, (verb, args, ct) => Task.FromResult((0, "{}")), null, gh,
+            GitHubTokenProvider.FromEnvironment(n => n == "GH_TOKEN" ? "tok" : null), (_, _) => Task.CompletedTask, credentials);
+        Assert.Equal(0, credentials.Calls);   // (construction made no token call)
+        var args = new JsonObject { ["item"] = 5, ["attest"] = new string('a', 40), ["holder"] = "w1" }.ToJsonString();
+
+        var first = await host.Run("private-build", args, TimeSpan.FromSeconds(30));
+        Assert.Equal(20, first.Code);
+        Assert.Equal((false, 20), (Answer(first)["ok"]!.GetValue<bool>(), Answer(first)["exit"]!.GetValue<int>()));
+        Assert.Equal(30, Answer(first)["retryAfterSeconds"]!.GetValue<int>());
+
+        var second = await host.Run("private-build", args, TimeSpan.FromSeconds(30));
+        Assert.Equal(0, second.Code);
+        Assert.Equal(new string('a', 40), gh.State["private_build"]!["sha"]!.ToString());
+    }
+
     [Fact]
     public async Task ACallersFieldsOfTheGateway_AreTakenOut_AndTheSessionFooterEndsTheComment()
     {

@@ -17,7 +17,7 @@ static class DeliveryRoutes
     /// </summary>
     public static void Register(V2VerbRoutes routes, IServiceProvider services)
     {
-        var host = new Lazy<DeliveryVerbHost>(() => DeliveryVerbHost.Make(services));
+        var host = new Lazy<DeliveryVerbHost>(() => DeliveryVerbHost.Make(services), LazyThreadSafetyMode.PublicationOnly);   // (a failed construction is not kept: the next call tries again)
         foreach (var verb in Routed)
         {
             var name = verb;
