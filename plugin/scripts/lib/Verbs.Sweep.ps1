@@ -958,12 +958,12 @@ function Invoke-Intake($a, $List, $Offers, $Unconfirmed, $Pins, $Seen, [string]$
         if (@($it.labels | Where-Object { "$_" -like 'hold:*' -or "$_" -like 'worker:*' -or (Test-NameIn "$_" $set.hold) }).Count -gt 0) { continue }
         if (-not $it.cardId) { continue }
         # intake.v2Plans (W9.10e, a gateway argument): where the v2 engine acts, its intake takes the Todo items of these plans and starts their sagas. The plan is what the engine's intake decides it by (DocsIntakeJob): the docs-only marker in the body
-        # is the docs plan, any other item the feature plan. An item that names what it depends on stays here: the engine's intake leaves it to this one, which checks the dependencies.
+        # is the docs plan, any other item the feature plan. The engine's intake checks the dependencies of the items it takes (W9.10h, D1: DocsIntakeJob.DependenciesMet), so v1 leaves them all, one that names a dependency too.
         $body = $null
         if ($v2Plans.Count -gt 0) {
             $body = if ($it.ContainsKey('body')) { "$($it.body)" } else { "$((Get-ItemInfo ([int]$it.number)).body)" }
             $plan = if ($body.Contains("$($c.docsOnlyMarker)")) { 'docs' } else { 'feature' }
-            if ($plan -in $v2Plans -and $body -notmatch '(?i)\bdepends\s+on\b') { continue }
+            if ($plan -in $v2Plans) { continue }
         }
         # Depends-on (issue 65): read with the sweep's own functions when this gateway has them
         if (Get-Command Get-ItemDependencies -ErrorAction SilentlyContinue) {

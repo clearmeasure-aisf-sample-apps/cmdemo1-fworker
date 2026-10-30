@@ -48,7 +48,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.LeaseDue = StepOf(step).Lease(Policy) is { } lease ? Now + lease : null;
         State.MergeRequest = null; State.MergeRetryAt = null;   // (a merge asked of an earlier arm is no longer waited for)
         TimerChanged = true;
-        Decide(WorkItemActions.StepEntered, reason);
+        State.CardSeq = Decide(WorkItemActions.StepEntered, reason).Sequence;
         StepOf(step).OnEnter(this);   // (after the decision: what the step asks for, it asks for in the step it has entered)
         // a step that needs no session gives the slot of the scheduler back; the merge is the end of the item's time in flight there (the feature plan, W7.3)
         if (step is StepKind.Merge or StepKind.Deliver) EndSession();

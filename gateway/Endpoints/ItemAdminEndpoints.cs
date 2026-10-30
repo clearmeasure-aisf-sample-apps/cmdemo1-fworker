@@ -16,7 +16,8 @@ static class RuleScriptResult
 
 // The operator's hand on single items and on the plant manager (task C7b): the manager's actions and mode, releasing a park early, settling a merged
 // item again.
-sealed class ItemAdminEndpoints(MessagingSettings messaging, Plant plant, Runner runner, EventHub hub, GatewayOptions gateway) : IEndpointModule
+// W9.10h: where the engine acts, the unpark also tells the saga of the item (ResumeWorkItem): it was parked by the script's verb alone, so V2Ownership went on owning the item without offering it.
+sealed class ItemAdminEndpoints(MessagingSettings messaging, Plant plant, Runner runner, EventHub hub, GatewayOptions gateway, SagaInputs? saga = null) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes)
     {
@@ -74,6 +75,8 @@ sealed class ItemAdminEndpoints(MessagingSettings messaging, Plant plant, Runner
             try { if (ownerMode && JsonNode.Parse(output)?["reoffer"] is JsonValue ro && ro.TryGetValue<bool>(out var reoffer) && reoffer) plant.OnVerb("release", new JsonObject { ["item"] = n }, ctx.Caller().Who, new JsonObject()); }
             catch (Exception e) { Console.Error.WriteLine($"plant hook unpark-item: {e.Message}"); }
             if (ownerMode) plant.ClearParks(new[] { n });   // issue 82: the digest no longer reports a park that was released
+            // the saga takes the step up again (budgets of the phase start afresh) and the next read of its table offers the item again; the sweep this call requests reads it
+            if (saga is not null) await saga.Resumed(n, SagaKeys.ResumeKey(output));
             hub.RequestSweep(n);
         }
         return Results.Text(output, "application/json", Encoding.UTF8, RuleScriptResult.Status(code));

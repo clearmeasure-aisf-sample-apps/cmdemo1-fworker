@@ -27,6 +27,9 @@ public static class WorkItemHandlers
     public static Task<OutgoingMessages> Handle(DeliveryLost m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(ParkWorkItem m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(ResumeWorkItem m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(ItemClosed m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(HoldObserved m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(CardMoved m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(PhaseLeaseExpired m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(SettleWindowElapsed m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(ReviewRecorded m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);

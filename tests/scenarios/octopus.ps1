@@ -16,6 +16,8 @@ function Oct-Host([string]$Method, [string]$Path, $Body = $null, [string]$Token 
 function Oct-Report([string]$HostName, [object[]]$Containers) { Oct-Host POST '/api/v1/runtime/octopus/report' @{ host = $HostName; containers = @($Containers) } }
 # every host reports (no container) once, as Reconcile hosts does: the gateway starts nothing on a host it has not heard from since its start
 function Oct-Up { foreach ($h in 'host-a', 'host-b', 'host-c') { [void](Oct-Report $h @()) } }
+# whether the item's state comment holds a park (false while the item has no state comment yet)
+function Oct-Parked([int]$Item) { try { $s = Get-ItemState $Item; ($s -is [hashtable]) -and $s.ContainsKey('park') } catch { $false } }
 function Oct-Machines([object[]]$Machines) { [void](Fake 'octo-machines' @{ machines = @($Machines) }) }
 $OctDefaultMachines = @(@{ id = 'Machines-1'; name = 'host-a' }, @{ id = 'Machines-2'; name = 'host-b' }, @{ id = 'Machines-3'; name = 'host-sick'; health = 'Unhealthy' }, @{ id = 'Machines-4'; name = 'host-uat'; env = 'Environments-12' }, @{ id = 'Machines-5'; name = 'web-1'; roles = @('web') })
 # The scenario's items are closed, both hosts report no container (every detached worker ends, gone), held tasks end, the runtime is healthy again.
@@ -290,6 +292,42 @@ $OctopusScenarios = [ordered]@{
         Start-Sleep -Seconds 3
         Check 'a worker whose Stop run is newer than its Start is not adopted' (@((Oct-Status).executions | Where-Object { $_.worker -eq $name }).Count -eq 0) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
     } finally { Oct-Cleanup @($n) }
+}
+
+# W9.10h: start-worker.sh refuses a start with "host-full: ..." and exit 75 when its host has no room (Fworker.PerHostCapacity, the headroom rules). Octopus ends the Start worker task Failed, with the error message
+# ("... exit code 75") and the line in the task log. That is a wait like "no capacity", not a failure of the session: the execution is refunded (the day budget), nothing is counted against the item's phase
+# (maxFailuresPerPhase 2 would park it runtime-failed at the second) or the runtime's health (unhealthyAfterFailures 2), and the item is offered again. Any other failed start is still a failure.
+'octopus: a start the host refused for room (exit 75) is a wait: the execution is refunded, no failure is counted, the item is not parked and is offered again; any other failed start is a failure' = {
+    Oct-Up   # every host has reported, as after a reconcile: the gateway starts nothing on a host it has not heard from
+    $n = 0
+    try {
+        [void](Fake 'octo-hold-starts' @{ hold = $true })   # the Start worker task stays Executing until the test sets how it ended
+        $n = New-Item-Fake 'Octopus host full' 'x' $OctLabels
+        Check 'a Start worker run is made' (Wait-Until -Seconds 60 { (Oct-Runs 'Start worker' $n).Count -eq 1 })
+        $first = (Oct-Runs 'Start worker' $n)[0]; $name1 = "$($first.values.Name)"
+        $today = [int](Oct-Status).today
+        Check 'the execution counts against the day' ($today -ge 1) (Oct-Status | ConvertTo-Json -Compress -Depth 4)
+        # the host said no, in the task's error message
+        [void](Fake 'octo-task' @{ id = $first.task; state = 'Failed'; error = 'The remote script failed with exit code 75' })
+        Check 'the execution ends as host-full' (Wait-Until -Seconds 60 { @((Oct-Status).last | Where-Object { $_.worker -eq $name1 -and $_.outcome -eq 'host-full' }).Count -eq 1 }) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
+        $s = Oct-Status
+        Check 'no failure of the item, the runtime healthy, no start failure in a row' (@($s.failures | Where-Object { $_.item -eq $n }).Count -eq 0 -and $s.healthy -eq $true -and $s.startFailuresInRow -eq 0) ($s | ConvertTo-Json -Compress -Depth 5)
+        Check 'the execution is refunded: the day budget has it back' (([int]$s.today) -le $today - 1 + @($s.executions | Where-Object { $_.item -eq $n }).Count) ($s | ConvertTo-Json -Compress -Depth 4)
+        Check 'the item is not parked' (-not (Oct-Parked $n))
+        # and it is offered again: a second Start worker run for the item (the plant waits for the next reading after a refusal for room)
+        Check 'the item is offered again: a second Start worker run is made' (Wait-Until -Seconds 90 { (Oct-Runs 'Start worker' $n).Count -eq 2 }) ((Oct-State).runs | ConvertTo-Json -Compress -Depth 5)
+        $second = (Oct-Runs 'Start worker' $n)[1]; $name2 = "$($second.values.Name)"
+        # the second time the task has no error message, only the line in its log
+        [void](Fake 'octo-task' @{ id = $second.task; state = 'Failed'; error = 'The action failed. See the task log for details.'; log = "INFO starting`nhost-full: 1 running fw-* container(s) on this host, the limit is 1`nERROR exit code 75" })
+        Check 'the second refusal is a wait too, found in the log' (Wait-Until -Seconds 60 { @((Oct-Status).last | Where-Object { $_.worker -eq $name2 -and $_.outcome -eq 'host-full' }).Count -eq 1 }) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
+        $s = Oct-Status
+        Check 'two refusals in the phase: still no failure, still healthy, the item not parked' (@($s.failures | Where-Object { $_.item -eq $n }).Count -eq 0 -and $s.healthy -eq $true -and -not (Oct-Parked $n)) ($s | ConvertTo-Json -Compress -Depth 5)
+        # any other failed start is a failure of the phase
+        Check 'a third run is made' (Wait-Until -Seconds 90 { (Oct-Runs 'Start worker' $n).Count -eq 3 })
+        $third = (Oct-Runs 'Start worker' $n)[2]; $name3 = "$($third.values.Name)"
+        [void](Fake 'octo-task' @{ id = $third.task; state = 'Failed'; error = 'The remote script failed with exit code 1'; log = 'docker: Error response from daemon: name conflict' })
+        Check 'a start that failed for another reason is a failure of the item''s phase' (Wait-Until -Seconds 60 { @((Oct-Status).failures | Where-Object { $_.item -eq $n -and $_.count -eq 1 }).Count -eq 1 -and @((Oct-Status).last | Where-Object { $_.worker -eq $name3 -and $_.outcome -eq 'failed' }).Count -eq 1 }) (Oct-Status | ConvertTo-Json -Compress -Depth 5)
+    } finally { [void](Fake 'octo-hold-starts' @{ hold = $false }); Oct-Cleanup @($n) }
 }
 
 # W0.2: the day budget is counted from the server tasks, every Start and overflow run since 00:00 UTC, whether its worker still runs or was stopped.

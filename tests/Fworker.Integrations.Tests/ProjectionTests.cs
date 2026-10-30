@@ -11,7 +11,7 @@ using Xunit;
 namespace Fworker.Integrations.Tests;
 
 /// <summary>
-/// W6.3 (#330): the projections of the v2 engine (state comment, labels, board column) against a fake of GitHub's issue-comment, label and Projects v2 GraphQL endpoints. The
+/// W6.3 (#330): the projections of the v2 engine (state comment, board column) against a fake of GitHub's issue-comment and Projects v2 GraphQL endpoints. The
 /// state comment must read back with the logic of Get-State (plugin/scripts/lib/Board.ps1): the golden writes of tests/scenarios/golden are parsed and re-rendered, and the
 /// body of a C# write is checked against the shape Get-State's regex reads.
 /// </summary>
@@ -25,16 +25,15 @@ public sealed class ProjectionTests
 
     sealed record Comment(long Id, string Login, string Body);
 
-    /// <summary>GitHub for one repository: issue comments, issue labels and the GraphQL calls of the board. Every request is listed in <see cref="Calls"/>.</summary>
+    /// <summary>GitHub for one repository: issue comments and the GraphQL calls of the board. Every request is listed in <see cref="Calls"/>.</summary>
     sealed class FakeGitHub : HttpMessageHandler
     {
         public readonly List<Comment> Comments = [];
-        public readonly List<string> Labels = [];
         public readonly List<string> Calls = [];
         public readonly List<JsonObject> GraphQl = [];
         public Action? AfterListing;   // a write by another process lands here, between the read and the save
         public Action<string>? OnCommentWrite;   // the webhook for a comment write: called with the body, while the write's own answer is still on its way
-        public bool FailMutation, FailDelete, FailCommentWrite;
+        public bool FailMutation, FailCommentWrite;
         long nextId = 1000;
         // the board
         public string Column = "Technical Design";
@@ -73,23 +72,6 @@ public sealed class ProjectionTests
                 if (req.Method == HttpMethod.Patch && FailCommentWrite) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.UnprocessableEntity));
                 if (req.Method == HttpMethod.Patch) { OnCommentWrite?.Invoke(JsonNode.Parse(body)!["body"]!.ToString()); Replace(id, JsonNode.Parse(body)!["body"]!.ToString()); c = Comments.First(x => x.Id == id); }
                 return Task.FromResult(Ok(Json(c)));
-            }
-            if (path == "/repos/o/r/issues/7/labels")
-            {
-                if (req.Method == HttpMethod.Get)
-                {
-                    var page = int.Parse(Regex.Match(q, @"[?&]page=(\d+)").Groups[1].Value);
-                    return Task.FromResult(Ok(new JsonArray(Labels.Skip((page - 1) * 100).Take(100).Select(l => (JsonNode)new JsonObject { ["name"] = l }).ToArray())));
-                }
-                foreach (var l in JsonNode.Parse(body)!["labels"]!.AsArray()) if (!Labels.Contains(l!.ToString(), StringComparer.OrdinalIgnoreCase)) Labels.Add(l.ToString());
-                return Task.FromResult(Ok(new JsonArray(Labels.Select(l => (JsonNode)new JsonObject { ["name"] = l }).ToArray())));
-            }
-            m = Regex.Match(path, @"^/repos/o/r/issues/7/labels/(.+)$");
-            if (m.Success && req.Method == HttpMethod.Delete)
-            {
-                if (FailDelete) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.UnprocessableEntity));
-                var name = Uri.UnescapeDataString(m.Groups[1].Value);
-                return Task.FromResult(Labels.RemoveAll(l => string.Equals(l, name, StringComparison.OrdinalIgnoreCase)) > 0 ? Ok(new JsonArray()) : new HttpResponseMessage(HttpStatusCode.NotFound));
             }
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
@@ -135,7 +117,6 @@ public sealed class ProjectionTests
         public readonly InMemoryProjectionVersions Versions = new();
         public readonly ProjectionEcho Echo;
         public readonly StateCommentProjection State;
-        public readonly LabelProjection Labels;
         public readonly BoardColumnProjection Board;
         public readonly List<string> Log = [];
         public DateTime Now = new(2026, 10, 28, 9, 0, 0, DateTimeKind.Utc);
@@ -148,7 +129,6 @@ public sealed class ProjectionTests
             var store = new GitHubJournalStore(client, new JournalIdentity(Name, _ => Task.FromResult(Login), []), () => Now, Log.Add);
             Echo = new ProjectionEcho(Versions);
             State = new StateCommentProjection(store, Versions, Echo);
-            Labels = new LabelProjection(client, Versions, Echo);
             Board = new BoardColumnProjection(http, cred, new BoardRef("o", 3), Versions, Echo, () => new DateTimeOffset(Now));
         }
 
@@ -313,18 +293,15 @@ public sealed class ProjectionTests
     {
         var r = new Rig();
         Assert.Equal(ProjectionOutcome.Applied, await r.State.Apply(Item, 5, s => s["x"] = 1));
-        Assert.Equal(ProjectionOutcome.Applied, await r.Labels.Apply(Item, 5, ["a"], ["a"]));
         Assert.Equal(ProjectionOutcome.Applied, await r.Board.Move(Item, 5, "Functional Testing"));
         r.Api.Calls.Clear(); r.Api.GraphQl.Clear();
         foreach (var v in new long[] { 5, 4 })
         {
             Assert.Equal(ProjectionOutcome.Stale, await r.State.Apply(Item, v, s => s["x"] = 99));
-            Assert.Equal(ProjectionOutcome.Stale, await r.Labels.Apply(Item, v, [], ["a"]));
             Assert.Equal(ProjectionOutcome.Stale, await r.Board.Move(Item, v, "Done"));
         }
         Assert.Empty(r.Api.Calls);
         Assert.Equal(1, (int)GetStateReads(r.StateComment().Body)["x"]!);
-        Assert.Equal(["a"], r.Api.Labels);
         Assert.Equal("Functional Testing", r.Api.Column);
         Assert.Equal(5, await r.Versions.Applied(Key, ProjectionTargets.Comment));
         Assert.Equal(ProjectionOutcome.Applied, await r.State.Apply(Item, 6, s => s["x"] = 2));
@@ -339,43 +316,9 @@ public sealed class ProjectionTests
         Assert.True(await v.Advance("o/r#1", "card", 3, t));
         Assert.False(await v.Advance("o/r#1", "card", 3, t));
         Assert.False(await v.Advance("o/r#1", "card", 2, t));
-        Assert.True(await v.Advance("o/r#1", "labels", 1, t));
+        Assert.True(await v.Advance("o/r#1", "comment", 1, t));
         Assert.True(await v.Advance("o/r#2", "card", 1, t));
-        Assert.Equal((3, 1, 1), (await v.Applied("o/r#1", "card"), await v.Applied("o/r#1", "labels"), await v.Applied("o/r#2", "card")));
-    }
-
-    // ---- labels -----------------------------------------------------------------------------------------------------------------------------
-
-    [Fact]
-    public async Task Labels_AreAddedAndRemovedOnlyForTheDifference_AndAForeignLabelIsNeverTouched()
-    {
-        var r = new Rig();
-        r.Api.Labels.AddRange(["env:tdd", "priority:high", "bug", "Auto Merge"]);
-        var outcome = await r.Labels.Apply(Item, 1, desired: ["env:tdd", "Auto Merge", "needs/review"], managed: ["env:tdd", "priority:high", "priority:top", "auto merge", "needs/review"]);
-        Assert.Equal(ProjectionOutcome.Applied, outcome);
-        Assert.Equal(["env:tdd", "bug", "Auto Merge", "needs/review"], r.Api.Labels);   // priority:high went (managed, not wanted); bug stays (not ours); one new label
-        var writes = r.Api.Calls.Where(c => !c.StartsWith("GET")).ToList();
-        Assert.Equal(["POST /repos/o/r/issues/7/labels", "DELETE /repos/o/r/issues/7/labels/priority%3Ahigh"], writes);
-    }
-
-    [Fact]
-    public async Task Labels_AlreadyAsWanted_WriteNothing_ButRecordTheVersion()
-    {
-        var r = new Rig();
-        r.Api.Labels.AddRange(["env:tdd", "Docs"]);
-        Assert.Equal(ProjectionOutcome.Unchanged, await r.Labels.Apply(Item, 3, ["ENV:TDD", "docs"], ["env:tdd", "docs"]));
-        Assert.All(r.Api.Calls, c => Assert.StartsWith("GET", c));
-        Assert.Equal(3, await r.Versions.Applied(Key, ProjectionTargets.Labels));
-    }
-
-    [Fact]
-    public async Task ALabelNameWithASpaceOrASlash_IsEscapedInTheDelete()
-    {
-        var r = new Rig();
-        r.Api.Labels.Add("needs review/x");
-        Assert.Equal(ProjectionOutcome.Applied, await r.Labels.Apply(Item, 1, [], ["needs review/x"]));
-        Assert.Contains("DELETE /repos/o/r/issues/7/labels/needs%20review%2Fx", r.Api.Calls);
-        Assert.Empty(r.Api.Labels);
+        Assert.Equal((3, 1, 1), (await v.Applied("o/r#1", "card"), await v.Applied("o/r#1", "comment"), await v.Applied("o/r#2", "card")));
     }
 
     // ---- the board column --------------------------------------------------------------------------------------------------------------------
@@ -452,17 +395,12 @@ public sealed class ProjectionTests
     }
 
     [Fact]
-    public async Task TheEventsOfTheLabelAndTheCardWrites_AreEchoes_ForTheLabelsAndTheColumnWritten()
+    public async Task TheEventOfTheCardWrite_IsAnEcho_ForTheColumnWritten()
     {
         var r = new Rig();
-        r.Api.Labels.AddRange(["bug", "priority:high"]);
-        await r.Labels.Apply(Item, 2, ["env:tdd"], ["env:tdd", "priority:high"]);
-        Assert.True(await r.Echo.IsEcho(Key, ProjectionTargets.Labels, ProjectionEcho.LabelsFingerprint(["Bug", "env:tdd"])));   // what the issue now carries, any order or case
-        Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Labels, ProjectionEcho.LabelsFingerprint(["bug", "env:tdd", "extra"])));   // somebody added one more
         await r.Board.Move(Item, 2, "Done");
         Assert.True(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("done")));
         Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Backlog")));   // a person moved it back
-        Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Labels, ProjectionEcho.ColumnFingerprint("done")));   // (the targets are apart)
         r.Echo.Forget(Key);
         Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("done")));
     }
@@ -502,18 +440,6 @@ public sealed class ProjectionTests
     }
 
     [Fact]
-    public async Task ALabelWriteThatIsHalfDone_TakesItsEchoRecordBack()
-    {
-        var r = new Rig();
-        r.Api.Labels.AddRange(["bug", "priority:high"]);
-        r.Api.FailDelete = true;   // the POST of env:tdd goes through, the DELETE of priority:high is refused
-        await Assert.ThrowsAsync<ProjectionRefusedException>(() => r.Labels.Apply(Item, 1, ["env:tdd"], ["env:tdd", "priority:high"]));
-        Assert.Contains("env:tdd", r.Api.Labels);
-        Assert.False(await r.Echo.IsEcho(Key, ProjectionTargets.Labels, ProjectionEcho.LabelsFingerprint(["bug", "env:tdd"])));   // the planned set, as a person could reach it later
-        Assert.Equal(0, await r.Versions.Applied(Key, ProjectionTargets.Labels));
-    }
-
-    [Fact]
     public async Task AnOlderApplyThatComesLate_NeverReplacesTheRecordOfANewerOne()
     {
         var r = new Rig();
@@ -529,13 +455,41 @@ public sealed class ProjectionTests
         Assert.True(r.Echo.Record(Key, ProjectionTargets.Card, 6, ProjectionEcho.ColumnFingerprint("Technical Design")).Taken);
     }
 
+    // ---- W9.10h: the latest few writes, for the webhook of a write that is no longer the newest ------------------------------------------------
+
     [Fact]
-    public async Task ALabelThatIsThereWithOtherCasing_KeepsTheCasingItHas_NothingIsWritten()
+    public async Task TheWebhookOfAnEarlierWrite_IsStillTheProjections_UntilItsWindowIsOver_ButTheNewestIsTheOnlyStrictEcho()
     {
-        var r = new Rig();
-        r.Api.Labels.Add("auto merge");
-        Assert.Equal(ProjectionOutcome.Unchanged, await r.Labels.Apply(Item, 1, ["Auto Merge"], ["auto merge"]));
-        Assert.Equal(["auto merge"], r.Api.Labels);
-        Assert.All(r.Api.Calls, c => Assert.StartsWith("GET", c));
+        var now = new DateTimeOffset(2026, 10, 30, 10, 0, 0, TimeSpan.Zero);
+        var echo = new ProjectionEcho(new InMemoryProjectionVersions(), () => now);
+        echo.Record(Key, ProjectionTargets.Card, 1, ProjectionEcho.ColumnFingerprint("Development"));
+        now = now.AddSeconds(20);
+        echo.Record(Key, ProjectionTargets.Card, 2, ProjectionEcho.ColumnFingerprint("Functional Testing"));
+        var window = TimeSpan.FromMinutes(2);
+        Assert.True(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("development"), window));   // (any case)
+        Assert.True(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Functional Testing"), window));
+        Assert.False(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Technical Design"), window));   // never written
+        Assert.False(echo.WroteRecently("o/r#8", ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Development"), window));   // another item
+        Assert.False(echo.WroteRecently(Key, ProjectionTargets.Comment, ProjectionEcho.ColumnFingerprint("Development"), window));   // another target
+        Assert.False(await echo.IsEcho(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Development")));   // (the strict echo is the newest write only)
+        now = now.AddMinutes(3);
+        Assert.False(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Development"), window));
+        Assert.False(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Functional Testing"), window));
+    }
+
+    [Fact]
+    public void AWriteThatFailed_IsNotAmongTheRecentOnes_AndOnlyTheLatestFewAreKept_AndForgetClearsThem()
+    {
+        var now = new DateTimeOffset(2026, 10, 30, 10, 0, 0, TimeSpan.Zero);
+        var echo = new ProjectionEcho(new InMemoryProjectionVersions(), () => now);
+        var window = TimeSpan.FromMinutes(2);
+        var mark = echo.Record(Key, ProjectionTargets.Card, 1, ProjectionEcho.ColumnFingerprint("Backlog"));
+        echo.Unrecord(mark);
+        Assert.False(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("Backlog"), window));
+        for (var v = 2; v < 2 + ProjectionEcho.RecentWrites + 1; v++) echo.Record(Key, ProjectionTargets.Card, v, ProjectionEcho.ColumnFingerprint("column " + v));
+        Assert.False(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("column 2"), window));   // (the oldest was dropped)
+        Assert.True(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("column 3"), window));
+        echo.Forget(Key);
+        Assert.False(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("column 3"), window));
     }
 }

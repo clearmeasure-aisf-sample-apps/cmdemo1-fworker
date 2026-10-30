@@ -8,16 +8,16 @@ using Fworker.Integrations.Commands;
 
 namespace Fworker.Integrations.GitHub;
 
-// W6.3 (#330): the projections of the v2 engine onto GitHub: the item's state comment (in the format v1's Get-State reads, the rollback path), its labels and its
+// W6.3 (#330): the projections of the v2 engine onto GitHub: the item's state comment (in the format v1's Get-State reads, the rollback path) and its
 // board column. Each write carries the version of the command that asks for it and is recorded against the item's projection version (the table of W2.1,
 // behind IProjectionVersions): an older or repeated version is skipped, and the events GitHub sends back for a write of the projection itself are recognized
-// (ProjectionEcho) so the engine does not treat its own write as news. Nothing here is registered in DI yet.
+// (ProjectionEcho) so the engine does not treat its own write as news. The card is wired where the engine acts (DocsProjection; W9.10h: the ingress inbox consults the echo before a card event reaches the saga), the state
+// comment by W9.10i. There is no label projection: the labels of an item are the rule scripts' and the people's (W9.10h deleted the unused LabelProjection; the factory's own labels are not the engine's to project).
 
 /// <summary>The projected targets: the <c>Target</c> column of the projection versions table.</summary>
 public static class ProjectionTargets
 {
     public const string Card = "card";
-    public const string Labels = "labels";
     public const string Comment = "comment";
 }
 
@@ -65,14 +65,21 @@ public sealed class InMemoryProjectionVersions : IProjectionVersions
 
 /// <summary>
 /// Echo suppression. After a projection writes, GitHub tells the engine about it (a webhook, or the reconciler's next read). The projection records what it wrote as a
-/// fingerprint (the state comment's revision, the labels, the column) beside the version of the write; an event whose fingerprint is that one, while the version is
+/// fingerprint (the state comment's revision, the column) beside the version of the write; an event whose fingerprint is that one, while the version is
 /// still the newest applied, is the projection's own and is ignored. Any other fingerprint (a person, a v1 rule script, a worker) is news. The record is in memory: after
 /// a restart an echo is processed once, which the engine's reads tolerate (they are idempotent), never lost.
 /// </summary>
-public sealed class ProjectionEcho(IProjectionVersions versions)
+public sealed class ProjectionEcho(IProjectionVersions versions, Func<DateTimeOffset>? now = null)
 {
+    /// <summary>How many of a target's latest writes are remembered for <see cref="WroteRecently"/>.</summary>
+    public const int RecentWrites = 8;
+
     readonly object gate = new();
+    readonly Func<DateTimeOffset> now = now ?? (() => DateTimeOffset.UtcNow);
     readonly Dictionary<(string, string), (long Version, string Fingerprint)> last = [];
+    // W9.10h: the latest few writes of a target with their time. An event for a write that is no longer the newest one (a card moved twice in a few seconds: the webhook of the first arrives after the second was
+    // written) is still the projection's own; IsEcho alone, which compares with the newest write only, would take it for news.
+    readonly Dictionary<(string, string), List<(string Fingerprint, DateTimeOffset At)>> recent = [];
 
     /// <summary>What <see cref="Record"/> did, for <see cref="Unrecord"/>: whether the record was taken and what it replaced.</summary>
     public readonly record struct Mark(string ItemKey, string Target, long Version, string Fingerprint, bool Taken, bool HadPrevious, long PreviousVersion, string? PreviousFingerprint);
@@ -81,8 +88,6 @@ public sealed class ProjectionEcho(IProjectionVersions versions)
     public static string StateFingerprint(System.Text.Json.Nodes.JsonObject state) => RevisionFingerprint(ItemStateComment.RevOf(state));
     /// <summary>The same for a revision number: a projection knows the revision it is about to write before the write has answered.</summary>
     public static string RevisionFingerprint(int rev) => $"rev:{rev}";
-    /// <summary>The labels' fingerprint: the names, case-insensitive and in any order.</summary>
-    public static string LabelsFingerprint(IEnumerable<string> labels) => string.Join('\n', labels.Select(l => l.ToLowerInvariant()).Distinct().Order(StringComparer.Ordinal));
     /// <summary>The card's fingerprint: the column name, case-insensitive.</summary>
     public static string ColumnFingerprint(string column) => column.ToLowerInvariant();
 
@@ -98,6 +103,9 @@ public sealed class ProjectionEcho(IProjectionVersions versions)
             var had = last.TryGetValue((itemKey, target), out var cur);
             if (had && cur.Version > version) return new Mark(itemKey, target, version, fingerprint, false, false, 0, null);
             last[(itemKey, target)] = (version, fingerprint);
+            if (!recent.TryGetValue((itemKey, target), out var writes)) recent[(itemKey, target)] = writes = [];
+            writes.Add((fingerprint, now()));
+            if (writes.Count > RecentWrites) writes.RemoveAt(0);
             return new Mark(itemKey, target, version, fingerprint, true, had, had ? cur.Version : 0, had ? cur.Fingerprint : null);
         }
     }
@@ -111,6 +119,21 @@ public sealed class ProjectionEcho(IProjectionVersions versions)
             var k = (mark.ItemKey, mark.Target);
             if (!last.TryGetValue(k, out var cur) || cur.Version != mark.Version || cur.Fingerprint != mark.Fingerprint) return;
             if (mark.HadPrevious) last[k] = (mark.PreviousVersion, mark.PreviousFingerprint!); else last.Remove(k);
+            if (recent.TryGetValue(k, out var writes) && writes.FindLastIndex(w => w.Fingerprint == mark.Fingerprint) is >= 0 and var at) writes.RemoveAt(at);   // (the write did not happen)
+        }
+    }
+
+    /// <summary>
+    /// W9.10h: was a state with this fingerprint among the target's latest writes, written no longer than <paramref name="within"/> ago? For a webhook, which arrives within seconds of the write it reports: the
+    /// event of an earlier write of a quick run of writes is still the projection's. Not for a poll, which reports the state as it is now: an older state that a person put back is news.
+    /// </summary>
+    public bool WroteRecently(string itemKey, string target, string fingerprint, TimeSpan within)
+    {
+        lock (gate)
+        {
+            if (!recent.TryGetValue((itemKey, target), out var writes)) return false;
+            var since = now() - within;
+            return writes.Any(w => w.Fingerprint == fingerprint && w.At >= since);
         }
     }
 
@@ -127,7 +150,14 @@ public sealed class ProjectionEcho(IProjectionVersions versions)
         ItemStateComment.Parse(commentBody) is { } s ? IsEcho(itemKey, ProjectionTargets.Comment, StateFingerprint(s), ct) : Task.FromResult(false);
 
     /// <summary>The item is finished: its record goes.</summary>
-    public void Forget(string itemKey) { lock (gate) foreach (var k in last.Keys.Where(k => k.Item1 == itemKey).ToList()) last.Remove(k); }
+    public void Forget(string itemKey)
+    {
+        lock (gate)
+        {
+            foreach (var k in last.Keys.Where(k => k.Item1 == itemKey).ToList()) last.Remove(k);
+            foreach (var k in recent.Keys.Where(k => k.Item1 == itemKey).ToList()) recent.Remove(k);
+        }
+    }
 }
 
 /// <summary>The REST and GraphQL calls of the projections, answered with Invoke-Gh's rules (Core.ps1): 2xx the body, an allowed 404 null, a worth-a-retry answer an HttpRequestException, any other refusal a ProjectionRefusedException.</summary>

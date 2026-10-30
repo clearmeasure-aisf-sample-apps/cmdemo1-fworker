@@ -82,7 +82,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
         public DateTime Started = DateTime.UtcNow;
         public DateTime? TaskDone, Ended;
         public int? MemPeakMb;   // the largest memory peak a host report gave for the container (cgroup memory.peak), the sample of the host's footprint when its session ends
-        public bool StopAsked, Adopted, FromReport;   // FromReport: adopted from a host report (no start task of this process; TaskId "adopted:<name>")   // Adopted: read back at a restart, not yet seen in a host report
+        public bool StopAsked, Adopted, FromReport, HostFull;   // HostFull: the start task failed with the host's refusal (exit 75, W9.10h)   // FromReport: adopted from a host report (no start task of this process; TaskId "adopted:<name>")   // Adopted: read back at a restart, not yet seen in a host report
         public string Status = "Processing";
     }
     sealed record Container(string Name, int Item, string State, DateTime? StartedAt, int? MemPeakMb = null);
@@ -164,6 +164,13 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
 
     async Task<(int Status, JsonNode? Body)> Send(HttpMethod m, string url, JsonNode? body, CancellationToken ct)
     {
+        var (status, text) = await SendText(m, url, body, ct);
+        JsonNode? j = null; try { if (text.Length > 0) j = JsonNode.Parse(text); } catch { }
+        return (status, j);
+    }
+
+    async Task<(int Status, string Text)> SendText(HttpMethod m, string url, JsonNode? body, CancellationToken ct)
+    {
         for (var attempt = 0; ; attempt++)
         {
             using var req = new HttpRequestMessage(m, url);
@@ -173,10 +180,28 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
             using var resp = await http.SendAsync(req, ct);
             // an access token Octopus no longer takes (revoked, expired early): one new exchange and one retry
             if (cfg.Oidc && attempt == 0 && resp.StatusCode == System.Net.HttpStatusCode.Unauthorized) continue;
-            var text = await resp.Content.ReadAsStringAsync(ct);
-            JsonNode? j = null; try { if (text.Length > 0) j = JsonNode.Parse(text); } catch { }
-            return ((int)resp.StatusCode, j);
+            return ((int)resp.StatusCode, await resp.Content.ReadAsStringAsync(ct));
         }
+    }
+
+    // W9.10h: start-worker.sh refuses a start with "host-full: ..." and exit 75 when the host has no room (Fworker.PerHostCapacity, the headroom rules). Octopus says so in the failed task's error message
+    // ("... exit code 75") and its log carries the line. That is a wait like "no capacity", not a failure of the session: the execution is refunded and no failure is counted (RuntimeManager, status HostFull).
+    static readonly System.Text.RegularExpressions.Regex HostFullText = new(@"exit code 75\b|(?m:^.*\bhost-full:)", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+
+    /// <summary>Whether a failed start task is the host's refusal for room: the task's error message or its log says so.</summary>
+    public static bool IsHostFull(string? errorMessage, string? log) =>
+        (errorMessage is { Length: > 0 } && HostFullText.IsMatch(errorMessage)) || (log is { Length: > 0 } && HostFullText.IsMatch(log));
+
+    // a failed start task: its error message first, then its log (a read that fails or finds nothing leaves the failure a failure)
+    async Task<bool> StartRefusedForHost(string taskId, JsonNode? task, CancellationToken ct)
+    {
+        if (IsHostFull(task?["ErrorMessage"]?.ToString(), null)) return true;
+        try
+        {
+            var (s, log) = await SendText(HttpMethod.Get, $"{cfg.ServerUrl}/api/tasks/{Uri.EscapeDataString(taskId)}/raw", null, ct);
+            return s == 200 && IsHostFull(null, log);
+        }
+        catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { return false; }
     }
 
     async Task<JsonNode> Get(string url, CancellationToken ct)
@@ -399,7 +424,12 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
             if (s == 404) { lock (gate) { rec.State = "Missing"; rec.TaskDone = DateTime.UtcNow; } continue; }
             if (s != 200) throw new HttpRequestException($"task read answered {s}");
             var state = t?["State"]?.ToString() ?? "";
-            lock (gate) { rec.State = state; if (t?["IsCompleted"]?.GetValue<bool>() == true || state is "Success" or "Failed" or "Canceled" or "TimedOut") rec.TaskDone ??= DateTime.UtcNow; }
+            var hostFull = state == "Failed" && rec.Mode == "detached" && !rec.HostFull && await StartRefusedForHost(rec.TaskId, t, ct);
+            lock (gate)
+            {
+                rec.State = state; if (t?["IsCompleted"]?.GetValue<bool>() == true || state is "Success" or "Failed" or "Canceled" or "TimedOut") rec.TaskDone ??= DateTime.UtcNow;
+                if (hostFull) { rec.HostFull = true; noCapacityUntil = DateTime.UtcNow.AddSeconds(Math.Max(cfg.ListSeconds, 15)); }   // (the plant queues the item until the next reading, as after a refusal for capacity)
+            }
         }
         var now = DateTime.UtcNow; var list = new List<RuntimeInstance>();
         lock (gate)
@@ -410,7 +440,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
                 {
                     string st;
                     if (rec.Mode == "held") st = rec.State == "Missing" ? "Stopped" : Map(rec.State);
-                    else if (rec.State is "Failed" or "TimedOut" or "Canceled" or "Missing") st = "Failed";   // the start itself did not succeed
+                    else if (rec.State is "Failed" or "TimedOut" or "Canceled" or "Missing") st = rec.HostFull ? "HostFull" : "Failed";   // the start itself did not succeed (HostFull: the host had no room, W9.10h)
                     else if (rec.State != "Success") st = "Processing";
                     else
                     {
@@ -422,7 +452,7 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
                         else st = "Running";
                     }
                     rec.Status = st;
-                    if (st is "Succeeded" or "Failed" or "Stopped") rec.Ended = now;
+                    if (st is "Succeeded" or "Failed" or "Stopped" or "HostFull") rec.Ended = now;
                 }
                 list.Add(new RuntimeInstance(rec.TaskId, rec.Name, rec.Item, rec.Phase, rec.Status, rec.Started, rec.Ended, rec.FromReport));
             }

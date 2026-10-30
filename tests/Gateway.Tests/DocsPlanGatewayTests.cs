@@ -810,6 +810,7 @@ public sealed class DocsIntakeJobTests
     static readonly RepoId Home = new("acme", "orders");
     const string Marker = "<!-- aisf:docs-only -->";
     static readonly string[] Ai = ["Technical Design", "Development", "Functional Testing"];
+    static readonly JsonNode DocsSource = JsonNode.Parse("""{"columns":{"ai":["Technical Design","Development","Functional Testing"],"hold":["Release Queue"],"done":"Done"}}""")!;
 
     sealed class Boards(params BoardCard[] cards) : IBoardReader
     {
@@ -840,13 +841,13 @@ public sealed class DocsIntakeJobTests
         public DocsIntakeJob Job;
         public Items Facts;
 
-        public Rig(Boards boards, Items facts, IntakeSettings? settings = null, Func<BoardRef?>? board = null)
+        public Rig(Boards boards, Items facts, IntakeSettings? settings = null, Func<BoardRef?>? board = null, IItemIssueReader? issues = null)
         {
             Svc = new WorkItemService(Store, new WorkItemSaga(new DocsPort()));
             Facts = facts;
             settings ??= new IntakeSettings(true, 6, "Todo", [], new Dictionary<string, int>(), ["docs"], "engine:v2", "factory worker", "", "");
             var intake = new WorkItemIntake(Store, settings, async (m, ct) => { Started.Add(m); await Svc.Handle(m, ct); });
-            Job = new DocsIntakeJob(boards, facts, intake, board ?? (() => Board), Home, DocsPlanSettingsReader.From(null), Ai, () => Slots, () => DesignWaiting, () => Leader, () => Low);
+            Job = new DocsIntakeJob(boards, facts, intake, board ?? (() => Board), Home, DocsPlanSettingsReader.From(DocsSource), Ai, () => Slots, () => DesignWaiting, () => Leader, () => Low, issues);
         }
     }
 
@@ -904,13 +905,75 @@ public sealed class DocsIntakeJobTests
         Assert.Equal(Enumerable.Range(10, 10), facts.Read);
     }
 
-    [Fact]
-    public async Task ABodyThatNamesItsDependencies_IsLeftToV1_AndTheLimitsOfTheIntakeRuleHold()
+    /// <summary>The issues of the tests: closed ones by number (the rest are open, or unknown).</summary>
+    sealed class Issues(int[] closed, params int[] open) : IItemIssueReader
     {
-        var dependent = new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, "Depends on #3\n" + Marker))));
-        var r = await dependent.Job.Run(default);
-        Assert.Equal("no-candidate", r);
-        Assert.Empty(dependent.Started);
+        public readonly List<int> Read = [];
+        public Exception? Throw;
+        public Task<ItemIssue?> ReadIssue(ItemId item, CancellationToken ct = default)
+        {
+            Read.Add(item.Number);
+            if (Throw is not null) throw Throw;
+            return Task.FromResult<ItemIssue?>(closed.Contains(item.Number) || open.Contains(item.Number) ? new ItemIssue(item, closed.Contains(item.Number), []) : null);
+        }
+        public Task<IReadOnlyList<CommitCheck>?> ReadCheckRuns(RepoId repository, string commit, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<CommitCheck>?>(null);
+        public Task<IReadOnlyList<string>?> ReadPullRequestFiles(RepoId repository, int number, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<string>?>(null);
+    }
+
+    // W9.10h (D1): the engine's intake checks "Depends on" itself (v1's intake no longer takes the items that name one); the rule is Test-DependencyMet of Verbs.Sweep.ps1
+    [Theory]
+    [InlineData("Done", true, true)]            // merged and delivered: the card is in the done column
+    [InlineData("Release Queue", true, true)]   // merged, waiting for production: a hold column
+    [InlineData("Development", false, true)]    // the dependency is closed
+    [InlineData("Development", true, false)]    // still being worked on
+    [InlineData("Todo", true, false)]
+    public async Task AnItemThatDependsOnAnItemOnTheBoard_StartsOnlyOnceTheDependencyIsClosedOrInTheDoneOrAHoldColumn(string column, bool open, bool starts)
+    {
+        var rig = new Rig(new Boards(Card(5, "Todo"), Card(3, column, open: open)), new Items(Todo((5, "Depends on #3\n" + Marker))));
+        var result = await rig.Job.Run(default);
+        Assert.Equal(starts ? "started acme/orders#5" : "no-candidate", result);
+        Assert.Equal(starts ? 1 : 0, rig.Started.Count);
+    }
+
+    [Fact]
+    public async Task ADependencyThatIsNotOnTheBoard_IsReadFromItsIssue_AndOneThatCannotBeReadIsNotMet()
+    {
+        var closed = new Issues([3]);
+        var done = new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, "Depends on #3\n" + Marker))), issues: closed);
+        Assert.Equal("started acme/orders#5", await done.Job.Run(default));
+        Assert.Equal([3], closed.Read);
+        var open = new Issues([], 3);
+        Assert.Equal("no-candidate", await new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, "Depends on #3\n" + Marker))), issues: open).Job.Run(default));
+        var unknown = new Issues([]);   // (no such issue)
+        Assert.Equal("no-candidate", await new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, "Depends on #3\n" + Marker))), issues: unknown).Job.Run(default));
+        var broken = new Issues([3]) { Throw = new HttpRequestException("boom") };
+        Assert.Equal("no-candidate", await new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, "Depends on #3\n" + Marker))), issues: broken).Job.Run(default));
+        Assert.Equal("no-candidate", await new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, "Depends on #3\n" + Marker)))).Job.Run(default));   // (nothing to read it with)
+    }
+
+    [Fact]
+    public async Task EveryDependencyMustBeMet_AForeignOneBlocksNothing_AndTheItemsOwnNumberIsNoDependency()
+    {
+        var both = new Rig(new Boards(Card(5, "Todo"), Card(3, "Done"), Card(4, "Development")), new Items(Todo((5, "Depends on #3 and #4\n" + Marker))));
+        Assert.Equal("no-candidate", await both.Job.Run(default));
+        var allMet = new Rig(new Boards(Card(5, "Todo"), Card(3, "Done"), Card(4, "Done", open: false)), new Items(Todo((5, "Depends on #3 and #4\n" + Marker))));
+        Assert.Equal("started acme/orders#5", await allMet.Job.Run(default));
+        var foreign = new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, "Depends on acme/billing#9 and #5\n" + Marker))));
+        Assert.Equal("started acme/orders#5", await foreign.Job.Run(default));   // (a reference to another repository is recorded, as in v1, and blocks nothing; #5 is the item itself)
+        var qualifiedHome = new Rig(new Boards(Card(5, "Todo"), Card(3, "Todo")), new Items(Todo((5, "Depends on acme/orders#3\n" + Marker))));
+        Assert.Equal("no-candidate", await qualifiedHome.Job.Run(default));   // (a qualified reference that names the home repository is a home item)
+    }
+
+    [Fact]
+    public async Task ADependentThatIsPassedOver_DoesNotKeepAnotherItemFromStarting()
+    {
+        var rig = new Rig(new Boards(Card(5, "Todo"), Card(6, "Todo"), Card(3, "Development")), new Items(Todo((5, "Depends on #3\n" + Marker), (6, "No dependency\n" + Marker))));
+        Assert.Equal("started acme/orders#6", await rig.Job.Run(default));
+    }
+
+    [Fact]
+    public async Task TheLimitsOfTheIntakeRuleHold()
+    {
         var noSlot = new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, Marker)))) { Slots = 0 };
         Assert.Equal("no-free-slot", await noSlot.Job.Run(default));
         var waiting = new Rig(new Boards(Card(5, "Todo")), new Items(Todo((5, Marker)))) { DesignWaiting = true };

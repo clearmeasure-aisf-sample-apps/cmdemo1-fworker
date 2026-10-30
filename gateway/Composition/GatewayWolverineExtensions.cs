@@ -77,6 +77,8 @@ static class GatewayWolverineExtensions
                     var map = new Fworker.Integrations.Correlation.GenerationStampingMap(new Fworker.Integrations.Correlation.SqlCorrelationMap(cs), new Fworker.Integrations.Correlation.SqlItemGenerations(cs));
                     var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
                     IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
+                    // W9.10h: what a person does on GitHub (close, reopen, move the card, a hold label) reaches the saga from the same events; the card projection's echo is consulted first
+                    IngressInboxSagaWiring.Attach(host, new SagaIngress(workItems.Store, home, workItems.Docs.Settings, workItems.Docs.Versions!, workItems.Docs.Echo!, workItems.Docs.Issues));
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item
                     var mergedDeriver = ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable);
                     if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));
@@ -172,6 +174,13 @@ static class GatewayWolverineExtensions
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return jobs; });
         // W6.6: the saga's parts, for the verbs' feed (S1) (resolving it builds the host first, which makes them)
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return workItemParts!; });
+        // W9.10h: the producers of the saga's inputs that are the gateway's own paths (the park and unpark of the runtime adapters, the credit guard and the admin endpoint; the runtime manager's budgets and refused starts)
+        if (c.Engine.V2Acts && c.Instance.Home is { } sagaHome)
+            services.AddSingleton(sp =>
+            {
+                var parts = sp.GetRequiredService<WorkItemParts>(); var host = sp.GetRequiredService<WolverineHostService>();
+                return new SagaInputs(parts.Ownership!, parts.Store, sagaHome, m => host.PublishAsync(m), m => host.PublishAsync(m));
+            });
         // W6.7: the views of the items the saga owns (status, dashboard, digest), read from the saga's table and the item history; no host is needed for a read, only the database. Nowhere else is it registered, so
         // every other environment answers exactly as before
         if (c.Engine.V2Acts && c.Database.ConnectionString is { } viewsConnection)
