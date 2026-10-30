@@ -376,6 +376,8 @@ $QcGateLeaseScenarios = [ordered]@{
     Check 'the record went back to assigned with a new assignment (relaunch 1)' $moved ((Qc-Rec $x.n $x.pr) | ConvertTo-Json -Compress -Depth 4)
     $rec = Qc-Rec $x.n $x.pr
     Check 'it is on the other worker, mode relaunch, relaunches = 1' ($rec.worker -eq $w2 -and $rec.relaunches -eq 1 -and $rec.mode -eq 'relaunch') "$($rec.worker) $($rec.relaunches) $($rec.mode)"
+    # (the record takes the worker when the gateway has offered the job; the worker's client writes the event to its output a moment later, which the rule script's slower write used to cover)
+    [void](Wait-Until -Seconds 15 { (Qc-Events $w2 $x.n).Count -ge 1 })
     $evs = Qc-Events $w2 $x.n
     Check 'the other worker was offered a qc-env job with mode relaunch and a new assignment' ($evs.Count -ge 1 -and $evs[$evs.Count - 1].mode -eq 'relaunch' -and $evs[$evs.Count - 1].assignment -ne $asg1) (($evs | ConvertTo-Json -Compress -Depth 3))
     Check 'the lost worker was told to stop what it still runs' ((Gate-TeardownCount $w1 $x.pr) -ge 1)
