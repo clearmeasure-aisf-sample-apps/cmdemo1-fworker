@@ -12,7 +12,12 @@
 #   10000 + 1000 * slot + 100 * g, its result in name-gG.result.json), name@all/n runs all n groups through one run.ps1 that starts them (as qc runs
 #   by itself). A suite is listed once: whole, as @all/n, or as shards of one n. The summary adds the shards of a suite up into its line; only a suite
 #   run whole in one process (no shard, no @all) rewrites its time in suite-times.json.
-param([ValidateSet('fast', 'full')][string] $Tier = 'fast', [int] $Parallel = 4, [string[]] $Suites = @(), [string] $Only = '', [switch] $NoBuild, [switch] $KeepWork, [string] $LogDir = '', [int] $MinAvailableMb = 1500, [int] $MinFreeDiskMb = 2048, [switch] $Force)
+#   -Engine v2   the claims of v2-claims.txt (or -Claims <file>) on the v2 engine, as the jobs "Tier 1 (v2 ...)" of tests.yml run them (W9.10d): needs FACTORY_TEST_SQL (a SQL Server connection string without a database;
+#                every process makes a database of its own). -Suites then names suites that have claims, with the same shards of a whole-suite claim (name@g/n, name@all/n); a suite whose claims are partial (a regular expression
+#                of its scenarios) runs each claim as a job of its own, in the port range 10000 + 1000 * slot + 100 * (9 - claim index), with the profile the claim names (run.ps1 -V2Profile). Without -Suites every claimed suite
+#                runs. A claim that lists no scenario fails the run (a renamed suite or scenario cannot leave a claim empty and green), and so does a job whose scenarios that ran are not the ones listed.
+#                suite-times.json and scenario-stats.json are the engine v1's: a v2 run does not write them.
+param([ValidateSet('fast', 'full')][string] $Tier = 'fast', [int] $Parallel = 4, [string[]] $Suites = @(), [string] $Only = '', [switch] $NoBuild, [switch] $KeepWork, [string] $LogDir = '', [int] $MinAvailableMb = 1500, [int] $MinFreeDiskMb = 2048, [switch] $Force, [ValidateSet('v1', 'v2')][string] $Engine = 'v1', [string] $Claims = '')
 $Suites = @($Suites | ForEach-Object { $_ -split ',' } | Where-Object { $_ })   # pwsh -File passes "a,b" as one string
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
@@ -44,6 +49,51 @@ $timesAll = @{}; if (Test-Path $timesFile) { $timesAll = Get-Content -Raw $times
 $known = @{}; if ($timesAll.ContainsKey($Tier)) { foreach ($e in $timesAll[$Tier].GetEnumerator()) { $known[$e.Key] = [double]$e.Value } }
 # the jobs: one per suite, or one per shard (label = the suite's name, or name-gG for group G); a plain name runs the suite in one process (-Groups 1)
 $todo = @()
+# -Engine v2 (W9.10d): the claims of v2-claims.txt. One line per claim: "<suite>", "<suite> | <regex>", each with an optional "| profile=<name>"; "v1-only <suite> | <reason>" declares a suite that stays on v1.
+function Read-V2Claims([string]$Path) {
+    $out = @(); $n = 0
+    foreach ($raw in [IO.File]::ReadAllLines($Path)) {
+        $n++; $line = $raw.Trim(); if (-not $line -or $line.StartsWith('#')) { continue }
+        if ($line -match '^v1-only\s+([a-z0-9-]+)\s*\|\s*(.+)$') { $out += @{ line = $n; kind = 'v1-only'; suite = $Matches[1]; only = ''; profile = 'plain'; reason = $Matches[2].Trim() }; continue }
+        $f = @($line -split ' \| ' | ForEach-Object { $_.Trim() })
+        if ($f[0] -notmatch '^[a-z0-9-]+$') { throw "${Path}:${n}: '$($f[0])' is not a suite name" }
+        $only = ''; $profile = 'plain'
+        foreach ($x in @(if ($f.Count -gt 1) { $f[1..($f.Count - 1)] })) { if ($x -match '^profile=(plain|saga-docs|saga-feature)$') { $profile = $Matches[1] } elseif ($x -match '^profile=') { throw "${Path}:${n}: '$x' is not a profile of run.ps1 (plain, saga-docs, saga-feature)" } elseif ($x) { $only = $x } else { throw "${Path}:${n}: an empty field" } }
+        $out += @{ line = $n; kind = 'claim'; suite = $f[0]; only = $only; profile = $profile; reason = '' }
+    }
+    return $out
+}
+$script:ClaimsFile = $(if ($Claims) { $Claims } else { Join-Path $here 'v2-claims.txt' })
+if ($Engine -eq 'v2') {
+    if ($Only) { Write-Host '-Only does not go with -Engine v2: a claim names its scenarios'; exit 2 }
+    if (-not "$env:FACTORY_TEST_SQL".Trim()) { Write-Host '-Engine v2 needs a SQL Server: FACTORY_TEST_SQL (a connection string without a database) is not set'; exit 2 }
+    $allClaims = @(Read-V2Claims $script:ClaimsFile | Where-Object { $_.kind -eq 'claim' })
+    $claimed = @($allClaims | ForEach-Object { $_.suite } | Select-Object -Unique)
+    $specs = $(if ($Suites.Count) { $Suites } else { $claimed })
+    foreach ($spec in $specs) {
+        $m = [regex]::Match($spec, '^(?<s>[^@]+?)(@(?<g>all|\d+)/(?<n>\d+))?$')
+        $sn = $m.Groups['s'].Value
+        if (-not $m.Success -or $claimed -notcontains $sn) { throw "-Suites: '$spec' is not a suite that $script:ClaimsFile claims; claimed: $($claimed -join ', ') (a shard of a whole-suite claim: name@g/n or name@all/n)" }
+        $mine = @($allClaims | Where-Object { $_.suite -eq $sn })
+        $whole = @($mine | Where-Object { -not $_.only })
+        if ($whole.Count -gt 1 -or ($whole.Count -eq 1 -and $mine.Count -gt 1)) { throw "$script:ClaimsFile: the suite $sn has a whole-suite claim and others (a suite is claimed whole, once, or by claims that each name scenarios)" }
+        if ($whole.Count -eq 1) {
+            $c = $whole[0]; $gn = 1; $gg = -1; $label = $sn
+            if ($m.Groups['n'].Success) {
+                $gn = [int]$m.Groups['n'].Value
+                if ($gn -lt 1 -or $gn -gt 10) { throw "-Suites ${spec}: n is 1 to 10 (run.ps1 -Groups)" }
+                if ($m.Groups['g'].Value -ne 'all') { $gg = [int]$m.Groups['g'].Value; if ($gg -ge $gn) { throw "-Suites ${spec}: g is 0 to n-1 (groups are numbered from 0)" }; $label = "$sn-g$gg" }
+            }
+            $todo += @{ label = $label; suite = $sn; groups = $gn; group = $gg; only = ''; profile = $c.profile; portBase = ''; listed = -1 }
+        } else {
+            if ($m.Groups['n'].Success) { throw "-Suites ${spec}: the claims of $sn name scenarios (a regular expression): they cannot be sharded" }
+            if ($mine.Count -gt 10) { throw "${script:ClaimsFile}: at most 10 claims of one suite ($sn has $($mine.Count)): each has a port range of 100" }
+            $k = 0
+            foreach ($c in $mine) { $todo += @{ label = "$sn~L$($c.line)"; suite = $sn; groups = 1; group = -1; only = $c.only; profile = $c.profile; portBase = "@$(9 - $k)"; listed = -1 }; $k++ }
+        }
+    }
+    if ($todo.Count -eq 0) { throw "$script:ClaimsFile: no claim (an empty list would make the run green without running anything)" }
+} else {
 foreach ($spec in $(if ($Suites.Count) { $Suites } else { $names })) {
     $m = [regex]::Match($spec, '^(?<s>[^@]+?)(@(?<g>all|\d+)/(?<n>\d+))?$')
     if (-not $m.Success -or $names -notcontains $m.Groups['s'].Value) { throw "unknown suite in -Suites: '$spec'; known: $($names -join ', ') (a shard of one: name@g/n or name@all/n)" }
@@ -62,8 +112,9 @@ foreach ($sn in @($todo | ForEach-Object { $_.suite } | Select-Object -Unique)) 
         throw "-Suites: $sn is listed more than once (list it whole, as $sn@all/n, or as shards $sn@g/n of one n with each g once)"
     }
 }
+}
 # the port slot of each suite (run.ps1 -ListSuites, in slot order): a shard's port range is 10000 + 1000 * slot + 100 * group, as run.ps1 gives its groups
-$slots = @(); if (@($todo | Where-Object { $_.group -ge 0 }).Count) { $slots = @(& pwsh -NoProfile -File (Join-Path $here 'run.ps1') -ListSuites | Where-Object { $_ }) }
+$slots = @(); if (@($todo | Where-Object { $_.group -ge 0 -or "$($_.portBase)" -like '@*' }).Count) { $slots = @(& pwsh -NoProfile -File (Join-Path $here 'run.ps1') -ListSuites | Where-Object { $_ }) }
 # scenarios this run leaves out: the full-tier ones (only when -Tier fast), and the suites that have nothing left to run are not started at all
 $todoSuites = @($todo | ForEach-Object { $_.suite } | Select-Object -Unique)
 $leftOut = @(); if ($Tier -eq 'fast') { $leftOut = @($scen | Where-Object { $_.tier -eq 'full' -and $todoSuites -contains $_.suite -and (-not $Only -or $_.name -match $Only) }) }
@@ -71,6 +122,17 @@ if ($Tier -eq 'fast' -and -not $Only) { $todo = @($todo | Where-Object { $sn = $
 # longest first (a shard as its share of the suite's time); a suite without a known duration goes first (it could be the long one)
 $queue = [System.Collections.Generic.List[object]]::new(); foreach ($j in ($todo | Sort-Object { $d = $(if ($_.group -ge 0) { $_.groups } else { 1 }); if ($known.ContainsKey($_.suite)) { -$known[$_.suite] / $d } else { -1e9 } })) { $queue.Add($j) }
 $jobOf = @{}; foreach ($j in $todo) { $jobOf[$j.label] = $j }
+# -Engine v2: the scenarios each job is to run (run.ps1 -ListScenarios, the same selection as the job's own), so that a claim that lists none fails the run and a job that ran others is told
+if ($Engine -eq 'v2') {
+    $empty = @()
+    foreach ($j in $todo) {
+        $la = @('-NoProfile', '-File', (Join-Path $here 'run.ps1'), '-ListScenarios', '-Suite', $j.suite, '-Tier', $Tier)
+        if ($j.only) { $la += @('-Only', $j.only) }; if ($j.groups -gt 1 -and $j.group -ge 0) { $la += @('-Groups', $j.groups, '-Group', $j.group) }
+        $j.listed = @(& pwsh @la | Where-Object { $_ -match '^[^\t]+\t[^\t]+\t(fast|full)$' }).Count
+        if ($j.listed -eq 0 -and -not ($j.groups -gt 1 -and $j.group -ge 0)) { $empty += "$($j.suite)$(if ($j.only) { " /$($j.only)/" })" }
+    }
+    if ($empty.Count) { throw "$script:ClaimsFile: the claim lists no scenario (a renamed suite or scenario?): $($empty -join '; ')" }
+}
 
 function Get-StatKey([string]$Name) { $Name -replace '\s\[full\]\s*$', '' }   # the tier tag is not part of a scenario's identity
 function Get-MemAvailableMb { try { [int]((Select-String -Path /proc/meminfo -Pattern '^MemAvailable:\s+(\d+)').Matches[0].Groups[1].Value) / 1024 } catch { 99999 } }
@@ -93,7 +155,9 @@ try {
             $work = Join-Path $LogDir "work-$name"; New-Item -ItemType Directory -Force -Path $work | Out-Null
             $resultFile = Join-Path $LogDir "$name.result.json"; $log = Join-Path $LogDir "$name.log"
             $args2 = @('-NoProfile', '-File', (Join-Path $here 'run.ps1'), '-Suite', $job.suite, '-Tier', $Tier, '-Groups', $job.groups, '-NoBuild', '-ResultFile', $resultFile); if ($job.group -ge 0) { $args2 += @('-Group', $job.group) }; if ($Only) { $args2 += @('-Only', $Only) }
+            if ($Engine -eq 'v2') { $args2 += @('-Engine', 'v2', '-V2Profile', $job.profile); if ($job.only) { $args2 += @('-Only', $(if ($job.only -match '\s') { '"' + $job.only + '"' } else { $job.only })) } }
             $shardBase = ''; if ($job.group -ge 0) { $slot = $slots.IndexOf($job.suite); if ($slot -lt 0) { throw "run.ps1 -ListSuites does not list $($job.suite)" }; $shardBase = "$(10000 + 1000 * $slot + 100 * $job.group)" }
+            if ("$($job.portBase)" -like '@*') { $slot = $slots.IndexOf($job.suite); if ($slot -lt 0) { throw "run.ps1 -ListSuites does not list $($job.suite)" }; $shardBase = "$(10000 + 1000 * $slot + 100 * [int]($job.portBase.Substring(1)))" }
             $oldTmp = $env:TMPDIR; $env:TMPDIR = $work; Remove-Item Env:TEST_PORT_BASE -ErrorAction SilentlyContinue; if ($shardBase) { $env:TEST_PORT_BASE = $shardBase }
             try { $p = Start-Process pwsh -ArgumentList $args2 -PassThru -RedirectStandardOutput $log -RedirectStandardError (Join-Path $LogDir "$name.err") } finally { $env:TMPDIR = $oldTmp; Remove-Item Env:TEST_PORT_BASE -ErrorAction SilentlyContinue }
             $running[$name] = @{ proc = $p; sw = [Diagnostics.Stopwatch]::StartNew(); result = $resultFile; log = $log; work = $work }
@@ -106,6 +170,8 @@ try {
             $secs = [math]::Round($r.sw.Elapsed.TotalSeconds, 1)
             $res = if (Test-Path $r.result) { Get-Content -Raw $r.result | ConvertFrom-Json -AsHashtable } else { $null }
             if (-not $res) { $res = [ordered]@{ suite = $jobOf[$name].suite; checks = 0; failed = 1; failures = @("${name}: the suite process ended without a result (exit $($r.proc.ExitCode)); see $($r.log)"); seconds = $secs; verbCalls = 0; verbSeconds = 0; gatewayVerbLines = 0 } }
+            # -Engine v2: the scenarios that ran are the ones the claim lists (a group that was cut, or an -Only that matched another set, would pass with fewer)
+            if ($Engine -eq 'v2' -and $res.checks -gt 0 -and $jobOf[$name].listed -ge 0 -and @($res.scenarios).Count -ne $jobOf[$name].listed) { $res.failed = [int]$res.failed + 1; $res.failures = @($res.failures) + "${name}: $(@($res.scenarios).Count) scenarios ran, $($jobOf[$name].listed) listed" }
             $results[$name] = $res; $running.Remove($name)
             $perVerb = if ($res.verbCalls -gt 0) { '{0:N2}s/verb' -f ($res.verbSeconds / $res.verbCalls) } else { '-' }
             Write-Host ("  {0,-4} {1,-18} checks {2,4}  failed {3,2}  {4,6:N0}s  verbs {5,4} ({6})" -f $(if ($res.failed -eq 0) { 'done' } else { 'FAIL' }), $name, $res.checks, $res.failed, $res.seconds, $res.verbCalls, $perVerb)
@@ -149,7 +215,7 @@ if ($Tier -eq 'fast') {
 Write-Host "slowest scenarios:"; foreach ($sc in ($allRun | Sort-Object { -[double]$_.seconds } | Select-Object -First 8)) { Write-Host ("  {0,6:N1}s {1,4} checks  {2}: {3}" -f $sc.seconds, $sc.checks, $sc.suite, $sc.name) }
 
 # ---- remember the durations (clean suites only, a failed or cut-short one says nothing about its length) ----------------------------
-if (-not $Only) {
+if (-not $Only -and $Engine -ne 'v2') {
     $mine = @{}; if ($timesAll.ContainsKey($Tier)) { foreach ($e in $timesAll[$Tier].GetEnumerator()) { $mine[$e.Key] = $e.Value } }
     foreach ($n in $results.Keys) { if ($results[$n].failed -eq 0 -and $jobOf[$n].groups -eq 1) { $mine[$n] = [math]::Round($results[$n].seconds, 0) } }   # (a shard or a split run is not the suite's time in one process)
     $ordered = [ordered]@{}; foreach ($n in $names) { if ($mine.ContainsKey($n)) { $ordered[$n] = $mine[$n] } }
@@ -158,7 +224,7 @@ if (-not $Only) {
     foreach ($t in 'fast', 'full') { $k2 = "wall-$t"; if ($t -ne $Tier -and $timesAll.ContainsKey($k2)) { $out[$k2] = $timesAll[$k2] } }
     ($out | ConvertTo-Json -Depth 4) | Set-Content -Path $timesFile
 }
-if ($Tier -eq 'full' -and -not $Only) {
+if ($Tier -eq 'full' -and -not $Only -and $Engine -ne 'v2') {
     $stats = @{}; if (Test-Path $statsFile) { $stats = Get-Content -Raw $statsFile | ConvertFrom-Json -AsHashtable }
     foreach ($sc in $allRun) { if ($sc.failed -eq 0) { if (-not $stats.ContainsKey($sc.suite)) { $stats[$sc.suite] = @{} }; $stats[$sc.suite][(Get-StatKey $sc.name)] = @{ tier = $sc.tier; seconds = $sc.seconds; checks = $sc.checks } } }
     ($stats | ConvertTo-Json -Depth 4) | Set-Content -Path $statsFile

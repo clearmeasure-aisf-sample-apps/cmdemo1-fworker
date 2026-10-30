@@ -114,7 +114,7 @@ public class MergeTrainTrackedTests
 
     // ---- the table -------------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task TheStore_SavesByRevision_AStaleWriterAndASecondInsertOfTheKeyLose_AndTheJsonRoundTrips()
     {
         if (!TrackedSessionHost.Available) return;
@@ -136,7 +136,7 @@ public class MergeTrainTrackedTests
 
     // ---- direct ----------------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task Direct_ARequestIsGranted_Merged_AndAnsweredToTheSaga_StateAndHistoryInTheDatabase()
     {
         if (!TrackedSessionHost.Available) return;
@@ -155,7 +155,7 @@ public class MergeTrainTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task Direct_SeveralItems_AreAllLetThroughWithoutWaiting()
     {
         if (!TrackedSessionHost.Available) return;
@@ -169,7 +169,7 @@ public class MergeTrainTrackedTests
 
     // ---- train -----------------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task Train_TheSecondItemWaitsForTheFirst_ThenMergesInItsTurn()
     {
         if (!TrackedSessionHost.Available) return;
@@ -195,7 +195,7 @@ public class MergeTrainTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task Train_RequestsThatArriveTogether_GrantExactlyOneTurn_TheLineIsSerializedByTheQueue()
     {
         if (!TrackedSessionHost.Available) return;
@@ -212,7 +212,7 @@ public class MergeTrainTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task Train_EachRepositoryHasItsOwnLine_InTheTable()
     {
         if (!TrackedSessionHost.Available) return;
@@ -225,7 +225,7 @@ public class MergeTrainTrackedTests
         Assert.Equal(["acme/orders#1"], (await Row(h))!.Line.Select(e => e.Item));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task Train_ATransientFaultOfThePort_IsNotKeptAsALastingAnswer_TheItemMergesOnTheNextAttempt()
     {
         if (!TrackedSessionHost.Available) return;
@@ -244,7 +244,7 @@ public class MergeTrainTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task Train_AMergeByAPerson_ReleasesThePlace_ThroughTheDeliveryTrainsItemMerged()
     {
         if (!TrackedSessionHost.Available) return;
@@ -265,7 +265,7 @@ public class MergeTrainTrackedTests
 
     // ---- restart and crash -----------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task ARestart_KeepsTheLine_TheNewProcessAnswersTheSecondItemAWait()
     {
         if (!TrackedSessionHost.Available) return;
@@ -281,7 +281,7 @@ public class MergeTrainTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ACrashBetweenTheSaveAndThePublish_IsHealedByTheRedelivery_OneTurnOneEntry_AndTheItemMerges()
     {
         if (!TrackedSessionHost.Available) return;

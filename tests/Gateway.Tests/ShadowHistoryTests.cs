@@ -258,7 +258,7 @@ public sealed class ShadowHistorySqlServerTests
         return n;
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ShadowOn_RecordsEventsAndJournalLines_AndV1StillActs()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -289,7 +289,7 @@ public sealed class ShadowHistorySqlServerTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ShadowOff_ARegisteredConnectionString_RecordsNothing_AndCreatesNoTable()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -302,7 +302,7 @@ public sealed class ShadowHistorySqlServerTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ARedeliveredRecord_WritesItsRowOnce()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;

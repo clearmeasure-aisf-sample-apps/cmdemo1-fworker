@@ -135,13 +135,6 @@ $QcGateScenarios = [ordered]@{
     Check 'merged' ((Pv $r0 'outcome') -eq 'merged') "$(Pv $r0 'outcome') $(Pv $r0 'reason')"
 }
 
-'qc: gate a reset keeps the record of the run for the same head [full]' = {
-    Ensure-QcWorker
-    $x = New-QcOffered
-    $x = Gate-Run $x 'qw1'
-    $r0 = F 'op' @('qc-reset', '--item', $x.n, '--pr', $x.pr); CheckExit 'reset' $r0 0
-    Check 'the new attempt carries ran_sha over (an environment for this head did reach ready)' ((Qc-Rec $x.n $x.pr).ran_sha -eq (Get-Head $x.pr) -and (Qc-Rec $x.n $x.pr).attempt -eq 2) "$((Qc-Rec $x.n $x.pr) | ConvertTo-Json -Compress -Depth 4)"
-}
 
 'qc: gate a person''s approval wakes the owner with qc.approved (webhook and sweep), a dismissal clears it, and the retried merge succeeds [full]' = {
     Ensure-QcWorker
@@ -248,23 +241,6 @@ $QcGateScenarios = [ordered]@{
     $r0 = Gate-Merge $x; CheckExit 'merge is refused for the missing QC run, not for a missing approval' $r0 10 'qc-not-run'
 }
 
-'qc: gate an Auto Merge label added to an item with a live environment tears the environment down [full]' = {
-    Ensure-QcWorker
-    $x = New-QcOffered
-    $x = Gate-Run $x 'qw1'
-    Gh-As 'fake-operator' "issues/$($x.n)/labels" @{ labels = @('Auto Merge') } | Out-Null
-    $td = Wait-Until -Seconds 60 { (Gate-TeardownCount 'qw1' $x.pr) -gt 0 }
-    Check 'the worker is told to tear the environment down' $td
-    Check 'the record names the reason label-changed' ((Gate-TdReason $x) -eq 'label-changed') (Gate-TdReason $x)
-    $hb = Fo 'qw1' @('qc-heartbeat', '--item', $x.n, '--env-id', $x.env, '--app-alive', 'true', '--local-health', 'ok'); Check 'the heartbeat is answered teardown' ($hb.action -eq 'teardown') "$($hb.action)"
-    Gate-Stop $x
-    Check 'journal: qc-torn-down (label-changed)' ((Gate-Journal $x.n 'qc-torn-down' 'label-changed') -eq 1)
-    Qc-Sweeps 2
-    Check 'the offer is withdrawn: no new environment and no new job' ((Qc-QcAssignments $x.n).Count -eq 0)
-    Gate-Inspect $x
-    $r0 = Gate-Merge $x; CheckExit 'the item is an Auto Merge item now: merge needs neither run nor person' $r0 0
-    Check 'merged' ((Pv $r0 'outcome') -eq 'merged') "$(Pv $r0 'outcome') $(Pv $r0 'reason')"
-}
 
 }
 
@@ -281,6 +257,34 @@ $QcGateAutoScenarios = [ordered]@{
     $a = New-QcPr @('factory worker', 'Auto Merge')
     $m = F 'w1' @('merge', '--item', $a.n, '--pr', $a.pr); CheckExit 'an Auto Merge item merges without QC' $m 0
     Check 'merged (by the gateway at the verdict; the session''s merge confirms it)' ((Pv $m 'outcome') -in 'merged', 'already-merged' -and (Get-FakePr $a.pr).merged) "$(Pv $m 'outcome')"
+}
+
+# Moved from the peer-approved suite 'qc-gate' (W9.10d, #552): what these two check is the QC environment's own record and lifecycle, not the merge gate, and they run under the auto policy as well:
+# the reset carries the run's head over (ran_sha), and an Auto Merge label added to an item whose environment is live tears it down (label-changed). The rest of qc-gate is the dropped policy (v1-only in v2-claims.txt).
+
+'qc: gate a reset keeps the record of the run for the same head [full]' = {
+    Ensure-QcWorker
+    $x = New-QcOffered
+    $x = Gate-Run $x 'qw1'
+    $r0 = F 'op' @('qc-reset', '--item', $x.n, '--pr', $x.pr); CheckExit 'reset' $r0 0
+    Check 'the new attempt carries ran_sha over (an environment for this head did reach ready)' ((Qc-Rec $x.n $x.pr).ran_sha -eq (Get-Head $x.pr) -and (Qc-Rec $x.n $x.pr).attempt -eq 2) "$((Qc-Rec $x.n $x.pr) | ConvertTo-Json -Compress -Depth 4)"
+}
+
+'qc: gate an Auto Merge label added to an item with a live environment tears the environment down [full]' = {
+    Ensure-QcWorker
+    $x = New-QcOffered
+    $x = Gate-Run $x 'qw1'
+    Gh-As 'fake-operator' "issues/$($x.n)/labels" @{ labels = @('Auto Merge') } | Out-Null
+    $td = Wait-Until -Seconds 60 { (Gate-TeardownCount 'qw1' $x.pr) -gt 0 }
+    Check 'the worker is told to tear the environment down' $td
+    Check 'the record names the reason label-changed' ((Gate-TdReason $x) -eq 'label-changed') (Gate-TdReason $x)
+    $hb = Fo 'qw1' @('qc-heartbeat', '--item', $x.n, '--env-id', $x.env, '--app-alive', 'true', '--local-health', 'ok'); Check 'the heartbeat is answered teardown' ($hb.action -eq 'teardown') "$($hb.action)"
+    Gate-Stop $x
+    Check 'journal: qc-torn-down (label-changed)' ((Gate-Journal $x.n 'qc-torn-down' 'label-changed') -eq 1)
+    Qc-Sweeps 2
+    Check 'the offer is withdrawn: no new environment and no new job' ((Qc-QcAssignments $x.n).Count -eq 0)
+    # (the peer-approved version of this scenario went on to merge the item through the gate; under the auto policy there is no gate: the item carries the label, which is all that is left to say)
+    Check 'the item carries the Auto Merge label' (@((Get-FakeIssue $x.n).labels) -contains 'Auto Merge') ((Get-FakeIssue $x.n).labels -join ',')
 }
 
 }

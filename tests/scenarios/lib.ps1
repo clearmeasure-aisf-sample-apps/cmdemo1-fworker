@@ -18,7 +18,16 @@ $script:Failures = New-Object System.Collections.ArrayList
 $L2 = @('factory worker', 'Auto Merge')
 $script:Checks = 0
 
-function Start-TestEnv([hashtable]$Config = @{}) {
+# $Base's block laid under $Over key by key: a key of $Over that is a block (a hashtable) and is a block in $Base too is merged into it, every other key of $Over replaces the one of $Base.
+# (-Merge of Start-TestEnv: the v2 test profiles of run.ps1, which add to the blocks of config/instance.json and do not replace them.)
+function Merge-ConfigBlock($Base, $Over) {
+    # (statements, not $( ) and a comma before an array: a one-element array such as @('docs') must stay an array in the JSON)
+    if (-not ($Base -is [System.Collections.IDictionary]) -or -not ($Over -is [System.Collections.IDictionary])) { return , $Over }
+    $out = [ordered]@{}; foreach ($k in $Base.Keys) { $out[$k] = $Base[$k] }
+    foreach ($k in $Over.Keys) { if ($out.Contains($k)) { $out[$k] = Merge-ConfigBlock $out[$k] $Over[$k] } else { $out[$k] = $Over[$k] } }
+    return $out
+}
+function Start-TestEnv([hashtable]$Config = @{}, [hashtable]$Merge = @{}) {
     $work = Join-Path ([IO.Path]::GetTempPath()) "factory-worker-test-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     $script:Work = $work
@@ -36,6 +45,7 @@ function Start-TestEnv([hashtable]$Config = @{}) {
     # scenario switches it on (FACTORY_INTAKE, owner.ps1)
     $cfg.intake = @{ enabled = $false }
     foreach ($k in $Config.Keys) { $cfg[$k] = $Config[$k] }
+    foreach ($k in $Merge.Keys) { if ($cfg.ContainsKey($k)) { $cfg[$k] = Merge-ConfigBlock $cfg[$k] $Merge[$k] } else { $cfg[$k] = $Merge[$k] } }
     # __FAKE_URL__ in a suite's configuration is the fake's address (the fake ARM of the runtime suite)
     $cfgPath = Join-Path $work 'instance.test.json'; ($cfg | ConvertTo-Json -Depth 12).Replace('__FAKE_URL__', "http://127.0.0.1:$($script:FakePort)") | Set-Content $cfgPath
     $fakeDll = Join-Path $script:Root 'tests/FakeGitHub/bin/Release/net10.0/FakeGitHub.dll'
@@ -88,7 +98,7 @@ function Assert-GoldenTails([string]$Suite) {
     # the fake keeps at most 400,000 writes of a process: beyond that a tail line could be missed for want of room, which must not look like a defect
     $dropped = Get-RecField $res 'droppedProcessWrites'
     if ($null -ne $dropped -and [long]$dropped -gt 0) { Check 'golden tail writes: the fake kept every write of the process' $false "($dropped writes were not kept; the missing tail lines below may be among them)" }
-    # every tail line missing is a quarantined miss of its own (Add-GoldenMiss: issue #386)
+    # every tail line missing is a quarantined miss of its own (Add-GoldenMiss: issue #415, which continues the closed #386)
     $missing = @(Get-RecField $res 'missing')
     foreach ($m in $missing) {
         $suite = "$(Get-RecField $m 'suite')"; $slug = "$(Get-RecField $m 'slug')"
@@ -392,6 +402,14 @@ function Compare-CauseLines($Expected, $Actual) {
     $first.objects = $count
     return $first
 }
+# Scenarios whose caused writes differ from their golden file now and then for a cause not found (issue #415: each was red on the first run of a pull request and green on the re-run, without a change of code). The comparison of
+# such a scenario is a quarantined check (CheckQuarantined: reported and counted, the suite does not fail) with the issue that keeps it open; the scenario's other checks still fail it. A name here is the start of the scenario's name.
+# Remove an entry with its cause. (W9.10d: with the v2 job blocking, a re-run that hides a flake is no longer enough.)
+$script:GoldenCausedFlaky = @{
+    'keeper: split-item creates ordered children' = '#415'
+    'mgr: text that comes from a message enters an item only as a marked block' = '#415'
+    'copilot: a red master after the merge resumes the owner task once to fix forward' = '#415'
+}
 # A record against a golden file: (a) the caused writes ('= ') must be the golden's exactly, in the golden's order per object (Get-WriteObject);
 # (b) every settled background line of the golden ('+ ') must be among the record's background lines, settled or tail ('+ ' or '~ '). The
 # golden's tail lines ('~ ') are checked at the end of the group (Assert-GoldenTails), not here. Background lines the golden does not name
@@ -432,18 +450,20 @@ function Compare-GoldenWrites($Rec, [string]$Name, [string]$Mode = (Get-GoldenMo
         $detail = "(the writes differ from the golden file: $($why -join '; '))`n        " + ($shown -join "`n        ")
     }
     # caused writes and the format block; a missing settled background line is a quarantined miss of its own (Add-GoldenMiss)
-    Check 'golden writes unchanged' ($null -eq $r.cause -and $r.format.Count -eq 0) $detail
+    $flaky = $script:GoldenCausedFlaky.Keys | Where-Object { $Name.StartsWith($_, [StringComparison]::Ordinal) } | Select-Object -First 1
+    if ($flaky) { CheckQuarantined 'golden writes unchanged' ($null -eq $r.cause -and $r.format.Count -eq 0) $detail -Issue $script:GoldenCausedFlaky[$flaky] }
+    else { Check 'golden writes unchanged' ($null -eq $r.cause -and $r.format.Count -eq 0) $detail }
     foreach ($l in $r.missing) { Add-GoldenMiss -Section '+' -Scenario $Name -Suite (Split-Path -Leaf (Split-Path -Parent $file)) -Slug ((Split-Path -Leaf $file) -replace '\.writes\.txt$', '') -Line $l -Golden $golden }
 }
 # A required background line of a golden file that a run did not write: a settled line ('+ ') missing from the scenario's record, or a tail line
 # ('~ ') written by no write of the group. Whether a background line lands in time is the gateway loops' timing, so a miss is reported as a
-# quarantined check (issue #386: printed with its scenario and normalized line, counted, the suite does not fail), while a difference of the
+# quarantined check (issue #415, which continues the closed #386: printed with its scenario and normalized line, counted, the suite does not fail), while a difference of the
 # caused writes stays a failure. The repeat rule (README: Comparison): a stage C pull request with a miss re-runs that shard once, and the same
 # line missing again in the same scenario is a regression that blocks the pull request. To compare two attempts, every miss is also appended
 # as "<section> <suite>/<slug> <line>" to golden-misses.txt in the records' directory (TEST_WRITES_DIR, uploaded as writes-<job>-<attempt>).
 function Add-GoldenMiss([string]$Section, [string]$Scenario, [string]$Suite, [string]$Slug, [string]$Line, [string]$Golden) {
     $what = $(if ($Section -eq '+') { 'settled background line missing from the record' } else { 'tail line written by no write of the group' })
-    CheckQuarantined "golden $what`: $Scenario" $false "`n        $Section $Line`n        golden: $Golden" -Issue '#386'
+    CheckQuarantined "golden $what`: $Scenario" $false "`n        $Section $Line`n        golden: $Golden" -Issue '#415'
     if ($env:FAKE_RECORD_DIR) {
         try { [IO.File]::AppendAllText((Join-Path $env:FAKE_RECORD_DIR 'golden-misses.txt'), "$Section $Suite/$Slug $Line`n", [Text.UTF8Encoding]::new($false)) } catch { Write-Host "    (golden-misses.txt not written: $($_.Exception.Message))" }
     }

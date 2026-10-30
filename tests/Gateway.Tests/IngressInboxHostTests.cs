@@ -128,7 +128,7 @@ public sealed class IngressInboxHostTests
         Assert.True(await Until(() => Task.FromResult(wolverine.State == WolverineHostService.Phase.Running), 90), "the Wolverine host did not start");
     }
 
-    [Fact]
+    [SqlFact]
     public async Task OneWebhookEvent_ReachesBothHandlers_TheCorrelationCarriesTheGeneration_AndALaterDuplicateIsAnsweredWithoutAGitHubRead()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -165,7 +165,7 @@ public sealed class IngressInboxHostTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AGitHubFaultOnTheMergeRead_IsTriedAgain_AndNothingGoesToTheDeadLetters()
     {
         // the merge is derived from this message or from nothing; a 502 of GitHub must not end it after a few quick attempts (#494)
@@ -182,7 +182,7 @@ public sealed class IngressInboxHostTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AWebhookThatArrivesBeforeTheHostIsUp_IsStoredWhenItIs_NotLost()
     {
         // the publish happens after the webhook was answered; the host (database migrations, the leader) is not always up yet, and a publish that said "not up" used to be the end of the event (#485)

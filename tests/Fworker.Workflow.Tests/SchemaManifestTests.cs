@@ -14,7 +14,7 @@ public class SchemaManifestTests
 {
     static string ManifestPath => Path.Combine(RepoPaths.Root, "src", "Fworker.Database", "schema-manifest.json");
 
-    [Fact]
+    [SqlFact]
     public async Task TheManifestIsWhatTheScriptsBuild()
     {
         if (!TestDatabase.Available) return;
@@ -45,7 +45,7 @@ public class SchemaManifestTests
         Assert.Equal(m.ToJson(), SchemaManifest.FromJson(m.ToJson()).ToJson());
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheScriptsAreIdempotent_RunASecondTime_NoErrorAndTheManifestIsUnchanged()
     {
         if (!TestDatabase.Available) return;
@@ -68,7 +68,7 @@ public class SchemaManifestTests
         Assert.Equal(FactorySchema.Scripts.Count, second.Journaled);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task VerifyFindsDrift_ADroppedColumnOrIndex_AnAlteredProcedure_ARemovedJournalRow_AndToleratesAnExtraTable()
     {
         if (!TestDatabase.Available) return;
@@ -101,7 +101,7 @@ public class SchemaManifestTests
         Assert.DoesNotContain("400", string.Join(" ", d));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AJournalEntryThisBuildDoesNotShip_IsAheadAndNotAFailure()
     {
         if (!TestDatabase.Available) return;
@@ -113,7 +113,7 @@ public class SchemaManifestTests
         Assert.Equal(FactorySchema.Scripts.Count + 1, r.Journaled);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TwoProcessesStartingTogether_BothSucceed_AndEachScriptIsJournaledOnce()
     {
         if (!TestDatabase.Available) return;
@@ -126,7 +126,7 @@ public class SchemaManifestTests
         Assert.Equal(FactorySchema.Scripts.Count, await db.Count("SELECT COUNT(DISTINCT ScriptName) FROM dbo.SchemaVersions"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AFailingScript_IsNotJournaled_AndNamesItself()
     {
         if (!TestDatabase.Available) return;
@@ -142,7 +142,7 @@ public class SchemaManifestTests
         await Assert.ThrowsAsync<SchemaUpgradeException>(() => FactorySchema.UpgradeAndVerifyAsync(db.ConnectionString, new SchemaRunOptions { LockTimeout = TimeSpan.FromSeconds(2) }));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheLogHoldsScriptNamesAndNeverTheConnectionString()
     {
         if (!TestDatabase.Available) return;
@@ -153,7 +153,7 @@ public class SchemaManifestTests
         Assert.All(lines, l => { Assert.Contains("\"gateway\":\"schema\"", l); Assert.DoesNotContain("Password", l, StringComparison.OrdinalIgnoreCase); Assert.DoesNotContain(db.Name, l); });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheDatabaseIsCreatedOnlyWhenTheOptionSaysSo()
     {
         if (!TestDatabase.Available) return;

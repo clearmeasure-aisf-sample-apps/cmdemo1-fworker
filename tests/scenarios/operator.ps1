@@ -4,7 +4,7 @@
 # reaches the daily limit comes after the one that needs a quiet answer, and the revoke scenario uses the second name.
 
 function Op-Token([string]$Name = 'operator-session', [int]$Rev = 0) { if ($Rev) { "o1.$Name.1-$Rev.$(Msg-Mac "operator:${Name}:1:$Rev")" } else { "o1.$Name.1.$(Msg-Mac "operator:${Name}:1")" } }
-function Op-Registered($St) { Msg-Read $St 8 { param($e) @($e | Where-Object { $_.data.event -eq 'operator.registered' }).Count -gt 0 } }
+function Op-Registered($St) { Msg-Read $St 15 { param($e) @($e | Where-Object { $_.data.event -eq 'operator.registered' }).Count -gt 0 } }
 function Op-Open([string]$Name = 'operator-session', [string]$Token = '', [string]$Model = 'claude-opus-5-5') { $s = Msg-Open "name=$Name&operator=1&model=$Model&effort=low" $(if ($Token) { $Token } else { Op-Token $Name }); Op-Registered $s; return $s }
 # The slot for one name: waits out the takeover window of whoever held it before (another scenario's second name).
 function Op-Hold([string]$Name = 'operator-session') {
@@ -65,8 +65,10 @@ $OperatorScenarios = [ordered]@{
         $weak = Msg-First @(Op-Events $s1b 'operator.registered')
         Check 'a weaker model is flagged, on the stream and in /status' ($weak.modelCheck -eq 'weak' -and (Op-Get '/api/v1/status' 'test-token').operator.session.modelCheck -eq 'weak') ($weak | ConvertTo-Json -Compress)
         Msg-Close $s1b
-        Start-Sleep -Seconds 6      # past mgrTakeoverSeconds (4) without a request of the first name
-        $s2 = Op-Open 'operator-two'
+        # past mgrTakeoverSeconds (4) without a request of the first name: the second name is let in as soon as the window has passed, however late a loaded runner reads the clock (#415: a fixed
+        # sleep of 6 s met the window on a first run and the open was refused 409 operator-active); Op-Hold asks again every 700 ms for 30 s
+        Start-Sleep -Seconds 5
+        $s2 = Op-Hold 'operator-two'
         try {
             Check 'after the takeover window the second name takes the slot' ($s2.status -eq 200 -and (Op-Get '/api/v1/status' 'test-token').operator.session.name -eq 'operator-two') "$($s2.status) $($s2.body)"
             $stale = Op-Get '/api/v1/status'; $note = Op-Post '/api/v1/messages' @{ to = 'alice'; text = 'from the one that was replaced' }; $chk = Op-Get '/api/v1/operator/release-check'

@@ -55,6 +55,8 @@ pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Tier fast -NoBuild           
 pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Tier full -NoBuild                  # everything (about 30 minutes on 4 cores)
 pwsh -NoProfile -File tests/scenarios/run.ps1 -Suite auto -Only 'substring of a scenario name' -NoBuild
 pwsh -NoProfile -File tests/scenarios/run.ps1 -ListSuites
+FACTORY_TEST_SQL='Server=localhost,1433;User Id=sa;Password=...;TrustServerCertificate=True;Encrypt=False' \
+  pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Engine v2 -Tier full -NoBuild      # the claims of tests/scenarios/v2-claims.txt on the v2 engine (a SQL Server of your own; a database per process)
 ```
 
 Rules of the runners:
@@ -68,10 +70,14 @@ Rules of the runners:
 - `run-all.ps1` without `-NoBuild` builds with `--no-restore`: on a fresh clone run the two `dotnet build` commands above first.
 - A new suite is appended at the END of `$SuiteDefs` in `tests/scenarios/run.ps1` (the position is its port slot) and added to a job of
   `.github/workflows/tests.yml` (the workflow fails when one is missing). A scenario tagged ` [full]` in its name is left out of the fast tier.
-- The v2 engine has a second Tier 1 job, `Tier 1 (v2)` of `tests.yml`: it runs the suites and scenarios named in `tests/scenarios/v2-claims.txt` again with
-  `run.ps1 -Engine v2` (`FACTORY_ENVIRONMENT` v2ci, `engine.v2Environments` naming it, `FACTORY_DB_CONNECTION` a database of its own on the SQL Server of
-  `FACTORY_TEST_SQL`; CI only, a machine without one exits 2). It is not a shard: the coverage check ignores it. `Tests result` reports it and does not
-  fail on it until `V2_BLOCKING` there is set to true. The job `Image starts without a database` runs the built image with no `FACTORY_DB_CONNECTION`.
+- The v2 engine has a second Tier 1, the matrix jobs `Tier 1 (v2 ...)` of `tests.yml`: they run the suites and scenarios named in `tests/scenarios/v2-claims.txt` again with
+  `run-all.ps1 -Engine v2` (`run.ps1 -Engine v2 -V2Profile`; `FACTORY_ENVIRONMENT` v2ci, or the suite's own name where it sets one (tdd for copilot, promote, envscope),
+  `engine.v2Environments` naming it, `FACTORY_DB_CONNECTION` a database of its own on the SQL Server of `FACTORY_TEST_SQL`; a machine without one exits 2). A claim names its profile:
+  `saga-docs` and `saga-feature` turn the engine's intake on, so that the Todo items of the suite `saga` start sagas. The entries of the matrix name their suites after `claims:` (not `suites:`:
+  they are not shards), and `python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml` (run by the coverage job) proves that every claim is in exactly one of them.
+  Where v2 writes differently on purpose, `tests/scenarios/golden/v2-differences.txt` says so. `Tests result` reports the jobs and does not fail on them until `V2_BLOCKING` there is set to true
+  (after the first green run of `Tests` on master). The job `Image starts without a database` runs the built image with no `FACTORY_DB_CONNECTION`. The unit tests that need a SQL Server are `[SqlFact]`:
+  without `FACTORY_TEST_SQL` a run reports them as skipped.
 - `run-all.ps1` rewrites `tests/scenarios/suite-times.json` (and a full run `scenario-stats.json`): commit them only when the timings
   really changed.
 

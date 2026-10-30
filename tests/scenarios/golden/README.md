@@ -252,7 +252,7 @@ A difference of 1 or 3 fails the check, the scenario and the suite; it prints th
 up to 2 lines before it, the golden's and the record's line there, `(no more writes)` where one side ends), then the paths of the golden
 file, the record and the raw file.
 
-A miss of 2, or of a tail line at the end of the group, is a quarantined check (`CheckQuarantined` of lib.ps1, issue #386): each missing
+A miss of 2, or of a tail line at the end of the group, is a quarantined check (`CheckQuarantined` of lib.ps1, issue #415, which continues the closed #386): each missing
 line is its own check, `golden settled background line missing from the record: <scenario>` or `golden tail line written by no write of
 the group: <scenario>`, printed as `QUARANTINED (failed)` with the line (`+ ` or `~ `, normalized) and the golden file's path, counted in
 the quarantined total of the suite summary, run-all and the "Tests result" summary, and it does not fail the suite. Whether a background

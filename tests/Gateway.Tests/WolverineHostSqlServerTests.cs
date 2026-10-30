@@ -86,7 +86,7 @@ public sealed class WolverineHostSqlServerTests
         Assert.Equal(200, last.Status);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task Solo_Default_StartsInTheBackground_BuildsTheSchemaWithTheScripts_AndHoldsNoSessionOrLock()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -122,7 +122,7 @@ public sealed class WolverineHostSqlServerTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task Balanced_ElectsItsNodeLeader_HoldsTheLock_AndTheStopReleasesIt()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;

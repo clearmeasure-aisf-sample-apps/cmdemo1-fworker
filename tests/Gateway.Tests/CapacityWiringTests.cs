@@ -41,7 +41,7 @@ public sealed class CapacityWiringTests
 
     static RequestSlot Ask(ItemId item) => new(item, "ask-1", 1, "cursor-cloud", "design", default, false, false, 1, DateTimeOffset.UtcNow, [], Footprint.Empty);
 
-    [Fact]
+    [SqlFact]
     public async Task WhereTheEngineActs_TheSchedulerRunsInTheWolverineHost_RequestToLedgerToHistory()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -82,7 +82,7 @@ public sealed class CapacityWiringTests
         }
     }
 
-    [Fact]
+    [SqlFact]
     public async Task InTheShadowRunOfTdd_NothingOfTheSchedulerExists_ARequestIsNotHandled()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;

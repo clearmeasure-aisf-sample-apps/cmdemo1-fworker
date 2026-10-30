@@ -1,9 +1,13 @@
 # Declared differences of v2 (`v2-differences.txt`)
 
 The golden writes (`README.md` of this directory) are the oracle for both engines: v2 must write what v1 writes. Where v2 writes differently **on
-purpose**, the difference is a block in `v2-differences.txt`, reviewed in a pull request like a golden file. The file is empty today: v2 has no
-declared difference yet. The comparison that reads it is part of the v2 Tier 1 job (`tests.yml`, `run.ps1 -Engine v2`; issue #468);
-`tests/scenarios/v2-differences.ps1` has its functions and `lib.ps1` (`Initialize-V2Golden`, `Get-GoldenDir`) uses them.
+purpose**, the difference is a block in `v2-differences.txt`, reviewed in a pull request like a golden file. The blocks today are those of the scenarios
+of the suite `saga` (`tests/scenarios/saga.ps1`, W9.10d), the first that start a `WorkItemSaga` on v2: the docs plan (W6.6) and the feature plan (W7.3). The suite runs on both engines
+from one script, its golden files are recorded on v1, and each block says what v2 writes instead: the engine's intake and the saga's projection move the card (source `gateway`), the plant's journal lines
+go through the Wolverine sink (source `gateway`), the docs plan's merge is the saga's own call (source `gateway`, no merge comment, the card to Done by the projection). A block whose `# why:` names #557
+(W9.10e) holds a difference that is a defect until v1's sweep leaves the saga's items alone, and is removed or changed by that task. The comparison that reads the file is part of the v2 Tier 1 jobs (`tests.yml`,
+`run-all.ps1 -Engine v2`; issue #468); `tests/scenarios/v2-differences.ps1` has its functions and `lib.ps1` (`Initialize-V2Golden`, `Get-GoldenDir`) uses them.
+To make a block: run the scenario with `-Engine v2` and `TEST_WRITES_DIR` set, and compare the record it writes with the golden file (the lines of one that the other lacks are the block's `-` and `+` lines).
 
 ## Format
 

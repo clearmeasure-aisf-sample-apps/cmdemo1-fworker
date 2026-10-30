@@ -126,7 +126,7 @@ public class DeliveryShadowTrackedTests
 
     static long Recorded(DeliveryShadow s) => (long)s.Status()["v2"]!["commandsRecorded"]!;
 
-    [Fact]
+    [SqlFact]
     public async Task TheTrainsPromotion_IsRecordedNotExecuted_ComparedWithV1_AndStored()
     {
         if (!TrackedSessionHost.Available) return;
@@ -168,7 +168,7 @@ public class DeliveryShadowTrackedTests
     }
 
     /// <summary>The events of the watcher's replay as it publishes them (Watcher.Poll): every release first, every deployment after, Started then Succeeded, an old release deployed to uat among newer ones.</summary>
-    [Fact]
+    [SqlFact]
     public async Task AReplayShapedLikeTdds_IsAppliedWithoutDecisions_JudgedOnce_AndItsRowsAreFlaggedAndNotCounted()
     {
         if (!TrackedSessionHost.Available) return;
@@ -207,7 +207,7 @@ public class DeliveryShadowTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AReadThatFails_LosesNoInput_TheMessageIsHandled_AndNothingGoesToTheDeadLetters()
     {
         if (!TrackedSessionHost.Available) return;
@@ -225,7 +225,7 @@ public class DeliveryShadowTrackedTests
         Assert.NotNull(shadow);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ASignOff_IsRecordedAsAnswered_AndComparedWithV1sAnswer()
     {
         if (!TrackedSessionHost.Available) return;

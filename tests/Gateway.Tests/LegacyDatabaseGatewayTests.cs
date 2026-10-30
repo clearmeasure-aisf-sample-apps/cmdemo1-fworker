@@ -26,7 +26,7 @@ public sealed class LegacyDatabaseGatewayTests(ITestOutputHelper output)
                 CONSTRAINT PK_IngressDedup PRIMARY KEY (Layer, [Key]));
         """;
 
-    [Fact]
+    [SqlFact]
     public async Task AGatewayStartedOnTheDatabaseTheOldWayBuilt_AppliesTheScriptsAsNoOps_KeepsTheRows_AndStartsWolverine()
     {
         if (!StubPwsh.Supported || !TestDatabase.Available) return;
