@@ -14,7 +14,7 @@ public sealed class LeadershipGatewayTests
 {
     // the rule scripts for these tests: the answer of a verb is the file answers/<verb>.<action> (the input's first "action"), else answers/<verb>,
     // else a default; a test changes the files while the gateway runs. Every call is logged with its action and input.
-    const string Stub = """
+    internal const string Stub = """
         #!/bin/sh
         verb="$6"
         input=$(cat)
@@ -37,7 +37,7 @@ public sealed class LeadershipGatewayTests
     sealed record Call(string Verb, string Action, JsonObject Input);
 
     // a gateway with the leader lease and the plant snapshot on (the revocations are read, through the stub), quick snapshot cadence, rare lease checks
-    static GatewayEnvironment Environment(Action<GatewayEnvironment>? change = null)
+    internal static GatewayEnvironment Environment(Action<GatewayEnvironment>? change = null)
     {
         var env = new GatewayEnvironment();
         env.Set("FACTORY_TEST_SKIP_REVOCATIONS", null);
@@ -78,7 +78,7 @@ public sealed class LeadershipGatewayTests
     static async Task<JsonNode?> Status(GatewayHost host) =>
         (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json;
 
-    static async Task<JsonNode?> StatusUntil(GatewayHost host, Func<JsonNode?, bool> cond, int seconds = 30)
+    internal static async Task<JsonNode?> StatusUntil(GatewayHost host, Func<JsonNode?, bool> cond, int seconds = 30)
     {
         var sw = Stopwatch.StartNew();
         JsonNode? s = null;
@@ -91,7 +91,7 @@ public sealed class LeadershipGatewayTests
         return s;
     }
 
-    static string Role(JsonNode? s) => (string?)s?["leader"]?["role"] ?? "";
+    internal static string Role(JsonNode? s) => (string?)s?["leader"]?["role"] ?? "";
     static JsonNode? Restore(JsonNode? s) => s?["plantSnapshot"]?["restore"];
     static long Saves(JsonNode? s) => (long?)s?["plantSnapshot"]?["saves"] ?? 0;
     static string Trail(IEnumerable<Call> calls) => string.Join(", ", calls.Select(c => c.Action == "" ? c.Verb : c.Verb + ":" + c.Action));
@@ -106,6 +106,7 @@ public sealed class LeadershipGatewayTests
         var s = await StatusUntil(host, x => Role(x) == "acting" && Saves(x) >= 1);
         Assert.Equal("acting", Role(s));
         Assert.Equal(1L, (long?)s?["leader"]?["epoch"]);
+        Assert.Null(s?["leader"]?["sql"]);   // W9.10b: no database, no SQL lease: the ref alone arbitrates, as before
         var ps = s?["plantSnapshot"];
         Assert.Equal(true, (bool?)ps?["enabled"]);
         Assert.Equal(true, (bool?)ps?["leader"]);

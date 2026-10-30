@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Seams;
+using Fworker.Database;
 
 // The gateway's registrations, one method per area (gateway-composition.md 2 and 3 B, task C5a). Program.cs calls them in this order:
 //
@@ -73,6 +74,17 @@ static class GatewayServiceCollectionExtensions
         var leader = new GatewayLeader(c.Runner, leaderSettings,
             (typeof(Program).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false).FirstOrDefault() as System.Reflection.AssemblyInformationalVersionAttribute)?.InformationalVersion?.Split('+')[0] ?? "0.0.0");
         services.AddSingleton<ILeadership>(leader);
+        // W9.10b: where there is a database (the Wolverine host runs: the connection string is set and the engine is shadow or v2) and the lease is on, the process must also hold the SQL application lock to run the node,
+        // and where the engine acts to act at all. The GitHub ref above stays the arbitration with a process that has no database (v1 under the kill switch, uat, prod): those build no SqlLease.
+        if (leaderOn && c.WolverineHost)
+        {
+            var leaseConnection = WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, WolverineHostOptions.From(c.Instance).ConnectTimeoutSeconds);
+            var createDatabase = c.Database.CreateIfMissing;
+            // (the leadership row is a table of script 170: the scripts are applied before the lock is first tried, under their own application lock, as the host does; the host then finds nothing to apply)
+            leader.UseSqlLease(new SqlLease(leaseConnection,
+                ct => FactorySchema.UpgradeAsync(leaseConnection, new SchemaRunOptions { CreateDatabase = createDatabase, Log = line => { try { Console.WriteLine(line); } catch { } } }, ct),
+                leaderSettings.SqlRequestFreshSeconds), fencesActing: c.Engine.V2Acts);
+        }
         // fencing (W0.1): the rule scripts that act on the board run under this process's lease epoch and refuse their writes once it is lost (Runner.InjectLease)
         c.Runner.Lease = () => leader.FenceLease;
         // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)

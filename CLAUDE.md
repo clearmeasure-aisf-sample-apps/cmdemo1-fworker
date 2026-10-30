@@ -160,6 +160,9 @@ afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting,
 - **Only one gateway may sweep the board.** The leader lease enforces it: the newest process with a GitHub identity takes the lease and the
   one before stands down. So do not start `run-gateway.sh` or `run-owner-gateway.sh` against the real repository while tdd is the acting
   gateway: it would take the plant over from tdd (`FACTORY_LEADER_LEASE=0` turns the lease off for a local gateway, and then two would sweep).
+  Where a database is configured (tdd, the v2 CI gateways) the process must also hold the SQL application lock `fworker:leader`
+  (`gateway/Leadership/SqlLease.cs`, row `factory.Leadership`, status `leader.sql`): the Wolverine node runs only on its holder, and where
+  the engine acts so does everything else. A process without a database (v1 under the kill switch, uat, prod) is arbitrated by the ref alone.
 - **Protected areas need the owner**: credentials and tokens, authorization, revoke, the deploy pipeline (`.github/workflows/`,
   `Dockerfile`, `config/deploy.overrides.json`), uat and prod. `build.yml`, `release.yml`, `secret-scan.yml` and `architecture.yml` come
   from the demo-environment kit: the only local addition is the `tests` job of `build.yml`.
