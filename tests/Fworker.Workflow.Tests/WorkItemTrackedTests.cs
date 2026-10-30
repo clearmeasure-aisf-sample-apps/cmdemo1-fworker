@@ -106,7 +106,7 @@ public class WorkItemTrackedTests
 
     // ---- state, index and history in the database ---------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task AStart_SavesTheStateTheOpenInstanceAndTheHistory_AndTheLeaseIsADurableScheduledMessage()
     {
         if (!TrackedSessionHost.Available) return;
@@ -131,7 +131,7 @@ public class WorkItemTrackedTests
         return Convert.ToString(await cmd.ExecuteScalarAsync()) ?? "";
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheCompletionClosesTheOpenInstance_AndTheNextGenerationOpensItAgain()
     {
         if (!TrackedSessionHost.Available) return;
@@ -149,7 +149,7 @@ public class WorkItemTrackedTests
 
     // ---- timers --------------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task ALeaseThatRunsOut_FiresByItself_AndArmsTheStepAgain()
     {
         if (!TrackedSessionHost.Available) return;
@@ -162,7 +162,7 @@ public class WorkItemTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ARestartInTheMiddle_KeepsTheStateAndTheTimer_AndTheItemIdSurvivesTheDurableJson()
     {
         if (!TrackedSessionHost.Available) return;
@@ -177,7 +177,7 @@ public class WorkItemTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ACrashBetweenTheSaveAndThePublish_IsHealedByTheRedelivery_NothingIsLostAndNothingIsSavedTwice()
     {
         if (!TrackedSessionHost.Available) return;
@@ -198,7 +198,7 @@ public class WorkItemTrackedTests
             Item = A.ToString(), Generation = 1, Plan = "docs", Step = StepKind.Verify, ArmId = "1.3", ArmSeq = 3, StartedAt = DateTimeOffset.UtcNow, PullRequest = 11, Head = new string('a', 40), LeaseDue = DateTimeOffset.UtcNow.AddHours(3),
         }, 0, default);
 
-    [Fact]
+    [SqlFact]
     public async Task APassAsksForTheMerge_ThroughTheOutbox_AndACrashBetweenTheSaveAndThePublishStillAsksOnce()
     {
         if (!TrackedSessionHost.Available) return;
@@ -215,7 +215,7 @@ public class WorkItemTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ABlockedMerge_IsAskedAgainByADurableTimer_AndTheAnswerOfTheLastCallMergesTheItem()
     {
         if (!TrackedSessionHost.Available) return;
@@ -240,7 +240,7 @@ public class WorkItemTrackedTests
 
     // ---- partitioning ---------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task TheMessagesOfOneItem_RunOneAtATime_WhileDifferentItemsRunBesideEachOther()
     {
         if (!TrackedSessionHost.Available) return;
@@ -265,7 +265,7 @@ public class WorkItemTrackedTests
 
     // ---- NotFound -------------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task ALateMessageForAnItemWithNoSaga_EndsQuietly_NoRowNoErrorNoDeadLetter()
     {
         if (!TrackedSessionHost.Available) return;
@@ -290,7 +290,7 @@ public class WorkItemTrackedTests
 
     // ---- the merge and the delivery, as the train's events ------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task TheDeliveryTrainsEvents_MoveTheItemsSaga_AndAreIgnoredForTheItemsOfV1()
     {
         if (!TrackedSessionHost.Available) return;
@@ -314,7 +314,7 @@ public class WorkItemTrackedTests
 
     // ---- IRevisioned ---------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task TheRevisionIsTheConcurrencyToken_OnlyOneOfTwoWritersOfTheSameRevisionWins()
     {
         if (!TrackedSessionHost.Available) return;
@@ -338,7 +338,7 @@ public class WorkItemTrackedTests
 
     // ---- the hybrid hand-off -------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task AnItemTheIntakeGaveToV2_IsOwnedUntilItCompletes_AndItsRepositoryCountsItAsInFlight()
     {
         if (!TrackedSessionHost.Available) return;

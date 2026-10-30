@@ -595,7 +595,10 @@ $CopilotScenarios = [ordered]@{
     $n = 0
     try {
         $n = New-Item-Fake 'Copilot red master' 'Change src/App/Red.cs.' @('factory worker', 'Auto Merge', 'env:tdd')
-        Check 'the owner task is created' (Wait-Until -Seconds 30 { (Cop-Tasks $n).Count -gt 0 })
+        # (#415: 30 s met a loaded runner twice, and the next line then read the first of no task: "Index was outside the bounds of the array" and a golden difference; the wait is longer and the scenario stops here when no task came)
+        $created = Wait-Until -Seconds 90 { (Cop-Tasks $n).Count -gt 0 }
+        Check 'the owner task is created' $created (Cop-Brief $n)
+        if (-not $created) { return }
         $t = (Cop-Tasks $n)[0]
         $br = "copilot/red-$n"
         [void](Fake 'push-branch' @{ branch = $br; files = @('src/App/Red.cs') })

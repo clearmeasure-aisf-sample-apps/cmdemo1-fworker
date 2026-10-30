@@ -14,7 +14,7 @@ public class SchemaMatchesEfModelTests
     // the tables the gateway's SQL stores use without EF (raw SQL), so no entity maps them
     static readonly string[] NotMapped = ["IdempotencyLedger", "IdempotencyClaims", "CopilotReservations", "IngressDedup"];
 
-    [Fact]
+    [SqlFact]
     public async Task TheScriptsBuildTheEfModel()
     {
         if (!TestDatabase.Available) return;

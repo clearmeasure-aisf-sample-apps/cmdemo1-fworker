@@ -9,3 +9,5 @@ node_modules/
 TestResults/
 # the record of the last tests/fullrun/create-items.ps1 run
 tests/fullrun/created.json
+# Python bytecode of tests/ci (a committed .pyc was removed in W9.10d)
+__pycache__/

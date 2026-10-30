@@ -136,7 +136,7 @@ public sealed class DeliveryShadowGatewayTests
 
     static Task<Answer> Get(GatewayHost host, string path) => host.SendAsync("GET", path, GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
 
-    [Fact]
+    [SqlFact]
     public async Task TheMergeAndTheOctopusEvents_FeedTheTrain_V1sPassIsCompared_AndTheReportShowsIt()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -188,7 +188,7 @@ public sealed class DeliveryShadowGatewayTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheAlertRoute_IsNotThereInTheShadowRun_EvenThoughTheIngressInboxIs()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -200,7 +200,7 @@ public sealed class DeliveryShadowGatewayTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheWatchersReplay_IsAppliedWithoutADecision_AndJudgedOnceWhenItEnds()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -229,7 +229,7 @@ public sealed class DeliveryShadowGatewayTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ARestartOnTheSameDatabase_PublishesTheTrainsDecisionsAgain_AfterTheSecondReplay()
     {
         // tdd 1.0.838 and 1.0.839: the state of the first process held the fingerprint of every decision, so the second one replayed, judged, found nothing new and published nothing; its shadow stayed empty
@@ -276,7 +276,7 @@ public sealed class DeliveryShadowGatewayTests
         });
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ARangeThatCannotBeRead_DoesNotSilenceTheTrain_TheOtherReleasesAreStillDecided()
     {
         // tdd 1.0.833: the replay ended with a release that succeeded in tdd whose range GitHub would not give (the shadow's reads are limited per minute); the whole look was thrown away and the train decided nothing

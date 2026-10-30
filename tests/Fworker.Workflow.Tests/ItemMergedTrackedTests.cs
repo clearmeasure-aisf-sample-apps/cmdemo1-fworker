@@ -55,7 +55,7 @@ public class ItemMergedTrackedTests
         w.PublishMessage<Undelivered>().ToLocalQueue("harness-delivered");
     };
 
-    [Fact]
+    [SqlFact]
     public async Task WebhookReconcilerAndSecondWebhook_GiveOneItemMerged_WithGatesAndDependencies()
     {
         if (!TrackedSessionHost.Available) return;
@@ -73,7 +73,7 @@ public class ItemMergedTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheReconcilerFirst_GivesTheMessage_AndTheWebhookAfterItGivesNone()
     {
         if (!TrackedSessionHost.Available) return;
@@ -85,7 +85,7 @@ public class ItemMergedTrackedTests
         Assert.Equal(1, await h.Count("SELECT COUNT(*) FROM factory.MergedItems WHERE Source = 'poll'"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TwoItemsOfOneCommit_AreTwoRows_AndTheRowKeepsGatesAndDependenciesAsJson()
     {
         if (!TrackedSessionHost.Available) return;
@@ -103,7 +103,7 @@ public class ItemMergedTrackedTests
         Assert.Contains("\"AutoMerge\":false", row.GatesJson);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheSqlStore_ClaimsPerItemAndCommit_InOneTransaction_AndAnItemTheOtherMessageHoldsDoesNotHideTheOthers()
     {
         if (!TrackedSessionHost.Available) return;
@@ -141,7 +141,7 @@ public class ItemMergedTrackedTests
         public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) { before(); return base.SaveChangesAsync(cancellationToken); }
     }
 
-    [Fact]
+    [SqlFact]
     public async Task OnTheSqlStore_AMessageThatFailedBeforeItsClaim_LeavesEveryItemToTheOtherSource()
     {
         if (!TrackedSessionHost.Available) return;
@@ -159,7 +159,7 @@ public class ItemMergedTrackedTests
         Assert.Equal(2, await h.Count("SELECT COUNT(*) FROM factory.MergedItems WHERE Source = 'poll'"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheDeliveredToTable_FollowsDeliveredToAndUndelivered_AndAnswersTheDependenciesSlot()
     {
         if (!TrackedSessionHost.Available) return;

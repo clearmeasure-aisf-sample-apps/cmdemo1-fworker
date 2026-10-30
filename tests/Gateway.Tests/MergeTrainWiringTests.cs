@@ -211,7 +211,7 @@ public sealed class MergeTrainWiringTests
 
     static async Task<WorkItemState> Row(string cs, ItemId item) => (await new SqlWorkItemStore(() => WorkItemWiring.Open(cs)).Load(item.ToString(), default))!.State;
 
-    [Fact]
+    [SqlFact]
     public async Task Train_TwoItemsAskTogether_OneMerges_TheOtherWaitsItsTurn_TheMergesNeverOverlap()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;

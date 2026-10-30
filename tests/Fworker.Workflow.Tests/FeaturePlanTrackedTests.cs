@@ -214,7 +214,7 @@ public class FeaturePlanTrackedTests
 
     // ---- the whole way ----------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task AFeatureItem_GoesFromItsStartToItsMerge_AcrossTheSchedulerAndTheMergeTrain_WithEveryStateInTheDatabase()
     {
         if (!TrackedSessionHost.Available) return;
@@ -268,7 +268,7 @@ public class FeaturePlanTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task RedChecksOnTheTestedHead_AreAFixForwardRound_TheSlotIsAskedAgainAsAnOwnedItem_AndTheNextHeadIsMerged()
     {
         if (!TrackedSessionHost.Available) return;
@@ -297,7 +297,7 @@ public class FeaturePlanTrackedTests
 
     // ---- the hold in the invoke -----------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task AnItemWhoseDesignOverlapsAnItemInFlight_IsHeldAtTheEndOfItsDesign_AndGoesWhenTheHolderIsMerged()
     {
         if (!TrackedSessionHost.Available) return;
@@ -334,7 +334,7 @@ public class FeaturePlanTrackedTests
 
     // ---- the session -------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task ASessionThatIsGone_FreesItsSlot_AndTheItemIsGrantedANewOne()
     {
         if (!TrackedSessionHost.Available) return;
@@ -353,7 +353,7 @@ public class FeaturePlanTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AParkedItem_GivesItsSlotBackAndLeavesTheScheduler_AndAnUnparkedOneAsksAgain()
     {
         if (!TrackedSessionHost.Available) return;
@@ -371,7 +371,7 @@ public class FeaturePlanTrackedTests
 
     // ---- faults ------------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task ACrashBetweenTheSaveAndThePublish_AsksForOneSlot_NotNone_AndNotTwo()
     {
         if (!TrackedSessionHost.Available) return;
@@ -385,7 +385,7 @@ public class FeaturePlanTrackedTests
         await NoDeadLetters(h);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ARestartWhileAnItemWaitsForCapacity_KeepsItsRequest_AndTheEndOfTheHoldersSessionGrantsIt()
     {
         if (!TrackedSessionHost.Available) return;
@@ -410,7 +410,7 @@ public class FeaturePlanTrackedTests
 
     // ---- the merge line --------------------------------------------------------------------------------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task AHeadThatMovesAfterThePass_SendsTheItemBackToVerify_AndGivesItsPlaceInTheLineBack()
     {
         if (!TrackedSessionHost.Available) return;

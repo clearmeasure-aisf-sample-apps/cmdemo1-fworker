@@ -31,7 +31,7 @@ public class LegacyDatabaseUpgradeTests
         foreach (var batch in Regex.Split(sql, @"^GO\s*$", RegexOptions.Multiline).Where(b => !string.IsNullOrWhiteSpace(b))) await db.Execute(batch);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheScriptsRunAsNoOpsOnTheDatabaseTheOldWayBuilt_AndKeepItsRows()
     {
         if (!TestDatabase.Available) return;
