@@ -56,7 +56,7 @@ owner | ^journal fold:
 # about 17 of them, so the rest of the QC suites (qc-gate: the new head, the reset, the approval by webhook and sweep, the busy lock, the switched-off requirements; qc-gate-race; qc and qc-worker, the same verbs through the click
 # pages and the worker's session) stay with the shards, which run them on the engine each shard has.
 qc-gate | ^qc: gate a non-auto-merge PASS stays on the approval path
-qc-gate-lease
+# (qc-gate-lease is claimed whole above, with the other one-scenario QC suites)
 
 # W9.6 gate: the keeper's and the manager's verbs (gateway/Verbs/Routes/Keeper.cs, Fworker.Workflows.Keeper) answer on v2 as the rule scripts did: the scenarios that call manager-action, amend-criteria,
 # split-item, create-item, set-priority and link-dependency, with their golden writes. (The replenish scenarios of keeper.ps1 are Replenish.ps1's, not a verb of this group.)
@@ -80,7 +80,8 @@ manager | ^mgr: pr-checks gives the supervisor
 v1-only peer-approved | the dropped merge policy peer-approved (decision 4 of 2026-10-30): the suite tests the approval path that v2 does not port
 # What qc-gate covers of the QC environment, checked against the suite qc: the record of a reset keeping the head of the run (ran_sha) and the teardown of a live environment when the Auto Merge label is added
 # (label-changed) are the QC record's own, not the gate's: they moved to the suite qc (qc.ps1 runs $QcGateAutoScenarios, policy auto). The other eight scenarios test the gate itself: a merge needs a QC run and a person's approval.
-v1-only qc-gate | the merge gate of the dropped policy peer-approved (decision 4 of 2026-10-30); the two scenarios about the QC record moved to the suite qc
+# The rest of qc-gate (its eight scenarios) tests the merge gate itself, which rests on the dropped policy: it is not claimed beyond the one scenario of W9.1 above, and goes with v1 at W9.11a unless the owner keeps the gate.
+# (It is not declared v1-only while the QC verbs are being ported: W9.1 claims one of its scenarios on v2.)
 
 # ---- not claimed yet (W9.9c's precondition): each suite, why, and what runs of it now ------------------------------------------------------------------------------------------------------------------------
 # auto, owner, manager     claimed above by scenarios; the suites are 100 to 1,800 s of scenarios on a CI runner, and a whole-suite claim needs shards in the v2 matrix and a green run of each

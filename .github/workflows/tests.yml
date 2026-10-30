@@ -482,7 +482,7 @@ jobs:
             parallel: 1
           # the QC environment suites (policy auto)
           - name: qc-gates-a
-            claims: qc-gate-race,qc-gate-grace,qc-gate-lease
+            claims: qc-gate,qc-gate-race,qc-gate-grace,qc-gate-lease
             parallel: 2
           - name: qc-gates-b
             claims: qc-gate-idle,qc-gate-lifetime,qc-gate-waiting,qc-rate,qc-proxy
