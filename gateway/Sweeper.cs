@@ -18,7 +18,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     public V2Ownership? V2 { get; init; }
     // W9.10e: the plans of intake.v2Plans, handed to v1's intake (sync-board intake.v2Plans): it leaves their Todo items to the engine's intake. Used only with V2 set
     public IReadOnlyList<string> V2Plans { get; init; } = [];
-    // W9.10g: the plant-wide steps (claim-ref reap, gap renewal, board guard, QC sync, replenish, the keeper's backlog count) are recurring jobs of the engine (PlantStepJobs): the sweep leaves them out (skip_steps), does not take the gap, and applies none of
+    // W9.10g: the plant-wide steps (claim-ref reap, board guard, QC sync, replenish, the keeper's backlog count) are recurring jobs of the engine (PlantStepJobs): the sweep leaves them out (skip_steps) and applies none of
     // their results. Set only where the engine acts, together with the jobs.
     public bool PlantJobs { get; init; }
 
@@ -139,7 +139,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         if (ownerMode && items == null && plant.LastPlanWaiting() is { } lastWaiting) args["replenish_waiting"] = lastWaiting;
         var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
         // the first full sweep after a gap (no gateway was up): the owners' claims that ran out in it are renewed, not offered again (issue 94)
-        var gapTaken = items == null && !PlantJobs ? Gap?.Take() : null;   // (W9.10g: where the engine acts the gap-renew job takes it)
+        // (W9.10g: the gap stays with this pass where the engine acts too: the first full sweep after a restore would otherwise offer a claim that ran out in the gap as a relaunch before a job could renew it)
+        var gapTaken = items == null ? Gap?.Take() : null;
         if (gapTaken is { } gap) args["gap"] = new JsonObject { ["since"] = gap.ToString("o"), ["until"] = DateTime.UtcNow.ToString("o") };
         int code; string output;
         try { (code, output) = await runner.RunAsync("sync-board", args.ToJsonString(), TimeSpan.FromSeconds(280)); }

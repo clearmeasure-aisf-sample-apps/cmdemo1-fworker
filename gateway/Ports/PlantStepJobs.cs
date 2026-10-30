@@ -4,19 +4,19 @@ using System.Text.Json.Nodes;
 // W9.10g (docs/design/fworker-wolverine-implementation.md, row W9.10g): the plant-wide steps of v1's sweep as recurring jobs of the engine, leader only. Where the engine acts the sweep (Sweeper.cs) leaves these steps to the jobs
 // (sync-board skip_steps) and the jobs run each of them on the leader at the sweep's own interval:
 //   claim-ref-reap  the claim refs with no live claim behind them (issue 47);            sync-board plant_steps ["claim-ref-reap"]
-//   gap-renew       the owners' claims that ran out while no gateway was up (issue 94);  sync-board plant_steps ["gap-renew"] with the gap the restore noted (once per start)
 //   board-guard     open labelled issues without a card are put on the board;           sync-board plant_steps ["board-guard"]
 //   qc-sync         the PR QC environments' offers and teardowns, through QcService:    the verb qc-sync (v2's own answer), whose records QcHub.Reconcile takes
 //   replenish       the keeper's replenishment of the backlog (Replenish.ps1);           sync-board plant_steps ["replenish"]
 //   backlog-low     the count of the keeper's column, and the keeper's backlog-low job;  sync-board plant_steps ["design-waiting"], Plant.KeeperBacklog
+// The gap renewal (issue 94) is not a job: it must run in the first full sweep after the restore, before that sweep can offer a claim that ran out in the gap as a relaunch, and only the sweep can promise that order (Sweeper.cs takes the gap).
 // A plant pass reads the board list once and runs only the steps it names: no item loop, no intake, no seen state (Verbs.Sweep.ps1). The steps are still the script's rules until W9.11, which is why each job is a call of
 // sync-board that the inventory lists (docs/design/verb-inventory.json "plant-steps"); the QC sync is not: it is the verb v2 answers itself. A job does nothing while this process may not act, before the plant is restored,
 // while the saga table has not been read once (the steps leave the saga's items alone), or while the GitHub budget is below its reserve (the steps are the ones the sweep skipped on a low budget). A pass the lease ended is dropped.
 
 /// <summary>The plant-wide steps of the sweep as jobs. One instance for the gateway; each method is one job and answers how the run ended.</summary>
-sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, GitHubBudget budget, SweepGap gap, V2Ownership? ownership, Func<bool> mayAct, Func<bool> restored, bool ownerMode)
+sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, GitHubBudget budget, V2Ownership? ownership, Func<bool> mayAct, Func<bool> restored, bool ownerMode)
 {
-    /// <summary>The steps the sweep leaves to the jobs (sync-board skip_steps). The gap and the keeper's count are not steps of an ordinary pass: the gateway simply does not hand them to it.</summary>
+    /// <summary>The steps the sweep leaves to the jobs (sync-board skip_steps). The keeper's count is not a step of an ordinary pass: the gateway simply does not apply it.</summary>
     public static readonly string[] SweepSkips = ["claim-ref-reap", "board-guard", "qc-sync", "replenish"];
 
     static readonly TimeSpan PassTimeout = TimeSpan.FromSeconds(280);
@@ -36,17 +36,9 @@ sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, G
         return null;
     }
 
-    // (the sweep skipped the claim-ref reap, the board guard and the QC sync on a low budget; the gap renewal, the replenishment and the keeper's count it ran whatever the budget)
+    // (the sweep skipped the claim-ref reap, the board guard and the QC sync on a low budget; the replenishment and the keeper's count it ran whatever the budget)
     public Task<string> ClaimRefReap(CancellationToken ct) => Pass("claim-ref-reap", ["claim-ref-reap"], ct, budgetGated: true);
     public Task<string> BoardGuard(CancellationToken ct) => Pass("board-guard", ["board-guard"], ct, budgetGated: true);
-
-    public async Task<string> GapRenew(CancellationToken ct)
-    {
-        if (NotNow(false) is { } why) { Note("gap-renew", why); return why; }
-        if (gap.Take() is not { } since) { Note("gap-renew", "no-gap"); return "no-gap"; }
-        var outcome = await Pass("gap-renew", ["gap-renew"], ct, new JsonObject { ["gap"] = new JsonObject { ["since"] = since.ToString("o"), ["until"] = DateTime.UtcNow.ToString("o") } }, budgetGated: false, onFailure: () => gap.Set(since));
-        return outcome;
-    }
 
     public async Task<string> Replenish(CancellationToken ct)
     {
@@ -78,23 +70,20 @@ sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, G
         return outcome;
     }
 
-    async Task<string> Pass(string job, string[] steps, CancellationToken ct, JsonObject? extra = null, bool budgetGated = false, Action<JsonNode, Plant?>? apply = null, Action? onFailure = null)
+    async Task<string> Pass(string job, string[] steps, CancellationToken ct, JsonObject? extra = null, bool budgetGated = false, Action<JsonNode, Plant?>? apply = null)
     {
-        // (gap-renew has asked already: its gap is taken before the pass and given back when the pass failed)
-        if (job != "gap-renew" && NotNow(budgetGated) is { } why) { Note(job, why); return why; }
+        if (NotNow(budgetGated) is { } why) { Note(job, why); return why; }
         var args = new JsonObject { ["plant_steps"] = new JsonArray(steps.Select(s => (JsonNode)s).ToArray()) };
         if (extra is not null) foreach (var kv in extra) args[kv.Key] = kv.Value?.DeepClone();
         if (ownership is not null) { try { await ownership.RefreshAsync(ct); } catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch { } }
         Sweeper.AddV2Arguments(args, ownership, []);   // skip_items: the saga's items are not v1's
-        int code; string output;
-        try { (code, output) = await runner.RunAsync("sync-board", args.ToJsonString(), PassTimeout); }
-        catch { onFailure?.Invoke(); throw; }
-        if (code != 0) { onFailure?.Invoke(); Note(job, "failed"); Console.WriteLine(Line(job, "failed", ("exit", code), ("out", output.Length > 300 ? output[..300] : output))); return "failed"; }
+        var (code, output) = await runner.RunAsync("sync-board", args.ToJsonString(), PassTimeout);
+        if (code != 0) { Note(job, "failed"); Console.WriteLine(Line(job, "failed", ("exit", code), ("out", output.Length > 300 ? output[..300] : output))); return "failed"; }
         JsonNode? j;
         try { j = JsonNode.Parse(output); } catch (JsonException) { j = null; }
-        if (j is not JsonObject answer) { onFailure?.Invoke(); Note(job, "failed"); return "failed"; }
+        if (j is not JsonObject answer) { Note(job, "failed"); return "failed"; }
         // fencing as the sweep does it: the script found the lease lost, or this process lost it while the script ran; what the pass read is dropped
-        if (answer["fenced"] is JsonObject || !mayAct()) { onFailure?.Invoke(); Note(job, "fenced"); Console.WriteLine(Line(job, "fenced")); return "fenced"; }
+        if (answer["fenced"] is JsonObject || !mayAct()) { Note(job, "fenced"); Console.WriteLine(Line(job, "fenced")); return "fenced"; }
         apply?.Invoke(answer, plant());
         var actions = answer["actions"] as JsonArray ?? new JsonArray(); var errors = answer["errors"] as JsonArray ?? new JsonArray();
         Console.WriteLine(Line(job, "ok", ("actions", actions.Count), ("errors", errors.Count), ("elapsedMs", answer["elapsed_ms"]?.ToString() ?? "")));

@@ -11,7 +11,6 @@ public class PlantStepJobsTests
     {
         public readonly List<(string Verb, JsonObject Args)> Calls = [];
         public readonly GitHubBudget Budget = new(300);
-        public readonly SweepGap Gap = new();
         public readonly Plant Plant = new("secret", (_, _, _, _) => Task.CompletedTask, 30);
         public bool May = true, Restored = true;
         public int Code; public string? Output;
@@ -22,7 +21,7 @@ public class PlantStepJobsTests
         public Rig(bool ownerMode = true)
         {
             Runner.V2Own = (verb, stdin, _) => { Calls.Add((verb, (JsonObject)JsonNode.Parse(stdin)!)); return Task.FromResult<(int, string)?>((Code, Output ?? Answer.ToJsonString())); };
-            Jobs = new PlantStepJobs(Runner, () => Plant, () => null, Budget, Gap, null, () => May, () => Restored, ownerMode);
+            Jobs = new PlantStepJobs(Runner, () => Plant, () => null, Budget, null, () => May, () => Restored, ownerMode);
         }
     }
 
@@ -48,12 +47,11 @@ public class PlantStepJobsTests
         Assert.Equal("not-leader", await r.Jobs.ClaimRefReap(default));
         r.May = true; r.Restored = false;
         Assert.Equal("waiting-for-restore", await r.Jobs.Replenish(default));
-        Assert.Equal("waiting-for-restore", await r.Jobs.GapRenew(default));
         Assert.Empty(r.Calls);
     }
 
     [Fact]
-    public async Task ALowBudgetStopsTheReapAndTheGuard_NotTheReplenishmentTheCountOrTheGap()
+    public async Task ALowBudgetStopsTheReapAndTheGuard_NotTheReplenishmentOrTheCount()
     {
         var r = new Rig();
         r.Budget.Observe(new JsonObject { ["core"] = new JsonObject { ["remaining"] = 10, ["reset"] = DateTimeOffset.UtcNow.AddMinutes(30).ToUnixTimeSeconds(), ["limit"] = 5000 } });
@@ -62,30 +60,7 @@ public class PlantStepJobsTests
         Assert.Equal("budget-low", await r.Jobs.BoardGuard(default));
         Assert.Equal("ok", await r.Jobs.Replenish(default));
         Assert.Equal("ok", await r.Jobs.BacklogLow(default));
-        r.Gap.Set(DateTime.UtcNow.AddMinutes(-10));
-        Assert.Equal("ok", await r.Jobs.GapRenew(default));
-        Assert.Equal(["replenish", "design-waiting", "gap-renew"], r.Calls.Select(c => Steps(c.Args)).ToArray());
-    }
-
-    [Fact]
-    public async Task TheGapIsTakenOnce_HandedToThePass_AndGivenBackWhenThePassFailsOrIsFenced()
-    {
-        var r = new Rig();
-        Assert.Equal("no-gap", await r.Jobs.GapRenew(default)); Assert.Empty(r.Calls);   // no gateway was down: no call at all
-        var since = new DateTime(2026, 10, 30, 7, 0, 0, DateTimeKind.Utc);
-        r.Gap.Set(since);
-        r.Code = 20; r.Output = "{\"ok\":false}";
-        Assert.Equal("failed", await r.Jobs.GapRenew(default));
-        Assert.Equal(since, r.Gap.Take());   // back for the next run
-        r.Gap.Set(since); r.Code = 0; r.Output = new JsonObject { ["ok"] = true, ["fenced"] = new JsonObject { ["step"] = "sweep-tail" }, ["actions"] = new JsonArray(), ["errors"] = new JsonArray() }.ToJsonString();
-        Assert.Equal("fenced", await r.Jobs.GapRenew(default));
-        Assert.Equal(since, r.Gap.Take());
-        r.Gap.Set(since); r.Output = null; r.Code = 0;
-        Assert.Equal("ok", await r.Jobs.GapRenew(default));
-        Assert.Null(r.Gap.Take());   // renewed once, not again
-        var call = r.Calls.Last().Args;
-        Assert.Equal(since.ToString("o"), call["gap"]!["since"]!.ToString());
-        Assert.True(DateTime.TryParse(call["gap"]!["until"]!.ToString(), out _));
+        Assert.Equal(["replenish", "design-waiting"], r.Calls.Select(c => Steps(c.Args)).ToArray());
     }
 
     [Fact]
@@ -148,7 +123,7 @@ public class PlantStepJobsTests
         var slots = RecurringJobSlots.Default(RecurringJobIntervals.From(null, 180)).Slots;
         TimeSpan Every(string name) => slots.Single(s => s.Name == name).Every;
         Assert.Equal(TimeSpan.FromMinutes(2), Every(RecurringJobSlots.BoardReconciler));
-        foreach (var n in new[] { RecurringJobSlots.ClaimRefReap, RecurringJobSlots.GapRenew, RecurringJobSlots.BoardGuard, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow }) Assert.Equal(TimeSpan.FromSeconds(180), Every(n));
+        foreach (var n in new[] { RecurringJobSlots.ClaimRefReap, RecurringJobSlots.BoardGuard, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow }) Assert.Equal(TimeSpan.FromSeconds(180), Every(n));
         Assert.Equal(TimeSpan.FromSeconds(60), Every(RecurringJobSlots.QcSync));
         Assert.Equal(TimeSpan.FromHours(24), Every(RecurringJobSlots.RetentionPrune));
         // a gateway that sweeps every 2 seconds (the Tier 1 tests) runs the steps every 5 seconds, never faster, and the QC sync no slower than them

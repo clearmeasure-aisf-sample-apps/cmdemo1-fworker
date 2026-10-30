@@ -134,22 +134,27 @@ public sealed class PlantPassScriptTests : IDisposable
     }
 
     [Fact]
-    public async Task APlantPassForTheGap_RenewsTheClaimThatRanOutInsideIt_AndOnlyThat()
+    public async Task TheFirstFullPassAfterAGap_WithTheJobsSkipsSet_RenewsTheClaimThatRanOutInsideIt_AndOffersNoRelaunch()
     {
         if (rig is null || !HasPwsh()) return;
         var now = DateTime.UtcNow;
         var inside = await OwnedClaimThatLapsed(now.AddMinutes(-5));
         var before = await OwnedClaimThatLapsed(now.AddMinutes(-90));   // ran out before the gateway went down: not the gap's
         var gap = new JsonObject { ["since"] = now.AddMinutes(-20).ToString("o"), ["until"] = now.ToString("o") };
+        JsonArray Skips() => new("claim-ref-reap", "board-guard", "qc-sync", "replenish");
+        static bool Relaunch(JsonObject a, int n) => a["offers"]!.AsArray().Any(o => o!["item"]!.GetValue<int>() == n && o["reason"]!.ToString() == "relaunch");
 
-        var (exit0, _) = await SyncBoard(new JsonObject { ["skip_steps"] = new JsonArray("claim-ref-reap", "board-guard", "qc-sync", "replenish") });   // no gap is handed to an ordinary pass where the job has it
+        // (issue 94, the review of W9.10g) without the gap, the first pass offers the lapsed claim again: a second session would take the item the owner is about to come back to
+        var (exit0, nogap) = await SyncBoard(new JsonObject { ["skip_steps"] = Skips(), ["free_workers"] = 1 });
         Assert.Equal(0, exit0);
+        Assert.True(Relaunch(nogap, inside), nogap["offers"]!.ToJsonString());
         Assert.False(ClaimOf(inside).ContainsKey("gap_renewed"));
 
-        var (exit, a) = await SyncBoard(new JsonObject { ["plant_steps"] = new JsonArray("gap-renew"), ["gap"] = gap });
+        var (exit, a) = await SyncBoard(new JsonObject { ["skip_steps"] = Skips(), ["free_workers"] = 1, ["gap"] = gap });
         Assert.Equal(0, exit);
         var renewed = a["actions"]!.AsArray().Where(x => x!["action"]!.ToString() == "claim-renewed-after-gap").Select(x => x!["item"]!.GetValue<int>()).ToArray();
         Assert.Equal([inside], renewed);
+        Assert.False(Relaunch(a, inside), a["offers"]!.ToJsonString());
         Assert.True(ClaimOf(inside).ContainsKey("gap_renewed"));
         Assert.True(DateTime.Parse(ClaimOf(inside)["lease_until"]!.ToString(), null, System.Globalization.DateTimeStyles.AdjustToUniversal) > now);
         Assert.False(ClaimOf(before).ContainsKey("gap_renewed"));

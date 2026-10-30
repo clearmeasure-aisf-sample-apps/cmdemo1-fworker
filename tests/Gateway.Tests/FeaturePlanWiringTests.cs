@@ -205,7 +205,7 @@ public sealed class FeaturePlanWiringTests
         Assert.True(jobs.Has(RecurringJobSlots.LedgerPurge));   // W9.10o: the successes of the idempotency ledger do not live for ever
         Assert.NotNull(host.Services.GetService<V2Health>());
         // W9.10g: the plant-wide steps of the sweep, the retention and the faster reconciler are jobs of the engine, and the sweep knows it leaves the steps to them
-        foreach (var slot in new[] { RecurringJobSlots.ClaimRefReap, RecurringJobSlots.GapRenew, RecurringJobSlots.BoardGuard, RecurringJobSlots.QcSync, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow, RecurringJobSlots.RetentionPrune })
+        foreach (var slot in new[] { RecurringJobSlots.ClaimRefReap, RecurringJobSlots.BoardGuard, RecurringJobSlots.QcSync, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow, RecurringJobSlots.RetentionPrune })
             Assert.True(jobs.Has(slot), slot);
         Assert.NotNull(host.Services.GetService<PlantStepJobs>());
         Assert.Contains(host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>(), h => h is Sweeper { PlantJobs: true });

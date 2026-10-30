@@ -162,7 +162,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | owner-ci-release | `gateway/Runtimes/OwnerCiReleaseService.cs` | 2 | by argument | runner | W9.4 | W9.9a | OwnerCiReleaseService runs ci-release. |
 | owner-ci-journal | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | journal | runner | W9.8 | W9.9a | Its journal lines. |
 | sweep-board | `gateway/Sweeper.cs` | 1 | sync-board | runner | W9.8 | W9.10g | The sweep: sync-board (the reconciler of W9.8, the item and plant-wide steps of W9.10e to W9.10g). |
-| plant-step-jobs | `gateway/Ports/PlantStepJobs.cs` | 1 | sync-board | runner | W9.10g | W9.10g | The plant-wide steps of the sweep as recurring jobs (sync-board plant_steps: claim-ref reap, gap renew, board guard, replenish, backlog-low); the QC sync is the verb qc-sync (QcService). The steps are still the script's rules; the second pull request of W9.10g ports them and deletes this entry. |
+| plant-step-jobs | `gateway/Ports/PlantStepJobs.cs` | 1 | sync-board | runner | W9.10g | W9.10g | The plant-wide steps of the sweep as recurring jobs (sync-board plant_steps: claim-ref reap, board guard, replenish, backlog-low); the QC sync is the verb qc-sync (QcService). The steps are still the script's rules; the second pull request of W9.10g ports them and deletes this entry. |
 
 ### The fallbacks of verbs that have a v2 owner
 

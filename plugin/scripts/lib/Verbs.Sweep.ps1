@@ -515,9 +515,9 @@ function Invoke-SyncBoard($a) {
     $skipItems = @{}
     if (Test-Has $a 'skip_items') { foreach ($x in @($a.skip_items)) { $si = 0; if ([int]::TryParse("$x", [ref]$si) -and $si -gt 0) { $skipItems[$si] = $true } } }
     $low = (Test-Has $a 'low') -and $a.low
-    # plant_steps and skip_steps (W9.10g): the plant-wide steps of the sweep (claim-ref-reap, gap-renew, board-guard, qc-sync, replenish, design-waiting) are recurring jobs of the gateway where the engine acts.
+    # plant_steps and skip_steps (W9.10g): the plant-wide steps of the sweep (claim-ref-reap, board-guard, qc-sync, replenish, design-waiting) are recurring jobs of the gateway where the engine acts.
     # A pass with plant_steps is a plant pass: the board list is read once and only those steps run (no item loop, no intake, no seen state, no resume point). skip_steps names the steps an ordinary pass leaves to
-    # the jobs (claim-ref-reap, board-guard, qc-sync, replenish; the gateway also leaves the gap and the keeper's count out of the pass). Absent where the engine does not act: v1 sweeps as before.
+    # the jobs (claim-ref-reap, board-guard, qc-sync, replenish; the gateway also leaves the keeper's count out of the pass; the gap stays with the sweep, issue 94). Absent where the engine does not act: v1 sweeps as before.
     $plantSteps = @{}; $skipSteps = @{}
     if (Test-Has $a 'plant_steps') { foreach ($x in @($a.plant_steps)) { if ("$x") { $plantSteps["$x"] = $true } } }
     if (Test-Has $a 'skip_steps') { foreach ($x in @($a.skip_steps)) { if ("$x") { $skipSteps["$x"] = $true } } }
@@ -568,28 +568,9 @@ function Invoke-SyncBoard($a) {
         } catch { }
     }
     $unparkCtx = @{ free_workers = $(if (Test-Has $a 'free_workers') { [int]$a.free_workers } else { 0 }) }
-    # a plant pass reads no item: the count of the keeper's column and the gap renewal are all it takes from the list (W9.10g)
+    # a plant pass reads no item: the count of the keeper's column is all it takes from the list (W9.10g)
     if ($plantPass -and $plantSteps.ContainsKey('design-waiting')) {
         foreach ($it in $list) { if ((Test-NameIn $c.label $it.labels) -and $it.open -and "$($it.column)" -ieq $designCol) { $designWaiting++ } }
-    }
-    if ($plantPass -and $plantSteps.ContainsKey('gap-renew') -and $gap -and -not $dry) {
-        foreach ($it in $list) {
-            if ($script:LeaseFence -and -not (Test-LeaseHeld)) { $fenced = Get-LeaseFenceInfo 'sweep-item'; break }
-            if (-not $it.open -or -not (Test-NameIn $c.label $it.labels) -or $skipItems.ContainsKey([int]$it.number)) { continue }
-            $col = "$($it.column)"
-            if (-not $col -or $col -ieq $last -or -not ((Test-NameIn $col $c.columns.ai) -or (Test-NameIn $col $c.columns.hold)) -or (Test-NameIn $c.rivalLabel $it.labels)) { continue }
-            try {
-                $n = [int]$it.number; $s = (Get-State $n).state
-                if (-not ((Test-OwnedClaim $s) -and -not (Test-ClaimLive $s))) { continue }
-                $lu0 = ConvertFrom-Iso $s.claim.lease_until
-                if ($lu0 -and $lu0 -ge $gap.since -and $lu0 -le $gap.until) {
-                    $gh = Invoke-GapRenew $n $gap
-                    if ($gh) { $actions += @{ item = $n; action = 'claim-renewed-after-gap'; holder = $gh; lapsed = (ConvertTo-Iso $lu0) } }
-                }
-            }
-            catch [FactoryReject] { $errors += @{ item = [int]$it.number; code = $_.Exception.Code; reason = "gap-renew: $($_.Exception.Message)" } }
-            catch { $errors += @{ item = [int]$it.number; code = 'error'; reason = "gap-renew: $($_.Exception.Message)" } }
-        }
     }
     foreach ($it in $(if ($plantPass) { @() } else { $list })) {
         if ($script:LeaseFence -and -not (Test-LeaseHeld)) { $fenced = Get-LeaseFenceInfo 'sweep-item'; break }   # (W0.1: before each item, so a superseded gateway acts on no more of them)

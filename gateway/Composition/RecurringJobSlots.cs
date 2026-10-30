@@ -2,7 +2,7 @@
 // scheduler (a hosted service of the gateway, leader lease only) publishes RecurringJobRun(name) to the durable local queue "recurring-jobs" when a slot is due, and the
 // handler runs the job. Attached to the Wolverine host only where the engine acts (Engine.V2Acts), so shadow (tdd) and v1 register nothing. A restart loses no chain (there
 // is none: the scheduler's clock is the process's, a queued run survives in the durable inbox), and a run that finds its job still running is dropped, so a slow pass never piles up.
-// W9.10g: the plant-wide steps of v1's sweep (claim-ref reap, gap renewal, board guard, QC sync, replenish, the keeper's backlog count) are slots of their own, and so are the retention prune and the faster board reconciler.
+// W9.10g: the plant-wide steps of v1's sweep (claim-ref reap, board guard, QC sync, replenish, the keeper's backlog count) are slots of their own, and so are the retention prune and the faster board reconciler.
 // Their intervals come from <see cref="RecurringJobIntervals"/>; a slot may carry the delay of its first run (<c>First</c>), which defaults to the scheduler's.
 sealed record RecurringJobSlot(string Name, TimeSpan Every, TimeSpan? First = null);
 
@@ -28,7 +28,7 @@ sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
 {
     public const string BoardReconciler = "board-reconciler", CatalogReread = "catalog-reread", IngressDedupPurge = "ingress-dedup-purge", DocsIntake = "docs-intake", FeatureChecks = "feature-checks", SagaRearm = "saga-rearm", LedgerPurge = "ledger-purge", IncidentHealth = "incident-health";
     // W9.10g: the plant-wide steps of the sweep, the retention prune
-    public const string ClaimRefReap = "claim-ref-reap", GapRenew = "gap-renew", BoardGuard = "board-guard", QcSync = "qc-sync", Replenish = "replenish", BacklogLow = "backlog-low", RetentionPrune = "retention-prune";
+    public const string ClaimRefReap = "claim-ref-reap", BoardGuard = "board-guard", QcSync = "qc-sync", Replenish = "replenish", BacklogLow = "backlog-low", RetentionPrune = "retention-prune";
     public IReadOnlyList<RecurringJobSlot> Slots { get; } = slots;
     // W7.3: the watcher of the checks of the feature items runs every minute too, and is filled only when the engine carries the feature plan
     // W6.6: the intake of docs items is the one slot that runs every minute, as v1's sweep pulls an item when a session is free; it is filled only when intake names the docs plan
@@ -37,7 +37,7 @@ sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
         var i = intervals ?? RecurringJobIntervals.Default;
         TimeSpan Soon(TimeSpan every) => TimeSpan.FromSeconds(Math.Min(every.TotalSeconds, 15));   // the first run of a plant-wide step: as soon as the leader may act (the job itself waits for the restore)
         return new([new(BoardReconciler, i.BoardReconciler), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1)), new(FeatureChecks, TimeSpan.FromMinutes(1)), new(SagaRearm, TimeSpan.FromMinutes(5)), new(LedgerPurge, TimeSpan.FromHours(6)), new(IncidentHealth, TimeSpan.FromMinutes(1)),
-            new(ClaimRefReap, i.PlantSteps, Soon(i.PlantSteps)), new(GapRenew, i.PlantSteps, Soon(i.PlantSteps)), new(BoardGuard, i.PlantSteps, Soon(i.PlantSteps)), new(QcSync, i.QcSync, Soon(i.QcSync)), new(Replenish, i.PlantSteps, Soon(i.PlantSteps)), new(BacklogLow, i.PlantSteps, Soon(i.PlantSteps)),
+            new(ClaimRefReap, i.PlantSteps, Soon(i.PlantSteps)), new(BoardGuard, i.PlantSteps, Soon(i.PlantSteps)), new(QcSync, i.QcSync, Soon(i.QcSync)), new(Replenish, i.PlantSteps, Soon(i.PlantSteps)), new(BacklogLow, i.PlantSteps, Soon(i.PlantSteps)),
             new(RetentionPrune, i.Retention, TimeSpan.FromMinutes(10))]);
     }
 
