@@ -203,6 +203,27 @@ public class CapacityLedgerRow
 }
 
 /// <summary>
+/// The state of the incident saga of one application and environment (W8.0 for W8.1, wolverine-factory.md 3.3): one row per pair, the key "deployable/environment" in lower case, holding the current or the last
+/// incident. The state is a JSON document owned by Fworker.Workflows.Incident (the status, the signals that joined, the rollback and the hotfix, the timer), saved with a revision so that two writers cannot both
+/// win. The row is the open-instance index of the design: a status other than "quiet" is an open incident. The columns beside the document are the ones read without opening it: which incident an item is the
+/// hotfix of, and which incidents are open. The incident timeline is written to <see cref="ItemHistoryEntry"/> (the item key is "incident:deployable/environment"), not to a table of its own.
+/// </summary>
+public class IncidentRow
+{
+    public string Key { get; set; } = "";
+    /// <summary>The generation of the incident in <see cref="StateJson"/>: 0 before the first, then one more for each incident of the pair.</summary>
+    public int Generation { get; set; }
+    /// <summary>Counts the saves; the concurrency token: a writer that read an older revision fails and runs again on the new state.</summary>
+    public int Revision { get; set; }
+    /// <summary>"quiet", "triaging", "rolling-back", "fixing", "verifying" or "escalated".</summary>
+    public string Status { get; set; } = "";
+    /// <summary>The qualified item ("owner/repo#N") of the hotfix of the open incident, or null: an item's events find their incident by it.</summary>
+    public string? HotfixItem { get; set; }
+    public string StateJson { get; set; } = "";
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>
 /// The state of one QC gate (W9.0 for W9.1, refactor R9): one row per repository and pull request, the key "owner/repo!N" in lower case. The state is a JSON document owned by Fworker.Workflows.Qc (the
 /// environment record, its attempt and assignment, the verdict), saved with a revision so that two writers cannot both win. The columns beside the document are the ones read without opening it: the pull
 /// requests of one repository that are not over ("Waiting for PR QC") and the item the pull request belongs to.

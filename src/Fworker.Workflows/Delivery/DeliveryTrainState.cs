@@ -51,6 +51,8 @@ public sealed class TrainDeployment
     public DateTimeOffset? FinishedAt { get; set; }
     public bool Completed => Phase != "Started";
     public bool Succeeded => Phase == "Succeeded";
+    /// <summary>W8.3: this deployment is the train's own rollback (the deployment of a release that had run here before, ordered by the incident): it delivers no item.</summary>
+    public bool Rollback { get; set; }
 }
 
 /// <summary>A Sign-off (manual intervention) a deployment of this environment waits at.</summary>
@@ -109,6 +111,9 @@ public sealed class TrainState
     public Dictionary<string, DateTimeOffset> Requested { get; set; } = [];
     /// <summary>When each release was first asked for: a request Octopus never shows is dropped after <see cref="DeliveryTrainService.RequestExpiry"/>, so it cannot block a newer release.</summary>
     public Dictionary<string, DateTimeOffset> FirstRequested { get; set; } = [];
+    /// <summary>The number of the request for each release (W9.10o): the first request of a version is 1, and a request made again after the earlier one was dropped (Octopus never showed it) is the next. It is in the key of
+    /// the PromoteRelease command, so the ledger answers the retries of one request and never a later request for the same version.</summary>
+    public Dictionary<string, int> RequestNumbers { get; set; } = [];
     /// <summary>"item|commit" of the items already delivered here: a redelivered ItemMerged does not make them candidates again.</summary>
     public List<string> DeliveredItems { get; set; } = [];
     /// <summary>The releases that reached the environment by version and the release that carried it: "delivered in release X, superseding Y".</summary>
@@ -120,6 +125,9 @@ public sealed class TrainState
     /// <summary>An incident holds the train: nothing is promoted while true.</summary>
     public bool Held { get; set; }
     public string HeldReason { get; set; } = "";
+    /// <summary>The incident that holds the train ("deployable/environment#generation") and the items of its hotfix whose release passes the hold (W8.1): the release that carries one of them is judged and promoted as any other.</summary>
+    public string HeldIncident { get; set; } = "";
+    public List<string> HoldAllow { get; set; } = [];
     /// <summary>When the one pending timer is due (null: none). A timer that fires with another due time is stale and clears nothing.</summary>
     public DateTimeOffset? WakeDue { get; set; }
     /// <summary>The fingerprint of the last decision published for each release ("" for those about none): a decision is published once per change.</summary>
@@ -133,6 +141,13 @@ public sealed class TrainState
     public bool RepublishPending { get; set; }
     /// <summary>Set while the watcher's replay of Octopus's history is being applied: the train takes inputs in and decides nothing (it ends with the replay, or after <see cref="DeliveryTrainService.ReplayLimit"/>).</summary>
     public DateTimeOffset? ReplayingSince { get; set; }
+    /// <summary>W8.3: the rollback being carried out (or the last one that ended), the ones asked for behind it, the incidents already seen and the releases that were rolled back from.</summary>
+    public RollbackState? ActiveRollback { get; set; }
+    public List<RollbackRequest> RollbackQueue { get; set; } = [];
+    public List<string> RollbackSeen { get; set; } = [];
+    public List<string> RolledBack { get; set; } = [];
+    /// <summary>W8.3: the items each of the newest delivered releases carried (by version), so that a rollback knows which items it undelivers and can make them candidates again.</summary>
+    public Dictionary<string, List<TrainCandidate>> DeliveredBy { get; set; } = [];
     public long Sequence { get; set; }
 
     static readonly JsonSerializerOptions Json = new() { WriteIndented = false };

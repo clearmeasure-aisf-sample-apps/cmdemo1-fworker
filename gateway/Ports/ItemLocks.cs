@@ -50,5 +50,8 @@ static class ItemLocks
 {
     /// <summary>The gateway's one lock (registered by AddGatewayCore); a table or a test built without the gateway's services gets the file lock of the state directory <paramref name="env"/> names, which is the same lock.</summary>
     public static IItemLock From(IServiceProvider services, Func<string, string?> env) =>
-        services.GetService(typeof(IItemLock)) as IItemLock ?? new FileItemLock(RuleStateDirectory.Resolve(env));
+        services.GetService(typeof(IItemLock)) as IItemLock ?? Default(env);
+
+    /// <summary>The file lock of the state directory <paramref name="env"/> names: what a table built without the gateway's services (a test) takes.</summary>
+    public static IItemLock Default(Func<string, string?> env) => new FileItemLock(RuleStateDirectory.Resolve(env));
 }

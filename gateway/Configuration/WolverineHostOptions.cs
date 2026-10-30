@@ -2,12 +2,12 @@ using System.Text.Json.Nodes;
 using Fworker.Database;
 
 // How the Wolverine host runs (task W2.2, docs/design/wolverine-host.md). Two profiles, chosen by config/instance.json block "wolverine", key "mode":
-// - "solo" (the default while the host is inert): one node, no node agent, no leader election. Every remaining timer (the durability agent's scheduled-job
-//   poll, the orphan sweep, the clean-ups, metrics) is set to 4 hours, so an idle gateway leaves the serverless tdd database (auto-pause after 60 minutes
-//   without a session, cmdemo1-system PR #374) a gap in which it can pause. Measured: no session stays open and no lock is held.
-// - "balanced": Wolverine's leader election (the revision of #311). Election needs the node agent's polling, and the leader holds a SQL Server application
-//   lock on a session of its own for as long as it leads, so a database with a leader never pauses: this profile costs a 0.5 vCore database around the clock.
-//   Its timers are 30 s (Wolverine's own are 5 to 10 s). W2.3 switches it on for the observation window.
+// - "solo" (the default and the mode of the deployed gateway): one node, no node agent, no leader election; the gateway's lease decides who acts and the node runs only on
+//   the holder (W9.10a, WolverineHostService). The remaining timers (the durability agent's scheduled-job poll, the orphan sweep, the clean-ups, metrics) are set to 4 hours
+//   (from the time the database was serverless and paused after 60 minutes without a session; tdd is Azure SQL S0 since 2026-10-29, which does not pause, so the long
+//   timers only keep an idle gateway quiet). No session stays open and no lock is held.
+// - "balanced": Wolverine's leader election (the revision of #311, closed as superseded by the lease decision of 2026-10-30). Election needs the node agent's polling, and
+//   the leader holds a SQL Server application lock on a session of its own for as long as it leads. Its timers are 30 s (Wolverine's own are 5 to 10 s). Not used by a deployment.
 // The values can be changed in the same block (seconds); a value below its floor, or not a number, leaves the default of the profile.
 sealed record WolverineHostOptions
 {

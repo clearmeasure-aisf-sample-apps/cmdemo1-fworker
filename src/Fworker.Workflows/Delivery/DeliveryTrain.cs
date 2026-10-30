@@ -12,7 +12,8 @@ namespace Fworker.Workflows.Delivery;
 // only at the newest release that succeeded in the previous one and judges it with the rules of D2 (EvidenceComposite) and D3 (ContentGate, ReleaseChoice), falling back to the release
 // before it when the newer is blocked, as the content gate decides today. Where v1 promotes (tdd), v1's decision stays the acting one: the train decides, publishes TrainDecided and, only
 // when its policy lets it act (DeliveryPolicy.Acts) and the engine acts, asks for the deployment with PromoteRelease and answers a Sign-off with AnswerSignOff. Nothing here calls Octopus: both
-// are integration commands that a host without Engine.V2Acts does not execute.
+// are integration commands that a host without Engine.V2Acts does not execute. W9.10p: in an environment v1's AutoPromoter still promotes (DeliveryPolicy.Shadow) the train decides the same and its
+// commands leave as ShadowCommand, which only the shadow records.
 //
 // It is a saga in the sense of the design (state per key, saved with a revision, timers by Wolverine scheduled messages), not Wolverine's Saga base class: that one needs generated handler
 // code per saga type, and the state here is the one JSON document the shadow run compares. Delivery is at least once: every input is applied twice with the same result.
@@ -35,7 +36,7 @@ public sealed record TrainResult(IReadOnlyList<object> Messages, DateTimeOffset?
 /// <summary>Two writers moved the same train at once more often than the retries allow; the message is retried by Wolverine.</summary>
 public sealed class TrainConflictException(string key) : Exception($"the delivery train {key} kept changing under the handler");
 
-public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies policies, ITrainReads reads, IDeliveredLookup delivered, Func<DateTimeOffset>? clock = null)
+public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies policies, ITrainReads reads, IDeliveredLookup delivered, Func<DateTimeOffset>? clock = null, IMigrationProbe? migrations = null)
 {
     readonly Func<DateTimeOffset> clock = clock ?? (() => DateTimeOffset.UtcNow);
 
@@ -93,7 +94,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             if (!gated)
             {
                 var republish = state.RepublishPending;
-                run = new TrainRun(state, policy, reads, delivered, policies, now, replayEnded || republish);
+                run = new TrainRun(state, policy, reads, delivered, policies, now, replayEnded || republish, migrations);
                 try { await run.Evaluate(ct, republish); }
                 catch (Exception e) when (IsTransient(e, ct))
                 {
@@ -133,10 +134,14 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 UpsertRelease(s, d.ReleaseId, d.Version, d.Commit, d.At);
                 if (key is null) break;
                 var have = s.DeploymentOf(d.Version, key);
+                // W8.3: an older deployment of the release seen again (the watcher's replay) must not take the place of the rollback's own
+                if (have is { Rollback: true } && have.DeploymentId != d.DeploymentId && d.At <= have.StartedAt) break;
                 if (have is null || have.DeploymentId != d.DeploymentId)
                 {
                     if (!s.Deployments.TryGetValue(d.Version, out var byEnv)) s.Deployments[d.Version] = byEnv = [];
-                    byEnv[key] = have = new TrainDeployment { DeploymentId = d.DeploymentId, TaskId = d.TaskId, Phase = "Started", StartedAt = d.At };
+                    // W8.3: the deployment of the release a rollback goes back to, while the rollback waits for it, is the rollback's
+                    var ours = key == p.Environment && s.ActiveRollback is { Phase: RollbackPhase.Deploying } ar && ar.To == d.Version;
+                    byEnv[key] = have = new TrainDeployment { DeploymentId = d.DeploymentId, TaskId = d.TaskId, Phase = "Started", StartedAt = d.At, Rollback = ours };
                     // a newer deployment of the release to the environment (a redeploy after a failure) starts the settling over
                     if (key == p.Environment) s.Settled.Remove(d.Version);
                 }
@@ -152,10 +157,15 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 break;
             case TrainHold h:
                 s.Held = h.Held; s.HeldReason = h.Held ? h.Reason : "";
+                s.HeldIncident = h.Held ? h.IncidentId : "";
+                s.HoldAllow = h.Held ? (h.Allow ?? []).Select(a => a.ToLowerInvariant()).Distinct().ToList() : [];
                 break;
             case TrainReplay r:
                 s.ReplayingSince = r.Active ? now : null;
                 if (!r.Active) s.RepublishPending = true;   // the end of a replay is a restart's: whoever listens to the decisions starts empty
+                break;
+            case TrainRollback or TrainRollbackFailed:
+                RollbackRules.Apply(s, input, now);   // W8.3 (the incident's request, W8.1, and the executor's refusal)
                 break;
         }
     }
@@ -169,7 +179,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
 }
 
 /// <summary>One evaluation of one train on its state: the settling of finished deployments, the Sign-offs, the promotion. Short-lived; <see cref="Out"/> is what it decided to publish.</summary>
-sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, IDeliveryPolicies policies, DateTimeOffset now, bool replay = false)
+sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, IDeliveryPolicies policies, DateTimeOffset now, bool replay = false, IMigrationProbe? migrations = null)
 {
     public List<object> Out { get; } = [];
     readonly List<DateTimeOffset> wakes = [];
@@ -197,8 +207,10 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
     async Task Evaluate(CancellationToken ct)
     {
         await Settle(ct);
+        await RollbackStep(ct);   // W8.3: the one deployment the tdd train creates itself; an incident's hold does not stop it (it is the incident's own)
         if (!p.Acts) return;   // tdd is deployed by the release's lifecycle and an external promoter creates its own deployments: the train observes
-        if (s.Held) { Decide("held", "", [], [string.IsNullOrEmpty(s.HeldReason) ? "an incident holds the train" : s.HeldReason]); return; }
+        // an incident holds the train: nothing is promoted, except (W8.1) the release that carries the incident's hotfix, which waits for the same gates as any release; with no hotfix item yet there is nothing to let through
+        if (s.Held && s.HoldAllow.Count == 0) { Decide("held", "", [], [string.IsNullOrEmpty(s.HeldReason) ? "an incident holds the train" : s.HeldReason]); return; }
         if (!await SignOffs(ct)) await Promote(ct);
         // a train that waits looks again at least every SafetyWake, whatever else wakes it (an input lost between the save and the outbox, a gap no event lifts)
         if (s.Decisions.Values.Any(fp => fp.StartsWith("waiting|") || fp.StartsWith("following|") || fp.StartsWith("signoff-waiting|"))) wakes.Add(now.Add(DeliveryTrainService.SafetyWake));
@@ -223,6 +235,13 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         foreach (var version in done)
         {
             var release = s.Releases[version]; var dep = s.Deployments[version][env];
+            if (dep.Rollback)
+            {
+                // W8.3: the rollback's deployment puts back a release that was delivered when it first ran: it delivers nothing, and what it brings back is what runs here now
+                s.Settled.Add(version);
+                s.Current = version;
+                continue;
+            }
             var before = RunningBefore(dep);
             var carried = new List<TrainCandidate>();
             if (!string.IsNullOrEmpty(release.Commit))
@@ -246,6 +265,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 items.Add(c.Item);
             }
             s.Settled.Add(version);
+            if (carried.Count > 0) RememberDelivery(version, carried);
             if (s.Current is null || !s.Releases.TryGetValue(s.Current, out var cur) || (s.DeploymentOf(s.Current, env)?.FinishedAt ?? DateTimeOffset.MinValue) <= (dep.FinishedAt ?? dep.StartedAt)) s.Current = version;
             // older releases that never reached the environment ride in this one: "delivered in release X, superseding Y"
             var superseded = s.Releases.Values.Where(r => r.Version != version && r.Assembled <= release.Assembled && s.DeploymentOf(r.Version, env) is not { Succeeded: true } && !s.Superseded.ContainsKey(r.Version))
@@ -381,7 +401,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
             if (so.Answered)
             {
                 // the answer's effect is not seen yet: send it again after a while (the key makes a second send harmless)
-                if (so.AnsweredAt is { } at && now - at >= DeliveryTrainService.CommandRetry) { so.AnsweredAt = now; Out.Add(AnswerOf(so, so.LastProceed, so.LastNotes)); }
+                if (so.AnsweredAt is { } at && now - at >= DeliveryTrainService.CommandRetry) { so.AnsweredAt = now; Out.Add(Send(AnswerOf(so, so.LastProceed, so.LastNotes), so.Version)); }
                 wakes.Add((so.AnsweredAt ?? now).Add(DeliveryTrainService.CommandRetry));
                 continue;
             }
@@ -391,6 +411,8 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 continue;
             }
             var j = await Judge(release, ct);
+            // under an incident's hold only the release that carries the hotfix is answered; the others wait where they are (the hold ends with the incident)
+            if (!PassesHold(j.Items)) { Decide("held", so.Version, j.Items, [HoldText()]); continue; }
             // The Sign-off asks again only what can get worse while it waits, and aborts only for a hard failure (Invoke-AutoPromoteInner): an item gate, a commit of the release that is no
             // factory work item's, the release superseded in the target, the previous environment's app not Healthy now. A waiting reason leaves it pending.
             var hard = j.ItemGaps.Concat(j.Content.Hard).ToList();
@@ -420,7 +442,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
             var proceed = hard.Count == 0;
             var notes = proceed ? "Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md)." : $"Aborted by the factory worker gateway: {string.Join("; ", hard)}";
             so.Answered = true; so.AnsweredAt = now; so.LastProceed = proceed; so.LastNotes = notes;
-            Out.Add(AnswerOf(so, proceed, notes));
+            Out.Add(Send(AnswerOf(so, proceed, notes), so.Version));
             wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
             Decide(proceed ? "signoff-proceed" : "signoff-abort", so.Version, j.Items, proceed ? [] : hard);
         }
@@ -456,7 +478,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 continue;
             }
             // asked for, and Octopus shows nothing yet
-            if (now - at >= DeliveryTrainService.CommandRetry && s.Releases.TryGetValue(version, out var rel)) { s.Requested[version] = now; Out.Add(PromoteOf(rel)); }
+            if (now - at >= DeliveryTrainService.CommandRetry && s.Releases.TryGetValue(version, out var rel)) { s.Requested[version] = now; Out.Add(Send(PromoteOf(rel), rel.Version)); }
             wakes.Add(s.Requested[version].Add(DeliveryTrainService.CommandRetry));
             Decide("following", version, [], [$"the deployment of {version} to {TargetName} was requested; Octopus shows none yet"]);
             return;
@@ -490,7 +512,9 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 j = await Judge(r, ct);
                 if (j.Content.Skip) continue;   // not newer than what runs here: nothing to promote
                 common = j.Content.Gaps.ToList();
-                if (!stop && j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
+                // under an incident's hold a release that does not carry the hotfix is judged no further (no read of the previous environment): it waits for the hold to end
+                if (!PassesHold(j.Items)) common.Add(HoldText());
+                else if (!stop && j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
             }
             catch (Exception e) when (DeliveryTrainService.IsTransient(e, ct))
             {
@@ -517,17 +541,27 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         mentioned.Add(pick.Version); Retract(mentioned);
         var release = s.Releases[pick.Version];
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
-        Out.Add(PromoteOf(release));
+        s.RequestNumbers[pick.Version] = s.RequestNumbers.GetValueOrDefault(pick.Version) + 1;   // a new request: a new key (the retries of this one keep it)
+        Out.Add(Send(PromoteOf(release), release.Version));
         wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
         Decide("promote", pick.Version, winner.Items, []);
 
         void Note(string version, IReadOnlyList<string> items, IReadOnlyList<string> reasons) => notes.Add((version, items, reasons.ToList()));
     }
 
+    /// <summary>Whether a release with these items may be promoted under the hold: always when nothing holds the train, else only when it carries an item of the incident's hotfix.</summary>
+    bool PassesHold(IReadOnlyList<string> items) => !s.Held || items.Any(i => s.HoldAllow.Contains(i.ToLowerInvariant()));
+
+    string HoldText() => $"an incident holds the train ({(s.HeldIncident.Length == 0 ? "no incident named" : s.HeldIncident)}): only the release that carries the hotfix {string.Join(", ", s.HoldAllow)} is promoted";
+
     /// <summary>How many open releases behind the one that wins (or waits for the clock) are still read to say what they wait for.</summary>
     const int MaxDescribedBehind = 10;
 
-    PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}", p.Deployable, p.Project, r.Version, env);
+    /// <summary>W9.10p: the command as it goes out: itself, or, in an environment v1 still promotes (<see cref="DeliveryPolicy.Shadow"/>), the record of it that only the shadow handles.</summary>
+    object Send(IntegrationCommand command, string release) => p.Shadow ? new ShadowCommand(s.Key, command.Name, command.IdempotencyKey, release) : command;
+
+    // the key names the request (W9.10o): deployable, version, environment and the number of the request, so a promotion asked for again after the first was dropped, or after a rollback, is not answered from the ledger
+    PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}|{Math.Max(1, s.RequestNumbers.GetValueOrDefault(r.Version))}", p.Deployable, p.Project, r.Version, env);
 
     // ---- decisions -----------------------------------------------------------------------------------------------------------------------------------------
 

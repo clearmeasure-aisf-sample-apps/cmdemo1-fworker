@@ -121,7 +121,7 @@ public class DocsMergeStep : MergeStep
 
     public override void OnEnter(StepContext c)
     {
-        c.State.MergeAttempt = 0; c.State.MergeBlockedReason = "";
+        c.State.MergeAttempt = 0; c.State.MergeAnswers = 0; c.State.MergeBlockedReason = "";
         MergeSteps.Request(c, "");
     }
 
@@ -136,6 +136,19 @@ public class DocsMergeStep : MergeStep
 /// <summary>The merge step's decisions on the answers of the merge command.</summary>
 static class MergeSteps
 {
+    // the reasons of the gateway's own failures to ask (an error while reading, no credential, the GitHub budget): the answer says nothing about the pull request, so it does not use up the attempts the pull request is allowed
+    static readonly HashSet<string> NotAboutPullRequest = new(StringComparer.Ordinal) { "merge-error", "merge-unavailable", "github-budget" };
+
+    /// <summary>An answer is about the pull request unless it is one of the gateway's own failures to ask.</summary>
+    public static bool AboutPullRequest(MergeResult r) => !(r.Transient && NotAboutPullRequest.Contains(r.Reason));
+
+    // the pull request has had its answers (MaxMergeAttempts of them), or the calls have gone on far past that without them
+    static bool Spent(StepContext c) =>
+        c.State.MergeAnswers >= c.Policy.DocsRules.MaxMergeAttempts || c.State.MergeAttempt >= (long)c.Policy.DocsRules.MaxMergeAttempts * DocsPlanRules.CallsPerAnswer;
+
+    // (the answers that were about the pull request, when the calls were more than those)
+    static string Answered(WorkItemState s) => s.MergeAnswers == s.MergeAttempt ? "" : $"; {s.MergeAnswers} of them answered about the pull request";
+
     public static bool SameHead(string a, string b) => a.Length > 0 && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
     public static string Short(string sha) => sha.Length > 7 ? sha[..7] : sha;
 
@@ -143,9 +156,9 @@ static class MergeSteps
     public static void Request(StepContext c, string lastReason)
     {
         var s = c.State;
-        if (s.MergeAttempt >= c.Policy.DocsRules.MaxMergeAttempts)
+        if (Spent(c))
         {
-            c.Park($"merge-blocked: {s.MergeAttempt} merge calls without a merge{(lastReason.Length == 0 ? "" : $" ({lastReason})")}");
+            c.Park($"merge-blocked: {s.MergeAttempt} merge calls without a merge{(lastReason.Length == 0 ? "" : $" ({lastReason})")}{Answered(s)}");
             return;
         }
         s.MergeAttempt++;
@@ -162,6 +175,7 @@ static class MergeSteps
         if (s.MergeRequest is null || s.MergeRequest.Attempt != m.Attempt) return StepAnswer.Stale("no merge call waits for that answer");
         var r = m.Result;
         s.MergeRequest = null;
+        if (AboutPullRequest(r)) s.MergeAnswers++;
         if (r.UpdatesAdded > 0) s.MergeUpdates += r.UpdatesAdded;
         switch (r.Kind)
         {
@@ -192,9 +206,9 @@ static class MergeSteps
             if (r.NewHead.Length > 0) { s.VerdictHead = r.NewHead.ToLowerInvariant(); s.Head = s.VerdictHead; s.MergeUpdatedFrom = ""; }
             else s.MergeUpdatedFrom = s.VerdictHead;
         }
-        if (s.MergeAttempt >= c.Policy.DocsRules.MaxMergeAttempts)
+        if (Spent(c))
         {
-            c.Park($"merge-blocked: {s.MergeAttempt} merge calls without a merge ({r.Reason})");
+            c.Park($"merge-blocked: {s.MergeAttempt} merge calls without a merge ({r.Reason}){Answered(s)}");
             return StepAnswer.Applied;
         }
         if (c.StepOf(s.Step).Lease(c.Policy) is { } lease) s.LeaseDue = c.Now + lease;

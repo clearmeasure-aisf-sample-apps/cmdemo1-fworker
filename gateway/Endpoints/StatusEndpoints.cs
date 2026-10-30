@@ -79,6 +79,8 @@ sealed class StatusQuery
         }
         // the schema of the database (docs/design/fworker-database.md): the scripts applied, the check against them; only where a database is configured and the environment runs the Wolverine host
         if (services.GetService<FactorySchemaStatus>()?.Status() is { } schema) o["schema"] = schema;
+        // a FACTORY_DB_CONNECTION that is set and is not a connection string (W9.10o) is treated as no database; the status says so, so that "v1 alone" is not mistaken for "not configured"
+        if (services.GetService<DatabaseOptions>() is { Malformed: true }) o["database"] = new JsonObject { ["configured"] = false, ["malformed"] = true };
         // the shadow run of the delivery train (W5.2): the comparison counts since this process started; the report endpoint reads the stored ones. Only in the shadow run
         if (services.GetService<DeliveryShadowHolder>()?.Shadow is { } deliveryShadow) o["deliveryShadow"] = deliveryShadow.Status();
         return o;
@@ -90,6 +92,8 @@ sealed class StatusQuery
     {
         var o = Status();
         if (services.GetService<V2ItemViews>() is { } v2) o["v2Items"] = V2ItemViews.StatusBlock(await v2.Read(ct));
+        // W9.10o: the health of the v2 engine (dead letters, envelopes, jobs, trains, sagas), wherever the Wolverine host runs
+        if (services.GetService<V2Health>() is { } health) o["v2"] = await health.Block(ct);
         return o;
     }
 

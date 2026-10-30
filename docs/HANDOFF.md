@@ -286,8 +286,7 @@ beyond `next_event` and item tool calls.
 Built 2026-10-29: **the database schema by DbUp** (owner: "just like cmdemo1-workorders does it ... when the gateway starts, we should know the schema is good"; design
 `docs/design/fworker-database.md`, section "Database" of `CLAUDE.md`). `src/Fworker.Database` holds 11 idempotent scripts (001 to 008 are the EF migrations, 009 and 010 the
 tables the stores created on first use, 011 Wolverine's message store generated from WolverineFx 6.56.0 / Weasel 9.47.0). The gateway applies them at start under an application lock,
-then compares the catalog with `schema-manifest.json`; `/ready` answers 503 `waitingFor: schema` until that passes (where `FACTORY_DB_CONNECTION` is set and the environment runs the Wolverine
-host), and Wolverine builds and diffs nothing (`AutoCreate.None`), so its start no longer reads the schema for about 80 s and the 300 s command timeout of #533 is gone.
+then compares the catalog with `schema-manifest.json`; `/ready` answers 503 `waitingFor: schema` until that passes (where `FACTORY_DB_CONNECTION` is set and v2 acts; in shadow, W9.10o, the schema shows in `/api/v1/status` `schema` and `/ready` does not wait), and Wolverine builds and diffs nothing (`AutoCreate.None`), so its start no longer reads the schema for about 80 s and the 300 s command timeout of #533 is gone.
 Cutover of tdd (first release of this change): nothing to do by hand. The scripts run as no-ops on the existing tables, create `IdempotencyLedger`, `CopilotReservations` and `IngressDedup` if
 they are missing, rewrite Wolverine's 5 procedures in place, journal all 11 names. Check after the release: `/ready` 200, `/api/v1/status` `schema.state` `good`, `schema.differences` empty,
 `schema.applied` the scripts of this start, `wolverine.state` `running` within seconds. If `schema.differences` names objects, the guards did not match what EF or Weasel built there: read the names,

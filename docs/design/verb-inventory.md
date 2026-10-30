@@ -133,6 +133,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | plant-snapshot | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.10k | W9.11b | SnapshotCoordinator: plant-snapshot-save, -load, -clear and -await. **exception until W9.11b.** |
 | revocation-calls | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | bridge | W9.7 | W9.9a | RevocationService through ServiceVerbCalls (revocations, revoke-worker). |
 | copilot-owner-verbs | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.4 | W9.9a | CopilotOwnerVerbs: copilot-owner. |
+| delivery-bridge | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | bridge | W9.4 | W9.9a | DeliveryVerbBridge: the delivery verbs go to v2's DeliveryVerbHost where the engine acts, and to the Runner everywhere else. |
 | copilot-settle-client | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.4 | W9.9a | CopilotSettleClient: copilot-settle. |
 | plant-journal | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | journal | runner | W9.8 | W9.9a | The plant's journal lines (#477). |
 | operator-release-calls | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | bridge | W9.7 | W9.9a | OperatorReleaseLoader through ServiceVerbCalls (operator-releases). |
@@ -140,7 +141,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | runtime-release-claim | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | claim-item | runner | W9.10j | W9.10j | The runtime adapters' ReleaseClaim; the saga's step lease and the scheduler's slot replace it. |
 | credit-guard-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | runner | W9.10h | W9.10h | The Copilot credit guard's park. |
 | feature-checks | `gateway/Composition/GatewayWolverineExtensions.cs` | 1 | by argument | runner | W9.5 | W9.9a | FeatureChecksJob reads pr-checks through PullRequestChecks. |
-| publish-demo | `gateway/Endpoints/DemoEndpoints.cs` | 1 | publish-demo | runner | W9.4 | W9.9a | The demo endpoint. |
+| publish-demo | `gateway/Endpoints/DemoEndpoints.cs` | 2 | publish-demo, publish-demo | runner | W9.4 | W9.9a | The demo endpoint (the Runner and the delivery bridge: v2 where the engine acts). |
 | unpark-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | unpark-item | runner | W9.2 | W9.9a | The unpark endpoint (W9.10h adds the saga's ResumeWorkItem). |
 | resettle-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | resettle-item | runner | W9.2 | W9.9a | The resettle endpoint. |
 | metrics-calls | `gateway/Endpoints/MetricsEndpoints.cs` | 1 | metrics | bridge | W9.7 | W9.9a | Through ServiceVerbCalls. |
@@ -155,8 +156,10 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | item-verbs-v1 | `gateway/Ports/ItemVerbsPort.cs` | 1 | by argument | runner | W9.10q | W9.10q | ItemVerbsV1, the IItemV1 plumbing: it goes with the fallbacks. |
 | item-admin-feed | `gateway/Ports/ItemVerbsPort.cs` | 1 | by argument | router | W9.2 | - | ItemAdminFeed forwards to the router it wraps (no script). |
 | qc-calls | `gateway/Qc.cs` | 1 | by argument | runner | W9.1 | W9.9a | QcHub runs the qc-* verbs (QcService in W9.1). |
+| qc-facts | `gateway/Ports/QcPort.cs` | 1 | inspect-facts | router | W9.5 | - | QcFactsAdapter asks the router for the inspector's facts; the router answers on v2 or runs the script. |
+| delivery-open-pr | `gateway/Ports/DeliveryVerbHost.cs` | 1 | by argument | router | W9.4 | - | copilot-settle opens the item's pull request through the verb router (open-pr); no script of its own. |
 | item-pr-lookup | `gateway/Runtimes/ItemPrLookup.cs` | 1 | item-pr | runner | W9.2 | W9.9a | The pull request of an item for the runtime adapters (the owner-task case is a fallback below). |
-| owner-ci-release | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | by argument | runner | W9.4 | W9.9a | OwnerCiReleaseService runs ci-release. |
+| owner-ci-release | `gateway/Runtimes/OwnerCiReleaseService.cs` | 2 | by argument | runner | W9.4 | W9.9a | OwnerCiReleaseService runs ci-release. |
 | owner-ci-journal | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | journal | runner | W9.8 | W9.9a | Its journal lines. |
 | sweep-board | `gateway/Sweeper.cs` | 1 | sync-board | runner | W9.8 | W9.10g | The sweep: sync-board (the reconciler of W9.8, the item and plant-wide steps of W9.10e to W9.10g). |
 

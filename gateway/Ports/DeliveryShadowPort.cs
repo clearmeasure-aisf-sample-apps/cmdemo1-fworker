@@ -36,7 +36,11 @@ static class DeliveryShadowSettings
             if (project.Length == 0) return null;
             // v1 promotes only where autoPromote is on and names this gateway's environment (AutoPromoteHere); otherwise the train observes
             var acts = cfg.AutoPromoteHere;
-            var environments = acts && ap?["environments"] is JsonArray a ? a.Select(e => e?.ToString() ?? "").Where(e => e != "").ToList() : [];
+            var named = acts && ap?["environments"] is JsonArray a ? a.Select(e => e?.ToString() ?? "").Where(e => e != "").ToList() : [];
+            // W9.10p: where the engine acts the train promotes the named environments only when delivery.autoPromote.trainActs is on (W9.12). Until then v1's AutoPromoter promotes them and the train decides them in shadow
+            // (policy.Shadow: the decisions are recorded and compared with the AutoPromoter's, the commands are not executed). In the shadow run itself (the engine does not act) every named environment is v1's and recorded as before.
+            var shadowed = engineActs && !cfg.TrainActs ? named : [];
+            var environments = shadowed.Count > 0 ? [] : named;
             var names = new Dictionary<string, string>(); var urls = new Dictionary<string, string>();
             foreach (var k in DeliveryPolicy.Chain)
             {
@@ -45,7 +49,9 @@ static class DeliveryShadowSettings
             }
             double Num(JsonNode? n, string name, double fallback) => n?[name] is JsonValue v && v.TryGetValue<double>(out var d) && d > 0 ? d : fallback;
             var window = new HealthWindow(Num(o?["health"], "spacingMinutes", 5), Num(o?["health"], "settleMinutes", 10));
-            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered);
+            // W8.3: delivery.rollback.migrationPaths, the path fragments that mark a file as a database migration (the rollback's precondition); absent: DbUp's scripts/Update
+            var migrations = (cfg.Root?["delivery"]?["rollback"]?["migrationPaths"] as JsonArray)?.Select(m => m?.ToString() ?? "").Where(m => m != "").ToList();
+            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, shadowed, migrations);
         }
         catch { return null; }
     }
@@ -183,9 +189,11 @@ static class DeliveryShadowWiring
             DeliveryTopology.Route(w);
             // The train keeps a failed read from losing an input (it saves the input first and looks again by itself), so this is the backstop for one that still escapes: GitHub or the app
             // not answering is tried again with growing pauses and then scheduled again every few minutes; it never goes to the dead letters, because an input lost there is lost for good.
-            // The same for a train that kept changing under the handler (TrainConflictException: the handler re-reads the state and tries again by itself, five times) and for a database that does not
-            // answer (a connection that cannot be opened, a timeout): the input is applied again from the state as it is then, which the train's redelivery rule makes harmless.
-            w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().Or<TrainConflictException>().Or<TimeoutException>().Or<System.Data.Common.DbException>().RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5));
+            // The same for a database that does not answer (a connection that cannot be opened, a timeout): the input is applied again from the state as it is then, which the train's redelivery rule makes harmless. A train that
+            // kept changing under the handler (TrainConflictException) and a transient SQL fault are the host's FaultPolicy, which comes first. The retry is BOUNDED (W9.10o, #500: it used to repeat every 5 minutes for ever, so a permanent
+            // fault never reached the dead letters): three tries, then 5 minutes, 15 minutes, 1 hour and 6 hours, then the dead letters, which /api/v1/status counts and shows by type.
+            w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().Or<TimeoutException>().Or<System.Data.Common.DbException>()
+                .RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5)).Then.ScheduleRetry(TimeSpan.FromMinutes(15)).Then.ScheduleRetry(TimeSpan.FromHours(1)).Then.ScheduleRetry(TimeSpan.FromHours(6)).Then.MoveToErrorQueue();
         };
     }
 

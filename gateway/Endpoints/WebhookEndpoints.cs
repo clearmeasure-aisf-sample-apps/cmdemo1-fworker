@@ -20,14 +20,15 @@ sealed class WebhookDeduplicator
 }
 
 // W4.0: the secret of each webhook source and the check of its signature. A source's secret comes from its own environment variable
-// (github: FACTORY_WEBHOOK_SECRET, the one the gateway always had; octopus: FACTORY_WEBHOOK_SECRET_OCTOPUS); a source without a secret (unset or empty)
+// (github: FACTORY_WEBHOOK_SECRET, the one the gateway always had; octopus: FACTORY_WEBHOOK_SECRET_OCTOPUS; azure-monitor, W8.2: FACTORY_WEBHOOK_SECRET_AZURE_MONITOR); a source without a secret (unset or empty)
 // refuses every delivery, and an unknown source has none. The secrets are never logged; the comparison is in constant time. GitHub signs the body
 // (X-Hub-Signature-256, HMAC-SHA256); an Octopus subscription cannot compute a signature, so it sends the shared secret itself in a header
-// (X-Octopus-Webhook-Secret) over TLS. A protected area (CLAUDE.md).
+// (X-Octopus-Webhook-Secret) over TLS; an Azure Monitor action group cannot set a header either, so its secret rides in the webhook URI (query "secret") or, from a relay, in
+// X-Azure-Monitor-Secret, and is compared like Octopus's. A protected area (CLAUDE.md).
 sealed class WebhookSecrets(Func<string, string?> env)
 {
-    public const string GitHub = "github", Octopus = "octopus";
-    public static string EnvVar(string source) => source switch { GitHub => "FACTORY_WEBHOOK_SECRET", Octopus => "FACTORY_WEBHOOK_SECRET_OCTOPUS", _ => "" };
+    public const string GitHub = "github", Octopus = "octopus", AzureMonitor = "azure-monitor";
+    public static string EnvVar(string source) => source switch { GitHub => "FACTORY_WEBHOOK_SECRET", Octopus => "FACTORY_WEBHOOK_SECRET_OCTOPUS", AzureMonitor => "FACTORY_WEBHOOK_SECRET_AZURE_MONITOR", _ => "" };
 
     /// <summary>The secret of the source, or null when there is none (unset, empty, unknown source).</summary>
     public string? For(string source) { var v = EnvVar(source) is { Length: > 0 } n ? env(n) : null; return string.IsNullOrEmpty(v) ? null : v; }
@@ -42,7 +43,7 @@ sealed class WebhookSecrets(Func<string, string?> env)
             case GitHub:
                 var expected = "sha256=" + Convert.ToHexString(HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), body)).ToLowerInvariant();
                 return HttpResultsX.FixedEquals(signature, expected);
-            case Octopus: return CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(signature)), SHA256.HashData(Encoding.UTF8.GetBytes(secret)));   // hashed first: no length leak
+            case Octopus or AzureMonitor: return CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(signature)), SHA256.HashData(Encoding.UTF8.GetBytes(secret)));   // hashed first: no length leak
             default: return false;
         }
     }

@@ -20,6 +20,7 @@ static class BoardReconcilerJob
         var reader = new HttpBoardReader(http, new ProviderCredentialSource(tokens),
             (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } }));
         var reconciler = new BoardReconciler(reader, () => catalog.Current, json => inbox.Publish(new IngressInboxMessage("poll", json)), () => c.Leader.MayAct, () => budget.Low().Low);
+        c.BoardReconciler = reconciler;   // W9.8: the verb sync-board runs a pass of this one on demand (it remembers what it published)
         return async ct =>
         {
             var r = await reconciler.Run(ct);

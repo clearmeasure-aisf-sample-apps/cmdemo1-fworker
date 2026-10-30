@@ -93,6 +93,19 @@ public sealed class MergeDirect
         return await Merge(client, cmd, ct);
     }
 
+    /// <summary>
+    /// W9.10c: whether an earlier handling of the same command, cut off before its result was recorded, did the merge: the pull request's merge state. Merged is Found (the result that handling would
+    /// have recorded); open is Absent (the merge did not happen, so the call may be made); a read that fails is Unknown (the caller asks again).
+    /// </summary>
+    public async Task<EffectLookup> LookUpMerge(MergePullRequest cmd, CancellationToken ct = default)
+    {
+        var client = await _clients.For(cmd.Repository, ct);
+        var read = await Get(client, $"pulls/{cmd.PullRequest}", ct);
+        if (!read.Ok) return EffectLookup.Unknown($"read of PR #{cmd.PullRequest}: {read.Status}");
+        if (read.Json!["merged"]?.GetValue<bool>() == true) return EffectLookup.Found(MergeOutcome.MergedAs(Lower(read.Json["merge_commit_sha"]?.ToString()), "already-merged").ToResult());
+        return EffectLookup.Absent;
+    }
+
     async Task<MergeOutcome> Merge(GitHubRepoClient client, MergePullRequest cmd, CancellationToken ct)
     {
         var n = cmd.PullRequest;

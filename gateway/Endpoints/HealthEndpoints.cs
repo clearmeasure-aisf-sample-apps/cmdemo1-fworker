@@ -38,7 +38,7 @@ sealed class HealthEndpoints(BuildInfo build, PluginArchive plugin, PromptStore 
     // readiness: the revoked credentials are read (at once where there is nothing to read), so a session credential is answered without waiting
     // (503 says what the start waits for, how many reads have failed and since when: {"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."});
     // the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5) are loaded once, and a broken one keeps /ready at 503;
-    // where a database is configured and the environment runs the Wolverine host, the schema of the database is applied and checked first (FactorySchemaStatus):
+    // where a database is configured and v2 acts (Engine.V2Acts; in shadow the schema shows in /api/v1/status only), the schema of the database is applied and checked first (FactorySchemaStatus):
     // {"ready":false,"waitingFor":"schema","state":"upgrading"|"failed","attempts":N,"since":"...","failedScript":...,"lastFailure":...}, until the first good verification of the process
     IResult Ready() => leader.Replaced ? Results.Json(new { ready = false, waitingFor = "nothing", replaced = true, reason = "a newer gateway process holds the lease" }, statusCode: 503)
         : prompts.Errors.Count > 0 ? Results.Json(new { ready = false, waitingFor = "prompts", errors = prompts.Errors }, statusCode: 503)
