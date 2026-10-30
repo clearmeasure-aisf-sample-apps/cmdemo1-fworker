@@ -39,7 +39,8 @@ public sealed class BoardRoutesTests : IDisposable
     public void WhereTheEngineActs_AndThePartsAreThere_AllSixVerbsAreRegistered()
     {
         var routes = V2VerbRoutes.Build(Engine("\"prod\""), Services(new Runner("/nonexistent/factory.ps1"), Parts()));
-        Assert.Equal(BoardRoutes.Verbs.OrderBy(x => x), routes.Verbs.OrderBy(x => x));
+        // the other groups register what they register (their own tests say what): the board group is all of its six verbs
+        Assert.Equal(BoardRoutes.Verbs.OrderBy(x => x), routes.Verbs.Where(BoardRoutes.Verbs.Contains).OrderBy(x => x));
         Assert.Equal(["sync-board", "ingest-event", "journal", "transcript-save", "transcript-load", "transcript-prune"], BoardRoutes.Verbs);
     }
 
@@ -47,7 +48,7 @@ public sealed class BoardRoutesTests : IDisposable
     public void WithoutTheParts_NothingIsRegistered_AndTheRunnerIsLeftAlone()
     {
         var runner = new Runner("/nonexistent/factory.ps1");
-        Assert.Equal(0, V2VerbRoutes.Build(Engine("\"prod\""), Services(runner, null)).Count);
+        Assert.DoesNotContain(V2VerbRoutes.Build(Engine("\"prod\""), Services(runner, null)).Verbs, BoardRoutes.Verbs.Contains);
         Assert.Null(runner.V2Own);
     }
 

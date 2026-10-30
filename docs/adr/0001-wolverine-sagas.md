@@ -2,7 +2,8 @@
 
 - **Status:** Proposed. On 2026-10-25 the owner asked for "a phased refactoring plan that keeps fworker releases stable" and then
   "Save an adr with this plan"; this records the plan. It becomes Accepted with the decisions of the plan's section 7, the base
-  included; nothing is built. Revised 2026-10-26 (section "Revision 2026-10-26"); still Proposed.
+  included; nothing is built. Revised 2026-10-26 (section "Revision 2026-10-26") and 2026-10-30 (section "Revision 2026-10-30":
+  leadership stays a lease with Solo); still Proposed.
 - **Date:** 2026-10-25
 - **Plan:** `docs/design/fworker-wolverine-refactor.md` (phases R0 to R9, the rules that keep releases stable, the seams, the verb
   inventory).
@@ -155,6 +156,30 @@ taken is decision 1 of the plan's section 7.
 - **No approval stops inside the repository:** protected paths and security-sensitive tasks merge on green after the reviewer
   subagent (with a security brief for the latter), recorded in the handoff. The actions outside the repository (Azure SQL, a replica,
   `FACTORY_V2_OFF` in cmdemo1-system, cmdemo1-aisf off board 679) remain.
+
+## Revision 2026-10-30
+
+**Decisions of the owner, 2026-10-30,** after an audit of the program (`fworker-wolverine-implementation.md`, "Revision 2026-10-30
+(audit)"):
+1. **Leadership:** one acting process, fenced by a lease, with Wolverine in Solo mode on the lease holder. The lease moves from the
+   GitHub ref to a SQL application lock that also decides when the Solo node starts; the node stops before its hand-over. It is kept
+   after v1 is removed.
+2. **The app's uat and prod promotions** stay with v1's `AutoPromoter` after the cutover, until the delivery train has a recorded clean
+   live window; v2 acts in tdd only.
+3. `delivery.finalEnvironment` is tdd; the `peer-approved` merge policy is dropped; the train's newest-only promotion is a declared
+   difference; synchronous decision verbs are dropped in favour of the as-built feed; multi-repository comes after the cutover.
+
+**What changes in the decision above:**
+- **Point 5, the rules, and the Revision 2026-10-26:** "Solo mode on the lease holder" is the target again, without an end date;
+  "v2 runs Balanced with Wolverine's leader election" no longer holds. The coordinators' single writer is the one acting process (local
+  sequential queues), not `GlobalPartitioned` listeners across nodes.
+- **Point 2, the target:** decision verbs feed the saga after v1's verb answers (`V2VerbFeed`) instead of an `InvokeAsync` that can
+  refuse; `wolverine-factory.md` 8 lists this and the other deviations as built.
+- **Rollback:** unchanged in form (revert or `FACTORY_V2_OFF`), but it rests on the state comment projection, which is wired before the
+  cutover, and on re-adoption fencing after the switch.
+
+**Consequences:** a database outage stops the acting tdd gateway once v2 acts (the lease lives there); one process is a single point of
+work, as before, with the hand-over order fixed so that two Solo nodes never run at once.
 
 ## Alternatives considered
 

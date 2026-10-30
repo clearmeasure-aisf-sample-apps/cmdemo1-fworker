@@ -76,6 +76,8 @@ static class EndpointModuleExtensions
         // C7d: the verb route and its pipeline (seam S1); the GitHub budget is the composition's, not (yet) a service of its own
         // S1 (W1.4): the engine the environment is composed with; v1 is the only one
         // W9.0: the verbs that v2 answers (one route file per verb group, gateway/Verbs/Routes); empty, and Register not called, unless the engine acts
+        // W9.1: the QC service, whose verbs QcRoutes registers there (null without a GitHub identity: the qc-* verbs then stay on v1)
+        if (c.Engine.V2Acts) services.AddSingleton(sp => QcWiring.Make(c, sp)!);
         services.AddSingleton(sp => V2VerbRoutes.Build(c.Engine, sp));
         services.AddSingleton<IVerbRouter>(sp =>
         {
@@ -84,7 +86,9 @@ static class EndpointModuleExtensions
             if (c.Engine.V2Acts && c.Instance.Home is { } home && sp.GetService<WorkItemParts>() is { Ownership: { } ownership } parts)
             {
                 var host = sp.GetRequiredService<WolverineHostService>();
-                router = new V2VerbFeed(router, ownership, parts.Store, home, parts.Docs.Settings, m => host.PublishAsync(m), parts.Docs.Heads);
+                var feed = new V2VerbFeed(router, ownership, parts.Store, home, parts.Docs.Settings, m => host.PublishAsync(m), parts.Docs.Heads);
+                sp.GetService<V2ActivityTap>()?.Connect(feed.Observe);   // W9.4: a verb a v2 route answers is still a sign of life of the session
+                router = feed;
             }
             // W9.0: the verbs a route file registered are answered by v2 and never reach v1; with none registered the router is what it was
             return c.Engine.V2Acts && sp.GetRequiredService<V2VerbRoutes>() is { Count: > 0 } routes ? new V2VerbRouter(router, routes) : router;
