@@ -267,7 +267,7 @@ public static class SettleVerb
     }
 
     /// <summary>Find-GreenMaster (issue 114): master is green for a merge when the merge commit's latest attempt is green, or when a later commit of the default branch that contains it is (the newest first, at most masterContainsLookback after the merge commit).</summary>
-    static async Task<(string Sha, bool Own)?> FindGreenMaster(RuleKit kit, string sha, CancellationToken ct)
+    internal static async Task<(string Sha, bool Own)?> FindGreenMaster(RuleKit kit, string sha, CancellationToken ct)
     {
         var ign = kit.MasterIgnoredChecks();
         if ((await kit.GetChecksFor(sha, ct, ign)).Status == "success") return (sha, true);

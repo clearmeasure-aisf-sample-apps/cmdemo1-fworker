@@ -20,6 +20,13 @@
 saga | ^saga: a docs item | profile=saga-docs
 # W7 gate (#266): the feature plan (intake.v2Plans docs and feature), the same flow with a code item.
 saga | ^saga: a code item | profile=saga-feature
+# W9.10f: the sweep's item steps on v2, as the saga's rules and the watcher `item-steps` (docs/design/fworker-wolverine-implementation.md "W9.10f as built"): the wait for master's CI after a merge (master-green, and master-broken after the one re-run of
+# the failed jobs with the saga's own lift of the park once master is green at a later commit), the demotion of a PASS whose pull request was closed, and a person's merge (merge pickup). v1 does these in `sync-board` for every item; the
+# scenarios have nothing to play on v1 (they pass there at once) and the suites auto and owner test the script. The expiry of a park (timing.parkHours, a day), the clear-hold of an approved inspector hold, the owner that waits out
+# a hold (idleReleaseMinutes, an hour) and the settle's re-arm run on timers or on state no scenario of Tier 1 can reach in its time: they are tested by Fworker.Workflow.Tests (SweepStepsTests, ItemStepsTests, WorkItemTrackedTests).
+# (two claims of two scenarios each, so that the job saga runs the four sweep scenarios on its two lanes: each waits for the watcher's minute)
+saga | ^saga: sweep step: a (merged code item|PASS whose) | profile=saga-feature
+saga | ^saga: sweep step: a (red master|merge by a person) | profile=saga-feature
 
 # ---- whole suites ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous

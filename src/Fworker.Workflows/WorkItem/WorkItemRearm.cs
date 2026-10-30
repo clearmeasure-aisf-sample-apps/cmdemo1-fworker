@@ -8,7 +8,7 @@ namespace Fworker.Workflows.WorkItem;
 // The alternative, one transaction for the save and the outbox (WolverineFx.EntityFrameworkCore on FactoryDbContext), would put the saga's store inside Wolverine's unit of work and the hand-written service behind
 // it; this job does the same repair from outside and also covers a crash of the process that Wolverine's outbox would not (the message that was never produced). It publishes again, for each open item that is not parked:
 //  - a timer that is overdue by more than OverdueGrace (the durable timers poll every few seconds, so a timer that late is lost): the timer's message itself, which the saga takes as the timer would have been (a lease that
-//    ran out, a merge retry, the end of the settle window; a timer that already fired is Stale or a repeated key, and does nothing);
+//    ran out, a merge retry, the end of the settle window, the end of a park, the master-green wait that ran out; a timer that already fired is Stale or a repeated key, and does nothing);
 //  - the commands of the item's last transition (the slot request, the end of a session, the merge call), when the item has not changed for SilentFor and the transition asked for any: every one of them is idempotent by
 //    its key (the scheduler and the merge line answer a repeat as they answered the first), and the next input of the item empties the list.
 
@@ -45,7 +45,14 @@ public sealed class WorkItemRearm(IWorkItemAges ages, WorkItemPolicy policy, Fun
         {
             ct.ThrowIfCancellationRequested();
             var s = item.State;
-            if (s.Status == WorkItemStatus.Completed || s.Parked) continue;
+            if (s.Status == WorkItemStatus.Completed) continue;
+            if (s.Parked)
+            {
+                // W9.10f: a parked item has the timers of its park (its end, the owner's patience): a lost one would leave it parked for ever
+                foreach (var t in WorkItemSaga.TimersOf(s).Where(t => t.Due <= now - OverdueGrace))
+                    if (await Send(t.Message)) timers++; else failed++;
+                continue;
+            }
             open++;
             foreach (var t in WorkItemSaga.TimersOf(s).Where(t => t.Due <= now - OverdueGrace))
                 if (await Send(t.Message)) timers++; else failed++;

@@ -163,6 +163,26 @@ public class WorkItemTrackedTests
     }
 
     [SqlFact]
+    public async Task AParkThatEnds_ExpiresByItself_AsADurableScheduledMessage_AndTheItemTakesUpItsStepAgain()
+    {
+        if (!TrackedSessionHost.Available) return;
+        // W9.10f: the sweep's expiry of a park, with the park of two seconds
+        var policy = Quick() with { Sweep = new SweepRules(TimeSpan.FromSeconds(2), TimeSpan.FromMinutes(30)) };
+        await using var h = await TrackedSessionHost.StartAsync(Wire(policy));
+        await h.TrackSend(new StartWorkItem(A, "intake"));
+        await h.TrackSend(new ParkWorkItem(A, 0, "park-1", "a person said so"));
+        var parked = (await Row(h, A))!.State;
+        Assert.True(parked.Parked);
+        Assert.NotNull(parked.ParkUntil);
+        Assert.True(await Until(async () => !(await Row(h, A))!.State.Parked, 30), "the park's timer did not fire");
+        var state = (await Row(h, A))!.State;
+        Assert.Equal(StepKind.Design, state.Step);
+        Assert.Null(state.ParkUntil);
+        Assert.True(await Until(async () => await History(h, "acme/orders#7", "park-expired") >= 1, 20));
+        Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
+    }
+
+    [SqlFact]
     public async Task ARestartInTheMiddle_KeepsTheStateAndTheTimer_AndTheItemIdSurvivesTheDurableJson()
     {
         if (!TrackedSessionHost.Available) return;
