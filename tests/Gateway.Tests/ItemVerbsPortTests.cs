@@ -87,7 +87,7 @@ public sealed class ItemVerbsPortTests : IDisposable
             Assert.True(Task.Run(() => host.Server).Wait(TimeSpan.FromSeconds(60)), "the gateway of an acting v2 environment did not finish starting");
             var routes = host.Services.GetRequiredService<V2VerbRoutes>();
             Assert.All(ItemRoutes.Verbs, v => Assert.True(routes.TryGet(v, out _), v));
-            Assert.False(routes.TryGet("merge", out _));   // another group's verb is not registered by this one
+            Assert.False(routes.TryGet("auto-promote", out _));   // another group's verb is not registered by this one
             Assert.IsType<V2VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
         }
         // no credential, no routes: the verbs stay v1's (behind the saga's feed, as W6.6 left them)
