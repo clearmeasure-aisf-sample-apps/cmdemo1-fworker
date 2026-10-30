@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
 using Fworker.Workflows.WorkItem.Verbs;
 using Xunit;

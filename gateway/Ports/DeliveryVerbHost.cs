@@ -75,14 +75,15 @@ sealed class DeliveryVerbHost
     readonly Func<bool> mayAct;
     readonly Action<JsonObject> observeRate;
     readonly BoardMetaCache board = new();
-    readonly ItemLocks locks = new();
+    readonly IItemLock locks;
     readonly VerbCall openPr;
     readonly V2ActivityTap? tap;
     readonly Func<TimeSpan, CancellationToken, Task> delay;
 
     public DeliveryVerbHost(JsonObject root, Func<string, string?> env, Func<bool> mayAct, Action<JsonObject> observeRate, VerbCall openPr, V2ActivityTap? tap = null,
-        HttpMessageHandler? inner = null, GitHubTokenProvider? tokens = null, Func<TimeSpan, CancellationToken, Task>? delay = null, IGitHubCredentialSource? credentials = null)
+        HttpMessageHandler? inner = null, GitHubTokenProvider? tokens = null, Func<TimeSpan, CancellationToken, Task>? delay = null, IGitHubCredentialSource? credentials = null, IItemLock? itemLock = null)
     {
+        locks = itemLock ?? ItemLocks.Default(env);
         config = RuleKit.WithTimingOverrides(root, env); this.env = env; this.mayAct = mayAct; this.observeRate = observeRate; this.openPr = openPr; this.tap = tap;
         this.tokens = tokens ?? GitHubTokenProvider.FromEnvironment(env);
         this.delay = delay ?? ((t, ct) => Task.Delay(t, ct));
@@ -107,6 +108,13 @@ sealed class DeliveryVerbHost
             clients = new GitHubClientFactory(github, credentials ?? new ProviderCredentialSource(this.tokens), new Fworker.Integrations.GitHub.GitHubBudget());
             identity = Identity(root, env, github, this.tokens);
         }
+    }
+
+    /// <summary>The item's lock (the gateway's one IItemLock, W9.10l); a lock that stays busy is the refusal 20 item-busy, as the delivery verbs always answered it.</summary>
+    async Task<JsonObject> WithLock(int item, Func<Task<JsonObject>> body, CancellationToken ct)
+    {
+        try { return await locks.Use(item, body, 45, ct); }
+        catch (ItemBusyException) { throw new Fworker.Workflows.Delivery.Verbs.VerbReject(20, "item-busy", $"another operation on item {item} is running", new JsonObject { ["retryAfterSeconds"] = 5 }); }
     }
 
     /// <summary>The state comment's store, over a client made now (the credential source returns the provider's current token).</summary>
@@ -140,7 +148,7 @@ sealed class DeliveryVerbHost
         var leadership = sp.GetService<ILeadership>();
         // copilot-settle opens the item's pull request through the verb open-pr, answered by whoever answers it (the item verbs' route, or the rule script)
         VerbCall call = async (verb, args, ct) => { var a = await sp.GetRequiredService<IVerbRouter>().RunAsync(verb, args.ToJsonString(), TimeSpan.FromSeconds(120)); return (a.Code, a.Output); };
-        return new DeliveryVerbHost(instance.Root as JsonObject ?? new JsonObject(), Environment.GetEnvironmentVariable, () => leadership?.MayAct ?? true, budget.Observe, call, sp.GetService<V2ActivityTap>());
+        return new DeliveryVerbHost(instance.Root as JsonObject ?? new JsonObject(), Environment.GetEnvironmentVariable, () => leadership?.MayAct ?? true, budget.Observe, call, sp.GetService<V2ActivityTap>(), itemLock: ItemLocks.From(sp, Environment.GetEnvironmentVariable));
     }
 
     // ---- one call --------------------------------------------------------------------------------------------------------------------------------------
@@ -160,7 +168,7 @@ sealed class DeliveryVerbHost
             var transport = new HttpGhTransport(github, uploads, octopus, config, env, fenced ? mayAct : null, observeRate, delay);
             var kit = new RuleKit(transport, new FencedStateStore(await Store(cts.Token), fenced ? mayAct : null), config, board, env).ForSession(session);
             Task<JsonObject> Body() => Dispatch(verb, kit, a, cts.Token);
-            if (!NoLock.Contains(verb) && J.Has(a, "item")) return await locks.With(J.I(a["item"]), Body);
+            if (!NoLock.Contains(verb) && J.Has(a, "item")) return await WithLock(J.I(a["item"]), Body, cts.Token);
             return await Body();
         });
         var line = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["v2route"] = verb, ["exit"] = exit };

@@ -355,19 +355,19 @@ static class QcWiring
         IQcEnvironmentStore? table = null;
         if (c.Database.ConnectionString is { Length: > 0 } cs && sp.GetService<FactorySchemaStatus>() is { } schema)
             table = new SchemaGatedQcStore(schema, new SqlQcEnvironmentStore(() => WorkItemWiring.Open(WolverineHostService.WithConnectTimeout(cs, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds))));
-        return Build(cfg, home, tokens, http, env, observe, authors, () => sp.GetRequiredService<IVerbRouter>(), table, new FileQcIndex(env));
+        return Build(cfg, home, tokens, http, env, observe, authors, () => sp.GetRequiredService<IVerbRouter>(), table, new FileQcIndex(env), locks: ItemLocks.From(sp, env));
     }
 
     /// <summary>The service over the given clients: the GitHub client of the QC reads and writes, the journal store and ledger of the journal command (Get-State, Save-State, Add-Journal), the inspector through the router.</summary>
     public static QcService Build(QcConfig cfg, Fworker.Contracts.Ids.RepoId home, GitHubTokenProvider tokens, HttpClient http, Func<string, string?> env, Action<string, string?, string?, string?>? observe,
-        IReadOnlyList<string> stateAuthors, Func<IVerbRouter> router, IQcEnvironmentStore? table, IQcIndex index, Func<DateTime>? utcNow = null)
+        IReadOnlyList<string> stateAuthors, Func<IVerbRouter> router, IQcEnvironmentStore? table, IQcIndex index, Func<DateTime>? utcNow = null, IItemLock? locks = null)
     {
         var github = new QcGitHubClient(http, tokens, cfg, env, observe);
         var clients = new GitHubClientFactory(http, new ProviderCredentialSource(tokens), new Fworker.Integrations.GitHub.GitHubBudget());
         var repoClient = clients.For(home).GetAwaiter().GetResult();
         var store = new GitHubJournalStore(repoClient, new JournalIdentity(cfg.Name, ct => github.ServerLogin(ct), stateAuthors), utcNow);
         var minutes = cfg.Timing.TryGetValue("journalWaitingMinutes", out var m) ? m : 30;
-        var ledger = new JournalLedger(store, new JournalSettings(minutes, cfg.SecretPatterns), utcNow);
+        var ledger = new JournalLedger(store, new JournalSettings(minutes, cfg.SecretPatterns), utcNow, itemLock: locks ?? ItemLocks.Default(env));
         return new QcService(cfg, new QcItemsAdapter(github, store, ledger), github, new QcFactsAdapter(router), index, table, utcNow);
     }
 }

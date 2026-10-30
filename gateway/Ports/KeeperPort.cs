@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Fworker.Contracts.Ids;
+using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Fworker.Workflows.Keeper;
@@ -281,7 +282,7 @@ sealed class KeeperStateStore(IJournalStore store, JournalLedger ledger, Action<
         {
             var f = JournalLedger.FieldsOf(fields);
             if (holder is Holder h) return await ledger.AddTo(item, h.Item, ev, f, key);
-            return (await ledger.Append(item, ev, f, key)).Posted;
+            return (await ledger.AppendHeld(item, ev, f, key)).Posted;   // the verb holds the item's lock (KeeperFileLocks.Item), which is not reentrant
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {
@@ -297,9 +298,10 @@ sealed class KeeperStateStore(IJournalStore store, JournalLedger ledger, Action<
 
 /// <summary>
 /// <c>Use-ItemLock</c> and <c>Use-IntakeLock</c> (Core.ps1): a file in the state directory opened for exclusive use, polled every 300 ms for 45 s, then the 'item-busy' or 'intake-busy' refusal. The same files as the rule scripts'
-/// (item-N.lock, board-intake.lock in FACTORY_STATE_DIR, else the factory data directory's state folder), so the scripts and this engine exclude each other.
+/// (item-N.lock, board-intake.lock in FACTORY_STATE_DIR, else the factory data directory's state folder), so the scripts and this engine exclude each other. W9.10l: the item's lock is the gateway's one <see cref="IItemLock"/>
+/// (ItemLocks.cs), the lock of every port and of the journal ledger, handed out here as a handle; only the board-intake lock is this class's own file.
 /// </summary>
-sealed class KeeperFileLocks(Func<string, string?>? env = null, TimeSpan? wait = null) : IVerbLocks
+sealed class KeeperFileLocks(IItemLock items, Func<string, string?>? env = null, TimeSpan? wait = null) : IVerbLocks
 {
     readonly Func<string, string?> env = env ?? Environment.GetEnvironmentVariable;
     readonly TimeSpan wait = wait ?? TimeSpan.FromSeconds(45);
@@ -329,7 +331,24 @@ sealed class KeeperFileLocks(Func<string, string?>? env = null, TimeSpan? wait =
         return dir;
     }
 
-    public Task<IAsyncDisposable> Item(int item) => Take($"item-{item}.lock", () => VerbRejection.Retry(20, "item-busy", $"another operation on item {item} is running", 5));
+    /// <summary>The item's lock as a handle: <see cref="IItemLock"/> takes a body, so the body here waits until the handle is disposed. A lock that stays busy for the wait is the refusal 'item-busy' (20).</summary>
+    public async Task<IAsyncDisposable> Item(int item)
+    {
+        var acquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var held = items.Use(item, async () => { acquired.TrySetResult(); await release.Task; return 0; }, (int)Math.Ceiling(wait.TotalSeconds), CancellationToken.None);
+        if (await Task.WhenAny(acquired.Task, held) == held)
+        {
+            try { await held; }
+            catch (ItemBusyException) { throw VerbRejection.Retry(20, "item-busy", $"another operation on item {item} is running", 5); }
+        }
+        return new ItemHandle(release, held);
+    }
+
+    sealed class ItemHandle(TaskCompletionSource release, Task held) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync() { release.TrySetResult(); await held; }
+    }
 
     public Task<IAsyncDisposable> Intake() => Take("board-intake.lock", () => VerbRejection.Retry(20, "intake-busy", "another work item is being put on the board", 5));
 
@@ -396,11 +415,12 @@ static class KeeperWiring
         var identity = Identity(root, env, http, tokens);
         // made at the first read of a state: a GitHub that cannot be reached at the start (an App token that cannot be minted) does not stop the gateway from starting
         IJournalStore store = new LazyJournalStore(async ct => new GitHubJournalStore(await clients.For(home, ct), identity));
-        var ledger = new JournalLedger(store, JournalOptions(root, env));
+        var itemLocks = ItemLocks.From(services, env);
+        var ledger = new JournalLedger(store, JournalOptions(root, env), itemLock: itemLocks);
         var host = services.GetService<WolverineHostService>();
         var ownership = services.GetService<WorkItemParts>()?.Ownership;
         IKeeperSaga saga = host is null || ownership is null ? new NoSaga() : new KeeperSagaPort(ownership, home, m => host.PublishAsync(m));
-        return new KeeperVerbs(new VerbContext(rules, github, new KeeperStateStore(store, ledger), new KeeperFileLocks(env), saga));
+        return new KeeperVerbs(new VerbContext(rules, github, new KeeperStateStore(store, ledger), new KeeperFileLocks(itemLocks, env), saga));
     }
 
     // the secrets catalogue and the waiting minutes of the journal, from the configuration the rule scripts read

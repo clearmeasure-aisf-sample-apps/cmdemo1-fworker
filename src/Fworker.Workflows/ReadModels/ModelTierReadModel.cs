@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 
 namespace Fworker.Workflows.ReadModels;
 

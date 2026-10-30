@@ -181,7 +181,7 @@ public sealed class KeeperRoutesTests : IDisposable
     [Fact]
     public async Task TheLocksAreTheFilesOfTheScripts_AndAHeldOneIsBusyAfterTheWait()
     {
-        var locks = new KeeperFileLocks(Env(null, Path.Combine(dir, "locks")), TimeSpan.FromMilliseconds(500));
+        var locks = new KeeperFileLocks(new FileItemLock(Path.Combine(dir, "locks")), Env(null, Path.Combine(dir, "locks")), TimeSpan.FromMilliseconds(500));
         Assert.Equal(Path.Combine(dir, "locks"), locks.StateDir());
         await using (await locks.Item(5))
         {
@@ -205,7 +205,7 @@ public sealed class KeeperRoutesTests : IDisposable
         var h = new Scripted();
         var http = new HttpClient(h) { BaseAddress = new Uri("https://api.example.test/") };
         var rules = FactoryRules.From(JsonNode.Parse(Config), _ => null);
-        var verbs = new KeeperVerbs(new VerbContext(rules, new KeeperGitHub(http, rules, 1), new NoState(), new KeeperFileLocks(Env(null, stateDir), TimeSpan.FromMilliseconds(400)), new NoSaga()));
+        var verbs = new KeeperVerbs(new VerbContext(rules, new KeeperGitHub(http, rules, 1), new NoState(), new KeeperFileLocks(new FileItemLock(stateDir), Env(null, stateDir), TimeSpan.FromMilliseconds(400)), new NoSaga()));
         var a = await verbs.Run("set-priority", """{"item":5,"level":"top","policy":"backlog-low"}""", TimeSpan.FromSeconds(20));
         Assert.Equal(20, a.Code);
         Assert.Equal("item-busy", JsonNode.Parse(a.Output)!["code"]!.ToString());

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Wolverine;
@@ -107,12 +108,12 @@ sealed class LazyJournalStore(Func<CancellationToken, Task<IJournalStore>> make)
 // W3.2: the one place the journal command is wired, and only where the engine mode is V2.
 static class JournalCommandWiring
 {
-    public static JournalCommandSink Attach(WolverineHostService host, GatewayComposition c, Func<string, string?>? env = null, HttpClient? http = null, IIdempotencyLedger? ledger = null)
+    public static JournalCommandSink Attach(WolverineHostService host, GatewayComposition c, Func<string, string?>? env = null, HttpClient? http = null, IIdempotencyLedger? ledger = null, IItemLock? locks = null)
     {
         env ??= Environment.GetEnvironmentVariable;
         var settings = Settings(c, env);
         var store = new LazyJournalStore(ct => Task.FromResult<IJournalStore>(MakeStore(c, env, http)));
-        var journal = new JournalLedger(store, settings);
+        var journal = new JournalLedger(store, settings, itemLock: locks ?? new FileItemLock(RuleStateDirectory.Resolve(env)));
         c.JournalLedger = journal;   // W9.8: the verb journal writes through this one
         var history = c.Database.ConnectionString is { } cs && c.Instance.Home is { } home ? new Fworker.Workflows.Reconcilers.JournalHistory(() => WorkItemWiring.Open(cs)) : null;
         var service = new JournalCommandService(new WriteJournalLineHandler(ledger ?? new InMemoryIdempotencyLedger(), journal), history, c.Instance.Home);

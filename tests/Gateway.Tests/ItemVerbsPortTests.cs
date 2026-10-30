@@ -221,17 +221,22 @@ public sealed class ItemVerbsPortTests : IDisposable
     // ---- the lock file and the refusals file -----------------------------------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task TheLock_IsTheItemsFile_OneAtATime_AndABusyOneRefusesWith20()
+    public async Task TheLock_IsTheItemsFile_OneAtATime_AndABusyOneIsItemBusy_WhichTheRunnerAnswersWith20()
     {
-        var l = new ItemVerbsLock(dir);
+        var l = new FileItemLock(dir);
         var inside = new TaskCompletionSource(); var release = new TaskCompletionSource();
         var first = l.Use(5, async () => { inside.SetResult(); await release.Task; return 1; }, 5, default);
         await inside.Task;
         Assert.True(File.Exists(Path.Combine(dir, "item-5.lock")));
         // another item is free, the same item is busy
         Assert.Equal(2, await l.Use(6, () => Task.FromResult(2), 1, default));
-        var e = await Assert.ThrowsAsync<ItemRefusal>(() => l.Use(5, () => Task.FromResult(3), 1, default));
-        Assert.Equal(20, e.Exit); Assert.Equal("item-busy", e.Code); Assert.Equal(5, (int)e.Extra["retryAfterSeconds"]!);
+        var e = await Assert.ThrowsAsync<ItemBusyException>(() => l.Use(5, () => Task.FromResult(3), 1, default));
+        Assert.Equal(5, e.Item); Assert.Equal("another operation on item 5 is running", e.Message);
+        // the item verbs' runner turns it into the script's answer: exit 20 item-busy, retry after 5 seconds, and the handler did not run
+        var ran = false;
+        var busy = await new ItemVerbRunner(l, new ItemVerbsRefusals(dir)).Run("comment", "{\"item\":5}", _ => { ran = true; return Task.FromResult(new JsonObject()); });
+        Assert.False(ran);
+        Assert.Equal(20, busy.Exit); Assert.Equal("item-busy", busy.Body["code"]!.ToString()); Assert.Equal(5, (int)busy.Body["retryAfterSeconds"]!); Assert.False((bool)busy.Body["ok"]!);
         release.SetResult();
         Assert.Equal(1, await first);
         Assert.Equal(4, await l.Use(5, () => Task.FromResult(4), 1, default));   // let go
@@ -258,15 +263,21 @@ public sealed class ItemVerbsPortTests : IDisposable
     }
 
     [Fact]
-    public void TheStateDirectory_IsTheScriptsOne()
+    public async Task OneLockServesEveryPort_TheRegisteredOne_OrTheFileLockOfTheStateDirectory()
     {
-        var env = new Dictionary<string, string?> { ["FACTORY_STATE_DIR"] = Path.Combine(dir, "a") };
-        Assert.Equal(Path.Combine(dir, "a"), ItemVerbsFiles.StateDir(n => env.GetValueOrDefault(n)));
-        env.Clear(); env["FACTORY_DATA_DIR"] = Path.Combine(dir, "data");
-        Assert.Equal(Path.Combine(dir, "data", "state"), ItemVerbsFiles.StateDir(n => env.GetValueOrDefault(n)));
-        Assert.True(Directory.Exists(Path.Combine(dir, "data", "state")));
-        env.Clear(); env["HOME"] = dir;
-        Assert.Equal(Path.Combine(dir, ".local/share/factory-worker", "state"), ItemVerbsFiles.StateDir(n => env.GetValueOrDefault(n)));
+        var env = new Dictionary<string, string?> { ["FACTORY_STATE_DIR"] = dir };
+        var registered = new FileItemLock(Path.Combine(dir, "elsewhere"));
+        var services = new ServiceCollection().AddSingleton<IItemLock>(registered).BuildServiceProvider();
+        Assert.Same(registered, ItemLocks.From(services, n => env.GetValueOrDefault(n)));
+        // without a registration: the file lock of the scripts' state directory, so it excludes a holder of the same file
+        var made = ItemLocks.From(new ServiceCollection().BuildServiceProvider(), n => env.GetValueOrDefault(n));
+        Assert.IsType<FileItemLock>(made);
+        var inside = new TaskCompletionSource(); var release = new TaskCompletionSource();
+        var held = new FileItemLock(dir).Use(11, async () => { inside.SetResult(); await release.Task; return 1; }, 5, default);
+        await inside.Task;
+        await Assert.ThrowsAsync<ItemBusyException>(() => made.Use(11, () => Task.FromResult(2), 1, default));
+        release.SetResult(); await held;
+        Assert.Equal(3, await made.Use(11, () => Task.FromResult(3), 1, default));
     }
 
     // ---- the feed of a park to the saga ----------------------------------------------------------------------------------------------------------------------

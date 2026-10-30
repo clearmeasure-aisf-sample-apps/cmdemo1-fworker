@@ -284,18 +284,3 @@ public static class VerbAnswers
         catch (Exception e) { return InternalError(verb, e); }
     }
 }
-
-/// <summary>"One verb at a time per item" (Use-ItemLock) inside this process: the file lock of the rule scripts is another process's, the state comment's revision guards the rest.</summary>
-public sealed class ItemLocks
-{
-    readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> locks = new();
-
-    public async Task<T> With<T>(int item, Func<Task<T>> body, int waitSeconds = 45)
-    {
-        var gate = locks.GetOrAdd(item, _ => new SemaphoreSlim(1, 1));
-        if (!await gate.WaitAsync(TimeSpan.FromSeconds(waitSeconds)))
-            throw new VerbReject(20, "item-busy", $"another operation on item {item} is running", new JsonObject { ["retryAfterSeconds"] = 5 });
-        try { return await body(); }
-        finally { gate.Release(); }
-    }
-}

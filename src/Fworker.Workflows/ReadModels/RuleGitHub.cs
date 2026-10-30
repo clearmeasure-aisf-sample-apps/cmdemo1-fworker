@@ -171,8 +171,3 @@ public interface IItemStateStore
     Task<bool> Update(int item, Func<JsonObject, Task<bool>> mutate, CancellationToken ct, int tries = 1);
 }
 
-/// <summary>One verb at a time per item on this machine (<c>Use-ItemLock</c>), the lock the rule scripts take too: exit 20 item-busy when it is not free in 45 seconds.</summary>
-public interface IItemLock
-{
-    Task<T> Use<T>(int item, Func<Task<T>> body, CancellationToken ct);
-}

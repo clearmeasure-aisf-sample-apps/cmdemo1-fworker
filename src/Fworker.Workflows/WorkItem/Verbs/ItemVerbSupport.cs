@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using System.Text.RegularExpressions;
 
 namespace Fworker.Workflows.WorkItem.Verbs;
@@ -193,7 +194,7 @@ public sealed class ItemVerbRunner(IItemLock locks, IItemRefusals refusals, IIte
             if (Ps.Has(args, "_lease")) args.Remove("_lease");
             var call = new ItemCall(verb, args, session, cause, ct);
             JsonObject body;
-            if (Ps.Has(args, "item") && !NoLockVerbs.Contains(verb)) body = await locks.Use(Ps.Int(args, "item"), () => handler(call), 45, ct);
+            if (Ps.Has(args, "item") && !NoLockVerbs.Contains(verb)) body = await locks.Use(Ps.Int(args, "item"), () => handler(call), IItemLock.DefaultWaitSeconds, ct);
             else body = await handler(call);
             return Finish(verb, body, 0);
         }
@@ -204,6 +205,11 @@ public sealed class ItemVerbRunner(IItemLock locks, IItemRefusals refusals, IIte
                 return Finish(verb, new JsonObject { ["ok"] = false, ["verb"] = verb, ["code"] = "v1-unavailable", ["reason"] = $"{verb}: {d.Message}; the gateway has no v1 to ask" }, 30, refused: true);
             JsonObject body; try { body = JsonNode.Parse(raw.Output) as JsonObject ?? new JsonObject(); } catch (System.Text.Json.JsonException) { body = new JsonObject(); }
             return new ItemVerbAnswer(raw.Exit, body, raw.Output);
+        }
+        catch (ItemBusyException b)
+        {
+            // the lock of the item (IItemLock, the one of every port) was not free in time: Use-ItemLock's exit 20 item-busy
+            return Finish(verb, new JsonObject { ["ok"] = false, ["verb"] = verb, ["code"] = "item-busy", ["reason"] = b.Message, ["retryAfterSeconds"] = 5 }, 20, refused: true);
         }
         catch (ItemRefusal e)
         {
