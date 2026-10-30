@@ -1,6 +1,6 @@
 using Fworker.Contracts.Seams;
 
-// W9.10l: the one lock of an item. Every port that writes an item's state (the item verbs, the read models, the journal ledger and, as they land, the QC, delivery, keeper and manager ports) takes an IItemLock, and the gateway
+// W9.10l: the one lock of an item. Every port that writes an item's state (the item verbs, the read models, the keeper and manager verbs, the journal ledger and, as they land, the QC and delivery ports) takes an IItemLock, and the gateway
 // has exactly one implementation of it: FileItemLock. It is the file `item-N.lock` of the state directory that the rule scripts lock too (Use-ItemLock), so a v2 verb, a journal line and a script that touch one item exclude one
 // another for as long as scripts exist. When the scripts go (W9.11b) this class is replaced, in place, by an in-process lock (the single actor of the SQL lease guarantees one process) or a database lock; no port changes, because
 // all of them hold only the interface. An architecture test (tests/Gateway.Tests/ArchitectureInventoryTests.cs) keeps it one implementation and one construction of it per process.

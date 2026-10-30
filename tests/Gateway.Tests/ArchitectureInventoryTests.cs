@@ -207,6 +207,8 @@ public class ArchitectureInventoryTests
             foreach (Match m in Regex.Matches(code, @"new\s+JournalLedger\s*\(([^;]*);"))
                 if (!m.Groups[1].Value.Contains("itemLock:", StringComparison.Ordinal)) problems.Add($"{path}: new JournalLedger(...) without itemLock:, so its lines would not exclude a verb or a script on the same item");
             if (Regex.IsMatch(code, @"ConcurrentDictionary<int,\s*SemaphoreSlim>|Dictionary<int,\s*SemaphoreSlim>")) problems.Add($"{path}: a lock for each item of its own");
+            // the item-N.lock file is opened in one place; a port that opens it itself is a second lock (the keeper's was, before W9.10l)
+            if (path != "gateway/Ports/ItemLocks.cs" && Regex.IsMatch(code, @"item-\{[^}]*\}\.lock")) problems.Add($"{path}: opens the item lock file itself; use the registered IItemLock");
         }
         Assert.True(problems.Count == 0, string.Join("\n", problems));
     }

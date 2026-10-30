@@ -144,6 +144,17 @@ public sealed class JournalLedgerTests
     }
 
     [Fact]
+    public async Task ACallerThatHoldsTheItemLock_WritesWithoutTakingItAgain_TheLockIsNotReentrant()
+    {
+        // the keeper and manager verbs run under the item's lock: a line they write must not wait for the lock they hold
+        var l = new RecordingLock(busy: true); var r = new Rig(itemLock: l);
+        Assert.True((await r.Ledger.AppendHeld(7, "matched", new Dictionary<string, object?>(Matched.ToDictionary(x => x.Item1, x => x.Item2)), "m1")).Posted);
+        var holder = new ItemState { State = new JsonObject { ["schema"] = 1, ["item"] = 7 } };
+        Assert.True(await r.Ledger.AddTo(7, holder, "keeper-action", new Dictionary<string, object?> { ["verb"] = "set-priority", ["policy"] = "p", ["by"] = "b", ["reason"] = "r", ["detail"] = "d" }, "k1"));
+        Assert.Empty(l.Calls);
+    }
+
+    [Fact]
     public async Task WithoutALock_TheLinesOfOneItemAreWrittenOneAfterTheOther()
     {
         var l = new InProcessItemLock();

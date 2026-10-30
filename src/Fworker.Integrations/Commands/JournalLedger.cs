@@ -63,11 +63,26 @@ public sealed class JournalLedger
     /// </summary>
     public async Task<JournalOutcome> Append(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
     {
+        (ev, key) = Prepare(ev, key);
+        try { return await itemLock.Use(item, () => AppendLocked(item, ev, fields, key, ct), IItemLock.DefaultWaitSeconds, ct); }
+        catch (ItemBusyException e) { throw new TimeoutException($"journal {ev} for #{item}: {e.Message}", e); }   // worth a retry: the command base classifies a timeout as transient
+    }
+
+    /// <summary>
+    /// <see cref="Append"/> for a caller that already holds the item's lock (W9.10l): the keeper and manager verbs run under it, and the lock is not reentrant, so taking it again would wait for the caller itself.
+    /// </summary>
+    public Task<JournalOutcome> AppendHeld(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
+    {
+        (ev, key) = Prepare(ev, key);
+        return AppendLocked(item, ev, fields, key, ct);
+    }
+
+    (string Event, string Key) Prepare(string ev, string key)
+    {
         if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
         ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
         if (string.IsNullOrEmpty(key) || ev == "waiting") key = utcNow().Ticks.ToString(CultureInfo.InvariantCulture);
-        try { return await itemLock.Use(item, () => AppendLocked(item, ev, fields, key, ct), IItemLock.DefaultWaitSeconds, ct); }
-        catch (ItemBusyException e) { throw new TimeoutException($"journal {ev} for #{item}: {e.Message}", e); }   // worth a retry: the command base classifies a timeout as transient
+        return (ev, key);
     }
 
     async Task<JournalOutcome> AppendLocked(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct)
@@ -91,13 +106,13 @@ public sealed class JournalLedger
     /// <summary>
     /// W9.6: Add-Journal with the caller's holder, the call the keeper and manager verbs make (Verbs.Keeper.ps1, Verbs.Manager.ps1): the line is posted and the ledger updated in <paramref name="holder"/>, which the caller saves
     /// itself together with the state it changed (no save here). False when the line was a repeat or over the cap. Throws for a failure that is worth a retry, as <see cref="Append"/> does; the caller decides what a lost line means.
+    /// The caller holds the item's lock (W9.10l: the verbs run under it and it is not reentrant), so none is taken here.
     /// </summary>
-    public async Task<bool> AddTo(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
+    public Task<bool> AddTo(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
     {
         if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
         ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
-        using var held = await Enter(item, ct);
-        return await AddJournal(item, holder, ev, fields, key, save: false, ct);
+        return AddJournal(item, holder, ev, fields, key, save: false, ct);
     }
 
     /// <summary>
