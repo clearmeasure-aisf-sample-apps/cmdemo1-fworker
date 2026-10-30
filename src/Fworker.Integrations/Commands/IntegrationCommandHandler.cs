@@ -19,7 +19,12 @@ public abstract class IntegrationCommandHandler<TCommand> where TCommand : Integ
     public async Task<CommandResult> Handle(TCommand command, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(command.IdempotencyKey)) return CommandResult.Failed(FailureKind.Permanent, $"{command.Name}: no idempotency key");
-        if (_ledger.TryGet(command.IdempotencyKey) is { } done) return done;
+        if (_ledger.TryGet(command.IdempotencyKey) is { } done)
+        {
+            // a re-request whose key the ledger already holds is answered from it and runs nothing: its own outcome in the log, so a request that never runs (a key that should have changed) can be seen (W9.10o)
+            try { Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["command"] = command.Name, ["outcome"] = "ledger-answered", ["ok"] = done.Ok }.ToJsonString()); } catch { }
+            return done;
+        }
         CommandResult result;
         try { result = await Execute(command, ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -41,9 +46,25 @@ public interface IIdempotencyLedger
     void Record(string key, CommandResult result);
 }
 
-public sealed class InMemoryIdempotencyLedger : IIdempotencyLedger
+/// <summary>
+/// A ledger that forgets its successes after a retention period (W9.10o): a key is a request, and the same request asked again long after (a promotion of the same version after a rollback) must run. Failures that are
+/// settled (permanent, not supported) are kept: forgetting one would run a call that cannot work again at every redelivery.
+/// </summary>
+public interface IPurgeableLedger
 {
-    readonly System.Collections.Concurrent.ConcurrentDictionary<string, CommandResult> _done = new(StringComparer.Ordinal);
-    public CommandResult? TryGet(string key) => _done.TryGetValue(key, out var r) ? r : null;
-    public void Record(string key, CommandResult result) => _done.TryAdd(key, result);
+    /// <summary>Forgets the successes recorded before <c>now - retention</c>; the number forgotten.</summary>
+    int PurgeSuccesses(TimeSpan retention, DateTimeOffset now);
+}
+
+public sealed class InMemoryIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger
+{
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, (CommandResult Result, DateTimeOffset At)> _done = new(StringComparer.Ordinal);
+    public CommandResult? TryGet(string key) => _done.TryGetValue(key, out var r) ? r.Result : null;
+    public void Record(string key, CommandResult result) => _done.TryAdd(key, (result, DateTimeOffset.UtcNow));
+    public int PurgeSuccesses(TimeSpan retention, DateTimeOffset now)
+    {
+        var n = 0;
+        foreach (var kv in _done.Where(kv => kv.Value.Result.Ok && kv.Value.At < now - retention).ToList()) if (_done.TryRemove(kv.Key, out _)) n++;
+        return n;
+    }
 }

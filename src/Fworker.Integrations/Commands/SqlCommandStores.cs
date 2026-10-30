@@ -36,8 +36,23 @@ public sealed class SqlCommandSchema(string connectionString)
     }
 }
 
-public sealed class SqlIdempotencyLedger(SqlCommandSchema schema) : IIdempotencyLedger
+public sealed class SqlIdempotencyLedger(SqlCommandSchema schema) : IIdempotencyLedger, IPurgeableLedger
 {
+    /// <summary>Forgets the successes older than the retention (W9.10o), in batches so that a long backlog does not hold a lock; the number forgotten.</summary>
+    public int PurgeSuccesses(TimeSpan retention, DateTimeOffset now)
+    {
+        var total = 0;
+        while (true)
+        {
+            using var c = schema.Open();
+            using var cmd = new SqlCommand("DELETE TOP (1000) FROM factory.IdempotencyLedger WHERE Ok = 1 AND RecordedAt < @before", c);
+            cmd.Parameters.Add("@before", SqlDbType.DateTime2).Value = (now - retention).UtcDateTime;
+            var n = cmd.ExecuteNonQuery();
+            total += n;
+            if (n < 1000) return total;
+        }
+    }
+
     public CommandResult? TryGet(string key)
     {
         using var c = schema.Open();

@@ -43,7 +43,7 @@ public class DeliveryTrainTests
         await f.After(TimeSpan.FromMinutes(5)); Assert.Empty(f.Of<PromoteRelease>());
         var third = await f.After(TimeSpan.FromMinutes(5));   // reads at 0, 5 and 10 min: the last is 10 min after the deployment finished and 5 min after the one before
         var cmd = Assert.Single(f.Of<PromoteRelease>());
-        Assert.Equal(new PromoteRelease("PromoteRelease|orders|1.0.2|uat", "orders", "orders-project", "1.0.2", "uat"), cmd);
+        Assert.Equal(new PromoteRelease("PromoteRelease|orders|1.0.2|uat|1", "orders", "orders-project", "1.0.2", "uat"), cmd);
         Assert.Equal("promote", f.LastDecision!.Action);
         Assert.Equal(["acme/orders#7"], f.LastDecision.Items);
         Assert.Contains(third.Messages, m => m is PromoteRelease);
@@ -51,6 +51,22 @@ public class DeliveryTrainTests
         await f.After(TimeSpan.FromMinutes(1));
         Assert.Single(f.Of<PromoteRelease>());
         Assert.Equal("following", f.LastDecision.Action);
+    }
+
+    [Fact]
+    public async Task ARequestOctopusNeverShowed_IsDropped_AndTheNextRequestForTheSameVersionHasItsOwnKey()
+    {
+        var f = await OneRelease();
+        await f.After(TimeSpan.FromMinutes(5)); await f.After(TimeSpan.FromMinutes(5));
+        Assert.Equal("PromoteRelease|orders|1.0.2|uat|1", Assert.Single(f.Of<PromoteRelease>()).IdempotencyKey);
+        // the retry of the same request keeps the key (the ledger answers it from the first), W9.10o
+        await f.After(DeliveryTrainService.CommandRetry);
+        Assert.All(f.Of<PromoteRelease>(), c => Assert.Equal("PromoteRelease|orders|1.0.2|uat|1", c.IdempotencyKey));
+        // Octopus shows nothing for half an hour: the request is dropped, and the release is asked for again as a new request, whose key the ledger has not seen
+        await f.After(DeliveryTrainService.RequestExpiry);
+        var keys = f.Of<PromoteRelease>().Select(c => c.IdempotencyKey).Distinct().ToList();
+        Assert.Equal(["PromoteRelease|orders|1.0.2|uat|1", "PromoteRelease|orders|1.0.2|uat|2"], keys);
+        Assert.Equal(2, f.State.RequestNumbers["1.0.2"]);
     }
 
     [Fact]

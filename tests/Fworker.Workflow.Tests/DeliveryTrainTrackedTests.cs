@@ -136,7 +136,7 @@ public class DeliveryTrainTrackedTests
         // the timer fires by itself (nothing else is sent), reads the app again and, once the window is full, asks for the deployment
         Assert.True(await Until(() => Task.FromResult(cap.Count(cap.Promotes) >= 1)), "the timers did not lead to the promotion");
         var promote = cap.Promotes[0];
-        Assert.Equal(("orders", "1.0.2", "uat", "PromoteRelease|orders|1.0.2|uat"), (promote.Deployable, promote.Version, promote.Environment, promote.IdempotencyKey));
+        Assert.Equal(("orders", "1.0.2", "uat", "PromoteRelease|orders|1.0.2|uat|1"), (promote.Deployable, promote.Version, promote.Environment, promote.IdempotencyKey));
         Assert.Contains(cap.Decisions, d => d.Key == "orders/uat" && d.Action == "waiting");
         Assert.Contains(cap.Decisions, d => d.Key == "orders/uat" && d.Action == "promote" && d.Release == "1.0.2");
         // the tdd train delivered the item with the tdd deployment (the pipeline's); the prod train has nothing to promote (1.0.2 is not in uat yet)

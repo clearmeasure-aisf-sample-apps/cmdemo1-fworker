@@ -61,7 +61,7 @@ public sealed class CapacityHistory(Func<FactoryDbContext> open)
         var json = JsonSerializer.Serialize(detail);
         db.ItemHistory.Add(new ItemHistoryEntry { ItemKey = item, Generation = generation, At = at, Kind = "event", Type = type, Detail = json.Length <= 4000 ? json : json[..4000], MessageId = messageId });
         try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException e) when (e.InnerException is Microsoft.Data.SqlClient.SqlException { Number: 2627 or 2601 }) { /* the unique (MessageId, Kind) index: written by an earlier attempt of this message */ }
+        catch (Exception e) when (Faults.SqlFaults.IsDuplicateKey(e)) { /* the unique (MessageId, Kind) index: written by an earlier attempt of this message */ }
     }
 }
 

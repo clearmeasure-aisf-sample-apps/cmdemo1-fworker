@@ -6,11 +6,11 @@ sealed record RecurringJobSlot(string Name, TimeSpan Every);
 
 sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
 {
-    public const string BoardReconciler = "board-reconciler", CatalogReread = "catalog-reread", IngressDedupPurge = "ingress-dedup-purge", DocsIntake = "docs-intake", FeatureChecks = "feature-checks";
+    public const string BoardReconciler = "board-reconciler", CatalogReread = "catalog-reread", IngressDedupPurge = "ingress-dedup-purge", DocsIntake = "docs-intake", FeatureChecks = "feature-checks", SagaRearm = "saga-rearm", LedgerPurge = "ledger-purge";
     public IReadOnlyList<RecurringJobSlot> Slots { get; } = slots;
     // W7.3: the watcher of the checks of the feature items runs every minute too, and is filled only when the engine carries the feature plan
     // W6.6: the intake of docs items is the one slot that runs every minute, as v1's sweep pulls an item when a session is free; it is filled only when intake names the docs plan
-    public static RecurringJobSlots Default() => new([new(BoardReconciler, TimeSpan.FromMinutes(5)), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1)), new(FeatureChecks, TimeSpan.FromMinutes(1))]);
+    public static RecurringJobSlots Default() => new([new(BoardReconciler, TimeSpan.FromMinutes(5)), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1)), new(FeatureChecks, TimeSpan.FromMinutes(1)), new(SagaRearm, TimeSpan.FromMinutes(5)), new(LedgerPurge, TimeSpan.FromHours(6))]);
 
     /// <summary>Adds the slots and the registry of their jobs to the host's services and the queue the runs travel on. Returns the slots registered.</summary>
     public static RecurringJobSlots Attach(WolverineHostService host, RecurringJobRegistry? registry = null)
@@ -37,20 +37,34 @@ public sealed class RecurringJobRegistry
     readonly Dictionary<string, Func<CancellationToken, Task>> jobs = new(StringComparer.Ordinal);
     readonly HashSet<string> running = [];
     public Dictionary<string, int> Runs { get; } = new(StringComparer.Ordinal);
+    readonly Dictionary<string, JobRun> last = new(StringComparer.Ordinal);
+
+    /// <summary>The latest run of each job that has run (W9.10o): when it started, how long it took and how it ended (the type of the exception, never its message). The v2 block of /api/v1/status shows it.</summary>
+    public IReadOnlyDictionary<string, JobRun> LastRuns { get { lock (last) return new Dictionary<string, JobRun>(last); } }
+
+    void Record(string name, DateTimeOffset started, System.Diagnostics.Stopwatch clock, string? error) { lock (last) last[name] = new JobRun(started, clock.ElapsedMilliseconds, error); }
 
     public RecurringJobRegistry Add(string name, Func<CancellationToken, Task> job) { jobs[name] = job; return this; }
     public bool Has(string name) => jobs.ContainsKey(name);
+    /// <summary>The names of the jobs that are filled.</summary>
+    public IReadOnlyCollection<string> Names => jobs.Keys.ToList();
+    /// <summary>How many runs of the job finished without an error.</summary>
+    public int RunCount(string name) { lock (Runs) return Runs.GetValueOrDefault(name); }
 
     public async Task Run(string name, CancellationToken ct)
     {
         if (!jobs.TryGetValue(name, out var job)) return;
         lock (running) if (!running.Add(name)) return;
-        try { await job(ct); lock (Runs) Runs[name] = Runs.GetValueOrDefault(name) + 1; }
+        var started = DateTimeOffset.UtcNow; var clock = System.Diagnostics.Stopwatch.StartNew();
+        try { await job(ct); lock (Runs) Runs[name] = Runs.GetValueOrDefault(name) + 1; Record(name, started, clock, null); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (Exception e) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"recurringJob\":\"{name}\",\"error\":\"{e.GetType().Name}\"}}"); }
+        catch (Exception e) { Record(name, started, clock, e.GetType().Name); Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"recurringJob\":\"{name}\",\"error\":\"{e.GetType().Name}\"}}"); }
         finally { lock (running) running.Remove(name); }
     }
 }
+
+/// <summary>How the latest run of a recurring job ended: when it started, how long it took, and the type of the exception when it failed (null when it did not).</summary>
+public sealed record JobRun(DateTimeOffset StartedAt, long Milliseconds, string? Error);
 
 /// <summary>The handler of the durable queue "recurring-jobs". Public because Wolverine's generated code refers to it.</summary>
 public static class RecurringJobHandler

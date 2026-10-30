@@ -89,7 +89,7 @@ public class FeatureMergeStep : DocsMergeStep
     public override void OnEnter(StepContext c)
     {
         var s = c.State;
-        s.MergeAttempt = 0; s.MergeBlockedReason = ""; s.MergeAwaitingChecks = false;
+        s.MergeAttempt = 0; s.MergeAnswers = 0; s.MergeBlockedReason = ""; s.MergeAwaitingChecks = false;
         if (s.ChecksState == FeatureFlow.Green && MergeSteps.SameHead(s.ChecksHead, s.VerdictHead)) { MergeSteps.Request(c, ""); return; }
         // the PASS came first: the merge needs the checks too, and the watcher says when they are green (or red: a fix-forward round)
         s.MergeAwaitingChecks = true;

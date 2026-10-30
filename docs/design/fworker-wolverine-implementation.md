@@ -715,6 +715,10 @@ W9.12 when the W5 gate is recorded, and W9.13.
 - #496 (train parity): the newest-only difference declared; the event-time question carried by the W5 gate; save and outbox in
   W9.10o; hand-written handlers accepted (#491);
 - #500 (train on replay state): defects 1 to 7 fixed; the wake after a restart observed on tdd; the open-ended retry bounded in W9.10o;
+  W9.10o built (the status block, the retry classification, the re-arm, `/ready` only where v2 acts, the malformed connection string, the `PromoteRelease` key with the request's number and
+  the ledger retention of 30 days for successes, the docs plan's merge answers): `/api/v1/status` `v2` (`gateway/Endpoints/StatusV2Health.cs`) is on tdd in shadow too; the Wolverine retry
+  for the faults of the database is `FaultPolicy` (`src/Fworker.Workflows/Faults`): 2 s, 10 s and 60 s, then 5 minutes, 15 minutes, 1 hour and 3 hours, then the dead letters; the delivery
+  train's rule for GitHub and the app is bounded the same way (5 minutes, 15 minutes, 1 hour, 6 hours); the save and the outbox are repaired by the `saga-rearm` job (not one transaction).
 - #437 (Copilot and Cursor day budgets from history): done, or the Copilot and Cursor runtimes off for the measured batch;
 - #465 (session mailbox): not required for the cutover, since one Solo node serves every session (pushes stay node-local and are lost
   on a restart, as the messaging rule says); kept open as post-cutover work;
