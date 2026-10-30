@@ -12,7 +12,7 @@
 #                engine.v2Environments names it, and FACTORY_DB_CONNECTION is the SQL Server of FACTORY_TEST_SQL with a database of its own for this process (the gateway's DbUp creates it, FACTORY_DB_CREATE=1,
 #                tests only, and applies the scripts). FACTORY_TEST_SQL is required: without it the run exits 2. The default, v1, changes nothing.
 #   -V2Profile   (with -Engine v2) the test profile of the gateway: 'plain' (default: intake off, as every suite runs), 'saga-docs' (the intake is on and names the docs plan, so the docs items of the Todo column
-#                start a WorkItemSaga) or 'saga-feature' (docs and feature). Every v2 profile also sets the timers of the Wolverine host at their floor (see $V2Profiles below). v1's own intake (the rule script's) is
+#                start a WorkItemSaga) or 'saga-feature' (docs and feature). The saga profiles also set the timers of the Wolverine host at their floor (see $V2Profiles below); 'plain' leaves them at the defaults. v1's own intake (the rule script's) is
 #                switched off in the configuration file once the gateway runs (Disable-ScriptIntake), so that only the engine pulls (W9.10e makes v1 skip the plans of intake.v2Plans by itself). A claim of v2-claims.txt names its profile.
 #   Start guards (guard.ps1): refuses with exit 4 when another run.ps1 or run-all.ps1 is active on this machine, or when the temp filesystem has less than
 #   -MinFreeDiskMb (default 2048) free; with less than -MinAvailableMb (default 1500) of memory a suite runs in half its groups. -Force starts anyway.
@@ -325,7 +325,8 @@ if ($Engine -eq 'v2' -and $env:FACTORY_TEST_SQL) {
 #    "state in W9.9 that the batch runs with featureSlots false"). The slots are a claim of their own, with a runtime (the octopus suite), when W9.10j makes the saga start the sessions.
 # A suite's own Extra is applied first, the profile over it.
 $script:V2Profiles = @{
-    'plain'        = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct' }
+    # 'plain' leaves the host's timers at their defaults: with the recurring jobs at their floor the octopus scenario 'journal order' (accept while the offered and launched lines are in flight) fails on v2 (seen after #572); the plain profile is as master's run
+    'plain'        = @{ mergeStrategy = 'direct' }
     'saga-docs'    = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct'; intake = @{ enabled = $true; v2Plans = @('docs') }; scheduler = @{ featureSlots = $false } }
     'saga-feature' = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct'; intake = @{ enabled = $true; v2Plans = @('docs', 'feature') }; scheduler = @{ featureSlots = $false } }
 }
