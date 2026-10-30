@@ -81,6 +81,18 @@ public sealed class JournalLedger
         }
     }
 
+    /// <summary>
+    /// W9.6: Add-Journal with the caller's holder, the call the keeper and manager verbs make (Verbs.Keeper.ps1, Verbs.Manager.ps1): the line is posted and the ledger updated in <paramref name="holder"/>, which the caller saves
+    /// itself together with the state it changed (no save here). False when the line was a repeat or over the cap. Throws for a failure that is worth a retry, as <see cref="Append"/> does; the caller decides what a lost line means.
+    /// </summary>
+    public async Task<bool> AddTo(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
+    {
+        if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
+        ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
+        using var held = await Enter(item, ct);
+        return await AddJournal(item, holder, ev, fields, key, save: false, ct);
+    }
+
     // a 'waiting' note is rate-limited: at most one per timing.journalWaitingMinutes per item; the state is read once, and saved here after the line
     async Task<JournalOutcome> AppendWaiting(int item, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct)
     {

@@ -21,3 +21,8 @@ owner | ^journal fold:
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
+
+# W9.6 gate: the keeper's and the manager's verbs (gateway/Verbs/Routes/Keeper.cs, Fworker.Workflows.Keeper) answer on v2 as the rule scripts did: the scenarios that call manager-action, amend-criteria,
+# split-item, create-item, set-priority and link-dependency, with their golden writes. (The replenish scenarios of keeper.ps1 are Replenish.ps1's, not a verb of this group.)
+manager | ^act: (the supervisor unparks|unpark refuses|the supervisor drains|the plan offers)
+manager | ^keeper: (a worker-failure park|split-item)
