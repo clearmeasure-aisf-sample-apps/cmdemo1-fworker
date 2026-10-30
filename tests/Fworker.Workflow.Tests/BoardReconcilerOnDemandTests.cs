@@ -61,4 +61,48 @@ public class BoardReconcilerOnDemandTests
         b.Cards = all;
         Assert.Equal(0, (await r.Run(default)).Published);          // still known: a full pass that had run on the empty board would have made them news
     }
+
+    /// <summary>A board that holds every read until released, to overlap passes.</summary>
+    sealed class SlowBoard(List<BoardCard> cards) : IBoardReader
+    {
+        public readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<IReadOnlyList<BoardCard>> Read(BoardRef b, CancellationToken ct = default) { Entered.TrySetResult(); await Release.Task; return cards.ToList(); }
+    }
+
+    [Fact]
+    public async Task OverlappingPasses_AreSerialized_OnePublishPerCard_AndNoException()
+    {
+        var cards = Enumerable.Range(1, 50).Select(i => new BoardCard(Home, i, "Todo", true, "t" + i)).ToList();
+        var board = new SlowBoard(cards);
+        var sent = new List<string>(); var sync = new object();
+        var r = new BoardReconciler(board, Snap, j => { lock (sync) sent.Add(j); return Task.FromResult(true); }, () => true) { OnDemandWait = TimeSpan.FromSeconds(30) };
+        var job = r.Run(default);                       // the recurring job's pass, held inside the board read
+        await board.Entered.Task;
+        var verb1 = Task.Run(() => r.Run(default, null, false));   // two sync-board calls on top of it
+        var verb2 = Task.Run(() => r.Run(default, new HashSet<int> { 1, 2, 3 }, false));
+        await Task.Delay(100);
+        board.Release.SetResult();
+        var results = await Task.WhenAll(job, verb1, verb2);
+        Assert.Equal(50, sent.Count);                   // each card once, however many passes overlapped
+        Assert.Equal(50, sent.Select(s => JsonNode.Parse(s)!["item"]!.ToString()).Distinct().Count());
+        Assert.Equal(50, results.Sum(x => x.Published));
+        Assert.All(results, x => Assert.Equal("ok", x.Outcome));
+    }
+
+    [Fact]
+    public async Task AnOnDemandPass_ThatFindsAPassRunning_AnswersBusyAfterItsWait_AndTheRunningPassIsUnharmed()
+    {
+        var board = new SlowBoard([new BoardCard(Home, 1, "Todo", true, "t")]);
+        var sent = new List<string>();
+        var r = new BoardReconciler(board, Snap, j => { sent.Add(j); return Task.FromResult(true); }, () => true) { OnDemandWait = TimeSpan.FromMilliseconds(50) };
+        var job = r.Run(default);
+        await board.Entered.Task;
+        var busy = await r.Run(default, null, false);
+        Assert.Equal(("busy", 0, 0), (busy.Outcome, busy.Cards, busy.Published));
+        board.Release.SetResult();
+        Assert.Equal(1, (await job).Published);
+        Assert.Single(sent);
+        Assert.Equal("ok", (await r.Run(default, null, true)).Outcome);   // the gate was released
+    }
 }
