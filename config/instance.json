@@ -118,6 +118,23 @@
     "featureSlots": true,
     "runtime": ""
   },
+  "incidents": {
+    "comment": "W8.0/W8.1: the incident saga of the application's environments (exists where the engine acts, no flag). environments = the ones watched; rollback = the rollback policy by environment (automatic | signoff | off; one not named is off): by the owner's decision of 2026-10-26 only tdd is configured, uat and prod are not.",
+    "environments": ["tdd"],
+    "rollback": { "tdd": "automatic" },
+    "deploymentFailureOpens": [],
+    "confirmReads": 3,
+    "confirmWithinMinutes": 15,
+    "rollbackWithinMinutes": 60,
+    "triageMinutes": 30,
+    "rollbackMinutes": 30,
+    "fixMinutes": 240,
+    "verifyHealthyMinutes": 10,
+    "verifyMinutes": 60,
+    "deploymentMaxMinutes": 60,
+    "maxRelapses": 2,
+    "issueLabel": "incident"
+  },
   "engine": {
     "v2Environments": [],
     "shadowEnvironments": []

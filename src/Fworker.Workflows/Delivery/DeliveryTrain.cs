@@ -35,7 +35,17 @@ public sealed record TrainResult(IReadOnlyList<object> Messages, DateTimeOffset?
 /// <summary>Two writers moved the same train at once more often than the retries allow; the message is retried by Wolverine.</summary>
 public sealed class TrainConflictException(string key) : Exception($"the delivery train {key} kept changing under the handler");
 
-public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies policies, ITrainReads reads, IDeliveredLookup delivered, Func<DateTimeOffset>? clock = null)
+/// <summary>
+/// W8.3's side of the incident rollback: decides and starts the rollback of the environment the train serves (the target release, the migration precondition, the one deployment the train creates itself in tdd).
+/// W8.1 sends the request and handles every answer; until this exists the train answers that it cannot (<see cref="DeliveryTrainService.Unavailable"/>) and the incident goes to its owner.
+/// </summary>
+public interface IRollbackExecutor
+{
+    /// <summary>The answer to the request: "started", "done", "refused" or "failed" with the code that says why (<see cref="RollbackAnswered"/>).</summary>
+    Task<RollbackAnswered> Execute(TrainState state, DeliveryPolicy policy, TrainRollback request, DateTimeOffset now, CancellationToken ct);
+}
+
+public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies policies, ITrainReads reads, IDeliveredLookup delivered, Func<DateTimeOffset>? clock = null, IRollbackExecutor? rollback = null)
 {
     readonly Func<DateTimeOffset> clock = clock ?? (() => DateTimeOffset.UtcNow);
 
@@ -60,6 +70,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
         var (deployable, environment) = TrainKey.Split(input.Key);
         var policy = policies.For(deployable, environment);
         if (policy is null) return TrainResult.None;   // the deployable left the catalog
+        if (input is TrainRollback request) return await Rollback(request, policy, ct);   // (the incident's request: answered, never applied to the state)
         var replayEnded = input is TrainReplay { Active: false };
         TrainRecord? carried = null;
         // W7.7: a delivery of an item concerns the train only if one of its candidates waits for that item; for it the input is a wake, nothing to apply
@@ -108,6 +119,22 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
         throw new TrainConflictException(input.Key);
     }
 
+    /// <summary>What the train answers to a rollback request while no executor exists (W8.3): it cannot, and says so, so that the incident does not wait for its timeout.</summary>
+    public static RollbackAnswered Unavailable(TrainRollback request, DateTimeOffset now)
+        => new(request.Key, request.IncidentId, request.Generation, "refused", "unavailable", request.ToRelease, "this delivery train does not execute rollbacks yet", now);
+
+    /// <summary>
+    /// The incident's rollback request (W8.1). The train owns the deployments, so the executor decides from the train's state; a store that fails is a fault (the request is delivered again), a train without state
+    /// has no previous release to go back to.
+    /// </summary>
+    async Task<TrainResult> Rollback(TrainRollback request, DeliveryPolicy policy, CancellationToken ct)
+    {
+        var now = clock();
+        if (rollback is null) return new TrainResult([Unavailable(request, now)], null);
+        var state = (await store.Load(request.Key, ct))?.State ?? TrainState.New(request.Key);
+        return new TrainResult([await rollback.Execute(state, policy, request, now, ct)], null);
+    }
+
     /// <summary>A fault of a read (GitHub, the app, the delivered-to table's database) that a later look gets past: the input is saved, the look is repeated, and nothing of this look is kept or decided.</summary>
     internal static bool IsTransient(Exception e, CancellationToken ct) => e is HttpRequestException or TimeoutException or System.Data.Common.DbException || (e is OperationCanceledException && !ct.IsCancellationRequested);
 
@@ -152,6 +179,8 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 break;
             case TrainHold h:
                 s.Held = h.Held; s.HeldReason = h.Held ? h.Reason : "";
+                s.HeldIncident = h.Held ? h.IncidentId : "";
+                s.HoldAllow = h.Held ? (h.Allow ?? []).Select(a => a.ToLowerInvariant()).Distinct().ToList() : [];
                 break;
             case TrainReplay r:
                 s.ReplayingSince = r.Active ? now : null;
@@ -198,7 +227,8 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
     {
         await Settle(ct);
         if (!p.Acts) return;   // tdd is deployed by the release's lifecycle and an external promoter creates its own deployments: the train observes
-        if (s.Held) { Decide("held", "", [], [string.IsNullOrEmpty(s.HeldReason) ? "an incident holds the train" : s.HeldReason]); return; }
+        // an incident holds the train: nothing is promoted, except (W8.1) the release that carries the incident's hotfix, which waits for the same gates as any release; with no hotfix item yet there is nothing to let through
+        if (s.Held && s.HoldAllow.Count == 0) { Decide("held", "", [], [string.IsNullOrEmpty(s.HeldReason) ? "an incident holds the train" : s.HeldReason]); return; }
         if (!await SignOffs(ct)) await Promote(ct);
         // a train that waits looks again at least every SafetyWake, whatever else wakes it (an input lost between the save and the outbox, a gap no event lifts)
         if (s.Decisions.Values.Any(fp => fp.StartsWith("waiting|") || fp.StartsWith("following|") || fp.StartsWith("signoff-waiting|"))) wakes.Add(now.Add(DeliveryTrainService.SafetyWake));
@@ -391,6 +421,8 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 continue;
             }
             var j = await Judge(release, ct);
+            // under an incident's hold only the release that carries the hotfix is answered; the others wait where they are (the hold ends with the incident)
+            if (!PassesHold(j.Items)) { Decide("held", so.Version, j.Items, [HoldText()]); continue; }
             // The Sign-off asks again only what can get worse while it waits, and aborts only for a hard failure (Invoke-AutoPromoteInner): an item gate, a commit of the release that is no
             // factory work item's, the release superseded in the target, the previous environment's app not Healthy now. A waiting reason leaves it pending.
             var hard = j.ItemGaps.Concat(j.Content.Hard).ToList();
@@ -490,7 +522,9 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 j = await Judge(r, ct);
                 if (j.Content.Skip) continue;   // not newer than what runs here: nothing to promote
                 common = j.Content.Gaps.ToList();
-                if (!stop && j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
+                // under an incident's hold a release that does not carry the hotfix is judged no further (no read of the previous environment): it waits for the hold to end
+                if (!PassesHold(j.Items)) common.Add(HoldText());
+                else if (!stop && j.ItemGaps.Count == 0 && common.Count == 0) { var gap = await Evidence(r, prev, ct); if (gap.Length > 0) { common.Add(gap); evidenceOnly = true; } }
             }
             catch (Exception e) when (DeliveryTrainService.IsTransient(e, ct))
             {
@@ -523,6 +557,11 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
 
         void Note(string version, IReadOnlyList<string> items, IReadOnlyList<string> reasons) => notes.Add((version, items, reasons.ToList()));
     }
+
+    /// <summary>Whether a release with these items may be promoted under the hold: always when nothing holds the train, else only when it carries an item of the incident's hotfix.</summary>
+    bool PassesHold(IReadOnlyList<string> items) => !s.Held || items.Any(i => s.HoldAllow.Contains(i.ToLowerInvariant()));
+
+    string HoldText() => $"an incident holds the train ({(s.HeldIncident.Length == 0 ? "no incident named" : s.HeldIncident)}): only the release that carries the hotfix {string.Join(", ", s.HoldAllow)} is promoted";
 
     /// <summary>How many open releases behind the one that wins (or waits for the clock) are still read to say what they wait for.</summary>
     const int MaxDescribedBehind = 10;
