@@ -1,0 +1,110 @@
+using System.Text.Json.Nodes;
+using Fworker.Contracts.Commands;
+using Fworker.Contracts.Messaging;
+using Fworker.Contracts.Seams;
+using Fworker.Integrations.Commands;
+using Fworker.Integrations.Octopus;
+using Fworker.Workflows.Delivery;
+using Wolverine;
+using Wolverine.ErrorHandling;
+
+// W9.4 (#356): the delivery train where the engine acts. In the shadow run (DeliveryShadowWiring) the train decides and its commands are only recorded; here the train is the promoter: the router and the train's handlers
+// are attached, and PromoteRelease and AnswerSignOff are executed against Octopus (Fworker.Integrations.Octopus.OctopusPromoter, ported from Verbs.Promote.ps1) from a durable queue of their own, with the runtime
+// commands' retry rule. v1's loop that called the rule script auto-promote (AutoPromoter) does not start where the engine acts, so exactly one of them promotes. The events of the Octopus watcher (W4.2) reach the
+// train through the same port the shadow run uses (ShadowOctopusPort) and the ingress that wraps it; what the train decides goes to the history. Nothing is registered unless the engine acts.
+
+/// <summary>A delivery command was settled: executed, or refused for good (then <see cref="IntegrationFailed"/> goes with it). Public because Wolverine's generated code refers to it.</summary>
+[MessageIdentity("delivery.command-finished")]
+public sealed record DeliveryCommandFinished(string IdempotencyKey, string Name, bool Ok, string Error);
+
+/// <summary>The runs of the delivery commands: the handler of the command, the retry of a transient failure, the messages of the outcome.</summary>
+public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, AnswerSignOffHandler answer)
+{
+    static RuntimeOutcome Settle<T>(T c, CommandResult r) where T : IntegrationCommand
+    {
+        if (r.Ok) return new(r, new DeliveryCommandFinished(c.IdempotencyKey, c.Name, true, ""), null);
+        var failed = IntegrationCommandHandler<T>.FailureMessage(c, r);
+        return new(r, failed == null ? null : new DeliveryCommandFinished(c.IdempotencyKey, c.Name, false, r.Error), failed);
+    }
+
+    static RuntimeOutcome Exhausted(IntegrationCommand c, string error)
+    {
+        var r = RuntimeOutcome.ExhaustedResult(error);
+        return new(r, new DeliveryCommandFinished(c.IdempotencyKey, c.Name, false, r.Error), IntegrationFailed.From(c, r));
+    }
+
+    internal Task<IReadOnlyList<object>> PromoteMessages(PromoteRelease c, int attempts, CancellationToken ct) =>
+        RuntimeCommandService.Outcome(c, async () => Settle(c, await promote.Handle(c, ct)), e => Exhausted(c, e), attempts);
+
+    internal Task<IReadOnlyList<object>> AnswerMessages(AnswerSignOff c, int attempts, CancellationToken ct) =>
+        RuntimeCommandService.Outcome(c, async () => Settle(c, await answer.Handle(c, ct)), e => Exhausted(c, e), attempts);
+
+    public async Task RunPromote(PromoteRelease c, IMessageBus bus, int attempts, CancellationToken ct) { foreach (var m in await PromoteMessages(c, attempts, ct)) await bus.PublishAsync(m); }
+    public async Task RunAnswer(AnswerSignOff c, IMessageBus bus, int attempts, CancellationToken ct) { foreach (var m in await AnswerMessages(c, attempts, ct)) await bus.PublishAsync(m); }
+}
+
+/// <summary>The handlers of the acting train's outputs. Public because Wolverine's generated code refers to them.</summary>
+public static class DeliveryExecutorHandlers
+{
+    public const string Queue = "delivery-commands";
+    public static Task Handle(PromoteRelease m, DeliveryExecutorService s, IMessageBus bus, Envelope envelope, CancellationToken ct) => s.RunPromote(m, bus, envelope.Attempts, ct);
+    public static Task Handle(AnswerSignOff m, DeliveryExecutorService s, IMessageBus bus, Envelope envelope, CancellationToken ct) => s.RunAnswer(m, bus, envelope.Attempts, ct);
+
+    public static void Handle(DeliveryCommandFinished m) =>
+        Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "delivery-command", ["command"] = m.Name, ["key"] = m.IdempotencyKey, ["ok"] = m.Ok, ["error"] = m.Ok ? null : m.Error }.ToJsonString());
+
+    /// <summary>What the train decided, once per change, for the history (the shadow run keeps it in the comparison; here it is the record of why a release waited or went).</summary>
+    public static ShadowHistoryRecord Handle(TrainDecided m)
+    {
+        var detail = new JsonObject
+        {
+            ["action"] = m.Action, ["release"] = m.Release, ["items"] = new JsonArray(m.Items.Select(i => (JsonNode?)i).ToArray()), ["reasons"] = new JsonArray(m.Reasons.Select(r => (JsonNode?)r).ToArray()), ["replay"] = m.Replay,
+        }.ToJsonString();
+        return new ShadowHistoryRecord(m.Key, "delivery.train." + m.Action, detail.Length <= ShadowHistory.MaxDetailChars ? detail : detail[..ShadowHistory.MaxDetailChars], m.At);
+    }
+}
+
+static class DeliveryActingWiring
+{
+    /// <summary>
+    /// The acting train for an engine that acts: the same parts the shadow run is made of (policies, the reads, the delivered-to table), the executor of its commands and the port for the watcher's events.
+    /// The returned port is the one the ingress publishes the Octopus events to; it is disabled when the train cannot be built (no GH_TOKEN or catalog).
+    /// </summary>
+    public static ShadowOctopusPort Attach(WolverineHostService host, GatewayComposition c, Func<Fworker.Contracts.Catalog.ISystemCatalog?> catalog, string connectionString, Func<string, string?> env, Func<bool> mayAct, IIdempotencyLedger ledger)
+    {
+        var parts = catalog() is { } cat ? DeliveryShadowWiring.Make(c, cat, connectionString, env) : null;
+        if (parts is null) return new ShadowOctopusPort(_ => Task.FromResult(false), false);
+        var root = c.Instance.Root as JsonObject ?? new JsonObject();
+        var octopus = root["octopus"] as JsonObject ?? new JsonObject();
+        var names = (octopus["environments"] as JsonObject)?.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.OrdinalIgnoreCase) ?? new Dictionary<string, string>();
+        var http = new HttpClient(new CauseHandler { InnerHandler = new HttpClientHandler() }) { BaseAddress = new Uri((octopus["url"]?.ToString() ?? "http://localhost").TrimEnd('/') + "/"), Timeout = TimeSpan.FromSeconds(30) };
+        // the key that may create deployments and answer interruptions: the runbook service account's, else the reader key
+        var settings = new OctopusPromoteSettings(octopus["space"]?.ToString() ?? "", names, () => env("OCTOPUS_RUNBOOK_API_KEY") is { Length: > 0 } k ? k : env("OCTOPUS_API_KEY"), mayAct);
+        var promoter = new OctopusPromoter(http, settings);
+        var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter));
+        var previous = host.RuntimeCommands;
+        host.RuntimeCommands = (services, w) =>
+        {
+            previous?.Invoke(services, w);
+            services.AddSingleton(parts.Policies);
+            services.AddSingleton(parts.Reads);
+            services.AddSingleton<IDeliveredLookup>(parts.Delivered);
+            services.AddSingleton<ITrainStore>(new SqlTrainStore(() => ItemMergedWiring.Open(parts.ConnectionString)));
+            services.AddSingleton<DeliveryTrainService>();
+            services.AddSingleton<DeliveryTrainRouter>();
+            services.AddSingleton(service);
+            w.Discovery.IncludeType(typeof(DeliveryTrainHandlers));
+            w.Discovery.IncludeType(typeof(DeliveryTrainRouting));
+            w.Discovery.IncludeType(typeof(DeliveryExecutorHandlers));
+            // the Octopus events and the trains' inputs each travel one queue, one at a time and in order (DeliveryTopology says why)
+            DeliveryTopology.Route(w);
+            w.PublishMessage<PromoteRelease>().ToLocalQueue(DeliveryExecutorHandlers.Queue);
+            w.PublishMessage<AnswerSignOff>().ToLocalQueue(DeliveryExecutorHandlers.Queue);
+            w.PublishMessage<DeliveryCommandFinished>().ToLocalQueue(DeliveryExecutorHandlers.Queue);
+            w.LocalQueue(DeliveryExecutorHandlers.Queue).UseDurableInbox();
+            // the same backstop as the shadow run: GitHub or the app not answering is tried again with growing pauses and then scheduled again every few minutes, never to the dead letters
+            w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().Or<TrainConflictException>().Or<TimeoutException>().Or<System.Data.Common.DbException>().RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5));
+        };
+        return new ShadowOctopusPort(ev => DeliveryShadowWiring.Publish(host, ev), true);
+    }
+}

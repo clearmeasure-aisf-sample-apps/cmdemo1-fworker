@@ -69,7 +69,10 @@ static class GatewayWolverineExtensions
                     var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
                     IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item
-                    if (ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable) is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));
+                    var mergedDeriver = ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable);
+                    if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));
+                    // W9.4: the delivery train acts: it promotes (PromoteRelease, AnswerSignOff are executed against Octopus) and the watcher's events reach it; v1's auto-promote loop does not start (AddGatewayBackground)
+                    if (mergedDeriver is not null) octopusPort = DeliveryActingWiring.Attach(host, c, () => sp.GetService<ISystemCatalog>(), cs, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger);
                     // W6.6: the intake of docs items (off unless intake is enabled and names the docs plan in intake.v2Plans); the plant's facts are read when the job runs
                     if (workItems.Intake is { Enabled: true } && workItems.Intake.V2Plans.Count > 0)
                     {
@@ -132,6 +135,8 @@ static class GatewayWolverineExtensions
                 services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return inboxPort!; });
             }
         }
+        // W9.4: the way for the Octopus watcher's events into the acting train (the same port the shadow run uses)
+        if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return octopusPort ?? new ShadowOctopusPort(_ => Task.FromResult(false), false); });
         // W6.1: the items the saga owns, for the sweep (resolving it builds the host first, which makes it; null without a home repository)
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return v2Ownership!; });
         // W6.6: the jobs of the recurring slots, for a look at which are filled (resolving it builds the host first, which fills them)

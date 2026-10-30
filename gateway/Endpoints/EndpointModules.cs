@@ -86,7 +86,9 @@ static class EndpointModuleExtensions
             if (c.Engine.V2Acts && c.Instance.Home is { } home && sp.GetService<WorkItemParts>() is { Ownership: { } ownership } parts)
             {
                 var host = sp.GetRequiredService<WolverineHostService>();
-                router = new V2VerbFeed(router, ownership, parts.Store, home, parts.Docs.Settings, m => host.PublishAsync(m), parts.Docs.Heads);
+                var feed = new V2VerbFeed(router, ownership, parts.Store, home, parts.Docs.Settings, m => host.PublishAsync(m), parts.Docs.Heads);
+                sp.GetService<V2ActivityTap>()?.Connect(feed.Observe);   // W9.4: a verb a v2 route answers is still a sign of life of the session
+                router = feed;
             }
             // W9.0: the verbs a route file registered are answered by v2 and never reach v1; with none registered the router is what it was
             return c.Engine.V2Acts && sp.GetRequiredService<V2VerbRoutes>() is { Count: > 0 } routes ? new V2VerbRouter(router, routes) : router;
