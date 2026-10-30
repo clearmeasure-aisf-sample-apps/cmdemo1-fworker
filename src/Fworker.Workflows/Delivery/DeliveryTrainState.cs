@@ -120,6 +120,9 @@ public sealed class TrainState
     /// <summary>An incident holds the train: nothing is promoted while true.</summary>
     public bool Held { get; set; }
     public string HeldReason { get; set; } = "";
+    /// <summary>The incident that holds the train ("deployable/environment#generation") and the items of its hotfix whose release passes the hold (W8.1): the release that carries one of them is judged and promoted as any other.</summary>
+    public string HeldIncident { get; set; } = "";
+    public List<string> HoldAllow { get; set; } = [];
     /// <summary>When the one pending timer is due (null: none). A timer that fires with another due time is stale and clears nothing.</summary>
     public DateTimeOffset? WakeDue { get; set; }
     /// <summary>The fingerprint of the last decision published for each release ("" for those about none): a decision is published once per change.</summary>

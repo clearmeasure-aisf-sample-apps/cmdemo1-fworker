@@ -611,6 +611,102 @@
         }
       }
     },
+    "factory.Incidents": {
+      "columns": {
+        "Generation": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "HotfixItem": {
+          "type": "nvarchar",
+          "maxLength": 600,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "Key": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Revision": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "StateJson": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Status": {
+          "type": "nvarchar",
+          "maxLength": 32,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "UpdatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "IX_Incidents_HotfixItem": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "HotfixItem"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "IX_Incidents_Status": {
+          "unique": false,
+          "primary": false,
+          "keys": [
+            "Status"
+          ],
+          "included": [],
+          "filter": null
+        },
+        "PK_Incidents": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Key"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
     "factory.IngressDedup": {
       "columns": {
         "ClaimedAt": {

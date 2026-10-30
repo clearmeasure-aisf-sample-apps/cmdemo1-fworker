@@ -25,7 +25,7 @@ static class DocsVerbs
 
     /// <summary>The pull request whose head the inputs need, or 0: the head the verdict was given for (when the call does not name it) and the head of the pull request a development completes with.</summary>
     /// <summary>Whether the saga has the item on a plan this feed tells it about: the docs plan (W6.6), or the feature plan (W7.3) where the engine carries its steps (a feature item of an engine that does not is v1's to decide).</summary>
-    public static bool Fed(WorkItemState state, DocsPlanSettings? settings) => state.Plan == WorkPlans.Docs || (state.Plan == WorkPlans.Feature && settings?.CarriesFeature == true);
+    public static bool Fed(WorkItemState state, DocsPlanSettings? settings) => state.Plan == WorkPlans.Docs || (WorkPlans.IsCode(state.Plan) && settings?.CarriesFeature == true);   // (the hotfix plan of an incident, W8.1, has the feature plan's steps)
 
     public static int PullRequestToRead(string verb, JsonObject body, JsonObject answer, WorkItemState state, DocsPlanSettings? settings = null)
     {
@@ -39,7 +39,7 @@ static class DocsVerbs
     public static IReadOnlyList<WorkItemInput> Inputs(string verb, JsonObject body, JsonObject answer, WorkItemState state, DocsPlanSettings settings, string head, IReadOnlyList<string>? files = null)
     {
         if (!state.IsOpen || !Fed(state, settings) || state.Parked) return [];
-        var feature = state.Plan == WorkPlans.Feature;
+        var feature = WorkPlans.IsCode(state.Plan);
         var item = state.ItemId; var gen = state.Generation; var arm = state.ArmId;
         switch (verb)
         {
@@ -137,7 +137,7 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
             var give = false;
             if (ownership.Count > 0 && int.TryParse(body["item"]?.ToString(), out var number) && number > 0 && ownership.Owns(number)
                 && (await store.Load(new ItemId(home, number).ToString(), CancellationToken.None))?.State is { } state)
-                give = state.IsOpen && !state.Parked && state.Plan == WorkPlans.Feature && state.Step == StepKind.Develop && settings.CarriesFeature;
+                give = state.IsOpen && !state.Parked && WorkPlans.IsCode(state.Plan) && state.Step == StepKind.Develop && settings.CarriesFeature;
             if (!give && !sent) return stdin;
             if (give) body[FlagName] = true;
             return body.ToJsonString();
@@ -160,7 +160,7 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
         {
             head = await heads.HeadOf(home, pr, CancellationToken.None);
             // the feature plan's footprint after the first push is the pull request's files (D6); docs items bring none
-            if (state.Plan == WorkPlans.Feature && verb == "complete") files = await heads.FilesOf(home, pr, CancellationToken.None);
+            if (WorkPlans.IsCode(state.Plan) && verb == "complete") files = await heads.FilesOf(home, pr, CancellationToken.None);
         }
         foreach (var input in DocsVerbs.Inputs(verb, body, answer, state, settings, head, files)) await Send(input);
     }

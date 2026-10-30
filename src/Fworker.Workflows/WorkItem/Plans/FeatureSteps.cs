@@ -51,7 +51,7 @@ public class FeatureDevelopStep : DevelopStep
         if (input is ReviewRecorded r) return DocsReviews.Record(c, r, c.Policy.DocsRules.MaxReviewRounds);
         var before = c.State.Head;
         var answer = base.Handle(c, input);
-        if (answer.Outcome != WorkItemOutcome.Applied || input is not PullRequestChanged p || c.State.Plan != WorkPlans.Feature) return answer;
+        if (answer.Outcome != WorkItemOutcome.Applied || input is not PullRequestChanged p || !WorkPlans.IsCode(c.State.Plan)) return answer;
         FeatureFlow.PullRequest(c, p, before);
         return answer;
     }
@@ -134,7 +134,7 @@ static class FeatureFlow
     public static StepAnswer Checks(StepContext c, ChecksObserved o)
     {
         var s = c.State;
-        if (!c.Policy.HasFeatureSteps || s.Plan != WorkPlans.Feature) return StepAnswer.Refused($"the {s.Plan} plan watches no checks");
+        if (!c.Policy.HasFeatureSteps || !WorkPlans.IsCode(s.Plan)) return StepAnswer.Refused($"the {s.Plan} plan watches no checks");
         if (s.Parked) return StepAnswer.Refused("the item is parked");
         if (s.Status != WorkItemStatus.Open || s.Step > StepKind.Merge) return StepAnswer.Stale("the item is past its merge");
         var head = o.Head.ToLowerInvariant();
