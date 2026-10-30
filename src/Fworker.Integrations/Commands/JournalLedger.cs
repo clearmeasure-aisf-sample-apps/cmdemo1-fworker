@@ -82,6 +82,18 @@ public sealed class JournalLedger
     }
 
     /// <summary>
+    /// W9.6: Add-Journal with the caller's holder, the call the keeper and manager verbs make (Verbs.Keeper.ps1, Verbs.Manager.ps1): the line is posted and the ledger updated in <paramref name="holder"/>, which the caller saves
+    /// itself together with the state it changed (no save here). False when the line was a repeat or over the cap. Throws for a failure that is worth a retry, as <see cref="Append"/> does; the caller decides what a lost line means.
+    /// </summary>
+    public async Task<bool> AddTo(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
+    {
+        if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
+        ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
+        using var held = await Enter(item, ct);
+        return await AddJournal(item, holder, ev, fields, key, save: false, ct);
+    }
+
+    /// <summary>
     /// W9.2: Add-Journal into a holder the caller has read and will save itself (the item verbs write their journal line and their state together, as the rule scripts do): the line is added to the holder's ledger and posted
     /// (or folded), nothing is saved here. False when the line was a repeat, over the cap, or already posted. Throws for a failure of GitHub, which the caller treats as the script does (it logs and goes on).
     /// </summary>
