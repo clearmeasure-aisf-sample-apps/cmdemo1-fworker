@@ -1044,6 +1044,24 @@ deployment itself, the incident rollback of the app in tdd, automatic (uat and p
 - **Not here (documented gaps):** the incident's hold and rollback request reach the acting train through the local queues of `DeliveryTopology` (W9.4; the train handles `TrainHold` and `TrainRollback` as any input); the items delivered before this train state
   existed are not remembered (`DeliveredBy` starts empty), so the first rollback after the upgrade undelivers only what is delivered from then on; uat and prod are never rolled back by the gateway.
 
+**W8.2 as built (#350).** `POST /webhooks/azure-monitor?deployable=<name>&environment=<name>&secret=<secret>` (`gateway/Endpoints/AlertsEndpoints.cs`, `Fworker.Integrations/Alerts/AzureMonitorAlerts.cs`). It is the
+fourth route of the webhook port (the middleware lets it through on that port and answers 503 on a replaced process like the others) and answers 404 unless the engine acts (`Engine.V2Acts`; the ingress inbox alone is not the gate, the shadow run registers it too for the delivery train), so v1, the
+shadow run (tdd today) and `FACTORY_V2_OFF` are what they were. No new table: the durable queue `ingress-inbox` (W4.1) is the store, and its history record files an incident trigger under the key `incident:<deployable>/<environment>`
+(type `ingress.inbox.azure-monitor.incident.alert`) instead of `board`.
+- **Credential:** the W4.0 per-source secret, source `azure-monitor`, variable `FACTORY_WEBHOOK_SECRET_AZURE_MONITOR`. An Azure action group cannot send a header, so the secret is the query parameter `secret` of the webhook URI
+  (a relay may send `X-Azure-Monitor-Secret`); compared in constant time like Octopus's, checked before the body is read, the body bounded at 256 KB, never logged. A source without a secret refuses every delivery (401).
+- **Subject:** the deployable and environment come from the URI (one action group per deployable and environment), not from the alert, which names resources and not the factory's deployables. tdd only: an alert for another
+  environment than the gateway's is acknowledged (202, `environment-not-served`) and ignored; so is one for the factory's own deployable `fworker` (`factory-alert-is-out-of-band`: its failures cannot run on its own bus).
+  A deployable the catalog lists nothing like is a mistake of the URI (400, `unknown-deployable`); a catalog with no deployables (the single repository fallback) cannot say and accepts.
+- **The trigger:** the common alert schema only (`useCommonAlertSchema: true`). Fired is `incident.alert`, Resolved `incident.alert.resolved`, both as an event object of the inbox with source `azure-monitor`, ref `<alertId>|<condition>`
+  (so the delivery Azure sends again after a 5xx is dropped by the inbox's delivery layer, and the resolution of an alert is a delivery of its own), the rule, severity (`Sev0` to `Sev4` also as `severityLevel`), signal type, service,
+  fired and resolved times, a description and up to ten target ids, bounded; the alert's own context is not carried. The `IncidentSaga` (W8.1) consumes these events: it joins them to the open incident of the (deployable, environment),
+  and applies the suppression while the environment is deploying (the route decides nothing of that).
+- **Answers for Azure's retry policy:** 202 stored, or ignored on purpose; 401; 400 and 413 (no retry); 503 with `Retry-After: 30` when the inbox did not take the event (the host not up, the database not answering): Azure retries,
+  and the log line `{"alertIngress":"not-stored"}` is what the factory's out-of-band rule watches.
+- **The factory's out-of-band alert:** Azure rules on the factory's own health notify the owner by e-mail, not through the webhook (`docs/deploy/incident-alert-rules.md` has the exact rule and action group definitions, for the
+  cmdemo1 session to apply in cmdemo1-system). The rollback itself (the tdd train's one deployment of its own, the incident rollback of the app in tdd, automatic, tdd only) is W8.3's.
+
 ## 5. Critical path and clock time
 
 ```

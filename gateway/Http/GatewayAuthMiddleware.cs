@@ -22,10 +22,10 @@ sealed class GatewayAuthMiddleware(RequestDelegate next, GatewayOptions gateway,
     {
         var port = ctx.Connection.LocalPort;
         var path = ctx.Request.Path.Value ?? "";
-        if (port == hookPort && hookPort != apiPort && !((Is(path, "/webhooks/github") || Is(path, "/webhooks/octopus")) && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
+        if (port == hookPort && hookPort != apiPort && !((Is(path, "/webhooks/github") || Is(path, "/webhooks/octopus") || Is(path, "/webhooks/azure-monitor")) && ctx.Request.Method == "POST")) { ctx.Response.StatusCode = 404; return; }
         // a process that a newer one superseded (Leader.cs) serves nothing any more but its status to the operator: calls and new streams are answered
         // 503 gateway-replaced, so the client tries again and reaches the new process; a webhook too (the new process's sweep catches up)
-        if (leader.Replaced && (Is(path, "/webhooks/github") || Is(path, "/webhooks/octopus") || Under(path, "/qc/") || ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) || (Under(path, "/api/") && !((Is(path, "/api/v1/status") || Is(path, "/api/v1/dashboard")) && credentials.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
+        if (leader.Replaced && (Is(path, "/webhooks/github") || Is(path, "/webhooks/octopus") || Is(path, "/webhooks/azure-monitor") || Under(path, "/qc/") || ctx.Request.Path.StartsWithSegments("/mcp", StringComparison.OrdinalIgnoreCase) || (Under(path, "/api/") && !((Is(path, "/api/v1/status") || Is(path, "/api/v1/dashboard")) && credentials.Authenticate(ctx.Request.Headers.Authorization.ToString(), apiToken, tokenSecret, messaging, revocations)?.Kind == "admin"))))
         {
             ctx.Response.StatusCode = 503;
             await ctx.Response.WriteAsJsonAsync(new { ok = false, code = "gateway-replaced", reason = "this gateway process was replaced by a newer one; try again", retryAfterSeconds = 5, exit = 20 });
