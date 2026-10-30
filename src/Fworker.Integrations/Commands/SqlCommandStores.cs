@@ -61,17 +61,17 @@ public sealed class SqlIdempotencyLedger : IIdempotencyLedger
     static CommandResult Read(SqlDataReader r) => new(r.GetBoolean(0), (FailureKind)r.GetInt32(1), r.GetString(2), r.GetString(3), r.GetString(4));
 
     /// <summary>The first result of a key stays (as the in-memory ledger's TryAdd): a second record of the key changes nothing. The key's claim ends in the same transaction, so a handling that
-    /// takes the claim afterwards finds the result.</summary>
+    /// takes the claim afterwards finds the result. The claim is touched before the ledger, as in <see cref="Claim"/>, so the two never wait for each other's locks in a circle.</summary>
     public void Record(string key, CommandResult result)
     {
         using var c = schema.Open();
         using var cmd = new SqlCommand("""
             SET XACT_ABORT ON;
             BEGIN TRANSACTION;
+            DELETE FROM factory.IdempotencyClaims WHERE [Key] = @k;
             INSERT INTO factory.IdempotencyLedger ([Key], Ok, Failure, Error, Execution, Url, RecordedAt)
             SELECT @k, @ok, @f, @e, @x, @u, SYSUTCDATETIME()
             WHERE NOT EXISTS (SELECT 1 FROM factory.IdempotencyLedger WITH (UPDLOCK, HOLDLOCK) WHERE [Key] = @k);
-            DELETE FROM factory.IdempotencyClaims WHERE [Key] = @k;
             COMMIT TRANSACTION;
             """, c);
         cmd.Parameters.Add("@k", SqlDbType.NVarChar, 400).Value = key;

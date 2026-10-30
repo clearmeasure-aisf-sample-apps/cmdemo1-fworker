@@ -96,6 +96,27 @@ public class PendingClaimSqlTests
     }
 
     [Fact]
+    public async Task ALateRecordOfASupersededHandling_RacingTheTakeOver_NeitherDeadlocksNorLosesTheResult()
+    {
+        if (!TestDatabase.Available) return;
+        await using var db = await TestDatabase.CreateAsync("fw_claimlate_");
+        for (var round = 0; round < 20; round++)
+        {
+            var key = "late-" + round;
+            var slow = Process(db.ConnectionString, "slow", 1, TimeSpan.FromMilliseconds(50)).Ledger; var live = Process(db.ConnectionString, "live", 2).Ledger;
+            Assert.Equal(ClaimState.Claimed, slow.Claim(key).State);
+            await Task.Delay(120);   // its claim ran out while its call was still going
+            var go = new ManualResetEventSlim();
+            var record = Task.Run(() => { go.Wait(); slow.Record(key, CommandResult.Success("late")); });
+            var claim = Task.Run(() => { go.Wait(); return live.Claim(key); });
+            go.Set();
+            await record; var outcome = await claim;
+            Assert.Contains(outcome.State, new[] { ClaimState.TakenOver, ClaimState.Done });
+            Assert.Equal("late", live.TryGet(key)!.Execution);   // the result is there either way
+        }
+    }
+
+    [Fact]
     public async Task AnExpiredClaim_IsTakenOverByExactlyOne()
     {
         if (!TestDatabase.Available) return;
