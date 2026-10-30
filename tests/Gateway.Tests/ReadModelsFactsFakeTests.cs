@@ -104,6 +104,9 @@ public sealed class ReadModelsFactsFakeTests : IClassFixture<ReadModelsChecksFak
         var done = Verdict(state: s => s["verdict"]!["processed"] = true);
         var (e2, r2) = await Call(parts, "inspect-facts", new { item = done.N });
         Assert.True(e2 == 10 && Ps.Str(r2, "code") == "no-pass-verdict");
+        // the QC service names the pull request itself (Get-QcTrust): the facts come whatever the verdict is
+        var (eq, rq) = await Call(parts, "inspect-facts", new { item = done.N, pr = done.Pr });
+        Assert.True(eq == 0 && Ps.Bool(Ps.Prop(rq, "ok")), rq.ToJsonString());
         var (e3, r3) = await Call(parts, "inspect-facts", new { });
         Assert.True(e3 == 2 && Ps.Str(r3, "code") == "usage" && Ps.Str(r3, "reason") == "missing argument: item", r3.ToJsonString());
         var (e4, r4) = await Call(parts, "inspect-facts", new { item = 999999 });

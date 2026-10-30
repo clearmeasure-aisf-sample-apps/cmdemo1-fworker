@@ -124,12 +124,20 @@ public sealed class DeliveryUatProdV1Tests
     public void AGatewayWhoseEngineActs_StartsTheAutoPromoter_ForUatAndProd_AndTheTrainTakesItOnlyWhenTold()
     {
         if (!StubPwsh.Supported) return;
-        Assert.True(Enabled(trainActs: false, v2: true), "the engine acts and the train does not promote: the AutoPromoter runs");
-        Assert.False(Enabled(trainActs: true, v2: true), "the train promotes: the loop does not run");
-        Assert.True(Enabled(trainActs: false, v2: false), "v1");
+        var shadowed = Composition(trainActs: false, v2: true);
+        Assert.True(shadowed.Promoter, "the engine acts and the train does not promote: the AutoPromoter runs");
+        Assert.True(shadowed.Holder, "and the train's shadow of uat and prod is found by the AutoPromoter's passes and the status endpoints (DeliveryShadowHolder)");
+        Assert.True(shadowed.Tick, "and its comparison with the AutoPromoter's is stored (DeliveryShadowService)");
+        var takenOver = Composition(trainActs: true, v2: true);
+        Assert.False(takenOver.Promoter, "the train promotes: the loop does not run");
+        Assert.False(takenOver.Holder, "and there is nothing in shadow");
+        Assert.False(takenOver.Tick);
+        var v1 = Composition(trainActs: false, v2: false);
+        Assert.True(v1.Promoter, "v1");
+        Assert.False(v1.Holder); Assert.False(v1.Tick);
     }
 
-    static bool Enabled(bool trainActs, bool v2)
+    static (bool Promoter, bool Holder, bool Tick) Composition(bool trainActs, bool v2)
     {
         using var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
@@ -144,6 +152,9 @@ public sealed class DeliveryUatProdV1Tests
         using var host = new GatewayHost();
         var started = Task.Run(() => host.Server);
         Assert.True(started.Wait(TimeSpan.FromSeconds(60)), "the gateway did not finish starting");
-        return host.Services.GetServices<IHostedService>().OfType<AutoPromoter>().Single().Enabled;
+        // (the holder is a factory that builds the Wolverine host: its registration is read, not resolved)
+        return (host.Services.GetServices<IHostedService>().OfType<AutoPromoter>().Single().Enabled,
+            host.Captured!.Any(d => d.ServiceType == typeof(DeliveryShadowHolder)),
+            host.Services.GetServices<IHostedService>().OfType<DeliveryShadowService>().Any());
     }
 }

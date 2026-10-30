@@ -7,7 +7,7 @@ using System.Text.Json.Nodes;
 // uploads or replaces the asset with the gateway's GitHub credential. Not POST /api/v1/verbs: that route reads the body as text and pipes it to
 // the rule script as JSON, and Kestrel caps a body at about 30 MB by default. The right to publish goes with the right to record the verdict
 // (validation-verdict of the owner role) or an explicit publish-demo in the role's verb list. Not held under the plant's gate; bounded by a timeout.
-sealed class DemoEndpoints(GatewayOptions gateway, Plant plant, Runner runner) : IEndpointModule
+sealed class DemoEndpoints(GatewayOptions gateway, Plant plant, Runner runner, DeliveryVerbBridge? bridge = null) : IEndpointModule
 {
     const long DemoMaxBytes = 100L * 1024 * 1024;
     // at most two uploads at once (disk: 2 x 100 MB, two runner slots); a third is refused busy, not queued
@@ -57,7 +57,7 @@ sealed class DemoEndpoints(GatewayOptions gateway, Plant plant, Runner runner) :
             if (headLen < 8 || Encoding.ASCII.GetString(head, 4, 4) != "ftyp") return No(415, "not-mp4", "the file is not an MP4 (its header has no ftyp box)", 2);
             authorized["file"] = tmp; authorized["size"] = size;
             if (gateway.OwnerMode && who.Kind == "item") plant.NoteActivity(who.Name, who.Item, true);
-            var (code, output) = await runner.RunAsync("publish-demo", authorized.ToJsonString(), TimeSpan.FromMinutes(10));
+            var (code, output) = bridge is null ? await runner.RunAsync("publish-demo", authorized.ToJsonString(), TimeSpan.FromMinutes(10)) : await bridge.RunAsync("publish-demo", authorized.ToJsonString(), TimeSpan.FromMinutes(10));   // (W9.4: a v2 route answers it where the engine acts)
             Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"verb\":\"publish-demo\",\"item\":\"{item}\",\"holder\":\"{authorized["holder"]}\",\"caller\":\"{who.Kind}:{who.Role}\",\"bytes\":{size},\"exit\":{code}}}");
             output = RuleScriptResult.OrNoOutput(output, code);
             // here an exit of 30 (forbidden) is a 403 as well

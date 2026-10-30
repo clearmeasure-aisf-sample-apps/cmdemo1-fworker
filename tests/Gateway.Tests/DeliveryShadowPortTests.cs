@@ -408,8 +408,13 @@ public sealed class DeliveryShadowPortTests
         var taking = asm.GetTypes().SelectMany(t => t.GetMethods().Where(m => m.Name == "Handle" && m.GetParameters().Length > 0
             && m.GetParameters()[0].ParameterType.FullName is "Fworker.Contracts.Commands.PromoteRelease" or "Fworker.Contracts.Commands.AnswerSignOff").Select(m => t.Name)).Distinct().ToList();
         Assert.Equal(["DeliveryShadowHandlers"], taking);
-        // and the gateway has none of its own
+        // and the gateway has none of its own but the executor's (W9.4: DeliveryExecutorHandlers), which only DeliveryActingWiring attaches, where the engine acts
         var gw = typeof(DeliveryShadowWiring).Assembly;
-        Assert.DoesNotContain(gw.GetTypes().SelectMany(t => t.GetMethods()), m => m.Name == "Handle" && m.GetParameters().Any(p => p.ParameterType.Name is "PromoteRelease" or "AnswerSignOff"));
+        Assert.DoesNotContain(gw.GetTypes().Where(t => t.Name != "DeliveryExecutorHandlers").SelectMany(t => t.GetMethods()), m => m.Name == "Handle" && m.GetParameters().Any(p => p.ParameterType.Name is "PromoteRelease" or "AnswerSignOff"));
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "gateway", "Program.cs"))) dir = dir.Parent;
+        var shadowWiring = File.ReadAllText(Path.Combine(dir!.FullName, "gateway", "Ports", "DeliveryShadowPort.cs"));
+        Assert.DoesNotContain("DeliveryExecutor", shadowWiring);
+        Assert.DoesNotContain("PromoteReleaseHandler", shadowWiring);
     }
 }

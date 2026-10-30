@@ -8,12 +8,14 @@ using System.Text.Json.Nodes;
 // credential (POST /api/v1/runtime/transcript); the operator reads them at /sessions/{name} (live while the session runs) and
 // GET /api/v1/sessions/{name}.
 //
-// Durable store: the one the plant snapshot already uses (rule scripts transcript-save/-load/-prune, plugin/scripts/lib/PlantSnapshot.ps1): a
+// Durable store, v1 (RuleScriptTranscriptBackend): the one the plant snapshot uses (rule scripts transcript-save/-load/-prune, plugin/scripts/lib/PlantSnapshot.ps1): a
 // parentless commit per save in the work-orders repository, one ref per session under refs/factory/<instance>/transcripts/<yyyymmdd>/<name>.
 // The gateway holds no disk and no blob store of its own, and GitHub is what it already writes to and reads back at a start. That repository is
 // public, so the message is ciphertext: gzip of the JSON, then AES-GCM with a key derived (HKDF) from the gateway's token secret, which the
 // environment's vault keeps across restarts and releases. Kept: the last MaxBytes of lines per session, sessions of the last Days days.
 // Saved at most every SaveSeconds while lines arrive, at once when the session ends, and at the stop of the process.
+// Durable store, v2 (W9.8, DatabaseTranscriptBackend): where the engine acts the sessions are rows of factory.Transcripts (Fworker.Workflows.Transcripts), in the clear, with the qualified item as a column;
+// a session the database does not have is read from the ref store once (the 14 days that were written there before the move) and saved to the database from then on.
 sealed class TranscriptStore
 {
     public int MaxBytes = 2 * 1024 * 1024, MaxLine = 2000, MaxBatchLines = 500, Days = 14, MaxSessions = 200;
@@ -28,20 +30,24 @@ sealed class TranscriptStore
     readonly object gate = new();
     readonly Dictionary<string, Session> sessions = new(StringComparer.Ordinal);
     readonly Dictionary<string, DateTime> missing = new(StringComparer.Ordinal);
-    readonly Func<string, string, TimeSpan, Task<(int Code, string Output)>>? run;
-    readonly byte[] key;
-    string tree = "";
+    volatile ITranscriptBackend? backend;
     DateTime prunedAt = DateTime.MinValue;
     long saves, saveFailures, loads;
     int saving;
 
-    public bool Durable => run != null && key.Length > 0;
+    public bool Durable => backend != null;
 
     public TranscriptStore(Func<string, string, TimeSpan, Task<(int Code, string Output)>>? run, string tokenSecret)
     {
-        this.run = run;
-        key = tokenSecret.Length == 0 ? [] : HKDF.DeriveKey(HashAlgorithmName.SHA256, Encoding.UTF8.GetBytes(tokenSecret), 32, info: Encoding.UTF8.GetBytes("fworker-transcript-v1"));
+        var seal = new TranscriptSeal(tokenSecret);
+        if (run != null && seal.Available) backend = new RuleScriptTranscriptBackend(run, seal);
     }
+
+    /// <summary>The rule-script backend this store was made with (null when it is in memory only): the fallback of the database backend.</summary>
+    public ITranscriptBackend? Backend => backend;
+
+    /// <summary>W9.8: from now on the sessions are saved with <paramref name="next"/> (the database), not the ref store.</summary>
+    public void UseBackend(ITranscriptBackend next) => backend = next;
 
     public static bool ValidName(string n) => n.Length is > 0 and <= 100 && char.IsAsciiLetterOrDigit(n[0]) && n.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-');
 
@@ -110,8 +116,7 @@ sealed class TranscriptStore
         JsonObject? doc = null;
         try
         {
-            var (code, output) = await run!("transcript-load", new JsonObject { ["name"] = name }.ToJsonString(), TimeSpan.FromSeconds(60));
-            if (code == 0 && JsonNode.Parse(output) is JsonObject o && o["found"]?.GetValue<bool>() == true) doc = Open(o["data"]?.ToString() ?? "");
+            doc = await backend!.Load(name);
             Interlocked.Increment(ref loads);
         }
         catch (Exception e) { Console.Error.WriteLine($"transcript-load {name}: {e.GetType().Name}"); }
@@ -120,11 +125,11 @@ sealed class TranscriptStore
         {
             if (sessions.ContainsKey(name)) return;
             if (Get(name, true) is not { } s) return;
-            s.Item = (int?)doc["item"] ?? 0; s.Phase = doc["phase"]?.ToString() ?? ""; s.Runtime = doc["runtime"]?.ToString() ?? ""; s.Day = doc["day"]?.ToString() ?? s.Day;
+            s.Item = (int)TranscriptJson.Num(doc["item"]); s.Phase = doc["phase"]?.ToString() ?? ""; s.Runtime = doc["runtime"]?.ToString() ?? ""; s.Day = doc["day"]?.ToString() ?? s.Day;
             if (DateTime.TryParse(doc["started"]?.ToString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var st)) s.Started = st;
             if (DateTime.TryParse(doc["ended"]?.ToString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var en)) s.Ended = en;
             if (DateTime.TryParse(doc["lastLine"]?.ToString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var ll)) s.LastLine = ll;
-            s.Dropped = (long?)doc["dropped"] ?? 0; s.Total = (long?)doc["total"] ?? 0;
+            s.Dropped = TranscriptJson.Num(doc["dropped"]); s.Total = TranscriptJson.Num(doc["total"]);
             foreach (var l in doc["lines"]?.AsArray() ?? []) { var t = l?.ToString() ?? ""; s.Lines.AddLast(t); s.Bytes += t.Length + 1; }
             s.Dirty = false; s.SavedAt = DateTime.UtcNow;
         }
@@ -152,33 +157,6 @@ sealed class TranscriptStore
     public JsonObject Status() { lock (gate) return new JsonObject { ["durable"] = Durable, ["sessions"] = sessions.Count, ["dirty"] = sessions.Values.Count(s => s.Dirty), ["saving"] = Volatile.Read(ref saving), ["saves"] = saves, ["saveFailures"] = saveFailures, ["loads"] = loads, ["days"] = Days, ["maxBytes"] = MaxBytes }; }
 
     // ---- the durable copy ----------------------------------------------------------------------------------------------------------------------
-    string Seal(JsonObject doc)
-    {
-        var plain = Encoding.UTF8.GetBytes(doc.ToJsonString());
-        using var ms = new MemoryStream();
-        using (var gz = new GZipStream(ms, CompressionLevel.SmallestSize, true)) gz.Write(plain);
-        var packed = ms.ToArray();
-        var nonce = RandomNumberGenerator.GetBytes(12); var tag = new byte[16]; var cipher = new byte[packed.Length];
-        using (var aes = new AesGcm(key, 16)) aes.Encrypt(nonce, packed, cipher, tag);
-        return "fwt1:" + Convert.ToBase64String([.. nonce, .. tag, .. cipher]);
-    }
-
-    JsonObject? Open(string data)
-    {
-        try
-        {
-            if (!data.StartsWith("fwt1:", StringComparison.Ordinal) || key.Length == 0) return null;
-            var b = Convert.FromBase64String(data[5..]);
-            if (b.Length < 28) return null;
-            var packed = new byte[b.Length - 28];
-            using (var aes = new AesGcm(key, 16)) aes.Decrypt(b.AsSpan(0, 12), b.AsSpan(28), b.AsSpan(12, 16), packed);
-            using var gz = new GZipStream(new MemoryStream(packed), CompressionMode.Decompress);
-            using var rd = new StreamReader(gz, Encoding.UTF8);
-            return JsonNode.Parse(rd.ReadToEnd()) as JsonObject;
-        }
-        catch { return null; }   // another secret, or changed by someone with write access: not this gateway's transcript
-    }
-
     JsonObject Doc(Session s, int skip) => new()
     {
         ["v"] = 1, ["name"] = s.Name, ["item"] = s.Item, ["phase"] = s.Phase, ["runtime"] = s.Runtime, ["day"] = s.Day, ["started"] = s.Started.ToString("o"),
@@ -189,32 +167,23 @@ sealed class TranscriptStore
     // saves the sessions whose lines changed (at most every SaveSeconds, an ended one at once); all: every changed one now (the process stops)
     public async Task Flush(bool all, TimeSpan timeout)
     {
-        if (!Durable) return;
-        List<(string Name, string Day, string Data)> work = [];
+        if (backend is not { } store) return;
+        List<(string Name, JsonObject Doc)> work = [];
         lock (gate)
         {
             var now = DateTime.UtcNow;
             foreach (var s in sessions.Values.Where(x => x.Dirty && (all || x.Ended != null || (now - x.SavedAt).TotalSeconds >= SaveSeconds)).ToList())
             {
-                // the stored message is capped at 900000 characters: older lines are left out of the stored copy until it fits
-                var skip = 0; string data;
-                while (true) { data = Seal(Doc(s, skip)); if (data.Length <= 880000 || skip >= s.Lines.Count) break; skip += Math.Max(1, (s.Lines.Count - skip) / 4); }
-                work.Add((s.Name, s.Day, data)); s.Dirty = false; s.SavedAt = now; Interlocked.Increment(ref saving); // saving: taken and not yet answered, counted in the same lock as Dirty
+                work.Add((s.Name, Doc(s, 0))); s.Dirty = false; s.SavedAt = now; Interlocked.Increment(ref saving); // saving: taken and not yet answered, counted in the same lock as Dirty
             }
         }
         using var cts = new CancellationTokenSource(timeout);
-        foreach (var (name, day, data) in work)
+        foreach (var (name, doc) in work)
         {
             try {
             if (cts.IsCancellationRequested) { lock (gate) if (sessions.TryGetValue(name, out var s0)) s0.Dirty = true; continue; }
             var ok = false;
-            try
-            {
-                var args = new JsonObject { ["name"] = name, ["day"] = day, ["data"] = data }; if (tree != "") args["tree"] = tree;
-                var (code, output) = await run!("transcript-save", args.ToJsonString(), TimeSpan.FromSeconds(60));
-                ok = code == 0;
-                if (ok && JsonNode.Parse(output) is JsonObject o && o["tree"]?.ToString() is { Length: > 0 } t) tree = t;
-            }
+            try { ok = await store.Save(doc); }
             catch (Exception e) { Console.Error.WriteLine($"transcript-save {name}: {e.GetType().Name}"); }
             if (ok) Interlocked.Increment(ref saves);
             else { Interlocked.Increment(ref saveFailures); lock (gate) if (sessions.TryGetValue(name, out var s1)) s1.Dirty = true; }
@@ -225,7 +194,7 @@ sealed class TranscriptStore
         if (DateTime.UtcNow - prunedAt > TimeSpan.FromHours(6))
         {
             prunedAt = DateTime.UtcNow;
-            try { await run!("transcript-prune", new JsonObject { ["days"] = Days }.ToJsonString(), TimeSpan.FromSeconds(120)); } catch { }
+            try { await store.Prune(Days); } catch { }
         }
     }
 
