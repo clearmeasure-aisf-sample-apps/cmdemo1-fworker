@@ -33,3 +33,8 @@ auto | ^docs-only fast path: one design review round
 auto | ^(push gate|pr-checks|model ladder|testing profile):
 owner | ^owner: pr-checks with an item token
 manager | ^mgr: pr-checks gives the supervisor
+
+# W9.10p: where the engine acts, the app's uat and prod stay with v1's AutoPromoter (the delivery train decides them in shadow and acts for tdd only). The run names the gateway environment of delivery.autoPromote
+# v2ci (run.ps1), so these are the end-to-end proof that the loop runs on v2: a release goes to uat, its Sign-off is answered, then to prod, each deployment created once; and a Sign-off the gateway did not create is left alone.
+promote | ^promote: every gate met:
+promote | ^promote: a Sign-off of a deployment the gateway did not create

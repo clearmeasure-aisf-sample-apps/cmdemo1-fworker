@@ -818,6 +818,23 @@ that needs no GitHub, `ReadModelSettings` what they take from `config/instance.j
   local time with its offset). (5) A regular expression of the configuration or of the diff that takes more than ten seconds is an `internal-error` (exit 20) and not a wait without end.
 - *Not here.* No smoke evidence, no overflow, no merge queue (the W7 scope cut). `get-item` and the other item verbs (W9.2) read the same state through the same store.
 
+**W9.10p as built (#555): the app's uat and prod stay with v1's `AutoPromoter`** (owner decision 2026-10-30, decision 2 of the audit). Where the engine acts the train promotes nothing in uat or prod, and the loop that calls the rule
+script `auto-promote` keeps promoting them; the train acts for tdd only, where it observes the release lifecycle's deployment and publishes `DeliveredTo(tdd)`. #545 (W9.4) stops the loop wherever `Engine.V2Acts`; this row narrows that stop
+to the day the train takes the environments over. It changes the shared gateway in one place, the composition's line that decides whether the loop starts (`AutoPromoter.Runs`); everything else is inert unless the engine acts.
+- *The switch.* `delivery.autoPromote.trainActs` (`config/instance.json`, false; `InstanceConfig.TrainActs`). `AutoPromoter.Runs(instance, engineActs)`: the loop starts when `autoPromote` names this gateway's environment, except where the engine acts
+  and `trainActs` is on. One of the two promotes: the rule script promotes every environment of `autoPromote.environments`, so the train takes them all or none. W9.12 sets `trainActs` in `deploy.overrides.json` and removes the loop;
+  nothing in the deployed overrides names it today.
+- *The train in shadow.* With the engine acting and `trainActs` off, `DeliveryShadowSettings.From` gives the policy no promoted environment and names the autoPromote environments in `DeliveryPolicySettings.ShadowEnvironments`; their
+  `DeliveryPolicy` has `Acts` and `Shadow`. The train decides there as it does in the shadow run (the same decisions, the same state), but what it would send, `PromoteRelease` and `AnswerSignOff`, leaves as `ShadowCommand` (name, key and
+  release as plain text), so no executor sees a command for uat or prod. `dependenciesDelivered` is off for a shadow environment (v1 has no such rule; W9.12 turns it on with the environments). tdd is `Promoter.Pipeline`: its policy neither
+  acts nor shadows, and `Settle` still publishes `DeliveredTo(tdd)` for the items of a succeeded deployment.
+- *Recording and comparison.* `DeliveryActingShadowHandlers` is `DeliveryShadowHandlers` for a host where the engine acts: the `TrainDecided` of a shadow environment goes to `DeliveryShadow.ObserveV2` (the `AutoPromoter` hands its pass to
+  `ObserveV1`, as in the shadow run) and a `ShadowCommand` is recorded (`executed: false`); a decision of an environment the train promotes for real is left to the history. `/api/v1/status` and `GET /api/v1/delivery-shadow` show the
+  comparison, which is the evidence the W5 gate (restated above) reads for W9.12.
+- *Parity.* `v2-claims.txt` claims two scenarios of the suite `promote` on the v2 engine (`run.ps1` names the gateway environment of `autoPromote` `v2ci` there): a release goes to uat, its Sign-off is answered, then to prod, each deployment
+  created once; and a Sign-off of a deployment the gateway did not create is left alone. Tests: `DeliveryUatProdV1Tests` (the settings, `Runs`, a started gateway whose engine acts has the loop on), `DeliveryShadowEnvironmentTests` (the
+  train in a shadow environment, the handlers, the comparison with an `AutoPromoter` pass).
+
 **Cutover gate, as events** (restated 2026-10-30: it replaces the earlier "full Tier 1, the drill, one measured batch, v2's node
 leading, a 4-hour quiet window", and W9.11's 2-hour window; recorded on #268 by W9.9c). Before the switch merges:
 the precondition list of W9.9c's After column. After it, in this order, every event observed and recorded:
