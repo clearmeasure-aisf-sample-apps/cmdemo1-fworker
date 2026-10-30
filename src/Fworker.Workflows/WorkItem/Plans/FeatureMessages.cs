@@ -50,7 +50,7 @@ public sealed record SessionLost(ItemId Item, int Generation, string Key, string
 /// <paramref name="FootprintFromPullRequest"/> says whether the footprint is the pull request's changed files (else the Technical Design's <c>Files:</c> line).
 /// </summary>
 [MessageIdentity("workitem.slot-wanted")]
-public sealed record SlotWanted(ItemId Item, int Generation, string ArmId, string Key, string Phase, bool Resume, int ColumnDepth, IReadOnlyList<string> Footprint, bool FootprintFromPullRequest, DateTimeOffset RequestedAt) : ItemCommand(Item);
+public sealed record SlotWanted(ItemId Item, int Generation, string ArmId, string Key, string Phase, bool Resume, int ColumnDepth, IReadOnlyList<string> Footprint, bool FootprintFromPullRequest, DateTimeOffset RequestedAt, bool TopRank = false) : ItemCommand(Item);
 
 /// <summary>
 /// A command the saga keeps in its state until the transition that made it is published (so a handler that died between the save and the publish publishes it again, as with the decisions). The records are closed:
@@ -65,7 +65,7 @@ public sealed record SlotWanted(ItemId Item, int Generation, string ArmId, strin
 public abstract record StateCommand(string Key);
 
 /// <summary>Ask for a slot for a session of <paramref name="Phase"/> (published as <see cref="SlotWanted"/>).</summary>
-public sealed record AskSlot(string Key, string ArmId, string Phase, bool Resume, int ColumnDepth, List<string> Footprint, bool FromPullRequest, DateTimeOffset At) : StateCommand(Key);
+public sealed record AskSlot(string Key, string ArmId, string Phase, bool Resume, int ColumnDepth, List<string> Footprint, bool FromPullRequest, DateTimeOffset At, bool TopRank = false) : StateCommand(Key);
 
 /// <summary>The item's session needs no slot any more (published as the scheduler's <c>SessionEnded</c>): <paramref name="SlotId"/> names the slot.</summary>
 public sealed record EndSession(string Key, string SlotId) : StateCommand(Key);

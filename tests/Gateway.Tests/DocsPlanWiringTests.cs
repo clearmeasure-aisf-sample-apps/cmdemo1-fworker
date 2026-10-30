@@ -267,8 +267,11 @@ public sealed class DocsPlanInertTests
         using var host = new GatewayHost();
         var started = Task.Run(() => host.Server);
         Assert.True(started.Wait(TimeSpan.FromSeconds(60)), "the gateway of an acting v2 environment did not finish starting");
-        // (the feed, or, once a route file has registered verbs (W9.2 to W9.8), the router of those verbs in front of it)
-        Assert.True(host.Services.GetRequiredService<IVerbRouter>() is V2VerbFeed or V2VerbRouter);
+        // the verb groups that W9.2 to W9.8 fill register their routes (a V2VerbRouter over the feed of the saga, which answers every verb they leave to v1)
+        var router = host.Services.GetRequiredService<IVerbRouter>();
+        Assert.IsType<V2VerbFeed>(router is V2VerbRouter routed ? routed.Below : router);
+        Assert.IsType<V2VerbRouter>(router);
+        Assert.True(host.Services.GetRequiredService<V2VerbRoutes>().Count > 0);
         Assert.NotNull(host.Services.GetRequiredService<WorkItemParts>());
         // intake is off in the source defaults, and names no v2 plan: the registry has no job for the docs intake
         Assert.False(host.Services.GetRequiredService<RecurringJobRegistry>().Has(RecurringJobSlots.DocsIntake));

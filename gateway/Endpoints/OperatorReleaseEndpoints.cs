@@ -14,7 +14,7 @@ sealed class ReleasesLoadedFilter(IOperatorReleaseLoader loader) : IEndpointFilt
 // The operator session's two enforced checks (Operator.cs, docs/design/operator-session.md), for the active operator session and the operator. The
 // release records are refs in GitHub, written by the rule scripts and read once at start. Guards, in this order: the operator session enabled (then
 // owner mode and messaging), the admin or the active operator session, the records read.
-sealed class OperatorReleaseEndpoints(Plant plant, Runner runner, RevocationService revocations) : IEndpointModule
+sealed class OperatorReleaseEndpoints(Plant plant, ServiceVerbCalls verbs, RevocationService revocations) : IEndpointModule
 {
     // its own gate (a flood of records must never delay a revoke)
     readonly SemaphoreSlim releaseGate = new(1, 1);
@@ -49,7 +49,7 @@ sealed class OperatorReleaseEndpoints(Plant plant, Runner runner, RevocationServ
             if (!plant.HasRelease(pr))
             {
                 if (!ReleaseRecordPolicy.WriteAllowed(false, plant.ReleaseRecordsToday())) return Results.Json(new { ok = false, code = "record-limit", reason = $"{Plant.ReleaseWritesPerDay} releases are recorded today; no more are written", retryAfterSeconds = 3600, exit = 20 }, statusCode: 429);
-                var (code, _) = await runner.RunAsync("operator-release", new JsonObject { ["day"] = OperatorReleaseLoader.Day(now), ["pr"] = pr, ["version"] = version }.ToJsonString(), TimeSpan.FromSeconds(120));
+                var (code, _) = await verbs.RunAsync("operator-release", new JsonObject { ["day"] = OperatorReleaseLoader.Day(now), ["pr"] = pr, ["version"] = version }.ToJsonString(), TimeSpan.FromSeconds(120));
                 if (code != 0) return Results.Json(new { ok = false, code = "not-recorded", reason = "the release could not be written to GitHub, so it is not counted; try again", retryAfterSeconds = 15, exit = 20 }, statusCode: 503);
                 plant.AddRelease(now, pr, version);
                 Console.WriteLine(new JsonObject { ["at"] = now.ToString("o"), ["operatorRelease"] = pr, ["version"] = version, ["by"] = c.Caller().By }.ToJsonString());

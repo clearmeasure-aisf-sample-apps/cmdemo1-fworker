@@ -90,6 +90,10 @@ public sealed class InspectReadModel(ItemReads reads, ChecksReadModel checks)
         return (info, s, await reads.Pr(Ps.ToInt(Ps.Prop(verdict, "pr")), ct));
     }
 
+    /// <summary>The item, its state and the given pull request, with no verdict asked for (the QC trust of a run, which the rule script computes from the same three).</summary>
+    async Task<(ItemInfo Info, JsonObject State, JsonNode Pr)> QcSubject(int n, int pr, CancellationToken ct) =>
+        (await reads.Info(n, ct), await reads.State(n, ct), await reads.Pr(pr, ct));
+
     static readonly Regex DerivedBlock = new(@"<!-- aisf:assumption source=([A-Za-z0-9-]{1,40}) from=([A-Za-z0-9_-]{1,40})(?: in_reply_to=[A-Za-z0-9-]{1,40})? -->(?:(?!<!-- aisf:assumption ).)*?<!-- /aisf:assumption -->",
         RegexOptions.Singleline | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(10));
 
@@ -104,12 +108,14 @@ public sealed class InspectReadModel(ItemReads reads, ChecksReadModel checks)
     public async Task<JsonObject> InspectFacts(VerbArgs a, CancellationToken ct)
     {
         var n = a.ItemNumber();
-        var v = await VerdictState(n, ct);
-        var r = await Facts(n, v.Info, v.State, v.Pr, ct);
+        // W9.1: the QC service asks for the facts of the pull request it was given (Get-QcTrust calls Get-InspectFacts with that pull request and the item's state, whatever the verdict); the
+        // inspector's own call names no pull request and judges the one of the item's PASS verdict
+        var (info, state, pr) = a.Has("pr") ? await QcSubject(n, a.Int("pr"), ct) : await VerdictState(n, ct);
+        var r = await Facts(n, info, state, pr, ct);
         return new JsonObject
         {
             ["ok"] = true, ["id"] = n, ["facts"] = r.Facts, ["mandatory"] = r.Mandatory, ["must_escalate"] = r.Mandatory.Count > 0,
-            ["item"] = new JsonObject { ["title"] = v.Info.Title, ["body"] = RemoveDerivedBlocks(v.Info.Body) },
+            ["item"] = new JsonObject { ["title"] = info.Title, ["body"] = RemoveDerivedBlocks(info.Body) },
         };
     }
 }

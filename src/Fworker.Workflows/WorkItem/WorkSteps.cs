@@ -148,7 +148,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         s.SlotAsked = s.SlotId.Length == 0;
         if (s.SlotAsked) { s.LeaseDue = null; s.SlotWait = ""; }
         TimerChanged = true;
-        Send(new AskSlot($"ask|{ItemKey}|{s.Generation}|{s.AskSeq}", s.ArmId, phase, s.EverGranted, depth, [.. s.Footprint], s.FootprintFromPullRequest, Now));
+        Send(new AskSlot($"ask|{ItemKey}|{s.Generation}|{s.AskSeq}", s.ArmId, phase, s.EverGranted, depth, [.. s.Footprint], s.FootprintFromPullRequest, Now, Plan.TopRank));
     }
 
     /// <summary>The item's session needs no slot any more: the scheduler frees it at once. Nothing when the item holds none.</summary>
@@ -170,7 +170,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
     /// <summary>The item leaves the Merge step with no merge: its place in the repository's merge line is released.</summary>
     public void LeaveTrain(string reason)
     {
-        if (!State.TrainEntered || !Policy.HasFeatureSteps || Plan.Name != WorkPlans.Feature || State.MergeCommit.Length > 0) { State.TrainEntered = false; return; }
+        if (!State.TrainEntered || !Policy.HasFeatureSteps || !WorkPlans.IsCode(Plan.Name) || State.MergeCommit.Length > 0) { State.TrainEntered = false; return; }
         Send(new LeaveTrain($"leave|{ItemKey}|{State.Generation}|{State.Sequence}", reason));
         State.TrainEntered = false;
     }
@@ -338,7 +338,7 @@ public static class Steps
 
     /// <summary>The step class of <paramref name="kind"/> on <paramref name="plan"/> under <paramref name="policy"/>: the feature plan has its own steps (W7.3) where the engine carries it, the docs plan has its (W6.6), every other plan the core's.</summary>
     public static WorkStep For(WorkPlan plan, StepKind kind, WorkItemPolicy policy) =>
-        plan.Name == WorkPlans.Feature && policy.HasFeatureSteps ? FeaturePlanSteps[kind] : For(plan, kind);
+        WorkPlans.IsCode(plan.Name) && policy.HasFeatureSteps ? FeaturePlanSteps[kind] : For(plan, kind);
 
     /// <summary>The step a message belongs to, or null for a message of the saga itself (start, completion, budgets, leases, park).</summary>
     public static StepKind? HomeOf(WorkItemInput input) => input switch

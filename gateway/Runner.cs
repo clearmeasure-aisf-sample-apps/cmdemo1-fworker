@@ -65,7 +65,16 @@ sealed class Runner(string entry)
     }
     // the shared GitHub budget (GitHubBudget.cs, issue 92): every answer's _github field is recorded there and taken out of the answer
     public GitHubBudget? Budget { get; set; }
+    // W9.8: where the engine acts, the gateway's own calls of the verbs v2 answers by itself (journal, ingest-event: BoardWiring.OwnCalls) are answered there; null means the verb is a rule script's
+    public Func<string, string, TimeSpan, Task<(int Code, string Output)?>>? V2Own { get; set; }
     public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
+    {
+        if (V2Own is { } own && await own(verb, stdin, timeout) is { } answered) return answered;
+        return await RunScriptAsync(verb, stdin, timeout);
+    }
+
+    /// <summary>The rule script, whatever v2 answers by itself: what a v2 verb that cannot answer (no ledger, no translator) falls back to.</summary>
+    public async Task<(int Code, string Output)> RunScriptAsync(string verb, string stdin, TimeSpan timeout)
     {
         // a call of the gateway itself that can wait (a journal line, the back-merge check, the metrics) is not started while the budget is low
         if (Budget is { } b && GitHubBudget.DeferredCalls.Contains(verb) && b.Low() is { Low: true } low)
