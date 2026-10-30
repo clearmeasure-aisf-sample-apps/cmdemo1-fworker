@@ -251,6 +251,9 @@ dashboard's "where is item X". Dead letters: an admin page over WolverineFx.Http
 CritterWatch optional. OpenTelemetry (`Wolverine` source, `Wolverine*` meter) into the existing Application Insights exporter.
 
 ### 4.8 Restarts and replicas
+*Revised 2026-10-30 (owner): the factory keeps a single-actor lease, a SQL application lock, and runs Wolverine in Solo mode on its
+holder; the node starts when the process acts and stops before its hand-over. The plant's state moves into SQL, so the snapshot goes,
+but the lease stays. The paragraph below is the original proposal; section 8 lists what was built instead.*
 Balanced mode with leader election replaces the lease and snapshot. A graceful rolling deploy within the termination grace drains
 listeners (documented: no duplicate executions); a hard kill is recovered by the durability agent and may handle a message twice,
 which the business keys absorb. Saga state is fenced by `IRevisioned`; projections by their version (4.6). Together they close
@@ -339,3 +342,21 @@ coordinators above.
 - **In-flight NServiceBus state does not migrate:** drain it, or run side by side with the SQL Server transport interop if the AI
   Software Factory moves to SQL Server first.
 - **Visibility:** the item history is required from M1.
+
+## 8. As built: deviations from this design (2026-10-30)
+
+Recorded after the audit of 2026-10-30, with the owner's decisions of that day (`fworker-wolverine-implementation.md`, "Revision
+2026-10-30 (audit)"; ADR 0001, "Revision 2026-10-30"):
+- **Solo, not Balanced** (2, 4.8): one acting process holds a lease (a SQL application lock from W9.10b) and runs the only Wolverine
+  node; the coordinators use local sequential or partitioned queues, not `GlobalPartitioned` listeners. No replica set elects a leader.
+- **Decision verbs feed the saga, they do not invoke it** (0.5, 2): `V2VerbFeed` runs the verb as v1 answers it and then tells the
+  saga what happened, so the saga cannot refuse a session in the call, and the file-overlap hold is decided by the scheduler
+  asynchronously. Synchronous decision verbs are dropped as a target.
+- **History is written by a separate `WorkItemDecided` handler,** outside the saga's own transaction (4.7).
+- **The trains are hand-written handlers over a JSON state document** with a revision (#491), not Wolverine `Saga` classes; the saga
+  save and the outbox become one transaction in W9.10o.
+- **The hybrid composition** (6.1): where v2 acts, the sagas own the items they started and every routed verb, and what is left of v1
+  runs beside them in the same process until W9.11; `intake.v2Plans` chooses the plans v2 carries.
+- **Sessions are started by the plant** until W9.10j moves the start to the saga after `SlotGranted` (3.2, 4.5).
+- **The session mailbox** (2, 4.5) is not built: one node serves every session, and pushes stay node-local.
+- **Incidents** (3.3, 5.5): automatic rollback in the app's tdd only; uat and prod escalate; no analyst session role.

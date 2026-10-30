@@ -37,7 +37,7 @@ sealed class MetricsAccessFilter(GatewayOptions gateway, MessagingSettings messa
 // since=24h or 7d (none is read as 7d, the script's default), with no max and no fresh: its answers come from two cache entries, so it causes at most
 // one computation per entry in 120 s while they succeed, and one in 30 s while they fail. The supervisor's call is a step of its hourly budget, like a
 // read verb (SupervisorBudget).
-sealed class MetricsEndpoints(MetricsCache cache, Runner runner) : IEndpointModule
+sealed class MetricsEndpoints(MetricsCache cache, ServiceVerbCalls verbs) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes) =>
         routes.MapGet("/api/v1/metrics", async (HttpContext c) => { return await Metrics(c); })
@@ -64,7 +64,7 @@ sealed class MetricsEndpoints(MetricsCache cache, Runner runner) : IEndpointModu
         {
             lock (entries) if (!fresh && entries.TryGetValue(key, out var hit) && MetricsCache.Fresh(hit)) return Results.Text(hit.Json, "application/json", Encoding.UTF8, MetricsCache.StatusOf(hit.Code));
             var args = new JsonObject(); if (since != "") args["since"] = since; if (maxText != "") args["max"] = int.Parse(maxText);
-            var (code, output) = await runner.RunAsync("metrics", args.ToJsonString(), TimeSpan.FromMinutes(3));
+            var (code, output) = await verbs.RunAsync("metrics", args.ToJsonString(), TimeSpan.FromMinutes(3));
             lock (entries)
             {
                 foreach (var k in entries.Where(kv => !MetricsCache.Fresh(kv.Value)).Select(kv => kv.Key).ToList()) entries.Remove(k);
