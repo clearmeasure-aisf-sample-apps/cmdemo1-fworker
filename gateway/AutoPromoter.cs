@@ -11,6 +11,15 @@ sealed class AutoPromoter(Runner runner, TimeSpan interval, bool enabled) : Back
     // the gateway's cap for one pass; the rule script ends its own work earlier (budget_seconds, 200), so this is the backstop, not the plan
     public static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(240);
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(60);
+    /// <summary>
+    /// Whether the loop runs in this gateway (W9.10p, owner decision 2026-10-30): where delivery.autoPromote names this environment, and where the engine acts only until the train promotes for real
+    /// (delivery.autoPromote.trainActs, off until W9.12). So the app's uat and prod stay with this loop in an engine that acts: the delivery train there decides them in shadow and acts for tdd only, which it
+    /// observes (the release's lifecycle deploys it). One of the two promotes, never both: the rule script promotes every environment of autoPromote.environments, so the train takes them all or none.
+    /// </summary>
+    public static bool Runs(InstanceConfig instance, bool engineActs) => instance.AutoPromoteHere && !(engineActs && instance.TrainActs);
+
+    /// <summary>Whether the loop runs at all (the composition decided it with <see cref="Runs"/>); a stopped one never calls the rule script.</summary>
+    public bool Enabled => enabled;
     public Func<bool>? MayAct { get; init; }
     // W5.2: what the pass did, for the shadow run's comparison with the delivery train (DeliveryShadow); null where there is no shadow. It must not throw and v1 does not wait for it.
     public Action<JsonArray>? OnActions { get; init; }

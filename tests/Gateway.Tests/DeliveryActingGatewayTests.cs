@@ -152,8 +152,8 @@ public sealed class DeliveryActingGatewayTests
             Assert.Contains(stub.Seen, r => r.Method == "PUT" && r.Path.EndsWith("/interruptions/Interruptions-3/responsible"));
             Assert.Equal("Proceed", JsonNode.Parse(stub.Seen.Single(r => r.Path.EndsWith("/submit")).Body)!["Result"]!.ToString());
             Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
-            // the engine acts, so the shadow's comparison is not there
-            Assert.Null((await Get(host, "/api/v1/status")).Json!["deliveryShadow"]);
+            // the engine acts for tdd; the shadow of the environments v1's AutoPromoter still promotes (uat and prod, W9.10p) is there, so the status shows its comparison
+            Assert.NotNull((await Get(host, "/api/v1/status")).Json!["deliveryShadow"]);
         });
     }
 }

@@ -73,6 +73,14 @@ public sealed record TrainDecided(string Key, string Action, string Release, IRe
     IReadOnlyList<string>? Superseded = null, bool Replay = false) : IEvent;
 
 /// <summary>
+/// W9.10p: a command that a train in an engine that acts would send for an environment v1's AutoPromoter still promotes (<see cref="DeliveryPolicy.Shadow"/>): the train publishes this in place of the
+/// <c>PromoteRelease</c> or <c>AnswerSignOff</c>, so no executor ever sees the command. Only the shadow records it (<see cref="DeliveryActingShadowHandlers"/>); the fields are plain text, so it travels the
+/// outbox like any other message. <paramref name="Name"/> is the command's name, <paramref name="IdempotencyKey"/> its key.
+/// </summary>
+[MessageIdentity("delivery.train.shadow-command")]
+public sealed record ShadowCommand(string Key, string Name, string IdempotencyKey, string Release) : IEvent;
+
+/// <summary>
 /// The watcher's replay of Octopus's history begins (<paramref name="Active"/> true) or is applied (false). While it runs the train takes its inputs in and decides nothing; the end makes it judge
 /// its state once, and what it decides then is flagged <see cref="TrainDecided.Replay"/> (a judgment of history, not of a live event).
 /// </summary>

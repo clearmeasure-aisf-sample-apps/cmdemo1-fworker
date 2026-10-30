@@ -68,7 +68,8 @@
       "enabled": false,
       "environments": ["uat", "prod"],
       "gatewayEnvironment": "",
-      "signoffWaitHours": 2
+      "signoffWaitHours": 2,
+      "trainActs": false
     },
     "finalEnvironment": "prod",
     "dependenciesDelivered": true,

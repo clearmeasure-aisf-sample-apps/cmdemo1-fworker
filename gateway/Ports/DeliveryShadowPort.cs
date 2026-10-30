@@ -36,7 +36,11 @@ static class DeliveryShadowSettings
             if (project.Length == 0) return null;
             // v1 promotes only where autoPromote is on and names this gateway's environment (AutoPromoteHere); otherwise the train observes
             var acts = cfg.AutoPromoteHere;
-            var environments = acts && ap?["environments"] is JsonArray a ? a.Select(e => e?.ToString() ?? "").Where(e => e != "").ToList() : [];
+            var named = acts && ap?["environments"] is JsonArray a ? a.Select(e => e?.ToString() ?? "").Where(e => e != "").ToList() : [];
+            // W9.10p: where the engine acts the train promotes the named environments only when delivery.autoPromote.trainActs is on (W9.12). Until then v1's AutoPromoter promotes them and the train decides them in shadow
+            // (policy.Shadow: the decisions are recorded and compared with the AutoPromoter's, the commands are not executed). In the shadow run itself (the engine does not act) every named environment is v1's and recorded as before.
+            var shadowed = engineActs && !cfg.TrainActs ? named : [];
+            var environments = shadowed.Count > 0 ? [] : named;
             var names = new Dictionary<string, string>(); var urls = new Dictionary<string, string>();
             foreach (var k in DeliveryPolicy.Chain)
             {
@@ -47,7 +51,7 @@ static class DeliveryShadowSettings
             var window = new HealthWindow(Num(o?["health"], "spacingMinutes", 5), Num(o?["health"], "settleMinutes", 10));
             // W8.3: delivery.rollback.migrationPaths, the path fragments that mark a file as a database migration (the rollback's precondition); absent: DbUp's scripts/Update
             var migrations = (cfg.Root?["delivery"]?["rollback"]?["migrationPaths"] as JsonArray)?.Select(m => m?.ToString() ?? "").Where(m => m != "").ToList();
-            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, migrations);
+            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, shadowed, migrations);
         }
         catch { return null; }
     }

@@ -12,7 +12,8 @@ namespace Fworker.Workflows.Delivery;
 // only at the newest release that succeeded in the previous one and judges it with the rules of D2 (EvidenceComposite) and D3 (ContentGate, ReleaseChoice), falling back to the release
 // before it when the newer is blocked, as the content gate decides today. Where v1 promotes (tdd), v1's decision stays the acting one: the train decides, publishes TrainDecided and, only
 // when its policy lets it act (DeliveryPolicy.Acts) and the engine acts, asks for the deployment with PromoteRelease and answers a Sign-off with AnswerSignOff. Nothing here calls Octopus: both
-// are integration commands that a host without Engine.V2Acts does not execute.
+// are integration commands that a host without Engine.V2Acts does not execute. W9.10p: in an environment v1's AutoPromoter still promotes (DeliveryPolicy.Shadow) the train decides the same and its
+// commands leave as ShadowCommand, which only the shadow records.
 //
 // It is a saga in the sense of the design (state per key, saved with a revision, timers by Wolverine scheduled messages), not Wolverine's Saga base class: that one needs generated handler
 // code per saga type, and the state here is the one JSON document the shadow run compares. Delivery is at least once: every input is applied twice with the same result.
@@ -400,7 +401,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             if (so.Answered)
             {
                 // the answer's effect is not seen yet: send it again after a while (the key makes a second send harmless)
-                if (so.AnsweredAt is { } at && now - at >= DeliveryTrainService.CommandRetry) { so.AnsweredAt = now; Out.Add(AnswerOf(so, so.LastProceed, so.LastNotes)); }
+                if (so.AnsweredAt is { } at && now - at >= DeliveryTrainService.CommandRetry) { so.AnsweredAt = now; Out.Add(Send(AnswerOf(so, so.LastProceed, so.LastNotes), so.Version)); }
                 wakes.Add((so.AnsweredAt ?? now).Add(DeliveryTrainService.CommandRetry));
                 continue;
             }
@@ -441,7 +442,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             var proceed = hard.Count == 0;
             var notes = proceed ? "Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md)." : $"Aborted by the factory worker gateway: {string.Join("; ", hard)}";
             so.Answered = true; so.AnsweredAt = now; so.LastProceed = proceed; so.LastNotes = notes;
-            Out.Add(AnswerOf(so, proceed, notes));
+            Out.Add(Send(AnswerOf(so, proceed, notes), so.Version));
             wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
             Decide(proceed ? "signoff-proceed" : "signoff-abort", so.Version, j.Items, proceed ? [] : hard);
         }
@@ -477,7 +478,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
                 continue;
             }
             // asked for, and Octopus shows nothing yet
-            if (now - at >= DeliveryTrainService.CommandRetry && s.Releases.TryGetValue(version, out var rel)) { s.Requested[version] = now; Out.Add(PromoteOf(rel)); }
+            if (now - at >= DeliveryTrainService.CommandRetry && s.Releases.TryGetValue(version, out var rel)) { s.Requested[version] = now; Out.Add(Send(PromoteOf(rel), rel.Version)); }
             wakes.Add(s.Requested[version].Add(DeliveryTrainService.CommandRetry));
             Decide("following", version, [], [$"the deployment of {version} to {TargetName} was requested; Octopus shows none yet"]);
             return;
@@ -541,7 +542,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         var release = s.Releases[pick.Version];
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
         s.RequestNumbers[pick.Version] = s.RequestNumbers.GetValueOrDefault(pick.Version) + 1;   // a new request: a new key (the retries of this one keep it)
-        Out.Add(PromoteOf(release));
+        Out.Add(Send(PromoteOf(release), release.Version));
         wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
         Decide("promote", pick.Version, winner.Items, []);
 
@@ -555,6 +556,9 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
 
     /// <summary>How many open releases behind the one that wins (or waits for the clock) are still read to say what they wait for.</summary>
     const int MaxDescribedBehind = 10;
+
+    /// <summary>W9.10p: the command as it goes out: itself, or, in an environment v1 still promotes (<see cref="DeliveryPolicy.Shadow"/>), the record of it that only the shadow handles.</summary>
+    object Send(IntegrationCommand command, string release) => p.Shadow ? new ShadowCommand(s.Key, command.Name, command.IdempotencyKey, release) : command;
 
     // the key names the request (W9.10o): deployable, version, environment and the number of the request, so a promotion asked for again after the first was dropped, or after a rollback, is not answered from the ledger
     PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}|{Math.Max(1, s.RequestNumbers.GetValueOrDefault(r.Version))}", p.Deployable, p.Project, r.Version, env);

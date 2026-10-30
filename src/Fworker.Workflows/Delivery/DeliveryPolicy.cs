@@ -23,6 +23,7 @@ public sealed record DeliveryPolicySettings(
     HealthWindow? Window = null,
     double SignoffWaitHours = 2,
     bool DependenciesDelivered = false,
+    IReadOnlyList<string>? ShadowEnvironments = null,
     IReadOnlyList<string>? MigrationPaths = null);
 
 /// <summary>The policy of one train: a deployable in one environment (tdd, uat or prod).</summary>
@@ -30,7 +31,7 @@ public sealed record DeliveryPolicy(
     string Deployable, RepoId Repository, string Environment, Promoter Promoter, bool Enabled, string Project,
     IReadOnlyDictionary<string, string> EnvironmentNames, IReadOnlyDictionary<string, string> EnvironmentUrls,
     string HealthPath, HealthWindow Window, double SignoffWaitHours, bool DependenciesDelivered,
-    int PollSeconds = 120, int MinReadGapSeconds = 30, IReadOnlyList<string>? MigrationPaths = null)
+    int PollSeconds = 120, int MinReadGapSeconds = 30, bool Shadow = false, IReadOnlyList<string>? MigrationPaths = null)
 {
     /// <summary>W8.3: the path fragments that mark a file as a database migration of the deployable (the rollback's precondition); the default is DbUp's scripts/Update.</summary>
     public IReadOnlyList<string> Migrations => MigrationPaths is { Count: > 0 } ? MigrationPaths : RollbackRules.DefaultMigrationPaths;
@@ -51,6 +52,10 @@ public sealed record DeliveryPolicy(
 
     /// <summary>The train promotes (creates deployments, answers Sign-offs) only for an enabled environment after tdd that the gateway promotes.</summary>
     public bool Acts => Enabled && Promoter == Promoter.Gateway && ReleaseChoice.PreviousEnvironment(Environment) is not null;
+
+    // The Shadow parameter (W9.10p): the train decides here, in the engine that acts, but v1's AutoPromoter still promotes (the app's uat and prod until the train's recorded clean live window, W9.12): the decisions are published and
+    // compared with v1's, and the commands it would send are wrapped in ShadowCommand, which the shadow records and nothing executes. False for every environment of the shadow run, whose commands
+    // are all recorded by the shadow host's handlers anyway, and for an environment the train promotes for real.
 }
 
 public interface IDeliveryPolicies
@@ -83,11 +88,13 @@ public sealed class CatalogDeliveryPolicies(Func<CatalogSnapshot> catalog, Func<
             foreach (var env in DeliveryPolicy.Chain)
             {
                 // fail closed (v1: without delivery.autoPromote.enabled and the environment named nobody promotes); tdd is deployed by the release's lifecycle, never by the train
-                var named = s?.Environments?.Any(e => string.Equals(e, env, StringComparison.OrdinalIgnoreCase)) == true;
+                var promoted = s?.Environments?.Any(e => string.Equals(e, env, StringComparison.OrdinalIgnoreCase)) == true;
+                var shadowed = !promoted && s?.ShadowEnvironments?.Any(e => string.Equals(e, env, StringComparison.OrdinalIgnoreCase)) == true;   // (W9.10p: decided, recorded, not executed)
+                var named = promoted || shadowed;
                 var promoter = env == "tdd" ? Promoter.Pipeline : s?.Promoter ?? Promoter.External;
                 list.Add(new DeliveryPolicy(d.Name.ToLowerInvariant(), d.Repository, env, promoter, named && env != "tdd", s?.Project ?? "",
                     s?.EnvironmentNames ?? new Dictionary<string, string>(), s?.EnvironmentUrls ?? new Dictionary<string, string>(),
-                    EvidenceComposite.HealthPath(s?.HealthPath ?? d.HealthPath), s?.Window ?? new HealthWindow(5, 10), s?.SignoffWaitHours ?? 2, s?.DependenciesDelivered ?? false, MigrationPaths: s?.MigrationPaths));
+                    EvidenceComposite.HealthPath(s?.HealthPath ?? d.HealthPath), s?.Window ?? new HealthWindow(5, 10), s?.SignoffWaitHours ?? 2, (s?.DependenciesDelivered ?? false) && !shadowed, Shadow: shadowed && env != "tdd", MigrationPaths: s?.MigrationPaths));
             }
         }
         return list;

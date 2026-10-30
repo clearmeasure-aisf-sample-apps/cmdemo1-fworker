@@ -82,7 +82,9 @@ public sealed class DeliveryShadowPortTests
         Assert.False(DeliveryShadowSettings.From(Config(Full.Replace("\"delivery\":{", "\"delivery\":{\"dependenciesDelivered\":\"yes\",")), engineActs: true)!.DependenciesDelivered);
         // and the policies of the home repository's deployable carry it
         var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, DateTimeOffset.UtcNow, "acme", Home, null, [new RepositoryEntry(Home, [new DeployableEntry("ui", Home, null, null, null, null, false)])], []);
-        Assert.All(new CatalogDeliveryPolicies(() => snapshot, DeliveryShadowSettings.For(Config(on), () => snapshot, engineActs: true)).All(), p => Assert.True(p.DependenciesDelivered));
+        // (W9.10p: uat and prod are decided in shadow while v1's AutoPromoter promotes them, and the rule is off there until delivery.autoPromote.trainActs; see DeliveryUatProdV1Tests)
+        var trainActs = on.Replace("\"autoPromote\":{", "\"autoPromote\":{\"trainActs\":true,");
+        Assert.All(new CatalogDeliveryPolicies(() => snapshot, DeliveryShadowSettings.For(Config(trainActs), () => snapshot, engineActs: true)).All(), p => Assert.True(p.DependenciesDelivered));
         Assert.All(new CatalogDeliveryPolicies(() => snapshot, DeliveryShadowSettings.For(Config(on), () => snapshot)).All(), p => Assert.False(p.DependenciesDelivered));
     }
 

@@ -46,6 +46,10 @@ auto | ^(push gate|pr-checks|model ladder|testing profile):
 owner | ^owner: pr-checks with an item token
 manager | ^mgr: pr-checks gives the supervisor
 
+# W9.10p: where the engine acts, the app's uat and prod stay with v1's AutoPromoter (the delivery train decides them in shadow and acts for tdd only). The run names the gateway environment of delivery.autoPromote
+# v2ci (run.ps1), so these are the end-to-end proof that the loop runs on v2: a release goes to uat, its Sign-off is answered, then to prod, each deployment created once; and a Sign-off the gateway did not create is left alone.
+promote | ^promote: every gate met:
+promote | ^promote: a Sign-off of a deployment the gateway did not create
 # W9.4 gate: the delivery verbs that a session or a scenario calls through the verb route. private-build (the push gate's attestation) and publish-demo (the demo
 # video's release and asset) are answered by v2's own code (gateway/Ports/DeliveryVerbHost.cs) and write what the rule scripts write; no difference is declared.
 # settle, copilot-settle, copilot-owner and ci-release have no scenario that can be claimed here: the sweep's settle is the script's own (sync-board, W9.8), and the

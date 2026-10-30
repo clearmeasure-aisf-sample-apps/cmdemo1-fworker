@@ -80,8 +80,8 @@ static class GatewayWolverineExtensions
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item
                     var mergedDeriver = ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable);
                     if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));
-                    // W9.4: the delivery train acts: it promotes (PromoteRelease, AnswerSignOff are executed against Octopus) and the watcher's events reach it; v1's auto-promote loop does not start (AddGatewayBackground)
-                    if (mergedDeriver is not null) octopusPort = DeliveryActingWiring.Attach(host, c, () => sp.GetService<ISystemCatalog>(), cs, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger);
+                    // W9.4: the delivery train acts: it promotes (PromoteRelease, AnswerSignOff are executed against Octopus) and the watcher's events reach it. W9.10p: for tdd only; v1's auto-promote loop keeps uat and prod (AddGatewayBackground, AutoPromoter.Runs) and the train's shadow of them is the holder's
+                    if (mergedDeriver is not null) octopusPort = DeliveryActingWiring.Attach(host, c, () => sp.GetService<ISystemCatalog>(), cs, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger, shadowHolder);
                     // W6.6: the intake of docs items (off unless intake is enabled and names the docs plan in intake.v2Plans); the plant's facts are read when the job runs
                     if (workItems.Intake is { Enabled: true } && workItems.Intake.V2Plans.Count > 0)
                     {
@@ -188,6 +188,9 @@ static class GatewayWolverineExtensions
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)
             services.AddSingleton(sp => { var h = sp.GetRequiredService<WolverineHostService>(); return new RecurringJobScheduler(recurring!, jobs, r => h.PublishAsync(r), () => c.Leader.MayAct); });
+        // W9.10p: where the engine acts and v1's AutoPromoter still promotes the app's uat and prod, the train's shadow of them is found through the same holder (the AutoPromoter's passes, the status endpoints)
+        if (c.Engine.V2Acts && c.WolverineHost && c.Instance.Home != null && AutoPromoter.Runs(c.Instance, true))
+            services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return shadowHolder; });
         // W5.2: the shadow run of the delivery train (resolving these builds the host first, which makes them)
         if (c.Engine.ShadowRuns && c.Instance.Home != null)
         {

@@ -890,6 +890,27 @@ that needs no GitHub, `ReadModelSettings` what they take from `config/instance.j
   local time with its offset). (5) A regular expression of the configuration or of the diff that takes more than ten seconds is an `internal-error` (exit 20) and not a wait without end.
 - *Not here.* No smoke evidence, no overflow, no merge queue (the W7 scope cut). `get-item` and the other item verbs (W9.2) read the same state through the same store.
 
+**W9.10p as built (#555): the app's uat and prod stay with v1's `AutoPromoter`** (owner decision 2026-10-30, decision 2 of the audit). Where the engine acts the train promotes nothing in uat or prod, and the loop that calls the rule
+script `auto-promote` keeps promoting them; the train acts for tdd only, where it observes the release lifecycle's deployment and publishes `DeliveredTo(tdd)`. #545 (W9.4) stops the loop wherever `Engine.V2Acts`; this row narrows that stop
+to the day the train takes the environments over. It changes the shared gateway in one place, the composition's line that decides whether the loop starts (`AutoPromoter.Runs`); everything else is inert unless the engine acts.
+- *The switch.* `delivery.autoPromote.trainActs` (`config/instance.json`, false; `InstanceConfig.TrainActs`). `AutoPromoter.Runs(instance, engineActs)`: the loop starts when `autoPromote` names this gateway's environment, except where the engine acts
+  and `trainActs` is on. One of the two promotes: the rule script promotes every environment of `autoPromote.environments`, so the train takes them all or none. W9.12 sets `trainActs` in `deploy.overrides.json` and removes the loop;
+  nothing in the deployed overrides names it today.
+- *The train in shadow.* With the engine acting and `trainActs` off, `DeliveryShadowSettings.From` gives the policy no promoted environment and names the autoPromote environments in `DeliveryPolicySettings.ShadowEnvironments`; their
+  `DeliveryPolicy` has `Acts` and `Shadow`. The train decides there as it does in the shadow run (the same decisions, the same state), but what it would send, `PromoteRelease` and `AnswerSignOff`, leaves as `ShadowCommand` (name, key and
+  release as plain text), so no executor sees a command for uat or prod. `dependenciesDelivered` is off for a shadow environment (v1 has no such rule; W9.12 turns it on with the environments). tdd is `Promoter.Pipeline`: its policy neither
+  acts nor shadows, and `Settle` still publishes `DeliveredTo(tdd)` for the items of a succeeded deployment.
+- *Recording and comparison.* `DeliveryActingShadowHandlers` is `DeliveryShadowHandlers` for a host where the engine acts: the `TrainDecided` of a shadow environment goes to `DeliveryShadow.ObserveV2` (the `AutoPromoter` hands its pass to
+  `ObserveV1`, as in the shadow run) and a `ShadowCommand` is recorded (`executed: false`); a decision of an environment the train promotes for real is left to the history. `/api/v1/status` and `GET /api/v1/delivery-shadow` show the
+  comparison, which is the evidence the W5 gate (restated above) reads for W9.12.
+- *Where it is registered.* `DeliveryActingWiring.Configure` (`gateway/Ports/DeliveryExecutorPort.cs`, what `Attach` calls for the acting host) registers `DeliveryActingShadowHandlers` beside the train's, the router's and the executor's handlers, and the
+  `DeliveryShadow` they record to; `Attach` sets `DeliveryShadowHolder.Shadow`. The composition registers the holder and the comparison tick (`DeliveryShadowService`) where the engine acts and `AutoPromoter.Runs` (so the `AutoPromoter`'s `OnActions`
+  reaches `ObserveV1`, and `/api/v1/status` and `GET /api/v1/delivery-shadow` show the comparison). Both are absent once `trainActs` is on: nothing is in shadow then. `DeliveryActingShadowHostTests` runs `Configure` in a real Wolverine host: the decision
+  of a shadow environment lands in the comparison, the `ShadowCommand` is recorded and no `PromoteRelease` reaches the executor; with the environment promoted by the train the command reaches the executor and the shadow records nothing.
+- *Parity.* `v2-claims.txt` claims two scenarios of the suite `promote` on the v2 engine (`run.ps1` names the gateway environment of `autoPromote` `v2ci` there): a release goes to uat, its Sign-off is answered, then to prod, each deployment
+  created once; and a Sign-off of a deployment the gateway did not create is left alone. Tests: `DeliveryUatProdV1Tests` (the settings, `Runs`, a started gateway whose engine acts has the loop, the holder and the tick on, and none of them once `trainActs` is on), `DeliveryShadowEnvironmentTests` (the
+  train in a shadow environment, the handlers, the comparison with an `AutoPromoter` pass).
+
 **W9.4 as built (#356), the delivery train verbs.** Owner decisions of 2026-10-28 stand: hybrid composition (v1's plant offers the sessions and v1's sweep script still runs what v2 does not own), tdd only, the W7 scope cut (no smoke
 evidence, no overflow, no merge queue). Everything is registered only where `Engine.V2Acts`; v1, the shadow run and `FACTORY_V2_OFF` are what they were.
 - **The verbs** `settle`, `publish-demo`, `ci-release`, `copilot-settle`, `copilot-owner` and `private-build` are answered by `Fworker.Workflows.Delivery.Verbs`, ported one for one from `Verbs.Delivery.ps1` and `Verbs.Pr.ps1`: the same refusals with the
