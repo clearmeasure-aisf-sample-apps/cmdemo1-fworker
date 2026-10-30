@@ -63,7 +63,7 @@ public class DeliveryShadowEnvironmentTests
         Assert.Equal("1.0.2", f.LastDecision.Release);
         Assert.Empty(f.Of<PromoteRelease>());
         var c = Assert.Single(f.Of<ShadowCommand>());
-        Assert.Equal(new ShadowCommand(f.Key, "PromoteRelease", "PromoteRelease|orders|1.0.2|uat", "1.0.2"), c);
+        Assert.Equal(new ShadowCommand(f.Key, "PromoteRelease", "PromoteRelease|orders|1.0.2|uat|1", "1.0.2"), c);
         // as in an environment it promotes, the request is kept in the state, so a later input neither decides nor sends it again
         await f.After(TimeSpan.FromMinutes(1));
         Assert.Single(f.Of<ShadowCommand>());

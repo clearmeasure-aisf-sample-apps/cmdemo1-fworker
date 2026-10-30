@@ -84,6 +84,7 @@ static class DeliveryActingWiring
         var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter));
         // W9.10p: the shadow of the environments v1's AutoPromoter still promotes (uat and prod until delivery.autoPromote.trainActs): the AutoPromoter's passes (AddGatewayBackground) and the status endpoints find it through the holder
         if (shadowHolder is not null) shadowHolder.Shadow = parts.Shadow;
+        RollbackWiring.Attach(host, c, env, mayAct, ledger);   // W8.3: the executor of the train's incident rollback (RollbackRelease) and the migration probe it takes; the executor refuses every environment but tdd
         var previous = host.RuntimeCommands;
         host.RuntimeCommands = (services, w) =>
         {

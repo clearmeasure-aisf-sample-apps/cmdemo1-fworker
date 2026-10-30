@@ -208,7 +208,8 @@ static class WorkItemWiring
         var budget = c.GitHubBudget;
         Action<string, string?, string?, string?> observe = (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
         var clients = new GitHubClientFactory(http, creds, new Fworker.Integrations.GitHub.GitHubBudget());
-        var merge = new MergePullRequestHandler(new SqlCommandStores(connectionString).Ledger, new MergeDirect(clients));
+        var claimNode = Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node;
+        var merge = new MergePullRequestHandler(new SqlCommandStores(connectionString, owner: () => new Fworker.Integrations.Commands.ClaimOwner(claimNode, c.Leader?.Epoch ?? 0)).Ledger, new MergeDirect(clients));
         var facts = new HttpMergeFactsReader(http, creds, Str("name", "factory-worker"), Str("videoLabel", "video"), observe);
         var versions = new SqlProjectionVersions(open); var echo = new ProjectionEcho(versions);
         BoardColumnProjection? card = null;

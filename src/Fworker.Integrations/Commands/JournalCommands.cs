@@ -32,7 +32,9 @@ public static class JournalKeys
 public sealed class WriteJournalLineHandler : IntegrationCommandHandler<WriteJournalLine>
 {
     readonly JournalLedger ledger;
-    public WriteJournalLineHandler(IIdempotencyLedger idempotency, JournalLedger ledger) : base(idempotency) { this.ledger = ledger; }
+    // W9.10c: an earlier handling that was cut off may have posted the line: its key is in the item's journal ledger (the comment itself carries no key)
+    public WriteJournalLineHandler(IIdempotencyLedger idempotency, JournalLedger ledger) : base(idempotency, async (c, ct) =>
+        await ledger.Recorded(c.Item, c.Event, c.Key, ct) ? EffectLookup.Found(CommandResult.Success("recorded")) : EffectLookup.Absent) { this.ledger = ledger; }
 
     protected override async Task<CommandResult> Execute(WriteJournalLine c, CancellationToken ct)
     {

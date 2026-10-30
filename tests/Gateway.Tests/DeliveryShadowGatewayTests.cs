@@ -113,6 +113,7 @@ public sealed class DeliveryShadowGatewayTests
         env.Set("FACTORY_DB_CONNECTION", cs);
         env.Set("GH_TOKEN", "ghp_" + new string('B', 26));   // composed at run time; the stub accepts anything
         env.Set("GITHUB_API_URL", stub.Base);
+        env.Set("FACTORY_WEBHOOK_SECRET_AZURE_MONITOR", "azure-secret-for-tests");   // W8.2: the shadow run has the ingress inbox, and still not the alert route
         env.EditConfig = cfg =>
         {
             cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray(), ["shadowEnvironments"] = new JsonArray("tdd") };
@@ -184,6 +185,18 @@ public sealed class DeliveryShadowGatewayTests
             var live = (await Get(host, "/api/v1/status")).Json!["deliveryShadow"]!;
             Assert.Equal(0, live["v2"]!["commandsExecuted"]!.GetValue<long>());
             Assert.True(0 == long.Parse((await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]), string.Join(" // ", await Rows(cs, "SELECT message_type, exception_type, LEFT(exception_message, 400) FROM wolverine.wolverine_dead_letters")));
+        });
+    }
+
+    [Fact]
+    public async Task TheAlertRoute_IsNotThereInTheShadowRun_EvenThoughTheIngressInboxIs()
+    {
+        if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
+        await WithShadowGateway(async (cs, host, stub) =>
+        {
+            Assert.True(await Until(async () => (await Get(host, "/api/v1/status")).Json?["wolverine"]?["state"]?.ToString() == "running", 90), "the host did not start");
+            Assert.NotNull(host.Services.GetService<IngressInboxPort>());
+            Assert.Equal(404, (await host.SendAsync("POST", "/webhooks/azure-monitor?deployable=ui&environment=tdd&secret=azure-secret-for-tests", GatewayEnvironment.HookPort, body: "{}")).Status);
         });
     }
 

@@ -190,6 +190,23 @@ public sealed class FeaturePlanWiringTests
     }
 
     [Fact]
+    public void WhereTheEngineActs_TheRearmOfTheSagasAndThePurgeOfTheLedger_AreFilled_AndTheHealthBlockExists()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = new GatewayEnvironment();
+        env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Set("GH_TOKEN", Token);
+        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+        env.Apply();
+        using var host = new GatewayHost();
+        var started = Task.Run(() => host.Server);
+        Assert.True(started.Wait(TimeSpan.FromSeconds(60)), "the gateway of an acting v2 environment did not finish starting");
+        var jobs = host.Services.GetRequiredService<RecurringJobRegistry>();
+        Assert.True(jobs.Has(RecurringJobSlots.SagaRearm));   // W9.10o: the repair of a save whose timer or command was never sent
+        Assert.True(jobs.Has(RecurringJobSlots.LedgerPurge));   // W9.10o: the successes of the idempotency ledger do not live for ever
+        Assert.NotNull(host.Services.GetService<V2Health>());
+    }
+
+    [Fact]
     public void WhereTheEngineDoesNotAct_NoFeaturePartsExist()
     {
         if (!StubPwsh.Supported) return;

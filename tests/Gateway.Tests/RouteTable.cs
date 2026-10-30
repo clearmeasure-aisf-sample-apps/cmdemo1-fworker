@@ -26,6 +26,7 @@ public static class RouteTable
         new("GET", "/sessions/{name}", 200),
         new("POST", "/webhooks/github", 401),
         new("POST", "/webhooks/octopus", 404),   // W4.2: 404 unless the Octopus watcher is on (v2 acting)
+        new("POST", "/webhooks/azure-monitor", 404),   // W8.2: 404 unless the engine acts (Engine.V2Acts; the shadow run has the inbox too)
         // past the middleware: the endpoint checks its own credential
         new("POST", "/api/v1/runtime/redeem", 401, "unauthorized"),
         new("POST", "/api/v1/copilot/exchange", 401, "unauthorized"),

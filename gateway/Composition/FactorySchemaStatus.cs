@@ -4,12 +4,16 @@ using Microsoft.Data.SqlClient;
 
 // Where the schema of the gateway's database stands (docs/design/fworker-database.md): the start of the Wolverine host applies the scripts of Fworker.Database and checks the catalog
 // against them (WolverineHostService.RunAsync), and this holds the outcome for /ready, /api/v1/status and the services that must not touch the tables before they exist.
-// - Required is true where a database is configured and the environment runs the Wolverine host (today tdd and the v2 CI gateways). Elsewhere /ready and /api/v1/status are what they were.
-// - /ready answers 503 "waitingFor":"schema" until the first good verification of this process. After that /ready no longer depends on the database: a later outage shows in
+// - Tracked is true where a database is configured and the environment runs the Wolverine host (shadow and v2): /api/v1/status carries the schema block. Elsewhere /api/v1/status is what it was.
+// - Required (W9.10o) is true only where v2 acts (Engine.V2Acts) and a database is configured: only there is the schema part of being ready. In shadow v1 acts and needs no table, so a database that
+//   is down, slow to start or failing a v2-only script must not keep /ready at 503 (the operator treats a 503 as a failed release and reverts an unrelated v1 change); the schema then shows in status only.
+// - Where it is required, /ready answers 503 "waitingFor":"schema" until the first good verification of this process. After that /ready no longer depends on the database: a later outage shows in
 //   /api/v1/status (the schema and wolverine blocks) and does not flip /ready.
 // - Nothing here is a secret: a failure is a type, a SQL error number and a script name, never a message.
-sealed class FactorySchemaStatus(bool required)
+sealed class FactorySchemaStatus(bool required, bool? tracked = null)
 {
+    readonly bool tracked = tracked ?? required;
+
     public const int MaxDifferences = 20;
 
     readonly object gate = new();
@@ -21,7 +25,10 @@ sealed class FactorySchemaStatus(bool required)
     string? failedScript, lastFailure;
     SchemaReport? report;
 
-    /// <summary>A database is configured and the environment runs the Wolverine host: the schema is part of being ready.</summary>
+    /// <summary>A database is configured and the environment runs the Wolverine host (shadow or v2): the schema is reported in /api/v1/status.</summary>
+    public bool Tracked => tracked;
+
+    /// <summary>A database is configured and v2 acts here: the schema is part of being ready.</summary>
     public bool Required => required;
 
     /// <summary>The schema was verified good by this process (at least once): the tables exist, so the services that read them may.</summary>
@@ -71,10 +78,10 @@ sealed class FactorySchemaStatus(bool required)
         }
     }
 
-    /// <summary>The "schema" block of /api/v1/status; null where the schema is not required.</summary>
+    /// <summary>The "schema" block of /api/v1/status; null where the schema is not tracked.</summary>
     public JsonObject? Status()
     {
-        if (!required) return null;
+        if (!tracked) return null;
         lock (gate)
         {
             JsonArray Names(IEnumerable<string>? names) => new(names?.Select(n => (JsonNode?)n).ToArray() ?? []);

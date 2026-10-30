@@ -71,11 +71,40 @@ public sealed class WolverineHostOffTests(TwoPortGateway gw) : IClassFixture<Two
     }
 }
 
-/// <summary>With a connection string and a database that cannot be reached: the gateway starts and works as v1; /ready waits for the schema (503 "schema") and the host keeps trying in the background.</summary>
+/// <summary>With a connection string and a database that cannot be reached: the gateway starts and works as v1; /ready does not wait for the schema in shadow (W9.10o; the schema shows in the status) and the host keeps trying in the background.</summary>
 public sealed class WolverineHostUnreachableFixture : GatewayFixture
 {
     protected override string UpPath => "/health";
     protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); }
+}
+
+/// <summary>Where v2 acts (W9.10o): /ready is the one place the schema gates, so a database that does not answer keeps it at 503 with the reason.</summary>
+public sealed class WolverineHostV2UnreachableFixture : GatewayFixture
+{
+    protected override string UpPath => "/health";
+    protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() }; }
+}
+
+public sealed class WolverineHostV2UnreachableDatabaseTests(WolverineHostV2UnreachableFixture gw) : IClassFixture<WolverineHostV2UnreachableFixture>
+{
+    [Fact]
+    public async Task WhereV2Acts_ReadyWaitsForTheSchema_AndNamesIt_WithoutTheConnectionString()
+    {
+        if (!StubPwsh.Supported) return;
+        var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
+        Assert.Equal(503, ready.Status);
+        Assert.Equal(false, (bool?)ready.Json?["ready"]);
+        Assert.Equal("schema", (string?)ready.Json?["waitingFor"]);
+        Assert.Equal("upgrading", (string?)ready.Json?["state"]);
+        Assert.DoesNotContain("Password", ready.Json!.ToJsonString());
+        Assert.DoesNotContain("127.0.0.1", ready.Json.ToJsonString());
+        Assert.True(gw.Host.Services.GetRequiredService<FactorySchemaStatus>().Required);
+        // the v2 health block says it cannot be read yet (the schema is not good), and the status still answers
+        var st = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
+        Assert.Equal(200, st.Status);
+        Assert.Equal(false, (bool?)st.Json?["v2"]?["available"]);
+        Assert.Equal(true, (bool?)st.Json?["v2"]?["acts"]);
+    }
 }
 
 public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachableFixture gw) : IClassFixture<WolverineHostUnreachableFixture>
@@ -101,14 +130,14 @@ public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachab
     {
         if (!StubPwsh.Supported) return;
         Assert.NotNull(gw.ReadyAfter);   // up: /health answers, the start was not held by the database
-        // /ready deliberately waits for the schema where a database is configured (docs/design/fworker-database.md): it names what it waits for, and no connection string
+        // W9.10o: in shadow v1 acts and needs no table: /ready does not wait for the schema (a database that is down must not make a v1 release look failed). The schema is in the status, and no connection string is
         var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
-        Assert.Equal(503, ready.Status);
-        Assert.Equal(false, (bool?)ready.Json?["ready"]);
-        Assert.Equal("schema", (string?)ready.Json?["waitingFor"]);
-        Assert.Equal("upgrading", (string?)ready.Json?["state"]);
-        Assert.DoesNotContain("Password", ready.Json!.ToJsonString());
-        Assert.DoesNotContain("127.0.0.1", ready.Json.ToJsonString());
+        Assert.Equal(200, ready.Status);
+        var st = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
+        Assert.Equal("upgrading", (string?)st.Json?["schema"]?["state"]);
+        Assert.Equal((false, false), ((bool?)st.Json?["v2"]?["acts"], (bool?)st.Json?["v2"]?["available"]));   // the v2 health block is there in shadow too, and says it cannot read (the schema is not good)
+        Assert.DoesNotContain("Password", st.Json!.ToJsonString());
+        Assert.DoesNotContain("127.0.0.1", st.Json.ToJsonString());
         // the first attempt waits for a database that does not answer for the whole connect timeout (90 s): the start is "starting", not failed, and nothing else waits
         JsonNode? w = null;
         var sw = Stopwatch.StartNew();
@@ -145,7 +174,11 @@ public sealed class WolverineHostServiceTests
         public void Dispose() => Disposed++;
     }
 
-    static GatewayLeader Leader() => new(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = true }, "0.0.0");
+    /// <summary>A leader that is not acting yet: the lease is on and has not been taken (W9.10a: the node does not start).</summary>
+    static GatewayLeader WaitingLeader() => new(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = true }, "0.0.0");
+
+    /// <summary>The holder: the lease is taken and the predecessor's snapshot seen, as LeadershipService reports with StartActing.</summary>
+    static GatewayLeader Leader() { var l = WaitingLeader(); l.StartActing(); return l; }
 
     /// <summary>A schema that is good, as the real one reports after it applied the scripts and checked the catalog.</summary>
     internal static SchemaReport GoodReport => new() { Verified = true, Journaled = FactorySchema.Scripts.Count };
@@ -262,8 +295,9 @@ public sealed class WolverineHostServiceTests
         await svc.StartAsync(CancellationToken.None);
         await Until(() => svc.State == WolverineHostService.Phase.Running);
         fail = true;
-        await leader.OnSuperseded!(null);
-        await leader.OnReacquired!(null);   // the node begins anew and applies the schema again
+        await leader.RunBeforeHandOverAsync("superseded");
+        leader.MarkSupersededForTest();
+        leader.StartActing();   // the standby took the lease again: the node begins anew and applies the schema again
         await Until(() => (string?)status.Status()!["state"] == "failed");
         Assert.Equal("SchemaLockTimeout", (string?)status.Status()!["lastFailure"]);
         Assert.Null(status.Waiting());   // /ready stays 200
@@ -293,18 +327,19 @@ public sealed class WolverineHostServiceTests
     }
 
     [Fact]
-    public async Task Supersession_RunsTheHandOverFirst_ThenTheNodeLeaves_AndAStandbyThatTakesTheLeaseAgainBringsItBack()
+    public async Task Supersession_TheNodeLeavesBeforeTheHandOver_AndAStandbyThatTakesTheLeaseAgainBringsItBack()
     {
         var leader = Leader(); var order = new List<string>(); var hosts = new List<FakeHost>();
-        leader.OnSuperseded = _ => { order.Add("hand-over"); return Task.CompletedTask; };   // what LeadershipService sets
         var svc = Service(leader, (_, _) => { var h = new FakeHost(); hosts.Add(h); return h; });
+        // what LeadershipService does: BeforeHandOver first, then the final snapshot and the end of the streams (W9.10a)
+        async Task HandOver() { await leader.RunBeforeHandOverAsync("superseded"); order.Add(hosts[0].Stopped == 1 ? "node-left" : "node-still-up"); order.Add("hand-over"); }
         await svc.StartAsync(CancellationToken.None);
         await Until(() => svc.State == WolverineHostService.Phase.Running);
-        await leader.OnSuperseded!(null);
-        order.Add(hosts[0].Stopped == 1 ? "node-left" : "node-still-up");
-        Assert.Equal(new[] { "hand-over", "node-left" }, order);
+        leader.MarkSupersededForTest();
+        await HandOver();
+        Assert.Equal(new[] { "node-left", "hand-over" }, order);
         Assert.Equal(WolverineHostService.Phase.Stopped, svc.State);
-        await leader.OnReacquired!(null);
+        leader.StartActing();   // the standby took the lease again, the plant is restored
         await Until(() => svc.State == WolverineHostService.Phase.Running);
         Assert.Equal(2, hosts.Count);
         await svc.StopAsync(CancellationToken.None);
@@ -312,14 +347,69 @@ public sealed class WolverineHostServiceTests
     }
 
     [Fact]
-    public async Task SupersessionWhileStarting_StopsTheStart_AndNoHostIsLeftRunning()
+    public async Task TheNodeDoesNotStart_WhileTheLeaseIsNotHeld_AndStartsWhenThisProcessActs()
     {
-        var leader = Leader(); var fake = new FakeHost();
-        var svc = Service(leader, (_, _) => fake, async (_, ct) => { await Task.Delay(Timeout.Infinite, ct); return GoodReport; });
+        var leader = WaitingLeader(); var hosts = new List<FakeHost>();
+        var svc = Service(leader, (_, _) => { var h = new FakeHost(); hosts.Add(h); return h; });
+        await svc.StartAsync(CancellationToken.None);   // the lease is not taken yet: no node, no schema work
+        await Task.Delay(300);
+        Assert.Equal(WolverineHostService.Phase.Idle, svc.State);
+        Assert.Empty(hosts);
+        leader.StartActing();                            // lease taken, predecessor's snapshot seen
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        Assert.Single(hosts);
+        leader.StartActing();                            // again: still one node
+        await Task.Delay(100);
+        Assert.Single(hosts);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task AProcessThatIsStopping_StartsNoNode()
+    {
+        var leader = WaitingLeader(); var built = 0;
+        var svc = Service(leader, (_, _) => { built++; return new FakeHost(); });
         await svc.StartAsync(CancellationToken.None);
-        await leader.OnSuperseded!(null);
+        leader.StartActing();
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        await leader.RunBeforeHandOverAsync("stop");   // the holder's stop: the node leaves first
+        leader.BeginStop();
         Assert.Equal(WolverineHostService.Phase.Stopped, svc.State);
-        Assert.Equal(0, fake.Started);
+        leader.StartActing();                          // a late call after BeginStop (role Stopping) starts nothing
+        await Task.Delay(300);
+        Assert.Equal(1, built);
+        Assert.Equal(WolverineHostService.Phase.Stopped, svc.State);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task WithTheLeaseOff_TheNodeStartsAtTheStartOfTheHost_AsItDid()
+    {
+        var leader = new GatewayLeader(new Runner(Path.Combine(AppContext.BaseDirectory, "no-such-dir", "factory.ps1")), new LeaderSettings { On = false }, "0.0.0");
+        var svc = Service(leader, (_, _) => new FakeHost());
+        await svc.StartAsync(CancellationToken.None);
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task TheOldNodeLeavesInTheHandOver_BeforeASuccessorCouldStartItsOwn()
+    {
+        // the order of a release, in one process for the test: the old holder's hand-over (node leaves, then the snapshot) completes before the successor acts
+        var oldLeader = Leader(); var newLeader = WaitingLeader();
+        var oldHost = new FakeHost(); var newHost = new FakeHost();
+        var oldSvc = Service(oldLeader, (_, _) => oldHost);
+        var newSvc = Service(newLeader, (_, _) => newHost);
+        await oldSvc.StartAsync(CancellationToken.None); await newSvc.StartAsync(CancellationToken.None);
+        await Until(() => oldSvc.State == WolverineHostService.Phase.Running);
+        Assert.Equal(WolverineHostService.Phase.Idle, newSvc.State);   // the new process holds no lease yet: it has no node beside the old one
+        Assert.Equal(0, newHost.Started);
+        await oldLeader.RunBeforeHandOverAsync("superseded");
+        Assert.Equal(1, oldHost.Stopped);
+        newLeader.StartActing();                                         // after the hand-over and the release of the lease
+        await Until(() => newSvc.State == WolverineHostService.Phase.Running);
+        Assert.Equal((1, 1), (oldHost.Stopped, newHost.Started));
+        await oldSvc.StopAsync(CancellationToken.None); await newSvc.StopAsync(CancellationToken.None);
     }
 
     [Fact]
