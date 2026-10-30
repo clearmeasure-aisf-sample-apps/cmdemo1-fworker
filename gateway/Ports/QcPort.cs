@@ -208,8 +208,12 @@ sealed class QcGitHubClient(HttpClient http, GitHubTokenProvider tokens, QcConfi
     }
 }
 
-/// <summary>The work item: the issue and board (QcGitHubClient), the state comment and the journal through the stores of the journal command (the same Get-State, Save-State and Add-Journal in C#).</summary>
-sealed class QcItemsAdapter(QcGitHubClient github, IJournalStore store, JournalLedger ledger) : IQcItems
+/// <summary>
+/// The work item: the issue and board (QcGitHubClient), the state comment and the journal through the stores of the journal command (the same Get-State, Save-State and Add-Journal in C#). The save of the state comment is taken under the
+/// item's lock (the one IItemLock, W9.10l), as the journal ledger's is: the store's save is a read of the revision followed by a write, and two savers that both pass the read overwrite each other (the plant's "offered" journal line,
+/// posted while the QC record was being assigned, wrote back the record as it was read, and the worker's accept found no assignment: exit 11, then 40 for every verb of the environment).
+/// </summary>
+sealed class QcItemsAdapter(QcGitHubClient github, IJournalStore store, JournalLedger ledger, IItemLock itemLock) : IQcItems
 {
     public Task<QcItemInfo> GetInfo(int item, CancellationToken ct) => github.ItemInfo(item, ct);
 
@@ -227,7 +231,8 @@ sealed class QcItemsAdapter(QcGitHubClient github, IJournalStore store, JournalL
     public async Task SaveState(int item, QcItemState state, CancellationToken ct)
     {
         var holder = (ItemState)state.Handle!;
-        try { await store.Save(item, holder, ct); }
+        try { await itemLock.Use(item, async () => { await store.Save(item, holder, ct); return 0; }, ct); }
+        catch (ItemBusyException e) { throw new QcReject(20, "item-busy", e.Message, new JsonObject { ["retryAfterSeconds"] = 5 }); }
         catch (StateConflictException e) { throw new QcStateConflictException(e.Message); }
         catch (JournalRefusedException e) when (e.Message.StartsWith("state-too-large", StringComparison.Ordinal)) { throw new QcReject(10, "state-too-large", e.Message); }
         catch (Exception e) when (e is HttpRequestException or JournalRefusedException) { throw new QcReject(20, "github-error", e.Message, new JsonObject { ["retryAfterSeconds"] = 30 }); }
@@ -367,7 +372,8 @@ static class QcWiring
         var repoClient = clients.For(home).GetAwaiter().GetResult();
         var store = new GitHubJournalStore(repoClient, new JournalIdentity(cfg.Name, ct => github.ServerLogin(ct), stateAuthors), utcNow);
         var minutes = cfg.Timing.TryGetValue("journalWaitingMinutes", out var m) ? m : 30;
-        var ledger = new JournalLedger(store, new JournalSettings(minutes, cfg.SecretPatterns), utcNow, itemLock: locks ?? ItemLocks.Default(env));
-        return new QcService(cfg, new QcItemsAdapter(github, store, ledger), github, new QcFactsAdapter(router), index, table, utcNow);
+        var itemLock = locks ?? ItemLocks.Default(env);
+        var ledger = new JournalLedger(store, new JournalSettings(minutes, cfg.SecretPatterns), utcNow, itemLock: itemLock);
+        return new QcService(cfg, new QcItemsAdapter(github, store, ledger, itemLock), github, new QcFactsAdapter(router), index, table, utcNow);
     }
 }
