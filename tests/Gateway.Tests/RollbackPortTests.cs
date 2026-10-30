@@ -118,6 +118,9 @@ public sealed class RollbackPortTests
     {
         public CommandResult? TryGet(string key) => throw new InvalidOperationException("connection detail that must not travel");
         public void Record(string key, CommandResult result) { }
+        public ClaimOutcome Claim(string key) => throw new InvalidOperationException("connection detail that must not travel");
+        public void ReleaseClaim(string key) { }
+        public void ExpireClaim(string key) { }
     }
 
     // ---- the read of the files two commits differ by --------------------------------------------------------------------------------------------------------
