@@ -67,6 +67,12 @@ internal static class SqlLeadershipSupport
 /// <summary>The GitHub-ref lease in memory (the rule script leader-lease): acquire, check, renew and release with the answers GatewayLeader reads.</summary>
 internal sealed class FakeRefServer
 {
+    sealed class Calls(Func<string, string, TimeSpan, Task<(int Code, string Output)>> run) : IRuleScriptCalls
+    {
+        public Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout) => run(verb, stdin, timeout);
+    }
+    public IRuleScriptCalls Calls_(Func<Task>? beforeAcquire = null) => new Calls(Run(beforeAcquire));
+
     readonly object gate = new();
     long epoch; string? holder; DateTime until; bool released;
 
@@ -119,7 +125,7 @@ internal sealed class FakeProcess
     public FakeProcess(string name, FakeLockServer locks, FakeRefServer refs, SqlLeadershipSupport.Nodes nodes, Func<Task>? beforeRefWrite = null)
     {
         Lease = locks.NewLease();
-        Leader = new GatewayLeader(refs.Run(beforeRefWrite), new LeaderSettings { On = true, CheckSeconds = 0.1, SqlCheckSeconds = 0.05 }, "0.0.0");
+        Leader = new GatewayLeader(refs.Calls_(beforeRefWrite), new LeaderSettings { On = true, CheckSeconds = 0.1, SqlCheckSeconds = 0.05 }, "0.0.0");
         Leader.UseSqlLease(Lease, fencesActing: true);
         Service = SqlLeadershipSupport.Service(Leader, nodes, name);
         SqlLeadershipSupport.HandOver(Leader, nodes, name);

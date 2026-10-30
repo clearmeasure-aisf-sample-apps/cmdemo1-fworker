@@ -51,10 +51,14 @@ sealed class LeaderSettings
     }
 }
 
-sealed class GatewayLeader(Func<string, string, TimeSpan, Task<(int Code, string Output)>> run, LeaderSettings cfg, string version) : ILeadership
+/// <summary>The rule-script call the lease makes (Runner implements it; a test stands in for the GitHub ref).</summary>
+interface IRuleScriptCalls
 {
-    public GatewayLeader(Runner runner, LeaderSettings cfg, string version) : this(runner.RunAsync, cfg, version) { }
+    Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout);
+}
 
+sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string version) : ILeadership
+{
     public enum Role { Off, Starting, Acting, Superseded, Stopping }
     readonly object gate = new();
     Role role = cfg.On ? Role.Starting : Role.Off;
@@ -136,7 +140,7 @@ sealed class GatewayLeader(Func<string, string, TimeSpan, Task<(int Code, string
             ct.ThrowIfCancellationRequested();
             // W9.10b: where the engine acts the ref is never written without the SQL lock (a newer process may have asked for it, or the connection may have dropped)
             if (requireLock && sql is { Held: false }) throw new SqlLockLostException();
-            var (code, output) = await run("leader-lease", Args("acquire").ToJsonString(), TimeSpan.FromSeconds(60));
+            var (code, output) = await runner.RunAsync("leader-lease", Args("acquire").ToJsonString(), TimeSpan.FromSeconds(60));
             JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
             if (code == 0 && j?["epoch"] is JsonValue ev && ev.TryGetValue<long>(out var e))
             {
@@ -187,7 +191,7 @@ sealed class GatewayLeader(Func<string, string, TimeSpan, Task<(int Code, string
     // Before a process acts for the first time: is it still the holder? A process superseded while it restored stands by instead.
     public async Task<bool> ConfirmAsync()
     {
-        var (code, output) = await run("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
+        var (code, output) = await runner.RunAsync("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
         if (code != 0 || j == null || (j["leader"] is JsonValue lv && lv.TryGetValue<bool>(out var lb) && lb)) return true;   // unreadable: as Hold does, it keeps the lease
         var cur = j["current"] as JsonObject;
@@ -200,7 +204,7 @@ sealed class GatewayLeader(Func<string, string, TimeSpan, Task<(int Code, string
     async Task Hold()
     {
         bool due; lock (gate) due = (DateTime.UtcNow - renewedAt).TotalSeconds >= cfg.RenewSeconds;
-        var (code, output) = await run("leader-lease", Args(due ? "renew" : "check").ToJsonString(), TimeSpan.FromSeconds(60));
+        var (code, output) = await runner.RunAsync("leader-lease", Args(due ? "renew" : "check").ToJsonString(), TimeSpan.FromSeconds(60));
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
         if (code != 0 || j == null) { lock (gate) failures++; return; }   // GitHub did not answer: nobody else can take the lease meanwhile either
         var leader = j["leader"] is JsonValue lv && lv.TryGetValue<bool>(out var lb) && lb;
@@ -237,7 +241,7 @@ sealed class GatewayLeader(Func<string, string, TimeSpan, Task<(int Code, string
     // A standby takes the lease when it was released or ran out; until then it reads the record (conditionally) at every check.
     async Task Watch(CancellationToken ct)
     {
-        var (code, output) = await run("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
+        var (code, output) = await runner.RunAsync("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
         if (code != 0 || j == null) { lock (gate) failures++; return; }
         JsonObject? cur;
@@ -443,7 +447,7 @@ sealed class GatewayLeader(Func<string, string, TimeSpan, Task<(int Code, string
     {
         if (Epoch == 0) return false;
         var a = Args("release"); a["plant_epoch"] = plantEpoch;
-        var (code, _) = await run("leader-lease", a.ToJsonString(), timeout);
+        var (code, _) = await runner.RunAsync("leader-lease", a.ToJsonString(), timeout);
         Log(new JsonObject { ["gateway"] = "leader", ["released"] = Epoch, ["plantEpoch"] = plantEpoch, ["exit"] = code });
         return code == 0;
     }

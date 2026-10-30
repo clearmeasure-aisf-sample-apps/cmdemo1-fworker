@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-sealed class Runner(string entry)
+sealed class Runner(string entry) : IRuleScriptCalls
 {
     // runner.pool > 0: long-lived pwsh workers take the calls (RunnerPool.cs); null (the default): one process per call, as below.
     readonly RunnerPool? pool = RunnerPool.Create(entry);
