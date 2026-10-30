@@ -229,7 +229,7 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, gw.PublicUrl, gw.TokenSecret));
         // master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs); only the acting gateway
         var leader = c.Leader;
-        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode) { MayAct = () => leader.MayAct });
+        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode, sp.GetRequiredService<V2VerbRoutes>()) { MayAct = () => leader.MayAct });
         // the operator session's recorded releases (gateway/Operator/OperatorReleaseLoader.cs): read once at start, after the revocations' read has started
         var skipRevocations = c.Revocation.SkipRevocations;
         services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, skipRevocations, sp.GetRequiredService<ServiceVerbCalls>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));

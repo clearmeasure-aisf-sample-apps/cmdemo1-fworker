@@ -370,7 +370,8 @@ public sealed class ReadModelsPortTests : IDisposable
     public async Task WhereTheEngineActs_TheSixVerbsAreV2s_EveryOtherVerbStaysBelow()
     {
         var routes = V2VerbRoutes.Build(Engine(dir, "prod", "\"prod\""), Gateway());
-        Assert.Equal(ReadModelRoutes.Verbs.Order(), routes.Verbs.Order());
+        // (the merge verbs register without the configuration: they find their parts at the first call, W9.3; the other groups need credentials this table does not have)
+        Assert.Equal(ReadModelRoutes.Verbs.Concat(MergeRoutes.Verbs).Order(), routes.Verbs.Order());
         var below = new Below();
         var router = new V2VerbRouter(below, routes);
         // check-secrets answers from v2 (the probes fail without an identity); get-item is not v2's
@@ -389,7 +390,7 @@ public sealed class ReadModelsPortTests : IDisposable
         Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine(dir, "tdd", "\"prod\""), Gateway()));          // v1 acts
         Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine(dir, "prod", "\"prod\"", "1"), Gateway()));    // the kill switch
         var bare = V2VerbRoutes.Build(Engine(dir, "prod", "\"prod\""), new ServiceCollection().BuildServiceProvider());
-        Assert.Equal(0, bare.Count);
+        Assert.All(ReadModelRoutes.Verbs, v => Assert.False(bare.TryGet(v, out _), v));   // (the merge verbs of W9.3 register anyway and find their parts at the first call)
     }
 
     [Fact]
