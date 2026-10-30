@@ -222,13 +222,14 @@ function Get-ClaimRefItems {
     return , @($out)
 }
 
-function Invoke-ClaimRefReap($List) {
+function Invoke-ClaimRefReap($List, $Skip = @{}) {
     $t = (Get-Cfg).timing; $f = Get-ClaimOrphanFile
     $first = if (Test-Path $f) { try { Get-Content -Raw $f | ConvertFrom-Json -AsHashtable -DateKind String } catch { @{} } } else { @{} }
     if ($null -eq $first) { $first = @{} }
     $board = @{}; foreach ($it in $List) { $board["$($it.number)"] = $it }
     $acts = @(); $keep = @{}; $now = Get-UtcNow
     foreach ($n in (Get-ClaimRefItems)) {
+        if ($Skip.ContainsKey([int]$n)) { if ($first.ContainsKey("$n")) { $keep["$n"] = $first["$n"] }; continue }   # an item that has a saga (skip_items, W9.10e): its refs are not reaped by v1
         try {
             $open = if ($board.ContainsKey("$n")) { [bool]$board["$n"].open } else { try { [bool](Get-ItemInfo $n).open } catch [FactoryReject] { if ($_.Exception.Code -in 'github-not-found', 'item-not-found') { $false } elseif ($_.Exception.Code -eq 'out-of-scope') { $null } else { throw } } }
             if ($null -eq $open) { continue }   # another environment's claim (the refs are shared when the instance name is): not ours to reap
@@ -509,6 +510,10 @@ function Invoke-SyncBoard($a) {
     if ((Test-Has $a 'gap') -and (Test-Has $a.gap 'since') -and (Test-Has $a.gap 'until')) { $gap = @{ since = (ConvertFrom-Iso $a.gap.since); until = (ConvertFrom-Iso $a.gap.until) } }
     $only = $null
     if (Test-Has $a 'items') { $only = @($a.items | ForEach-Object { [int]$_ } | Where-Object { $_ -gt 0 } | Select-Object -Unique -First 50) }
+    # skip_items (W9.10e): the items that have a saga (the gateway's V2Ownership). They are the v2 engine's: the item loop reads and acts on none of them (settle, merge pickup, the PASS merge, park, demote, auto-unpark, idle release)
+    # and the claim-ref reap leaves their refs alone. Absent where the engine does not act, so v1 sweeps every item as before.
+    $skipItems = @{}
+    if (Test-Has $a 'skip_items') { foreach ($x in @($a.skip_items)) { $si = 0; if ([int]::TryParse("$x", [ref]$si) -and $si -gt 0) { $skipItems[$si] = $true } } }
     $low = (Test-Has $a 'low') -and $a.low
     $skipped = @()
     $seenFile = Get-SeenFile
@@ -560,6 +565,8 @@ function Invoke-SyncBoard($a) {
         if (-not (Test-NameIn $c.label $it.labels)) { continue }
         # (issue 82: a closed item in any column the factory works is read too, so a park it was left with is removed below)
         if (-not $it.open -and -not ((Test-NameIn "$($it.column)" $c.columns.ai) -or (Test-NameIn "$($it.column)" $c.columns.hold))) { continue }
+        # an item that has a saga is the v2 engine's (W9.10e): v1 neither reads its state nor acts on it. (It still counts as waiting in the keeper's column: the backlog is the board's.)
+        if ($skipItems.ContainsKey([int]$it.number)) { if ($it.open -and "$($it.column)" -ieq $designCol) { $designWaiting++ }; continue }
         # The budget of the sweep (issue 426) is checked before each item of a full sweep. The sweep then answers what it has read, marked partial: the
         # gateway handles it like an incremental pass over `viewed` (an item not looked at keeps its owner, its hold and its facts), so stopping here
         # loses nothing; the next full sweep begins at this item. Always at least one item. An incremental pass (at most 50 items) and a dry run are not cut.
@@ -863,7 +870,7 @@ function Invoke-SyncBoard($a) {
     elseif ($low) { $skipped += 'claim-ref-reap' }
     elseif ((Get-Date) -gt $script:SweepDeadline) { $skipped += 'claim-ref-reap-deferred' }
     elseif (-not $dry) {
-        try { $actions += @(Invoke-ClaimRefReap $list) }
+        try { $actions += @(Invoke-ClaimRefReap $list $skipItems) }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "claim-ref-reap: $($_.Exception.Message)" } }
         catch { $errors += @{ item = 0; code = 'error'; reason = "claim-ref-reap: $($_.Exception.Message)" } }
     }
@@ -936,6 +943,7 @@ function Invoke-Intake($a, $List, $Offers, $Unconfirmed, $Pins, $Seen, [string]$
     $set = Get-IntakeSettings
     if (-not $set.enabled -or -not (Test-Has $a 'intake') -or -not (Test-Has $a.intake 'freeSlots') -or [int]$a.intake.freeSlots -le 0) { return $null }
     $c = Get-Cfg; $td = "$(@($c.columns.ai)[0])"
+    $v2Plans = @(); if (Test-Has $a.intake 'v2Plans') { $v2Plans = @(@($a.intake.v2Plans) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }) }
     $byNumber = @{}; foreach ($x in $List) { $byNumber[[int]$x.number] = $x }
     # something already waits in Technical Design for a session: no intake (an item pinned to one worker waits for that worker, not for a slot)
     $waiting = @(@($Offers | Where-Object { "$($_.column)" -ieq $td -and (-not $_.ContainsKey('kind') -or "$($_.kind)" -eq 'own-item') -and -not $Pins.ContainsKey("$($_.item)") }) +
@@ -949,9 +957,17 @@ function Invoke-Intake($a, $List, $Offers, $Unconfirmed, $Pins, $Seen, [string]$
         if ((Test-NameIn $c.rivalLabel $it.labels) -or (Test-NameIn $c.demoLabel $it.labels)) { continue }
         if (@($it.labels | Where-Object { "$_" -like 'hold:*' -or "$_" -like 'worker:*' -or (Test-NameIn "$_" $set.hold) }).Count -gt 0) { continue }
         if (-not $it.cardId) { continue }
+        # intake.v2Plans (W9.10e, a gateway argument): where the v2 engine acts, its intake takes the Todo items of these plans and starts their sagas. The plan is what the engine's intake decides it by (DocsIntakeJob): the docs-only marker in the body
+        # is the docs plan, any other item the feature plan. An item that names what it depends on stays here: the engine's intake leaves it to this one, which checks the dependencies.
+        $body = $null
+        if ($v2Plans.Count -gt 0) {
+            $body = if ($it.ContainsKey('body')) { "$($it.body)" } else { "$((Get-ItemInfo ([int]$it.number)).body)" }
+            $plan = if ($body.Contains("$($c.docsOnlyMarker)")) { 'docs' } else { 'feature' }
+            if ($plan -in $v2Plans -and $body -notmatch '(?i)\bdepends\s+on\b') { continue }
+        }
         # Depends-on (issue 65): read with the sweep's own functions when this gateway has them
         if (Get-Command Get-ItemDependencies -ErrorAction SilentlyContinue) {
-            $body = if ($it.ContainsKey('body')) { "$($it.body)" } else { "$((Get-ItemInfo ([int]$it.number)).body)" }
+            if ($null -eq $body) { $body = if ($it.ContainsKey('body')) { "$($it.body)" } else { "$((Get-ItemInfo ([int]$it.number)).body)" } }
             $deps = Get-ItemDependencies ([int]$it.number) $body
             if (@($deps | Where-Object { -not (Test-DependencyMet $_ $byNumber $depCache) }).Count -gt 0) { continue }
         }

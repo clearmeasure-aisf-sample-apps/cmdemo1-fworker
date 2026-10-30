@@ -16,8 +16,8 @@ using Wolverine;
 // W6.0 and W6.1 (docs/design/fworker-wolverine-implementation.md W6): the WorkItemSaga in the Wolverine host, in the hybrid composition the owner decided on (2026-10-28). Only where the engine acts
 // (Engine.V2Acts; tdd stays in the shadow run, so nothing of this exists there or in v1): v1's plant still offers the sessions and runs every verb the v2 engine does not own yet, v2's saga decides the items it
 // has started (the docs-only items the intake gave it), and v1's sweep leaves those items alone. The second half is V2Ownership and SweepV2Filter: the sweep's answer is read as before, and everything it says about
-// an item that has a saga (an offer, a trigger, a hold, a park, an owner) is dropped before the plant sees it, so the plant offers no session for it and notifies no owner of it. The rule script itself is not
-// changed: it still reads such an item, and the follow-up that passes it the owned items belongs to the integrator of Verbs.Sweep.ps1 (docs/design/fworker-wolverine-implementation.md, W6.0).
+// an item that has a saga (an offer, a trigger, a hold, a park, an owner) is dropped before the plant sees it, so the plant offers no session for it and notifies no owner of it. W9.10e passes the owned set into the script as well (sync-board `skip_items`: the item loop and the claim-ref reap skip those items, so v1
+// settles, merges, parks and demotes none of them), and until the first read of the table (V2Ownership.Loaded) the sweeper runs no pass at all.
 // W6.6 adds what makes it run (Ports/DocsPlanPort.cs: the merge, the card, the intake of docs items; Verbs/V2VerbFeed.cs: the verbs' events into the saga; the offers below), still only where the engine acts, and with
 // intake.v2Plans empty in config/instance.json nothing starts a saga until the owner names the docs plan.
 
@@ -29,7 +29,14 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
 {
     volatile HashSet<int> owned = [];
     volatile IReadOnlyList<(int Item, string Column)> offers = [];
+    volatile bool loaded;
     public int Count => owned.Count;
+
+    /// <summary>
+    /// W9.10e: whether the saga's table has been read successfully at least once (or the set was given). Until then nobody knows which items are v2's, so the sweep acts on no item at all and incremental passes wait
+    /// (Sweeper): an empty set that only means "not read yet" would let v1 settle, merge or park an item that has a saga. After the first read a failed read keeps the last answer, as before.
+    /// </summary>
+    public bool Loaded => loaded;
 
     public bool Owns(int item) => owned.Contains(item);
 
@@ -70,7 +77,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
                 if (state.Status == WorkItemStatus.Open && !state.Parked && !state.SlotAsked && state.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && columnOf?.Invoke(state.Step) is { Length: > 0 } column)
                     wanted.Add((id.Number, column));
             }
-            owned = set; offers = wanted;
+            owned = set; offers = wanted; loaded = true;
             return true;
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -81,7 +88,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     }
 
     /// <summary>For a test or a host without a database: the owned items as given.</summary>
-    public void Set(IEnumerable<int> items) => owned = items.ToHashSet();
+    public void Set(IEnumerable<int> items) { owned = items.ToHashSet(); loaded = true; }
 }
 
 static class SweepV2Filter

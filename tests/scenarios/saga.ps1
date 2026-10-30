@@ -4,7 +4,7 @@
 # pulls it, and the scenario plays the owner session of that item from Technical Design to the merge. Every scenario runs on BOTH engines from the same script, so the golden writes of the suite (recorded
 # on v1) are the oracle for v2 and what v2 does differently is declared in golden/v2-differences.txt (blocks saga/*):
 #   v1  the rule script's intake (FACTORY_INTAKE=1) pulls the card; the verbs, the gateway's merge after the PASS and the sweep do the rest, the merge is a `rule` write with a record in the state comment;
-#   v2  the engine's intake (config intake.enabled with intake.v2Plans, profile saga-docs or saga-feature of run.ps1; FACTORY_INTAKE=0 so that the rule script does not take the card first) starts the
+#   v2  the engine's intake (config intake.enabled with intake.v2Plans, profile saga-docs or saga-feature of run.ps1; the rule script's intake skips the plans of intake.v2Plans, W9.10e) starts the
 #       WorkItemSaga; the verbs are v2's; the merge is the saga's own call through the merge train (source `gateway`), the card goes to Done by the gateway's projection and no comment says that it merged.
 # The suite is claimed by v2-claims.txt twice, with the profile of each plan (the scenario of the docs plan with saga-docs, the one of the feature plan with saga-feature).
 $script:SagaOwner = 'sg1'
@@ -68,11 +68,6 @@ function Saga-Pass($x) {
 }
 function Saga-MergeComments([int]$n, [int]$pr) { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "squash-merged PR #$pr " }).Count }
 
-# A check of what v2 does by itself once the PASS is recorded. For the docs plan it is a check. For the feature plan the verdict is still answered by the rule script's own path, whose inline merge (Verbs.Pr.ps1,
-# Verb_merge -Gateway) merges before the saga does: the merge is a `rule` write with its comment, as on v1, until W9.10e (#557, "no inline merge for an owned item") makes the saga the only merger. The check is
-# quarantined there; when #557 lands it passes and the quarantine is taken off.
-function Saga-V2Check([string]$Plan, [string]$Name, [bool]$Ok, [string]$Detail) { if ($Plan -eq 'feature') { CheckQuarantined $Name $Ok $Detail -Issue '#557' } else { Check $Name $Ok $Detail } }
-
 # What the two engines do once the PASS is recorded, checked on the same item: one merge write by either, and the differences W6.6 and W7.3 declare (golden/v2-differences.txt)
 function Saga-CheckMerged($x, [string]$Plan) {
     Check "the pull request of #$($x.n) is merged by the gateway" (Wait-Until -Seconds 150 { (Get-FakePr $x.pr).merged }) "merged $((Get-FakePr $x.pr).merged), column $(Saga-Col $x.n)"
@@ -83,14 +78,14 @@ function Saga-CheckMerged($x, [string]$Plan) {
         if ($null -ne $writes) {
             $gw = @(Saga-WritesOf $writes 'gateway' 'PUT' "/pulls/$($x.pr)/merge$")
             $rule = @(Saga-WritesOf $writes 'rule' 'PUT' "/pulls/$($x.pr)/merge$")
-            Saga-V2Check $Plan 'v2: the merge write is the gateway''s own (the saga through the merge train), none is the rule script''s' ($gw.Count -eq 1 -and $rule.Count -eq 0) "gateway $($gw.Count), rule $($rule.Count)"
+            Check 'v2: the merge write is the gateway''s own (the saga through the merge train), none is the rule script''s' ($gw.Count -eq 1 -and $rule.Count -eq 0) "gateway $($gw.Count), rule $($rule.Count)"
             $ruleMoves = @($writes | Where-Object { $_ -and "$(Get-RecField $_ 'source')" -eq 'rule' -and "$(Get-RecField $_ 'path')" -eq '/graphql' -and "$(Get-RecField $_ 'field')" -eq 'updateProjectV2ItemFieldValue' -and (Get-RecField $_ 'cause') -eq $null })
             Check 'v2: no card move after the PASS is the rule script''s (the projection moves the card)' ($ruleMoves.Count -eq 0) "rule card moves outside a verb call: $($ruleMoves.Count)"
         }
-        Saga-V2Check $Plan 'v2: no comment on the item says that the gateway merged it (the saga''s history is the record)' ((Saga-MergeComments $x.n $x.pr) -eq 0) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
+        Check 'v2: no comment on the item says that the gateway merged it (the saga''s history is the record)' ((Saga-MergeComments $x.n $x.pr) -eq 0) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
         $st = Pm-State $x.n; $mr = $(if ($st.ContainsKey('merge')) { $st['merge'] } else { $null })   # (the sweep's record may not be there yet: strict mode refuses a key that is not)
-        # until W9.10e (#557) the rule script's sweep still reads the saga's item: it takes the gateway's merge for a person's and writes its own record (by person, awaiting master-green) and the comments of that wait
-        CheckQuarantined 'v2: the state comment holds no wait record of the rule script''s merge (awaiting master CI, done_at)' ($null -eq $mr -or (-not $mr.ContainsKey('awaiting') -and -not $mr.ContainsKey('done_at'))) ($mr | ConvertTo-Json -Compress -Depth 4) -Issue '#557'
+        # (W9.10e: the rule script's sweep leaves the saga's item alone, so it takes the saga's merge for no person's and writes no wait record of its own)
+        Check 'v2: the state comment holds no wait record of the rule script''s merge (awaiting master CI, done_at)' ($null -eq $mr -or (-not $mr.ContainsKey('awaiting') -and -not $mr.ContainsKey('done_at'))) ($mr | ConvertTo-Json -Compress -Depth 4)
     } else {
         Check 'v1: the merge is recorded on the item once (the rule script''s comment and merge record)' ((Wait-Until -Seconds 30 { (Saga-MergeComments $x.n $x.pr) -eq 1 })) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
         Check 'v1: the state comment holds the merge record' ((Pm-State $x.n).ContainsKey('merge')) ((Pm-State $x.n) | ConvertTo-Json -Compress -Depth 4)
