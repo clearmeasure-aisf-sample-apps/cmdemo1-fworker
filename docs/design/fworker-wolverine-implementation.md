@@ -569,8 +569,8 @@ section 3. After W9.11 merges: the release check and a **2-hour window**; rollba
 **Gate:** a staged incident in the app's tdd, end to end (about an hour).
 
 **W8.2 as built (#350).** `POST /webhooks/azure-monitor?deployable=<name>&environment=<name>&secret=<secret>` (`gateway/Endpoints/AlertsEndpoints.cs`, `Fworker.Integrations/Alerts/AzureMonitorAlerts.cs`). It is the
-fourth route of the webhook port (the middleware lets it through on that port and answers 503 on a replaced process like the others) and answers 404 unless the ingress inbox exists (`Engine.V2Acts`), so v1, the
-shadow run and `FACTORY_V2_OFF` are what they were. No new table: the durable queue `ingress-inbox` (W4.1) is the store, and its history record files an incident trigger under the key `incident:<deployable>/<environment>`
+fourth route of the webhook port (the middleware lets it through on that port and answers 503 on a replaced process like the others) and answers 404 unless the engine acts (`Engine.V2Acts`; the ingress inbox alone is not the gate, the shadow run registers it too for the delivery train), so v1, the
+shadow run (tdd today) and `FACTORY_V2_OFF` are what they were. No new table: the durable queue `ingress-inbox` (W4.1) is the store, and its history record files an incident trigger under the key `incident:<deployable>/<environment>`
 (type `ingress.inbox.azure-monitor.incident.alert`) instead of `board`.
 - **Credential:** the W4.0 per-source secret, source `azure-monitor`, variable `FACTORY_WEBHOOK_SECRET_AZURE_MONITOR`. An Azure action group cannot send a header, so the secret is the query parameter `secret` of the webhook URI
   (a relay may send `X-Azure-Monitor-Secret`); compared in constant time like Octopus's, checked before the body is read, the body bounded at 256 KB, never logged. A source without a secret refuses every delivery (401).

@@ -33,7 +33,7 @@ public sealed class AlertWebhookTests
         public List<IngressInboxMessage> Stored = [];
     }
 
-    static async Task<Run> Post(string query, byte[]? body = null, Func<IngressInboxMessage, Task<bool>>? inbox = null, bool hasInbox = true, WebhookSecrets? secrets = null, string? header = null,
+    static async Task<Run> Post(string query, byte[]? body = null, Func<IngressInboxMessage, Task<bool>>? inbox = null, bool hasInbox = true, bool engineActs = true, WebhookSecrets? secrets = null, string? header = null,
         string environment = "tdd", ISystemCatalog? catalog = null, AlertsEndpoints? module = null, byte[]? raw = null)
     {
         var run = new Run();
@@ -45,7 +45,7 @@ public sealed class AlertWebhookTests
         ctx.Request.Method = "POST"; ctx.Request.QueryString = new QueryString(query);
         ctx.Request.Body = new MemoryStream(raw ?? body ?? Alert()); ctx.Response.Body = new MemoryStream();
         if (header != null) ctx.Request.Headers[AlertsEndpoints.SecretHeader] = header;
-        var m = module ?? new AlertsEndpoints(sp, environment, secrets ?? Secrets());
+        var m = module ?? new AlertsEndpoints(sp, environment, engineActs, secrets ?? Secrets());
         var recv = typeof(AlertsEndpoints).GetMethod("Receive", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
         var result = await (Task<IResult>)recv.Invoke(m, [ctx])!;
         await result.ExecuteAsync(ctx);
@@ -79,6 +79,9 @@ public sealed class AlertWebhookTests
     [Fact] public async Task TheOtherSourcesSecretsDoNotOpenThisRoute() => Assert.Equal(401, (await Post(Q("gh-secret"), secrets: new WebhookSecrets(n => n switch { "FACTORY_WEBHOOK_SECRET" => "gh-secret", "FACTORY_WEBHOOK_SECRET_OCTOPUS" => "oct", _ => null }))).Status);
     [Fact] public async Task ASourceWithoutASecretRefusesEverything() { Assert.Equal(401, (await Post(Q(""), secrets: Secrets(""))).Status); Assert.Equal(401, (await Post(Q(Secret), secrets: Secrets(null))).Status); }
     [Fact] public async Task WithoutTheInboxTheRouteIsNotThere() => Assert.Equal(404, (await Post(Q(), hasInbox: false)).Status);
+    // the shadow run registers the ingress inbox too (W5.2, for the delivery train): the inbox is not the gate, the engine is (Engine.V2Acts)
+    [Fact] public async Task WhereTheEngineDoesNotActTheRouteIsNotThere_EvenWithTheInboxAndTheRightSecret() { var r = await Post(Q(), engineActs: false); Assert.Equal(404, r.Status); Assert.Empty(r.Stored); }
+    [Fact] public async Task WhereTheEngineActsTheSameDeliveryIsStored() { var r = await Post(Q(), engineActs: true); Assert.Equal(202, r.Status); Assert.Single(r.Stored); }
     [Fact] public async Task TheSecretIsCheckedBeforeTheBodyIsRead() => Assert.Equal(401, (await Post(Q("nope"), raw: new byte[AlertsEndpoints.MaxBodyBytes * 2])).Status);
 
     [Fact] public async Task ADeliveryWithoutASubjectIsNotUsable() { var r = await Post($"?secret={Secret}"); Assert.Equal(400, r.Status); Assert.Equal("subject-missing", (string?)r.Json!["reason"]); }
@@ -118,7 +121,7 @@ public sealed class AlertWebhookTests
     public async Task TheCountsSayWhatTheRouteDid()
     {
         var sp = new ServiceCollection().AddSingleton(new IngressInboxPort(_ => Task.FromResult(true))).BuildServiceProvider();
-        var m = new AlertsEndpoints(sp, "tdd", Secrets());
+        var m = new AlertsEndpoints(sp, "tdd", true, Secrets());
         await Post(Q(), module: m); await Post(Q("x"), module: m); await Post(Q(environment: "uat"), module: m); await Post("?secret=" + Secret, module: m);
         Assert.Equal((1, 1, 1, 1, 0), (m.Counts.StoredCount, m.Counts.RefusedCount, m.Counts.IgnoredCount, m.Counts.UnusableCount, m.Counts.NotStoredCount));
     }

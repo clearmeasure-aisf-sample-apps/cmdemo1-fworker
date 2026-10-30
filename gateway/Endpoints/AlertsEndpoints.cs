@@ -4,8 +4,8 @@ using Fworker.Integrations.Alerts;
 using Fworker.Integrations.Correlation;
 
 // W8.2: the alert ingress. Azure Monitor's action group calls POST /webhooks/azure-monitor?deployable=<name>&environment=<name>&secret=<secret> (common alert schema); an accepted alert becomes an incident trigger
-// event of the ingress inbox (AzureMonitorAlerts, W4.1's durable queue "ingress-inbox"), where the IncidentSaga (W8.1) takes it from. Where the engine does not act (no inbox) the route answers 404 as if it
-// were not there, so v1, the shadow run and FACTORY_V2_OFF are what they were.
+// event of the ingress inbox (AzureMonitorAlerts, W4.1's durable queue "ingress-inbox"), where the IncidentSaga (W8.1) takes it from. The route exists only where the engine acts (Engine.V2Acts): v1, the shadow run (which has the
+// ingress inbox too, for the delivery train, but no IncidentSaga) and FACTORY_V2_OFF answer 404 as if it were not there, so they are what they were.
 //
 // Credential: the per-source secret of W4.0 (WebhookSecrets, FACTORY_WEBHOOK_SECRET_AZURE_MONITOR). An action group cannot send a header, so the secret is the query parameter "secret" of the webhook URI
 // (TLS, never logged); a relay may send it in X-Azure-Monitor-Secret instead. A source without a secret refuses every delivery. The check is made before the body is read, and the body is bounded.
@@ -15,7 +15,7 @@ using Fworker.Integrations.Correlation;
 // The subject (which deployable, which environment) comes from the URI, one action group per deployable and environment, because the common schema names the resources but not the factory's
 // deployable. Only this gateway's environment is served ("tdd only"): an alert for another environment is acknowledged and ignored. The factory's own deployable is never an incident of itself: its failures
 // cannot run on its own bus, an Azure Monitor alert on its health notifies the owner directly (docs/deploy/incident-alert-rules.md), so such a delivery is acknowledged and ignored too.
-sealed class AlertsEndpoints(IServiceProvider services, string environment, WebhookSecrets? secrets = null) : IEndpointModule
+sealed class AlertsEndpoints(IServiceProvider services, string environment, bool engineActs, WebhookSecrets? secrets = null) : IEndpointModule
 {
     public const string Route = "/webhooks/azure-monitor", SecretHeader = "X-Azure-Monitor-Secret", SecretQuery = "secret";
     public const int MaxBodyBytes = 256 * 1024;
@@ -31,6 +31,8 @@ sealed class AlertsEndpoints(IServiceProvider services, string environment, Webh
 
     async Task<IResult> Receive(HttpContext ctx)
     {
+        // v2 acts only: the inbox alone is not the gate, the shadow run registers it as well (W5.2)
+        if (!engineActs) return Results.NotFound();
         var inbox = services.GetService<IngressInboxPort>();
         if (inbox is null) return Results.NotFound();
         var presented = ctx.Request.Headers[SecretHeader].ToString();
