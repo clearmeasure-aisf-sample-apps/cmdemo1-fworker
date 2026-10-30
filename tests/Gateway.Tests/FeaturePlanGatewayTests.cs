@@ -742,6 +742,46 @@ public sealed class FeatureFeedTests
         Assert.False(V2VerbFeed.TakeOutFlag(body));
     }
 
+    // W9.10e: no inline merge for an item whose saga merges it. The verdict of an owned item carries the gateway's flag, once, whatever the plan and whatever a caller sent; the script makes no merge on seeing it (Verbs.Pr.ps1).
+    [Theory]
+    [InlineData("docs")]
+    [InlineData("feature")]
+    public async Task AVerdictForAnOwnedItem_IsGivenSagaMerges_OnceAndWhateverTheCaseOfOneACallerSent(string plan)
+    {
+        var rig = new Rig(plan);
+        var inner = new Inner(0, """{"ok":true,"recorded":true,"passed":true,"next":"merge"}""");
+        var body = JsonNode.Parse(Body(new { passed = true, pr = 11 }))!.AsObject(); body["SAGAMERGES"] = false; body["sagaMerges"] = "no";
+        var answer = await rig.Feed(inner).RunAsync("validation-verdict", body.ToJsonString(), TimeSpan.FromSeconds(1));
+        Assert.Equal(0, answer.Code);
+        var call = JsonNode.Parse(Assert.Single(inner.Calls).Stdin)!.AsObject();
+        Assert.Equal([V2VerbFeed.SagaMergesFlagName], call.Select(p => p.Key).Where(k => k.Equals(V2VerbFeed.SagaMergesFlagName, StringComparison.OrdinalIgnoreCase)).ToArray());
+        Assert.True(call["sagaMerges"]!.GetValue<bool>());
+        Assert.Equal(11, call["pr"]!.GetValue<int>());   // (the rest of the call is kept)
+        Assert.False(call.ContainsKey(V2VerbFeed.FlagName));
+    }
+
+    [Fact]
+    public async Task AVerdictForAnItemThatHasNoSaga_KeepsV1sInlineMerge_AndACallersFlagIsTakenOut()
+    {
+        var rig = new Rig("docs");
+        var other = JsonNode.Parse(Body(new { passed = true, pr = 11 }))!.AsObject(); other["item"] = 99; other["sagaMerges"] = true;
+        var inner = new Inner(0, """{"ok":true,"recorded":true}""");
+        await rig.Feed(inner).RunAsync("validation-verdict", other.ToJsonString(), TimeSpan.FromSeconds(1));
+        Assert.False(JsonNode.Parse(Assert.Single(inner.Calls).Stdin)!.AsObject().ContainsKey(V2VerbFeed.SagaMergesFlagName));
+        // and the flag is the verdict's: no other verb is given it
+        var comment = new Inner(0, """{"ok":true}""");
+        await rig.Feed(comment).RunAsync("comment", Body(), TimeSpan.FromSeconds(1));
+        Assert.False(JsonNode.Parse(Assert.Single(comment.Calls).Stdin)!.AsObject().ContainsKey(V2VerbFeed.SagaMergesFlagName));
+    }
+
+    [Fact]
+    public void TakingTheFlagsOut_AlsoRemovesSagaMerges_InEverySpelling()
+    {
+        var body = new JsonObject { ["item"] = 7, ["sagaMerges"] = true, ["SagaMerges"] = "true", ["SAGAMERGES"] = 1, ["ftWithPendingChecks"] = true, ["pr"] = 3 };
+        Assert.True(V2VerbFeed.TakeOutFlag(body));
+        Assert.Equal(["item", "pr"], body.Select(p => p.Key).ToArray());
+    }
+
     [Fact]
     public async Task AFaultWhileAskingForTheFlag_LeavesTheCallAsItCame()
     {

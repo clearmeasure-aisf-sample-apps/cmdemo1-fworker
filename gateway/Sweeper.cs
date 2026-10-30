@@ -16,6 +16,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     public GitHubBudget? Budget { get; init; }
     // W6.1 (hybrid composition): the items that have a WorkItemSaga. Set only where the engine acts; the sweep's answer says nothing about them to the plant, and an incremental pass does not ask for them
     public V2Ownership? V2 { get; init; }
+    // W9.10e: the plans of intake.v2Plans, handed to v1's intake (sync-board intake.v2Plans): it leaves their Todo items to the engine's intake. Used only with V2 set
+    public IReadOnlyList<string> V2Plans { get; init; } = [];
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -30,6 +32,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         while (!ct.IsCancellationRequested)
         {
             if (MayAct?.Invoke() == false) { try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { } continue; }
+            // W9.10e: where the engine acts, nothing is swept until the saga's table has been read once: an empty set that only means "not read yet" would let v1 act on an item that has a saga. Items asked for meanwhile stay queued.
+            if (V2 is { Loaded: false } && !await OwnershipRead(ct)) { try { await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } continue; }
             try
             {
                 var now = DateTime.UtcNow; var sinceFull = (now - lastFull).TotalSeconds;
@@ -76,6 +80,25 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         }
     }
 
+    /// <summary>
+    /// W9.10e: what the script is told where the engine acts. `skip_items`: the items that have a saga are not v1's, so the script reads and acts on none of them (settle, merge pickup, the PASS merge, park, demote,
+    /// auto-unpark, claim-ref reap). `intake.v2Plans` (only in a pass that has an intake block): the plans whose Todo items the engine's intake takes, which v1's intake leaves in the column. Nothing is added without V2.
+    /// </summary>
+    internal static void AddV2Arguments(JsonObject args, V2Ownership? v2, IReadOnlyList<string> v2Plans)
+    {
+        if (v2 is null) return;
+        if (v2.Count > 0) args["skip_items"] = new JsonArray(v2.Items.OrderBy(i => i).Select(i => (JsonNode)i).ToArray());
+        if (v2Plans.Count > 0 && args["intake"] is JsonObject intake) intake["v2Plans"] = new JsonArray(v2Plans.Select(p => (JsonNode)p).ToArray());
+    }
+
+    DateTime ownershipWarned = DateTime.MinValue;
+    async Task<bool> OwnershipRead(CancellationToken ct)
+    {
+        try { if (await V2!.RefreshAsync(ct)) return true; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return false; }
+        if (DateTime.UtcNow - ownershipWarned > TimeSpan.FromMinutes(1)) { ownershipWarned = DateTime.UtcNow; Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"waiting\",\"reason\":\"the saga table has not been read yet; v1 acts on no item until it has\"}}"); }
+        return false;
+    }
+
     // W6.6: a pass over items that all have a saga: nothing to read for v1, the plant takes the saga's offers for exactly those items (scope), as it takes the offers of an incremental pass
     void PlanV2Offers(List<int> mine)
     {
@@ -107,6 +130,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         if (ownerMode) args["free_workers"] = plant.FreeOwnerSessions();
         // work intake (issue 104): a full sweep may pull a Todo item onto the board when an owner session has a free slot
         if (ownerMode && items == null) args["intake"] = new JsonObject { ["freeSlots"] = plant.IntakeSlots() };
+        AddV2Arguments(args, V2, V2Plans);
         // replenish backpressure (delivery-speed.md 6): the waiting items of the last plan; absent before the first plan has run (Replenish.ps1 then holds back)
         if (ownerMode && items == null && plant.LastPlanWaiting() is { } lastWaiting) args["replenish_waiting"] = lastWaiting;
         var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)

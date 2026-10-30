@@ -88,11 +88,16 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
     /// <summary>The flag of a completion that lets Functional Testing start beside pending checks. The gateway's to give; the script reads it by any spelling of its case (a PowerShell hashtable's keys are case-blind).</summary>
     public const string FlagName = "ftWithPendingChecks";
 
-    /// <summary>Takes the flag out of a call body whatever the case of its name; true if there was one.</summary>
+    /// <summary>
+    /// W9.10e: the flag of a verdict for an item whose saga merges it: the script then makes no inline merge (Verb_merge -Gateway in validation-verdict); the answer says `next: merge` and the saga's merge train merges. The gateway's to give, like the one above.
+    /// </summary>
+    public const string SagaMergesFlagName = "sagaMerges";
+
+    /// <summary>Takes the gateway's flags out of a call body whatever the case of their names; true if there was one.</summary>
     public static bool TakeOutFlag(JsonObject body)
     {
         var found = false;
-        foreach (var name in body.Select(p => p.Key).Where(k => string.Equals(k, FlagName, StringComparison.OrdinalIgnoreCase)).ToList()) { body.Remove(name); found = true; }
+        foreach (var name in body.Select(p => p.Key).Where(k => string.Equals(k, FlagName, StringComparison.OrdinalIgnoreCase) || string.Equals(k, SagaMergesFlagName, StringComparison.OrdinalIgnoreCase)).ToList()) { body.Remove(name); found = true; }
         return found;
     }
 
@@ -125,21 +130,27 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
     /// <summary>
     /// A development completion of a feature item the saga owns carries `ftWithPendingChecks` (the flag is the gateway's to give: one a caller sent is taken out of every `complete`): pending checks no longer park the item, the script moves it on to Functional Testing and answers `continue` with the next column and
     /// `checks: pending` (delivery-speed.md 5.1), because the saga watches the checks beside the session. A red head is still refused by the script. Any fault here leaves the call as it came.
+    /// W9.10e: a verdict for an item the saga owns carries `sagaMerges`: the script records it as always but makes no inline merge (Verb_merge -Gateway); the saga merges through the merge train, and the sweep leaves the item alone, so the item
+    /// is merged once, by one writer. An owned item is the saga's whatever its plan; one that is not owned keeps v1's inline merge.
     /// </summary>
     async Task<string> AskForFunctionalTestingAlongside(string verb, string stdin)
     {
-        if (verb != "complete") return stdin;
+        if (verb is not ("complete" or "validation-verdict")) return stdin;
         try
         {
             if (JsonNode.Parse(stdin) is not JsonObject body) return stdin;
-            // the flag is the gateway's to give: one a caller sent is taken out, whatever the item
+            // the flags are the gateway's to give: one a caller sent is taken out, whatever the item
             var sent = TakeOutFlag(body);
-            var give = false;
-            if (ownership.Count > 0 && int.TryParse(body["item"]?.ToString(), out var number) && number > 0 && ownership.Owns(number)
-                && (await store.Load(new ItemId(home, number).ToString(), CancellationToken.None))?.State is { } state)
-                give = state.IsOpen && !state.Parked && WorkPlans.IsCode(state.Plan) && state.Step == StepKind.Develop && settings.CarriesFeature;
-            if (!give && !sent) return stdin;
+            var give = false; var sagaMerges = false;
+            if (ownership.Count > 0 && int.TryParse(body["item"]?.ToString(), out var number) && number > 0 && ownership.Owns(number))
+            {
+                if (verb == "validation-verdict") sagaMerges = true;
+                else if ((await store.Load(new ItemId(home, number).ToString(), CancellationToken.None))?.State is { } state)
+                    give = state.IsOpen && !state.Parked && WorkPlans.IsCode(state.Plan) && state.Step == StepKind.Develop && settings.CarriesFeature;
+            }
+            if (!give && !sagaMerges && !sent) return stdin;
             if (give) body[FlagName] = true;
+            if (sagaMerges) body[SagaMergesFlagName] = true;
             return body.ToJsonString();
         }
         catch (Exception e) { Console.Error.WriteLine($"v2 feed {verb}: {e.GetType().Name}"); return stdin; }

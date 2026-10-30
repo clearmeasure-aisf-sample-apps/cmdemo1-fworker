@@ -144,6 +144,26 @@ public sealed class V2OwnershipTests
         Assert.Equal([7], own.Items);
     }
 
+    // W9.10e: an empty set that only means "not read yet" must not look like "v1 owns everything"; the sweeper waits for Loaded
+    [Fact]
+    public async Task TheOwnershipIsNotLoaded_UntilTheFirstSuccessfulRead_AndStaysLoadedWhenALaterReadFails()
+    {
+        var store = new FlakyStore(new InMemoryWorkItemStore()) { Down = true };
+        var own = new V2Ownership(store, Home);
+        Assert.False(own.Loaded);
+        Assert.False(await own.RefreshAsync());   // (the first read fails: v1 still knows nothing of the saga's items)
+        Assert.False(own.Loaded);
+        store.Down = false;
+        Assert.True(await own.RefreshAsync());
+        Assert.True(own.Loaded);
+        store.Down = true;
+        Assert.False(await own.RefreshAsync());
+        Assert.True(own.Loaded);   // (the last answer stands)
+        var given = new V2Ownership(store, Home);
+        given.Set([7]);
+        Assert.True(given.Loaded);
+    }
+
     [Fact]
     public async Task ADatabaseThatDoesNotAnswer_KeepsTheLastAnswer_SoV1DoesNotTakeAnItemOverDuringAnOutage()
     {
@@ -157,6 +177,81 @@ public sealed class V2OwnershipTests
         Assert.True(own.Owns(7));
         store.Down = false;
         Assert.True(await own.RefreshAsync());
+    }
+}
+
+/// <summary>
+/// W9.10e: what the sweeper tells the script where the engine acts (the owned set as `skip_items`, the engine's plans as `intake.v2Plans`), and that it sweeps nothing until the saga's table has been read once.
+/// </summary>
+public sealed class SweeperV2ArgumentsTests
+{
+    static readonly RepoId Home = new("acme", "orders");
+
+    static List<JsonObject> SyncBoardCalls(GatewayEnvironment env)
+    {
+        var log = env.StubLog + ".in";
+        if (!File.Exists(log)) return [];
+        using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var sr = new StreamReader(fs);
+        return sr.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split('\t', 2)).Where(p => p.Length == 2 && p[0] == "sync-board").Select(p => (JsonObject)JsonNode.Parse(p[1])!).ToList();
+    }
+
+    [Fact]
+    public void TheOwnedSetAndTheEnginesPlans_GoToTheScript_OnlyWhereTheEngineActs()
+    {
+        var own = new V2Ownership(new InMemoryWorkItemStore(), Home);
+        own.Set([9, 3, 7]);
+        var args = new JsonObject { ["intake"] = new JsonObject { ["freeSlots"] = 2 } };
+        Sweeper.AddV2Arguments(args, own, ["docs", "feature"]);
+        Assert.Equal([3, 7, 9], args["skip_items"]!.AsArray().Select(x => x!.GetValue<int>()).ToArray());
+        Assert.Equal(["docs", "feature"], args["intake"]!["v2Plans"]!.AsArray().Select(x => x!.GetValue<string>()).ToArray());
+        Assert.Equal(2, args["intake"]!["freeSlots"]!.GetValue<int>());
+
+        // an incremental pass has no intake block: the plans have nowhere to go, the owned set still does
+        var incremental = new JsonObject { ["items"] = new JsonArray(4) };
+        Sweeper.AddV2Arguments(incremental, own, ["docs"]);
+        Assert.NotNull(incremental["skip_items"]); Assert.Null(incremental["intake"]);
+
+        // nothing owned, no plans: nothing is added
+        var none = new JsonObject { ["intake"] = new JsonObject { ["freeSlots"] = 1 } };
+        Sweeper.AddV2Arguments(none, new V2Ownership(new InMemoryWorkItemStore(), Home), []);
+        Assert.Equal(["intake"], none.Select(p => p.Key).ToArray()); Assert.Equal(["freeSlots"], ((JsonObject)none["intake"]!).Select(p => p.Key).ToArray());
+
+        // v1 (no ownership at all): the script is called as it always was
+        var v1 = new JsonObject { ["intake"] = new JsonObject { ["freeSlots"] = 1 } };
+        Sweeper.AddV2Arguments(v1, null, ["docs"]);
+        Assert.Equal(["intake"], v1.Select(p => p.Key).ToArray()); Assert.Null(v1["intake"]!["v2Plans"]);
+    }
+
+    // The control (v1) shows that the sweeper sweeps in this test environment at all; the v2 gateway's store throws on every read, so no pass runs and no item is acted on until the table has been read.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task WhereTheEngineActs_NoPassRunsWhileTheSagaTableHasNeverBeenRead(bool v2)
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = new GatewayEnvironment();
+        env.Set("FACTORY_SWEEP_SECONDS", "1"); env.Set("FACTORY_SWEEP_MIN_SECONDS", "1");
+        if (v2)
+        {
+            env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
+            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+        }
+        env.Apply();
+        File.WriteAllText(Path.Combine(env.Dir, "answer-sync-board.json"), new JsonObject { ["ok"] = true, ["actions"] = new JsonArray(), ["offers"] = new JsonArray() }.ToJsonString() + "\n");
+        using var host = new GatewayHost();
+        _ = host.Server;
+        var sweeper = host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<Sweeper>().Single();
+        var sw = Stopwatch.StartNew();
+        if (!v2)
+        {
+            while (sw.Elapsed < TimeSpan.FromSeconds(40) && SyncBoardCalls(env).Count == 0) await Task.Delay(200);
+            Assert.NotEmpty(SyncBoardCalls(env));
+            return;
+        }
+        await Task.Delay(TimeSpan.FromSeconds(15));
+        Assert.False(sweeper.V2!.Loaded);
+        Assert.Empty(SyncBoardCalls(env));
     }
 }
 
@@ -235,6 +330,17 @@ public sealed class WorkItemWiringTests
             .Select(p => (int?)(JsonNode.Parse(p[1]) as JsonObject)?["replenish_waiting"]).ToList();
     }
 
+    // W9.10e: the owned set each pass told the script to leave alone (sync-board skip_items)
+    static List<int[]> SkipItemsOfSweeps(GatewayEnvironment env)
+    {
+        var log = env.StubLog + ".in";
+        if (!File.Exists(log)) return [];
+        using var fs = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var sr = new StreamReader(fs);
+        return sr.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split('\t', 2)).Where(p => p.Length == 2 && p[0] == "sync-board")
+            .Select(p => (JsonNode.Parse(p[1]) as JsonObject)?["skip_items"] as JsonArray).Where(a => a != null).Select(a => a!.Select(x => x!.GetValue<int>()).ToArray()).ToList();
+    }
+
     static async Task<bool> Until(Func<Task<bool>> cond, int seconds)
     {
         var sw = Stopwatch.StartNew();
@@ -285,6 +391,9 @@ public sealed class WorkItemWiringTests
             Assert.True(await Until(() => Task.FromResult(ColumnOf(701) == "Technical Design"), 60), "the plant was not offered the saga's item in its design column: " + plant.UnownedJson().ToJsonString());
             var before = WaitingOfSweeps(env).Count;
             Assert.True(await Until(() => Task.FromResult(WaitingOfSweeps(env).Skip(before).Count(w => w == 2) >= 2), 60), "the plan lost an offer: " + string.Join(",", WaitingOfSweeps(env)));
+            // W9.10e: and the script is told to leave the saga's item alone: its passes carry skip_items [701] (never 702, whose sagas do not exist), and none before the saga started did
+            Assert.True(await Until(() => Task.FromResult(SkipItemsOfSweeps(env).Any(a => a.SequenceEqual([701]))), 60), "no pass carried skip_items [701]: " + string.Join(";", SkipItemsOfSweeps(env).Select(a => string.Join(",", a))));
+            Assert.DoesNotContain(SkipItemsOfSweeps(env), a => a.Contains(702));
             Assert.Equal("Technical Design", ColumnOf(701));   // (v1's offer for the column Development never came back)
             Assert.Equal("Technical Design", ColumnOf(702));
             var owned = gateway.Services.GetRequiredService<V2Ownership>();

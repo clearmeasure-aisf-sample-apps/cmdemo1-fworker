@@ -470,7 +470,7 @@ and W6.1 built, and what is left:
 - **The hand-off in the gateway:** `V2Ownership` reads the saga's table before each sweep and `SweepV2Filter` drops what the sweep
   says about those items (offers, triggers, holds, parks, owners) before the plant sees it. The rule script itself is not changed.
 - **Left for the integrator and W6.2 to W6.7:** passing the owned items into `sync-board` so the script also stops reading them
-  (`Verbs.Sweep.ps1`; no task took it until the revision of 2026-10-30, which gives it to W9.10e); writing the `engine:v2` label (a
+  (`Verbs.Sweep.ps1`; no task took it until the revision of 2026-10-30, which gave it to W9.10e, done: `skip_items`); writing the `engine:v2` label (a
   projection, W6.3). (The feeder, the decision verbs and the demotion and
   mechanical rows of D5's table were left to W6.6 here; W6.6 below has them. The fix-forward row, CI red, stays with W7.)
 
@@ -839,7 +839,7 @@ each as the rule script answers it for the same input: the same fields and exit 
   migration check of the CI rule (W9.5), and the pull request of a `copilot/*` branch or an owner task (`open-pr`, `item-pr`; W9.4). A gateway without a v1 answers `v1-unavailable` (30) for them.
 - **Declared difference:** the inline merge of a PASS in `validation-verdict` (`Verb_merge -Gateway`) is not made in the call. The answer says `next: merge` as before; the merge is the sweep's and the saga's right after (a verdict
   asks for a sweep), and `merge` called by the session still answers `already-merged`. W9.3 (the merge train verbs) closes it, and
-  W9.10e makes sure the sweep makes no second merge of an owned item. The Tier 1 suite `auto` runs with `gatewayMerge` off, so none of its scenarios sees it.
+  W9.10e (done) makes the sweep leave an owned item alone and the verdict make no inline merge for it. The Tier 1 suite `auto` runs with `gatewayMerge` off, so none of its scenarios sees it.
 - **Not yet routed:** the gateway's own calls of these verbs (`PlantRuleHooks` renew and take-back, the park of the runtime adapters, the unpark and resettle endpoints, `ItemPrLookup`) go through `Runner` and stay the script's
   until W9.9 moves them to the router (2026-10-30: listed by W9.10l, routed by W9.9a).
 - **Proof:** `ItemVerbsTests` (55 cases of the scripts' branches on an in-memory GitHub), `ItemVerbsPortTests`, and `ItemVerbsFakeGitHubTests`/`ItemVerbsReplayTests`, which start the fake GitHub of Tier 1 and compare the writes it
@@ -899,13 +899,12 @@ GitHub that the first saga found were fixed in `tests/FakeGitHub` (the single-is
 - *The profiles* (`$V2Profiles` of `run.ps1`, `-V2Profile`, laid over the test configuration key by key by `Start-TestEnv -Merge`): every profile sets `mergeStrategy` direct; the two saga profiles set the Wolverine host's timers at their floor (`scheduledJobSeconds` 60,
   `firstScheduledJobSeconds` 0, so that the saga's leases and the scheduler's wakes run inside a scenario), `plain` leaves them at the defaults (with them at the floor the octopus scenario `journal order` fails on v2 after #572; cause not analysed further, the run is as master's); `saga-docs` turns `intake.enabled` on with `v2Plans` [docs]; `saga-feature` with [docs, feature].
   `scheduler.featureSlots` is **off** in both: with it on a feature item waits for a slot that only a running runtime grants, and Tier 1 has none for the scheduler (audit finding 20: the batch of W9.9 runs with it off until W9.10j).
-  Until W9.10e (#557) the rule script's own intake would pull the Todo card within seconds, long before the engine's job (every minute) could start the saga, and both read the same switches; `run.ps1` therefore writes
-  `intake.enabled: false` into the configuration file after the gateway has started (the gateway read its settings at the start, the scripts read the file at every call): `Disable-ScriptIntake`, to be removed by W9.10e.
+  (Until W9.10e, #557, the rule script's own intake would have pulled the Todo card within seconds, long before the engine's job could start the saga, and `run.ps1` switched the script's intake off in the configuration file once the gateway ran: `Disable-ScriptIntake`, now removed; v1's intake skips the plans of `intake.v2Plans` itself.)
 - *The suite `saga`* (`saga.ps1`, slot 29, appended at the end): a Todo item, a connected owner session with a free slot, the intake, the owner session's design, development with its pull request, validation and PASS, and the merge.
   It runs on both engines from one script; its golden files are recorded on v1, and `golden/v2-differences.txt` declares what v2 writes instead: the W6.6 block (docs plan: the cards and the plant's journal lines are the gateway's
   writes, the merge is the saga's own call and no comment says that it merged, the card goes to Done by the projection) and the W7.3 block (feature plan: the same intake, projection and journal; the PASS's inline merge is still the
   rule script's, written after the verdict call has answered). The docs scenario asserts, with `gatewayMerge` on, one merge write, from the gateway, and no rule-sourced card move; the checks that the feature scenario's merge is the gateway's
-  and the state comment holds no wait record of the rule script's are quarantined under #557, which makes the saga the only merger (W9.10e) and turns them into plain checks. No #496 block exists: the app's uat and prod stay with
+  and the state comment holds no wait record of the rule script's were quarantined under #557; W9.10e made the saga the only merger and they are plain checks. No #496 block exists: the app's uat and prod stay with
   v1's `AutoPromoter` (decision 2), so the `promote` suite runs unchanged on v2 and shows no newest-only difference in Tier 1.
 - *The W6 and W7 gates* (#265, #266) are therefore proven by the two claims of `saga` (`v2-claims.txt`, profiles `saga-docs` and `saga-feature`) once the matrix job is green; the entry for the record is the run of `Tests` on master.
 - *Claims.* `v2-claims.txt` gained the profile (`| profile=<name>`), the whole-suite claim and `v1-only <suite> | <reason>`; `tests/ci/run-v2-claims.py` is now the static check (the claims parse, list a scenario, and are each in exactly one
@@ -918,6 +917,22 @@ GitHub that the first saga found were fixed in `tests/FakeGitHub` (the single-is
   differ now and then (`keeper: split-item ...`, `mgr: text that comes from a message ...`, `copilot: a red master after the merge ...`) and the 4-requests check of the promote cold pass are quarantined under #415 (`$script:GoldenCausedFlaky`);
   the quarantine of the golden misses moved from the closed #386 to #415. The unit tests that need a SQL Server are `[SqlFact]` (88 tests): without `FACTORY_TEST_SQL` they are reported as skipped. The committed `tests/ci/__pycache__` file is removed.
 - *Not here.* `V2_BLOCKING` stays false: it becomes true after the first green run of `Tests` on master, which the main session starts after the merge batch and records on #268.
+
+**W9.10e as built (#557): v1 leaves the saga's items alone.** Only where the engine acts (`Engine.V2Acts`); tdd stays in the shadow run and its v1 sweep is called as it always was (no `skip_items`, no `intake.v2Plans`, no `Loaded` wait).
+- *The owned set into the script.* The Sweeper adds `skip_items` (the numbers `V2Ownership` holds) to every `sync-board` call (`Sweeper.AddV2Arguments`). `Verbs.Sweep.ps1` skips those items in its item loop before it reads their state, so the settle and the master-CI watch,
+  merge pickup, the PASS merge, park, demote, clear-hold, idle release and auto-unpark are not done for them, and the claim-ref reap leaves their refs alone. They still count in `design_waiting` (the backlog is the board's). The gateway's filter (`SweepV2Filter`) stays as the second line.
+- *No inline merge.* The gateway gives the verdict of an owned item the flag `sagaMerges` (`V2VerbFeed`, like `ftWithPendingChecks`: a caller's own is taken out of every call); `Verb_validation_verdict` records the verdict as always and makes no `Verb_merge -Gateway`.
+  The answer still says `next: merge`; the saga's merge train merges, once. An item with no saga keeps the script's inline merge. (Where the item verbs are routed to C# (W9.2, `ItemRoutes`) the verdict never merges inline; the flag is for the script path, which a gateway whose routes are not registered still runs.)
+- *Intake.* The Sweeper adds `intake.v2Plans` (the names of `intake.v2Plans`) to a full sweep's `intake` block; `Invoke-Intake` leaves in Todo an item of those plans: the docs-only marker in the body is the docs plan, any other item the feature plan (the rule of `DocsIntakeJob`),
+  except an item whose body names what it depends on, which the engine's intake leaves to v1's until W9.10h admits `Depends on` in v2's intake.
+- *`Loaded`.* `V2Ownership.Loaded` is false until the first successful read of the saga's table (`Set` counts as one). Until then the Sweeper runs no pass, full or incremental (items asked for stay queued), and says so once a minute; after the first read a failed read keeps the last answer.
+  (Stricter than "acts on no item": a pass over an unread set would also plan from the script's answer for items the saga owns.)
+- *Harness.* `Disable-ScriptIntake` of `run.ps1` is gone: the saga profiles leave the switches on and v1's intake skips the plans. The checks of `saga.ps1` that were quarantined under #557 are plain checks (the merge write is the gateway's, no merge comment, no wait record of the rule script's);
+  the two blocks of `v2-differences.txt` lose the lines of v1's pickup and of the rule script's merge, and the feature block's merge is the gateway's.
+- *Known window.* The owned set is read at the start of a pass, so an item whose saga starts during a pass (up to the script's 280 s) can still be acted on by that pass once; the saga starts only from Todo, which the pass does not touch for it. A claim ref of a merged saga item is removed by
+  the reap after the item closes and its claim has lapsed, not by a pickup at the merge.
+- *Proof.* `SweeperV2ArgumentsTests` (the arguments; a v2 gateway whose table cannot be read sweeps nothing, a v1 control sweeps), `V2OwnershipTests` (`Loaded`), `FeatureFeedTests` (the flag), the gateway test of `WorkItemWiringTests` (the pass carries `skip_items [701]` while the saga is open). The Tier 1 claims of `saga`
+  are unchanged; their quarantines and the declared differences were changed without a local Tier 1 run (see the pull request).
 
 **W9.10p as built (#555): the app's uat and prod stay with v1's `AutoPromoter`** (owner decision 2026-10-30, decision 2 of the audit). Where the engine acts the train promotes nothing in uat or prod, and the loop that calls the rule
 script `auto-promote` keeps promoting them; the train acts for tdd only, where it observes the release lifecycle's deployment and publishes `DeliveredTo(tdd)`. #545 (W9.4) stops the loop wherever `Engine.V2Acts`; this row narrows that stop

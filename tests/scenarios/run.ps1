@@ -13,7 +13,7 @@
 #                tests only, and applies the scripts). FACTORY_TEST_SQL is required: without it the run exits 2. The default, v1, changes nothing.
 #   -V2Profile   (with -Engine v2) the test profile of the gateway: 'plain' (default: intake off, as every suite runs), 'saga-docs' (the intake is on and names the docs plan, so the docs items of the Todo column
 #                start a WorkItemSaga) or 'saga-feature' (docs and feature). The saga profiles also set the timers of the Wolverine host at their floor (see $V2Profiles below); 'plain' leaves them at the defaults. v1's own intake (the rule script's) is
-#                switched off in the configuration file once the gateway runs (Disable-ScriptIntake), so that only the engine pulls (W9.10e makes v1 skip the plans of intake.v2Plans by itself). A claim of v2-claims.txt names its profile.
+#                left on by the same switches and skips the plans of intake.v2Plans by itself (W9.10e), so only the engine pulls them. A claim of v2-claims.txt names its profile.
 #   Start guards (guard.ps1): refuses with exit 4 when another run.ps1 or run-all.ps1 is active on this machine, or when the temp filesystem has less than
 #   -MinFreeDiskMb (default 2048) free; with less than -MinAvailableMb (default 1500) of memory a suite runs in half its groups. -Force starts anyway.
 param([string] $Only = '', [switch] $NoBuild, [string] $Suite = '', [switch] $ListSuites, [switch] $ListScenarios, [string] $ResultFile = '', [ValidateSet('full', 'fast')][string] $Tier = 'full', [int] $Groups = 0, [int] $Group = -1, [double] $GroupTimeoutMinutes = 30, [switch] $Force, [int] $MinFreeDiskMb = 2048, [int] $MinAvailableMb = 1500, [ValidateSet('v1', 'v2')][string] $Engine = 'v1', [ValidateSet('plain', 'saga-docs', 'saga-feature')][string] $V2Profile = 'plain')
@@ -345,7 +345,7 @@ function Get-SuiteEnv([string]$Kind) {
         'copilot' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; COPILOT_TASKS_TOKEN = 'fake-copilot' } }
         # the promote suite: the key that creates deployments, composed here at run time
         'promote' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_LEADER_LEASE = '0'; OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()) } }
-        # the saga suite: the owner suite's environment, and v1's own intake on (a saga profile of -Engine v2 turns it off: the engine pulls), three items at most in the AI columns
+        # the saga suite: the owner suite's environment, and v1's own intake on (a saga profile of -Engine v2 takes the switch from the configuration instead, where v1's intake leaves the plans of intake.v2Plans to the engine's), three items at most in the AI columns
         'saga' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_INTAKE = '1'; FACTORY_INTAKE_WIP = '3' } }
         'envscope' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_LEADER_LEASE = '0' } }
         # the octopus suite: owner mode, the runbook key and the host token, both composed here at run time (no credential-like fixture in the repository)
@@ -361,17 +361,6 @@ function Get-SuiteEnv([string]$Kind) {
         }
     }
     return @{}
-}
-
-# A saga profile (W9.10d): the engine's intake and the rule script's intake read the same switches (intake.enabled of the configuration, FACTORY_INTAKE), and the script's sweep pulls a Todo card within seconds,
-# where the engine's job pulls once a minute: the card would be in Technical Design before a saga could start. W9.10e makes the script skip the plans of intake.v2Plans; until then the harness switches the
-# script's intake off after the gateway has started: the gateway read its settings at the start (IntakeSettings.From, at the build of the Wolverine host), the rule scripts read the file at every call.
-# Remove this with W9.10e. (A scenario of a saga profile therefore never restarts the gateway: the restarted one would read the switched-off file.)
-function Disable-ScriptIntake {
-    $cfgObj = Get-Content -Raw $env:FACTORY_CONFIG | ConvertFrom-Json -AsHashtable
-    $cfgObj['intake']['enabled'] = $false
-    ($cfgObj | ConvertTo-Json -Depth 12) | Set-Content -Path $env:FACTORY_CONFIG
-    Write-Host "    (saga profile: intake.enabled is false in the file the rule scripts read; the engine's intake keeps the setting it started with)"
 }
 
 # -Engine v2: what /api/v1/status says of the engine and of the Wolverine host (its state is running once the migration has created the database and the node has started)
@@ -410,7 +399,6 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
         $script:V2Seen = @{ mode = ''; state = ''; wolverine = '(not asked)' }
         [void](Wait-Until -Seconds 120 -Message 'the Wolverine host' { $script:V2Seen = Get-V2State; $script:V2Seen.state -eq 'running' })
         Check 'engine v2: the status names the engine v2 and the Wolverine host runs' ($script:V2Seen.mode -eq 'v2' -and $script:V2Seen.state -eq 'running') "(engine mode '$($script:V2Seen.mode)'; wolverine: $($script:V2Seen.wolverine))"
-        if ($script:IsSagaProfile) { Disable-ScriptIntake }
         Initialize-V2Golden   # the declared differences of v2 (golden/v2-differences.txt) applied to the golden files, and checked against them
     }
     try {

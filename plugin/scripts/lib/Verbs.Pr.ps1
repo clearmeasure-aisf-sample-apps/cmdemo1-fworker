@@ -715,7 +715,9 @@ function Verb_validation_verdict($a) {
     # The gateway merges an approved change itself (Verbs.Merge.ps1): in this call when nothing stands in the way, otherwise the sweep does it as
     # soon as it can. 'merge' in the answer says what happened; 'next' stays "merge" so the session's one merge call (answered already-merged)
     # still confirms it, and names the new state only when the merge sent the item back or parked it.
-    if ($c.mergePolicy -eq 'auto' -and (Test-GatewayMerge) -and (Test-Label $info $c.autoMergeLabel)) {
+    # W9.10e: an item whose saga merges it (the gateway gives sagaMerges to the verdict of an item the v2 engine owns) is merged by the saga's merge train alone: no inline merge here, and the sweep skips the item
+    $sagaMerges = (Test-Has $a 'sagaMerges') -and "$($a.sagaMerges)" -in 'True', 'true', '1'
+    if ($c.mergePolicy -eq 'auto' -and (Test-GatewayMerge) -and (Test-Label $info $c.autoMergeLabel) -and -not $sagaMerges) {
         $m = try { Verb_merge @{ item = $n; pr = $pr } -Gateway } catch [FactoryReject] { @{ ok = $true; id = $n; outcome = 'waiting'; reason = $_.Exception.Code } }
         $res.merge = $m
         if ($m.outcome -in 'demoted', 'parked') { $res.next = $m.outcome; if (Test-Has $m 'detail') { $res.detail = $m.detail } }
