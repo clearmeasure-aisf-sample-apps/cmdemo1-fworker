@@ -42,6 +42,7 @@ sealed class SqlLease : ISqlLease
     SqlConnection? conn;
     bool prepared, requested, conceded, held;
     long epoch;
+    string? me;   // the holder name this lease acts for (set by the first try), so that a stop can withdraw its own takeover request
 
     /// <param name="connectionString">The database's connection string; the lock's connection is made from it with pooling and connection resiliency off.</param>
     /// <param name="prepare">Brings the schema up (the scripts of Fworker.Database) before the first use: the leadership row is a table of script 170.</param>
@@ -82,6 +83,7 @@ sealed class SqlLease : ISqlLease
         await io.WaitAsync(ct);
         try
         {
+            me = holder;
             if (Held) return new SqlLeaseAcquire(true, Epoch);
             if (!prepared) { await prepare(ct); prepared = true; }
             var c = await ConnectionAsync(ct);
@@ -176,20 +178,27 @@ sealed class SqlLease : ISqlLease
             {
                 var c = conn ?? throw new InvalidOperationException("no connection");
                 // the session's own view of the lock (a reconnected session has none), and the row: the term must still be ours
-                await using var cmd = Command(c, """
-                    SELECT APPLOCK_MODE(N'public', @r, N'Session'), l.Epoch, l.Holder, l.TakeoverBy, CASE WHEN l.TakeoverAt >= DATEADD(SECOND, -@fresh, SYSDATETIMEOFFSET()) THEN 1 ELSE 0 END
-                    FROM (SELECT 1 AS One) d LEFT JOIN factory.Leadership l ON l.Id = 1;
-                    """, 10);
-                await using var r = await cmd.ExecuteReaderAsync(ct);
-                if (!await r.ReadAsync(ct)) return Lost("no answer");
-                var mode = r.GetString(0);
-                var rowEpoch = r.IsDBNull(1) ? -1 : r.GetInt64(1);
-                var rowHolder = r.IsDBNull(2) ? null : r.GetString(2);
-                if (mode != "Exclusive") return Lost("the lock is gone");
-                if (rowHolder != holder || rowEpoch != Epoch) return Lost("the term is another's");
-                var by = r.IsDBNull(3) ? null : r.GetString(3);
-                if (by != null && by != holder && r.GetInt32(4) == 1) return new SqlLeaseCheck(SqlLeaseState.TakeoverRequested, by);
-                return new SqlLeaseCheck(SqlLeaseState.Held);
+                // (a lock that does not show is asked for once more before it counts as gone)
+                for (var look = 1; ; look++)
+                {
+                    await using var cmd = Command(c, """
+                        SELECT APPLOCK_MODE(N'public', @r, N'Session'), l.Epoch, l.Holder, l.TakeoverBy, CASE WHEN l.TakeoverAt >= DATEADD(SECOND, -@fresh, SYSDATETIMEOFFSET()) THEN 1 ELSE 0 END
+                        FROM (SELECT 1 AS One) d LEFT JOIN factory.Leadership l ON l.Id = 1;
+                        """, 10);
+                    await using var r = await cmd.ExecuteReaderAsync(ct);
+                    if (!await r.ReadAsync(ct)) return Lost("no answer");
+                    var mode = r.GetString(0);
+                    var rowEpoch = r.IsDBNull(1) ? -1 : r.GetInt64(1);
+                    var rowHolder = r.IsDBNull(2) ? null : r.GetString(2);
+                    if (mode != "Exclusive" || rowHolder != holder || rowEpoch != Epoch)
+                    {
+                        if (look == 1) continue;
+                        return Lost(mode != "Exclusive" ? "the lock is gone" : "the term is another's");
+                    }
+                    var by = r.IsDBNull(3) ? null : r.GetString(3);
+                    if (by != null && by != holder && r.GetInt32(4) == 1) return new SqlLeaseCheck(SqlLeaseState.TakeoverRequested, by);
+                    return new SqlLeaseCheck(SqlLeaseState.Held);
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception e) { return Lost(e is SqlException se ? $"SqlException {se.Number}" : e.GetType().Name); }
@@ -197,8 +206,9 @@ sealed class SqlLease : ISqlLease
         finally { io.Release(); }
     }
 
-    // the holder has lost the lock: it acts no more; the connection (and with it any lock it still held) ends
-    SqlLeaseCheck Lost(string why) { SetHeld(false); Drop(); return new SqlLeaseCheck(SqlLeaseState.Lost, Failure: why); }
+    // The holder has lost the lock: it acts no more. The connection is NOT ended here: a lock the server still holds (a failed look, a timeout) stays held until ReleaseAsync, which the step-down calls
+    // after the node has left and the plant is saved, so that no other process can take it while this node still runs.
+    SqlLeaseCheck Lost(string why) { SetHeld(false); return new SqlLeaseCheck(SqlLeaseState.Lost, Failure: why); }
 
     public async Task<SqlLeasePeek> PeekAsync(CancellationToken ct)
     {
@@ -227,9 +237,12 @@ sealed class SqlLease : ISqlLease
         try
         {
             var c = conn;
-            if (c is { State: ConnectionState.Open } && Held)
+            if (c is { State: ConnectionState.Open })
             {
-                try { using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)); await ReleaseLockAsync(c, cts.Token); } catch { }
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                // a stopping newcomer withdraws its own request (it is not honoured when stale, but the holder need not step down for it meanwhile)
+                if (me != null) { try { await using var clear = Command(c, "UPDATE factory.Leadership SET TakeoverBy = NULL, TakeoverAt = NULL WHERE Id = 1 AND TakeoverBy = @h;"); clear.Parameters.Add("@h", SqlDbType.NVarChar, 100).Value = me; await clear.ExecuteNonQueryAsync(cts.Token); } catch { } }
+                try { await ReleaseLockAsync(c, cts.Token); } catch { }
             }
             SetHeld(false); Drop();
             lock (gate) { requested = false; conceded = false; }

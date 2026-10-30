@@ -51,8 +51,10 @@ sealed class LeaderSettings
     }
 }
 
-sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : ILeadership
+sealed class GatewayLeader(Func<string, string, TimeSpan, Task<(int Code, string Output)>> run, LeaderSettings cfg, string version) : ILeadership
 {
+    public GatewayLeader(Runner runner, LeaderSettings cfg, string version) : this(runner.RunAsync, cfg, version) { }
+
     public enum Role { Off, Starting, Acting, Superseded, Stopping }
     readonly object gate = new();
     Role role = cfg.On ? Role.Starting : Role.Off;
@@ -126,13 +128,15 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
 
     // Takes the lease with the next epoch; tries until it has it (a gateway that cannot write the lease cannot act anyway). Returns the
     // predecessor's record (null: there was none).
-    public async Task<JsonObject?> AcquireAsync(CancellationToken ct)
+    public async Task<JsonObject?> AcquireAsync(CancellationToken ct, bool requireLock = false)
     {
         var pause = 2.0;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
-            var (code, output) = await runner.RunAsync("leader-lease", Args("acquire").ToJsonString(), TimeSpan.FromSeconds(60));
+            // W9.10b: where the engine acts the ref is never written without the SQL lock (a newer process may have asked for it, or the connection may have dropped)
+            if (requireLock && sql is { Held: false }) throw new SqlLockLostException();
+            var (code, output) = await run("leader-lease", Args("acquire").ToJsonString(), TimeSpan.FromSeconds(60));
             JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
             if (code == 0 && j?["epoch"] is JsonValue ev && ev.TryGetValue<long>(out var e))
             {
@@ -183,7 +187,7 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
     // Before a process acts for the first time: is it still the holder? A process superseded while it restored stands by instead.
     public async Task<bool> ConfirmAsync()
     {
-        var (code, output) = await runner.RunAsync("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
+        var (code, output) = await run("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
         if (code != 0 || j == null || (j["leader"] is JsonValue lv && lv.TryGetValue<bool>(out var lb) && lb)) return true;   // unreadable: as Hold does, it keeps the lease
         var cur = j["current"] as JsonObject;
@@ -196,7 +200,7 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
     async Task Hold()
     {
         bool due; lock (gate) due = (DateTime.UtcNow - renewedAt).TotalSeconds >= cfg.RenewSeconds;
-        var (code, output) = await runner.RunAsync("leader-lease", Args(due ? "renew" : "check").ToJsonString(), TimeSpan.FromSeconds(60));
+        var (code, output) = await run("leader-lease", Args(due ? "renew" : "check").ToJsonString(), TimeSpan.FromSeconds(60));
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
         if (code != 0 || j == null) { lock (gate) failures++; return; }   // GitHub did not answer: nobody else can take the lease meanwhile either
         var leader = j["leader"] is JsonValue lv && lv.TryGetValue<bool>(out var lb) && lb;
@@ -233,7 +237,7 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
     // A standby takes the lease when it was released or ran out; until then it reads the record (conditionally) at every check.
     async Task Watch(CancellationToken ct)
     {
-        var (code, output) = await runner.RunAsync("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
+        var (code, output) = await run("leader-lease", Args("check").ToJsonString(), TimeSpan.FromSeconds(60));
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
         if (code != 0 || j == null) { lock (gate) failures++; return; }
         JsonObject? cur;
@@ -248,17 +252,18 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
         bool handing; lock (gate) handing = handingOver > 0;
         if (handing) return;   // a step-down is still running
         var take = released || lapsed;
-        var lockProof = false;
         if (SqlFences)
         {
-            // W9.10b: a process with a database takes the ref only with the SQL lock. A ref whose holder was the last holder of the lock, while the lock is free, belongs to a process that is gone (its
-            // connection dropped): the lock is the proof, so the standby does not wait for the ref to run out. A ref of any other holder (a process without a database, a newer one) is the ref's to decide.
+            // W9.10b: a process with a database takes the ref only with the SQL lock. While the lock is free, a ref held by the last holder of the lock has no one acting for it (the holder let both go
+            // or its connection dropped), and a ref held by this very process has none either (it lost the lock to a newer process that never wrote the ref): the standby does not wait for the ref to
+            // run out. The restore still waits for the predecessor's final snapshot as it always does (a holder that stepped down wrote it before it let the lock go). A ref of any other holder (a
+            // process without a database, a newer one) is the ref's to decide.
             if (!take)
             {
                 try
                 {
                     var peek = await sql!.PeekAsync(ct);
-                    take = lockProof = peek.LockFree && cur?["holder"]?.ToString() is { Length: > 0 } refHolder && refHolder == peek.LastHolder;
+                    take = peek.LockFree && cur?["holder"]?.ToString() is { Length: > 0 } refHolder && (refHolder == peek.LastHolder || refHolder == Holder);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
                 catch (Exception e) { NoteSqlFailure(e); return; }
@@ -277,14 +282,47 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
         lock (gate) { sha = ""; etag = ""; }
         JsonObject? pred;
         try { pred = await AcquireAsync(ct); } catch (OperationCanceledException) { return; }
-        // the predecessor's connection dropped: it writes no more snapshots, so the restore reads the last one at once instead of waiting for a final one
-        if (lockProof && pred != null) pred["until"] = DateTime.UtcNow.AddSeconds(-1).ToString("o");
         Log(new JsonObject { ["gateway"] = "leader", ["reacquired"] = Epoch, ["after"] = released ? "released" : lapsed ? "lapsed" : "sql-lock-free" });
         if (OnReacquired is { } f) await f(pred);
         StartActing();
     }
 
     // ---- W9.10b ---------------------------------------------------------------------------------------------------------------------------------
+
+    sealed class SqlLockLostException : Exception { }
+
+    /// <summary>
+    /// The start of a process that acts: where the engine acts, the SQL lock first (the newest process asks the holder to make room), then the ref, and if the lock is gone once the ref is written (a newer process
+    /// asked meanwhile, or the connection dropped) back to the lock, passively this time, before anything is restored or started. Never leaves the ref written by a process that does not hold the lock. Without
+    /// a SQL lease, or in the shadow run, it is the ref alone. Returns the predecessor's record of the ref (null: none).
+    /// </summary>
+    public async Task<JsonObject?> AcquireAllAsync(CancellationToken ct)
+    {
+        var first = true;
+        while (true)
+        {
+            if (SqlFences)
+            {
+                await AcquireSqlAsync(ct, request: first); first = false;
+                StartSqlLoop(ct);
+            }
+            try
+            {
+                var pred = await AcquireAsync(ct, SqlFences);
+                if (!SqlFences || sql!.Held) return pred;
+            }
+            catch (SqlLockLostException) { }
+            Log(new JsonObject { ["gateway"] = "leader", ["sqlLostBeforeActing"] = true, ["holder"] = Holder });
+        }
+    }
+
+    int sqlLoopStarted;
+    /// <summary>Starts the SQL lock's loop once.</summary>
+    public void StartSqlLoop(CancellationToken ct)
+    {
+        if (sql == null || Interlocked.Exchange(ref sqlLoopStarted, 1) != 0) return;
+        _ = Task.Run(() => SqlLoopAsync(ct));
+    }
 
     void NoteSqlFailure(Exception e)
     {
@@ -298,7 +336,7 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
     }
 
     /// <summary>Takes the SQL lock, trying until it has it: a starting process asks the holder to make room (the newest process wins) and waits for it to release. Returns at once when there is no SQL lease.</summary>
-    public async Task AcquireSqlAsync(CancellationToken ct)
+    public async Task AcquireSqlAsync(CancellationToken ct, bool request = true)
     {
         if (sql == null) return;
         var pause = 0.0;
@@ -308,7 +346,7 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
             var failed = false;
             try
             {
-                var got = await sql.TryAcquireAsync(Holder, true, ct);
+                var got = await sql.TryAcquireAsync(Holder, request, ct);
                 if (got.Acquired) { SqlTaken(got); SqlGranted(); return; }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -329,9 +367,10 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
     public async Task SqlLoopAsync(CancellationToken ct)
     {
         if (sql == null) return;
-        var first = true;
+        var first = true; var failures = 0;
         while (!ct.IsCancellationRequested)
         {
+            var failed = false;
             try
             {
                 if (sql.Held) await SqlCheckAsync(ct);
@@ -352,9 +391,12 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
-            catch (Exception e) { NoteSqlFailure(e); }
+            catch (Exception e) { NoteSqlFailure(e); failed = true; }
             first = false;
-            try { await Task.Delay(TimeSpan.FromSeconds(cfg.SqlCheckSeconds), ct); } catch (OperationCanceledException) { return; }
+            // a database that does not answer is not asked (and the scripts are not applied) every few seconds: the pause doubles up to a minute
+            failures = failed ? Math.Min(failures + 1, 6) : 0;
+            var pause = failed ? Math.Min(60, cfg.SqlCheckSeconds * Math.Pow(2, failures)) : cfg.SqlCheckSeconds;
+            try { await Task.Delay(TimeSpan.FromSeconds(pause), ct); } catch (OperationCanceledException) { return; }
         }
     }
 
@@ -401,7 +443,7 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
     {
         if (Epoch == 0) return false;
         var a = Args("release"); a["plant_epoch"] = plantEpoch;
-        var (code, _) = await runner.RunAsync("leader-lease", a.ToJsonString(), timeout);
+        var (code, _) = await run("leader-lease", a.ToJsonString(), timeout);
         Log(new JsonObject { ["gateway"] = "leader", ["released"] = Epoch, ["plantEpoch"] = plantEpoch, ["exit"] = code });
         return code == 0;
     }

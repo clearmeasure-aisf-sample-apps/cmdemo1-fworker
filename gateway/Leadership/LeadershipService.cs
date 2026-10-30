@@ -106,13 +106,9 @@ sealed class LeadershipService : IHostedService
                 // plant from a healthy predecessor
                 await revocations.Loaded.WaitAsync(ct);
                 // W9.10b: where there is a database, the SQL lock first when the engine acts (the newest process asks the holder to stop its node, save the plant and release, then takes the lock and the
-                // next epoch); in the shadow run v1 acts at once and the lock, taken in the background, gates the node only
-                if (leader.HasSqlLease)
-                {
-                    if (leader.SqlFences) await leader.AcquireSqlAsync(ct);
-                    _ = Task.Run(() => leader.SqlLoopAsync(ct));
-                }
-                var pred = await leader.AcquireAsync(ct);
+                // next epoch) and the ref only with the lock held (GatewayLeader.AcquireAllAsync); in the shadow run v1 acts at once and the lock, taken in the background, gates the node only
+                if (leader.HasSqlLease && !leader.SqlFences) leader.StartSqlLoop(ct);
+                var pred = await leader.AcquireAllAsync(ct);
                 await snapshots.RestoreFromPredecessorAsync(pred, "start");
                 // superseded while it restored (two starts close together): it stands by instead of acting
                 if (await leader.ConfirmAsync()) leader.StartActing();
