@@ -82,6 +82,7 @@ static class DeliveryActingWiring
         var settings = new OctopusPromoteSettings(octopus["space"]?.ToString() ?? "", names, () => env("OCTOPUS_RUNBOOK_API_KEY") is { Length: > 0 } k ? k : env("OCTOPUS_API_KEY"), mayAct);
         var promoter = new OctopusPromoter(http, settings);
         var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter));
+        RollbackWiring.Attach(host, c, env, mayAct, ledger);   // W8.3: the executor of the train's incident rollback (RollbackRelease) and the migration probe it takes; the executor refuses every environment but tdd
         var previous = host.RuntimeCommands;
         host.RuntimeCommands = (services, w) =>
         {

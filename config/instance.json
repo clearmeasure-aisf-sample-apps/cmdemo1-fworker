@@ -71,7 +71,10 @@
       "signoffWaitHours": 2
     },
     "finalEnvironment": "prod",
-    "dependenciesDelivered": true
+    "dependenciesDelivered": true,
+    "rollback": {
+      "migrationPaths": ["scripts/Update/"]
+    }
   },
   "plant": {
     "oneItemPerSession": true

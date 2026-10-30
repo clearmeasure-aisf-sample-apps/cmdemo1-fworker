@@ -35,17 +35,7 @@ public sealed record TrainResult(IReadOnlyList<object> Messages, DateTimeOffset?
 /// <summary>Two writers moved the same train at once more often than the retries allow; the message is retried by Wolverine.</summary>
 public sealed class TrainConflictException(string key) : Exception($"the delivery train {key} kept changing under the handler");
 
-/// <summary>
-/// W8.3's side of the incident rollback: decides and starts the rollback of the environment the train serves (the target release, the migration precondition, the one deployment the train creates itself in tdd).
-/// W8.1 sends the request and handles every answer; until this exists the train answers that it cannot (<see cref="DeliveryTrainService.Unavailable"/>) and the incident goes to its owner.
-/// </summary>
-public interface IRollbackExecutor
-{
-    /// <summary>The answer to the request: "started", "done", "refused" or "failed" with the code that says why (<see cref="RollbackAnswered"/>).</summary>
-    Task<RollbackAnswered> Execute(TrainState state, DeliveryPolicy policy, TrainRollback request, DateTimeOffset now, CancellationToken ct);
-}
-
-public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies policies, ITrainReads reads, IDeliveredLookup delivered, Func<DateTimeOffset>? clock = null, IRollbackExecutor? rollback = null)
+public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies policies, ITrainReads reads, IDeliveredLookup delivered, Func<DateTimeOffset>? clock = null, IMigrationProbe? migrations = null)
 {
     readonly Func<DateTimeOffset> clock = clock ?? (() => DateTimeOffset.UtcNow);
 
@@ -70,7 +60,6 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
         var (deployable, environment) = TrainKey.Split(input.Key);
         var policy = policies.For(deployable, environment);
         if (policy is null) return TrainResult.None;   // the deployable left the catalog
-        if (input is TrainRollback request) return await Rollback(request, policy, ct);   // (the incident's request: answered, never applied to the state)
         var replayEnded = input is TrainReplay { Active: false };
         TrainRecord? carried = null;
         // W7.7: a delivery of an item concerns the train only if one of its candidates waits for that item; for it the input is a wake, nothing to apply
@@ -104,7 +93,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             if (!gated)
             {
                 var republish = state.RepublishPending;
-                run = new TrainRun(state, policy, reads, delivered, policies, now, replayEnded || republish);
+                run = new TrainRun(state, policy, reads, delivered, policies, now, replayEnded || republish, migrations);
                 try { await run.Evaluate(ct, republish); }
                 catch (Exception e) when (IsTransient(e, ct))
                 {
@@ -117,22 +106,6 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             if (await store.Save(input.Key, state, rec.Revision, ct)) return new TrainResult(run?.Out ?? [], wake);
         }
         throw new TrainConflictException(input.Key);
-    }
-
-    /// <summary>What the train answers to a rollback request while no executor exists (W8.3): it cannot, and says so, so that the incident does not wait for its timeout.</summary>
-    public static RollbackAnswered Unavailable(TrainRollback request, DateTimeOffset now)
-        => new(request.Key, request.IncidentId, request.Generation, "refused", "unavailable", request.ToRelease, "this delivery train does not execute rollbacks yet", now);
-
-    /// <summary>
-    /// The incident's rollback request (W8.1). The train owns the deployments, so the executor decides from the train's state; a store that fails is a fault (the request is delivered again), a train without state
-    /// has no previous release to go back to.
-    /// </summary>
-    async Task<TrainResult> Rollback(TrainRollback request, DeliveryPolicy policy, CancellationToken ct)
-    {
-        var now = clock();
-        if (rollback is null) return new TrainResult([Unavailable(request, now)], null);
-        var state = (await store.Load(request.Key, ct))?.State ?? TrainState.New(request.Key);
-        return new TrainResult([await rollback.Execute(state, policy, request, now, ct)], null);
     }
 
     /// <summary>A fault of a read (GitHub, the app, the delivered-to table's database) that a later look gets past: the input is saved, the look is repeated, and nothing of this look is kept or decided.</summary>
@@ -160,10 +133,14 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 UpsertRelease(s, d.ReleaseId, d.Version, d.Commit, d.At);
                 if (key is null) break;
                 var have = s.DeploymentOf(d.Version, key);
+                // W8.3: an older deployment of the release seen again (the watcher's replay) must not take the place of the rollback's own
+                if (have is { Rollback: true } && have.DeploymentId != d.DeploymentId && d.At <= have.StartedAt) break;
                 if (have is null || have.DeploymentId != d.DeploymentId)
                 {
                     if (!s.Deployments.TryGetValue(d.Version, out var byEnv)) s.Deployments[d.Version] = byEnv = [];
-                    byEnv[key] = have = new TrainDeployment { DeploymentId = d.DeploymentId, TaskId = d.TaskId, Phase = "Started", StartedAt = d.At };
+                    // W8.3: the deployment of the release a rollback goes back to, while the rollback waits for it, is the rollback's
+                    var ours = key == p.Environment && s.ActiveRollback is { Phase: RollbackPhase.Deploying } ar && ar.To == d.Version;
+                    byEnv[key] = have = new TrainDeployment { DeploymentId = d.DeploymentId, TaskId = d.TaskId, Phase = "Started", StartedAt = d.At, Rollback = ours };
                     // a newer deployment of the release to the environment (a redeploy after a failure) starts the settling over
                     if (key == p.Environment) s.Settled.Remove(d.Version);
                 }
@@ -186,6 +163,9 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 s.ReplayingSince = r.Active ? now : null;
                 if (!r.Active) s.RepublishPending = true;   // the end of a replay is a restart's: whoever listens to the decisions starts empty
                 break;
+            case TrainRollback or TrainRollbackFailed:
+                RollbackRules.Apply(s, input, now);   // W8.3 (the incident's request, W8.1, and the executor's refusal)
+                break;
         }
     }
 
@@ -198,7 +178,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
 }
 
 /// <summary>One evaluation of one train on its state: the settling of finished deployments, the Sign-offs, the promotion. Short-lived; <see cref="Out"/> is what it decided to publish.</summary>
-sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, IDeliveryPolicies policies, DateTimeOffset now, bool replay = false)
+sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDeliveredLookup delivered, IDeliveryPolicies policies, DateTimeOffset now, bool replay = false, IMigrationProbe? migrations = null)
 {
     public List<object> Out { get; } = [];
     readonly List<DateTimeOffset> wakes = [];
@@ -226,6 +206,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
     async Task Evaluate(CancellationToken ct)
     {
         await Settle(ct);
+        await RollbackStep(ct);   // W8.3: the one deployment the tdd train creates itself; an incident's hold does not stop it (it is the incident's own)
         if (!p.Acts) return;   // tdd is deployed by the release's lifecycle and an external promoter creates its own deployments: the train observes
         // an incident holds the train: nothing is promoted, except (W8.1) the release that carries the incident's hotfix, which waits for the same gates as any release; with no hotfix item yet there is nothing to let through
         if (s.Held && s.HoldAllow.Count == 0) { Decide("held", "", [], [string.IsNullOrEmpty(s.HeldReason) ? "an incident holds the train" : s.HeldReason]); return; }
@@ -253,6 +234,13 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         foreach (var version in done)
         {
             var release = s.Releases[version]; var dep = s.Deployments[version][env];
+            if (dep.Rollback)
+            {
+                // W8.3: the rollback's deployment puts back a release that was delivered when it first ran: it delivers nothing, and what it brings back is what runs here now
+                s.Settled.Add(version);
+                s.Current = version;
+                continue;
+            }
             var before = RunningBefore(dep);
             var carried = new List<TrainCandidate>();
             if (!string.IsNullOrEmpty(release.Commit))
@@ -276,6 +264,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 items.Add(c.Item);
             }
             s.Settled.Add(version);
+            if (carried.Count > 0) RememberDelivery(version, carried);
             if (s.Current is null || !s.Releases.TryGetValue(s.Current, out var cur) || (s.DeploymentOf(s.Current, env)?.FinishedAt ?? DateTimeOffset.MinValue) <= (dep.FinishedAt ?? dep.StartedAt)) s.Current = version;
             // older releases that never reached the environment ride in this one: "delivered in release X, superseding Y"
             var superseded = s.Releases.Values.Where(r => r.Version != version && r.Assembled <= release.Assembled && s.DeploymentOf(r.Version, env) is not { Succeeded: true } && !s.Superseded.ContainsKey(r.Version))

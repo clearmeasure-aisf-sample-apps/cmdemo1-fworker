@@ -51,6 +51,8 @@ public sealed class TrainDeployment
     public DateTimeOffset? FinishedAt { get; set; }
     public bool Completed => Phase != "Started";
     public bool Succeeded => Phase == "Succeeded";
+    /// <summary>W8.3: this deployment is the train's own rollback (the deployment of a release that had run here before, ordered by the incident): it delivers no item.</summary>
+    public bool Rollback { get; set; }
 }
 
 /// <summary>A Sign-off (manual intervention) a deployment of this environment waits at.</summary>
@@ -136,6 +138,13 @@ public sealed class TrainState
     public bool RepublishPending { get; set; }
     /// <summary>Set while the watcher's replay of Octopus's history is being applied: the train takes inputs in and decides nothing (it ends with the replay, or after <see cref="DeliveryTrainService.ReplayLimit"/>).</summary>
     public DateTimeOffset? ReplayingSince { get; set; }
+    /// <summary>W8.3: the rollback being carried out (or the last one that ended), the ones asked for behind it, the incidents already seen and the releases that were rolled back from.</summary>
+    public RollbackState? ActiveRollback { get; set; }
+    public List<RollbackRequest> RollbackQueue { get; set; } = [];
+    public List<string> RollbackSeen { get; set; } = [];
+    public List<string> RolledBack { get; set; } = [];
+    /// <summary>W8.3: the items each of the newest delivered releases carried (by version), so that a rollback knows which items it undelivers and can make them candidates again.</summary>
+    public Dictionary<string, List<TrainCandidate>> DeliveredBy { get; set; } = [];
     public long Sequence { get; set; }
 
     static readonly JsonSerializerOptions Json = new() { WriteIndented = false };

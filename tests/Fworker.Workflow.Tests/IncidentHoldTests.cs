@@ -115,37 +115,15 @@ public class IncidentHoldTests
     }
 
     [Fact]
-    public async Task TheRollbackRequest_IsAnsweredThatTheTrainCannotYet_AndChangesNothing()
+    public async Task TheRollbackRequest_OfATrainThatDoesNotRollBack_IsRefused_AndDeploysNothing()
     {
+        // one contract with W8.3: uat's train does not roll back by itself (tdd only), so the incident is told it is refused and goes to its owner; RollbackTests has the tdd train
         var f = await OneRelease();
-        var before = f.State.ToJson();
         var request = new TrainRollback(f.Key, "orders/uat#1", 1, null, "release 1.0.2 was deployed 5 minutes before the incident");
         var r = await f.Send(request);
         var a = Assert.Single(r.Messages.OfType<RollbackAnswered>());
-        Assert.Equal((f.Key, "orders/uat#1", 1, "refused", "unavailable"), (a.Key, a.IncidentId, a.Generation, a.Outcome, a.Code));
+        Assert.Equal((f.Key, "orders/uat#1", 1, "refused", RollbackCodes.NotPermitted), (a.Key, a.IncidentId, a.Generation, a.Outcome, a.Code));
         Assert.Equal(f.Now, a.At);
-        Assert.Equal(before, f.State.ToJson());
-    }
-
-    [Fact]
-    public async Task TheRollbackRequest_GoesToTheExecutor_WhenOneIsThere()
-    {
-        var f = await OneRelease();
-        var seen = new List<(TrainRollback Request, string Key)>();
-        var svc = new DeliveryTrainService(f.Store, f.Policies, f.Reads, f.Delivered, () => f.Now, new Executor(seen));
-        var request = new TrainRollback(f.Key, "orders/uat#1", 2, "1.0.1", "why");
-        var r = await svc.Handle(request);
-        var a = Assert.Single(r.Messages.OfType<RollbackAnswered>());
-        Assert.Equal(("started", "", "1.0.1"), (a.Outcome, a.Code, a.ToRelease));
-        Assert.Equal((request, f.Key), Assert.Single(seen));
-    }
-
-    sealed class Executor(List<(TrainRollback, string)> seen) : IRollbackExecutor
-    {
-        public Task<RollbackAnswered> Execute(TrainState state, DeliveryPolicy policy, TrainRollback request, DateTimeOffset now, CancellationToken ct)
-        {
-            seen.Add((request, state.Key));
-            return Task.FromResult(new RollbackAnswered(request.Key, request.IncidentId, request.Generation, "started", "", request.ToRelease, "", now));
-        }
+        Assert.Empty(r.Messages.OfType<Fworker.Contracts.Commands.RollbackRelease>());
     }
 }
