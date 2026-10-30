@@ -9,8 +9,10 @@ namespace Fworker.Integrations.Commands;
 // W3.2: the journal ledger in C#. A port of Add-Journal, Close-JournalFolds, Add-JournalKind and Verb_journal of plugin/scripts/lib/Journal.ps1: the
 // same comment text and marker, the same ledger in the item's state comment (journal.keys, count, kinds, fold, waiting_at, ciReleased), the same folds,
 // the same cap, and the same GitHub calls in the same order (the golden writes see no difference). It does not go through the `journal` verb.
-// Differences, all in failure cases only: the line is written under the IItemLock it is given (W9.10l: the gateway gives it the one lock of every port, the item lock file that the rule scripts take too, so a journal
-// line, an item verb and a script exclude one another; without one, a lock of this process; the commands of one item also run one after the other, see JournalCommandWiring); a state conflict reads the state again and repeats the line, and
+// Differences, all in failure cases only: the lines of one item are written one after the other under a lock of this process (the ledger's own gate; the commands of one item also run one after the other, see JournalCommandWiring),
+// and the shared IItemLock it is given (W9.10l: the gateway gives it the one lock of every port, the item lock file that the rule scripts take too) is held only around the Save of the state comment, never across the posts to GitHub:
+// the Save is a compare-and-write on the revision, which the item verbs and the scripts do under that lock, so it must exclude them; a post that takes seconds must not hold a verb of the same item behind it (the accept of a worker
+// waited for the offered and launched lines); a line that lost the race to a verb gets a state conflict, reads the state again and repeats, and
 // the repeat finds a comment that was posted before the conflict by its marker instead of posting it twice; a GitHub failure that is worth a retry is
 // thrown, for the command base to classify, where the script logs it and drops the line.
 
@@ -49,6 +51,7 @@ public sealed class JournalLedger
     readonly Func<DateTime> utcNow;
     readonly Action<string> log;
     readonly IItemLock itemLock;
+    readonly ConcurrentDictionary<int, Gate> gates = new();
 
     public JournalLedger(IJournalStore store, JournalSettings? settings = null, Func<DateTime>? utcNow = null, Action<string>? log = null, IItemLock? itemLock = null)
     {
@@ -64,7 +67,9 @@ public sealed class JournalLedger
     public async Task<JournalOutcome> Append(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
     {
         (ev, key) = Prepare(ev, key);
-        try { return await itemLock.Use(item, () => AppendLocked(item, ev, fields, key, ct), IItemLock.DefaultWaitSeconds, ct); }
+        // the lines of one item are written one after the other (the gate of this ledger); the shared item lock is taken only to save the state (see SaveState)
+        using var turn = await Enter(item, ct);
+        try { return await AppendLocked(item, ev, fields, key, held: false, ct); }
         catch (ItemBusyException e) { throw new TimeoutException($"journal {ev} for #{item}: {e.Message}", e); }   // worth a retry: the command base classifies a timeout as transient
     }
 
@@ -74,7 +79,7 @@ public sealed class JournalLedger
     public Task<JournalOutcome> AppendHeld(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
     {
         (ev, key) = Prepare(ev, key);
-        return AppendLocked(item, ev, fields, key, ct);
+        return AppendLocked(item, ev, fields, key, held: true, ct);
     }
 
     (string Event, string Key) Prepare(string ev, string key)
@@ -85,7 +90,7 @@ public sealed class JournalLedger
         return (ev, key);
     }
 
-    async Task<JournalOutcome> AppendLocked(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct)
+    async Task<JournalOutcome> AppendLocked(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, bool held, CancellationToken ct)
     {
         for (var attempt = 1; ; attempt++)
         {
@@ -93,9 +98,9 @@ public sealed class JournalLedger
             {
                 return ev switch
                 {
-                    "waiting" => await AppendWaiting(item, fields, key, ct),
-                    "ci-released" => await RecordCiReleased(item, fields, key, ct),
-                    _ => new JournalOutcome(await AddJournal(item, null, ev, fields, key, save: true, ct)),
+                    "waiting" => await AppendWaiting(item, fields, key, held, ct),
+                    "ci-released" => await RecordCiReleased(item, fields, key, held, ct),
+                    _ => new JournalOutcome(await AddJournal(item, null, ev, fields, key, save: true, held, ct)),
                 };
             }
             catch (StateConflictException) when (attempt < 3) { /* the state changed since the read: read it again */ }
@@ -125,7 +130,7 @@ public sealed class JournalLedger
     {
         if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
         ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
-        return AddJournal(item, holder, ev, fields, key, save: false, ct);
+        return AddJournal(item, holder, ev, fields, key, save: false, held: true, ct);
     }
 
     /// <summary>
@@ -133,25 +138,25 @@ public sealed class JournalLedger
     /// (or folded), nothing is saved here. False when the line was a repeat, over the cap, or already posted. Throws for a failure of GitHub, which the caller treats as the script does (it logs and goes on).
     /// </summary>
     public Task<bool> AddInHand(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default) =>
-        AddJournal(item, holder, ev, fields, key, save: false, ct);
+        AddJournal(item, holder, ev, fields, key, save: false, held: true, ct);
 
     // a 'waiting' note is rate-limited: at most one per timing.journalWaitingMinutes per item; the state is read once, and saved here after the line
-    async Task<JournalOutcome> AppendWaiting(int item, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct)
+    async Task<JournalOutcome> AppendWaiting(int item, IReadOnlyDictionary<string, object?> fields, string key, bool held, CancellationToken ct)
     {
         var st = await store.Read(item, ct);
         var last = st.State["journal"] is JsonObject jj && JournalJson.Has(jj, "waiting_at") ? JournalJson.FromIso(jj["waiting_at"]!.ToString()) : null;
         if (last is { } l && (utcNow() - l).TotalMinutes < settings.WaitingMinutes) return new JournalOutcome(false, "rate-limited");
-        var posted = await AddJournal(item, st, "waiting", fields, key, save: false, ct);
+        var posted = await AddJournal(item, st, "waiting", fields, key, save: false, held, ct);
         if (posted)
         {
             ((JsonObject)st.State["journal"]!)["waiting_at"] = JournalJson.Iso(utcNow());
-            await store.Save(item, st, ct);
+            await SaveState(item, st, held, ct);
         }
         return new JournalOutcome(posted);
     }
 
     // a routine release is machine-read state only (journal.ciReleased, the last 20): no issue comment
-    async Task<JournalOutcome> RecordCiReleased(int item, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct)
+    async Task<JournalOutcome> RecordCiReleased(int item, IReadOnlyDictionary<string, object?> fields, string key, bool held, CancellationToken ct)
     {
         var f = With(fields, item);
         var line = JournalText.LimitLine(JournalText.Protect(JournalText.Format("ci-released", f), settings.SecretPatterns));
@@ -165,12 +170,12 @@ public sealed class JournalLedger
         prev.Add($"{JournalText.Stamp(utcNow())} {line}");
         j["ciReleased"] = Strings(prev.TakeLast(JournalSettings.CiReleasedKept));
         AddKind(j, "ci-released", JournalJson.Iso(utcNow()));
-        await store.Save(item, st, ct);
+        await SaveState(item, st, held, ct);
         return new JournalOutcome(false, Recorded: true);
     }
 
     /// <summary>Add-Journal: posts one comment, or folds a repeat into the comment of its kind. <paramref name="st"/> is the caller's holder (null: read one and save it).</summary>
-    async Task<bool> AddJournal(int item, ItemState? st, string ev, IReadOnlyDictionary<string, object?> fields, string key, bool save, CancellationToken ct)
+    async Task<bool> AddJournal(int item, ItemState? st, string ev, IReadOnlyDictionary<string, object?> fields, string key, bool save, bool held, CancellationToken ct)
     {
         var own = false;
         if (st == null) { st = await store.Read(item, ct); own = true; }
@@ -219,7 +224,7 @@ public sealed class JournalLedger
         }
         AddKey(j, k);
         AddKind(j, ev, nowIso);
-        if (save || own) await store.Save(item, st, ct);
+        if (save || own) await SaveState(item, st, held, ct);
         return true;
     }
 
@@ -267,6 +272,28 @@ public sealed class JournalLedger
     }
 
     static bool Truthy(object? v) => v switch { null => false, string s => s.Length > 0, bool b => b, long l => l != 0, int i => i != 0, double d => d != 0, _ => true };
+
+    // ---- the locks: the gate of an item's lines, and the shared item lock around the save only ------------------------------------------------------
+
+    /// <summary>
+    /// Save-State under the shared item lock (unless the caller holds it already): the save is a compare-and-write on the revision, which a verb or a script of the same item does under that lock too, so they must exclude one
+    /// another here; everything slow (the posts and patches of the line) happens before, outside it. A save that lost the race throws <see cref="StateConflictException"/> and the line is repeated on a fresh read.
+    /// </summary>
+    Task SaveState(int item, ItemState st, bool held, CancellationToken ct) =>
+        held ? store.Save(item, st, ct) : itemLock.Use(item, async () => { await store.Save(item, st, ct); return 0; }, IItemLock.DefaultWaitSeconds, ct);
+
+    sealed class Gate { public readonly SemaphoreSlim Semaphore = new(1, 1); public int Users; }
+
+    async Task<IDisposable> Enter(int item, CancellationToken ct)
+    {
+        Gate g;
+        lock (gates) { g = gates.GetOrAdd(item, _ => new Gate()); g.Users++; }
+        try { await g.Semaphore.WaitAsync(ct); }
+        catch { lock (gates) { if (--g.Users == 0) gates.TryRemove(item, out _); } throw; }
+        return new Releaser(() => { g.Semaphore.Release(); lock (gates) { if (--g.Users == 0) gates.TryRemove(item, out _); } });
+    }
+
+    sealed class Releaser(Action release) : IDisposable { int done; public void Dispose() { if (Interlocked.Exchange(ref done, 1) == 0) release(); } }
 
     /// <summary>The fields of a command (json) as the ledger reads them: text, true/false, numbers, null; anything else as its json.</summary>
     public static Dictionary<string, object?> FieldsOf(JsonObject? fields)
