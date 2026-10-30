@@ -107,9 +107,12 @@ public sealed class DeliveryShadow(IDeliveryPolicies policies, IShadowComparison
     }
 
     /// <summary>A command of the train in shadow: counted and kept (the last few) for the report. Nothing is sent.</summary>
-    public void RecordCommand(IntegrationCommand command)
+    public void RecordCommand(IntegrationCommand command) => RecordCommand(command.Name, command.IdempotencyKey);
+
+    /// <summary>W9.10p: the same, for a <see cref="ShadowCommand"/> (the train of an engine that acts, in an environment v1 still promotes).</summary>
+    public void RecordCommand(string name, string idempotencyKey)
     {
-        var line = new JsonObject { ["at"] = clock().ToString("o"), ["command"] = command.Name, ["idempotencyKey"] = command.IdempotencyKey, ["executed"] = false };
+        var line = new JsonObject { ["at"] = clock().ToString("o"), ["command"] = name, ["idempotencyKey"] = idempotencyKey, ["executed"] = false };
         lock (gate)
         {
             commandsRecorded++;
@@ -245,4 +248,21 @@ public static class DeliveryShadowHandlers
     public static void Handle(TrainDecided message, DeliveryShadow shadow) => shadow.ObserveV2(message);
     public static void Handle(PromoteRelease message, DeliveryShadow shadow) => shadow.RecordCommand(message);
     public static void Handle(AnswerSignOff message, DeliveryShadow shadow) => shadow.RecordCommand(message);
+}
+
+/// <summary>
+/// W9.10p: the shadow's handlers in a host where the engine acts. The train there promotes for the environments it is given (delivery.autoPromote.trainEnvironments) and decides the others in shadow, because v1's
+/// AutoPromoter still promotes them (the app's uat and prod until W9.12): this records those decisions (compared with the AutoPromoter's actions) and their commands, which the train publishes as
+/// <see cref="ShadowCommand"/>. A decision of an environment the train promotes for real is no shadow decision and is left to the history. No handler of <c>PromoteRelease</c> or <c>AnswerSignOff</c> is here:
+/// those are the executor's. Public because Wolverine's generated code refers to it.
+/// </summary>
+public static class DeliveryActingShadowHandlers
+{
+    public static void Handle(TrainDecided message, DeliveryShadow shadow, IDeliveryPolicies policies)
+    {
+        var (deployable, environment) = TrainKey.Split(message.Key);
+        if (policies.For(deployable, environment) is { Shadow: true }) shadow.ObserveV2(message);
+    }
+
+    public static void Handle(ShadowCommand message, DeliveryShadow shadow) => shadow.RecordCommand(message.Name, message.IdempotencyKey);
 }

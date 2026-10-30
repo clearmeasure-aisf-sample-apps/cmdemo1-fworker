@@ -84,13 +84,14 @@ sealed class TrainFixture
     public readonly List<object> All = [];
     public string Key => TrainKey.Of("orders", Env);
 
-    public TrainFixture(string env = "uat", Promoter promoter = Promoter.Gateway, string[]? environments = null, bool dependencies = false, double signoffHours = 2, HealthWindow? window = null, int minReadGapSeconds = 30, int pollSeconds = 120, bool web = false)
+    public TrainFixture(string env = "uat", Promoter promoter = Promoter.Gateway, string[]? environments = null, bool dependencies = false, double signoffHours = 2, HealthWindow? window = null, int minReadGapSeconds = 30, int pollSeconds = 120, bool web = false, bool shadow = false)
     {
         Env = env;
-        var settings = new DeliveryPolicySettings("orders-project", promoter, environments ?? ["uat", "prod"],
+        // shadow (W9.10p): the engine acts but v1's AutoPromoter still promotes uat and prod, which the train decides without executing
+        var settings = new DeliveryPolicySettings("orders-project", promoter, shadow ? [] : environments ?? ["uat", "prod"],
             new Dictionary<string, string> { ["tdd"] = "Tdd", ["uat"] = "Uat", ["prod"] = "Prod" },
             new Dictionary<string, string> { ["tdd"] = "https://tdd.example", ["uat"] = "https://uat.example", ["prod"] = "https://prod.example" },
-            null, window, signoffHours, dependencies);
+            null, window, signoffHours, dependencies, shadow ? environments ?? ["uat", "prod"] : null);
         var repositories = new List<RepositoryEntry> { new(Repo, [new DeployableEntry("orders", Repo, null, null, null, null, false)]) };
         if (web) repositories.Add(new(Web, [new DeployableEntry("web", Web, null, null, null, null, false)]));
         var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, T0, "acme", Repo, null, repositories, []);

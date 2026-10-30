@@ -381,7 +381,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
             if (so.Answered)
             {
                 // the answer's effect is not seen yet: send it again after a while (the key makes a second send harmless)
-                if (so.AnsweredAt is { } at && now - at >= DeliveryTrainService.CommandRetry) { so.AnsweredAt = now; Out.Add(AnswerOf(so, so.LastProceed, so.LastNotes)); }
+                if (so.AnsweredAt is { } at && now - at >= DeliveryTrainService.CommandRetry) { so.AnsweredAt = now; Out.Add(Send(AnswerOf(so, so.LastProceed, so.LastNotes), so.Version)); }
                 wakes.Add((so.AnsweredAt ?? now).Add(DeliveryTrainService.CommandRetry));
                 continue;
             }
@@ -420,7 +420,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
             var proceed = hard.Count == 0;
             var notes = proceed ? "Signed off by the factory worker gateway: every gate of the release holds (docs/design/auto-promote.md)." : $"Aborted by the factory worker gateway: {string.Join("; ", hard)}";
             so.Answered = true; so.AnsweredAt = now; so.LastProceed = proceed; so.LastNotes = notes;
-            Out.Add(AnswerOf(so, proceed, notes));
+            Out.Add(Send(AnswerOf(so, proceed, notes), so.Version));
             wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
             Decide(proceed ? "signoff-proceed" : "signoff-abort", so.Version, j.Items, proceed ? [] : hard);
         }
@@ -456,7 +456,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
                 continue;
             }
             // asked for, and Octopus shows nothing yet
-            if (now - at >= DeliveryTrainService.CommandRetry && s.Releases.TryGetValue(version, out var rel)) { s.Requested[version] = now; Out.Add(PromoteOf(rel)); }
+            if (now - at >= DeliveryTrainService.CommandRetry && s.Releases.TryGetValue(version, out var rel)) { s.Requested[version] = now; Out.Add(Send(PromoteOf(rel), rel.Version)); }
             wakes.Add(s.Requested[version].Add(DeliveryTrainService.CommandRetry));
             Decide("following", version, [], [$"the deployment of {version} to {TargetName} was requested; Octopus shows none yet"]);
             return;
@@ -517,7 +517,7 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
         mentioned.Add(pick.Version); Retract(mentioned);
         var release = s.Releases[pick.Version];
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
-        Out.Add(PromoteOf(release));
+        Out.Add(Send(PromoteOf(release), release.Version));
         wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
         Decide("promote", pick.Version, winner.Items, []);
 
@@ -526,6 +526,9 @@ sealed class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads, IDelive
 
     /// <summary>How many open releases behind the one that wins (or waits for the clock) are still read to say what they wait for.</summary>
     const int MaxDescribedBehind = 10;
+
+    /// <summary>W9.10p: the command as it goes out: itself, or, in an environment v1 still promotes (<see cref="DeliveryPolicy.Shadow"/>), the record of it that only the shadow handles.</summary>
+    object Send(IntegrationCommand command, string release) => p.Shadow ? new ShadowCommand(s.Key, command.Name, command.IdempotencyKey, release) : command;
 
     PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}", p.Deployable, p.Project, r.Version, env);
 

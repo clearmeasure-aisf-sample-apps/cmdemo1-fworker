@@ -269,7 +269,7 @@ static class GatewayServiceCollectionExtensions
         var v2Sweep = c.Engine.V2Acts && c.Instance.Home != null;   // W6.1: v1's sweep leaves the items that have a saga alone
         services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : null });
         // The automatic promotion: a loop of its own after the sweep, its own call (verb auto-promote), timeout and leader gate; it never runs inside the sweep
-        var promoteOn = c.Instance.AutoPromoteHere; var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
+        var promoteOn = AutoPromoter.Runs(c.Instance, c.Engine.V2Acts); var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
         services.AddHostedService(sp => new AutoPromoter(sp.GetRequiredService<Runner>(), promoteInterval, promoteOn) { MayAct = () => leader.MayAct, OnActions = actions => sp.GetService<DeliveryShadowHolder>()?.Shadow?.ObserveV1(actions) });
         // one RuntimeLoop per adapter: AddHostedService uses TryAddEnumerable, which keeps only the first registration of an implementation type, so
         // with Cursor and Copilot both on the Copilot loop never ran (never relisted, every start refused runtime-relisting); AddSingleton<IHostedService> adds each
