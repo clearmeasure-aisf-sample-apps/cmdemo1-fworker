@@ -84,19 +84,19 @@ sealed class TrainFixture
     public readonly List<object> All = [];
     public string Key => TrainKey.Of("orders", Env);
 
-    public TrainFixture(string env = "uat", Promoter promoter = Promoter.Gateway, string[]? environments = null, bool dependencies = false, double signoffHours = 2, HealthWindow? window = null, int minReadGapSeconds = 30, int pollSeconds = 120, bool web = false)
+    public TrainFixture(string env = "uat", Promoter promoter = Promoter.Gateway, string[]? environments = null, bool dependencies = false, double signoffHours = 2, HealthWindow? window = null, int minReadGapSeconds = 30, int pollSeconds = 120, bool web = false, IMigrationProbe? migrations = null, string[]? migrationPaths = null)
     {
         Env = env;
         var settings = new DeliveryPolicySettings("orders-project", promoter, environments ?? ["uat", "prod"],
             new Dictionary<string, string> { ["tdd"] = "Tdd", ["uat"] = "Uat", ["prod"] = "Prod" },
             new Dictionary<string, string> { ["tdd"] = "https://tdd.example", ["uat"] = "https://uat.example", ["prod"] = "https://prod.example" },
-            null, window, signoffHours, dependencies);
+            null, window, signoffHours, dependencies, migrationPaths);
         var repositories = new List<RepositoryEntry> { new(Repo, [new DeployableEntry("orders", Repo, null, null, null, null, false)]) };
         if (web) repositories.Add(new(Web, [new DeployableEntry("web", Web, null, null, null, null, false)]));
         var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, T0, "acme", Repo, null, repositories, []);
         Policies = new DeliveryPolicies(new CatalogDeliveryPolicies(() => snapshot, n => n == "orders" ? settings : null), minReadGapSeconds, pollSeconds);
         Reads.Clock = () => Now;
-        Svc = new DeliveryTrainService(Store, Policies, Reads, Delivered, () => Now);
+        Svc = new DeliveryTrainService(Store, Policies, Reads, Delivered, () => Now, migrations);
         // the baseline: release 1.0.1 (commit d) runs in every environment
         Reads.Running["tdd"] = Reads.Running["uat"] = Reads.Running["prod"] = "1.0.1";
     }

@@ -38,6 +38,7 @@ static class GatewayWolverineExtensions
                 RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler), stores.Ledger,
                     (runtime, execution, item) => { _ = correlations?.FromRuntime(runtime, execution, item); });   // W4.1: the task or agent id finds its item later
                 journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands
+                RollbackWiring.Attach(host, c, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger);   // W8.3: the executor of the delivery train's rollback in tdd (inert until a train asks for one)
                 // W6.0, W6.1: the WorkItemSaga of the hybrid composition: v1's plant still offers the sessions, the saga decides the items it has started, and v1's sweep leaves those items alone (V2Ownership)
                 // W6.6: the docs plan's steps run in it; the board it moves cards on is the catalog's, read when the first card moves
                 // W7.3: a fix-forward round of the feature plan reaches the owner session as the trigger v1's sweep sends (the plant is resolved when the trigger is sent, not here: building the plant needs the host)

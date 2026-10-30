@@ -546,6 +546,34 @@ section 3. After W9.11 merges: the release check and a **2-hour window**; rollba
 
 **Gate:** a staged incident in the app's tdd, end to end (about an hour).
 
+**W8.3 as built (#351): rollback through the DeliveryTrain.** Owner decisions of 2026-10-29 apply: tdd only, hybrid composition, and one explicit exception to "the tdd train only observes": the tdd train may create exactly one kind of
+deployment itself, the incident rollback of the app in tdd, automatic (uat and prod are not configured). The IncidentSaga (W8.1) does not exist yet; this is the train's side of its contract.
+- **The contract:** `Rollback(deployable, environment, incident, toRelease?, reason)` goes to the train (`DeliveryTrainRouter.Route(Rollback)` makes `TrainRollbackRequested`, keyed by the incident, so a request delivered twice is one rollback);
+  the train answers `RollbackFinished(…, outcome: rolled-back | escalated, from, to, items, reasons)`. Nothing else in the incident calls Octopus.
+- **The plan (`RollbackTrain.cs`, a part of `TrainRun`; the state is in the train's JSON document, so no table and no DbUp script):** any train but tdd's escalates ("configured for tdd only"). The tdd train waits for a deployment that is still
+  running (30 minutes, then escalates), takes the release named or the one that ran before the newest deployment (the newest successful deployment to tdd that is not it and was not rolled back from; a failed newest deployment is rolled back to the
+  release that still runs), and checks the **migration precondition** before anything is deployed.
+- **The migration precondition (`RollbackRules.Judge`):** cmdemo1's DbUp migrations are forward-only, so going back is a rollback only when no migration was added since the target. The train reads the files GitHub's compare lists between the target's
+  commit and the commit that runs now (`IMigrationProbe`, a GET) and escalates, with the file names, when one matches `delivery.rollback.migrationPaths` (default `scripts/Update/`, DbUp's folder; a renamed file counts under both names). It escalates also
+  when it cannot show that none was added: no probe, no comparison (404, 422), a comparison that is not a straight line from the target to the release (`behind`, `diverged`), a list GitHub cut (300 files), a release without a commit.
+  A fault of the read (HTTP, timeout) is not an escalation: the input is saved and the train looks again after `TransientRetry`.
+- **The command and its executor:** `RollbackRelease(key, deployable, project, version, environment, incident)` (an integration command, `Fworker.Contracts`), executed by `RollbackExecutor` on the W3.0 command base
+  (`src/Fworker.Integrations/Octopus/RollbackExecutor.cs`, the Executions API route of `PromoteRelease`). Unlike `PromoteRelease` it deploys although a deployment of that release to tdd exists (that is a rollback); it deploys nothing when tdd's
+  **newest** deployment of the project already is of that release (idempotent against a replay after a crash between the create and the ledger, a restart, a second gateway), and a replay of a settled key is answered by the idempotency ledger.
+  The executor itself refuses every environment but tdd for good, writes only as the leader, and runs on a sequential durable queue (`rollback-commands`) with the retry rule of the runtime commands; a refusal for good reaches the train as
+  `TrainRollbackFailed` and it escalates. The train sends the command again (same key) every five minutes while Octopus shows no deployment, and gives up after 30.
+- **The deployment is the rollback's:** the first deployment of the target that appears while the rollback waits is flagged (`TrainDeployment.Rollback`). Settling it delivers nothing (no `DeliveredTo`); it sets what runs in tdd; an older deployment
+  of the same release seen again by the watcher's replay does not take its place.
+- **Undelivered:** when the rollback deployment succeeds, every item the rolled-back releases delivered receives `Undelivered(item, tdd)` (the delivered-to row goes, and the WorkItemSaga's `DeliveryLost` returns the item to its Deliver step inside its
+  settle window; both existed since W5.0 and W6.x) and becomes a candidate of the train again, so the release that fixes forward delivers it (`DeliveredBy`: the items of the newest ten delivered releases). The release rolled back from is
+  never a target again. A failed rollback deployment escalates and undelivers nothing.
+- **Held trains:** an incident's hold does not stop the rollback (it is the incident's own deployment); the hold's other half, letting the incident's hotfix release through, is W8.1's.
+- **Wiring:** `RollbackWiring.Attach` (`gateway/Ports/RollbackPort.cs`) is called only where the engine acts (`Engine.V2Acts`); v1, the shadow run and `FACTORY_V2_OFF` register nothing. It registers the executor when the Octopus URL, space and a key
+  (`OCTOPUS_RUNBOOK_API_KEY`, else `OCTOPUS_API_KEY`) are configured, and the compare read when GitHub can be read. `DeliveryTrainService` takes the probe as an optional part.
+- **Not here (documented gaps):** the train itself is registered in the host by the shadow run only until the cutover (W9.4 and W9.9 attach it where the engine acts), so until then nothing publishes `Rollback` and the executor is inert; the IncidentSaga that
+  sends `Rollback` and reads `RollbackFinished` is W8.1 (the gateway logs the outcome meanwhile); the items delivered before this train state existed are not remembered (`DeliveredBy` starts empty), so the first rollback after the upgrade undelivers
+  only what is delivered from then on; uat and prod are never rolled back by the gateway.
+
 ## 5. Critical path and clock time
 
 ```
