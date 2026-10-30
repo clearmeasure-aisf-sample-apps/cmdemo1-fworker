@@ -1,4 +1,5 @@
 using Fworker.Persistence;
+using Fworker.Workflows.Faults;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fworker.Workflows.Merge;
@@ -39,7 +40,7 @@ public sealed class SqlMergeTrainStore(Func<FactoryDbContext> open) : IMergeTrai
             await db.SaveChangesAsync(ct);
             return true;
         }
-        catch (DbUpdateException) { return false; }   // the key was taken by another writer first (insert), or the revision moved (update)
+        catch (Exception e) when (SqlFaults.IsConflict(e)) { return false; }   // the key was taken by another writer first (insert), or the revision moved (update); a fault of the database is thrown (SqlFaults, W9.10o)
     }
 }
 

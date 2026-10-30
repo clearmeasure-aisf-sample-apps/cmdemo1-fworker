@@ -17,6 +17,9 @@ public sealed record DocsPlanRules(int MaxReviewRounds = 3, int DocsOnlyMaxRevie
 {
     public static readonly DocsPlanRules Default = new();
 
+    /// <summary>How many merge calls one counted answer may take (W9.10o): the answers that say nothing of the pull request (the gateway could not ask) are not counted against <c>MaxMergeAttempts</c>, but the calls are bounded by this many times it.</summary>
+    public const int CallsPerAnswer = 5;
+
     /// <summary>Whether the step is left only after a complete review.</summary>
     public bool NeedsReview(StepKind step) => ReviewedSteps is null ? step is StepKind.Design or StepKind.Develop : ReviewedSteps.Contains(step);
 

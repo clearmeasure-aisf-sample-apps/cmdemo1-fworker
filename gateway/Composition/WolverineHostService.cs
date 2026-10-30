@@ -269,7 +269,10 @@ sealed class WolverineHostService : IHostedService
                 w.PublishMessage<ShadowHistoryRecord>().ToLocalQueue("shadow-history");
                 w.LocalQueue("shadow-history").UseDurableInbox().MaximumParallelMessages(2);
                 w.Policies.UseDurableOutboxOnAllSendingEndpoints();
-                w.Policies.OnException<SqlException>().RetryWithCooldown(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(60)).Then.MoveToErrorQueue();
+                // W9.10o: a transient fault of the database (the SQL error numbers of SqlFaults) and the conflict exceptions of the handlers are retried on a long, finite schedule (quick tries, then 5 minutes to 3 hours) before the dead letters,
+                // and this rule comes first so that no rule after it takes the same exceptions; any other SqlException keeps the three quick tries and then the dead letters
+                Fworker.Workflows.Faults.FaultPolicy.Apply(w);
+                w.Policies.OnException<SqlException>().RetryWithCooldown(Fworker.Workflows.Faults.FaultPolicy.Quick).Then.MoveToErrorQueue();
                 w.Durability.Mode = o.LeaderElection ? DurabilityMode.Balanced : DurabilityMode.Solo;
                 var d = w.Durability;
                 d.HealthCheckPollingTime = o.HealthCheckPollingTime; d.FirstHealthCheckExecution = o.FirstHealthCheckExecution; d.StaleNodeTimeout = o.StaleNodeTimeout;

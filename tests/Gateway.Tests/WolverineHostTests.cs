@@ -71,11 +71,40 @@ public sealed class WolverineHostOffTests(TwoPortGateway gw) : IClassFixture<Two
     }
 }
 
-/// <summary>With a connection string and a database that cannot be reached: the gateway starts and works as v1; /ready waits for the schema (503 "schema") and the host keeps trying in the background.</summary>
+/// <summary>With a connection string and a database that cannot be reached: the gateway starts and works as v1; /ready does not wait for the schema in shadow (W9.10o; the schema shows in the status) and the host keeps trying in the background.</summary>
 public sealed class WolverineHostUnreachableFixture : GatewayFixture
 {
     protected override string UpPath => "/health";
     protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); }
+}
+
+/// <summary>Where v2 acts (W9.10o): /ready is the one place the schema gates, so a database that does not answer keeps it at 503 with the reason.</summary>
+public sealed class WolverineHostV2UnreachableFixture : GatewayFixture
+{
+    protected override string UpPath => "/health";
+    protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() }; }
+}
+
+public sealed class WolverineHostV2UnreachableDatabaseTests(WolverineHostV2UnreachableFixture gw) : IClassFixture<WolverineHostV2UnreachableFixture>
+{
+    [Fact]
+    public async Task WhereV2Acts_ReadyWaitsForTheSchema_AndNamesIt_WithoutTheConnectionString()
+    {
+        if (!StubPwsh.Supported) return;
+        var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
+        Assert.Equal(503, ready.Status);
+        Assert.Equal(false, (bool?)ready.Json?["ready"]);
+        Assert.Equal("schema", (string?)ready.Json?["waitingFor"]);
+        Assert.Equal("upgrading", (string?)ready.Json?["state"]);
+        Assert.DoesNotContain("Password", ready.Json!.ToJsonString());
+        Assert.DoesNotContain("127.0.0.1", ready.Json.ToJsonString());
+        Assert.True(gw.Host.Services.GetRequiredService<FactorySchemaStatus>().Required);
+        // the v2 health block says it cannot be read yet (the schema is not good), and the status still answers
+        var st = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
+        Assert.Equal(200, st.Status);
+        Assert.Equal(false, (bool?)st.Json?["v2"]?["available"]);
+        Assert.Equal(true, (bool?)st.Json?["v2"]?["acts"]);
+    }
 }
 
 public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachableFixture gw) : IClassFixture<WolverineHostUnreachableFixture>
@@ -101,14 +130,14 @@ public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachab
     {
         if (!StubPwsh.Supported) return;
         Assert.NotNull(gw.ReadyAfter);   // up: /health answers, the start was not held by the database
-        // /ready deliberately waits for the schema where a database is configured (docs/design/fworker-database.md): it names what it waits for, and no connection string
+        // W9.10o: in shadow v1 acts and needs no table: /ready does not wait for the schema (a database that is down must not make a v1 release look failed). The schema is in the status, and no connection string is
         var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
-        Assert.Equal(503, ready.Status);
-        Assert.Equal(false, (bool?)ready.Json?["ready"]);
-        Assert.Equal("schema", (string?)ready.Json?["waitingFor"]);
-        Assert.Equal("upgrading", (string?)ready.Json?["state"]);
-        Assert.DoesNotContain("Password", ready.Json!.ToJsonString());
-        Assert.DoesNotContain("127.0.0.1", ready.Json.ToJsonString());
+        Assert.Equal(200, ready.Status);
+        var st = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
+        Assert.Equal("upgrading", (string?)st.Json?["schema"]?["state"]);
+        Assert.Equal((false, false), ((bool?)st.Json?["v2"]?["acts"], (bool?)st.Json?["v2"]?["available"]));   // the v2 health block is there in shadow too, and says it cannot read (the schema is not good)
+        Assert.DoesNotContain("Password", st.Json!.ToJsonString());
+        Assert.DoesNotContain("127.0.0.1", st.Json.ToJsonString());
         // the first attempt waits for a database that does not answer for the whole connect timeout (90 s): the start is "starting", not failed, and nothing else waits
         JsonNode? w = null;
         var sw = Stopwatch.StartNew();

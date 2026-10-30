@@ -540,6 +540,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         mentioned.Add(pick.Version); Retract(mentioned);
         var release = s.Releases[pick.Version];
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
+        s.RequestNumbers[pick.Version] = s.RequestNumbers.GetValueOrDefault(pick.Version) + 1;   // a new request: a new key (the retries of this one keep it)
         Out.Add(PromoteOf(release));
         wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
         Decide("promote", pick.Version, winner.Items, []);
@@ -555,7 +556,8 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
     /// <summary>How many open releases behind the one that wins (or waits for the clock) are still read to say what they wait for.</summary>
     const int MaxDescribedBehind = 10;
 
-    PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}", p.Deployable, p.Project, r.Version, env);
+    // the key names the request (W9.10o): deployable, version, environment and the number of the request, so a promotion asked for again after the first was dropped, or after a rollback, is not answered from the ledger
+    PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}|{Math.Max(1, s.RequestNumbers.GetValueOrDefault(r.Version))}", p.Deployable, p.Project, r.Version, env);
 
     // ---- decisions -----------------------------------------------------------------------------------------------------------------------------------------
 

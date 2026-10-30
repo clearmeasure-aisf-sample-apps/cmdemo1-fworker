@@ -147,12 +147,14 @@ The manifest is generated from a database built by the scripts (`FWORKER_UPDATE_
 ### Reporting
 
 - `/ready`, order of checks: replaced, prompts, revocations, then schema. Where `FactorySchemaStatus.Required` is true (`FACTORY_DB_CONNECTION` is set and
-  the environment runs the Wolverine host: today tdd and the v2 CI gateways) and the schema has not been verified good by this process, `/ready` answers
+  **v2 acts** in the environment, `Engine.V2Acts`: the v2 CI gateways, and tdd after the cutover; W9.10o narrowed it from "the environment runs the Wolverine host", so
+  in shadow, where v1 acts and needs no table, a database that is down, slow to start or failing a v2-only script does not keep `/ready` at 503 and no release is mistaken for
+  a failed one; the schema then shows in `/api/v1/status` only) and the schema has not been verified good by this process, `/ready` answers
   503 `{"ready":false,"waitingFor":"schema","state":"upgrading"|"failed","attempts":N,"since":"...","failedScript":...,"lastFailure":...}`. Where it is not
   required (uat, prod, image-start, every test without a database), `/ready` is exactly what it was. After the first good verification `/ready` no longer
   depends on the database for the life of the process. This deliberately reverses the W2.2 rule "/ready does not depend on the database", for the schema
   only and as the owner asked. Container Apps has no probe on `/ready`, so traffic is unaffected; the release rule (`/ready` 200) now proves the schema.
-- `/api/v1/status`: a block `schema` next to `wolverine`, only where required: `state`, `journal`, `shipped`, `latest`, `applied`, `pending`, `ahead`,
+- `/api/v1/status`: a block `schema` next to `wolverine`, where the host runs (shadow or v2): `state`, `journal`, `shipped`, `latest`, `applied`, `pending`, `ahead`,
   `differences` (at most 20), `extra`, `attempts`, `since`, `verifiedAt`, `durationMs`, `failedScript`, `lastFailure`.
 - `/_build`: `schemaVersion` (`"013"` today), the highest number the image ships, like workorders' `databaseVersion`.
 - A failure is a type, a SQL error number and a script name, never a message. One JSON line is logged: `{"gateway":"schema","event":"failed","detail":"<type> <script>"}`.
@@ -214,7 +216,9 @@ An EF model change follows the same steps: write `0NN_<Change>.sql` by hand, the
 
 ## 11. Risks
 
-- `/ready` now waits for the schema where a database is configured. A tdd database outage during a start keeps `/ready` at 503 although v1 works; no probe reads it.
+- `/ready` waits for the schema where a database is configured **and v2 acts** (W9.10o; before it, also in shadow). Where v2 acts a database outage during a start keeps `/ready` at 503
+  with `waitingFor: schema`: that calls for `FACTORY_V2_OFF` or a database fix, not for a revert of an unrelated pull request. A `FACTORY_DB_CONNECTION` that is set and is not a
+  connection string is treated as not configured (`/api/v1/status` `database.malformed`).
 - The first tdd start depends on the guards matching what EF and Weasel built there; nobody has read tdd's catalog for this design. The rehearsal is in CI. If tdd differs
   anyway, the check reports it in `/api/v1/status` `schema.differences` and `/ready` stays 503; roll back by reverting the pull request.
 - The manifest compares default expressions and procedure hashes. Script 011 rewrites the 5 procedures on tdd, so their hashes become the scripts'.

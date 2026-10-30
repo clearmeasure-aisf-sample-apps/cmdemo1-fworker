@@ -37,11 +37,11 @@ public abstract class IntegrationCommandHandler<TCommand> where TCommand : Integ
     {
         if (string.IsNullOrWhiteSpace(command.IdempotencyKey)) return CommandResult.Failed(FailureKind.Permanent, $"{command.Name}: no idempotency key");
         var key = command.IdempotencyKey;
-        if (_ledger.TryGet(key) is { } done) return done;
+        if (_ledger.TryGet(key) is { } done) return AnsweredFromLedger(command, done);
         var claim = _ledger.Claim(key);
         switch (claim.State)
         {
-            case ClaimState.Done: return claim.Result!;
+            case ClaimState.Done: return AnsweredFromLedger(command, claim.Result!);
             case ClaimState.Pending: return CommandResult.Failed(FailureKind.Transient, $"{command.Name}: {PendingError}");
             case ClaimState.TakenOver:
             {
@@ -71,6 +71,13 @@ public abstract class IntegrationCommandHandler<TCommand> where TCommand : Integ
         if (result.Ok || result.Failure is FailureKind.Permanent or FailureKind.NotSupported) _ledger.Record(key, result);
         else _ledger.ReleaseClaim(key);
         return result;
+    }
+
+    /// <summary>A re-request whose key the ledger already holds is answered from it and runs nothing: its own outcome in the log, so a request that never runs (a key that should have changed) can be seen (W9.10o).</summary>
+    static CommandResult AnsweredFromLedger(TCommand command, CommandResult done)
+    {
+        try { Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["command"] = command.Name, ["outcome"] = "ledger-answered", ["ok"] = done.Ok }.ToJsonString()); } catch { }
+        return done;
     }
 
     /// <summary>The message for the saga when the result is a failure that will not be retried here; null when it is a success or will be retried.</summary>
@@ -125,12 +132,22 @@ public interface IIdempotencyLedger
     void ExpireClaim(string key);
 }
 
-public sealed class InMemoryIdempotencyLedger : IIdempotencyLedger
+/// <summary>
+/// A ledger that forgets its successes after a retention period (W9.10o): a key is a request, and the same request asked again long after (a promotion of the same version after a rollback) must run. Failures that are
+/// settled (permanent, not supported) are kept: forgetting one would run a call that cannot work again at every redelivery.
+/// </summary>
+public interface IPurgeableLedger
+{
+    /// <summary>Forgets the successes recorded before <c>now - retention</c>; the number forgotten.</summary>
+    int PurgeSuccesses(TimeSpan retention, DateTimeOffset now);
+}
+
+public sealed class InMemoryIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger
 {
     /// <summary>How long a claim holds the key when its handling neither records nor releases it (a process that died): longer than any single call of a command (the HTTP clients stop at 60 s), shorter than the caller's retries (RuntimeCommandService.RetryPauses add up to 102 s), so a command whose process was killed finds the claim expired at its last retry.</summary>
     public static readonly TimeSpan DefaultClaimTtl = TimeSpan.FromSeconds(90);
 
-    readonly System.Collections.Concurrent.ConcurrentDictionary<string, CommandResult> _done = new(StringComparer.Ordinal);
+    readonly System.Collections.Concurrent.ConcurrentDictionary<string, (CommandResult Result, DateTimeOffset At)> _done = new(StringComparer.Ordinal);
     readonly Dictionary<string, (ClaimOwner Owner, DateTime Expires)> _claims = new(StringComparer.Ordinal);
     readonly Func<ClaimOwner> _owner; readonly TimeSpan _ttl; readonly Func<DateTime> _utcNow;
 
@@ -140,18 +157,28 @@ public sealed class InMemoryIdempotencyLedger : IIdempotencyLedger
         _owner = owner ?? (() => self); _ttl = claimTtl ?? DefaultClaimTtl; _utcNow = utcNow ?? (() => DateTime.UtcNow);
     }
 
-    public CommandResult? TryGet(string key) => _done.TryGetValue(key, out var r) ? r : null;
+    public CommandResult? TryGet(string key) => _done.TryGetValue(key, out var r) ? r.Result : null;
 
     public void Record(string key, CommandResult result)
     {
-        lock (_claims) { _done.TryAdd(key, result); _claims.Remove(key); }
+        lock (_claims) { _done.TryAdd(key, (result, DateTimeOffset.UtcNow)); _claims.Remove(key); }
+    }
+
+    public int PurgeSuccesses(TimeSpan retention, DateTimeOffset now)
+    {
+        lock (_claims)
+        {
+            var n = 0;
+            foreach (var kv in _done.Where(kv => kv.Value.Result.Ok && kv.Value.At < now - retention).ToList()) if (_done.TryRemove(kv.Key, out _)) n++;
+            return n;
+        }
     }
 
     public ClaimOutcome Claim(string key)
     {
         lock (_claims)
         {
-            if (_done.TryGetValue(key, out var r)) return new(ClaimState.Done, r);
+            if (_done.TryGetValue(key, out var r)) return new(ClaimState.Done, r.Result);
             var now = _utcNow();
             if (_claims.TryGetValue(key, out var cur) && cur.Expires > now) return new(ClaimState.Pending, Holder: cur.Owner, ExpiresAt: cur.Expires);
             var taken = _claims.ContainsKey(key);

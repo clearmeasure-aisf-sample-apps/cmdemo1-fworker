@@ -72,14 +72,15 @@ public sealed class WolverineHostSqlServerTests
         return w;
     }
 
-    // /ready waits for the schema where a database is configured: the first 200 (a 503 before it says what it waits for)
+    // W9.10o: in shadow /ready does not wait for the schema (only where v2 acts); the schema block of the status says when it is good, and /ready is 200 throughout
     static async Task WaitReady(GatewayHost host, int seconds = 90)
     {
         var sw = Stopwatch.StartNew(); var last = await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
-        while (last.Status != 200 && sw.Elapsed < TimeSpan.FromSeconds(seconds))
+        while (sw.Elapsed < TimeSpan.FromSeconds(seconds))
         {
-            Assert.Equal(503, last.Status);
-            Assert.Equal("schema", (string?)last.Json?["waitingFor"]);
+            Assert.Equal(200, last.Status);
+            var schema = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json?["schema"];
+            if ((string?)schema?["state"] == "good") break;
             await Task.Delay(100);
             last = await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
         }
@@ -104,6 +105,12 @@ public sealed class WolverineHostSqlServerTests
             Assert.Empty(schema?["pending"]?.AsArray() ?? []);
             Assert.Empty(schema?["differences"]?.AsArray() ?? []);
             Assert.Null(schema?["lastFailure"]);
+            // W9.10o: the health block of the status is there in shadow too (tdd), and reads the host's dead letters and envelopes: nothing dead, nothing waiting
+            var v2 = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json?["v2"];
+            Assert.Equal((false, true, "good"), ((bool?)v2?["acts"] ?? true, (bool?)v2?["available"] ?? false, (string?)v2?["schema"]));
+            Assert.Equal(0, (int?)v2?["deadLetters"]?["total"]);
+            Assert.Equal(0, (int?)v2?["sagas"]?["open"]);
+            Assert.Equal(0, (int?)v2?["scheduled"]?["overdue"]);
             // the journal holds exactly the scripts of this build, and the EF migrations are gone
             Assert.Equal(FactorySchema.Scripts, await Rows(cs, "SELECT ScriptName FROM dbo.SchemaVersions ORDER BY ScriptName"));
             Assert.Equal(0, await Count(cs, "SELECT COUNT(*) FROM sys.tables WHERE name='__EFMigrationsHistory'"));

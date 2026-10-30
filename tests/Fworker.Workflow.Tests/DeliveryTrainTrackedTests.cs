@@ -136,7 +136,7 @@ public class DeliveryTrainTrackedTests
         // the timer fires by itself (nothing else is sent), reads the app again and, once the window is full, asks for the deployment
         Assert.True(await Until(() => Task.FromResult(cap.Count(cap.Promotes) >= 1)), "the timers did not lead to the promotion");
         var promote = cap.Promotes[0];
-        Assert.Equal(("orders", "1.0.2", "uat", "PromoteRelease|orders|1.0.2|uat"), (promote.Deployable, promote.Version, promote.Environment, promote.IdempotencyKey));
+        Assert.Equal(("orders", "1.0.2", "uat", "PromoteRelease|orders|1.0.2|uat|1"), (promote.Deployable, promote.Version, promote.Environment, promote.IdempotencyKey));
         // (the decision travels as a message of its own, beside the command: it is awaited, not assumed to have arrived with it)
         TrainDecided[] Decided() { lock (cap.Decisions) return [.. cap.Decisions]; }
         Assert.True(await Until(() => Task.FromResult(Decided().Any(d => d.Key == "orders/uat" && d.Action == "promote" && d.Release == "1.0.2"))),
