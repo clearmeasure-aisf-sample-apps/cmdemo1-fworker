@@ -1,5 +1,66 @@
 {
   "tables": {
+    "factory.BoardSeen": {
+      "columns": {
+        "IsOpen": {
+          "type": "bit",
+          "maxLength": 1,
+          "precision": 1,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Number": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Repository": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "SeenAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "StatusColumn": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_BoardSeen": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Repository",
+            "Number"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
     "factory.CapacityLedgers": {
       "columns": {
         "Key": {

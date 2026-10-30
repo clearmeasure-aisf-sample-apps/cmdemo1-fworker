@@ -14,3 +14,10 @@ public interface IBoardReader
 {
     Task<IReadOnlyList<BoardCard>> Read(BoardRef board, CancellationToken ct = default);
 }
+
+/// <summary>W9.10g: a board reader that counts the GitHub requests it made (one GraphQL request per page of 100 cards), so the reconciler can measure what a pass costs.</summary>
+public interface IMeteredBoardReader : IBoardReader
+{
+    /// <summary>The requests made since the reader was built.</summary>
+    long Requests { get; }
+}

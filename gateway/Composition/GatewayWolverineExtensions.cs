@@ -28,7 +28,8 @@ static class GatewayWolverineExtensions
         CopilotReconciler? copilotReconciler = null;
         IngressCorrelations? correlations = null; IngressInboxPort? inboxPort = null;
         ShadowOctopusPort? octopusPort = null; var shadowHolder = new DeliveryShadowHolder();
-        var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null;
+        var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null; PlantStepJobs? plantSteps = null;
+        var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
         V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
         services.AddSingleton(sp =>
         {
@@ -79,7 +80,7 @@ static class GatewayWolverineExtensions
                     IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item
                     var mergedDeriver = ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable);
-                    if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));
+                    if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)), acting: true);
                     // W9.4: the delivery train acts: it promotes (PromoteRelease, AnswerSignOff are executed against Octopus) and the watcher's events reach it. W9.10p: for tdd only; v1's auto-promote loop keeps uat and prod (AddGatewayBackground, AutoPromoter.Runs) and the train's shadow of them is the holder's
                     if (mergedDeriver is not null) octopusPort = DeliveryActingWiring.Attach(host, c, () => sp.GetService<ISystemCatalog>(), cs, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger, shadowHolder);
                     // W6.6: the intake of docs items (off unless intake is enabled and names the docs plan in intake.v2Plans); the plant's facts are read when the job runs
@@ -114,8 +115,24 @@ static class GatewayWolverineExtensions
                     inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
                     // W4.1 follow-up (#485): the claims of the deduplication do not live for ever
                     jobs.Add(RecurringJobSlots.IngressDedupPurge, _ => { dedup.Purge(IngressDedupRetention); return Task.CompletedTask; });
-                    // W4.3: the board reconciler publishes what the board shows into the inbox as source "poll", the message a webhook sends
-                    if (BoardReconcilerJob.Make(c, sp.GetRequiredService<ISystemCatalog>(), inboxPort, Environment.GetEnvironmentVariable) is { } reconcile) jobs.Add(RecurringJobSlots.BoardReconciler, reconcile);
+                    // W4.3: the board reconciler publishes what the board shows into the inbox as source "poll", the message a webhook sends. W9.10g: its memory is in SQL (BoardSeen) and its GitHub cost is measured (status v2.reconciler)
+                    if (BoardReconcilerJob.Make(c, sp.GetRequiredService<ISystemCatalog>(), inboxPort, Environment.GetEnvironmentVariable, seen: new Fworker.Workflows.Reconcilers.SqlBoardSeenStore(() => ItemMergedWiring.Open(cs)), interval: intervals.BoardReconciler) is { } reconcile) jobs.Add(RecurringJobSlots.BoardReconciler, reconcile);
+                    // W9.10g: the plant-wide steps of the sweep as jobs of the leader (PlantStepJobs.cs; the sweep leaves them out where this exists), and the retention prune
+                    var restoredSince = DateTime.UtcNow;
+                    var steps = plantSteps = new PlantStepJobs(c.Runner, () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, c.SweepGap, workItems.Ownership, () => c.Leader.MayAct,
+                        () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60)), c.Gateway.OwnerMode);   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)
+                    jobs.Add(RecurringJobSlots.ClaimRefReap, ct => steps.ClaimRefReap(ct));
+                    jobs.Add(RecurringJobSlots.GapRenew, ct => steps.GapRenew(ct));
+                    jobs.Add(RecurringJobSlots.BoardGuard, ct => steps.BoardGuard(ct));
+                    jobs.Add(RecurringJobSlots.QcSync, ct => steps.QcSync(ct));
+                    jobs.Add(RecurringJobSlots.Replenish, ct => steps.Replenish(ct));
+                    jobs.Add(RecurringJobSlots.BacklogLow, ct => steps.BacklogLow(ct));
+                    var retention = new Fworker.Workflows.Reconcilers.RetentionPrune(() => ItemMergedWiring.Open(cs), Fworker.Workflows.Reconcilers.RetentionSettings.From(c.Instance.Root));
+                    jobs.Add(RecurringJobSlots.RetentionPrune, async ct =>
+                    {
+                        var r = await retention.Run(ct);
+                        if (r.Total > 0 || r.More) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["retentionPrune"] = new System.Text.Json.Nodes.JsonObject { ["itemHistory"] = r.ItemHistory, ["shadowHistory"] = r.ShadowHistory, ["shadowComparisons"] = r.ShadowComparisons, ["transcripts"] = r.Transcripts, ["transcriptsOverCap"] = r.TranscriptsOverCap, ["more"] = r.More } }.ToJsonString());
+                    });
                 }
                 // W8.1: the IncidentSaga of the watched environments of the application (incidents.environments; tdd). It listens to the Octopus watcher's deployment events and to the hotfix item, takes the health reads of its
                 // job, and holds the delivery train (W9.9 attaches the train to an acting host; until then the hold and the rollback request have no route)
@@ -127,7 +144,7 @@ static class GatewayWolverineExtensions
                     octopusPort = new ShadowOctopusPort(ev => ev is Fworker.Contracts.Seams.OctopusDeploymentChanged ? host.PublishAsync(ev) : Task.FromResult(true), enabled: true);   // (the other Octopus events concern the delivery train, which is not attached here yet)
                 }
                 if (c.Catalog.Enabled) jobs.Add(RecurringJobSlots.CatalogReread, async ct => { await sp.GetRequiredService<ISystemCatalog>().RefreshAsync(ct); });   // W4.3 (the loader keeps the last good snapshot on a failed read)
-                recurring = RecurringJobSlots.Attach(host, jobs);   // W4.0 slots, filled by W4.3
+                recurring = RecurringJobSlots.Attach(host, jobs, intervals);   // W4.0 slots, filled by W4.3 and W9.10g
             }
             else if (c.Engine.ShadowRuns && c.Instance.Home is { } shadowHome)
             {
@@ -170,6 +187,8 @@ static class GatewayWolverineExtensions
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return v2Ownership!; });
         // W6.6: the jobs of the recurring slots, for a look at which are filled (resolving it builds the host first, which fills them)
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return jobs; });
+        // W9.10g: the plant-wide steps as jobs, for the sweep to know it leaves them out (resolving it builds the host first, which makes them)
+        if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return plantSteps!; });
         // W6.6: the saga's parts, for the verbs' feed (S1) (resolving it builds the host first, which makes them)
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return workItemParts!; });
         // W6.7: the views of the items the saga owns (status, dashboard, digest), read from the saga's table and the item history; no host is needed for a read, only the database. Nowhere else is it registered, so
@@ -183,7 +202,7 @@ static class GatewayWolverineExtensions
             {
                 _ = sp.GetRequiredService<WolverineHostService>();
                 var cs = WolverineHostService.WithConnectTimeout(healthConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm);
+                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block());
             });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)

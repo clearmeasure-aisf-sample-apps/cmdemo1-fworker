@@ -18,6 +18,9 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     public V2Ownership? V2 { get; init; }
     // W9.10e: the plans of intake.v2Plans, handed to v1's intake (sync-board intake.v2Plans): it leaves their Todo items to the engine's intake. Used only with V2 set
     public IReadOnlyList<string> V2Plans { get; init; } = [];
+    // W9.10g: the plant-wide steps (claim-ref reap, gap renewal, board guard, QC sync, replenish, the keeper's backlog count) are recurring jobs of the engine (PlantStepJobs): the sweep leaves them out (skip_steps), does not take the gap, and applies none of
+    // their results. Set only where the engine acts, together with the jobs.
+    public bool PlantJobs { get; init; }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -131,11 +134,12 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         // work intake (issue 104): a full sweep may pull a Todo item onto the board when an owner session has a free slot
         if (ownerMode && items == null) args["intake"] = new JsonObject { ["freeSlots"] = plant.IntakeSlots() };
         AddV2Arguments(args, V2, V2Plans);
+        if (PlantJobs) args["skip_steps"] = new JsonArray(PlantStepJobs.SweepSkips.Select(x => (JsonNode)x).ToArray());
         // replenish backpressure (delivery-speed.md 6): the waiting items of the last plan; absent before the first plan has run (Replenish.ps1 then holds back)
         if (ownerMode && items == null && plant.LastPlanWaiting() is { } lastWaiting) args["replenish_waiting"] = lastWaiting;
         var sweepStarted = DateTime.UtcNow;   // (an owner released at a merge after this is not put back by this sweep's plan)
         // the first full sweep after a gap (no gateway was up): the owners' claims that ran out in it are renewed, not offered again (issue 94)
-        var gapTaken = items == null ? Gap?.Take() : null;
+        var gapTaken = items == null && !PlantJobs ? Gap?.Take() : null;   // (W9.10g: where the engine acts the gap-renew job takes it)
         if (gapTaken is { } gap) args["gap"] = new JsonObject { ["since"] = gap.ToString("o"), ["until"] = DateTime.UtcNow.ToString("o") };
         int code; string output;
         try { (code, output) = await runner.RunAsync("sync-board", args.ToJsonString(), TimeSpan.FromSeconds(280)); }
@@ -181,8 +185,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 var keep = new List<int>();
                 foreach (var x in j["errors"] as JsonArray ?? new JsonArray()) if (x?["item"] is JsonValue ev && ev.TryGetValue<int>(out var ei)) keep.Add(ei);
                 plant.Plan(j["offers"]!.AsArray(), j["owners"] as JsonObject, j["pins"] as JsonObject, j["owned"] as JsonObject, keep, j["priorities"] as JsonObject, sweepStarted, scope, j["runtimes"] as JsonObject, j["profiles"] as JsonObject);
-                if (items == null && j["replenish"] is JsonObject rpj) { plant.SetReplenish(rpj); plant.NoteGenerated((rpj["created"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var gi) ? gi : 0)); }
-                if (items == null && j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);   // a full sweep only: an incremental one reads a few items
+                if (items == null && !PlantJobs && j["replenish"] is JsonObject rpj) { plant.SetReplenish(rpj); plant.NoteGenerated((rpj["created"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var gi) ? gi : 0)); }
+                if (items == null && !PlantJobs && j["design_waiting"] is JsonValue dwv && dwv.TryGetValue<int>(out var dw)) plant.KeeperBacklog(dw);   // a full sweep only: an incremental one reads a few items
                 // the hold:owner items of the whole board: a full sweep replaces them, an incremental pass updates its own items; the plant hears
                 // them once a full sweep has read the whole board (until then its name actions wait, sweep-pending)
                 var holds = (j["holds"] as JsonArray ?? new JsonArray()).Select(x => int.TryParse(x?.ToString(), out var hi) ? hi : 0).Where(i => i > 0);
@@ -212,7 +216,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 if (scope == null)
                 {
                     plant.SetReleaseQueue(j["release_queue"] switch { JsonArray ra => ra, JsonObject ro => new JsonArray(ro.DeepClone()), _ => null });   // (PowerShell sends a one-item queue as an object)
-                    try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }
+                    if (!PlantJobs) try { await qc.Reconcile(j["qc"], j["qc_teardowns"], j["qc_approvals"]); } catch (Exception e) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); }   // (W9.10g: the qc-sync job reconciles where the engine acts)
                 }
                 foreach (var t in j["triggers"]?.AsArray() ?? new JsonArray())
                     if (t is JsonObject to && to["item"] is JsonNode ti)

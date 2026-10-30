@@ -559,6 +559,24 @@ sealed class QcHub : IEndpointModule
     }
 
     // ---- sweep: rebuild after a restart, tear down what the sweep found closed ---------------------------------------------------------------------------
+    /// <summary>
+    /// W9.10g: the QC sync as a recurring job. The verb qc-sync (the QcService's own answer where the engine acts, the rule script's elsewhere) reads the board and answers the records, teardowns and approvals the sweep's
+    /// embedded step used to; they go through <see cref="Reconcile"/> as before. Answers how it ended: ok, disabled (the gateway has no QC environments), failed, or fenced (this process lost the lease while the verb ran,
+    /// so what it read is dropped).
+    /// </summary>
+    public async Task<string> Sync(Func<bool> mayAct, CancellationToken ct = default)
+    {
+        var (exit, o) = await Ps("qc-sync", new JsonObject(), 280);
+        if (exit == 30) return "disabled";
+        if (exit != 0 || o["ok"]?.GetValue<bool>() != true) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"qcSync\":\"failed\",\"exit\":{exit}}}"); return "failed"; }
+        if (!mayAct()) return "fenced";
+        try { await Reconcile(o["records"], o["teardowns"], o["approvals"]); }
+        catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"qc reconcile: {e.Message}"); return "failed"; }
+        foreach (var a in o["actions"] as JsonArray ?? new JsonArray()) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweepAction\":{a!.ToJsonString()}}}");
+        foreach (var er in o["errors"] as JsonArray ?? new JsonArray()) Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweepError\":{er!.ToJsonString()}}}");
+        return "ok";
+    }
+
     public async Task Reconcile(JsonNode? records, JsonNode? teardowns, JsonNode? approvals = null)
     {
         // the records are what the sweep read some time ago; anything that moved on since (qc-stopped, a reset, a teardown) is newer in the mirror
