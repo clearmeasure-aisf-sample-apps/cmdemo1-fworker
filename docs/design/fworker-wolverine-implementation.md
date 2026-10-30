@@ -690,6 +690,22 @@ W9.10p when #545 is in; W9.10q after W9.10l. (An After cell that names a pull re
 W9.6's #358, #544 W9.1's #353, #545 W9.4's #356, #546 W9.8's #360, #549 W8.2's #350.) W9.9a to W9.9c in that order once every W9.10 row is merged. After the cutover gate: W9.11a to W9.11c beside W8, then
 W9.12 when the W5 gate is recorded, and W9.13.
 
+**W9.10b as built (#556).** The owner's interpretation of 2026-10-30 stands: the SQL lock is added beside the GitHub-ref lease, which stays (and is deleted in W9.11b) and keeps arbitrating with every process that has no database.
+- **The lock** (`gateway/Leadership/SqlLease.cs`): `sp_getapplock` on the resource `fworker:leader`, mode Exclusive, owner Session, timeout 0, on a connection of its own (pooling and connection resiliency off, so the lock lives exactly as long as the
+  connection: a holder that dies or loses its network has lost it). Script `170_AddLeadership.sql` (the reserved range 170-179) builds `factory.Leadership`, one row (`Id` 1): `Epoch` (one more each time a process takes the lock), `Holder` (the process name the
+  ref lease records too), `AcquiredAt`, and the takeover request (`TakeoverBy`, `TakeoverAt`). The scripts are applied before the lock is first tried (the row is a table of the schema; the host then finds nothing to apply).
+- **Where it exists:** only where `FACTORY_DB_CONNECTION` is set, the engine is shadow or v2 (the Wolverine host runs) and the ref lease is on. v1 under the kill switch, uat, prod and every process without a database build no `SqlLease`: nothing of
+  their behaviour changes, and `leader.sql` is absent from their status.
+- **Where the engine acts (v2)** the lock is part of acting: `ILeadership.MayAct` is true only while the lock is held, and a starting process takes the lock before the ref (a newcomer that finds it taken writes a takeover request and refreshes it at every try;
+  the newest process wins, a request that is not refreshed for four checks, at least 20 s, is stale). The holder looks at its lock every `timing.leaderSqlCheckSeconds` (5): a dropped connection (the session no longer holds the lock, or the call fails: any failure
+  counts as lost) or a fresh request from another process ends its term in the order of the hand-over: the node leaves (W9.10a), the final snapshot, the streams end, the lock is released. The newcomer takes the lock with the next epoch, then the ref
+  (the predecessor's snapshot is already written), restores, and only then starts its node and the recurring jobs. A process that lost the lock stands by like a superseded holder and takes the lock again when it is free, and takes the ref at once when the ref's
+  holder is the one that last held the lock (its connection dropped: the lock is the proof) and otherwise only when the ref was released or ran out. A standby never writes a request, and a newcomer whose request was overwritten by a newer one concedes.
+- **In the shadow run** (v1 acts, the node is inert) the lock gates the node only: v1 acts on the ref at once and a database outage never stops it; the node starts when the lock is held and leaves when it is lost or asked for.
+- **Epoch:** `GatewayLeader.Epoch` stays the ref's (the snapshot, the fence of the rule scripts and the restore compare it); `SqlEpoch` is the SQL term and `ClaimEpoch` (SQL term where there is one) is what the claims of the idempotency ledger carry. `/api/v1/status` `leader.sql`:
+  `held`, `epoch`, `fencesActing`, `acquisitions`, `lost`, `yielded`, `failures`, `lastFailure` (the exception type and the SQL error number only), `lostAt`, `previousHolder`.
+- **Known limit:** between the drop of the holder's connection and its next look (at most `leaderSqlCheckSeconds`, 5) the lock is already free and a successor may act; the old holder's ledger claims carry its own epoch, and its rule scripts are fenced by the ref as before.
+
 **The cutover's settings checklist** (W9.9c; every value is written in `config/deploy.overrides.json` and checked with
 `config/apply-overrides.ps1` before the merge):
 

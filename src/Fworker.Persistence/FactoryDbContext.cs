@@ -29,6 +29,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<QcEnvironmentRow> QcEnvironments => Set<QcEnvironmentRow>();
     public DbSet<TranscriptRow> Transcripts => Set<TranscriptRow>();
     public DbSet<IncidentRow> Incidents => Set<IncidentRow>();
+    public DbSet<LeadershipRow> Leadership => Set<LeadershipRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -217,6 +218,15 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             // the events of the hotfix item find their incident, and the open incidents are listed
             e.HasIndex(x => x.HotfixItem);
             e.HasIndex(x => x.Status);
+        });
+
+        b.Entity<LeadershipRow>(e =>
+        {
+            e.ToTable("Leadership");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).ValueGeneratedNever();
+            e.Property(x => x.Holder).HasMaxLength(100).IsRequired();
+            e.Property(x => x.TakeoverBy).HasMaxLength(100);
         });
 
         b.Entity<CatalogCopy>(e =>

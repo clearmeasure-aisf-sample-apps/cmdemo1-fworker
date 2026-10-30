@@ -224,6 +224,24 @@ public class IncidentRow
 }
 
 /// <summary>
+/// The leadership row (W9.10b, gateway/Leadership/SqlLease.cs): the one row (<see cref="Id"/> 1) beside the SQL application lock "fworker:leader" that fences the gateway's single actor. The lock is the fence and
+/// ends with the holder's connection; this row says whose term it is. The gateway writes it with plain SQL under the lock; EF only maps the table.
+/// </summary>
+public class LeadershipRow
+{
+    /// <summary>Always 1.</summary>
+    public int Id { get; set; }
+    /// <summary>Grows by one each time a process takes the lock: the epoch of the term.</summary>
+    public long Epoch { get; set; }
+    /// <summary>The process of the term (machine:pid:random, the same name the GitHub lease records).</summary>
+    public string Holder { get; set; } = "";
+    public DateTimeOffset AcquiredAt { get; set; }
+    /// <summary>A newer process that wants the lock, or null. Stale when TakeoverAt is not refreshed.</summary>
+    public string? TakeoverBy { get; set; }
+    public DateTimeOffset? TakeoverAt { get; set; }
+}
+
+/// <summary>
 /// The state of one QC gate (W9.0 for W9.1, refactor R9): one row per repository and pull request, the key "owner/repo!N" in lower case. The state is a JSON document owned by Fworker.Workflows.Qc (the
 /// environment record, its attempt and assignment, the verdict), saved with a revision so that two writers cannot both win. The columns beside the document are the ones read without opening it: the pull
 /// requests of one repository that are not over ("Waiting for PR QC") and the item the pull request belongs to.

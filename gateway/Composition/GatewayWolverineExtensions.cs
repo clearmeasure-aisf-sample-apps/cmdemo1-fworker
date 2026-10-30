@@ -40,7 +40,7 @@ static class GatewayWolverineExtensions
                 // with the database the host needs, the reservations and the idempotency ledger are in SQL and survive the kill the host is built for (#481)
                 // W9.10c: the claims of the ledger name this process and the epoch of the lease it holds
                 var claimNode = ClaimOwner.ThisProcess().Node; var claimLeader = sp.GetRequiredService<GatewayLeader>();
-                var stores = new SqlCommandStores(WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), owner: () => new ClaimOwner(claimNode, claimLeader.Epoch));
+                var stores = new SqlCommandStores(WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), owner: () => new ClaimOwner(claimNode, claimLeader.ClaimEpoch));
                 var reservations = stores.Reservations;
                 purgeable = stores.Ledger as IPurgeableLedger;
                 copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()), owners: new CopilotOwnerRecorder(sp.GetRequiredService<RuntimeRegistry>()));

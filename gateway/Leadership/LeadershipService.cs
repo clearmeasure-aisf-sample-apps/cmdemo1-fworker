@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 // The leader lease's start, the hand-over and the stop (Leader.cs, issue 94; gateway-composition.md 3 E). Moved out of Program.cs unchanged (C4d).
 // GatewayLeader holds the lease and its loop; SnapshotCoordinator holds the plant snapshot; this service decides when each runs:
 // - at the host's start: without the lease, the one read of the snapshot (and the process acts at once); with it, once the revoked credentials are
-//   read, the lease is taken, the plant restored from the predecessor, the lease confirmed, then the lease's loop and the snapshot of every change;
+//   read (W9.10b: and, where there is a database and the engine acts, the SQL application lock is taken first, SqlLease.cs), the lease is taken, the plant restored from the predecessor, the lease confirmed, then the lease's loop and the snapshot of every change;
 // - when a newer process takes the lease (superseded): the Wolverine node leaves (W9.10a), the final snapshot, then the streams end with stream.replaced;
 // - when a standby takes the lease again: the restore from the releaser's snapshot, then the node starts (GatewayLeader.OnActing);
 // - at the stop (ApplicationStopping, RegisterStopping): the node leaves, then the hand-over, or without the lease the write of the plant.
@@ -73,6 +73,7 @@ sealed class LeadershipService : IHostedService
                 if (was is not (GatewayLeader.Role.Acting or GatewayLeader.Role.Starting))
                 {   // superseded: its final snapshot was written when it stood down; one still being written is given its time
                     snapshots.WaitForWrite(TimeSpan.FromSeconds(10));
+                    try { leader.ReleaseSqlAsync().WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult(); } catch (TimeoutException) { }   // (W9.10b) a standby that holds nothing (or a lock still held) lets go
                     runner.DrainFencedAsync(TimeSpan.Zero).GetAwaiter().GetResult();   // (W0.1) a fenced script still running must not hold the stop up: it refuses its writes anyway
                     Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"{was.ToString().ToLowerInvariant()}\"}}"); return;
                 }
@@ -81,6 +82,8 @@ sealed class LeadershipService : IHostedService
                 try { leader.RunBeforeHandOverAsync("stop").WaitAsync(NodeLeaves).GetAwaiter().GetResult(); } catch (TimeoutException) { Console.Error.WriteLine("leader stop: the node did not leave in time"); }
                 if (was == GatewayLeader.Role.Acting && snapshots.On && snapshots.Restored.IsCompleted) snapshots.SaveAsync(true, TimeSpan.FromSeconds(12)).GetAwaiter().GetResult();
                 leader.ReleaseAsync(snapshots.HeldEpoch, TimeSpan.FromSeconds(Math.Max(5, 22 - sw.Elapsed.TotalSeconds))).GetAwaiter().GetResult();
+                // W9.10b: the SQL lock last (after the ref's release, which names whose snapshot holds the plant): the successor takes the lock first and the ref next
+                try { leader.ReleaseSqlAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult(); } catch (TimeoutException) { Console.Error.WriteLine("leader stop: the SQL lock was not released in time"); }
             }
             catch (Exception e) { try { Console.Error.WriteLine($"leader stop: {e.Message}"); } catch { } }
         });
@@ -102,6 +105,13 @@ sealed class LeadershipService : IHostedService
                 // not before this process can serve sessions: a start that never gets ready (the revoked credentials unreadable) must not take the
                 // plant from a healthy predecessor
                 await revocations.Loaded.WaitAsync(ct);
+                // W9.10b: where there is a database, the SQL lock first when the engine acts (the newest process asks the holder to stop its node, save the plant and release, then takes the lock and the
+                // next epoch); in the shadow run v1 acts at once and the lock, taken in the background, gates the node only
+                if (leader.HasSqlLease)
+                {
+                    if (leader.SqlFences) await leader.AcquireSqlAsync(ct);
+                    _ = Task.Run(() => leader.SqlLoopAsync(ct));
+                }
                 var pred = await leader.AcquireAsync(ct);
                 await snapshots.RestoreFromPredecessorAsync(pred, "start");
                 // superseded while it restored (two starts close together): it stands by instead of acting
