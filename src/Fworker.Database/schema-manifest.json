@@ -954,6 +954,75 @@
         }
       }
     },
+    "factory.Leadership": {
+      "columns": {
+        "AcquiredAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Epoch": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Holder": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Id": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "TakeoverAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "TakeoverBy": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_Leadership": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
     "factory.MergeTrains": {
       "columns": {
         "Key": {

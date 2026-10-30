@@ -4,7 +4,7 @@
 # Runs in the owner suite. The suite runs with the lease and the snapshot off (run.ps1); these scenarios switch both on for their own gateways and
 # give the suite's gateway back in finally. The fake's forwarder (FAKE_PROXY_PORT, lib.ps1) stands in for the platform's ingress.
 
-$script:LeaderEnv = @{ FACTORY_LEADER_LEASE = '1'; FACTORY_PLANT_SNAPSHOT = '1'; FACTORY_TIMING_leaderCheckSeconds = '1'; FACTORY_TIMING_leaderRenewSeconds = '4'; FACTORY_TIMING_leaderLeaseSeconds = '20'
+$script:LeaderEnv = @{ FACTORY_LEADER_LEASE = '1'; FACTORY_PLANT_SNAPSHOT = '1'; FACTORY_TIMING_leaderCheckSeconds = '1'; FACTORY_TIMING_leaderSqlCheckSeconds = '1'; FACTORY_TIMING_leaderRenewSeconds = '4'; FACTORY_TIMING_leaderLeaseSeconds = '20'
     FACTORY_TIMING_leaderHandoverSeconds = '30'; FACTORY_TIMING_plantSnapshotDebounceSeconds = '1' }
 function Ld-SetEnv([hashtable]$Env) { $old = @{}; foreach ($k in $Env.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $Env[$k]) }; return $old }
 function Ld-Status([string]$Base) { Invoke-RestMethod "$Base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 10 }
