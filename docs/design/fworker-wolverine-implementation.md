@@ -1,6 +1,8 @@
 # Implementing ADR 0001: the sequence of work and its parallel lanes
 
-Status: implementation plan, 2026-10-26, revised the same day. Nothing here is built. Asked for by the owner: "prepare for
+Status: implementation plan, 2026-10-26, revised the same day, on 2026-10-28 (the hybrid composition) and on 2026-10-30 (the audit;
+section "Revision 2026-10-30 (audit)" below). Stage C, W0 to W7 and W9.0, W9.2, W9.5 and W9.7 are built; W9.1, W9.3, W9.4, W9.6, W9.8
+and W8.0 to W8.3 are in flight; the rest is planned. Asked for by the owner: "prepare for
 implementation. I need the sequence of work, phased out including which tasks can be implemented by parallel subagents", then
 "Program.cs refactoring has to be first and stabilized before enhancement plan commences." It turns:
 - `gateway-composition.md` (stage C, first);
@@ -17,12 +19,106 @@ into tasks: each one pull request, with what it comes after, the files it owns, 
 So the gates are tdd observation windows in hours, not soaks in days or promotions to uat and prod. The v2 engine is built beside
 v1 as new projects, held to the same Tier 1 suites and golden-write oracle, and tdd switches engines **as a whole**, once; there is no
 per-item engine. Rollback is a revert or the `FACTORY_V2_OFF` kill switch. Appendix A lists the board's tasks whose scope changed.
+(The revision of 2026-10-28 brought back one per-plan exception, `intake.v2Plans`, and the revision of 2026-10-30 turns the remaining
+gates into events; Appendix B lists the issues of that revision.)
 
 | View | Source | Rendered |
 |---|---|---|
 | Stage C and the waves | `fwi-waves.puml` | [fwi-waves.svg](diagrams/fwi-waves.svg) |
 
 ![Waves](diagrams/fwi-waves.svg)
+
+## Revision 2026-10-30 (audit)
+
+An audit of the program on 2026-10-30 (Opus, against master and the in-flight pull requests #540 to #549) found the verb-level port
+(W9.1 to W9.8) nearly complete and built with care, and tdd safe today (shadow run, v1 acts, the v1 lease fences everything). It found
+the plan for the rest **not correct as written**:
+- under the hybrid composition, v1's lease, sweep, plant, snapshot and rule scripts are v2's base layer, yet W9.11 removed them and no
+  task replaced them;
+- W9.9 switched nothing (`intake.v2Plans` empty, and `intake.enabled` also turns on v1's intake);
+- no Tier 1 scenario has started a `WorkItemSaga`, so the W6 and W7 gates and the cutover precondition could not be proven;
+- the rollback path was unsound (the state comment projection is not wired);
+- leadership needed a decision before W9.11.
+
+This revision applies the owner's decisions of the same day and rewrites the rest of the plan. What it changes:
+
+**The owner's decisions (2026-10-30):**
+1. **Leadership:** keep a single-actor lease with Wolverine in Solo mode. The lease moves from the GitHub ref to a SQL application lock
+   that also decides when the Solo node starts; the node runs only on the holder and stops before its hand-over. W9.11 does not
+   remove the lease. Balanced mode with Wolverine's leader election (#464) is not the target any more.
+2. **The app's uat and prod promotions** stay with v1's `AutoPromoter` after the cutover, until the delivery train has a recorded clean
+   live window (the W5 gate, restated below as events). v2 acts in tdd only: the train decides uat and prod in shadow until then, and
+   W9.12 hands those environments to it.
+3. **`delivery.finalEnvironment` is tdd**: an item's delivery to the app's tdd starts its settle window.
+4. **The `peer-approved` merge policy is dropped**, not ported: its reviewer-App approval stays in the script, and its suites
+   (`peer-approved`, and `qc-gate`, which runs under that policy) go with v1 in W9.11a.
+5. **#496:** the train promotes the newest qualifying release only, where v1 may promote two. Accepted as a declared difference.
+6. **The nine defaults** of the audit, accepted as proposed:
+   1. `intake.v2Plans` stays, as a deliberate per-plan exception to "no per-capability flags" (section 1, rule 9; section 4);
+   2. at the cutover only parity evidence tdd can produce is required ("Owed evidence" below);
+   3. dead-letter and envelope-backlog counts in `/api/v1/status` (W9.10o) instead of #462 (OpenTelemetry and Azure Monitor) and #463
+      (the dead-letter page), which are not cutover work;
+   4. a faster board-reconciler poll (1 to 2 minutes, W9.10g and the W9.9c checklist) instead of a `projects_v2_item` webhook;
+   5. S1 is the pre-agreed fallback tier of the tdd database if the cutover batch saturates S0 (DTU p95 at or above 80%);
+   6. the gateway's Octopus account gets `DeploymentCreate` on tdd for cmdemo1-ui (W8.2b), for the tdd rollback;
+   7. incidents in the app's uat and prod escalate only: open the incident, hold the trains, notify; no automatic rollback there;
+   8. no W8.4 analyst role (no new role, `Auth.cs` and `Mcp/RoleTools.cs` untouched); triage reads the health endpoints;
+   9. synchronous decision verbs (a saga `InvokeAsync` that can refuse a session) are dropped in favour of the as-built feed
+      (`V2VerbFeed`: v1's verb answers, then the saga is told); `wolverine-factory.md` 8 records it.
+7. **Multi-repository** comes after the cutover, as its own row (W9.13). The cutover is home-repository only.
+
+**The hybrid composition is the shape of the cutover**, not a stage before it. Where v2 acts, the sagas, the scheduler and the trains
+own the items they started and every routed verb; what v1 still did for those items (the sweep's steps, the plant's offers and
+starts, the gateway's own rule-script calls, the snapshot) moves to v2 in the W9.10 rows before the switch, so the cutover gate
+measures what remains after W9.11, and W9.11 removes code that nothing calls. Section 4 is restated for it.
+
+**New rows between W9.8 and W9.9** (W9.10 is free since #362 closed; lettered sub-rows, each one issue under the W9 epic #268; the
+W9 table in section 4 gives content, owned files, order and size; Appendix B the issue numbers):
+
+| Row | In short |
+|---|---|
+| W9.10a | Solo node only on the acting holder; the old node stops before the hand-over (on today's lease, now) |
+| W9.10b | leadership: the lease as a SQL application lock that decides when the Solo node starts; kept by W9.11 |
+| W9.10c | idempotency: an atomic pending claim in the command ledger; Copilot resume as unknown (#479) |
+| W9.10d | v2 Tier 1: the saga profile, whole-suite claims, the declared-difference blocks, a sharded and blocking v2 job |
+| W9.10e | v1 leaves saga items alone: the owned set into `sync-board`, no inline merge, v1 intake off for `v2Plans`, a `Loaded` flag |
+| W9.10f | the sweep's item steps on v2 (settle and the master-CI watch, merge pickup, demote, clear hold, idle release, park expiry) |
+| W9.10g | the sweep's plant-wide steps on v2 as recurring jobs (reap, renew, board guard, QC sync, replenish, backlog-low); faster reconciler |
+| W9.10h | producers for the saga's inputs (park and resume, close, reopen, label, budgets, merge facts, start refused, Depends on) |
+| W9.10i | the state comment projection wired (the rollback path) |
+| W9.10j | session offers and starts from the saga and the scheduler; ledger executions subtracted from the plant's counts |
+| W9.10k | plant state that survives a restart; the plant, digest, patrol and manager fed from saga state |
+| W9.10l | the gateway's own rule-script calls and v1 fallbacks: the inventory and an architecture test |
+| W9.10m | adoption as reconciliation: the mapping from v1 state to saga state, at every start |
+| W9.10n | re-adoption fencing after `FACTORY_V2_OFF`: a new generation per item, ledger slots cleared |
+| W9.10o | v2 health and fault handling: the status block, retry classification, save and outbox, `/ready` only where v2 acts |
+| W9.10p | the app's uat and prod stay with v1's `AutoPromoter`; the train acts for tdd only |
+
+**W9.9 is resized to L and split** (one issue, #361, three pull requests): W9.9a the router takes the gateway's own calls; W9.9b
+adoption wired as a reconciliation; W9.9c the switch, its settings checklist, the drills and the cutover gate. **W9.11 is split** (one
+issue, #363): W9.11a the oracle and the tests; W9.11b the removal, which keeps the lease and the `AutoPromoter` for uat and prod; W9.11c
+the release check, `CLAUDE.md`, the handoff and the status fields. **New after the cutover:** W9.12 (the train takes the app's uat and
+prod after the W5 gate) and W9.13 (multi-repository). **W8:** W8.0's default is the tdd-only rollback, W8.1 is split into a and b,
+W8.2b is the infrastructure (cmdemo1 session), and the in-flight pull requests merge in a stated order (W8 below).
+
+**Gates are events,** not windows (the owner's rule: no time minimum where time proves nothing). The W5 gate, the cutover gate, the
+W9.11 gate and the W8 gate are restated below as lists of events, each observed and recorded on its epic.
+
+**Owed evidence** (default 2 above). The gates of W2 to W7 were recorded in a reduced form or not at all: W2 had no database stop and no
+leader election (Solo); W3's command parity became "v1 unaffected" (#471 was never built); W4 left the reconciler out of the shadow run;
+W5, W6 and W7 have no gate comment. What tdd and CI can produce is owed at the cutover, and the rest is dropped with this record:
+
+| Gate | Evidence | Disposition |
+|---|---|---|
+| W3 | v2's recorded commands matched with v1's writes | replaced by the v2 Tier 1 golden-write comparison of whole suites (W9.10d) and the measured batch; #471's report is not built |
+| W4 | every board change of a window has its event in v2's history | owed: observed in the cutover batch (the reconciler runs from W9.10g) |
+| W5 | live train decisions matching v1's | owed before W9.12, not before the cutover (decision 2): the W5 gate below |
+| W6, W7 | the docs and feature suites green on v2 | owed before W9.9c: recorded on #265 and #266 once W9.10d's saga profile runs them |
+| W2 | a database stop with v1 acting | dropped: v2 acts from the cutover, and W9.10o states what a database outage does where it acts |
+
+**CI from now on** (section 1, rule 5, applied): the main session runs `gh workflow run Tests --ref master` now and after every merge
+batch and records the result on the wave's epic; `V2_BLOCKING` becomes `true` after the first green master run that W9.10d produces;
+#542 to #546 merge one at a time, each rebased on the one before, after the main session lands `V2VerbRouter.Below` and its test helper.
 
 ## 1. How parallel subagents work on this repository
 
@@ -59,8 +155,10 @@ per-item engine. Rollback is a revert or the `FACTORY_V2_OFF` kill switch. Appen
    - Every merge to master restarts the acting tdd gateway. A **tdd observation window** is a stated number of hours from a release
      with no merge to master, except a fix for the window (which restarts it). In every window the main session checks, after the
      release that opens it and at its end: `/_build` shows the release, `/ready` answers 200, `/api/v1/status` shows the leader acting
-     and a successful restore (v1: `plantSnapshot.restore.how`; v2: the Wolverine node's leadership and the sagas resumed), and no
-     unplanned restart. Each gate adds its own comparison.
+     and a successful restore (v1: `plantSnapshot.restore.how`; v2: the lease holder's Solo node running, no second node in
+     `wolverine_nodes`, and the sagas resumed), and no unplanned restart. Each gate adds its own comparison.
+   - From the revision of 2026-10-30 the remaining gates are lists of events, not windows of hours: a gate ends when every event in
+     its list has been observed and recorded, and merges wait only while a drill or a measured batch is running.
    - Subagents keep working during a window; their pull requests wait for its end to merge.
    - Pull requests from outside the plan (operator-session fixes) avoid the hot files of the running wave; during stage C, `Program.cs`
      is frozen for them.
@@ -70,7 +168,9 @@ per-item engine. Rollback is a revert or the `FACTORY_V2_OFF` kill switch. Appen
 8. **Kit-owned files stay untouched:** `build.yml` belongs to the demo-environment kit (only its tests job is local). New checks go into
    `tests.yml`. The Dockerfile copies every `*.csproj` before `dotnet restore`.
 9. **One engine switch per environment** (refactor plan rule 3), default v1. tdd goes to v2 shadow mode at W2 and to v2 at the cutover
-   (W9.9), each a `deploy.overrides.json` change that merges on green like any other pull request. There are no per-capability flags.
+   (W9.9), each a `deploy.overrides.json` change that merges on green like any other pull request. There are no per-capability flags,
+   with one deliberate exception (owner, 2026-10-28, confirmed 2026-10-30): `intake.v2Plans` names the plans the engine carries where
+   it acts, so a plan joins v2 by a settings change (docs and feature at the cutover, hotfix and redeliver with W8.1b).
 10. **Subagents follow the owner's standing rule** (Opus, low effort). Each brief gives the task's row, the files it owns and must not
    touch, its tests and its "done when".
 
@@ -85,12 +185,14 @@ outside it:
 | The base: this plan proceeds on fworker; ADR 0001 stays Proposed until the owner accepts it | owner | W1.0 |
 | cmdemo1-aisf stops acting on board 679 (kit watcher change) | owner, Platform Hub, cmdemo1 session | W0 |
 | Azure SQL for the tdd gateway (provisioned, managed identity) | owner, cmdemo1 session | W2.0 |
-| At least one replica for the tdd gateway (Balanced mode, timers and recurring jobs from W2) | cmdemo1 session | W2.2 |
-| `FACTORY_V2_OFF` in cmdemo1-system's infrastructure code, unset | cmdemo1 session | W2.3 (it also stops shadow mode); drilled at W9.9 |
-| `projects_v2_item` delivery (organization or App webhook); without it the board reconciler is the source | owner (admin) | W4, not a stop |
+| At least one replica for the tdd gateway (timers and recurring jobs need a running process; Solo on the lease holder since 2026-10-30, not Balanced) | cmdemo1 session | W2.2 (done) |
+| `FACTORY_V2_OFF` in cmdemo1-system's infrastructure code (tdd fworker settings), unset; **overdue** (2026-10-30: absent from `system.json` and `infra/own/main.bicep`) | cmdemo1 session | W9.9c (After column); drilled there; removed with its reader in W9.11b |
+| `projects_v2_item` delivery (organization or App webhook) | owner (admin) | not needed: default 4 of 2026-10-30, a 1 to 2 minute reconciler poll (W9.10g) |
+| `DeploymentCreate` on tdd for cmdemo1-ui for the gateway's Octopus account (decided 2026-10-30) | cmdemo1 session | W8.2b, before the W8 gate |
+| S1 as the tdd database's fallback tier (decided 2026-10-30) | cmdemo1 session | only if the cutover batch saturates S0 |
 | The gateway's read access to cmdemo1-system; the `system.json` fields for policy, toolchain and WIP limit (kit and cmdemo1-system) | owner, Platform Hub | W1 (falls back without), W6 and W7 |
 | Delivery-speed cross-repo pieces (merge queue ruleset, workorders pipeline, kit `release.yml`, docs-only overflow) | owner, Platform Hub | W7.10, each optional, off the critical path |
-| The incident rollback policy in the app's prod; until answered, the default of `wolverine-factory.md` 5.5: automatic in the app's tdd and uat, a person's Sign-off in its prod | owner | W8.0, not a stop |
+| The incident rollback policy (decided 2026-10-30): automatic in the app's tdd only; in its uat and prod open the incident, hold the trains and escalate, no automatic rollback | owner | W8.0 (answered) |
 
 **Removed by the decisions of 2026-10-26:**
 - the lifting of cmdemo1-system#314's hold on uat and prod promotion, and `ui-auto-promote`'s application paths (`src/`, `*.csproj`,
@@ -158,9 +260,26 @@ inside the same gateway host. Its CI is the same Tier 1 suites run with the engi
 same golden-write oracle; where v2 writes differently on purpose, the difference is a line in a reviewed declared-differences file.
 The engine is chosen **per environment**, once, at start: `engine: { "v2Environments": [], "shadowEnvironments": [] }` in
 `config/instance.json`, read for `FACTORY_ENVIRONMENT`. tdd joins `shadowEnvironments` at W2 (v2 reads the board, its commands go to a
-recording sink, v1 acts) and `v2Environments` at the cutover W9.9 (v2 acts, v1 does not run). `FACTORY_V2_OFF=1` (cmdemo1-system) puts
-the environment back on v1 with no shadow, in a new revision and without an image change; reverting the switch's pull request does the
-same through a release.
+recording sink, v1 acts) and `v2Environments` at the cutover W9.9. `FACTORY_V2_OFF=1` (cmdemo1-system) puts the environment back on
+v1 with no shadow, in a new revision and without an image change; reverting the switch's pull request does the same through a release.
+
+**What "v2 acts" means: the hybrid composition** (owner, 2026-10-28; restated 2026-10-30). Where the environment is in
+`v2Environments`, one gateway process holds the lease and runs both: v2 (the Wolverine host in Solo mode, the sagas, the scheduler,
+the trains, the routed verbs) and what is left of v1 (the rule scripts of verbs not yet routed, the sweep for items v2 has not
+started, the plant, the `AutoPromoter` for the app's uat and prod). The split is by item and by verb, decided in code, not by flags:
+- **Items:** an item whose `WorkItemSaga` is open is v2's; v1's sweep, intake and inline merge leave it alone (W9.10e). The saga
+  starts items of the plans `intake.v2Plans` names (the one per-plan exception to "no per-capability flags", section 1, rule 9);
+  items of other plans, and items started before the switch and not adopted, are v1's. At the cutover W9.9b adopts every open item,
+  so after it v1 owns none.
+- **Verbs:** a verb with a route in `V2VerbRoutes` is v2's, whoever calls it: a session through the verb endpoint or the gateway itself
+  (W9.9a). A verb with no route still runs on v1; W9.10l's list of them must be empty before W9.11.
+- **Shared resources have one owner each:** capacity is the `CapacityScheduler`'s ledger, with the plant's own sessions counted once
+  (W9.10j); merges of saga items are the merge train's; delivery to the app's tdd is observed by the train; promotions to the app's
+  uat and prod are v1's `AutoPromoter`'s until W9.12 (decision 2 of 2026-10-30).
+- **One actor:** the lease (a SQL application lock from W9.10b) fences both engines; the Solo node runs only on its holder (W9.10a).
+- **The rollback path:** v2 writes the state comment in the format v1 reads for every decision that changes what v1 reads (W9.10i), so
+  `FACTORY_V2_OFF` or a revert hands every open item back to v1, and re-adoption fences what happened meanwhile (W9.10n).
+- **Home repository only** until W9.13.
 
 **What stays from the side-by-side design, and why:**
 - **S1, the verb router** (`VerbPipeline`): the verb endpoints call one engine interface, composed per environment. It keeps the
@@ -169,14 +288,16 @@ same through a release.
   recording sink that shadow mode and the golden-write comparison read.
 - **S3, the event ingress:** webhooks and the verbs' events enter through one interface, which in shadow mode also feeds v2.
 - **The state comment as v2's projection, in the format v1 reads:** this is how a revert or the kill switch hands every open item back
-  to v1 with nothing lost. It stays until v1's code is removed (W9.11).
+  to v1 with nothing lost. Not wired until W9.10i (the audit of 2026-10-30); it stays through the W9.11 gate, because until then a
+  revert of W9.11b is the rollback.
 
 **What went, because it existed only for v1 and v2 side by side on one environment:** the `engine:v2` label and the intake labelling;
 v1 skipping or forwarding v2 items (W6.4a to c, W6.5); the separate runtime and offer filter for v2 items; S4 as a seam in v1's code,
 S5 (timers) and S6 (the loopback route); v1's side effects through the outbox; v1 asking v2's scheduler (W7.5); moving v1's merge onto
-C# (in W7.2); the per-capability flags (`commands`, `ingress`, `delivery`, `intake.v2Plans`, `scheduler`, `merge`, `incidents`); Solo
-mode on the lease holder; the expand-then-contract steps for uat's and prod's lag; v1's promotion off-switch (W5.3); the per-item
-moves to v2 (W7.9, W9.9's QC items) and the drain of `engine:v1` items in W9.11.
+C# (in W7.2); the per-capability flags (`commands`, `ingress`, `delivery`, `scheduler`, `merge`, `incidents`); the expand-then-contract
+steps for uat's and prod's lag; v1's promotion off-switch (W5.3); the per-item moves to v2 (W7.9, W9.9's QC items) and the drain of
+`engine:v1` items in W9.11. **Came back:** `intake.v2Plans` (2026-10-28, the hybrid composition) and Solo mode on the lease holder
+(2026-10-30, the leadership decision: the lease is the fence, Balanced mode is not the target).
 
 ### W0: R0, safety and quick wins on v1 (2 to 3 at once)
 
@@ -251,6 +372,13 @@ storage ready; a history row for every ingress event; a 10-minute stop of the da
 (storage setup, leader election, the durability agent's cycles, which run every few seconds) and shows within minutes; the window also
 spans the release that opened it.
 
+**W2.2 as built, and the revision of 2026-10-30.** The host runs in **Solo** mode (`wolverine.mode` solo), not Balanced: the GitHub-ref
+lease is its only single-actor fence, and the coordinators use local sequential or partitioned queues, not `GlobalPartitioned`. The node
+is started whatever the lease state, so on every release the old and the new process each run a Solo node for up to the hand-over
+time; W9.10a fixes that, and W9.10b moves the lease into SQL. Balanced mode with Wolverine's leader election (#464) is closed as
+superseded by the lease decision. The W2 gate's "v2's node elected leader" is replaced, from the cutover, by checks Solo can show: the
+lease holder's node running, no second node in `wolverine_nodes`, and a scheduled wake that fires after a restart.
+
 ### W3: R3, v2's durable side effects (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
@@ -287,11 +415,22 @@ the replenisher if the board is idle): every board-relevant change in it has its
 
 **W5.1 revision notes:**
 - Hand-written handlers instead of a Wolverine Saga are the accepted design (#491).
-- The item "command or timer lost between save and outbox" moved to W9.9 (#361).
+- The item "command or timer lost between save and outbox" moved to W9.9 (#361), and on 2026-10-30 to W9.10o.
 
-**Gate:** a **tdd shadow run of 4 hours or 3 app releases, whichever ends later**, with zero unexplained differences between the
-train's decisions and v1's. It replaces the 3 shadow releases; there is no batch to prod, and no switch while v1 acts: the train acts
-from the cutover (W9.9), which adopts any pending Sign-off.
+**Gate, as events** (restated 2026-10-30; it replaces "a tdd shadow run of 4 hours or 3 app releases", which was never recorded on
+#264). It is the precondition of W9.12, not of the cutover: the
+app's uat and prod stay with v1's `AutoPromoter` until it is recorded (decision 2). Every event is read from tdd's shadow comparison and
+counts only decisions made after the watcher's replay was applied (#500, defect 6):
+1. at least **3 live app releases** after the replay, each with a train decision for uat (and prod, where one is due) that matches v1's
+   action or is a declared difference: the newest qualifying release only (#496, accepted), and any other difference declared on #264
+   with its cause; an unexplained difference fails the gate;
+2. each timer kind of the train fires at least once: a Sign-off wait, a health window, a retry and the safety wake;
+3. one release restart of the gateway during a train's wait, after which its scheduled `TrainWake` fires (#500's open question; the
+   evidence closes #500);
+4. "would hold" decisions of the `dependencies-delivered` rule reported in the shadow comparison (the rule is off in shadow), each
+   explained.
+
+The gate is recorded on #264 with the release numbers and the comparison rows.
 
 ### W6: R6, the docs plan (2 to 3 at once)
 
@@ -306,7 +445,9 @@ from the cutover (W9.9), which adopts any pending Sign-off.
 
 Parallel start: W6.1, W6.2, W6.3; then W6.7; W6.6 last.
 **Gate:** the docs-plan suites green in the v2 Tier 1 job, golden writes unchanged but for declared differences (CI). No window: v2
-does not act in tdd yet.
+does not act in tdd yet. *Not recorded (2026-10-30):* the v2 Tier 1 job never starts a saga (intake off, `v2Plans` empty, no
+declared-difference blocks), so this gate is recorded on #265 once W9.10d's saga profile runs the docs-only scenarios of `auto` and
+`owner`; it is a precondition of W9.9c.
 
 **Revision of 2026-10-28: the hybrid composition for W6.0 and W6.1 (owner decision).** The revision of 2026-10-26 above removed the
 per-item routing (`intake.v2Plans`, the `engine:v2` label, v1 skipping v2 items). For the docs plan the owner chose the composition
@@ -328,7 +469,8 @@ and W6.1 built, and what is left:
 - **The hand-off in the gateway:** `V2Ownership` reads the saga's table before each sweep and `SweepV2Filter` drops what the sweep
   says about those items (offers, triggers, holds, parks, owners) before the plant sees it. The rule script itself is not changed.
 - **Left for the integrator and W6.2 to W6.7:** passing the owned items into `sync-board` so the script also stops reading them
-  (`Verbs.Sweep.ps1`); writing the `engine:v2` label (a projection, W6.3). (The feeder, the decision verbs and the demotion and
+  (`Verbs.Sweep.ps1`; no task took it until the revision of 2026-10-30, which gives it to W9.10e); writing the `engine:v2` label (a
+  projection, W6.3). (The feeder, the decision verbs and the demotion and
   mechanical rows of D5's table were left to W6.6 here; W6.6 below has them. The fix-forward row, CI red, stays with W7.)
 
 **W6.6, the docs plan's steps (#335, built on W6.1 to W6.3).** Revision 2026-10-26 of the task stands: the steps only, no offer
@@ -401,7 +543,8 @@ The patrol digest the supervisor receives by push (`DigestBuilder`) is unchanged
 | W7.10 | approved cross-repo pieces, each its own pull request: the merge queue ruleset with `merge_group`, the workorders pipeline changes with fworker's docs-only signal (`Get-MergeDocsOnly`), the kit's `release.yml` | other repositories, `Verbs.Delivery.ps1` (docs-only signal) | W7.2 | per piece |
 
 Parallel start: W7.1, W7.2, W7.3, W7.4; then W7.6, W7.7; then W7.8, W7.10.
-**Gate:** the feature-plan suites green in the v2 Tier 1 job with golden writes (CI). No window.
+**Gate:** the feature-plan suites green in the v2 Tier 1 job with golden writes (CI). No window. *Not recorded (2026-10-30):* as for
+W6, recorded on #266 once W9.10d's profile (`v2Plans` [docs, feature]) runs the feature scenarios; a precondition of W9.9c.
 
 **W7.2 as built (#339), the direct and train strategies only.** Owner decisions of 2026-10-28: hybrid composition (v1's plant offers the sessions and runs the verbs v2 does not own; the sagas decide the v2 items; v1's sweep
 leaves them alone), tdd only, and the W7 scope cut: **the merge queue strategy (`queue`) and W7.10 are deferred**, so the train has two strategies. Wired only where `Engine.V2Acts` (in `WorkItemWiring.Attach`, which replaces the
@@ -474,7 +617,7 @@ steps are the core's, as W6.1 made them.
 - **The merge line** (W7.2) is connected both ways: a feature item that leaves the Merge step without a merge (head moved, fix-forward, park, hand-back) gives its place back (`MergeTrainLeft`); the merge of a code change counts in `mergeQueueDepth`
   (`MergeQueueCount`: the saga's own merged feature items that no environment has seen yet, `DocsOnly` is false for the plan), and a count that cannot be read is a transient answer.
 - **Intake:** where the engine carries the plan, `DocsIntakeJob` starts the next Todo item on it (a docs-only marker still starts the docs plan). `delivery.finalEnvironment` (prod) names the environment whose delivery starts the settle window; a tdd-only
-  factory sets it to tdd.
+  factory sets it to tdd (the owner's decision of 2026-10-30; W9.9c sets it).
 - **Not here (documented gaps):** the plant starts the sessions, on a runtime and host of its own choosing; the slot says whether a session may be offered and counts against the runtime's limits, but the plant does not honor its runtime or host, and what the plant's
   manager runs counts beside it (a ledger session is counted twice until the saga starts sessions itself); a v1 owner session that already holds the item when a hold begins is not stopped (the hold keeps the next offer and the ledger honest); `StartRefused`
   and `HostReported` have no sender (W7.4); the master-defect ruling of the CI rule is the script's `wait-for-checks` only; `MergeFactsRead` (a merge with no release built, settled as docs) has no sender; the merge queue depth does not count merged items
@@ -514,10 +657,69 @@ W9 now comes before W8: the cutover needs every verb on v2, and incidents are a 
 | W9.6 | keeper and manager commands (`backlog`, `amend-criteria`, `split-item`, `create-item`, `set-priority`, `link-dependency`, `manager-action`) | `src/Fworker.Workflows/Keeper/*`, `Manager.cs`, `gateway/Verbs/Routes/Keeper.cs` | W9.0 | M |
 | W9.7 | services (security-focused review): `revocations`, `revoke-worker`, `git-credential`, `operator-release(s)`, `metrics` | `gateway/Identity/*`, `gateway/Operator/*`, `gateway/Verbs/Routes/Services.cs` | W9.0 | M |
 | W9.8 | transcripts to the database; `sync-board` and `ingest-event` into the reconciler and ingress; `journal` into history and projection | `Transcripts.cs`, `src/Fworker.Workflows/Reconcilers/*`, `gateway/Verbs/Routes/Board.cs` | W9.0 | M |
-| W9.9 | **the tdd cutover:** on its first start as v2, the engine adopts every open item from its state comment and claim refs (idempotent) and every pending Sign-off; tdd moves from `shadowEnvironments` to `v2Environments` in `deploy.overrides.json`; the kill-switch drill | `src/Fworker.Workflows/Adoption*`, `config/deploy.overrides.json` | W9.1 to W9.8, every Tier 1 suite green on v2 | M |
-| W9.11 | remove v1: the sweep engine, the server rule scripts, the lease, the snapshot, `RunnerPool`, shadow mode and the v1 side of S1 (one subagent, last) | many | the cutover gate | L |
+| W9.10a | **Solo node only on the acting holder** (on today's GitHub-ref lease, a live defect of the shadow run): `WolverineHostService` starts the node when this process is Acting (lease taken and the predecessor's snapshot seen), not at `StartAsync`; on supersession it stops the node (drain, release of ownership) **before** the hand-over saves the snapshot and lets the lease go, so the successor's `StartSoloModeAsync` never releases rows of a running node; the header comments corrected (Solo, not Balanced; not serverless) | `gateway/Composition/WolverineHostService.cs`, `gateway/Leader.cs` (hand-over order), `tests/Fworker.Workflow.Tests` (hand-over case) | W9.0 (now) | S |
+| W9.10b | **leadership: the lease as a SQL application lock** (owner, 2026-10-30): where a database is configured, `sp_getapplock` (session owner, on a dedicated connection) plus a `factory.Leadership` row (epoch, holder, takeover request) is the single-actor fence; the newest process still wins (it writes a takeover request, the holder stops its node as in W9.10a, saves the plant and releases; the newcomer takes the lock, increments the epoch, then starts the node and the recurring jobs); a holder whose connection drops has lost the lock and acts no more; `ILeadership.MayAct` and W0.1's epoch read from it; the GitHub-ref lease stays as the arbitration with a process that has no database (v1, the kill switch, uat and prod) until W9.11b; W9.11 keeps this lease | `gateway/Leadership/*`, `gateway/Leader.cs`, the next free DbUp script, `tests/scenarios/leader.ps1` (hot: the main session) | W9.10a | M |
+| W9.10c | **idempotency: an atomic pending claim** in the integration-command ledger (key, owner node and epoch, expiry, one statement before the side effect); a second handling of the key waits or ends; an expired claim is settled by looking up the effect (runbook runs by worker name, deployments of the release, comments by journal key, the pull request's merge state); a Copilot resume that times out is unknown, not failed, and is reconciled from the pull request's comments and sessions; the Copilot reconciler writes the `copilot_task` owner record and its `Settle` is conditional; reservations durable and the task lookup checked against the real API (#479) | `src/Fworker.Integrations/Commands/*`, `gateway/Runtimes/CopilotCloudRuntime.cs`, the next free DbUp script | W9.0 | M |
+| W9.10d | **v2 Tier 1 that starts sagas:** `-Engine v2` takes the suite's own environment name per claim (tdd for `copilot`, `promote`, `envscope`); a v2 test profile per claim or suite (`intake.enabled`, `intake.v2Plans` [docs] then [docs, feature], `scheduler.featureSlots`, `mergeStrategy`, and a `wolverine` block with `scheduledJobSeconds` at its floor and the first run at 0); the W6.6, W7.3 and #496 blocks in `golden/v2-differences.txt`; a scenario with `gatewayMerge` true that asserts one merge write; the v2 job sharded as a matrix like `tier1` (`run-all.ps1 -Engine v2`); claims converted to whole suites, and the v1-only suites declared with a reason (`peer-approved`, `qc-gate`: the dropped policy; what `qc-gate` covers of the QC gate is checked against `qc` and moved where it is not); #415's copilot-2 and operator waits fixed, the other flakes quarantined under open issues, #386's quarantine moved to an open issue; SQL-backed tests reported skipped without `FACTORY_TEST_SQL`; the committed `__pycache__` file removed; `V2_BLOCKING` true after the first green master run | `tests/scenarios/{run,run-all,lib}.ps1`, `tests/scenarios/v2-claims.txt`, `tests/scenarios/golden/v2-differences.txt`, `.github/workflows/tests.yml`, `tests/ci/*` (hot: the main session integrates) | W9.0 | L |
+| W9.10e | **v1 leaves saga items alone:** the Sweeper passes the owned set to `sync-board` (`skip_items`) and `Verbs.Sweep.ps1` skips those items in its item loop and tail steps (settle, merge pickup, the PASS merge, park, demote, auto-unpark); `validation-verdict` makes no inline merge for an owned item; v1's `Invoke-Intake` skips the plans `intake.v2Plans` names (a gateway argument, not a new flag); `V2Ownership` gets a `Loaded` flag (until the first successful read the sweep acts on no item and incremental passes wait) | `gateway/Sweeper.cs`, `gateway/Ports/WorkItemPort.cs`, `Verbs.Sweep.ps1` (hot), `Verbs.Pr.ps1` (inline merge), `tests/Gateway.Tests` | W9.10d | M |
+| W9.10f | **the sweep's item steps on v2**, as saga and train rules, each with a v2 claim: settle and the master-CI watch (D5's master-green, master-broken and master-timeout parks and their auto-unpark), the settle re-arm, merge pickup (`ItemMerged` from a person's merge completes the item), demotion of a PASS whose pull request was closed, clear-hold when approved, idle-owner release, park expiry; where v2 acts, `sync-board` does none of these for owned items | `src/Fworker.Workflows/WorkItem/*`, `Merge/*`, `Delivery/*` (settle) | W9.10e, #542 and #545 merged | L |
+| W9.10g | **the sweep's plant-wide steps on v2** as recurring jobs (leader only), each with a v2 claim: claim-ref reap and gap renew, board guard, QC sync through `QcService`, replenish, the keeper's backlog-low (`design_waiting`); the board reconciler at 1 to 2 minutes (default 4) with its GitHub budget measured, its seen state durable or a lookback republish of closed cards with no `MergedItems` row, and `ItemMerged` derivation retried hourly instead of dead-lettered; a retention prune (`ItemHistory`, `Transcripts`, the shadow tables) and the transcript cap | `src/Fworker.Workflows/Reconcilers/*`, `gateway/Composition/RecurringJobSlots.cs` (hot), `gateway/Keeper.cs` | W9.10e, #544 and #546 merged | L |
+| W9.10h | **producers for the saga's inputs:** `ParkWorkItem` and `ResumeWorkItem` from every park and unpark path (the admin endpoint, the runtime adapters, the credit-guard park); close, reopen, label and card-move inputs from the ingress inbox, with `ProjectionEcho` consulted; `BudgetSpent` from launches and session ends; `MergeFactsRead` after the merge; `StartRefused` from the start command, with `host-full` (exit 75) mapped to a non-failure like "no capacity" (execution refunded, no failure counted); `Depends on` admission in v2 intake (D1); `LabelProjection` wired or deleted; the `V2VerbFeed.cs` comment fixed | `gateway/Ports/IngressInbox.cs`, `gateway/Endpoints/ItemAdminEndpoints.cs`, `gateway/Runtimes/*` (park and start outcomes), `src/Fworker.Workflows/Intake/*`, `src/Fworker.Integrations/GitHub/Projection.cs` | W9.10e | L |
+| W9.10i | **the state comment projection wired** (the rollback path): `StateCommentProjection` registered where v2 acts; every `WorkItemDecided` that changes what v1 reads writes v1's format (park and unpark, including merge-blocked, fix-forward-exhausted and held; step and column; `verdict.processed`; the merge record with `awaiting` and `done_at`; handed-back); `PromoteRelease` and `AnswerSignOff` write `merge.promoted.<env>` and `signoff_wait_since`; a v2 scenario: an item mid-flow, the kill switch on, v1 makes no duplicate or stale write | `src/Fworker.Integrations/GitHub/Projection*`, its registration (through the main session) | W9.10h | M |
+| W9.10j | **session offers and starts from the saga and the scheduler:** after `SlotGranted` the saga sends `StartRuntimeSession` with its arm id; offers of saga items come from saga state, not from the sweep's `PlanV2Offers`; `RuntimeManager` subtracts ledger-granted executions from its outside counts (concurrency and the day budget); the requested runtime is where the session starts; a failed dispatch (host not Running) settles like "no capacity" and offers wait for the host; failed stops are retried or reconciled with host reports; a scheduler reaper for items left in flight with no `ClearItem`; a v2 scenario that runs more sessions than half the day budget | `gateway/Runtimes/{RuntimeManager,RuntimeCommandService}.cs`, `gateway/Ports/CapacityPort.cs`, `src/Fworker.Workflows/Capacity/*`, `WorkItem/WorkSteps.cs` | W9.10h | L |
+| W9.10k | **plant state that survives a restart; the plant fed from saga state:** assignments and offers (the ids the workers' item tokens name), owners, bot holders and drains in SQL (the next free DbUp script), corrected at start from `WorkItems` and the claim refs; an adapter that builds the plant's sweep-shaped input from saga state and the reconciler's cards (owners, parks, the release queue from the Deliver step, pins, priorities, runtime labels); `DigestBuilder` and the patrol read `V2ItemViews` (parked, lease-overdue, held); `manager-action` sends `ResumeWorkItem`, `ReleaseOwner` and `Requeue` to the saga; the release check counts saga items in flight; one manager-suite v2 scenario for each | `gateway/Plant*.cs`, `gateway/PlantSnapshot.cs`, `gateway/Messaging.cs` (`DigestBuilder`), `Manager.cs`, the next free DbUp script | W9.10j, #543 merged | L |
+| W9.10l | **the gateway's own rule-script calls and v1 fallbacks:** the inventory of every `Runner.RunAsync` call outside `gateway/Verbs` (about 25: `PlantHooks` claim-item and expire-claim, the runtime adapters' park-item and `ReleaseClaim`, the credit-guard park, the unpark and resettle endpoints, `ItemPrLookup`, `sync-board`, `FeatureChecksJob`, `BaseUpdate` and `PlantTicker` journal (#477), `Leader`) and of every `IItemV1` fallback (QC accept, the red-head and migration checks of `complete`, `open-pr` and `item-pr` for `copilot/*` branches and owner tasks, `auto-promote`, the merge verb's refusal counter and migration-number collision), each with the row that gives it a v2 owner, in `verb-inventory.md`; an architecture test whose allow-list is that inventory and must be empty before W9.11 (the `peer-approved` path excepted, decision 4); one `IItemLock` for every port and `JournalLedger` (the file lock while scripts exist) | `docs/design/verb-inventory.md`, `tests/Gateway.Tests/Architecture*`, `gateway/Ports/*` (the lock) | #546 merged | M |
+| W9.10m | **adoption as reconciliation, the mapping:** a pure mapping (`src/Fworker.Workflows/Adoption`) from v1's state (state comment, claim refs, card, pull request) to saga state: plan (docs or feature), step, park and budgets (awaiting-checks, inspector-escalated, pass-without-auto-merge, master-broken, master-timeout, relaunch budgets), step lease and scheduler slot from a live owner claim, QC row, `MergedItems` row, merge-train line, the delivery train's current release, `signoff_wait_since` and pending Sign-offs; the rule: at every start an upsert in which the state comment wins when its revision is newer; the mapping table added to this plan; one `Fworker.Workflow.Tests` case per mapping | `src/Fworker.Workflows/Adoption/*`, `tests/Fworker.Workflow.Tests/Adoption*`, this plan (the table) | W9.10i | M |
+| W9.10n | **re-adoption fencing after `FACTORY_V2_OFF`:** every command and timer carries the item's generation (or an engine epoch); re-adoption after a v1 interval opens a new generation for every item v1 touched, so older inputs end as `NotFound`; the ledger slots of those items are cleared; saga rows of items v1 completed are closed; train rows built before the interval are validated or reset; a v2 scenario: an item v1 merged during the switch is not touched by v2 afterwards, and no stale timer acts | `src/Fworker.Workflows/Adoption/*`, `WorkItem/*` (generation), `Capacity/*` (slot cleanup) | W9.10m | M |
+| W9.10o | **v2 health and fault handling:** a v2 block in `/api/v1/status` (dead letters by type; incoming, outgoing and scheduled envelopes with the oldest age; the last run of each recurring job; ledger and train summaries; saga counts by step and age), instead of #462 and #463 (default 3); transient SQL errors (-2, 1205, 4060, 40197, 40501, 40613, 49918, 10928, 10929) and the conflict exceptions retryable on long schedules, only `DbUpdateConcurrencyException` and duplicate keys caught as conflicts, the delivery retry bounded (#500); the saga save and the outbox in one transaction (`WolverineFx.EntityFrameworkCore` on `FactoryDbContext`) or a re-arm job for open sagas with no timer or an overdue `LeaseDue` (from W5.1 and #496); `/ready`'s schema gate only where v2 acts (in shadow the schema shows in status only); a malformed `FACTORY_DB_CONNECTION` treated as not configured; the `PromoteRelease` key carries the request's sequence and the ledger keeps successes for a retention period; merge attempts count only answers about the pull request | `gateway/Composition/Wolverine*` (hot: the main session), `gateway/Endpoints/Status*`, the saga stores, `gateway/Configuration/Database*`, `src/Fworker.Workflows/WorkItem/Plans/DocsSteps.cs` | W9.0 | L |
+| W9.10p | **the app's uat and prod stay with v1's `AutoPromoter`** (decision 2): where v2 acts, `AutoPromoter` keeps promoting the app to uat and prod (#545 stops it there; this row narrows the stop to tdd, where the lifecycle deploys anyway), and the train's uat and prod decisions stay in shadow (recorded and compared, no `PromoteRelease` or `AnswerSignOff`); the train acts for tdd only (observes the lifecycle's deployment, publishes `DeliveredTo(tdd)`) | `gateway/AutoPromoter*`, `gateway/Ports/DeliveryShadowPort.cs`, `src/Fworker.Workflows/Delivery/DeliveryShadow*` | #545 merged | S |
+| W9.9a | **the router takes the gateway's own calls:** `Runner.RunAsync` asks `V2VerbRouter` first for every verb that has a route where v2 acts; the per-pull-request bridges (`DeliveryVerbBridge`, `ServiceVerbCalls`, `Runner.V2Own`) removed; W9.10l's allow-list down to the declared exceptions | `gateway/Runner*.cs`, `gateway/Verbs/*` (hot), the bridges | W9.10l, W9.1 to W9.8 merged | M |
+| W9.9b | **adoption wired as a reconciliation:** where v2 acts, at every start, W9.10m's mapping with W9.10n's fencing over every open item and pending Sign-off (W5.3); `DeliveredTo` backfilled from Octopus history and `MergedItems` from the merged pull requests (`mergeQueueDepth` 2 in tdd); train rows built in shadow validated or reset; the result in the v2 status block (adopted, upserted, skipped, by reason) | `gateway/Composition/Adoption*`, `src/Fworker.Workflows/Adoption/*` (wiring) | W9.9a, W9.10m, W9.10n | M |
+| W9.9c | **the switch, the drills and the cutover gate:** `deploy.overrides.json` per the settings checklist below; the readiness checklist below; the kill-switch drill, the overlap drill and the measured batch of the cutover gate; the result recorded on #268 | `config/deploy.overrides.json`, `docs/HANDOFF.md` (the gate's record) | W9.9a, W9.9b, every W9.10 row; the W6 and W7 gates recorded (#265, #266); #500's wake-after-restart evidence from tdd; `FACTORY_V2_OFF` provisioned in cmdemo1-system; the claim list equal to `run.ps1 -ListSuites` less the declared v1-only suites; `V2_BLOCKING` true | S |
+| W9.11a | **the oracle and the tests:** the goldens frozen as C#-owned fixtures; the parity tests that run the scripts retired (`MergeVerbParityTests`, `ServiceVerbParityTests`, `BoardVerbParityTests`, the script part of `tests/smoke.ps1`); v2 the suites' default engine; the v1-only suites removed (`peer-approved`, `qc-gate`, `merge-queue`, `snapshot`); `leader` kept, on the SQL lease | `tests/*` (hot: the main session) | the cutover gate | M |
+| W9.11b | **remove v1:** the sweep engine, the server rule scripts (an inventory of `plugin/scripts/lib` files to delete or keep: the client scripts workers download stay), `RunnerPool`, shadow mode, the v1 side of S1, the snapshot (the plant is in SQL from W9.10k), the ref part of the lease, the `FACTORY_V2_OFF` reader together with its cmdemo1-system entry; the state-directory files (`refusals.json`, `qc-items.json`, `seen.json`, `project-meta.json`, `item-N.lock`) into the database or memory. **Kept:** the SQL lease (W9.10b), the `AutoPromoter` for the app's uat and prod (until W9.12), the v1-format state comment through the W9.11 gate (a revert of this row is the rollback until then). fworker's own uat and prod gateways (no database, inert on the board) are out of scope; the image they would get after this row needs a database to act, so they stay on their last v1 release until the owner says otherwise | many (one subagent, last; two pull requests) | W9.11a; W8.2 (#549) merged (both edit `GatewayAuthMiddleware`) | L |
+| W9.11c | **the release check and the documents:** `CLAUDE.md`'s release step (the lease's fields instead of `leader.role`, the plant restore from SQL instead of `plantSnapshot.restore.how`), a Wolverine section in `docs/HANDOFF.md`, the `/ready` and status fields, the operator skill's reading of `waitingFor`; the W9.11 gate | `CLAUDE.md`, `docs/HANDOFF.md`, `plugin/skills/factory-operator/*`, `gateway/Endpoints/{Health,Status}*` | W9.11b | S |
+| W9.12 | **the train takes the app's uat and prod:** after the W5 gate (restated above) is recorded, one overrides change lets the train act for uat and prod and the `AutoPromoter` is removed; the `dependencies-delivered` rule then holds for those environments too | `config/deploy.overrides.json`, `gateway/AutoPromoter*`, `src/Fworker.Workflows/Delivery/*` | the W5 gate recorded; W9.11b | S |
+| W9.13 | **multi-repository after the cutover:** #452's catalog verb in C# with the App token, `catalog.enabled` for tdd, the per-owner App installation (W3.0, H6), App installations and webhooks per repository (owner actions), intake per repository; #455 and #456 are its gate | `src/Fworker.Integrations/Catalog/*`, `src/Fworker.Integrations/GitHub/GitHubTokenProvider.cs`, `src/Fworker.Workflows/Intake/*`, `config/deploy.overrides.json` | the cutover gate; W9.11b | L |
 
-Parallel start: W9.1 to W9.8 after W9.0, three at a time; W9.9 when they are merged; W9.11 after the cutover gate, beside W8.
+Order: W9.10a, W9.10c, W9.10d, W9.10o and W9.10l (when #546 is in) can start now, three at a time; W9.10b after W9.10a; W9.10e after
+W9.10d; then W9.10f, W9.10g and W9.10h; W9.10i and W9.10j after W9.10h; W9.10k after W9.10j; W9.10m after W9.10i, W9.10n after W9.10m;
+W9.10p when #545 is in. (An After cell that names a pull request means that pull request merged: #542 is W9.3's issue #355, #543
+W9.6's #358, #544 W9.1's #353, #545 W9.4's #356, #546 W9.8's #360, #549 W8.2's #350.) W9.9a to W9.9c in that order once every W9.10 row is merged. After the cutover gate: W9.11a to W9.11c beside W8, then
+W9.12 when the W5 gate is recorded, and W9.13.
+
+**The cutover's settings checklist** (W9.9c; every value is written in `config/deploy.overrides.json` and checked with
+`config/apply-overrides.ps1` before the merge):
+
+| Setting | Value at the cutover | Why |
+|---|---|---|
+| `engine.v2Environments` | `["tdd"]` | the switch |
+| `engine.shadowEnvironments` | without tdd | v2 acts there |
+| `intake.enabled` | `true` | v2's intake feeds the sagas; v1's intake skips the `v2Plans` (W9.10e) |
+| `intake.v2Plans` | `["docs", "feature"]` | hotfix and redeliver join with W8.1b |
+| `delivery.finalEnvironment` | `tdd` | decision 3 |
+| `delivery.autoPromote` | unchanged (uat, prod) | v1's `AutoPromoter` keeps them (W9.10p) |
+| `mergeStrategy` | `direct` | the train strategy only when the owner names it |
+| `scheduler.runtime` | `octopus` | matches where the plant starts sessions (W9.10j) |
+| `scheduler.featureSlots` | `true` | the ledger counts each session once from W9.10j |
+| `schedule.fileOverlap.enabled` | `false` | as v1; turned on only by an owner decision |
+| `gatewayMerge` | `true` | one merge writer for owned items (W9.10e) |
+| `catalog.enabled` | `false` | home repository only until W9.13 |
+| the board reconciler's interval | 1 to 2 minutes | default 4 |
+| `wolverine.scheduledJobSeconds` | at its floor (60) | the saga's timers fire within a minute |
+
+**The readiness checklist** (W9.9c; each line closed or re-scoped on its issue before the merge):
+- #477 (C# journal): the App token done (#498); `BaseUpdate` and `PlantTicker` go through the router (W9.9a); the empty key aligned;
+  the wiring test added;
+- #479 (Copilot reconciler): W9.10c;
+- #496 (train parity): the newest-only difference declared; the event-time question carried by the W5 gate; save and outbox in
+  W9.10o; hand-written handlers accepted (#491);
+- #500 (train on replay state): defects 1 to 7 fixed; the wake after a restart observed on tdd; the open-ended retry bounded in W9.10o;
+- #437 (Copilot and Cursor day budgets from history): done, or the Copilot and Cursor runtimes off for the measured batch;
+- #465 (session mailbox): not required for the cutover, since one Solo node serves every session (pushes stay node-local and are lost
+  on a restart, as the messaging rule says); kept open as post-cutover work;
+- the W9.10 rows merged; the W6 and W7 gates recorded; `FACTORY_V2_OFF` in the tdd fworker settings of cmdemo1-system; the W7.4
+  Tentacle tags and project variables set only after W9.10h maps `host-full` to a non-failure.
 
 **W9.0 as built (#352).** No flag moves QC-gated items to v2 (revision of 2026-10-26): the verbs of QC join v2 with W9.1 and the cutover. The schema is DbUp's, so the tables are two new idempotent scripts
 (`fworker-database.md`) and the model that maps them: `012_AddQcEnvironments.sql` (`factory.QcEnvironments`: one row per repository and pull request, the key `owner/repo!N`; the state as a JSON document with a
@@ -544,9 +746,10 @@ each as the rule script answers it for the same input: the same fields and exit 
 - **Left to the script, through `IItemV1` (the runner), before anything is written and after the item's lock is let go:** the `accept` of a QC environment (W9.1), the `complete` of Development with the red-head ruling and the
   migration check of the CI rule (W9.5), and the pull request of a `copilot/*` branch or an owner task (`open-pr`, `item-pr`; W9.4). A gateway without a v1 answers `v1-unavailable` (30) for them.
 - **Declared difference:** the inline merge of a PASS in `validation-verdict` (`Verb_merge -Gateway`) is not made in the call. The answer says `next: merge` as before; the merge is the sweep's and the saga's right after (a verdict
-  asks for a sweep), and `merge` called by the session still answers `already-merged`. W9.3 (the merge train verbs) closes it. The Tier 1 suite `auto` runs with `gatewayMerge` off, so none of its scenarios sees it.
+  asks for a sweep), and `merge` called by the session still answers `already-merged`. W9.3 (the merge train verbs) closes it, and
+  W9.10e makes sure the sweep makes no second merge of an owned item. The Tier 1 suite `auto` runs with `gatewayMerge` off, so none of its scenarios sees it.
 - **Not yet routed:** the gateway's own calls of these verbs (`PlantRuleHooks` renew and take-back, the park of the runtime adapters, the unpark and resettle endpoints, `ItemPrLookup`) go through `Runner` and stay the script's
-  until W9.9 moves them to the router.
+  until W9.9 moves them to the router (2026-10-30: listed by W9.10l, routed by W9.9a).
 - **Proof:** `ItemVerbsTests` (55 cases of the scripts' branches on an in-memory GitHub), `ItemVerbsPortTests`, and `ItemVerbsFakeGitHubTests`/`ItemVerbsReplayTests`, which start the fake GitHub of Tier 1 and compare the writes it
   records with the golden files the scripts wrote (`auto`: gates refuse what they should, escalate earlier, the docs-only fast path's design reviews; `owner`: update-pr). The three `auto` scenarios are claims of `v2-claims.txt`.
 
@@ -582,22 +785,77 @@ that needs no GitHub, `ReadModelSettings` what they take from `config/instance.j
   local time with its offset). (5) A regular expression of the configuration or of the diff that takes more than ten seconds is an `internal-error` (exit 20) and not a wait without end.
 - *Not here.* No smoke evidence, no overflow, no merge queue (the W7 scope cut). `get-item` and the other item verbs (W9.2) read the same state through the same store.
 
-**Cutover gate** (the stabilisation gate's form, on v2): the full Tier 1 on v2 with golden writes; the kill-switch drill first (set
-`FACTORY_V2_OFF`, v1 resumes every item from the state comments and acts for one sweep, unset it, v2 adopts them again); then **one
-measured 8-item batch** on v2 with no regression against the 2026-10-25 baseline (same rule as stage C's gate); after each release
-`/ready` 200, v2's node leading and every open saga resumed; a **4-hour quiet window** with the batch inside, for the reasons given in
-section 3. After W9.11 merges: the release check and a **2-hour window**; rollback from then on is a revert of W9.11.
+**Cutover gate, as events** (restated 2026-10-30: it replaces the earlier "full Tier 1, the drill, one measured batch, v2's node
+leading, a 4-hour quiet window", and W9.11's 2-hour window; recorded on #268 by W9.9c). Before the switch merges:
+the precondition list of W9.9c's After column. After it, in this order, every event observed and recorded:
+1. **The release check of the switch:** `/_build` shows it, `/ready` 200, the lease holder's Solo node running, no second node in
+   `wolverine_nodes`, the adoption result in the v2 status block (every open item adopted or skipped with a reason).
+2. **The kill-switch drill**, through the cmdemo1-system setting (not an ad-hoc update): `FACTORY_V2_OFF` set while one item is
+   mid-flow on v2 and one is waiting for its merge; v1 resumes every item from the state comments and acts for one full sweep (no
+   duplicate or stale write, the parked items stay parked); v1 merges one item during the switch; the switch is unset; re-adoption
+   opens new generations, **no stale timer acts, and v2 leaves alone the item v1 merged** (W9.10n).
+3. **The overlap drill:** a release of the gateway while a session start and a merge are in flight; afterwards exactly one start and
+   one merge (the runbook runs, the merge write and the ledger's claims show no duplicate effect), and one acting node.
+4. **The measured 8-item batch** on v2 (docs and feature items, from the first worker start to deployed in the app's tdd): no stage
+   median more than 5 minutes slower than the 2026-10-25 baseline, pickup latency (Todo to the first start) compared with v1's, no item
+   parked for a gateway fault, no item v1 acted on.
+5. **Each timer kind of v2 fires at least once** inside the batch: a step lease, `MergeRetryDue`, `CapacityWake`, the delivery safety
+   wake, and each recurring job (status shows its last run).
+6. **One release restart with sagas resumed** (any merge to master during the batch counts) and **one lease rollover with exactly one
+   acting node** (the old node stopped before the new one started: `wolverine_nodes` and the lease's epoch).
+7. **Observations through the batch:** dead letters 0; DTU p95 under 80% and the database size recorded (above it, S1 by default 5);
+   the uat and prod promotions of the batch's releases made by v1's `AutoPromoter`, and the train's shadow decisions for them recorded
+   for the W5 gate.
+8. **Owed evidence:** W4's board events (every board change of the batch has its event in v2's history).
+
+A failed event is fixed forward and the event observed again; the drills and the batch run again only if the fix touched what they
+measure. Rollback during the gate is `FACTORY_V2_OFF` or a revert of W9.9c.
+
+**W9.11 gate, as events** (recorded on #268 by W9.11c): the release check with the new fields; one lease rollover with exactly one
+acting node; a small batch (one docs item and one feature item) delivered to the app's tdd with no regression; dead letters 0.
+Rollback from W9.11b on is a revert of W9.11b, possible while the v1-format state comment is still written (through this gate).
 
 ### W8: R8, incidents, after the cutover (2 to 3 at once)
 
 | Task | Content | Owns | After | Size |
 |---|---|---|---|---|
-| W8.0 | integrator: the rollback policy (the default of section 2 until the owner answers); the incident tables | `config/*`, `src/Fworker.Persistence/*` (tables) | the cutover gate | S |
-| W8.1 | `IncidentSaga` per (deployable, environment), the hotfix plan, the train hold that lets the incident's own work through | `src/Fworker.Workflows/Incident/*`, `WorkItem/Plans/Hotfix*`, `Delivery/*` (hold) | W8.0 | L |
-| W8.2 | alert ingress: the Azure Monitor webhook route; alert rules and the factory's out-of-band alert (applied by the cmdemo1 session; security-focused review) | `gateway/Endpoints/Alerts*`, cmdemo1-system (rules) | W8.0 | M |
-| W8.3 | rollback through the DeliveryTrain with the migration precondition; `Undelivered` | `src/Fworker.Workflows/Delivery/Rollback*` | W8.1 | M |
+| W8.0 | integrator: the rollback policy (automatic in the app's tdd only; uat and prod escalate); the incident tables (`014_AddIncidents.sql`); `delivery.rollback.migrationPaths`; the gate's staging method | `config/*`, `src/Fworker.Persistence/*` (tables) | the cutover gate (built ahead in #547, v2 acts only) | S |
+| W8.1a | `IncidentSaga` per (deployable, environment), the train holds and the app's merge-train hold that let the incident's own work through, the app-health job | `src/Fworker.Workflows/Incident/*`, `Delivery/*` and `Merge/*` (holds) | W8.0; #542 and #545 merged | L |
+| W8.1b | hotfix and redeliver intake; `intake.v2Plans` gains them | `WorkItem/Plans/Hotfix*`, `src/Fworker.Workflows/Intake/*`, `config/deploy.overrides.json` | W8.1a | M |
+| W8.2 | alert ingress: the Azure Monitor webhook route (security-focused review) | `gateway/Endpoints/Alerts*`, `gateway/Http/GatewayAuthMiddleware.cs`, `docs/deploy/incident-alert-rules.md` | W8.0 | M |
+| W8.2b | the infrastructure: action group, alert rules, the factory's out-of-band alert, reader RBAC, the alert secret, Octopus `DeploymentCreate` on tdd, Tentacle tags (the cmdemo1 session and the owner) | cmdemo1-system, Octopus | W8.2 | M |
+| W8.3 | rollback through the DeliveryTrain with the migration precondition; `Undelivered` | `src/Fworker.Workflows/Delivery/Rollback*` | W8.1a | M |
 
-**Gate:** a staged incident in the app's tdd, end to end (about an hour).
+**W8, revised 2026-10-30** (the rows above; #547 to #549 are in flight):
+- **W8.0** (#348, in #547): the rollback policy's default is **automatic in the app's tdd only; in its uat and prod open the incident,
+  hold the trains and escalate** (default 7); the incident tables are `014_AddIncidents.sql` (expand-only); `delivery.rollback.migrationPaths`
+  names each deployable's migration paths (ui: `src/Database/`), and a compare GitHub answers incompletely (above 250 commits or 300
+  files) counts as "migration present"; the staging method of the gate: a tdd-only setting in a release snapshot that turns the app's
+  `/_healthcheck/detailed` Unhealthy, which the rollback to R-1 clears.
+- **W8.1a** (#349, in #547 plus a follow-up): `IncidentSaga`, the holds, **including a merge-train hold on the app's repository** that lets
+  only the incident's hotfix or revert through (a revert pull request is the default hotfix, so the bad commit does not come back with
+  the next release), and a leader-only recurring app-health job with the confirmation rule, suppressed during deployments. Starts only
+  after #542 and #545 merge (it touches `Merge/*` and `Delivery/*`).
+- **W8.1b** (#349, second pull request): hotfix and redeliver intake (the saga owns the item from its creation, a pinned rank, the WIP
+  bypass) and `intake.v2Plans` gaining hotfix and redeliver.
+- **No W8.4 analyst role** (default 8).
+- **W8.2** (#350, #549): owns `gateway/Endpoints/Alerts*`, `gateway/Http/GatewayAuthMiddleware.cs` (the azure-monitor source) and
+  `docs/deploy/incident-alert-rules.md`; merges before W9.11b.
+- **W8.2b** (new, the cmdemo1 session and the owner, before the W8 gate): an action group with the secret webhook to tdd's
+  `/webhooks/azure-monitor`; alert rules on the ui tdd app; the factory's out-of-band `/ready` availability alert; reader RBAC for
+  triage; the alert secret in `system.json` and Key Vault; Octopus `DeploymentCreate` on tdd for cmdemo1-ui for the gateway's account
+  (default 6); the W7.4 Tentacle tags and project variables (after W9.10h); DTU 80% and size 70% alerts on the tdd database. uat and
+  prod alert rules are deferred.
+- **W8.3** (#351, #548): merge #547 first; #548 rebases onto #547's message names (one contract between the `IncidentSaga` and the
+  train), with a wiring test that the saga's rollback request reaches the executor and its answer returns; the migration precondition
+  reads `delivery.rollback.migrationPaths`.
+- **Tests:** the fake Octopus redeploy and alert endpoints (`tests/FakeGitHub/Program.cs`), an incident suite at the end of
+  `$SuiteDefs`, its `tests.yml` job and its v2 claim belong to the W8 rows (the main session integrates the hot files).
+
+**W8 gate, as events** (recorded on #267): an alert arrives; the incident opens with its issue; the trains and the app's merge train
+are held; the rollback deployment to R-1 runs in the app's tdd; N healthy reads follow; `Undelivered` is published for the release's
+items; the incident resolves; the holds are released. **Negative case:** a release with a change under `src/Database/` escalates and
+is not rolled back. The uat and prod case (open, hold, escalate, no deployment) is a scenario of the incident suite, not staged live.
 
 ## 5. Critical path and clock time
 
@@ -652,6 +910,25 @@ day, about 5 days.
   cmdemo1-aisf off board 679), which are unbounded waits; the cross-repo pieces of W7.10, which are off the critical path; and any
   time the owner's decisions take.
 
+**What remains, from the revision of 2026-10-30** (same units and rules; the in-flight #542 to #549 are assumed to merge in about an
+hour of serial merges):
+
+```
+W9.10a, c, d, l, o (now) -> W9.10b; W9.10e -> W9.10f, g, h -> W9.10i, j -> W9.10k, m -> W9.10n; W9.10p
+  -> W9.9a -> W9.9b -> W9.9c -> cutover gate (drills, measured batch with the timer events inside)
+  -> W9.11a -> W9.11b -> W9.11c (W9.11 gate: a small batch), beside W8.1b, W8.2b and the W8 gate
+  -> W9.12 when the W5 gate is recorded (app releases); W9.13 when the owner's App installations exist
+```
+
+| Stage | Tasks (units) | Longest chain (units) | Coding | Gate events | Clock time |
+|---|---|---|---|---|---|
+| W9.10 and W9.9 | 19 (26) | W9.10d, e, h, j, k, then W9.9a, b, c (12) | 10 h | drills 1 h, measured batch 3.5 h | 14.5 h |
+| After the cutover | W9.11a to c 3 (4); W8.1b and follow-ups 2 (2) | W9.11a, b, c (4) | 3.3 h | small batch 1.5 h, staged incident 1 h | 5.5 h |
+| **Remaining** | **24 (32)** | | **about 13 h** | **about 7 h** | **about 20 h** |
+
+About 20 hours, in a range of 18 to 28; W9.12 waits on three live app releases after the replay (the W5 gate) and W9.13 on the
+owner's App installations, so neither is in the figure.
+
 ## 6. What the main session does in each wave
 
 1. Brief and start the wave's integrator, then the parallel tasks as their "after" items merge (two to three at once, lane D
@@ -662,6 +939,9 @@ day, about 5 days.
    handoff.
 5. If a gate fails: before the cutover v1 is acting, so fix forward (shadow mode can be stopped with `FACTORY_V2_OFF`); from the
    cutover, revert the switch's pull request or set `FACTORY_V2_OFF` through the cmdemo1 session, then fix forward.
+6. (2026-10-30) Run `gh workflow run Tests --ref master` after every merge batch and record the result on the wave's epic; merge the
+   in-flight pull requests one at a time, each rebased on the one before; land a hot-file prerequisite (such as `V2VerbRouter.Below`)
+   before the pull requests that need it.
 
 ## Appendix A. Board tasks whose scope changed (2026-10-26)
 
@@ -732,3 +1012,39 @@ owner approval.
 | #361 | W9.9 | reworded: the tdd cutover (adoption of open items and pending Sign-offs, the `deploy.overrides.json` switch, the kill-switch drill); absorbs W5.3 (#326) |
 | #362 | W9.10 | merged into W2.2 (#311) |
 | #363 | W9.11 | reworded: remove v1 after the cutover gate (sweep engine, server rule scripts, lease, snapshot, `RunnerPool`, shadow mode); no drain of `engine:v1` items |
+
+## Appendix B. Issues of the revision of 2026-10-30 (audit)
+
+**New issues** (each a sub-issue of its epic; listed in dependency order):
+
+| Issue | Row | Depends on |
+|---|---|---|
+| #550 | W9.10a: Solo node only on the acting holder | #352 |
+| #551 | W9.10c: an atomic pending claim in the command ledger | #352 |
+| #552 | W9.10d: v2 Tier 1 that starts sagas | #352 |
+| #553 | W9.10o: v2 health and fault handling | #352 |
+| #554 | W9.10l: the gateway's own rule-script calls and v1 fallbacks | #360 |
+| #555 | W9.10p: the app's uat and prod stay with v1's `AutoPromoter` | #356 |
+| #556 | W9.10b: the lease as a SQL application lock | #550 |
+| #557 | W9.10e: v1 leaves saga items alone | #552 |
+| #558 | W9.10f: the sweep's item steps on v2 | #557, #355, #356 |
+| #559 | W9.10g: the sweep's plant-wide steps on v2 | #557, #353, #360 |
+| #560 | W9.10h: producers for the saga's inputs | #557 |
+| #561 | W9.10i: the state comment projection wired | #560 |
+| #562 | W9.10j: session offers and starts from the saga and the scheduler | #560 |
+| #563 | W9.10k: plant state that survives a restart | #562, #358 |
+| #564 | W9.10m: adoption as reconciliation, the mapping | #561 |
+| #565 | W9.10n: re-adoption fencing after `FACTORY_V2_OFF` | #564 |
+| #566 | W9.12: the train takes the app's uat and prod | #264 (its gate), #363 |
+| #567 | W9.13: multi-repository after the cutover | #361, #363, #452 |
+| #568 | W8.2b: incident infrastructure (W8 epic #267) | #350 |
+
+**Rewritten:** #361 (W9.9: the tdd cutover, size L, three pull requests, depends on W9.1 to W9.8, every W9.10 issue, the W6 and W7
+gates and #500) and #363 (W9.11: three pull requests, keeps the lease and the uat and prod `AutoPromoter`, depends on #361 and #350).
+
+**Closed:** #464 (Balanced mode for W2.2c: superseded by the lease decision) and #496 (W5.1 follow-ups: newest-only accepted as
+declared; the event-time question carried by the W5 gate; save and outbox in #553; hand-written handlers accepted in #491).
+
+**Commented** with what changed: #261 (W2: Solo on the lease holder, not Balanced), #268 (W9: the new rows), #348 to #351 (W8: the
+tdd-only rollback default, the split of W8.1, W8.2b, the merge order of #547 to #549), #465 (the session mailbox is not a cutover
+prerequisite), #500 (the wake after a restart is a W9.9 precondition and a W5 gate event; the retry bounded in #553).
