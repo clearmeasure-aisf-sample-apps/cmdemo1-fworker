@@ -5,7 +5,7 @@ namespace Fworker.Workflows.Delivery;
 // W8.3: the rules of a rollback that need no read: where it may run, which release is the last good one, what counts as a migration, and how a request changes a train's state.
 
 /// <summary>The verdict of the migration precondition: <see cref="Safe"/> only when the range provably adds no database migration.</summary>
-public sealed record MigrationVerdict(bool Safe, string Reason)
+public sealed record MigrationVerdict(bool Safe, string Reason, bool Added = false)
 {
     public static readonly MigrationVerdict Clear = new(true, "");
 }
@@ -44,7 +44,7 @@ public static class RollbackRules
         var hits = files.Paths.Where(f => IsMigration(f, fragments)).ToList();
         if (hits.Count == 0) return MigrationVerdict.Clear;
         var shown = string.Join(", ", hits.Take(3)) + (hits.Count > 3 ? $" and {hits.Count - 3} more" : "");
-        return new(false, $"{from} adds {(hits.Count == 1 ? "a database migration" : hits.Count + " database migrations")} since {target} ({shown}): migrations are forward-only, so {target} is not a backward compatible rollback; fix forward or a person decides");
+        return new(false, $"{from} adds {(hits.Count == 1 ? "a database migration" : hits.Count + " database migrations")} since {target} ({shown}): migrations are forward-only, so {target} is not a backward compatible rollback; fix forward or a person decides", Added: true);
     }
 
     /// <summary>
@@ -69,25 +69,25 @@ public static class RollbackRules
     {
         switch (input)
         {
-            case TrainRollbackRequested r:
-                if (s.RollbackSeen.Contains(r.Incident)) break;
-                s.RollbackSeen.Add(r.Incident);
+            case TrainRollback r:
+                if (s.RollbackSeen.Contains(r.IncidentId)) break;
+                s.RollbackSeen.Add(r.IncidentId);
                 if (s.RollbackSeen.Count > KeptRequests) s.RollbackSeen.RemoveRange(0, s.RollbackSeen.Count - KeptRequests);
-                var request = new RollbackRequest { Incident = r.Incident, ToRelease = string.IsNullOrWhiteSpace(r.ToRelease) ? null : r.ToRelease.Trim(), Reason = r.Reason, At = now };
+                var request = new RollbackRequest { Incident = r.IncidentId, Generation = r.Generation, ToRelease = string.IsNullOrWhiteSpace(r.ToRelease) ? null : r.ToRelease.Trim(), Reason = r.Reason, At = now };
                 if (s.ActiveRollback is null || ((s.ActiveRollback.Terminal && s.ActiveRollback.Published) && s.RollbackQueue.Count == 0)) s.ActiveRollback = Start(request);
                 else s.RollbackQueue.Add(request);   // (it starts when the one before has ended)
                 break;
             case TrainRollbackFailed f:
-                if (s.ActiveRollback is { Phase: RollbackPhase.Deploying or RollbackPhase.Requested } a && a.Incident == f.Incident)
+                if (s.ActiveRollback is { Phase: RollbackPhase.Deploying or RollbackPhase.Requested } a && a.Incident == f.IncidentId)
                 {
-                    a.Phase = RollbackPhase.Escalated;
+                    a.Phase = RollbackPhase.Escalated; a.Code = RollbackCodes.Failed;
                     a.Reasons = [$"the rollback to {(a.To.Length > 0 ? a.To : "the last good release")} was refused: {f.Error}"];
                 }
                 break;
         }
     }
 
-    public static RollbackState Start(RollbackRequest r) => new() { Incident = r.Incident, RequestedTo = r.ToRelease, Reason = r.Reason, RequestedAt = r.At };
+    public static RollbackState Start(RollbackRequest r) => new() { Incident = r.Incident, Generation = r.Generation, RequestedTo = r.ToRelease, Reason = r.Reason, RequestedAt = r.At };
 
     /// <summary>The command's idempotency key: one rollback of one incident to one release in one environment is one deployment.</summary>
     public static string KeyOf(string deployable, string incident, string version, string environment) => $"RollbackRelease|{deployable}|{incident}|{version}|{environment}";

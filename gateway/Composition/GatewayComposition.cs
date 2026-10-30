@@ -79,4 +79,8 @@ sealed class GatewayComposition(GatewayOptions gateway, InstanceConfig instance,
 
     // AddGatewayBackground
     public int SweepMinSeconds { get; set; }
+
+    // W9.8, only where the engine acts: the journal ledger of the host (JournalCommandWiring, the verb journal writes through the same one: one lock per item) and the board reconciler of the recurring job (BoardReconcilerJob)
+    public Fworker.Integrations.Commands.JournalLedger? JournalLedger { get; set; }
+    public Fworker.Workflows.Reconcilers.BoardReconciler? BoardReconciler { get; set; }
 }

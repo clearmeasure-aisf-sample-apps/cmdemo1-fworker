@@ -8,6 +8,7 @@ namespace Fworker.Workflows.Delivery;
 public sealed class RollbackRequest
 {
     public string Incident { get; set; } = "";
+    public int Generation { get; set; }
     public string? ToRelease { get; set; }
     public string Reason { get; set; } = "";
     public DateTimeOffset At { get; set; }
@@ -29,6 +30,8 @@ public sealed class RollbackState
 {
     /// <summary>The incident: the request's identity.</summary>
     public string Incident { get; set; } = "";
+    /// <summary>The incident's generation, which the answers carry back.</summary>
+    public int Generation { get; set; }
     public string? RequestedTo { get; set; }
     public string Reason { get; set; } = "";
     public string Phase { get; set; } = RollbackPhase.Requested;
@@ -44,7 +47,9 @@ public sealed class RollbackState
     public List<string> RolledBack { get; set; } = [];
     /// <summary>Why the rollback was escalated (or the notes of its plan).</summary>
     public List<string> Reasons { get; set; } = [];
-    /// <summary>The outcome went out (RollbackFinished); the next queued request may start.</summary>
+    /// <summary>Why it was escalated, as the code of the answer (<see cref="RollbackCodes"/>).</summary>
+    public string Code { get; set; } = "";
+    /// <summary>The outcome went out (the final RollbackAnswered: done, refused or failed); the next queued request may start.</summary>
     public bool Published { get; set; }
 
     public bool Terminal => Phase is RollbackPhase.Done or RollbackPhase.Escalated;

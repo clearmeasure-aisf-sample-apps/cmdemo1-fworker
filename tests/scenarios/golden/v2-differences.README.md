@@ -1,8 +1,7 @@
 # Declared differences of v2 (`v2-differences.txt`)
 
 The golden writes (`README.md` of this directory) are the oracle for both engines: v2 must write what v1 writes. Where v2 writes differently **on
-purpose**, the difference is a block in `v2-differences.txt`, reviewed in a pull request like a golden file. The file is empty today: v2 has no
-declared difference yet. The comparison that reads it is part of the v2 Tier 1 job (`tests.yml`, `run.ps1 -Engine v2`; issue #468);
+purpose**, the difference is a block in `v2-differences.txt`, reviewed in a pull request like a golden file. The file holds the declared differences of the claimed scenarios (today: the transcript of the octopus scenarios, a database row on v2). The comparison that reads it is part of the v2 Tier 1 job (`tests.yml`, `run.ps1 -Engine v2`; issue #468);
 `tests/scenarios/v2-differences.ps1` has its functions and `lib.ps1` (`Initialize-V2Golden`, `Get-GoldenDir`) uses them.
 
 ## Format

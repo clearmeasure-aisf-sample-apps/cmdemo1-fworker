@@ -19,10 +19,10 @@ public static class DeliveryTrainHandlers
     public static Task<OutgoingMessages> Handle(TrainDeploymentSeen m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainSignOffAsked m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainHold m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(TrainRollback m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainReplay m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainDependencyDelivered m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainWake m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
-    public static Task<OutgoingMessages> Handle(TrainRollbackRequested m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(TrainRollbackFailed m, DeliveryTrainService svc, CancellationToken ct) => Run(m, svc, ct);
 
     public static async Task<OutgoingMessages> Run(TrainInput input, DeliveryTrainService svc, CancellationToken ct)
@@ -64,10 +64,6 @@ public sealed class DeliveryTrainRouter(IDeliveryPolicies policies, Func<DateTim
         => policies.All().Where(p => p.DependenciesDelivered && p.Acts && string.Equals(p.Environment, e.Environment, StringComparison.OrdinalIgnoreCase))
             .Select(p => (TrainInput)new TrainDependencyDelivered(TrainKey.Of(p.Deployable, p.Environment), e.Item.ToString(), p.Environment)).ToList();
 
-    /// <summary>W8.3: the incident's request goes to the one train it names; a train that cannot roll back (any but tdd's) escalates it.</summary>
-    public IReadOnlyList<TrainInput> Route(Rollback m)
-        => [new TrainRollbackRequested(TrainKey.Of(m.Deployable, m.Environment), m.Incident, m.ToRelease, m.Reason)];
-
     public IReadOnlyList<TrainInput> Route(OctopusReleaseCreated e)
         => policies.ForOctopusEvents().Select(p => (TrainInput)new TrainReleaseSeen(TrainKey.Of(p.Deployable, p.Environment), e.ReleaseId, e.Version, e.Commit, TimeOf(e.At))).ToList();
 
@@ -102,7 +98,6 @@ public static class DeliveryTrainRouting
         return All(inputs);
     }
 
-    public static OutgoingMessages Handle(Rollback m, DeliveryTrainRouter r) => All(r.Route(m));
     public static OutgoingMessages Handle(OctopusReleaseCreated m, DeliveryTrainRouter r) => All(r.Route(m));
     public static OutgoingMessages Handle(ReleaseCommitResolved m, DeliveryTrainRouter r) => All(r.Route(m));
     public static OutgoingMessages Handle(OctopusDeploymentChanged m, DeliveryTrainRouter r) => All(r.Route(m));

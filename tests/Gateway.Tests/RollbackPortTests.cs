@@ -81,9 +81,9 @@ public sealed class RollbackPortTests
         Assert.Equal(FailureKind.Permanent, Assert.IsType<IntegrationFailed>(messages[1]).Kind);
         var input = Assert.IsType<TrainRollbackFailed>(messages[2]);
         Assert.Equal("orders/tdd", input.Key);
-        Assert.Equal("inc-1", input.Incident);
+        Assert.Equal("inc-1", input.IncidentId);
         Assert.Contains("missing permission DeploymentCreate", input.Error);
-        Assert.DoesNotContain(messages, m => m is TrainRollbackRequested);
+        Assert.DoesNotContain(messages, m => m is TrainRollback);
     }
 
     [Fact]
@@ -232,7 +232,7 @@ public sealed class RollbackPortTests
         using var host = await Host(Service(octo), null, failures);
         await host.Services.GetRequiredService<IMessageBus>().PublishAsync(Command);
         Assert.True(await Until(() => { lock (failures) return failures.Count > 0; }));
-        Assert.Equal(("orders/tdd", "inc-1"), (failures[0].Key, failures[0].Incident));
+        Assert.Equal(("orders/tdd", "inc-1"), (failures[0].Key, failures[0].IncidentId));
         Assert.Equal(1, octo.Calls.Count(c => c.Method == HttpMethod.Post));
     }
 

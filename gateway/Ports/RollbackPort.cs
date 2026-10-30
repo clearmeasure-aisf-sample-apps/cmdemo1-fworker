@@ -8,7 +8,7 @@ using Fworker.Workflows.Delivery;
 using Wolverine;
 using Wolverine.ErrorHandling;
 
-// W8.3: the rollback of the delivery train in the gateway, only where the engine acts (Engine.V2Acts; v1, the shadow run and FACTORY_V2_OFF register nothing of it). The train (Fworker.Workflows.Delivery,
+// W8.3: the rollback of the delivery train in the gateway, only where the engine acts (Engine.V2Acts; v1, the shadow run and FACTORY_V2_OFF register nothing of it), attached by DeliveryActingWiring (W9.4) with the train. The train (Fworker.Workflows.Delivery,
 // RollbackTrain) decides: it checks the migration precondition and publishes RollbackRelease, the one deployment it creates itself (owner decision of 2026-10-29: the incident rollback of the app in tdd,
 // automatic, tdd only). This file is the host side of it: the executor of RollbackRelease on the W3.0 command base (RollbackExecutor, Octopus), its durable queue and retry rule, and the read of the files
 // two commits differ by (the migration precondition), a GET of GitHub's compare. Where no Octopus key, URL or space is configured the command has no executor: the train then escalates after the request expiry.
@@ -57,14 +57,6 @@ public static class RollbackLogHandlers
 {
     public static void Handle(RollbackCommandFinished m) =>
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "rollback-command", ["key"] = m.IdempotencyKey, ["incident"] = m.Incident, ["ok"] = m.Ok, ["execution"] = m.Ok ? m.Execution : null, ["error"] = m.Ok ? null : m.Error }.ToJsonString());
-
-    /// <summary>The end of a rollback, for the log until the incident saga (W8.1) reads it.</summary>
-    public static void Handle(RollbackFinished m) =>
-        Console.WriteLine(new JsonObject
-        {
-            ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "rollback", ["deployable"] = m.Deployable, ["environment"] = m.Environment, ["incident"] = m.Incident, ["outcome"] = m.Outcome,
-            ["from"] = m.From, ["to"] = m.To, ["items"] = new JsonArray(m.Items.Select(i => (JsonNode?)i).ToArray()), ["reasons"] = new JsonArray(m.Reasons.Select(r => (JsonNode?)r).ToArray()),
-        }.ToJsonString());
 }
 
 /// <summary>The files two commits differ by, from GitHub's compare. READ ONLY: a GET. A compare of fixed commits cannot change, so it is asked once per rollback.</summary>
@@ -90,7 +82,7 @@ sealed class HttpMigrationProbe(HttpClient github) : IMigrationProbe
 static class RollbackWiring
 {
     /// <summary>
-    /// The executor of RollbackRelease and the read of the migration precondition, for a host whose engine acts. The command has no executor without an Octopus URL, space and key (the train escalates);
+    /// The executor of RollbackRelease and the read of the migration precondition, for a host whose engine acts; DeliveryActingWiring calls it, so it exists exactly where the delivery train does. The command has no executor without an Octopus URL, space and key (the train escalates);
     /// without GitHub access (no GH_TOKEN or author App) the train cannot show that no migration was added and escalates every rollback.
     /// </summary>
     public static void Attach(WolverineHostService host, GatewayComposition c, Func<string, string?> env, Func<bool> mayAct, IIdempotencyLedger ledger)
@@ -127,7 +119,7 @@ static class RollbackWiring
     internal static void Register(IServiceCollection services, WolverineOptions w, RollbackExecutorService? service, IMigrationProbe? probe, bool durable = true)
     {
         w.Discovery.IncludeType(typeof(RollbackLogHandlers));
-        if (probe is not null) services.AddSingleton(probe);   // (the delivery train takes it as an optional part)
+        if (probe is not null) services.AddSingleton(probe);   // (the delivery train takes it as an optional part, DeliveryActingWiring builds the train)
         if (service is null) return;
         services.AddSingleton(service);
         w.Discovery.IncludeType(typeof(RollbackHandlers));

@@ -159,6 +159,26 @@ public sealed class JournalLedgerTests
         Assert.Equal(8, r.Plant(n).Count());
     }
 
+    // ---- W9.6: Add-Journal with the caller's holder (the keeper and manager verbs) ---------------------------------------------------------
+
+    [Fact]
+    public async Task AddTo_PostsTheLineAndUpdatesTheLedgerInTheCallersHolder_AndSavesNothing()
+    {
+        var r = new Rig();
+        var holder = new ItemState { State = new JsonObject { ["schema"] = 1, ["item"] = 7 } };
+        var fields = new Dictionary<string, object?> { ["verb"] = "set-priority", ["policy"] = "backlog-low", ["by"] = "backlog-keeper", ["reason"] = "first", ["detail"] = "set its priority to **top** (was normal)" };
+        Assert.True(await r.Ledger.AddTo(7, holder, "keeper-action", fields, "set-priority|1"));
+        Assert.Equal("\U0001F3ED Plant manager: the backlog keeper (**backlog-keeper**) set its priority to **top** (was normal), under policy `backlog-low`: first.\n\n<!-- plant event=keeper-action key=set-priority|1 -->",
+            r.Plant(7).Single().Body);
+        var j = (JsonObject)holder.State["journal"]!;
+        Assert.Equal(["keeper-action|set-priority|1"], JournalJson.Strings(j, "keys"));
+        Assert.Equal(1, JournalJson.Int(j, "count"));
+        Assert.Empty(r.Api.Of(7).Where(c => c.Body.StartsWith($"<!-- factory-state:{Name} v1 -->")));   // the caller saves the holder with the state it changed
+        Assert.False(await r.Ledger.AddTo(7, holder, "keeper-action", fields, "set-priority|1"));   // a repeat of the key is not written again
+        Assert.Single(r.Plant(7));
+        await Assert.ThrowsAsync<JournalRefusedException>(() => r.Ledger.AddTo(7, holder, "no-such-event", fields, "k"));
+    }
+
     static int Cnt(JsonObject kinds, string k) => JournalJson.Int((JsonObject)kinds[k]!, "count");
 
     // ---- the text of the posted comment and of a fold, pinned to the script -----------------------------------------------------------------

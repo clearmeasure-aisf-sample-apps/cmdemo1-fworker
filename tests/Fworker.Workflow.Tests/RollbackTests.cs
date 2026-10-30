@@ -50,7 +50,10 @@ public class RollbackTests
     }
 
     static Task<TrainResult> Ask(TrainFixture f, string incident = Incident, string? to = null, string reason = "error rate above baseline")
-        => f.Send(new TrainRollbackRequested(f.Key, incident, to, reason));
+        => f.Send(new TrainRollback(f.Key, incident, 1, to, reason));
+
+    /// <summary>The answers that end a request (done, refused, failed); "started" is the one that tells the incident the deployment is asked for.</summary>
+    static IEnumerable<RollbackAnswered> Finished(TrainFixture f) => f.Of<RollbackAnswered>().Where(a => a.Outcome != "started");
 
     static Task Rollback(TrainFixture f, string phase, string version = "1.0.1", string id = "D-rollback")
         => f.Send(new TrainDeploymentSeen(f.Key, id, "T-" + id, "Releases-" + version, version, "Tdd", phase, null, f.Now));
@@ -67,17 +70,20 @@ public class RollbackTests
         Assert.Equal(1, probe.Calls);   // (one read of the range from the target's commit up to what runs now)
         Assert.Equal("rollback", f.LastDecision!.Action);
         Assert.Equal(["acme/orders#7"], f.LastDecision.Items);
-        Assert.Empty(f.Of<RollbackFinished>());
+        Assert.Empty(Finished(f));
         Assert.Empty(f.Of<Undelivered>());
+        // the incident is told at once that the deployment is asked for (W8.1: "started"), and only then, when it ended, that it is done
+        var started = Assert.Single(f.Of<RollbackAnswered>());
+        Assert.Equal((f.Key, Incident, 1, "started", "", "1.0.1"), (started.Key, started.IncidentId, started.Generation, started.Outcome, started.Code, started.ToRelease));
 
         f.Now += TimeSpan.FromMinutes(1); await Rollback(f, "Started");
         Assert.True(f.State.DeploymentOf("1.0.1", "tdd")!.Rollback);
-        Assert.Empty(f.Of<RollbackFinished>());
+        Assert.Empty(Finished(f));
         f.Now += TimeSpan.FromMinutes(2); await Rollback(f, "Succeeded");
 
-        var done = Assert.Single(f.Of<RollbackFinished>());
-        Assert.Equal((RollbackOutcome.RolledBack, "1.0.2", "1.0.1", Incident), (done.Outcome, done.From, done.To, done.Incident));
-        Assert.Equal(["acme/orders#7"], done.Items);
+        var done = Assert.Single(Finished(f));
+        Assert.Equal(("done", "", "1.0.1", Incident, 1), (done.Outcome, done.Code, done.ToRelease, done.IncidentId, done.Generation));
+        Assert.Contains("1 item(s) are undelivered", done.Reason);
         Assert.Equal(f.Now, done.At);
         Assert.Equal(new Undelivered(new ItemId(Repo, 7), "tdd"), Assert.Single(f.Of<Undelivered>()));
         Assert.Empty(f.Of<DeliveredTo>());   // the rollback delivers nothing
@@ -88,7 +94,7 @@ public class RollbackTests
         Assert.Equal(RollbackPhase.Done, f.State.ActiveRollback!.Phase);
         // the same facts again (at-least-once) and a look later change nothing
         await Rollback(f, "Succeeded"); await f.Wake();
-        Assert.Single(f.Of<RollbackFinished>()); Assert.Single(f.Of<Undelivered>()); Assert.Single(f.Of<RollbackRelease>());
+        Assert.Single(Finished(f)); Assert.Single(f.Of<Undelivered>()); Assert.Single(f.Of<RollbackRelease>());
     }
 
     [Fact]
@@ -127,9 +133,10 @@ public class RollbackTests
         var (f, _) = await Delivered();
         await Ask(f, to: "9.9.9");
         Assert.Empty(f.Of<RollbackRelease>());
-        var fin = Assert.Single(f.Of<RollbackFinished>());
-        Assert.Equal(RollbackOutcome.Escalated, fin.Outcome);
-        Assert.Contains("9.9.9 is not known", fin.Reasons[0]);
+        var fin = Assert.Single(Finished(f));
+        Assert.True(fin.Outcome is "refused" or "failed", fin.Outcome);
+        Assert.Equal(("refused", RollbackCodes.Unavailable), (fin.Outcome, fin.Code));
+        Assert.Contains("9.9.9 is not known", fin.Reason);
 
         await Ask(f, "orders/tdd#2", to: "1.0.1");
         Assert.Equal("1.0.1", Assert.Single(f.Of<RollbackRelease>()).Version);
@@ -140,10 +147,10 @@ public class RollbackTests
     {
         var (f, _) = await Delivered();
         await Ask(f, to: "1.0.2");
-        Assert.Contains("already runs 1.0.2", Assert.Single(f.Of<RollbackFinished>()).Reasons[0]);
+        Assert.Contains("already runs 1.0.2", Assert.Single(Finished(f)).Reason);
         await f.Release("1.0.3", 'b');   // seen, never deployed to tdd
         await Ask(f, "orders/tdd#2", to: "1.0.3");
-        Assert.Contains("never ran successfully", f.Of<RollbackFinished>().Last().Reasons[0]);
+        Assert.Contains("never ran successfully", Finished(f).Last().Reason);
         Assert.Empty(f.Of<RollbackRelease>());
     }
 
@@ -153,7 +160,7 @@ public class RollbackTests
         var f = new TrainFixture("tdd", migrations: new FakeMigrationProbe());
         await f.Baseline();
         await Ask(f);
-        Assert.Contains("nothing to go back to", Assert.Single(f.Of<RollbackFinished>()).Reasons[0]);
+        Assert.Contains("nothing to go back to", Assert.Single(Finished(f)).Reason);
         Assert.Empty(f.Of<RollbackRelease>());
     }
 
@@ -168,8 +175,8 @@ public class RollbackTests
         var cmd = Assert.Single(f.Of<RollbackRelease>());
         Assert.Equal("1.0.2", cmd.Version);   // 1.0.2 is what ran before the failed deployment of 1.0.3
         f.Now += TimeSpan.FromMinutes(1); await Rollback(f, "Started", "1.0.2"); f.Now += TimeSpan.FromMinutes(2); await Rollback(f, "Succeeded", "1.0.2");
-        var done = Assert.Single(f.Of<RollbackFinished>());
-        Assert.Equal(RollbackOutcome.RolledBack, done.Outcome);
+        var done = Assert.Single(Finished(f));
+        Assert.Equal("done", done.Outcome);
         Assert.Empty(f.Of<Undelivered>());   // the failed deployment delivered nothing
     }
 
@@ -182,11 +189,12 @@ public class RollbackTests
         probe.Answers[(Sha('d'), Sha('a'))] = new ChangedFiles("ahead", ["src/App/Order.cs", "src/Database/scripts/Update/0042_AddOrderColumn.sql"], true);
         await Ask(f);
         Assert.Empty(f.Of<RollbackRelease>());
-        var fin = Assert.Single(f.Of<RollbackFinished>());
-        Assert.Equal(RollbackOutcome.Escalated, fin.Outcome);
-        Assert.Contains("adds a database migration since 1.0.1", fin.Reasons[0]);
-        Assert.Contains("0042_AddOrderColumn.sql", fin.Reasons[0]);
-        Assert.Contains("forward-only", fin.Reasons[0]);
+        var fin = Assert.Single(Finished(f));
+        Assert.True(fin.Outcome is "refused" or "failed", fin.Outcome);
+        Assert.Equal(("refused", RollbackCodes.Migration), (fin.Outcome, fin.Code));   // (the incident fixes forward on it)
+        Assert.Contains("adds a database migration since 1.0.1", fin.Reason);
+        Assert.Contains("0042_AddOrderColumn.sql", fin.Reason);
+        Assert.Contains("forward-only", fin.Reason);
         Assert.Equal("rollback-escalated", f.LastDecision!.Action);
         Assert.Empty(f.Of<Undelivered>());
         Assert.Equal(RollbackPhase.Escalated, f.State.ActiveRollback!.Phase);
@@ -199,7 +207,7 @@ public class RollbackTests
         var (f, probe) = await Delivered();
         probe.Fail = new HttpRequestException("GitHub does not answer");
         var r = await Ask(f);
-        Assert.Empty(f.Of<RollbackRelease>()); Assert.Empty(f.Of<RollbackFinished>());
+        Assert.Empty(f.Of<RollbackRelease>()); Assert.Empty(Finished(f));
         Assert.Equal(f.Now + DeliveryTrainService.TransientRetry, r.WakeAt);   // the request is kept; the look is repeated
         probe.Fail = null;
         await f.After(DeliveryTrainService.TransientRetry);
@@ -215,7 +223,7 @@ public class RollbackTests
         probe.Answers[(Sha('d'), Sha('a'))] = new ChangedFiles(status, ["src/App/Order.cs"], true);
         await Ask(f);
         Assert.Empty(f.Of<RollbackRelease>());
-        Assert.Contains($"compare says {status}", Assert.Single(f.Of<RollbackFinished>()).Reasons[0]);
+        Assert.Contains($"compare says {status}", Assert.Single(Finished(f)).Reason);
     }
 
     [Fact]
@@ -224,15 +232,15 @@ public class RollbackTests
         var (f, probe) = await Delivered();
         probe.Answers[(Sha('d'), Sha('a'))] = new ChangedFiles("ahead", ["src/App/Order.cs"], false);
         await Ask(f);
-        Assert.Contains("cut the list of files", f.Of<RollbackFinished>().Last().Reasons[0]);
+        Assert.Contains("cut the list of files", Finished(f).Last().Reason);
         probe.Answers[(Sha('d'), Sha('a'))] = null;
         await Ask(f, "orders/tdd#2");
-        Assert.Contains("cannot compare", f.Of<RollbackFinished>().Last().Reasons[0]);
+        Assert.Contains("cannot compare", Finished(f).Last().Reason);
         Assert.Empty(f.Of<RollbackRelease>());
 
         var (g, _) = await Delivered(withProbe: false);
         await Ask(g);
-        Assert.Contains("cannot read the files changed", Assert.Single(g.Of<RollbackFinished>()).Reasons[0]);
+        Assert.Contains("cannot read the files changed", Assert.Single(Finished(g)).Reason);
         Assert.Empty(g.Of<RollbackRelease>());
     }
 
@@ -245,7 +253,7 @@ public class RollbackTests
         await f.Deploy("1.0.2", "Tdd", "Started"); f.Now += TimeSpan.FromMinutes(1); await f.Deploy("1.0.2", "Tdd", "Succeeded");
         f.All.Clear();
         await Ask(f);
-        Assert.Contains("commit of 1.0.2 is not known", Assert.Single(f.Of<RollbackFinished>()).Reasons[0]);
+        Assert.Contains("commit of 1.0.2 is not known", Assert.Single(Finished(f)).Reason);
         Assert.Empty(f.Of<RollbackRelease>());
     }
 
@@ -261,7 +269,7 @@ public class RollbackTests
         probe.Answers[(Sha('d'), Sha('a'))] = new ChangedFiles("ahead", [changed], true);
         await Ask(f);
         Assert.Equal(rolledBack ? 1 : 0, f.Of<RollbackRelease>().Count());
-        Assert.Equal(rolledBack ? 0 : 1, f.Of<RollbackFinished>().Count());
+        Assert.Equal(rolledBack ? 0 : 1, Finished(f).Count());
     }
 
     // ---- tdd only ----------------------------------------------------------------------------------------------------------------------------------------
@@ -274,20 +282,21 @@ public class RollbackTests
         var (f, probe) = await Delivered(env);
         await Ask(f);
         Assert.Empty(f.Of<RollbackRelease>());
-        var fin = Assert.Single(f.Of<RollbackFinished>());
-        Assert.Equal(RollbackOutcome.Escalated, fin.Outcome);
-        Assert.Contains("configured for tdd only", fin.Reasons[0]);
+        var fin = Assert.Single(Finished(f));
+        Assert.True(fin.Outcome is "refused" or "failed", fin.Outcome);
+        Assert.Equal(("refused", RollbackCodes.NotPermitted), (fin.Outcome, fin.Code));
+        Assert.Contains("configured for tdd only", fin.Reason);
         Assert.Equal(0, probe.Calls);
         Assert.Empty(f.Of<PromoteRelease>());
     }
 
     [Fact]
-    public void TheRouter_AddressesTheTrainTheIncidentNames()
+    public async Task TheIncidentsRequest_ForADeployableTheTrainDoesNotKnow_IsNotApplied()
     {
-        var f = new TrainFixture("tdd");
-        var router = new DeliveryTrainRouter(f.Policies);
-        var input = Assert.IsType<TrainRollbackRequested>(Assert.Single(router.Route(new Rollback("Orders", "tdd", Incident, "1.0.1", "why"))));
-        Assert.Equal(new TrainRollbackRequested("orders/tdd", Incident, "1.0.1", "why"), input);
+        // (the incident names the train by its key; a deployable that left the catalog has no policy and the request goes nowhere)
+        var (f, _) = await Delivered();
+        var r = await new DeliveryTrainService(f.Store, f.Policies, f.Reads, f.Delivered, () => f.Now).Handle(new TrainRollback("gone/tdd", Incident, 1, null, "why"));
+        Assert.Empty(r.Messages);
     }
 
     // ---- the command and the deployment it waits for -----------------------------------------------------------------------------------------------------
@@ -315,9 +324,10 @@ public class RollbackTests
         var (f, _) = await Delivered();
         await Ask(f);
         for (var i = 0; i < 7; i++) await f.After(TimeSpan.FromMinutes(5));
-        var fin = Assert.Single(f.Of<RollbackFinished>());
-        Assert.Equal(RollbackOutcome.Escalated, fin.Outcome);
-        Assert.Contains("showed none within 30 minutes", fin.Reasons[0]);
+        var fin = Assert.Single(Finished(f));
+        Assert.True(fin.Outcome is "refused" or "failed", fin.Outcome);
+        Assert.Equal(("failed", RollbackCodes.Failed), (fin.Outcome, fin.Code));
+        Assert.Contains("showed none within 30 minutes", fin.Reason);
         Assert.Empty(f.Of<Undelivered>());
     }
 
@@ -327,9 +337,10 @@ public class RollbackTests
         var (f, _) = await Delivered();
         await Ask(f);
         f.Now += TimeSpan.FromMinutes(1); await Rollback(f, "Started"); f.Now += TimeSpan.FromMinutes(2); await Rollback(f, "Failed");
-        var fin = Assert.Single(f.Of<RollbackFinished>());
-        Assert.Equal(RollbackOutcome.Escalated, fin.Outcome);
-        Assert.Contains("ended Failed (D-rollback)", fin.Reasons[0]);
+        var fin = Assert.Single(Finished(f));
+        Assert.True(fin.Outcome is "refused" or "failed", fin.Outcome);
+        Assert.Equal(("failed", RollbackCodes.Failed), (fin.Outcome, fin.Code));
+        Assert.Contains("ended Failed (D-rollback)", fin.Reason);
         Assert.Empty(f.Of<Undelivered>());
         Assert.Contains("acme/orders#7|" + Sha('a'), f.State.DeliveredItems);   // the item stays delivered: nothing was taken back
         Assert.Empty(f.State.RolledBack);
@@ -341,11 +352,12 @@ public class RollbackTests
         var (f, _) = await Delivered();
         await Ask(f);
         await f.Send(new TrainRollbackFailed(f.Key, Incident, "Octopus refused to create the rollback deployment (403, missing permission DeploymentCreate)"));
-        var fin = Assert.Single(f.Of<RollbackFinished>());
-        Assert.Equal(RollbackOutcome.Escalated, fin.Outcome);
-        Assert.Contains("was refused: Octopus refused", fin.Reasons[0]);
+        var fin = Assert.Single(Finished(f));
+        Assert.True(fin.Outcome is "refused" or "failed", fin.Outcome);
+        Assert.Equal(("failed", RollbackCodes.Failed), (fin.Outcome, fin.Code));
+        Assert.Contains("was refused: Octopus refused", fin.Reason);
         await f.Send(new TrainRollbackFailed(f.Key, Incident, "again"));   // (the same refusal again: nothing new)
-        Assert.Single(f.Of<RollbackFinished>());
+        Assert.Single(Finished(f));
     }
 
     [Fact]
@@ -371,7 +383,7 @@ public class RollbackTests
         f.All.Clear();
         await Ask(f);
         for (var i = 0; i < 7; i++) await f.After(TimeSpan.FromMinutes(5));
-        Assert.Contains("is still running after 30 minutes", Assert.Single(f.Of<RollbackFinished>()).Reasons[0]);
+        Assert.Contains("is still running after 30 minutes", Assert.Single(Finished(f)).Reason);
         Assert.Empty(f.Of<RollbackRelease>());
     }
 
@@ -393,11 +405,11 @@ public class RollbackTests
         Assert.Equal(["orders/tdd#2"], f.State.RollbackQueue.Select(q => q.Incident));
         f.Now += TimeSpan.FromMinutes(1); await Rollback(f, "Started"); f.Now += TimeSpan.FromMinutes(2); await Rollback(f, "Succeeded");
         // the first ended; the second looked at 1.0.1, which runs now and has nothing before it
-        Assert.Equal(2, f.Of<RollbackFinished>().Count());
-        Assert.Equal(RollbackOutcome.RolledBack, f.Of<RollbackFinished>().First().Outcome);
-        var second = f.Of<RollbackFinished>().Last();
-        Assert.Equal("orders/tdd#2", second.Incident);
-        Assert.Equal(RollbackOutcome.Escalated, second.Outcome);
+        Assert.Equal(2, Finished(f).Count());
+        Assert.Equal("done", Finished(f).First().Outcome);
+        var second = Finished(f).Last();
+        Assert.Equal("orders/tdd#2", second.IncidentId);
+        Assert.True(second.Outcome is "refused" or "failed", second.Outcome);
         Assert.Empty(f.State.RollbackQueue);
     }
 

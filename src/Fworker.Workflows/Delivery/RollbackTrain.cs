@@ -4,14 +4,14 @@ using Fworker.Contracts.Messaging;
 
 namespace Fworker.Workflows.Delivery;
 
-// W8.3: the rollback, the part of one evaluation of a train (TrainRun) that carries it out. The incident asks (Rollback, then TrainRollbackRequested); the train
+// W8.3: the rollback, the part of one evaluation of a train (TrainRun) that carries it out. The incident asks (TrainRollback, W8.1) and the train answers it (RollbackAnswered); the train
 //   1. refuses unless it is the tdd train (RollbackRules.AutomaticEnvironment): any other environment is escalated to a person, nothing is deployed;
 //   2. waits for a deployment that is still running, then takes the last good release (the one named, or the one that ran before the release that runs now);
 //   3. checks the migration precondition: DbUp's migrations are forward-only, so going back is a rollback only when no migration was added since the target. It reads the files changed between the
-//      target's commit and the commit that runs now, and anything it cannot prove is a refusal: the release is not rolled back automatically, the incident is told (RollbackFinished, escalated);
-//   4. asks for the deployment with RollbackRelease (an integration command; the executor creates it in Octopus, tdd only, once) and follows the deployment Octopus shows;
+//      target's commit and the commit that runs now, and anything it cannot prove is a refusal: the release is not rolled back automatically, the incident is told (refused, code "migration" when one was added, so that it fixes forward);
+//   4. asks for the deployment with RollbackRelease (an integration command; the executor creates it in Octopus, tdd only, once), answers "started" and follows the deployment Octopus shows;
 //   5. when it succeeded, tells the items the rolled-back releases delivered that they are no longer in tdd (Undelivered, which returns them to their Deliver step) and makes them candidates again, so
-//      the release that fixes forward delivers them; RollbackFinished closes the request.
+//      the release that fixes forward delivers them; the answer "done" (or "failed" when the deployment did not succeed) closes the request.
 // A hold does not stop it: the rollback is the incident's own deployment. Nothing here calls Octopus: the command is executed only by a host whose engine acts.
 
 sealed partial class TrainRun
@@ -44,31 +44,31 @@ sealed partial class TrainRun
     {
         if (!RollbackRules.Automatic(p))
         {
-            Escalate(r, $"automatic rollback is configured for {RollbackRules.AutomaticEnvironment} only{(p.Project.Length == 0 ? " and needs the deployable's Octopus project" : "")}; the rollback of {p.Deployable} in {env} is a person's decision");
+            Escalate(r, RollbackCodes.NotPermitted, $"automatic rollback is configured for {RollbackRules.AutomaticEnvironment} only{(p.Project.Length == 0 ? " and needs the deployable's Octopus project" : "")}; the rollback of {p.Deployable} in {env} is a person's decision");
             return;
         }
-        if (RollbackRules.Newest(s, env) is not { } newest) { Escalate(r, $"no release is known to have been deployed to {TargetName}"); return; }
+        if (RollbackRules.Newest(s, env) is not { } newest) { Escalate(r, RollbackCodes.Unavailable, $"no release is known to have been deployed to {TargetName}"); return; }
         if (!newest.Deployment.Completed)
         {
             // a rollback during a deployment would race it: wait for it to end (the limit is the request expiry)
-            if (now - r.RequestedAt >= DeliveryTrainService.RequestExpiry) { Escalate(r, $"the deployment of {newest.Version} to {TargetName} (task {newest.Deployment.TaskId}) is still running after {DeliveryTrainService.RequestExpiry.TotalMinutes:0} minutes"); return; }
+            if (now - r.RequestedAt >= DeliveryTrainService.RequestExpiry) { Escalate(r, RollbackCodes.Unavailable, $"the deployment of {newest.Version} to {TargetName} (task {newest.Deployment.TaskId}) is still running after {DeliveryTrainService.RequestExpiry.TotalMinutes:0} minutes"); return; }
             wakes.Add(now.AddSeconds(p.PollSeconds));
             return;
         }
         var from = newest.Version;
         var target = r.RequestedTo ?? RollbackRules.LastGood(s, env, from);
-        if (target is null) { Escalate(r, $"no earlier release ran in {TargetName} before {from}, so there is nothing to go back to"); return; }
-        if (target == from && newest.Deployment.Succeeded) { Escalate(r, $"{TargetName} already runs {target}"); return; }
-        if (!s.Releases.TryGetValue(target, out var to)) { Escalate(r, $"the release {target} is not known to the train"); return; }
-        if (s.DeploymentOf(target, env) is not { Succeeded: true }) { Escalate(r, $"the release {target} never ran successfully in {TargetName}, so going to it is no rollback"); return; }
-        if (s.RolledBack.Contains(target)) { Escalate(r, $"the release {target} was rolled back from earlier"); return; }
+        if (target is null) { Escalate(r, RollbackCodes.NoPreviousRelease, $"no earlier release ran in {TargetName} before {from}, so there is nothing to go back to"); return; }
+        if (target == from && newest.Deployment.Succeeded) { Escalate(r, RollbackCodes.NoPreviousRelease, $"{TargetName} already runs {target}"); return; }
+        if (!s.Releases.TryGetValue(target, out var to)) { Escalate(r, RollbackCodes.Unavailable, $"the release {target} is not known to the train"); return; }
+        if (s.DeploymentOf(target, env) is not { Succeeded: true }) { Escalate(r, RollbackCodes.NoPreviousRelease, $"the release {target} never ran successfully in {TargetName}, so going to it is no rollback"); return; }
+        if (s.RolledBack.Contains(target)) { Escalate(r, RollbackCodes.NoPreviousRelease, $"the release {target} was rolled back from earlier"); return; }
         // the release the rollback leaves: the newest deployment's, or when that deployment failed, the one that still runs
-        if (string.IsNullOrEmpty(to.Commit) || !s.Releases.TryGetValue(from, out var current) || string.IsNullOrEmpty(current.Commit)) { Escalate(r, $"the commit of {(string.IsNullOrEmpty(to.Commit) ? target : from)} is not known, so it cannot be shown that no database migration was added"); return; }
+        if (string.IsNullOrEmpty(to.Commit) || !s.Releases.TryGetValue(from, out var current) || string.IsNullOrEmpty(current.Commit)) { Escalate(r, RollbackCodes.Unavailable, $"the commit of {(string.IsNullOrEmpty(to.Commit) ? target : from)} is not known, so it cannot be shown that no database migration was added"); return; }
         if (!string.Equals(to.Commit, current.Commit, StringComparison.OrdinalIgnoreCase))
         {
-            if (migrations is null) { Escalate(r, "this gateway cannot read the files changed between two releases, so it cannot be shown that no database migration was added"); return; }
+            if (migrations is null) { Escalate(r, RollbackCodes.Unavailable, "this gateway cannot read the files changed between two releases, so it cannot be shown that no database migration was added"); return; }
             var verdict = RollbackRules.Judge(await migrations.ChangedBetween(p.Repository, to.Commit!, current.Commit!, ct), p.Migrations, target, from);
-            if (!verdict.Safe) { Escalate(r, verdict.Reason); return; }
+            if (!verdict.Safe) { Escalate(r, verdict.Added ? RollbackCodes.Migration : RollbackCodes.Unavailable, verdict.Reason); return; }
         }
         r.From = from; r.To = target;
         // the items of the releases that came after the target and were delivered here: they are the rollback's undelivered
@@ -78,6 +78,7 @@ sealed partial class TrainRun
         r.Phase = RollbackPhase.Deploying;
         r.FirstCommandAt = r.CommandAt = now;
         Out.Add(CommandOf(r));
+        Out.Add(Answer(r, "started", "", $"deploying release {target}"));   // (the incident now waits for the deployment)
         wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
         Out.Add(new TrainDecided(s.Key, "rollback", target, r.Items.Select(c => c.Item).ToList(), [$"rolling {TargetName} back from {from} to {target} for {r.Incident}: {r.Reason}"], now, null, replay));
     }
@@ -92,23 +93,28 @@ sealed partial class TrainRun
         if (dep is not { Rollback: true })
         {
             // Octopus shows no deployment of the rollback yet: the command is sent again after a while (its key makes a second send harmless), and given up on after the request expiry
-            if (now - r.FirstCommandAt >= DeliveryTrainService.RequestExpiry) { Escalate(r, $"the rollback deployment of {r.To} to {TargetName} was requested and Octopus showed none within {DeliveryTrainService.RequestExpiry.TotalMinutes:0} minutes"); return; }
+            if (now - r.FirstCommandAt >= DeliveryTrainService.RequestExpiry) { Escalate(r, RollbackCodes.Failed, $"the rollback deployment of {r.To} to {TargetName} was requested and Octopus showed none within {DeliveryTrainService.RequestExpiry.TotalMinutes:0} minutes"); return; }
             if (now - r.CommandAt >= DeliveryTrainService.CommandRetry) { r.CommandAt = now; Out.Add(CommandOf(r)); }
             wakes.Add(r.CommandAt.Add(DeliveryTrainService.CommandRetry));
             return;
         }
         if (!dep.Completed) { wakes.Add(now.AddSeconds(p.PollSeconds)); return; }
-        if (!dep.Succeeded) { Escalate(r, $"the rollback deployment of {r.To} to {TargetName} ended {dep.Phase} ({dep.DeploymentId}); a person decides"); return; }
+        if (!dep.Succeeded) { Escalate(r, RollbackCodes.Failed, $"the rollback deployment of {r.To} to {TargetName} ended {dep.Phase} ({dep.DeploymentId}); a person decides"); return; }
         r.Phase = RollbackPhase.Done;
     }
 
     // ---- the end -------------------------------------------------------------------------------------------------------------------------------------------------
 
-    void Escalate(RollbackState r, string reason)
+    void Escalate(RollbackState r, string code, string reason)
     {
         r.Phase = RollbackPhase.Escalated;
+        r.Code = code;
         r.Reasons = [reason];
     }
+
+    /// <summary>The answer to the incident (W8.1's contract): the request's identity and generation come back with it.</summary>
+    RollbackAnswered Answer(RollbackState r, string outcome, string code, string reason)
+        => new(s.Key, r.Incident, r.Generation, outcome, code, r.To.Length > 0 ? r.To : r.RequestedTo, reason, now);
 
     void FinishRollback(RollbackState r)
     {
@@ -125,11 +131,12 @@ sealed partial class TrainRun
             }
             foreach (var v in r.RolledBack) { s.DeliveredBy.Remove(v); if (!s.RolledBack.Contains(v)) s.RolledBack.Add(v); }
             Out.Add(new TrainDecided(s.Key, "rolled-back", r.To, items, [$"{TargetName} runs {r.To} again"], now, null, replay));
-            Out.Add(new RollbackFinished(p.Deployable, env, r.Incident, RollbackOutcome.RolledBack, r.From, r.To, items, [$"{TargetName} runs {r.To} again; {(items.Count == 0 ? "no item was delivered by the releases after it" : $"{items.Count} item(s) are undelivered")}"], now));
+            Out.Add(Answer(r, "done", "", $"{TargetName} runs {r.To} again; {(items.Count == 0 ? "no item was delivered by the releases after it" : $"{items.Count} item(s) are undelivered")}"));
             return;
         }
         Out.Add(new TrainDecided(s.Key, "rollback-escalated", r.To, items, r.Reasons, now, null, replay));
-        Out.Add(new RollbackFinished(p.Deployable, env, r.Incident, RollbackOutcome.Escalated, r.From, r.To, [], r.Reasons, now));
+        // refused: nothing was asked of Octopus; failed: the deployment was asked for and did not happen
+        Out.Add(Answer(r, r.FirstCommandAt == default ? "refused" : "failed", r.Code, string.Join("; ", r.Reasons)));
     }
 
     // ---- what a rollback needs to remember of the deliveries ------------------------------------------------------------------------------------------------------

@@ -28,6 +28,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<CapacityLedgerRow> CapacityLedgers => Set<CapacityLedgerRow>();
     public DbSet<QcEnvironmentRow> QcEnvironments => Set<QcEnvironmentRow>();
     public DbSet<TranscriptRow> Transcripts => Set<TranscriptRow>();
+    public DbSet<IncidentRow> Incidents => Set<IncidentRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -201,6 +202,21 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             // the sessions of one item, and the prune by age
             e.HasIndex(x => new { x.ItemKey, x.StartedAt });
             e.HasIndex(x => x.StartedAt);
+        });
+
+        b.Entity<IncidentRow>(e =>
+        {
+            e.ToTable("Incidents");
+            e.HasKey(x => x.Key);
+            e.Property(x => x.Key).HasMaxLength(200);
+            e.Property(x => x.Status).HasMaxLength(16).IsRequired();
+            e.Property(x => x.HotfixItem).HasMaxLength(300);
+            e.Property(x => x.StateJson).IsRequired();
+            // the incident's state is read and written by its key; a stale writer loses (the handler runs again on the new state)
+            e.Property(x => x.Revision).IsConcurrencyToken();
+            // the events of the hotfix item find their incident, and the open incidents are listed
+            e.HasIndex(x => x.HotfixItem);
+            e.HasIndex(x => x.Status);
         });
 
         b.Entity<CatalogCopy>(e =>
