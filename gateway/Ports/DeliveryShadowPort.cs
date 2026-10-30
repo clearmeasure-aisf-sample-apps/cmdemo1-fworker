@@ -185,9 +185,11 @@ static class DeliveryShadowWiring
             DeliveryTopology.Route(w);
             // The train keeps a failed read from losing an input (it saves the input first and looks again by itself), so this is the backstop for one that still escapes: GitHub or the app
             // not answering is tried again with growing pauses and then scheduled again every few minutes; it never goes to the dead letters, because an input lost there is lost for good.
-            // The same for a train that kept changing under the handler (TrainConflictException: the handler re-reads the state and tries again by itself, five times) and for a database that does not
-            // answer (a connection that cannot be opened, a timeout): the input is applied again from the state as it is then, which the train's redelivery rule makes harmless.
-            w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().Or<TrainConflictException>().Or<TimeoutException>().Or<System.Data.Common.DbException>().RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5));
+            // The same for a database that does not answer (a connection that cannot be opened, a timeout): the input is applied again from the state as it is then, which the train's redelivery rule makes harmless. A train that
+            // kept changing under the handler (TrainConflictException) and a transient SQL fault are the host's FaultPolicy, which comes first. The retry is BOUNDED (W9.10o, #500: it used to repeat every 5 minutes for ever, so a permanent
+            // fault never reached the dead letters): three tries, then 5 minutes, 15 minutes, 1 hour and 6 hours, then the dead letters, which /api/v1/status counts and shows by type.
+            w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().Or<TimeoutException>().Or<System.Data.Common.DbException>()
+                .RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5)).Then.ScheduleRetry(TimeSpan.FromMinutes(15)).Then.ScheduleRetry(TimeSpan.FromHours(1)).Then.ScheduleRetry(TimeSpan.FromHours(6)).Then.MoveToErrorQueue();
         };
     }
 

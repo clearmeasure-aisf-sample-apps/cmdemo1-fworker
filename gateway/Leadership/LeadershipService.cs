@@ -5,9 +5,9 @@ using System.Text.Json.Nodes;
 // GatewayLeader holds the lease and its loop; SnapshotCoordinator holds the plant snapshot; this service decides when each runs:
 // - at the host's start: without the lease, the one read of the snapshot (and the process acts at once); with it, once the revoked credentials are
 //   read, the lease is taken, the plant restored from the predecessor, the lease confirmed, then the lease's loop and the snapshot of every change;
-// - when a newer process takes the lease (superseded): the final snapshot, then the streams end with stream.replaced;
-// - when a standby takes the lease again: the restore from the releaser's snapshot;
-// - at the stop (ApplicationStopping, RegisterStopping): the hand-over, or without the lease the write of the plant.
+// - when a newer process takes the lease (superseded): the Wolverine node leaves (W9.10a), the final snapshot, then the streams end with stream.replaced;
+// - when a standby takes the lease again: the restore from the releaser's snapshot, then the node starts (GatewayLeader.OnActing);
+// - at the stop (ApplicationStopping, RegisterStopping): the node leaves, then the hand-over, or without the lease the write of the plant.
 // Nothing here is stopped with the host: the loops end at ApplicationStopping, as before.
 sealed class LeadershipService : IHostedService
 {
@@ -21,6 +21,8 @@ sealed class LeadershipService : IHostedService
     // how long a superseded process lets the running rule scripts that act on the board finish before it ends them (delivery-speed.md 18.1.1): a sync-board
     // can run 280 s, the successor waits leaderHandoverSeconds (90) for the final snapshot
     public static readonly TimeSpan DrainFenced = TimeSpan.FromSeconds(45);
+    // how long the stop of the holder waits for the Wolverine node to leave before the final snapshot (W9.10a)
+    public static readonly TimeSpan NodeLeaves = TimeSpan.FromSeconds(10);
 
     public LeadershipService(GatewayLeader leader, SnapshotCoordinator snapshots, IRevocationService revocations, Plant plant, IHostApplicationLifetime lifetime, Runner runner)
     {
@@ -33,7 +35,10 @@ sealed class LeadershipService : IHostedService
         // (they find the lease lost); the final snapshot, then the streams end with stream.replaced, then the scripts are awaited for at most 45 s and ended
         leader.OnSuperseded = async cur =>
         {
-            // the final snapshot and the hand-over come FIRST: the successor waits for them, and a SIGTERM during a drain would skip them. The running
+            // W9.10a: the Wolverine node leaves before anything else of the hand-over: it drains and releases its rows while this process still holds the plant,
+            // so the successor's node (which clears the node table and releases every row of "node 1" when it starts) finds nothing of a running node
+            await leader.RunBeforeHandOverAsync("superseded");
+            // the final snapshot and the hand-over come NEXT: the successor waits for them, and a SIGTERM during a drain would skip them. The running
             // fenced scripts refuse their own writes (they find the lease lost); they are drained in the background and ended after 45 s.
             var saved = snapshots.On && snapshots.Restored.IsCompleted && await snapshots.SaveAsync(true, TimeSpan.FromSeconds(30));
             var n = plant.HandOver("a newer gateway process took over the plant; connect again");
@@ -72,6 +77,8 @@ sealed class LeadershipService : IHostedService
                     Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"{was.ToString().ToLowerInvariant()}\"}}"); return;
                 }
                 var sw = Stopwatch.StartNew();
+                // W9.10a: the node first (bounded: the platform's grace is 30 s, the snapshot and the release below take up to 22), then the snapshot and the lease
+                try { leader.RunBeforeHandOverAsync("stop").WaitAsync(NodeLeaves).GetAwaiter().GetResult(); } catch (TimeoutException) { Console.Error.WriteLine("leader stop: the node did not leave in time"); }
                 if (was == GatewayLeader.Role.Acting && snapshots.On && snapshots.Restored.IsCompleted) snapshots.SaveAsync(true, TimeSpan.FromSeconds(12)).GetAwaiter().GetResult();
                 leader.ReleaseAsync(snapshots.HeldEpoch, TimeSpan.FromSeconds(Math.Max(5, 22 - sw.Elapsed.TotalSeconds))).GetAwaiter().GetResult();
             }

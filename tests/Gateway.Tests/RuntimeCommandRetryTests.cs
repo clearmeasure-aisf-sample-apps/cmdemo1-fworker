@@ -32,6 +32,9 @@ public sealed class RuntimeCommandRetryTests
         public int Reads;
         public CommandResult? TryGet(string key) { Reads++; throw new InvalidOperationException("connection detail that must not travel"); }
         public void Record(string key, CommandResult result) { }
+        public ClaimOutcome Claim(string key) => throw new InvalidOperationException("connection detail that must not travel");
+        public void ReleaseClaim(string key) { }
+        public void ExpireClaim(string key) { }
     }
 
     static RuntimeManager Manager(Rt rt)

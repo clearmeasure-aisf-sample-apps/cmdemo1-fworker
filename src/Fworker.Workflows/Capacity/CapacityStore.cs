@@ -1,4 +1,5 @@
 using Fworker.Persistence;
+using Fworker.Workflows.Faults;
 using Microsoft.EntityFrameworkCore;
 
 namespace Fworker.Workflows.Capacity;
@@ -40,12 +41,8 @@ public sealed class SqlCapacityStore(Func<FactoryDbContext> open) : ICapacitySto
             return true;
         }
         // the key was taken by another writer first (insert), or the revision moved (update). A database that does not answer is no conflict: it throws, and Wolverine retries the message.
-        catch (DbUpdateConcurrencyException) { return false; }
-        catch (DbUpdateException e) when (IsDuplicateKey(e)) { return false; }
+        catch (Exception e) when (SqlFaults.IsConflict(e)) { return false; }
     }
-
-    // SQL Server: 2627 (primary key violation) and 2601 (unique index): the insert lost to another writer. Any other database error is a fault, not a conflict.
-    static bool IsDuplicateKey(DbUpdateException e) => e.InnerException is Microsoft.Data.SqlClient.SqlException { Number: 2627 or 2601 };
 }
 
 public sealed class InMemoryCapacityStore : ICapacityStore

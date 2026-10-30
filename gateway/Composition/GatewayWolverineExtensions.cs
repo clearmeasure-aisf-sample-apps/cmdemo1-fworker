@@ -10,13 +10,17 @@ static class GatewayWolverineExtensions
     /// <summary>How long a claim of the ingress deduplication is kept: longer than any redelivery of a webhook.</summary>
     public static readonly TimeSpan IngressDedupRetention = TimeSpan.FromDays(7);
 
+    /// <summary>How long the idempotency ledger keeps a success (W9.10o): a key is a request, and the same request asked for again after this long must run. Longer than any redelivery or retry schedule.</summary>
+    public static readonly TimeSpan LedgerRetention = TimeSpan.FromDays(30);
+
     public static IServiceCollection AddGatewayWolverine(this IServiceCollection services, GatewayComposition c)
     {
-        // always registered, so that /ready and /api/v1/status can take it; Required is false where there is no Wolverine host
-        var schemaStatus = new FactorySchemaStatus(required: c.WolverineHost);
+        // always registered, so that /ready and /api/v1/status can take it; Tracked is false where there is no Wolverine host, and Required (the gate of /ready) only where v2 acts (W9.10o)
+        var schemaStatus = new FactorySchemaStatus(required: c.WolverineHost && c.Engine.V2Acts, tracked: c.WolverineHost);
         services.AddSingleton(schemaStatus);
+        if (c.Database.Malformed) services.AddSingleton(c.Database);   // (only so that /api/v1/status can say the variable is set and malformed; every other case registers it with the host)
         if (!c.WolverineHost) return services;
-        services.AddSingleton(c.Database);
+        if (!c.Database.Malformed) services.AddSingleton(c.Database);
         BoardWiring.Register(services, c, schemaStatus);   // W9.8: the transcripts in the database, the board verbs (only where the engine acts)
         services.AddSingleton(WolverineHostOptions.From(c.Instance));
         // built after LeadershipService, whose hand-over callbacks it wraps (the order of the callbacks is the order of the stop: hand-over, then the node leaves)
@@ -25,7 +29,7 @@ static class GatewayWolverineExtensions
         IngressCorrelations? correlations = null; IngressInboxPort? inboxPort = null;
         ShadowOctopusPort? octopusPort = null; var shadowHolder = new DeliveryShadowHolder();
         var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null;
-        V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null;
+        V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
@@ -34,9 +38,12 @@ static class GatewayWolverineExtensions
             {
                 // W3.3: the Copilot launch runs under a reservation, settled by CopilotReconcileService (a hosted service of AddGatewayBackground)
                 // with the database the host needs, the reservations and the idempotency ledger are in SQL and survive the kill the host is built for (#481)
-                var stores = new SqlCommandStores(WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds));
+                // W9.10c: the claims of the ledger name this process and the epoch of the lease it holds
+                var claimNode = ClaimOwner.ThisProcess().Node; var claimLeader = sp.GetRequiredService<GatewayLeader>();
+                var stores = new SqlCommandStores(WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), owner: () => new ClaimOwner(claimNode, claimLeader.Epoch));
                 var reservations = stores.Reservations;
-                copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()));
+                purgeable = stores.Ledger as IPurgeableLedger;
+                copilotReconciler = new CopilotReconciler(reservations, new CopilotTaskLookup(sp.GetRequiredService<RuntimeRegistry>()), owners: new CopilotOwnerRecorder(sp.GetRequiredService<RuntimeRegistry>()));
                 RuntimeCommandWiring.Attach(host, sp.GetRequiredService<RuntimeRegistry>(), new CopilotLaunchPort(sp.GetRequiredService<Fworker.Contracts.Seams.ICommandPort>(), reservations, copilotReconciler), stores.Ledger,
                     (runtime, execution, item) => { _ = correlations?.FromRuntime(runtime, execution, item); });   // W4.1: the task or agent id finds its item later
                 journalSink = JournalCommandWiring.Attach(host, c, ledger: stores.Ledger);   // W3.2: the plant's journal lines become commands
@@ -92,6 +99,17 @@ static class GatewayWolverineExtensions
                         var watcher = new FeatureChecksJob(workItems.Store, home, new PullRequestChecks(async (verb, stdin, timeout) => await runner.RunAsync(verb, stdin, timeout)), m => host.PublishAsync(m), () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low);
                         jobs.Add(RecurringJobSlots.FeatureChecks, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["featureChecks"] = await watcher.Run(ct) }.ToJsonString()));
                     }
+                    // W9.10o: the repair of the window between a saga's save and its outbox (the timer or command that was never sent), and the purge of the old successes of the idempotency ledger
+                    if (workItems.Store is IWorkItemAges ages)
+                    {
+                        var repair = rearm = new WorkItemRearm(ages, workItems.Docs.Settings.Policy, m => host.PublishAsync(m));
+                        jobs.Add(RecurringJobSlots.SagaRearm, async ct =>
+                        {
+                            var report = await repair.Run(ct);
+                            if (report.Timers + report.Commands + report.Failed > 0) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["sagaRearm"] = new System.Text.Json.Nodes.JsonObject { ["open"] = report.Open, ["timers"] = report.Timers, ["commands"] = report.Commands, ["failed"] = report.Failed } }.ToJsonString());
+                        });
+                    }
+                    if (purgeable is { } ledgerToPurge) jobs.Add(RecurringJobSlots.LedgerPurge, ct => Task.Run(() => { var n = ledgerToPurge.PurgeSuccesses(LedgerRetention, DateTimeOffset.UtcNow); if (n > 0) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["ledgerPurge"] = n }.ToJsonString()); }, ct));
                     correlations = new IngressCorrelations(map, home);
                     inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
                     // W4.1 follow-up (#485): the claims of the deduplication do not live for ever
@@ -159,6 +177,14 @@ static class GatewayWolverineExtensions
         if (c.Engine.V2Acts && c.Database.ConnectionString is { } viewsConnection)
             services.AddSingleton(sp => new V2ItemViews(new SchemaGatedViewSource(sp.GetRequiredService<FactorySchemaStatus>(),
                 new SqlWorkItemViewSource(() => WorkItemWiring.Open(WolverineHostService.WithConnectTimeout(viewsConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds))))));
+        // W9.10o: the health block of /api/v1/status, where the Wolverine host runs (shadow or v2: tdd shows it too) and a database is configured; the jobs and the re-arm are those of the engine that acts, absent in shadow
+        if (c.Database.ConnectionString is { } healthConnection)
+            services.AddSingleton(sp =>
+            {
+                _ = sp.GetRequiredService<WolverineHostService>();
+                var cs = WolverineHostService.WithConnectTimeout(healthConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
+                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm);
+            });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)
             services.AddSingleton(sp => { var h = sp.GetRequiredService<WolverineHostService>(); return new RecurringJobScheduler(recurring!, jobs, r => h.PublishAsync(r), () => c.Leader.MayAct); });

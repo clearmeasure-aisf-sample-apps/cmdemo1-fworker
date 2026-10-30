@@ -715,6 +715,10 @@ W9.12 when the W5 gate is recorded, and W9.13.
 - #496 (train parity): the newest-only difference declared; the event-time question carried by the W5 gate; save and outbox in
   W9.10o; hand-written handlers accepted (#491);
 - #500 (train on replay state): defects 1 to 7 fixed; the wake after a restart observed on tdd; the open-ended retry bounded in W9.10o;
+  W9.10o built (the status block, the retry classification, the re-arm, `/ready` only where v2 acts, the malformed connection string, the `PromoteRelease` key with the request's number and
+  the ledger retention of 30 days for successes, the docs plan's merge answers): `/api/v1/status` `v2` (`gateway/Endpoints/StatusV2Health.cs`) is on tdd in shadow too; the Wolverine retry
+  for the faults of the database is `FaultPolicy` (`src/Fworker.Workflows/Faults`): 2 s, 10 s and 60 s, then 5 minutes, 15 minutes, 1 hour and 3 hours, then the dead letters; the delivery
+  train's rule for GitHub and the app is bounded the same way (5 minutes, 15 minutes, 1 hour, 6 hours); the save and the outbox are repaired by the `saga-rearm` job (not one transaction).
 - #437 (Copilot and Cursor day budgets from history): done, or the Copilot and Cursor runtimes off for the measured batch;
 - #465 (session mailbox): not required for the cutover, since one Solo node serves every session (pushes stay node-local and are lost
   on a restart, as the messaging rule says); kept open as post-cutover work;
@@ -849,6 +853,21 @@ case through `plugin/scripts/factory.ps1 --server` and through the C# verb again
 rate limit, a 500, a bad gateway, a 422 that is not "already exists", a ref answered and not kept, an item whose comments cannot be read); `ServiceVerbsTests` covers the rest (the scope of a git credential in every wrong form: the token is
 revoked and not handed out; the credential; the retries; the timeout; the budget; `RevocationService` and `OperatorReleaseLoader` on v2). Two differences, both on the side of refusing: `revocations` keeps two revoked names that differ by case only
 (the rule script's hashtable made one of them, and the generations of the gateway are per exact name), and `git-credential` takes the App key from `secret-tool` on a gateway on the operator's machine, as `Apps.ps1` does (no shell, fixed arguments). No new table.
+
+**W9.10c as built (#551): the pending claim, and Copilot resume as unknown.** Script 140 (`factory.IdempotencyClaims`: key, owner node, owner epoch, claimed and expiry times; `CopilotReservations.Mode`), expand-only
+(the numbers of the scripts are ascending, no longer contiguous: `DatabaseScriptsTests`). **The ledger** (`IIdempotencyLedger`) takes `Claim(key)` in one batch and one transaction before the side effect: `Claimed`, `TakenOver` (an
+expired claim), `Pending` (a live claim of another handling) or `Done` (a result is recorded; `Record` inserts the result and deletes the claim in one transaction, and `Claim` reads the ledger only after it holds the claim, so no
+handling gets through between the two). The claim names this process and the epoch of the lease it holds (`SqlCommandStores(cs, owner)`); `ReleaseClaim` and `ExpireClaim` act only on the owner's own. The default lifetime is 90 s: longer than
+any one call (the HTTP clients stop at 60 s), shorter than the 102 s of `RuntimeCommandService.RetryPauses`, so a command whose process was killed finds the claim expired at its last retry. **The handler base:** a second handling ends
+Transient (`PendingError`, the caller waits and asks again and then finds the result); an answer that settles is recorded; a retryable answer gives the claim back; a transport failure (the effect may be there) expires the claim at once; a
+stop of the host expires it too; a taken-over claim looks for the effect first (`EffectLookup`: Found is recorded and returned, Absent calls, Unknown ends Transient and expires the claim again). Lookups: a runbook run or an Octopus start by worker name
+(`OctopusRunbookRuntime.FindStartRunOf`, the prompted `Fworker.Name` of the Start runbooks, 6 hours back), a merge by the pull request's merge state (`MergeDirect.LookUpMerge`), a journal line by its key in the item's journal ledger
+(`JournalLedger.Recorded`); without a lookup (stop, and the runtimes whose starts have no way to find the run) the call is made again, as before. **Copilot:** a resume (`resume-<exception>`) is unknown like a launch: the reservation stays with
+its `Mode`, the start answers `reserved` (RateLimited: the manager gives the launch back and counts no failure, `RuntimeManager` handles the word beside `no capacity` and `quota`), so a fast unknown outcome is no longer exhausted into a failure
+before the reconciler's 2 minutes and no second comment is posted. The reconciler looks for the task (launch) or the `@copilot` comment and the session (resume), writes the owner record first (`CopilotCloudRuntime.RecordReconciledOwner`, the
+item state's `copilot_task`) and settles with `ICopilotReservations.Transition`, a conditional write. `TaskForItem` (#479) is no miss, and so does not release, when a full page was created since the reservation or a task created since it
+carries no text to match. **Not done here:** the real Copilot API has not been called (the fields the tasks list returns are the operator's to confirm on a live run), the delivery commands of #545 (`PromoteRelease`, `AnswerSignOff`) adopt the
+base with a lookup by the release's deployments when that pull request lands, and the `PromoteRelease` key's sequence and the ledger retention stay with W9.10o.
 
 **W9.5 as built (#357), the read models.** Owner decisions of 2026-10-28 stand (hybrid composition, tdd only, the W7 scope cut). The six verbs of `ReadModelRoutes` answer on v2 where the engine acts and each answers what its rule script
 answers for the same input: the same fields and exit codes, the same refusals (`Reject`), the same writes. The code is `src/Fworker.Workflows/ReadModels/` (`ChecksReadModel` for `pr-checks` and `wait-for-checks`, `InspectReadModel` for

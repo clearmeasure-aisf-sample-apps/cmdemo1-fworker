@@ -12,11 +12,12 @@ using System.Text.Json.Nodes;
 // the lease every timing.leaderRenewSeconds (120; the lease runs timing.leaderLeaseSeconds, 360) and between renewals checks it every
 // timing.leaderCheckSeconds (15) with one conditional read (an unchanged ref answers 304, which GitHub does not count against the rate limit).
 //
-// A holder that finds a later epoch is superseded: it stops acting, writes its final snapshot (tagged with its epoch), ends its streams with
+// A holder that finds a later epoch is superseded: it stops acting, first its Wolverine node (W9.10a: drained and released, so the successor's node never starts beside
+// a running one), then writes its final snapshot (tagged with its epoch), ends its streams with
 // stream.replaced (reconnect: the session's client connects again, and the platform routes it to the new process) and answers every further call
 // 503 gateway-replaced. It stays a standby: when the lease is released (a graceful stop of the holder) or runs out (the holder died), it takes the
 // lease again, so the last process standing always acts. A process that stops gracefully while it holds the lease writes its final snapshot and
-// releases the lease, so its successor does not wait.
+// releases the lease, so its successor does not wait (its node has stopped before either: BeforeHandOver).
 sealed class LeaderSettings
 {
     public bool On;
@@ -71,6 +72,17 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
     // called when this process finds itself superseded (stop, final snapshot, streams) and when a standby takes the lease again (restore)
     public Func<JsonObject?, Task>? OnSuperseded { get; set; }
     public Func<JsonObject?, Task>? OnReacquired { get; set; }
+    // W9.10a: called each time this process becomes the one that acts (at its start and when a standby took the lease again; with the lease off, at the start), after the
+    // plant is restored. The Wolverine node starts here and not earlier: two nodes of one database (Solo: every node is node 1) release each other's rows.
+    public Action? OnActing { get; set; }
+    // W9.10a: called FIRST in the hand-over (superseded, and the stop of the holder), before the final snapshot is written and before the lease is let go: what must stop
+    // acting for the successor to start safely stops here (the Wolverine node: drain, release of its ownership). Bounded by its own timeout; the argument says why.
+    public Func<string, Task>? BeforeHandOver { get; set; }
+    public async Task RunBeforeHandOverAsync(string why)
+    {
+        if (BeforeHandOver is not { } f) return;
+        try { await f(why); } catch (Exception e) { try { Console.Error.WriteLine($"leader before hand-over: {e.GetType().Name}"); } catch { } }
+    }
 
     JsonObject Args(string action)
     {
@@ -111,8 +123,11 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
 
     public void StartActing()
     {
-        lock (gate) { if (role is Role.Starting or Role.Superseded) role = Role.Acting; }
+        bool began;
+        lock (gate) { began = role is Role.Starting or Role.Superseded or Role.Off; if (role is Role.Starting or Role.Superseded) role = Role.Acting; }
         acting.TrySetResult();
+        // W9.10a: only now (lease taken, the predecessor's snapshot seen, the lease confirmed) may a node that acts start; outside the lock, and a callback that throws never breaks the lease
+        if (began) { try { OnActing?.Invoke(); } catch (Exception e) { Console.Error.WriteLine($"leader acting callback: {e.GetType().Name}"); } }
     }
 
     // The lease's own loop: renew or check while acting, watch the lease while superseded.
@@ -207,6 +222,9 @@ sealed class GatewayLeader(Runner runner, LeaderSettings cfg, string version) : 
         Log(new JsonObject { ["gateway"] = "leader", ["released"] = Epoch, ["plantEpoch"] = plantEpoch, ["exit"] = code });
         return code == 0;
     }
+
+    // for a test that needs a holder that was superseded without a lease repository behind it (WolverineHostServiceTests)
+    internal void MarkSupersededForTest() { lock (gate) { if (role == Role.Acting) { role = Role.Superseded; supersededAt = DateTime.UtcNow; } } }
 
     public JsonObject? Predecessor { get { lock (gate) return predecessor?.DeepClone() as JsonObject; } }
 

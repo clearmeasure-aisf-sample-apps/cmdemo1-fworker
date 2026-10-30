@@ -80,6 +80,7 @@ every added column under `IF COL_LENGTH(...) IS NULL`, every schema created only
 | 012 AddQcEnvironments | QcEnvironments (W9.0 for W9.1: the QC gate per repository and pull request) |
 | 013 AddTranscripts | Transcripts (W9.0 for W9.8: runtime session transcripts) |
 | 100 AddIncidents | Incidents (W8.0 for W8.1: the incident saga of one application and environment; the timeline is in ItemHistory) |
+| 140 AddIdempotencyClaimsAndReservationMode | IdempotencyClaims (W9.10c: the pending claim of a command key) and the column Mode of CopilotReservations (launch, resume). Numbers 130 to 169 are reserved per work item of W9.10 (the plan), so the numbers are ascending, not contiguous |
 
 The DDL of 001 to 008 is what `dotnet ef migrations script <previous> <this>` printed, with the history inserts removed and guards added. Column types,
 lengths, nullability, identity, key names (`PK_<Table>`), index names, filters and the default are exactly EF's, so the tables EF built on tdd match.
@@ -146,12 +147,14 @@ The manifest is generated from a database built by the scripts (`FWORKER_UPDATE_
 ### Reporting
 
 - `/ready`, order of checks: replaced, prompts, revocations, then schema. Where `FactorySchemaStatus.Required` is true (`FACTORY_DB_CONNECTION` is set and
-  the environment runs the Wolverine host: today tdd and the v2 CI gateways) and the schema has not been verified good by this process, `/ready` answers
+  **v2 acts** in the environment, `Engine.V2Acts`: the v2 CI gateways, and tdd after the cutover; W9.10o narrowed it from "the environment runs the Wolverine host", so
+  in shadow, where v1 acts and needs no table, a database that is down, slow to start or failing a v2-only script does not keep `/ready` at 503 and no release is mistaken for
+  a failed one; the schema then shows in `/api/v1/status` only) and the schema has not been verified good by this process, `/ready` answers
   503 `{"ready":false,"waitingFor":"schema","state":"upgrading"|"failed","attempts":N,"since":"...","failedScript":...,"lastFailure":...}`. Where it is not
   required (uat, prod, image-start, every test without a database), `/ready` is exactly what it was. After the first good verification `/ready` no longer
   depends on the database for the life of the process. This deliberately reverses the W2.2 rule "/ready does not depend on the database", for the schema
   only and as the owner asked. Container Apps has no probe on `/ready`, so traffic is unaffected; the release rule (`/ready` 200) now proves the schema.
-- `/api/v1/status`: a block `schema` next to `wolverine`, only where required: `state`, `journal`, `shipped`, `latest`, `applied`, `pending`, `ahead`,
+- `/api/v1/status`: a block `schema` next to `wolverine`, where the host runs (shadow or v2): `state`, `journal`, `shipped`, `latest`, `applied`, `pending`, `ahead`,
   `differences` (at most 20), `extra`, `attempts`, `since`, `verifiedAt`, `durationMs`, `failedScript`, `lastFailure`.
 - `/_build`: `schemaVersion` (`"013"` today), the highest number the image ships, like workorders' `databaseVersion`.
 - A failure is a type, a SQL error number and a script name, never a message. One JSON line is logged: `{"gateway":"schema","event":"failed","detail":"<type> <script>"}`.
@@ -185,8 +188,8 @@ tests run with `AutoCreate.None`, so every test runs on tables the scripts built
 
 | Test | Proves |
 |---|---|
-| `DatabaseScriptsTests` (no SQL) | Names, unique and contiguous numbers; the embedded set is the files; no DROP or TRUNCATE; DELETE or UPDATE only in procedure bodies; every CREATE and ALTER guarded; procedures `CREATE OR ALTER`; UTF-8 without BOM |
-| `SchemaMatchesEfModelTests` | A database built by the scripts equals the one `EnsureCreated` builds from `FactoryDbContext` (columns, keys, indexes); every other table is one of the three raw-SQL tables |
+| `DatabaseScriptsTests` (no SQL) | Names, unique and ascending numbers; the embedded set is the files; no DROP or TRUNCATE; DELETE or UPDATE only in procedure bodies; every CREATE and ALTER guarded; procedures `CREATE OR ALTER`; UTF-8 without BOM |
+| `SchemaMatchesEfModelTests` | A database built by the scripts equals the one `EnsureCreated` builds from `FactoryDbContext` (columns, keys, indexes); every other table is one of the four raw-SQL tables |
 | `SchemaManifestTests` | The manifest is what the scripts build; the scripts run twice with no error and no change; drift (dropped column, index, table, altered procedure, removed journal row) is found, an extra table is tolerated; two or three processes in parallel journal each script once; a failing script is not journaled; the log never has the connection string; the database is created only on request |
 | `LegacyDatabaseUpgradeTests` | The rehearsal of tdd: EF migrations as they ran, the old runtime DDL of one table, Wolverine's tables built by Weasel, with rows; the scripts succeed, journal all, create the two missing tables, keep every row and leave a schema equal to the fresh one |
 | `WolverineStorageScriptTests` | `TheExportMatchesTheGolden` (no SQL): the export for the solo and balanced profiles, with and without the runtime commands, is the same and equals `tests/Gateway.Tests/golden/wolverine-storage.sql`; script 011 is that golden with its header; `TheScriptsBuildWolverinesStorage` (SQL): Weasel's full diff of its model against a database built by the scripts is empty |
@@ -213,7 +216,9 @@ An EF model change follows the same steps: write `0NN_<Change>.sql` by hand, the
 
 ## 11. Risks
 
-- `/ready` now waits for the schema where a database is configured. A tdd database outage during a start keeps `/ready` at 503 although v1 works; no probe reads it.
+- `/ready` waits for the schema where a database is configured **and v2 acts** (W9.10o; before it, also in shadow). Where v2 acts a database outage during a start keeps `/ready` at 503
+  with `waitingFor: schema`: that calls for `FACTORY_V2_OFF` or a database fix, not for a revert of an unrelated pull request. A `FACTORY_DB_CONNECTION` that is set and is not a
+  connection string is treated as not configured (`/api/v1/status` `database.malformed`).
 - The first tdd start depends on the guards matching what EF and Weasel built there; nobody has read tdd's catalog for this design. The rehearsal is in CI. If tdd differs
   anyway, the check reports it in `/api/v1/status` `schema.differences` and `/ready` stays 503; roll back by reverting the pull request.
 - The manifest compares default expressions and procedure hashes. Script 011 rewrites the 5 procedures on tdd, so their hashes become the scripts'.

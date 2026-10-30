@@ -170,7 +170,7 @@ public sealed class SqlProjectionVersions(Func<FactoryDbContext> open) : IProjec
             if (await db.ProjectionVersions.AnyAsync(x => x.ItemKey == itemKey && x.Target == target, ct)) return false;   // there, and not older than this version
             db.ProjectionVersions.Add(new ProjectionVersion { ItemKey = itemKey, Target = target, AppliedVersion = version, AppliedAt = at });
             try { await db.SaveChangesAsync(ct); return true; }
-            catch (DbUpdateException) { /* another writer inserted the row between the check and the insert: look again */ }
+            catch (Exception e) when (Fworker.Workflows.Faults.SqlFaults.IsConflict(e)) { /* another writer inserted the row between the check and the insert: look again */ }
         }
         return false;
     }

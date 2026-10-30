@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Fworker.Contracts.Messaging;
 using Fworker.Persistence;
+using Fworker.Workflows.Faults;
 using Microsoft.EntityFrameworkCore;
 using Wolverine;
 
@@ -88,7 +89,7 @@ public sealed class WorkItemHistory(Func<FactoryDbContext> open)
         var detail = JsonSerializer.Serialize(new { m.Sequence, m.Action, m.Plan, m.Step, m.ArmId, m.Reasons });
         db.ItemHistory.Add(new ItemHistoryEntry { ItemKey = m.Item.ToString(), Generation = m.Generation, At = m.At, Kind = "event", Type = HistoryType, Detail = detail.Length <= 4000 ? detail : detail[..4000], MessageId = messageId });
         try { await db.SaveChangesAsync(ct); }
-        catch (DbUpdateException) { /* the unique (MessageId, Kind) index: written by an earlier attempt of this message */ }
+        catch (Exception e) when (SqlFaults.IsDuplicateKey(e)) { /* the unique (MessageId, Kind) index: written by an earlier attempt of this message */ }
     }
 }
 

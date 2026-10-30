@@ -483,6 +483,44 @@ public sealed class JournalLedgerTests
         Assert.False(replay.Message!.Posted); Assert.Single(r.Plant(70));
     }
 
+    // W9.10c: two concurrent handlings of one line post one comment; the second waits (Transient) while the first is writing
+    [Fact]
+    public async Task TheCommand_TwoConcurrentHandlings_PostOneComment_TheSecondWaits()
+    {
+        var r = new Rig();
+        var inside = new ManualResetEventSlim(); var release = new ManualResetEventSlim();
+        r.Api.Intercept = req => { if (req.Method == HttpMethod.Post) { inside.Set(); release.Wait(TimeSpan.FromSeconds(10)); } return null; };
+        var h = new WriteJournalLineHandler(new InMemoryIdempotencyLedger(), r.Ledger);
+        var c = Cmd(72, "offered", "off|c1|w1", new JsonObject { ["worker"] = "w1", ["type"] = "persistent-local", ["ackSeconds"] = 120.0 });
+        var first = Task.Run(() => h.Process(c));
+        Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
+        var second = await h.Process(c);
+        Assert.True(second.Retry); Assert.Equal(FailureKind.Transient, second.Result.Failure); Assert.Contains(IntegrationCommandHandler<WriteJournalLine>.PendingError, second.Result.Error);
+        release.Set();
+        Assert.True((await first.WaitAsync(TimeSpan.FromSeconds(10))).Message!.Posted);
+        Assert.True((await h.Process(c)).Message!.Posted);   // answered from the ledger
+        Assert.Single(r.Plant(72));
+    }
+
+    // W9.10c: a claim that ran out is settled by the journal key of the item's state comment: the line is not posted again, whether the earlier handling got as far as its write or not
+    [Fact]
+    public async Task TheCommand_AnExpiredClaim_IsSettledByTheJournalKey()
+    {
+        var r = new Rig();
+        var c = Cmd(73, "offered", "off|d1|w1", new JsonObject { ["worker"] = "w1", ["type"] = "persistent-local", ["ackSeconds"] = 120.0 });
+        Assert.True((await new WriteJournalLineHandler(new InMemoryIdempotencyLedger(), r.Ledger).Process(c)).Message!.Posted);   // the earlier handling wrote the line and died before it recorded the key
+        Assert.True(await r.Ledger.Recorded(73, "offered", "off|d1|w1"));
+        Assert.False(await r.Ledger.Recorded(73, "offered", "off|other"));
+        Assert.False(await r.Ledger.Recorded(73, "waiting", "off|d1|w1"));   // a waiting line takes the ticks of its write: it can never be looked up
+        var now = new DateTime(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
+        var ledger = new InMemoryIdempotencyLedger(claimTtl: TimeSpan.FromMinutes(2), utcNow: () => now);
+        ledger.Claim(c.IdempotencyKey); now = now.AddMinutes(3);
+        var calls = r.Api.Calls.Count(x => x.StartsWith("POST", StringComparison.Ordinal));
+        var o = await new WriteJournalLineHandler(ledger, r.Ledger).Process(c);
+        Assert.True(o.Result.Ok); Assert.Equal("recorded", o.Result.Execution); Assert.Equal(calls, r.Api.Calls.Count(x => x.StartsWith("POST", StringComparison.Ordinal)));
+        Assert.Single(r.Plant(73));
+    }
+
     [Fact]
     public async Task TheCommand_ATransientFailureIsRetried_AnUnsupportedEventGoesToTheSaga()
     {
