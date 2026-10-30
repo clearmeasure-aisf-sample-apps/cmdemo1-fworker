@@ -21,3 +21,9 @@ owner | ^journal fold:
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous
 # answer waits for its result (RuntimeManager.ProvisionAndWait), and the manager's records know the execution as soon as the run exists (NoteStarted) (#522).
 octopus
+
+# W9.5 gate: the read models (pr-checks, wait-for-checks, model-tier) on v2: the detail of a failed check, the baseline, the pages of a log and the artifacts, the item's own pull request, the count of red heads and the one
+# rerun, and the model ladder with the refusals the v1 wrapper counts in the state directory (the files the rule scripts and v2 share). The verbs answer from v2 where the engine acts; the rest of each scenario still runs on v1.
+auto | ^(push gate|pr-checks|model ladder|testing profile):
+owner | ^owner: pr-checks with an item token
+manager | ^mgr: pr-checks gives the supervisor

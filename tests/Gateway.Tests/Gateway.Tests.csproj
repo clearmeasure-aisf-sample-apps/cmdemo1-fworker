@@ -20,6 +20,8 @@
   <ItemGroup>
     <ProjectReference Include="../../gateway/Gateway.csproj" />
     <ProjectReference Include="../../src/Fworker.Database/Fworker.Database.csproj" />
+    <!-- the fake GitHub and Octopus of the Tier 1 suites, built beside the tests: the read models' tests (ReadModels*FakeTests) start it as a process of its own -->
+    <ProjectReference Include="../FakeGitHub/FakeGitHub.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
   <ItemGroup>
     <!-- texts recorded from master that a refactoring must reproduce byte for byte (RuntimePromptTests) -->
