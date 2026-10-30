@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Fworker.Contracts.Commands;
+using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Xunit;
@@ -81,13 +82,13 @@ public sealed class JournalLedgerTests
         public JournalLedger Ledger;
         // every read of the clock moves it by a tick, so two lines in the same instant still have the different ticks the script's keys (the ticks of the write) have
         DateTime Clock() { var t = Now; Now = Now.AddTicks(10); return t; }
-        public Rig(double waitingMinutes = 30, IReadOnlyList<string>? patterns = null, IReadOnlyList<string>? stateAuthors = null)
+        public Rig(double waitingMinutes = 30, IReadOnlyList<string>? patterns = null, IReadOnlyList<string>? stateAuthors = null, IItemLock? itemLock = null)
         {
             var http = new HttpClient(Api) { BaseAddress = new Uri("http://fake/") };
             var factory = new GitHubClientFactory(http, new StaticCredentialSource([], new GitHubCredential("t", "token")), new GitHubBudget());
             var client = factory.For(Contracts.Ids.RepoId.Parse("o/r")).GetAwaiter().GetResult();
             var store = new GitHubJournalStore(client, new JournalIdentity(Name, _ => Task.FromResult(Login), stateAuthors ?? []), Clock, Log.Add);
-            Ledger = new JournalLedger(store, new JournalSettings(waitingMinutes, patterns), Clock, Log.Add);
+            Ledger = new JournalLedger(store, new JournalSettings(waitingMinutes, patterns), Clock, Log.Add, itemLock);
         }
 
         public Task<JournalOutcome> Line(int n, string ev, string key, params (string K, object? V)[] f) =>
@@ -110,6 +111,51 @@ public sealed class JournalLedgerTests
     }
 
     static readonly (string, object?)[] Matched = [("column", "Technical Design"), ("reason", "board-move"), ("trigger", "the sweep")];
+
+    // ---- W9.10l: the lock of the item is the one the caller gives ---------------------------------------------------------------------------------
+
+    sealed class RecordingLock(bool busy = false) : IItemLock
+    {
+        public readonly List<(int Item, int Wait)> Calls = [];
+        public Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct)
+        {
+            Calls.Add((item, waitSeconds));
+            return busy ? throw new ItemBusyException(item) : body();
+        }
+    }
+
+    [Fact]
+    public async Task ALineIsWrittenUnderTheItemLockItIsGiven_WithTheWaitOfUseItemLock()
+    {
+        var l = new RecordingLock(); var r = new Rig(itemLock: l);
+        Assert.True((await r.Line(7, "matched", "m1", Matched)).Posted);
+        Assert.Equal([(7, 45)], l.Calls);
+        Assert.Single(r.Plant(7));
+    }
+
+    [Fact]
+    public async Task ABusyItemLock_IsATimeoutTheCommandBaseRetries_AndNothingWasWritten()
+    {
+        var l = new RecordingLock(busy: true); var r = new Rig(itemLock: l);
+        var e = await Assert.ThrowsAsync<TimeoutException>(() => r.Line(7, "matched", "m1", Matched));
+        Assert.Contains("another operation on item 7 is running", e.Message);
+        Assert.Empty(r.Api.Calls);
+        Assert.Equal(Fworker.Integrations.Commands.ErrorAction.Retry, ErrorClassifier.Classify(e).Action);
+    }
+
+    [Fact]
+    public async Task WithoutALock_TheLinesOfOneItemAreWrittenOneAfterTheOther()
+    {
+        var l = new InProcessItemLock();
+        var inside = new TaskCompletionSource(); var release = new TaskCompletionSource();
+        var first = l.Use(3, async () => { inside.SetResult(); await release.Task; return 1; }, 5, default);
+        await inside.Task;
+        Assert.Equal(2, await l.Use(4, () => Task.FromResult(2), 1, default));   // another item is free
+        await Assert.ThrowsAsync<ItemBusyException>(() => l.Use(3, () => Task.FromResult(3), 1, default));
+        release.SetResult();
+        Assert.Equal(1, await first);
+        Assert.Equal(4, await l.Use(3, () => Task.FromResult(4), 1, default));   // released
+    }
 
     // ---- journal-fold.ps1, step by step -------------------------------------------------------------------------------------------------------
 

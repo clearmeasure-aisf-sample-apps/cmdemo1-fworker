@@ -273,14 +273,14 @@ public sealed class ReadModelsPortTests : IDisposable
     {
         var state = Path.Combine(dir, "state");
         var waits = new List<TimeSpan>();
-        var l = new FileItemLock(state, TimeSpan.FromMilliseconds(250), async (t, ct) => { waits.Add(t); await Task.Delay(100, ct); });
+        var l = new FileItemLock(state, async (t, ct) => { waits.Add(t); await Task.Delay(400, ct); });
         var inner = "";
         var result = await l.Use(7, async () =>
         {
             Assert.True(File.Exists(Path.Combine(state, "item-7.lock")));
             // the same item again cannot get in: busy after the time it may wait
-            var busy = await Assert.ThrowsAsync<VerbRefusal>(() => l.Use(7, () => Task.FromResult(1), default));
-            Assert.Equal((20, "item-busy", "another operation on item 7 is running", 5), (busy.Exit, busy.Code, busy.Message, busy.Extra["retryAfterSeconds"]!.GetValue<int>()));
+            var busy = await Assert.ThrowsAsync<ItemBusyException>(() => l.Use(7, () => Task.FromResult(1), 1, default));
+            Assert.Equal((7, "another operation on item 7 is running"), (busy.Item, busy.Message));
             Assert.NotEmpty(waits); Assert.All(waits, w => Assert.Equal(TimeSpan.FromMilliseconds(300), w));
             // another item is free
             inner = await l.Use(8, () => Task.FromResult("eight"), default);

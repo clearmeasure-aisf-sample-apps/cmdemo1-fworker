@@ -20,7 +20,7 @@ static class ReadModelRoutes
             var budget = services.GetService(typeof(GitHubBudget)) as GitHubBudget;
             Action<string, string?, string?, string?>? observe = budget is null ? null
                 : (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
-            handlers = new ReadModelHandlers(ReadModelParts.Build(instance, observe));
+            handlers = new ReadModelHandlers(ReadModelParts.Build(instance, observe, locks: ItemLocks.From(services, Environment.GetEnvironmentVariable)));
         }
         catch (Exception e) when (e is not OperationCanceledException)
         {

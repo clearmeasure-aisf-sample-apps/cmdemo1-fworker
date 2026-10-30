@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 
 // The gateway's registrations, one method per area (gateway-composition.md 2 and 3 B, task C5a). Program.cs calls them in this order:
 //
@@ -52,6 +53,8 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(transcripts);
         services.AddSingleton<TranscriptService>();
         services.AddSingleton(runner);
+        // W9.10l: the one lock of an item for every port and the journal ledger (gateway/Ports/ItemLocks.cs); the item lock file of the state directory, which the rule scripts lock too
+        services.AddSingleton<IItemLock>(_ => new FileItemLock(RuleStateDirectory.Resolve(Environment.GetEnvironmentVariable)));
         c.GitHubBudget = githubBudget; c.Runner = runner; c.Transcripts = transcripts;
         return services;
     }

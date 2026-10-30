@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Xunit;
@@ -16,7 +17,7 @@ public static class CompositionGraph
     public static readonly Type[] Singletons =
     {
         typeof(EventHub), typeof(QcSettings), typeof(GatewayOptions), typeof(InstanceConfig), typeof(TimingOptions), typeof(RevocationOptions), typeof(EngineOptions),
-        typeof(MessagingSettings), typeof(KeeperSettings), typeof(GitHubBudget), typeof(TranscriptStore), typeof(TranscriptService), typeof(Runner),
+        typeof(MessagingSettings), typeof(KeeperSettings), typeof(GitHubBudget), typeof(TranscriptStore), typeof(TranscriptService), typeof(Runner), typeof(IItemLock),
         typeof(LeaderSettings), typeof(ILeadership), typeof(GatewayLeader), typeof(SnapshotCoordinator), typeof(ISnapshotCoordinator),
         typeof(LeadershipService), typeof(RevocationService), typeof(IRevocationService), typeof(OperatorReleaseLoader), typeof(IOperatorReleaseLoader),
         typeof(LeaseSettings), typeof(HostSettings), typeof(ManagerActionSettings), typeof(BaseUpdateSettings), typeof(RuntimeSettings),

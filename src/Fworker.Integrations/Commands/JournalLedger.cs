@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using Fworker.Domain;
 
 namespace Fworker.Integrations.Commands;
@@ -8,8 +9,8 @@ namespace Fworker.Integrations.Commands;
 // W3.2: the journal ledger in C#. A port of Add-Journal, Close-JournalFolds, Add-JournalKind and Verb_journal of plugin/scripts/lib/Journal.ps1: the
 // same comment text and marker, the same ledger in the item's state comment (journal.keys, count, kinds, fold, waiting_at, ciReleased), the same folds,
 // the same cap, and the same GitHub calls in the same order (the golden writes see no difference). It does not go through the `journal` verb.
-// Differences, all in failure cases only: the line is written under a per-item lock of this process instead of the item lock file of the rule script
-// (the commands of one item also run one after the other, see JournalCommandWiring); a state conflict reads the state again and repeats the line, and
+// Differences, all in failure cases only: the line is written under the IItemLock it is given (W9.10l: the gateway gives it the one lock of every port, the item lock file that the rule scripts take too, so a journal
+// line, an item verb and a script exclude one another; without one, a lock of this process; the commands of one item also run one after the other, see JournalCommandWiring); a state conflict reads the state again and repeats the line, and
 // the repeat finds a comment that was posted before the conflict by its marker instead of posting it twice; a GitHub failure that is worth a retry is
 // thrown, for the command base to classify, where the script logs it and drops the line.
 
@@ -47,10 +48,11 @@ public sealed class JournalLedger
     readonly JournalSettings settings;
     readonly Func<DateTime> utcNow;
     readonly Action<string> log;
-    readonly ConcurrentDictionary<int, ItemLock> locks = new();
+    readonly IItemLock itemLock;
 
-    public JournalLedger(IJournalStore store, JournalSettings? settings = null, Func<DateTime>? utcNow = null, Action<string>? log = null)
+    public JournalLedger(IJournalStore store, JournalSettings? settings = null, Func<DateTime>? utcNow = null, Action<string>? log = null, IItemLock? itemLock = null)
     {
+        this.itemLock = itemLock ?? new InProcessItemLock();
         this.store = store; this.settings = settings ?? new JournalSettings(); this.utcNow = utcNow ?? (() => DateTime.UtcNow);
         this.log = log ?? (m => Console.Error.WriteLine(m));
     }
@@ -64,7 +66,12 @@ public sealed class JournalLedger
         if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
         ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
         if (string.IsNullOrEmpty(key) || ev == "waiting") key = utcNow().Ticks.ToString(CultureInfo.InvariantCulture);
-        using var held = await Enter(item, ct);
+        try { return await itemLock.Use(item, () => AppendLocked(item, ev, fields, key, ct), IItemLock.DefaultWaitSeconds, ct); }
+        catch (ItemBusyException e) { throw new TimeoutException($"journal {ev} for #{item}: {e.Message}", e); }   // worth a retry: the command base classifies a timeout as transient
+    }
+
+    async Task<JournalOutcome> AppendLocked(int item, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct)
+    {
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -220,21 +227,6 @@ public sealed class JournalLedger
     }
 
     static bool Truthy(object? v) => v switch { null => false, string s => s.Length > 0, bool b => b, long l => l != 0, int i => i != 0, double d => d != 0, _ => true };
-
-    // ---- the lock of an item: lines of one item are written one after the other -------------------------------------------------------------------
-
-    sealed class ItemLock { public readonly SemaphoreSlim Gate = new(1, 1); public int Users; }
-
-    async Task<IDisposable> Enter(int item, CancellationToken ct)
-    {
-        ItemLock l;
-        lock (locks) { l = locks.GetOrAdd(item, _ => new ItemLock()); l.Users++; }
-        try { await l.Gate.WaitAsync(ct); }
-        catch { lock (locks) { if (--l.Users == 0) locks.TryRemove(item, out _); } throw; }
-        return new Releaser(() => { l.Gate.Release(); lock (locks) { if (--l.Users == 0) locks.TryRemove(item, out _); } });
-    }
-
-    sealed class Releaser(Action release) : IDisposable { int done; public void Dispose() { if (Interlocked.Exchange(ref done, 1) == 0) release(); } }
 
     /// <summary>The fields of a command (json) as the ledger reads them: text, true/false, numbers, null; anything else as its json.</summary>
     public static Dictionary<string, object?> FieldsOf(JsonObject? fields)

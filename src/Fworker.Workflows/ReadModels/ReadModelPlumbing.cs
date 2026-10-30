@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Fworker.Contracts.Seams;
 
 namespace Fworker.Workflows.ReadModels;
 
@@ -224,6 +225,7 @@ public static class VerbReply
     {
         try { return Ok(verb, await body()); }
         catch (VerbRefusal r) { return Refused(verb, r); }
+        catch (ItemBusyException b) { return Refused(verb, new VerbRefusal(20, "item-busy", b.Message, new JsonObject { ["retryAfterSeconds"] = 5 })); }   // the lock of the item (IItemLock) was not free in time
         catch (OperationCanceledException) { throw; }
         catch (Exception e) { Console.Error.WriteLine($"internal error in {verb} : {e.GetType().Name}: {e.Message}"); return InternalError(verb, e); }
     }
