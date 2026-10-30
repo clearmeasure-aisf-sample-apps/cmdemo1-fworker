@@ -529,6 +529,39 @@ The route files are `gateway/Verbs/Routes/{Item,Merge,Delivery,ReadModels,Keeper
 the transcript verbs in Board; the `qc-*` verbs and the five retired ones are in none) and has an empty `Register(V2VerbRoutes, IServiceProvider)` that its item fills with `routes.Add(Verbs, "verb", handler)`.
 `V2VerbRoutes.Build` calls the seven only where the engine acts (`Engine.V2Acts`) and the composition puts a `V2VerbRouter` in front of the router only when a route exists, so v1 routing, the shadow run and every
 environment are exactly what they were; a verb no group registered still runs on v1.
+
+**W9.3 as built (#355): the merge train verbs on v2.** `approve-pr`, `merge`, `clear-hold`, `base-watch` and `base-update-branch` are registered by `gateway/Verbs/Routes/Merge.cs` where the engine acts. Owner decisions of
+2026-10-28 apply (hybrid composition, tdd only, the W7 scope cut: no merge queue, no smoke evidence, no overflow). No table was added (`MergeTrains` and `WorkItems` are enough; the QC record is read from `QcEnvironments`, W9.0).
+- **Hybrid:** a verb is v2's for an item the WorkItemSaga owns, and the rule script's (`Runner`, as before) for every other item, for merge policy other than `auto` (the inspector's review, the approval of the current head,
+  the QC gate and the migration-number collision of `Verb_merge` are `peer-approved` rules, which stay on v1 as W6.2 declared) and whenever the saga's parts cannot be found (no host, no GitHub credential: not remembered, the next
+  call tries again). One call is answered by exactly one of them. `MergeVerbHandlers` (`gateway/Verbs/MergeVerbs.cs`) finds the parts at the first call: the host is built after the route table.
+- **`merge`** (`MergeVerbRules`, `MergeVerbService` in `Fworker.Workflows.Merge`): the script's checks in its order and with its codes, exits and texts, on the saga's state (`already-merged`, `item-closed`, `wrong-column`,
+  `no-pass-verdict`, then the labels read from the issue: `held-by-label`, `pr-mismatch`, `no-auto-merge-label`, and `held` for a parked saga). The merge itself is the saga's: its Merge step asks the repository's MergeTrainSaga
+  for the turn and the merge port runs the C# direct merge (W6.2, W7.2). The verb delivers the saga's retry timer at once (`MergeRetryDue` with the `MergeRetryAt` the state holds; nothing when a call is already out), looks at the
+  state once a second for at most 20 looks, and reports what the saga did in the shape of the script's answers: `merged` (sha, `by` gateway), `waiting` (the saga's reason, `checks-pending` before it has one, `since`), `demoted`
+  (`stale-head` when the head moved and the item is back to its verdict, `merge-out-of-date` when it is back in Development) and `parked` (the park reason up to its first colon). The script's own merge loop (the long waits of
+  a session's call, the update of the branch, the out-of-date retries) is the train's and the port's now, once, so a session and the saga can never merge the same item twice.
+- **`approve-pr` and `clear-hold`:** under `auto` they never decide anything about the pull request: `approve-pr` checks `item` and `text` and answers `not-required` (exit 10); `clear-hold` answers `item-closed` (11) for a saga
+  that completed and `not-held` (10) otherwise, because only an inspector's escalation, which `auto` never makes, is a hold it clears.
+- **`base-watch` and `base-update-branch`** (`BaseUpdateRules`, `BaseUpdateService`, adapters in `gateway/Ports/MergeVerbPort.cs`): the same GitHub reads as `BaseUpdate.ps1` (`branches`, `compare` with the 300-file bound, `pulls?state=open`,
+  the files of a pull request, the 3 s wait for a mergeability GitHub has not computed, `update-branch` with the head the trigger saw), the same rows (`skip` reasons `pass-unmerged`, `merged`, `pr-closed`, `no-branch`,
+  `verdict-recorded`, `merge-awaiting`, `in-validation`, `qc-for-head`, `error`) and outcomes (`not-open`, `head-moved`, `skip`, `conflict`, `unknown`, `current`, `refused`, `updated`). What the script reads in the state comment
+  the saga answers: a PASS waiting is `VerdictHead` without a `MergeCommit` (`pass-unmerged`), a merge on record is `MergeCommit` (`merged`), the validation column is the Verify and Merge steps, and the QC record is the
+  `QcEnvironments` row of the pull request. `base-watch` splits its items: the saga's are answered here, the others go to the script in one call with only those items and its rows join ours in the order of the call; with none
+  of the saga's among them the call is the script's as it was. `BaseWatch` (`gateway/BaseUpdate.cs`) calls the route table first, so the standing trigger is v2's where the engine acts. What the Runner does before
+  it starts the script of these calls is done here too: the two are not made while the GitHub budget is low (`GitHubBudget.DeferredCalls`, the same refusal), and `base-update-branch`, the one that writes, is refused with
+  `lease-lost` (exit 20) by a gateway that no longer holds the leader lease.
+- **Parity:** `tests/Gateway.Tests/MergeVerbParityTests.cs` runs 45 situations through the REAL scripts (`parity/merge-verbs-parity.ps1`: Verbs.Merge.ps1, Verbs.Inspect.ps1 and BaseUpdate.ps1 under PowerShell, with a scripted GitHub
+  and item state) and through the C# verbs with the saga state of the same situation, and compares the two answers field by field, texts included, with the exit code. The unit tests are `MergeVerbTests`, `BaseUpdateVerbTests`
+  (Workflow.Tests) and `MergeVerbRoutesTests` (Gateway.Tests: the route file, the hand-over to the script, the GitHub adapters, the QC read on a real SQL Server).
+- **Declared differences from the script (for `v2-differences.txt` when the v2 Tier 1 job claims a scenario that shows them):** the answer of a merge is the saga's, so it carries `by: gateway` and no comment on the item (the saga's
+  history is the record, as for the docs plan); a parked saga refuses the verb with `held` where the script's session call under `auto` ignored a park; the session's call no longer waits minutes for the checks (it answers `waiting`
+  after at most 20 seconds, as the gateway's own call always did); the refusals do not feed the model ladder's counter (`Add-Refusal` of the script; the saga counts its own failures); a saga records no branch name, so the
+  `pr.branch` fallback of the script's row (a branch recorded without a pull request number) does not exist for its items.
+- **Not here:** the claims of these verbs in `tests/scenarios/v2-claims.txt` (a suite is claimed when the v2 Tier 1 job has run it; the baseupdate scenarios of the owner suite are the candidates, and run on v1's items through the
+  hand-over); the peer-approved path in C# (the inspector's review as the reviewer App, the approval of the current head, the QC gate, the migration collision), which stays the script's until W9.11 decides whether the policy
+  survives; the merge queue (W7.10).
+
 **W9.2 as built (#354), the item verbs.** Owner decisions of 2026-10-28 stand (hybrid composition, tdd only, the W7 scope cut). The 18 verbs of `ItemRoutes` (`get-item` to `expire-claim`) are answered by v2 where the engine acts,
 each as the rule script answers it for the same input: the same fields and exit codes, the same writes to GitHub, the board and the state comment, in the same order.
 - **Where:** `src/Fworker.Workflows/WorkItem/Verbs/*` has the verbs as ports of `Verbs.Item.ps1`, `Owner.ps1` and `Verbs.Pr.ps1` against ports (`ItemVerbPorts.cs`: the wire to GitHub, the state comment, the journal, the item lock,
