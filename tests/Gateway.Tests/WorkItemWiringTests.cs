@@ -242,7 +242,7 @@ public sealed class WorkItemWiringTests
         return false;
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AStartedItem_IsDecidedByTheSaga_AndV1sSweepLeavesItAlone_UntilItCompletes()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;

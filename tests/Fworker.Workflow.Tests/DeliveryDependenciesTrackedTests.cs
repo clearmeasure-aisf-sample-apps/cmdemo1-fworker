@@ -72,7 +72,7 @@ public class DeliveryDependenciesTrackedTests
         return false;
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ADeliveryOfTheDependency_ReleasesTheHeldItem_ThroughTheRoutersHandler_WithoutWaitingForATimer()
     {
         if (!TrackedSessionHost.Available) return;
@@ -105,7 +105,7 @@ public class DeliveryDependenciesTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ADeliveryNobodyWaitsFor_IsNotRecordedByTheRoutersHandler_WhereTheRuleIsOff()
     {
         if (!TrackedSessionHost.Available) return;
@@ -116,7 +116,7 @@ public class DeliveryDependenciesTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM factory.DeliveredTo"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheMergedItemsTable_AnswersWhichDependenciesAreNotMerged()
     {
         if (!TrackedSessionHost.Available) return;

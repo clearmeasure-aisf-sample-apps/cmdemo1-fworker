@@ -118,7 +118,7 @@ public class DeliveryTrainTrackedTests
 
     static async Task<TrainRecord?> Row(TrackedSessionHost h, string key) => await new SqlTrainStore(() => Open(h.ConnectionString)).Load(key, default);
 
-    [Fact]
+    [SqlFact]
     public async Task TheTimers_AreDurableScheduledMessages_AndDriveAReleaseToItsPromotion()
     {
         if (!TrackedSessionHost.Available) return;
@@ -151,7 +151,7 @@ public class DeliveryTrainTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheSignOff_IsAnsweredThroughTheHost_AndTheDeliveryLandsInTheTable_ForAllReleasesItCarries()
     {
         if (!TrackedSessionHost.Available) return;
@@ -178,7 +178,7 @@ public class DeliveryTrainTrackedTests
         Assert.DoesNotContain("acme/orders#7", state.Candidates.Keys);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ARedeliveredFact_IsAppliedOnce_AndARestartKeepsTheTrain()
     {
         if (!TrackedSessionHost.Available) return;

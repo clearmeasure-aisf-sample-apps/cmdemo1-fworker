@@ -265,7 +265,7 @@ public sealed class MergeVerbRoutesTests
 
     // ---- the QC record, on a real SQL Server (FACTORY_TEST_SQL; returns at once without one) -------------------------------------------
 
-    [Fact]
+    [SqlFact]
     public async Task TheQcRecordOfAPullRequest_IsReadByItsKey_AndTheSagasFactsByItsItem()
     {
         if (!TestDatabase.Available) return;

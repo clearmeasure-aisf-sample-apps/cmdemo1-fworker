@@ -116,11 +116,12 @@ public sealed class JournalLedgerTests
 
     sealed class RecordingLock(bool busy = false) : IItemLock
     {
+        public bool Busy = busy;
         public readonly List<(int Item, int Wait)> Calls = [];
         public Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct)
         {
             Calls.Add((item, waitSeconds));
-            return busy ? throw new ItemBusyException(item) : body();
+            return Busy ? throw new ItemBusyException(item) : body();
         }
     }
 
@@ -134,13 +135,18 @@ public sealed class JournalLedgerTests
     }
 
     [Fact]
-    public async Task ABusyItemLock_IsATimeoutTheCommandBaseRetries_AndNothingWasWritten()
+    public async Task ABusyItemLock_IsATimeoutTheCommandBaseRetries_AndTheRetryDoesNotPostTheCommentTwice()
     {
+        // the lock is taken for the save only (the post is outside it), so the comment is posted before the lock is found busy; the repeat finds it by its marker
         var l = new RecordingLock(busy: true); var r = new Rig(itemLock: l);
         var e = await Assert.ThrowsAsync<TimeoutException>(() => r.Line(7, "matched", "m1", Matched));
         Assert.Contains("another operation on item 7 is running", e.Message);
-        Assert.Empty(r.Api.Calls);
         Assert.Equal(Fworker.Integrations.Commands.ErrorAction.Retry, ErrorClassifier.Classify(e).Action);
+        Assert.Empty(r.Api.Of(7).Where(c => c.Body.StartsWith("<!-- factory-state:")));   // nothing was saved
+        l.Busy = false;
+        Assert.True((await r.Line(7, "matched", "m1", Matched)).Posted);
+        Assert.Single(r.Plant(7));
+        Assert.Equal(1, JournalJson.Int(r.J(7), "count"));
     }
 
     [Fact]
@@ -166,6 +172,101 @@ public sealed class JournalLedgerTests
         release.SetResult();
         Assert.Equal(1, await first);
         Assert.Equal(4, await l.Use(3, () => Task.FromResult(4), 1, default));   // released
+    }
+
+    // ---- the shared item lock is not held across the posts to GitHub ---------------------------------------------------------------------------
+
+    /// <summary>Holds the post of the comment whose text contains <paramref name="needle"/> until <see cref="Release"/>: the slow post of the scenario "journal order" (the fake GitHub's latency).</summary>
+    sealed class SlowPost
+    {
+        readonly string needle; readonly ManualResetEventSlim gate = new(false);
+        public readonly TaskCompletionSource Reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public readonly List<string> Posts = [];   // the events of the comments posted, in the order the posts started
+        public SlowPost(FakeIssues api, string needle)
+        {
+            this.needle = needle;
+            api.Intercept = req =>
+            {
+                if (req.Method != HttpMethod.Post || !req.RequestUri!.AbsolutePath.EndsWith("/comments", StringComparison.Ordinal)) return null;
+                var body = req.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                var m = Regex.Match(body, "plant event=([a-z-]+)");
+                if (m.Success) lock (Posts) Posts.Add(m.Groups[1].Value);
+                if (body.Contains(this.needle, StringComparison.Ordinal)) { Reached.TrySetResult(); gate.Wait(TimeSpan.FromSeconds(30)); }
+                return null;
+            };
+        }
+        public void Release() => gate.Set();
+    }
+
+    [Fact]
+    public async Task AnItemVerb_IsNotBlockedBySlowJournalPostOfTheSameItem()
+    {
+        var l = new InProcessItemLock(); var r = new Rig(itemLock: l);
+        await r.Line(8, "matched", "m0", Matched);   // the state comment exists
+        var slow = new SlowPost(r.Api, "plant event=offered");
+        var line = Task.Run(() => r.Line(8, "offered", "o1", ("worker", "w"), ("type", "t"), ("ackSeconds", 1)));
+        await slow.Reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        // the line is in the middle of its post: a verb of the same item takes the shared lock at once (a wait of 2 seconds is far more than it needs)
+        var ran = await l.Use(8, () => Task.FromResult("verb ran"), 2, default);
+        Assert.Equal("verb ran", ran);
+        Assert.False(line.IsCompleted);
+        slow.Release();
+        Assert.True((await line.WaitAsync(TimeSpan.FromSeconds(10))).Posted);
+        Assert.Equal(["matched", "offered"], r.Events(8));
+        Assert.Equal(2, JournalJson.Int(r.J(8), "count"));
+    }
+
+    [Fact]
+    public async Task AVerbThatSavesTheStateDuringTheSlowPost_MakesTheLineReadAgainAndRepeat_WithoutPostingTwice()
+    {
+        // the protection of #572 stays: the save of the line is under the shared lock and refused when the revision moved, so a verb that saved meanwhile is never overwritten
+        var l = new InProcessItemLock(); var r = new Rig(itemLock: l);
+        await r.Line(9, "matched", "m0", Matched);
+        var stateId = r.Api.Of(9).Single(c => c.Body.StartsWith("<!-- factory-state:")).Id;
+        var slow = new SlowPost(r.Api, "plant event=offered");
+        var line = Task.Run(() => r.Line(9, "offered", "o1", ("worker", "w"), ("type", "t"), ("ackSeconds", 1)));
+        await slow.Reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await l.Use(9, () =>
+        {
+            var s = ItemStateComment.Parse(r.Api.Find(stateId)!.Body)!; s["rev"] = JournalJson.Int(s, "rev") + 1; s["marker"] = "the verb's write";
+            r.Api.Replace(stateId, ItemStateComment.Body(Name, 9, s));
+            return Task.FromResult(0);
+        }, 2, default);
+        slow.Release();
+        Assert.True((await line.WaitAsync(TimeSpan.FromSeconds(10))).Posted);
+        Assert.Single(r.Plant(9), c => c.Body.Contains("plant event=offered"));
+        Assert.Equal("the verb's write", r.State(9)["marker"]!.ToString());   // the verb's write is kept
+        Assert.Equal(2, JournalJson.Int(r.J(9), "count"));
+    }
+
+    [Fact]
+    public async Task TwoJournalLinesOfOneItem_StillLandInOrder_WhileTheFirstIsSlow()
+    {
+        var r = new Rig(itemLock: new InProcessItemLock());
+        var slow = new SlowPost(r.Api, "plant event=offered");
+        var first = Task.Run(() => r.Line(10, "offered", "o1", ("worker", "w"), ("type", "t"), ("ackSeconds", 1)));
+        await slow.Reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var second = Task.Run(() => r.Line(10, "launched", "l1", ("worker", "w"), ("type", "t")));
+        await Task.Delay(500);   // the second line has every chance to overtake the first
+        Assert.False(second.IsCompleted);
+        lock (slow.Posts) Assert.Equal(["offered"], slow.Posts);   // its post has not even started
+        slow.Release();
+        Assert.True((await first.WaitAsync(TimeSpan.FromSeconds(10))).Posted);
+        Assert.True((await second.WaitAsync(TimeSpan.FromSeconds(10))).Posted);
+        Assert.Equal(["offered", "launched"], r.Plant(10).OrderBy(c => c.Id).Select(c => Regex.Match(c.Body, "plant event=([a-z-]+)").Groups[1].Value));
+        Assert.Equal(2, JournalJson.Int(r.J(10), "count"));
+    }
+
+    [Fact]
+    public async Task LinesOfOtherItems_AreNotHeldBehindTheSlowPostOfOne()
+    {
+        var r = new Rig(itemLock: new InProcessItemLock());
+        var slow = new SlowPost(r.Api, "plant event=offered");
+        var first = Task.Run(() => r.Line(11, "offered", "o1", ("worker", "w"), ("type", "t"), ("ackSeconds", 1)));
+        await slow.Reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.True((await r.Line(12, "launched", "l1", ("worker", "w"), ("type", "t")).WaitAsync(TimeSpan.FromSeconds(10))).Posted);
+        slow.Release();
+        Assert.True((await first.WaitAsync(TimeSpan.FromSeconds(10))).Posted);
     }
 
     // ---- journal-fold.ps1, step by step -------------------------------------------------------------------------------------------------------

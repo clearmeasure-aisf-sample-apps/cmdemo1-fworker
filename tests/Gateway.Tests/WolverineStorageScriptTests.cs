@@ -78,7 +78,7 @@ public sealed class WolverineStorageScriptTests
         Assert.Equal(SchemaNames.Wolverine, WolverineHostOptions.Schema);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheScriptsBuildWolverinesStorage()
     {
         if (!TestDatabase.Available) return;

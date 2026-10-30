@@ -79,7 +79,7 @@ public class CapacityTrackedTests
     static Task<long> History(TrackedSessionHost h, string type, string? item = null) =>
         h.Count($"SELECT COUNT(*) FROM factory.ItemHistory WHERE Type = '{type}'" + (item == null ? "" : $" AND ItemKey = '{item}'"));
 
-    [Fact]
+    [SqlFact]
     public async Task ARequest_IsGranted_TheLedgerTheHistoryAndTheSlotsTimerAreInTheDatabase()
     {
         if (!TrackedSessionHost.Available) return;
@@ -96,7 +96,7 @@ public class CapacityTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheEndOfASession_HandsTheSlotToTheWaitingItem_AndTheHistoryTellsBoth()
     {
         if (!TrackedSessionHost.Available) return;
@@ -111,7 +111,7 @@ public class CapacityTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AHandlerThatDiesAfterTheSave_IsRunAgain_AndTheGrantIsPublishedOnce()
     {
         if (!TrackedSessionHost.Available) return;
@@ -127,7 +127,7 @@ public class CapacityTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheLedger_SurvivesARestartOfTheHost_AndTheNextInputWorksOnIt()
     {
         if (!TrackedSessionHost.Available) return;
@@ -142,7 +142,7 @@ public class CapacityTrackedTests
         Assert.Equal(2, rec.State.ExecutionsToday["cursor-cloud"]);
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AHostThatAnsweredHostFull_IsPlannedAgainByTheDurableTimer_WhenItsBlockEnds()
     {
         if (!TrackedSessionHost.Available) return;
@@ -166,7 +166,7 @@ public class CapacityTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ManyRequestsAtOnce_AreSerialisedByTheQueue_FiveSlotsFiveGrantsNoLostWrite()
     {
         if (!TrackedSessionHost.Available) return;

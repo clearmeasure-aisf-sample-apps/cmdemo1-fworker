@@ -539,7 +539,8 @@ sealed class World
             if (!issues.ContainsKey(int.Parse(m.Groups[1].Value))) return (404, "{\"message\":\"Not Found\"}");
             var i = issues[int.Parse(m.Groups[1].Value)];
             if (method == "PATCH") { if (b?["body"] is { } bb) i.Body = bb.ToString(); if (b?["state"]?.ToString() == "closed") i.Open = false; return (200, J(("number", i.Number))); }
-            return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body)));
+            // as GitHub: the labels are part of the issue (the engine's intake reads an item's labels from this single read, W9.10d)
+            return (200, J(("number", i.Number), ("state", i.Open ? "open" : "closed"), ("title", i.Title), ("body", i.Body), ("labels", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray()))));
         }
         if ((m = Regex.Match(path, $"^{root}/issues/(\\d+)/comments$")).Success)
         {
@@ -980,7 +981,7 @@ sealed class World
         if (q.Contains("issue(number"))
         {
             var n = v["n"]!.GetValue<int>(); if (!issues.TryGetValue(n, out var i) || i.Repo != null) return (200, Data(J(("repository", J(("issue", null))))));   // an issue of another repository is not one of this repository
-            var card = i.Card == null ? new JsonArray() : new JsonArray(J(("id", i.Card), ("project", J(("number", 679))), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column)))));
+            var card = i.Card == null ? new JsonArray() : new JsonArray(J(("id", i.Card), ("project", J(("id", "PVT_fake"), ("number", 679))), ("fieldValueByName", i.Column == null ? null : J(("name", i.Column)))));
             return (200, Data(J(("repository", J(("issue", J(("id", i.Node), ("number", i.Number), ("state", i.Open ? "OPEN" : "CLOSED"), ("title", i.Title), ("body", i.Body), ("url", $"https://fake/issues/{i.Number}"), ("createdAt", i.Created.ToString("o")),
                 ("labels", J(("nodes", new JsonArray(i.Labels.Select(x => (JsonNode)J(("name", x))).ToArray())))), ("projectItems", J(("nodes", card))))))))));
         }

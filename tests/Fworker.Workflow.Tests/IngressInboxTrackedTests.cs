@@ -36,7 +36,7 @@ public class IngressInboxTrackedTests
     static string Ev(string name, string delivery) =>
         new JsonObject { ["provider"] = "github", ["event"] = name, ["item"] = 7, ["ref"] = delivery, ["pr"] = 9, ["sha"] = "abc123" }.ToJsonString();
 
-    [Fact]
+    [SqlFact]
     public async Task WebhookTwiceAndThenPoll_AreTakenInOnce_WithOneCorrelationPerThing()
     {
         if (!TrackedSessionHost.Available) return;
@@ -52,7 +52,7 @@ public class IngressInboxTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task W43_ReRunAndCardPolls_AreTakenIn_AndThePurgeForgetsOldClaims()
     {
         if (!TrackedSessionHost.Available) return;
@@ -70,7 +70,7 @@ public class IngressInboxTrackedTests
         Assert.Equal(0, await h.Count("SELECT COUNT(*) FROM factory.IngressDedup"));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task TheRowsCarryTheGenerationOfTheOpenInstance_ZeroForAnItemWithNone_AndForOneThatIsComplete()
     {
         if (!TrackedSessionHost.Available) return;
@@ -92,7 +92,7 @@ public class IngressInboxTrackedTests
         Assert.Equal((2, 0, 0), (gens.CurrentGeneration("acme/orders#7"), gens.CurrentGeneration("acme/orders#8"), gens.CurrentGeneration("acme/orders#99")));
     }
 
-    [Fact]
+    [SqlFact]
     public async Task ARedeliveryOfOneMessage_PassesTheClaims_AndADifferentMessageDoesNot()
     {
         if (!TrackedSessionHost.Available) return;

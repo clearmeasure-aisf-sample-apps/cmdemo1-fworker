@@ -88,7 +88,7 @@ public sealed class FeaturePlanWiringTests
 
     static async Task<WorkItemState> Row(string cs, ItemId item) => (await new SqlWorkItemStore(() => WorkItemWiring.Open(cs)).Load(item.ToString(), default))!.State;
 
-    [Fact]
+    [SqlFact]
     public async Task AFeatureItem_AsksTheSchedulerForASlot_TheWaitReachesTheSaga_AndItsMergeIsACodeChangesMerge()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;

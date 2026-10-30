@@ -93,7 +93,7 @@ public sealed class DocsPlanWiringTests
 
     static async Task<WorkItemState> Row(string cs, ItemId item) => (await new SqlWorkItemStore(() => WorkItemWiring.Open(cs)).Load(item.ToString(), default))!.State;
 
-    [Fact]
+    [SqlFact]
     public async Task TheDocsPlan_RunsToItsMerge_TheSagaAsksTheGatewayToMerge_AndTheAnswerCompletesTheItem()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;
@@ -165,7 +165,7 @@ public sealed class DocsPlanWiringTests
         }
     }
 
-    [Fact]
+    [SqlFact]
     public async Task AMergeThatIsBlocked_IsAskedAgainLater_NeverAFailure_AndTheMergeItselfWaitsForTheLabel()
     {
         if (!StubPwsh.Supported || WolverineHostTestSupport.Sql == null) return;

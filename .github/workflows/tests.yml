@@ -18,12 +18,12 @@
 # The jobs unit (tests/Gateway.Tests, the gateway in process: routes and their guards, start and stop, in 4 shards) and src (the smoke test and the
 # test projects of src/) run the quick tests in minutes. SQL Server is a service of those two and of the job v2 below: the Tier 1 shards do not pass
 # a connection to the gateway.
-# The job "Tier 1 (v2)" (v2 below) is a second engine, not a shard: it runs the suites and scenarios of tests/scenarios/v2-claims.txt once more with
-# run.ps1 -Engine v2 (FACTORY_ENVIRONMENT v2ci, engine.v2Environments naming it, FACTORY_DB_CONNECTION a SQL Server of its own), through
-# tests/ci/run-v2-claims.py. Those scenarios also run, as before, in the shards; the job names no suites: line, so "Every scenario is in exactly one shard"
-# does not read it, and it uploads v2-results-*, not suite-results-*, so "Tests result" does not count its scenarios a second time. Until its first green run on
-# master it is reported by "Tests result" and does not fail it (V2_BLOCKING there). The job "Image starts without a database" builds the image and starts it with
-# no FACTORY_DB_CONNECTION (the kill-switch case of W2.0): /ready must answer 200.
+# The jobs "Tier 1 (v2 ...)" (v2 below, a matrix like tier1) are a second engine, not shards: they run the suites and scenarios of tests/scenarios/v2-claims.txt once more with
+# run-all.ps1 -Engine v2 (FACTORY_ENVIRONMENT v2ci, or the suite's own name; engine.v2Environments naming it; FACTORY_DB_CONNECTION a SQL Server of its own; the saga profiles of run.ps1 -V2Profile start
+# sagas). Those scenarios also run, as before, in the shards. An entry of the v2 matrix names its suites after `claims:`, not `suites:`, so "Every scenario is in exactly one shard" does not read it
+# (it runs tests/ci/run-v2-claims.py, which proves that every claim of the file is in exactly one v2 entry), and the jobs upload v2-results-*, not suite-results-*, so "Tests result" does not count
+# their scenarios a second time. Until the first green run of Tests on master they are reported by "Tests result" and do not fail it (V2_BLOCKING there). The job "Image starts without a database"
+# builds the image and starts it with no FACTORY_DB_CONNECTION (the kill-switch case of W2.0): /ready must answer 200.
 name: Tests
 
 on:
@@ -84,7 +84,7 @@ jobs:
             suites: merge-queue@0/2,qc-rate
             parallel: 2
           - name: merge-queue-b
-            suites: merge-queue@1/2,qc-proxy,repos
+            suites: merge-queue@1/2,qc-proxy,repos,saga
             parallel: 2
           # owner: about 2,900 s of scenarios in 10 contiguous groups, cut only at the barriers of owner.ps1 (the largest barrier-to-barrier run is about 410 s); the cuts are the optimal ones for the seconds of scenario-stats.json (Select-GroupShare)
           - name: owner-0
@@ -430,16 +430,67 @@ jobs:
             dotnet test "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false
           done
 
-  # Tier 1 on the v2 engine (issue 467, W2.4a): the claims of tests/scenarios/v2-claims.txt, one run.ps1 -Engine v2 each, one after the other
-  # (tests/ci/run-v2-claims.py: a claim that lists no scenario fails; all claims run even when one fails). The gateway under test runs with
-  # FACTORY_ENVIRONMENT v2ci and engine.v2Environments naming it, so Engine.V2Acts is true: the Wolverine host, the journal sink, the runtime
-  # commands, the recurring jobs and the ingress start, against a database of its own on the SQL Server service (FACTORY_TEST_SQL; run.ps1 adds the
-  # database name per process). This is a second engine over the same scenarios and goldens, not a shard: it has no `suites:` entry above, and its
-  # result files are v2-results-*, which "Tests result" does not add to the suites. Own jobs timeout: the claims take minutes; the rest leaves the uploads their time.
+  # Tier 1 on the v2 engine (issue 467, W2.4a; W9.10d, #552): the claims of tests/scenarios/v2-claims.txt, run by `run-all.ps1 -Engine v2` in matrix jobs like the shards of tier1 above. A claim is a suite (or the
+  # scenarios of a suite that a regular expression names) and the test profile of run.ps1 -V2Profile (plain; saga-docs and saga-feature turn the engine's intake on, so that the Todo items of the saga suite
+  # start a WorkItemSaga). The gateway under test runs with engine.v2Environments naming FACTORY_ENVIRONMENT (v2ci, or the suite's own name where it sets one: tdd for copilot, promote, envscope), so Engine.V2Acts is
+  # true: the Wolverine host, the journal sink, the runtime commands, the recurring jobs and the ingress start, against a database of its own on the SQL Server service (FACTORY_TEST_SQL; run.ps1 adds the database name per
+  # process). This is a second engine over the same scenarios and goldens (golden/v2-differences.txt declares where v2 writes differently on purpose), not a shard: an entry names its suites after `claims:`, and no
+  # `suites:` line, so "Every scenario is in exactly one shard" does not read it; "Every v2 claim is in exactly one v2 job" (job coverage) checks the claims against these entries. The result files are v2-results-*,
+  # which "Tests result" does not add to the suites.
   v2:
-    name: Tier 1 (v2)
+    name: Tier 1 (v2 ${{ matrix.name }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # parallel: how many jobs of run-all.ps1 run at once (a claim by scenarios, a suite or a shard of one is a job)
+        include:
+          # the suite saga: two claims (docs plan, feature plan), each with its profile
+          - name: saga
+            claims: saga
+            parallel: 2
+          # the claims of auto, owner and manager by scenarios (10 claims, a job each)
+          - name: partial
+            claims: auto,owner,manager
+            parallel: 2
+          - name: octopus
+            claims: octopus,copilot-manager
+            parallel: 2
+          # promote (tdd, slot 28): 667 s of scenarios in one process on a development machine, 3 shards as in tier1 above
+          - name: promote-0
+            claims: promote@0/3
+            parallel: 1
+          - name: promote-1
+            claims: promote@1/3
+            parallel: 1
+          - name: promote-2
+            claims: promote@2/3
+            parallel: 1
+          # qc-worker: 494 s of scenarios in one process on a development machine, 4 shards as in tier1 above
+          - name: qc-worker-0
+            claims: qc-worker@0/4
+            parallel: 1
+          - name: qc-worker-1
+            claims: qc-worker@1/4
+            parallel: 1
+          - name: qc-worker-2
+            claims: qc-worker@2/4
+            parallel: 1
+          - name: qc-worker-3
+            claims: qc-worker@3/4
+            parallel: 1
+          # the QC environment suites (policy auto)
+          - name: qc-gates-a
+            claims: qc-gate,qc-gate-race,qc-gate-grace,qc-gate-lease
+            parallel: 2
+          - name: qc-gates-b
+            claims: qc-gate-idle,qc-gate-lifetime,qc-gate-waiting,qc-rate,qc-proxy
+            parallel: 2
+          # whole suites of a few minutes each (envscope runs as tdd, with its own environment name)
+          - name: small
+            claims: repos,envscope,mcp,copilot-deadline,operator,merge-queue
+            parallel: 2
     env:
       FACTORY_TEST_SQL: "Server=localhost,1433;User Id=sa;Password=Fw1!${{ github.run_id }}-${{ github.run_attempt }}aB;TrustServerCertificate=True;Encrypt=False;Connect Timeout=30"
     services:
@@ -487,39 +538,50 @@ jobs:
             dotnet build "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --verbosity quiet
           done
 
-      # (the claims' ports are the slots of their suites, 6100 to 8999: below the ephemeral range, which the shards move for their group ports)
-      - name: The claims of v2-claims.txt on the v2 engine
-        timeout-minutes: 22
-        env:
-          # the fake writes each scenario's record here and the golden files are compared, as in the shards (TEST_GOLDEN unset: compare)
-          TEST_WRITES_DIR: ${{ runner.temp }}/v2-writes
-          # the suites' work directories (their gateway logs) are under it, for the upload of a failed run
-          TMPDIR: ${{ runner.temp }}/v2-work
+      # Every port Tier 1 listens on is below 40000: a suite's slot range 6100-9199, a group's (and a claim by scenarios') 10000 + 1000 * slot + 100 * n + 0..99 (slot at most 29, n at most 9: at most 39999).
+      # Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of one suite could take the port a group of a high slot is about to listen on: this moves that range above them.
+      - name: Ephemeral ports above the test ports
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/v2-results" "$TMPDIR"
-          python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt "$RUNNER_TEMP/v2-results"
+          sudo sysctl -w net.ipv4.ip_local_port_range="40000 60999"
+          cat /proc/sys/net/ipv4/ip_local_port_range
+
+      - name: The claims ${{ matrix.claims }} on the v2 engine (full tier)
+        # below the job's 30 minutes, so that a hung job still uploads its logs and results
+        timeout-minutes: 22
+        env:
+          CLAIMS: ${{ matrix.claims }}
+          PARALLEL: ${{ matrix.parallel }}
+          # the fake writes each scenario's record here and the golden files are compared, as in the shards (TEST_GOLDEN unset: compare)
+          TEST_WRITES_DIR: ${{ runner.temp }}/v2-writes
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/v2-results"
+          pwsh -NoProfile -File tests/scenarios/run-all.ps1 -Engine v2 -Tier full -NoBuild -Parallel "$PARALLEL" -Suites "$CLAIMS" -LogDir "$RUNNER_TEMP/v2-results"
 
       - name: Keep the results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: v2-results
-          path: ${{ runner.temp }}/v2-results
+          name: v2-results-${{ matrix.name }}
+          path: |
+            ${{ runner.temp }}/v2-results/*.result.json
+            ${{ runner.temp }}/v2-results/*.log
           if-no-files-found: warn
           retention-days: 7
 
-      # the gateway and fake logs of the claims (the fixtures of the tests only), as for the shards
+      # the gateway and fake logs of a failed claim (the fixtures of the tests only): run-all.ps1 keeps the work directory of a failed job only, as for the shards
       - name: Keep the logs of a failed run
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: v2-logs-${{ github.run_attempt }}
+          name: v2-logs-${{ matrix.name }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/v2-work/**/gateway*.out
-            ${{ runner.temp }}/v2-work/**/gateway*.err
-            ${{ runner.temp }}/v2-work/**/fake.out
-            ${{ runner.temp }}/v2-work/**/fake.err
+            ${{ runner.temp }}/v2-results/*.err
+            ${{ runner.temp }}/v2-results/work-*/**/gateway*.out
+            ${{ runner.temp }}/v2-results/work-*/**/gateway*.err
+            ${{ runner.temp }}/v2-results/work-*/**/fake.out
+            ${{ runner.temp }}/v2-results/work-*/**/fake.err
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
@@ -528,7 +590,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: writes-v2-${{ github.run_attempt }}
+          name: writes-v2-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/v2-writes
           if-no-files-found: ignore
           retention-days: 14
@@ -640,6 +702,10 @@ jobs:
           if [ -n "$twice" ]; then echo "::error::Scenarios in more than one shard:"; echo "$twice"; bad=1; fi
           test "$bad" -eq 0
           cp "$out/expected.tsv" "$RUNNER_TEMP/scenario-list.tsv"
+
+      # The claims of the v2 engine (W9.10d): the file parses, every claim names a suite of run.ps1 -ListSuites and lists a scenario, and every claimed suite is in exactly one entry (`claims:`) of the v2 matrix
+      - name: Every v2 claim is in exactly one v2 job
+        run: python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml
 
       - name: Keep the list of scenarios
         uses: actions/upload-artifact@v7
