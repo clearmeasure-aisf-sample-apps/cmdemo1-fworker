@@ -16,14 +16,14 @@ public sealed class HttpMergeFactsReader(HttpClient http, IGitHubCredentialSourc
 {
     const string ClosedBy = """
         query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ closedByPullRequestsReferences(first:10, includeClosedPrs:true){ nodes{
-          number merged baseRefName headRefName title body mergeCommit{ oid } } } } } }
+          number merged mergedAt baseRefName headRefName title body mergeCommit{ oid } } } } } }
         """;
 
     public async Task<MergedPullRequest?> ReadPullRequest(RepoId repository, int number, CancellationToken ct = default)
     {
         var p = await Get(repository.Owner, $"repos/{repository}/pulls/{number}", ct);
         return p is null ? null : new MergedPullRequest(repository, number, p["merged"]?.GetValue<bool>() == true, p["base"]?["ref"]?.ToString(), p["head"]?["ref"]?.ToString(),
-            p["title"]?.ToString(), p["body"]?.ToString(), Lower(p["merge_commit_sha"]?.ToString()));
+            p["title"]?.ToString(), p["body"]?.ToString(), Lower(p["merge_commit_sha"]?.ToString()), Time(p["merged_at"]));
     }
 
     public async Task<MergedPullRequest?> FindMergedPullRequest(ItemId item, CancellationToken ct = default)
@@ -36,11 +36,11 @@ public sealed class HttpMergeFactsReader(HttpClient http, IGitHubCredentialSourc
         if (!resp.IsSuccessStatusCode) throw new MergeFactsException($"GitHub answered {(int)resp.StatusCode} to the pull request read of {item}");
         var root = JsonNode.Parse(await resp.Content.ReadAsStringAsync(ct));
         if (root?["errors"] is JsonArray { Count: > 0 } errs) throw new MergeFactsException($"GitHub answered GraphQL errors to the pull request read of {item} ({errs[0]?["type"]})");
-        // the newest merged one: the last in the list
+        // the newest merged one: the latest mergedAt (the list's order for pull requests that name no time, or the same time)
         var nodes = root?["data"]?["repository"]?["issue"]?["closedByPullRequestsReferences"]?["nodes"] as JsonArray ?? [];
-        var pr = nodes.LastOrDefault(n => n?["merged"]?.GetValue<bool>() == true);
+        var pr = nodes.Where(n => n?["merged"]?.GetValue<bool>() == true).OrderBy(n => Time(n?["mergedAt"]) ?? DateTimeOffset.MinValue).LastOrDefault();
         return pr is null ? null : new MergedPullRequest(item.Repository, pr["number"]!.GetValue<int>(), true, pr["baseRefName"]?.ToString(), pr["headRefName"]?.ToString(),
-            pr["title"]?.ToString(), pr["body"]?.ToString(), Lower(pr["mergeCommit"]?["oid"]?.ToString()));
+            pr["title"]?.ToString(), pr["body"]?.ToString(), Lower(pr["mergeCommit"]?["oid"]?.ToString()), Time(pr["mergedAt"]));
     }
 
     public async Task<ItemMergeFacts?> ReadItem(ItemId item, CancellationToken ct = default)
@@ -132,6 +132,7 @@ public sealed class HttpMergeFactsReader(HttpClient http, IGitHubCredentialSourc
         if (H(r, "x-ratelimit-resource") is { } res) observe?.Invoke(res, H(r, "x-ratelimit-remaining"), H(r, "x-ratelimit-reset"), H(r, "x-ratelimit-limit"));
     }
 
+    static DateTimeOffset? Time(JsonNode? n) => n is JsonValue v && v.TryGetValue<string>(out var s) && DateTimeOffset.TryParse(s, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal, out var t) ? t : null;
     static string? Lower(string? s) => string.IsNullOrEmpty(s) ? null : s.ToLowerInvariant();
     static int? Int(JsonNode? n) => n is JsonValue v && v.TryGetValue<int>(out var i) ? i : null;
 }

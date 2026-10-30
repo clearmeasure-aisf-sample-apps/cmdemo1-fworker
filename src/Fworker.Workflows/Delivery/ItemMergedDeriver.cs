@@ -60,17 +60,21 @@ public sealed partial class ItemMergedDeriver(IMergeFactsReader reader, IMergedI
                 break;
         }
         if (pull is null) return new([], "pull-request-not-found");
-        return await FromPullRequest(pull, source, messageId, ct);
+        // The item of a board.card event is the one whose issue GitHub says this pull request closed (closedByPullRequestsReferences): a pull request linked by hand in the sidebar names it nowhere in its title, body or branch,
+        // and the content gate alone would drop it, leaving the item open on a closed issue. The item's own state comment still has to be there (ReadItem), as for every candidate.
+        return await FromPullRequest(pull, source, messageId, ev["event"]!.ToString() == "board.card" ? number : 0, ct);
     }
 
-    async Task<ItemMergedDerivation> FromPullRequest(MergedPullRequest pull, string source, Guid messageId, CancellationToken ct)
+    async Task<ItemMergedDerivation> FromPullRequest(MergedPullRequest pull, string source, Guid messageId, int linkedItem, CancellationToken ct)
     {
         var commit = (pull.MergeCommit ?? "").ToLowerInvariant();
         if (!pull.Merged || !Sha40().IsMatch(commit)) return new([], "not-merged");
         if (!string.Equals(pull.BaseRef, defaultBranch(), StringComparison.OrdinalIgnoreCase)) return new([], "not-the-default-branch");
         // Every read comes before the first claim: a GitHub failure on a later item (it throws, and the message is retried) leaves no earlier item claimed for a message that may never come back.
         var derived = new List<(MergedItem Row, ItemMerged Message)>(); var taken = 0;
-        foreach (var n in ContentGate.CandidateItems(pull.Number, pull.HeadRef, pull.Title, pull.Body))
+        var candidates = ContentGate.CandidateItems(pull.Number, pull.HeadRef, pull.Title, pull.Body).ToList();
+        if (linkedItem > 0 && linkedItem != pull.Number && !candidates.Contains(linkedItem)) candidates.Add(linkedItem);
+        foreach (var n in candidates)
         {
             var id = new ItemId(pull.Repository, n);
             if (await store.TakenByOther(id.ToString(), commit, messageId, ct)) { taken++; continue; }   // the other source got this item first: no read

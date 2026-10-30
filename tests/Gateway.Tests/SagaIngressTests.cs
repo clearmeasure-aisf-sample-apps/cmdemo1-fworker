@@ -138,6 +138,44 @@ public sealed class SagaIngressTests
     }
 
     [Fact]
+    public async Task AMergeOfAnEarlierGeneration_IsNotTheClosesMerge_SoAReopenedItemClosedByHand_IsAnItemClosed()
+    {
+        // #7 merged and was delivered; a person reopened it (generation 2 starts on Design) and closes it by hand. The pull request that ever closed the issue is still in the list GitHub answers with:
+        // the deriver answers duplicate-item for its commit, so only ItemClosed can complete the instance.
+        var rig = new Rig(withMerges: true); await rig.OnDevelop();
+        var first = await rig.Svc.Handle(new MergeSeen(Item, "merged|" + new string('a', 40), new string('a', 40), 11));
+        Assert.Equal(WorkItemOutcome.Applied, first.Decision.Outcome);
+        Assert.False(rig.State.IsOpen);
+        var reopened = await rig.Svc.Handle(Assert.IsType<ReopenWorkItem>(Assert.Single(await rig.Webhook("item.reopened"))));
+        Assert.Equal((WorkItemOutcome.Applied, 2), (reopened.Decision.Outcome, rig.State.Generation));
+        rig.Merged.Closing = MergedPr() with { MergedAt = DateTimeOffset.UtcNow.AddHours(-1) };
+        var closed = Assert.IsType<ItemClosed>(Assert.Single(await rig.Webhook("item.closed")));
+        Assert.Equal(1, rig.Merged.Finds);
+        Assert.IsType<ItemClosed>(Assert.Single(await rig.Poll("board.card", edit: e => { e["open"] = false; e["column"] = "Done"; })));
+        var done = await rig.Svc.Handle(closed);
+        Assert.Equal((WorkItemOutcome.Applied, WorkItemStatus.Completed), (done.Decision.Outcome, rig.State.Status));
+
+        // the merge of the new generation (after its start) is still the close's, and so is a pull request that names no time
+        foreach (var at in new DateTimeOffset?[] { DateTimeOffset.UtcNow.AddMinutes(5), null })
+        {
+            var again = new Rig(withMerges: true); await again.OnDevelop();
+            await again.Svc.Handle(new MergeSeen(Item, "merged|" + new string('a', 40), new string('a', 40), 11));
+            await again.Svc.Handle(Assert.IsType<ReopenWorkItem>(Assert.Single(await again.Webhook("item.reopened"))));
+            again.Merged.Closing = MergedPr() with { MergeCommit = new string('c', 40), MergedAt = at };
+            Assert.Empty(await again.Webhook("item.closed"));
+        }
+    }
+
+    [Fact]
+    public async Task AMergedPullRequestWithoutAUsableCommit_IsNoMerge_AndTheCloseIsTheSagas()
+    {
+        // the deriver drops such a pull request as not merged, so no ItemMerged would ever follow the close
+        var rig = new Rig(withMerges: true); await rig.OnDevelop();
+        rig.Merged.Closing = MergedPr() with { MergeCommit = null };
+        Assert.IsType<ItemClosed>(Assert.Single(await rig.Webhook("item.closed")));
+    }
+
+    [Fact]
     public async Task ACloseWithoutAMergedPullRequest_IsStillAnItemClosed_AndAFailedReadIsRetried()
     {
         var rig = new Rig(withMerges: true); await rig.OnDevelop();

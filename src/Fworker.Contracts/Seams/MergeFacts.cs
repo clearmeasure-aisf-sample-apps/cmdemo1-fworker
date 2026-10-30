@@ -5,8 +5,8 @@ namespace Fworker.Contracts.Seams;
 // W5.0: what the derivation of ItemMerged reads from GitHub. The webhook event names a pull request or a merge commit, the board reconciler an item; the rest
 // (title, branch, body, labels, the item's state comment) is read through this port. The implementation is Fworker.Integrations.GitHub.HttpMergeFactsReader.
 
-/// <summary>A pull request as the merge derivation needs it. <see cref="MergeCommit"/> is lower case, null when GitHub names none.</summary>
-public sealed record MergedPullRequest(RepoId Repository, int Number, bool Merged, string? BaseRef, string? HeadRef, string? Title, string? Body, string? MergeCommit);
+/// <summary>A pull request as the merge derivation needs it. <see cref="MergeCommit"/> is lower case, null when GitHub names none. <see cref="MergedAt"/> is when it merged (null when GitHub names no time): a reopened item starts a new generation, and only a merge since its start is that generation's.</summary>
+public sealed record MergedPullRequest(RepoId Repository, int Number, bool Merged, string? BaseRef, string? HeadRef, string? Title, string? Body, string? MergeCommit, DateTimeOffset? MergedAt = null);
 
 /// <summary>An item as the gates read it: whether it carries the factory's state comment, its labels and body, and what the state comment says of the verdict and the merge.</summary>
 public sealed record ItemMergeFacts(ItemId Item, bool IsFactoryItem, IReadOnlyList<string> Labels, string? Body, bool VerdictPassed, int? VerdictPr, int? MergePr, string? MergeBy, bool DemoVideoPublished);

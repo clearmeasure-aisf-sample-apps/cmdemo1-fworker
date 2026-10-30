@@ -70,7 +70,12 @@ public sealed class SagaIngress(IWorkItemStore store, RepoId home, DocsPlanSetti
     async Task<bool> ClosedByMerge(ItemId id, WorkItemState state, CancellationToken ct)
     {
         if (merges is null || !state.IsOpen || state.MergeCommit.Length > 0 || state.Status != WorkItemStatus.Open) return false;
-        return await merges.FindMergedPullRequest(id, ct) is { Merged: true };
+        // Only a merge of THIS generation is the close's: the pull request read lists every one that ever closed the issue, and the merge of an earlier generation (the item was reopened since) was applied long ago, the deriver
+        // answers duplicate-item for it and sends nothing, so treating it as the close's would strand the instance open on a closed issue. A pull request that names no time is taken as before. The commit must be one the deriver
+        // accepts (40 hex characters), or it drops the pull request as not merged and nothing would complete the instance.
+        if (await merges.FindMergedPullRequest(id, ct) is not { Merged: true } pr) return false;
+        if (pr.MergedAt is { } at && at < state.StartedAt) return false;
+        return pr.MergeCommit is { Length: 40 } commit && commit.All(Uri.IsHexDigit);
     }
 
     // A person's move of the card, or null: the item is not on a step a card stands for, the column is no step's, the projection has not applied this step's card yet, or the event is the projection's own write.

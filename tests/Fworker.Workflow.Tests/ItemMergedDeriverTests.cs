@@ -23,7 +23,9 @@ public class ItemMergedDeriverTests
         /// <summary>Items whose read fails the way a GitHub error does (the inbox retries the message).</summary>
         public readonly HashSet<int> FailingItems = [];
         public Task<MergedPullRequest?> ReadPullRequest(RepoId repository, int number, CancellationToken ct = default) { Reads++; PullRequestReads++; return Task.FromResult(Pulls.GetValueOrDefault(number)); }
-        public Task<MergedPullRequest?> FindMergedPullRequest(ItemId item, CancellationToken ct = default) { Reads++; PullRequestReads++; return Task.FromResult(Pulls.Values.FirstOrDefault(p => p.Merged && ContentGate.CandidateItems(p.Number, p.HeadRef, p.Title, p.Body).Contains(item.Number))); }
+        /// <summary>A pull request GitHub lists as closing the issue although nothing in it names the item (linked by hand in the sidebar).</summary>
+        public MergedPullRequest? Linked;
+        public Task<MergedPullRequest?> FindMergedPullRequest(ItemId item, CancellationToken ct = default) { Reads++; PullRequestReads++; if (Linked is not null) return Task.FromResult<MergedPullRequest?>(Linked); return Task.FromResult(Pulls.Values.FirstOrDefault(p => p.Merged && ContentGate.CandidateItems(p.Number, p.HeadRef, p.Title, p.Body).Contains(item.Number))); }
         public Task<ItemMergeFacts?> ReadItem(ItemId item, CancellationToken ct = default)
         {
             Reads++; ItemReads++;
@@ -132,6 +134,26 @@ public class ItemMergedDeriverTests
         // the closed card names only the item, and a reopened item can merge again: the merged pull request is found, then each item is checked before its own reads
         var card = await d.Derive("poll", ClosedCard(), Guid.NewGuid(), default);
         Assert.Equal(("duplicate-item", 1, 0), (card.Reason, reader.PullRequestReads, reader.ItemReads));
+    }
+
+    [Fact]
+    public async Task APullRequestLinkedByHand_ThatNamesTheItemNowhere_IsDerivedForTheItemOfTheClosedCard_ButNotFromTheWebhook()
+    {
+        // GitHub lists it as closing issue #7 (the sidebar link); its branch, title and body do not name 7, so the content gate alone would drop it and the item would stay open on a closed issue
+        var reader = Reader(); reader.Pulls.Clear();
+        reader.Linked = new MergedPullRequest(Home, 12, true, "master", "someone/cleanup", "Cleanup (#12)", "No keyword here", Sha);
+        var store = new InMemoryMergedItemStore(); var d = Deriver(reader, store);
+        var m = Assert.Single((await d.Derive("poll", ClosedCard(), Guid.NewGuid(), default)).Merged);
+        Assert.Equal((7, Sha, 12), (m.Item.Number, m.Commit, m.PullRequest));
+        // an item without the factory's state comment is no item, however the pull request was found
+        var other = Reader(); other.Pulls.Clear(); other.Items.Clear();
+        other.Linked = reader.Linked;
+        Assert.Empty((await Deriver(other, new InMemoryMergedItemStore()).Derive("poll", ClosedCard(), Guid.NewGuid(), default)).Merged);
+        // a webhook names a pull request and no item: only the content gate maps it
+        reader.Pulls[12] = reader.Linked;
+        reader.Items[7] = Facts(7);
+        var hook = new JsonObject { ["provider"] = "github", ["event"] = "base.merged", ["ref"] = "d-12", ["pr"] = 12, ["sha"] = Sha }.ToJsonString();
+        Assert.Empty((await Deriver(reader, new InMemoryMergedItemStore()).Derive("webhook", hook, Guid.NewGuid(), default)).Merged);
     }
 
     [Fact]

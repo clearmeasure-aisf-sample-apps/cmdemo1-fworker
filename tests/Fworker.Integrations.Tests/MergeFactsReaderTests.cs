@@ -53,6 +53,25 @@ public class MergeFactsReaderTests
     }
 
     [Fact]
+    public async Task TheMergedPullRequestOfAClosedIssue_IsTheOneThatMergedLast_AndCarriesWhenItMerged()
+    {
+        // the list is not in merge order: the latest mergedAt wins, and a pull request without a time keeps the list's order
+        var stub = new Stub((_, body) =>
+        {
+            Assert.Contains("mergedAt", body);
+            return (HttpStatusCode.OK, """
+                {"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
+                  {"number":9,"merged":true,"mergedAt":"2026-10-29T10:00:00Z","baseRefName":"master","headRefName":"a","title":"newer","body":"","mergeCommit":{"oid":"2222222222222222222222222222222222222222"}},
+                  {"number":4,"merged":true,"mergedAt":"2026-10-01T10:00:00Z","baseRefName":"master","headRefName":"b","title":"older","body":"","mergeCommit":{"oid":"1111111111111111111111111111111111111111"}}]}}}}}
+                """);
+        });
+        var pr = await Reader(stub).FindMergedPullRequest(new ItemId(Repo, 7));
+        Assert.Equal((9, new DateTimeOffset(2026, 10, 29, 10, 0, 0, TimeSpan.Zero)), (pr!.Number, pr.MergedAt));
+        var pulls = new Stub((_, _) => (HttpStatusCode.OK, """{"merged":true,"merged_at":"2026-10-29T10:00:00Z","base":{"ref":"master"},"head":{"ref":"x"},"title":"T","body":"","merge_commit_sha":"abc"}"""));
+        Assert.Equal(new DateTimeOffset(2026, 10, 29, 10, 0, 0, TimeSpan.Zero), (await Reader(pulls).ReadPullRequest(Repo, 9))!.MergedAt);
+    }
+
+    [Fact]
     public async Task TheItem_CarriesLabelsBody_AndTheVerdictAndMergeOfItsStateComment_AndTheDemoVideoWhenLabelled()
     {
         var state = new JsonObject { ["verdict"] = new JsonObject { ["passed"] = true, ["pr"] = 9 }, ["merge"] = new JsonObject { ["pr"] = 9, ["by"] = "gateway" } };
