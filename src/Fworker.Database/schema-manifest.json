@@ -131,6 +131,15 @@
           "identity": false,
           "default": null
         },
+        "Mode": {
+          "type": "nvarchar",
+          "maxLength": 40,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": "N\u0027\u0027"
+        },
         "Phase": {
           "type": "nvarchar",
           "maxLength": 200,
@@ -523,6 +532,66 @@
       },
       "indexes": {
         "PK_DeliveryTrains": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Key"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.IdempotencyClaims": {
+      "columns": {
+        "ClaimedAt": {
+          "type": "datetime2",
+          "maxLength": 8,
+          "precision": 27,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "ExpiresAt": {
+          "type": "datetime2",
+          "maxLength": 8,
+          "precision": 27,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Key": {
+          "type": "nvarchar",
+          "maxLength": 800,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "OwnerEpoch": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "OwnerNode": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_IdempotencyClaims": {
           "unique": true,
           "primary": true,
           "keys": [

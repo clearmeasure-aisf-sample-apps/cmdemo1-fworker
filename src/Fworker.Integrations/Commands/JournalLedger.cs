@@ -82,6 +82,19 @@ public sealed class JournalLedger
     }
 
     /// <summary>
+    /// W9.10c: whether the line with this event and key was handled already (its key is in the ledger of the item's state comment, which is what Add-Journal checks before it posts): the effect of a handling that was cut off
+    /// before its result was recorded. A 'waiting' line takes the ticks of its write as its key, so it can never be looked up (false).
+    /// </summary>
+    public async Task<bool> Recorded(int item, string ev, string key, CancellationToken ct = default)
+    {
+        if (string.Equals(ev, "waiting", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(key)) return false;
+        var supported = JournalEvents.Supported.FirstOrDefault(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
+        if (supported == null) return false;
+        var st = await store.Read(item, ct);
+        return JournalJson.Strings(Journal(st.State), "keys").Contains($"{supported}|{key}", StringComparer.Ordinal);
+    }
+
+    /// <summary>
     /// W9.2: Add-Journal into a holder the caller has read and will save itself (the item verbs write their journal line and their state together, as the rule scripts do): the line is added to the holder's ledger and posted
     /// (or folded), nothing is saved here. False when the line was a repeat, over the cap, or already posted. Throws for a failure of GitHub, which the caller treats as the script does (it logs and goes on).
     /// </summary>

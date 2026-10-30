@@ -460,17 +460,79 @@ sealed class CopilotCloudRuntime : IWorkerRuntime, IRuntimeDetail, IRuntimeWork,
     }
 
     // W3.3: the newest task created at or after since whose title or prompt names the item ("#<item>"); the reservation reconciler asks this (throws when GitHub cannot be asked)
+    //
+    // W9.10c (#479): a miss releases the reservation, so a launch could then create a second task. Two cases are therefore not a miss and throw (the reservation stays Reserved, the next pass asks again): the list may hold
+    // more tasks than one page since the reservation, and a task created since the reservation whose list entry carries no text at all cannot be told from the item's. The real API's fields are the operator's to confirm on a live
+    // run (docs/HANDOFF.md); the match stays "#<item>" in the name, title or prompt.
     public async Task<(string TaskId, string Url)?> TaskForItem(int item, DateTime since, CancellationToken ct)
     {
-        var (s, j) = await Send(HttpMethod.Get, $"{TasksPath}?per_page=100", null, ct);
+        const int PageSize = 100;
+        var (s, j) = await Send(HttpMethod.Get, $"{TasksPath}?per_page={PageSize}", null, ct);
         if (s != 200) throw new HttpRequestException($"copilot tasks list: {s}");
-        foreach (var t in ((j?["tasks"] as JsonArray) ?? new JsonArray()).OrderByDescending(x => x?["created_at"]?.ToString() ?? "", StringComparer.Ordinal))
+        var all = ((j?["tasks"] as JsonArray) ?? new JsonArray()).OrderByDescending(x => x?["created_at"]?.ToString() ?? "", StringComparer.Ordinal).ToList();
+        var blank = 0; var oldestSeenIsSince = all.Count >= PageSize;
+        foreach (var t in all)
         {
-            if (!DateTime.TryParse(t?["created_at"]?.ToString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var at) || at < since) continue;
+            if (!DateTime.TryParse(t?["created_at"]?.ToString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var at)) continue;
+            if (at < since) { oldestSeenIsSince = false; continue; }
             var text = (t?["name"]?.ToString() ?? "") + " " + (t?["title"]?.ToString() ?? "") + " " + (t?["prompt"]?.ToString() ?? "");
             if (t?["id"]?.ToString() is { Length: > 0 } id && System.Text.RegularExpressions.Regex.IsMatch(text, $@"#{item}(?!\d)")) return (id, TaskUrl(HtmlUrl(t), id));
+            if (string.IsNullOrWhiteSpace(text)) blank++;
         }
+        if (oldestSeenIsSince) throw new InvalidOperationException("copilot tasks list: a full page of tasks was created since the reservation; there may be more");
+        if (blank > 0) throw new InvalidOperationException("copilot tasks list: a task created since the reservation carries no text to match");
         return null;
+    }
+
+    // W9.10c: the resume a reservation was made for: a "@copilot" comment on the owner's pull request created at or after since, and the session it started. Throws when there is no owner or pull request to look at
+    // or GitHub cannot be asked (the reservation then stays). The execution is "<task>#<session>" as Resume names it; the session number is read from the task's sessions when GitHub has started it.
+    public async Task<(string TaskId, string Url)?> ResumeForItem(int item, DateTime since, CancellationToken ct)
+    {
+        var own = await Owner(item, ct) ?? throw new InvalidOperationException($"copilot: no owner task of #{item} to look for a resume of");
+        var pr = own.Pr;
+        if (pr <= 0 && itemPr != null && await itemPr.FindAsync(item, ct) is { } ip) pr = ip.Number;
+        if (pr <= 0 && own.Branch != "") pr = await PrOfBranch(own.Branch, ct);
+        if (pr <= 0) throw new InvalidOperationException($"copilot: no pull request of #{item} to look for a resume on");
+        var (s, j) = await Send(HttpMethod.Get, $"/repos/{cfg.Repository}/issues/{pr}/comments?since={Uri.EscapeDataString(since.ToUniversalTime().ToString("o"))}&per_page=100", null, ct);
+        if (s != 200) throw new HttpRequestException($"copilot comments of #{pr}: {s}");
+        var posted = ((j as JsonArray) ?? new JsonArray()).Any(c =>
+            DateTime.TryParse(c?["created_at"]?.ToString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var at) && at >= since
+            && (c?["body"]?.ToString() ?? "").StartsWith("@copilot", StringComparison.Ordinal));
+        if (!posted) return null;
+        var session = own.Sessions;
+        var (ts, tj) = await Send(HttpMethod.Get, $"{TasksPath}/{Uri.EscapeDataString(own.TaskId)}", null, ct);
+        if (ts == 200 && tj?["sessions"] is JsonArray ss) session = Math.Max(session, ss.Count - 1);
+        return ($"{own.TaskId}#{session}", own.Url != "" ? own.Url : TaskUrl(null, own.TaskId));
+    }
+
+    // W9.10c: the owner record of what the reservation reconciler found. A launch found is the item's task (the one before it, if any, is kept as previous); a resume found counts the session on the existing owner. The record is
+    // written through the owner verb (copilot_task) and throws when it cannot be, so the reconciler leaves the reservation Reserved and tries again. The task's branch and pull request are read from the task, so the next start
+    // resumes it on its pull request instead of opening a second task.
+    public async Task RecordReconciledOwner(int item, string phase, string mode, string taskId, string url, CancellationToken ct)
+    {
+        var own = await Owner(item, ct);
+        CopilotOwner rec;
+        if (mode == Fworker.Integrations.Commands.CopilotReservation.ResumeMode)
+        {
+            rec = own ?? throw new InvalidOperationException($"copilot: no owner task of #{item} to count the resume on");
+            var hash = taskId.LastIndexOf('#');
+            var number = hash >= 0 && int.TryParse(taskId[(hash + 1)..], out var n) ? n : rec.Sessions;
+            lock (tasks) { rec.Sessions = Math.Max(rec.Sessions, number + 1); rec.Phase = phase; rec.LastResume = DateTime.UtcNow; rec.WaitingOn = "session"; rec.Updated = DateTime.UtcNow; }
+        }
+        else
+        {
+            if (own != null && own.TaskId == taskId) rec = own;
+            else
+            {
+                string branch = ""; int pr = 0;
+                var (ts, tj) = await Send(HttpMethod.Get, $"{TasksPath}/{Uri.EscapeDataString(taskId)}", null, ct);
+                if (ts == 200) { branch = HeadRef(tj) ?? ""; if (branch != "") pr = await PrOfBranch(branch, ct); }
+                rec = new CopilotOwner { Item = item, TaskId = taskId, Url = url, Branch = branch, Pr = pr, Phase = phase, Sessions = 1, LastResume = DateTime.UtcNow, WaitingOn = "session" };
+                if (own != null) { rec.Previous.AddRange(own.Previous); rec.Previous.Add(own.TaskId); rec.Since = own.Since; }
+                lock (tasks) owners[item] = rec;
+            }
+        }
+        if (SaveOwner != null) await SaveOwner(rec);
     }
 
     // the open pull request on a branch (0: none)

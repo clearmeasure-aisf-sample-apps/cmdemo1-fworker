@@ -43,14 +43,15 @@ public class DatabaseScriptsTests
     static IEnumerable<string> Batches(string code) => Regex.Split(code, @"^\s*GO\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase).Where(b => !string.IsNullOrWhiteSpace(b));
 
     [Fact]
-    public void EveryNameIsNumberedAndDescribed_TheNumbersAreUniqueAndContiguous()
+    public void EveryNameIsNumberedAndDescribed_TheNumbersAreUniqueAndAscending()
     {
         Assert.NotEmpty(FactorySchema.Scripts);
         var rx = new Regex(@"^(\d{3})_[A-Za-z][A-Za-z0-9_]*\.sql$");
         foreach (var n in FactorySchema.Scripts) Assert.Matches(rx, n);
         var numbers = FactorySchema.Scripts.Select(n => int.Parse(rx.Match(n).Groups[1].Value)).ToList();
         Assert.Equal(numbers.Distinct().Count(), numbers.Count);
-        Assert.Equal(Enumerable.Range(1, numbers.Count), numbers.Order());
+        // ascending (the journal and the order of application are the names' ordinal order). The plan reserves a block of numbers per work item (docs/design/fworker-wolverine-implementation.md, W9.10: 130-139, 140-149, 150-159, 160-169), so the numbers are no longer contiguous.
+        Assert.Equal(numbers.Order(), numbers);
         Assert.Equal(numbers.Max(), FactorySchema.LatestVersion);
     }
 

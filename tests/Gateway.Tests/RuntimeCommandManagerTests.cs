@@ -70,6 +70,22 @@ public sealed class RuntimeCommandManagerTests
     }
 
     [Fact]
+    public async Task V2_Reserved_ACopilotLaunchWhoseOutcomeIsUnknown_IsNoFailureOfTheItem()
+    {
+        // W9.10c: the launch or the resume may have taken effect and the reconciler decides; the start is not a failure and counts no launch, however often it is offered meanwhile
+        var rt = new Rt(); var m = Manager(rt);
+        m.DispatchStart = _ => Task.CompletedTask;
+        for (var i = 0; i < 6; i++)
+        {
+            var t = m.Begin(7, "Development", "prof");
+            await m.Provision(t);
+            await m.CompleteStart(t.Name, 7, "Development", new ProvisionResult(false, "", "reserved"));
+            Assert.False(m.Alive(t.Name));
+        }
+        Assert.False(m.Exhausted(7, "Development"));
+    }
+
+    [Fact]
     public async Task V2_ADispatchThatThrows_IsAStartFailure_NotAnException()
     {
         var rt = new Rt(); var m = Manager(rt);

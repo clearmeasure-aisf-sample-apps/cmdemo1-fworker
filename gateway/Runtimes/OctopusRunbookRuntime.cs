@@ -474,6 +474,30 @@ sealed class OctopusRunbookRuntime : IWorkerRuntime, IRuntimeDetail, IRunHistory
         return n;
     }
 
+    // W9.10c: the effect of a start whose handling was cut off before its result was recorded: the run of a Start runbook whose prompted Fworker.Name is this worker's, if Octopus has one. A worker name is
+    // never reused, so the name alone identifies the run. Throws when Octopus cannot be asked (the caller treats the effect as unknown). Used by the v2 command handlers only (an expired claim); v1 never calls it.
+    public async Task<(string TaskId, string Url)?> FindStartRunOf(string workerName, DateTime sinceUtc, CancellationToken ct)
+    {
+        if (!Auth.ValidName(workerName)) return null;
+        await Ids(ct);
+        var books = await Runbooks(ct);
+        var startIds = new[] { cfg.StartRunbook, cfg.OverflowRunbook }.Select(n => books.TryGetValue(n, out var b) ? b.Id : "").Where(i => i != "").ToHashSet();
+        foreach (var t in await TasksSince(sinceUtc, ct))   // newest first
+        {
+            var runId = t["Arguments"]?["RunbookRunId"]?.ToString() ?? "";
+            if (runId == "") continue;
+            var (s, run) = await Send(HttpMethod.Get, Space($"/runbookRuns/{Uri.EscapeDataString(runId)}"), null, ct);
+            if (s != 200 || run == null) throw new HttpRequestException($"octopus runbook run answered {s}");
+            var rbId = run["RunbookId"]?.ToString() ?? "";
+            if (!startIds.Contains(rbId)) continue;
+            var ids = await Form(rbId, ct);
+            if (!ids.TryGetValue("Fworker.Name", out var nameId) || run["FormValues"]?[nameId]?.ToString() != workerName) continue;
+            var task = t["Id"]?.ToString() ?? "";
+            if (task != "") return (task, $"{cfg.ServerUrl}/app#/{cfg.SpaceId}/tasks/{task}");
+        }
+        return null;
+    }
+
     // Restart recovery: the runs of the last day of the project's runbooks are read back (task, run, its prompted values); a Start whose
     // worker has no later Stop is a record again. The values are read by the control ids of the runbook's form.
     async Task Rebuild(CancellationToken ct)

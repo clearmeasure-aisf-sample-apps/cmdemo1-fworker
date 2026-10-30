@@ -350,6 +350,14 @@ sealed class RuntimeManager : IRuntimeManager
             await End(t.Name, "no-capacity", failed: false, startFailure: false);
             return;
         }
+        // W9.10c (v2 only: the Copilot launch port answers it): a launch or a resume of this item and phase has an outcome nobody knows yet (its call timed out, or another one is reserved), and the reconciler
+        // decides. Not a failure of the item and no launch counted; the item is offered again and the reservation answers then.
+        if (r.Error == "reserved")
+        {
+            lock (gate) { if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            await End(t.Name, "reserved", failed: false, startFailure: false);
+            return;
+        }
         if (r.Error == "quota")
         {
             lock (gate) { if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
