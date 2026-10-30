@@ -562,6 +562,59 @@ environment are exactly what they were; a verb no group registered still runs on
   hand-over); the peer-approved path in C# (the inspector's review as the reviewer App, the approval of the current head, the QC gate, the migration collision), which stays the script's until W9.11 decides whether the policy
   survives; the merge queue (W7.10).
 
+**W9.2 as built (#354), the item verbs.** Owner decisions of 2026-10-28 stand (hybrid composition, tdd only, the W7 scope cut). The 18 verbs of `ItemRoutes` (`get-item` to `expire-claim`) are answered by v2 where the engine acts,
+each as the rule script answers it for the same input: the same fields and exit codes, the same writes to GitHub, the board and the state comment, in the same order.
+- **Where:** `src/Fworker.Workflows/WorkItem/Verbs/*` has the verbs as ports of `Verbs.Item.ps1`, `Owner.ps1` and `Verbs.Pr.ps1` against ports (`ItemVerbPorts.cs`: the wire to GitHub, the state comment, the journal, the item lock,
+  the refusals file, the v1 fallback); the handler of a verb is the port of its `Verb_*` function and says which. `gateway/Ports/ItemVerbsPort.cs` is the other side of the ports over what the gateway has (the GitHub wire with the
+  gateway's identity, `GitHubJournalStore` for `Get-State` and `Save-State`, `JournalLedger.AddInHand` for `Add-Journal` into the state in hand, the lock file `item-N.lock` and `refusals.json` of the state directory, so a script
+  of v1 and a verb of v2 exclude each other and the model ladder sees both). `gateway/Verbs/Routes/Item.cs` registers the verbs. The only line outside those files is `JournalLedger.AddInHand`.
+- **The answer is the script's:** the keys are read without regard to case, `_session`, `_cause` and `_lease` are taken out of the arguments, the verb runs under the item's lock unless it is `get-item` or `item-pr`, the answer
+  has `verb`, `ok` and `exit`, a refusal is `ok: false` with its code and reason, an exit 10 of `complete`, `record-review`, `validation-verdict`, `open-pr` or `append-body` is one data point of the model ladder, any other fault is
+  `internal-error` (20). Every request carries the user agent `factory-worker-gateway` (the state comment's and the journal's included) and, in the test mode, the cause id of the request, so the fake's golden recorder tells a write
+  of a verb (`rule`) from the gateway's own loops as it did.
+- **The saga:** the router is wrapped in `V2VerbFeed` (the decision verbs `append-body`, `record-review`, `complete`, `validation-verdict` and the lease renewals, as in W6.6 and W7.3) and `ItemAdminFeed`: `park-item` and
+  `unpark-item` tell the saga of an item it owns (`ParkWorkItem`, `ResumeWorkItem`) so its lease stops at the park and its step is armed again at the unpark.
+- **Left to the script, through `IItemV1` (the runner), before anything is written and after the item's lock is let go:** the `accept` of a QC environment (W9.1), the `complete` of Development with the red-head ruling and the
+  migration check of the CI rule (W9.5), and the pull request of a `copilot/*` branch or an owner task (`open-pr`, `item-pr`; W9.4). A gateway without a v1 answers `v1-unavailable` (30) for them.
+- **Declared difference:** the inline merge of a PASS in `validation-verdict` (`Verb_merge -Gateway`) is not made in the call. The answer says `next: merge` as before; the merge is the sweep's and the saga's right after (a verdict
+  asks for a sweep), and `merge` called by the session still answers `already-merged`. W9.3 (the merge train verbs) closes it. The Tier 1 suite `auto` runs with `gatewayMerge` off, so none of its scenarios sees it.
+- **Not yet routed:** the gateway's own calls of these verbs (`PlantRuleHooks` renew and take-back, the park of the runtime adapters, the unpark and resettle endpoints, `ItemPrLookup`) go through `Runner` and stay the script's
+  until W9.9 moves them to the router.
+- **Proof:** `ItemVerbsTests` (55 cases of the scripts' branches on an in-memory GitHub), `ItemVerbsPortTests`, and `ItemVerbsFakeGitHubTests`/`ItemVerbsReplayTests`, which start the fake GitHub of Tier 1 and compare the writes it
+  records with the golden files the scripts wrote (`auto`: gates refuse what they should, escalate earlier, the docs-only fast path's design reviews; `owner`: update-pr). The three `auto` scenarios are claims of `v2-claims.txt`.
+
+**W9.7 as built (#359, owner review: credentials and authorization).** The six service verbs answer on v2 as their rule scripts answer (`Owner.ps1`, `Apps.ps1`, `OperatorRelease.ps1`, `Metrics.ps1`), in C#:
+`gateway/Identity/RevocationVerbs.cs` (`revocations`, `revoke-worker`), `GitCredentialVerb.cs`, `gateway/Operator/OperatorReleaseVerbs.cs` and `MetricsVerb.cs`, over `ServiceGitHub` (the GitHub calls of `Core.ps1`: the same retries,
+the same refusals, the same user agent, the credential of `Get-GhToken`: the author App where `FACTORY_AUTHOR_APP` is 1, else `GH_TOKEN`, nothing else) and registered by `Routes/Services.cs`. Who may call is not touched: `VerbPolicy`,
+the pipeline's own refusals (`not-owner`, `use-endpoint`, the GitHub budget) and the guards of the endpoints come first, as in v1, and a test pins that order. The verbs that have an endpoint (`revocations`, `revoke-worker`,
+`operator-releases`, `operator-release`) stay refused to every caller of the verb route; the gateway's own calls (`RevocationService` and `OperatorReleaseLoader` at start, the revoke and record-release endpoints, the metrics
+endpoint) go through `ServiceVerbCalls`, which is the rule script (the Runner) unless the engine acts, so the kill switch is v1 again at the next call. Same answers, same exit codes, same calls: `ServiceVerbParityTests` runs each
+case through `plugin/scripts/factory.ps1 --server` and through the C# verb against the fake GitHub and compares the answer, the calls in order and the refs left, for every refusal (a missing or bad argument, a 404, a refused permission, a
+rate limit, a 500, a bad gateway, a 422 that is not "already exists", a ref answered and not kept, an item whose comments cannot be read); `ServiceVerbsTests` covers the rest (the scope of a git credential in every wrong form: the token is
+revoked and not handed out; the credential; the retries; the timeout; the budget; `RevocationService` and `OperatorReleaseLoader` on v2). Two differences, both on the side of refusing: `revocations` keeps two revoked names that differ by case only
+(the rule script's hashtable made one of them, and the generations of the gateway are per exact name), and `git-credential` takes the App key from `secret-tool` on a gateway on the operator's machine, as `Apps.ps1` does (no shell, fixed arguments). No new table.
+
+**W9.5 as built (#357), the read models.** Owner decisions of 2026-10-28 stand (hybrid composition, tdd only, the W7 scope cut). The six verbs of `ReadModelRoutes` answer on v2 where the engine acts and each answers what its rule script
+answers for the same input: the same fields and exit codes, the same refusals (`Reject`), the same writes. The code is `src/Fworker.Workflows/ReadModels/` (`ChecksReadModel` for `pr-checks` and `wait-for-checks`, `InspectReadModel` for
+`inspect-facts` (the inventory names `ChecksReadModel` as its owner; it reads that model, and `approve-pr` of W9.3 reads the same `InspectReadModel.Facts`), `DeliveryReadModel`, `ModelTierReadModel`, `SecretsReadModel`; `CheckRules` is the part
+that needs no GitHub, `ReadModelSettings` what they take from `config/instance.json`) and `gateway/Ports/ReadModelsPort.cs` (the wire and the files they read and write through). Workflows reaches the outside only through ports
+(`IGitHubApi`, `IOctopusApi`, `IItemStateStore`, `IItemLock`, `IRefusalCounts`), as the dependency rule has it.
+- *Reads.* The gateway's own GitHub identity (the token of the rule scripts: `GH_TOKEN`, else the author App's installation token) with the rule scripts' headers, so the fake GitHub tells their writes from the gateway's own
+  (`User-Agent factory-worker-gateway`, `X-Fake-Cause` in the test mode); the rate limit of every answer goes to the gateway's budget. A job log or an artifact is a redirect that is followed without the credential, as `Invoke-RestMethod` does.
+  GitHub's refusals map as `Invoke-Gh` maps them (404 exit 12, rate limit exit 20 with the wait, other 403 exit 30, anything else exit 20); the detail of `pr-checks` (logs, annotations, artifacts, the baseline) turns a refusal into data
+  in the answer and never an error of the verb. Octopus is read with `OCTOPUS_API_KEY` of the moment (exit 30 without it, 404 is nothing, any other failure exit 20).
+- *Writes, the same ones as v1.* `wait-for-checks` counts a red head once in the item's state (`checks_red`, the push gate of `open-pr` and `update-pr`) and reruns the one failed job that the base branch fails too, once per head
+  (`preexisting_reruns`); `model-tier` records the tier in `model_tier` when it changed. The state comment is saved through the same store as the journal (the revision check of `Save-State`: a state that moved is exit 11
+  `state-conflict`), and the item lock is the file `item-N.lock` of the rule scripts' state directory, so a verb that v1 still runs and one that v2 answers exclude one another. The refusals `model-tier` counts are the file
+  `refusals.json` of the same directory, which the server wrapper of v1 writes on every refused gate call until the verbs that refuse move to v2 (W9.2, W9.3).
+- *Parity.* The Tier 1 scenarios of these verbs are the oracle: `checks.ps1`, `model ladder` and `testing profile` run on v2 as claims of `v2-claims.txt`. `Gateway.Tests` (`ReadModels*FakeTests`) puts the read models against the same
+  fake GitHub and Octopus (the cases of those scenarios, and of the owner and messaging suites for `inspect-facts` and `get-delivery`), `Fworker.Workflow.Tests` pins the rules and the refusals, `ReadModelsPortTests` the gateway's side.
+- *Differences, on purpose.* (1) A call to `pr-checks --full-log` or `--artifact` has no deadline of the detail of its own, where the script's `$script:CkDeadline` is set by a detail call and can still be set when the next call runs in the same pooled worker. (2) `check-secrets` reads the
+  board's Status field every time, where the script serves `project-meta.json` for ten minutes (the probe should see the board as it is now); the file is still filled by v1's verbs. (3) The login of the author App comes from
+  `FACTORY_APP_AUTHOR_SLUG` (or the fake apps), not from `~/.config/factory-worker/apps/author.json`, which a gateway container does not have. (4) The times of an Octopus answer are written as PowerShell writes a time it parsed (a
+  local time with its offset). (5) A regular expression of the configuration or of the diff that takes more than ten seconds is an `internal-error` (exit 20) and not a wait without end.
+- *Not here.* No smoke evidence, no overflow, no merge queue (the W7 scope cut). `get-item` and the other item verbs (W9.2) read the same state through the same store.
+
 **Cutover gate** (the stabilisation gate's form, on v2): the full Tier 1 on v2 with golden writes; the kill-switch drill first (set
 `FACTORY_V2_OFF`, v1 resumes every item from the state comments and acts for one sweep, unset it, v2 adopts them again); then **one
 measured 8-item batch** on v2 with no regression against the 2026-10-25 baseline (same rule as stage C's gate); after each release
