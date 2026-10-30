@@ -99,7 +99,7 @@ public sealed class ServiceVerbsTests : IDisposable
     [InlineData("""{"x":true}""", "True")]
     [InlineData("""{"x":null}""", "")]
     [InlineData("""{}""", "")]
-    public void Text_IsWhatPowerShellMakesOfAJsonValue(string json, string expected) => Assert.Equal(expected, VerbArgs.Text(VerbArgs.Parse(json).Get("x")));
+    public void Text_IsWhatPowerShellMakesOfAJsonValue(string json, string expected) => Assert.Equal(expected, ServiceVerbArgs.Text(ServiceVerbArgs.Parse(json).Get("x")));
 
     [Theory]
     [InlineData("7", 7)]
@@ -110,27 +110,27 @@ public sealed class ServiceVerbsTests : IDisposable
     [InlineData("\"0x10\"", 16)]
     [InlineData("true", 1)]
     [InlineData("-3", -3)]
-    public void Int_IsTheCastOfPowerShell(string json, int expected) => Assert.Equal(expected, VerbArgs.Int(JsonNode.Parse(json)));
+    public void Int_IsTheCastOfPowerShell(string json, int expected) => Assert.Equal(expected, ServiceVerbArgs.Int(JsonNode.Parse(json)));
 
     [Theory]
     [InlineData("\"abc\"")]
     [InlineData("\"\"")]
     [InlineData("5000000000")]
     [InlineData("[1]")]
-    public void Int_OfWhatIsNoNumber_Throws(string json) => Assert.ThrowsAny<Exception>(() => VerbArgs.Int(JsonNode.Parse(json)));
+    public void Int_OfWhatIsNoNumber_Throws(string json) => Assert.ThrowsAny<Exception>(() => ServiceVerbArgs.Int(JsonNode.Parse(json)));
 
     [Fact]
     public void Arguments_NamesAreCaseSensitive_NullIsAbsent_NeedRefusesWithUsage()
     {
-        var a = VerbArgs.Parse("""{"Name":"x","gone":null,"empty":""}""");
+        var a = ServiceVerbArgs.Parse("""{"Name":"x","gone":null,"empty":""}""");
         Assert.False(a.Has("name")); Assert.True(a.Has("Name")); Assert.False(a.Has("gone")); Assert.True(a.Has("empty"));
         foreach (var k in new[] { "name", "gone", "empty", "nothing" })
         {
             var r = Assert.Throws<VerbReject>(() => a.Need(k));
             Assert.Equal((2, "usage", $"missing argument: {k}"), (r.Exit, r.Code, r.Message));
         }
-        Assert.False(VerbArgs.Parse("[1,2]").Has("0")); Assert.False(VerbArgs.Parse("").Has("x")); Assert.False(VerbArgs.Parse("5").Has("x"));
-        Assert.ThrowsAny<Exception>(() => VerbArgs.Parse("{nope"));
+        Assert.False(ServiceVerbArgs.Parse("[1,2]").Has("0")); Assert.False(ServiceVerbArgs.Parse("").Has("x")); Assert.False(ServiceVerbArgs.Parse("5").Has("x"));
+        Assert.ThrowsAny<Exception>(() => ServiceVerbArgs.Parse("{nope"));
     }
 
     // ---- the answer's shape: ok, verb, exit; a refusal is code and reason; what nobody expected is an internal error ----

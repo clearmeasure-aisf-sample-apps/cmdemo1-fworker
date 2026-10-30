@@ -10,14 +10,14 @@ using Fworker.Contracts.Seams;
 // and the verb pipeline reaches git-credential and metrics through the route table (gateway/Verbs/Routes/Services.cs).
 
 /// <summary>The arguments of a verb as the rule scripts' <c>Need</c> and <c>Test-Has</c> read them from the JSON hashtable (ConvertFrom-Json -AsHashtable: names are case sensitive): a null is absent, a missing one is a usage refusal.</summary>
-sealed class VerbArgs
+sealed class ServiceVerbArgs
 {
     readonly Dictionary<string, JsonNode?> map = new(StringComparer.Ordinal);
 
     /// <summary>The JSON object of stdin; an empty stdin is no arguments; JSON that is not an object has none either. JSON that cannot be read throws, as the rule script's reader did.</summary>
-    public static VerbArgs Parse(string stdin)
+    public static ServiceVerbArgs Parse(string stdin)
     {
-        var a = new VerbArgs();
+        var a = new ServiceVerbArgs();
         if (string.IsNullOrWhiteSpace(stdin)) return a;
         if (JsonNode.Parse(stdin) is JsonObject o)
             foreach (var kv in o) a.map[kv.Key] = kv.Value;
@@ -93,7 +93,7 @@ sealed class ServiceVerbs(ServiceGitHub gh, GitHubBudget? budget)
         JsonObject result; var exit = 0;
         try
         {
-            var args = VerbArgs.Parse(stdin);
+            var args = ServiceVerbArgs.Parse(stdin);
             result = await Dispatch(verb, args, scope);
             result["verb"] = verb;
             if (!result.ContainsKey("ok")) result["ok"] = true;
@@ -124,7 +124,7 @@ sealed class ServiceVerbs(ServiceGitHub gh, GitHubBudget? budget)
     // the rate limit this run saw goes to the gateway's budget, as the _github field of a rule script's answer does (Runner takes it out)
     void Report(ServiceGitHub.CallScope scope) { if (scope.RateReport() is { } report) budget?.Observe(report); }
 
-    async Task<JsonObject> Dispatch(string verb, VerbArgs a, ServiceGitHub.CallScope s)
+    async Task<JsonObject> Dispatch(string verb, ServiceVerbArgs a, ServiceGitHub.CallScope s)
     {
         switch (verb)
         {

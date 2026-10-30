@@ -12,10 +12,10 @@ static class OperatorReleaseVerbs
     static string RefPath(ServiceGitHub gh) => $"factory/{gh.Name}/operator-release";
 
     /// <summary>operator-releases: the releases recorded for one UTC day, one per pull request.</summary>
-    public static async Task<JsonObject> Releases(VerbArgs a, ServiceGitHub.CallScope s)
+    public static async Task<JsonObject> Releases(ServiceVerbArgs a, ServiceGitHub.CallScope s)
     {
         var gh = s.Gh;
-        var day = VerbArgs.Text(a.Need("day"));
+        var day = ServiceVerbArgs.Text(a.Need("day"));
         if (!Regex.IsMatch(day, @"^\d{8}$", Ps)) throw new VerbReject(2, "usage", "day is yyyyMMdd");
         var found = new JsonArray(); var seen = new HashSet<int>(); var prefix = $"refs/{RefPath(gh)}/{day}/";
         for (var page = 1; page <= 10; page++)
@@ -23,7 +23,7 @@ static class OperatorReleaseVerbs
             var rows = RevocationVerbs.Rows((await s.Get($"{gh.RepoPath}/git/matching-refs/{RefPath(gh)}/{day}/?per_page=100&page={page}")).Json);
             foreach (var row in rows)
             {
-                var r = row is JsonObject o ? VerbArgs.Text(o["ref"]) : "";
+                var r = row is JsonObject o ? ServiceVerbArgs.Text(o["ref"]) : "";
                 if (!r.StartsWith(prefix, StringComparison.Ordinal)) continue;
                 var m = Regex.Match(r[prefix.Length..], @"^(\d{1,9})/(\d{1,6}(\.\d{1,9}){1,3})$", Ps);
                 if (!m.Success) continue;
@@ -36,10 +36,10 @@ static class OperatorReleaseVerbs
     }
 
     /// <summary>operator-release: records one self-merged release (idempotent).</summary>
-    public static async Task<JsonObject> Record(VerbArgs a, ServiceGitHub.CallScope s)
+    public static async Task<JsonObject> Record(ServiceVerbArgs a, ServiceGitHub.CallScope s)
     {
         var gh = s.Gh;
-        var day = VerbArgs.Text(a.Need("day")); var pr = VerbArgs.Int(a.Need("pr")); var version = VerbArgs.Text(a.Need("version"));
+        var day = ServiceVerbArgs.Text(a.Need("day")); var pr = ServiceVerbArgs.Int(a.Need("pr")); var version = ServiceVerbArgs.Text(a.Need("version"));
         if (!Regex.IsMatch(day, @"^\d{8}$", Ps) || pr < 1 || !Regex.IsMatch(version, @"^\d{1,6}(\.\d{1,9}){1,3}$", Ps))
             throw new VerbReject(2, "usage", "day is yyyyMMdd, pr a pull request number and version digits and dots");
         var head = RevocationVerbs.Sha(await s.Get($"{gh.RepoPath}/git/ref/heads/{gh.DefaultBranch}"));

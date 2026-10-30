@@ -16,12 +16,12 @@ static class MetricsVerb
 
     sealed record Card(int Number, bool Open, string? Column, List<string> Labels);
 
-    public static async Task<JsonObject> Run(VerbArgs a, ServiceGitHub.CallScope s, Func<DateTime> utcNow)
+    public static async Task<JsonObject> Run(ServiceVerbArgs a, ServiceGitHub.CallScope s, Func<DateTime> utcNow)
     {
         var gh = s.Gh;
         var label = gh.Cfg("label"); var now = utcNow();
-        var since = Since(a.Has("since") ? VerbArgs.Text(a.Get("since")) : "", now);
-        var max = a.Has("max") ? Math.Clamp(VerbArgs.Int(a.Get("max")), 1, 300) : 100;
+        var since = Since(a.Has("since") ? ServiceVerbArgs.Text(a.Get("since")) : "", now);
+        var max = a.Has("max") ? Math.Clamp(ServiceVerbArgs.Int(a.Get("max")), 1, 300) : 100;
         var login = await gh.ServerLogin(s);
         var cands = (await BoardList(s)).Where(c => c.Labels.Any(l => string.Equals(l, label, StringComparison.OrdinalIgnoreCase))).OrderByDescending(c => c.Number).Take(max).ToList();
         var items = new List<JsonObject>(); var failed = new JsonArray();
@@ -55,7 +55,7 @@ static class MetricsVerb
     // ConvertFrom-Iso: empty is none, anything that is not a time throws
     static DateTime? FromIso(JsonNode? n)
     {
-        var t = VerbArgs.Text(n);
+        var t = ServiceVerbArgs.Text(n);
         return t == "" ? null : DateTime.Parse(t, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
     }
 
@@ -97,7 +97,7 @@ static class MetricsVerb
     {
         var e = (gh.Env("FACTORY_ENVIRONMENT") ?? "").Trim().ToLowerInvariant(); if (e == "") e = "tdd";
         var flag = gh.Env("FACTORY_ENV_SCOPE");
-        var on = flag is "0" or "1" ? flag == "1" : gh.CfgNode("envScope") is JsonArray list && list.Any(x => VerbArgs.Text(x).ToLowerInvariant() == e);
+        var on = flag is "0" or "1" ? flag == "1" : gh.CfgNode("envScope") is JsonArray list && list.Any(x => ServiceVerbArgs.Text(x).ToLowerInvariant() == e);
         return on ? "env:" + e : "";
     }
 
@@ -112,7 +112,7 @@ static class MetricsVerb
     {
         var gh = s.Gh; var mine = EnvLabel(gh); var cards = new List<Card>();
         string? after = null; bool more;
-        var project = VerbArgs.Int(gh.CfgNode("project"));
+        var project = ServiceVerbArgs.Int(gh.CfgNode("project"));
         do
         {
             var d = await s.GraphQl(BoardQuery, new JsonObject { ["o"] = gh.Owner, ["n"] = project, ["after"] = after });
@@ -121,11 +121,11 @@ static class MetricsVerb
             {
                 if (n?["content"] is not JsonObject content || !content.ContainsKey("number")) continue;
                 // a card of another repository linked to the board is never seen here
-                var repo = content["repository"] is JsonObject r ? VerbArgs.Text(r["nameWithOwner"]) : "";
+                var repo = content["repository"] is JsonObject r ? ServiceVerbArgs.Text(r["nameWithOwner"]) : "";
                 if (!string.Equals(repo, $"{gh.Owner}/{gh.Repo}", StringComparison.OrdinalIgnoreCase)) continue;
-                var labels = (content["labels"]?["nodes"] as JsonArray ?? []).Select(x => VerbArgs.Text(x?["name"])).ToList();
+                var labels = (content["labels"]?["nodes"] as JsonArray ?? []).Select(x => ServiceVerbArgs.Text(x?["name"])).ToList();
                 if (!InScope(mine, labels)) continue;   // another environment's card
-                cards.Add(new Card(VerbArgs.Int(content["number"]), VerbArgs.Text(content["state"]) == "OPEN", n["fieldValueByName"] is JsonObject f ? f["name"]?.ToString() : null, labels));
+                cards.Add(new Card(ServiceVerbArgs.Int(content["number"]), ServiceVerbArgs.Text(content["state"]) == "OPEN", n["fieldValueByName"] is JsonObject f ? f["name"]?.ToString() : null, labels));
             }
             after = items["pageInfo"]?["endCursor"]?.ToString();
             more = items["pageInfo"]?["hasNextPage"] is JsonValue hv && hv.TryGetValue<bool>(out var hb) && hb;
@@ -136,8 +136,8 @@ static class MetricsVerb
     // ---- the state comment (Get-State, Get-Comments) ----
     sealed record StateRead(JsonObject State, List<JsonNode?> Comments);
 
-    static string LoginOf(JsonNode? comment) => VerbArgs.Text(comment?["user"]?["login"]);
-    static string BodyOf(JsonNode? comment) => VerbArgs.Text(comment?["body"]);
+    static string LoginOf(JsonNode? comment) => ServiceVerbArgs.Text(comment?["user"]?["login"]);
+    static string BodyOf(JsonNode? comment) => ServiceVerbArgs.Text(comment?["body"]);
 
     static async Task<StateRead> State(ServiceGitHub.CallScope s, int item, string login)
     {
@@ -153,7 +153,7 @@ static class MetricsVerb
         if (found is null)
         {
             // a change of identity must not orphan the items in flight: the newest state written by one of the logins the instance names in stateAuthors is adopted
-            var trusted = (gh.CfgNode("stateAuthors") as JsonArray ?? []).Select(x => VerbArgs.Text(x)).ToList();
+            var trusted = (gh.CfgNode("stateAuthors") as JsonArray ?? []).Select(x => ServiceVerbArgs.Text(x)).ToList();
             var old = trusted.Count == 0 ? null : all.LastOrDefault(c => trusted.Any(t => string.Equals(t, LoginOf(c), StringComparison.OrdinalIgnoreCase)) && BodyOf(c).StartsWith(marker, StringComparison.Ordinal));
             if (old is not null && Block(BodyOf(old)) is { } adopted) return new StateRead(AsObject(adopted), all);
             return new StateRead(Empty(), all);
@@ -207,7 +207,7 @@ static class MetricsVerb
         if (s["flow"] is { } rawFlow)
         {
             var entries = rawFlow is JsonArray fa ? fa.ToList() : [rawFlow];
-            var fl = entries.Select(x => x is JsonObject eo && eo.ContainsKey("c") && eo.ContainsKey("at") ? (Stage: VerbArgs.Text(eo["c"]), At: FromIso(eo["at"])) : throw new InvalidOperationException("The property 'c' or 'at' cannot be found on this object. Verify that the property exists."))
+            var fl = entries.Select(x => x is JsonObject eo && eo.ContainsKey("c") && eo.ContainsKey("at") ? (Stage: ServiceVerbArgs.Text(eo["c"]), At: FromIso(eo["at"])) : throw new InvalidOperationException("The property 'c' or 'at' cannot be found on this object. Verify that the property exists."))
                 .Where(x => x.Stage != "" && x.At is not null).Select(x => (x.Stage, At: x.At!.Value)).ToList();
             for (var i = 0; i < fl.Count; i++)
             {
@@ -218,7 +218,7 @@ static class MetricsVerb
             }
         }
         o["flow"] = flow;
-        if (merge?["pr"] is not null) o["pr"] = VerbArgs.Int(merge["pr"]);
+        if (merge?["pr"] is not null) o["pr"] = ServiceVerbArgs.Int(merge["pr"]);
         o["last"] = Iso(first.Values.Max());
         return o;
     }

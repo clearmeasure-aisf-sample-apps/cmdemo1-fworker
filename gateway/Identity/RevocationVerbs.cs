@@ -30,7 +30,7 @@ static class RevocationVerbs
         return found;
     }
 
-    static string RefOf(JsonNode? row) => row is JsonObject o ? VerbArgs.Text(o["ref"]) : "";
+    static string RefOf(JsonNode? row) => row is JsonObject o ? ServiceVerbArgs.Text(o["ref"]) : "";
 
     /// <summary>revocations: every revoked name with its highest generation; read once when the gateway starts.</summary>
     /// <remarks>v1 collected the names in a PowerShell hashtable, which does not tell Alice from alice: two refs of names that differ by case only gave one entry. The gateway's generations are per exact name (Revocations,
@@ -54,10 +54,10 @@ static class RevocationVerbs
 
     /// <summary>revoke-worker: records generation G for one name (idempotent) and keeps one ref per name: the new generation is written, read back, and only then are the name's lower generations removed. The reader takes the
     /// highest, so a removal that fails costs nothing but a leftover ref (the next revoke of the name removes it); a lower generation is never removed before the higher one is seen on GitHub.</summary>
-    public static async Task<JsonObject> RevokeWorker(VerbArgs a, ServiceGitHub.CallScope s)
+    public static async Task<JsonObject> RevokeWorker(ServiceVerbArgs a, ServiceGitHub.CallScope s)
     {
         var gh = s.Gh;
-        var name = VerbArgs.Text(a.Need("name")); var gen = VerbArgs.Int(a.Need("generation"));
+        var name = ServiceVerbArgs.Text(a.Need("name")); var gen = ServiceVerbArgs.Int(a.Need("generation"));
         if (!Regex.IsMatch(name, @"^[A-Za-z0-9_-]{1,40}$", Ps) || gen < 1) throw new VerbReject(2, "usage", "name is a worker name and generation is 1 or more");
         var head = Sha(await s.Get($"{gh.RepoPath}/git/ref/heads/{gh.DefaultBranch}"));
         // only "already exists" is an acceptable 422
@@ -83,8 +83,8 @@ static class RevocationVerbs
 
     // (Invoke-Gh ...).object.sha : a missing member is an error of the script, which is an internal error here too
     internal static string Sha(GhResponse r) =>
-        (r.Json as JsonObject)?["object"] is JsonObject o && o["sha"] is { } sha ? VerbArgs.Text(sha) : throw new InvalidOperationException("The property 'sha' cannot be found on this object. Verify that the property exists.");
+        (r.Json as JsonObject)?["object"] is JsonObject o && o["sha"] is { } sha ? ServiceVerbArgs.Text(sha) : throw new InvalidOperationException("The property 'sha' cannot be found on this object. Verify that the property exists.");
 
     // "$($r.body.message)" of a refused write
-    internal static string Message(GhResponse r) => r.Json is JsonObject o ? VerbArgs.Text(o["message"]) : "";
+    internal static string Message(GhResponse r) => r.Json is JsonObject o ? ServiceVerbArgs.Text(o["message"]) : "";
 }

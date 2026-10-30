@@ -11,10 +11,10 @@ using System.Text.Json.Nodes;
 // caller and kept nowhere (not in a log, not on disk, not in memory beyond the answer). A token GitHub granted wider than asked for is revoked at once and nothing is handed out.
 static class GitCredentialVerb
 {
-    public static async Task<JsonObject> Run(VerbArgs a, ServiceGitHub.CallScope s)
+    public static async Task<JsonObject> Run(ServiceVerbArgs a, ServiceGitHub.CallScope s)
     {
         var gh = s.Gh;
-        var item = VerbArgs.Int(a.Need("item"));
+        var item = ServiceVerbArgs.Int(a.Need("item"));
         var repo = gh.Repo; var owner = gh.Owner;   // Get-Cfg: a configuration that cannot be read is 30 config-missing, before anything is asked of GitHub
         var info = gh.AppInfo();
         var apiBase = gh.ApiBase;
@@ -40,12 +40,12 @@ static class GitCredentialVerb
         var status = (int)resp.StatusCode;
         if (status != 201) throw new VerbReject(20, "app-token-failed", $"GitHub answered {status} when minting the item's git credential", new JsonObject { ["retryAfterSeconds"] = 30 });
         var granted = JsonNode.Parse(await resp.Content.ReadAsStringAsync(s.Ct)) as JsonObject ?? new JsonObject();
-        var token = VerbArgs.Text(granted["token"]);
+        var token = ServiceVerbArgs.Text(granted["token"]);
         // GitHub answers the scope it granted (every App token also carries metadata: read): a token wider than asked for is revoked, not handed out
         var grant = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (granted["permissions"] is JsonObject perms) foreach (var kv in perms) grant[kv.Key] = VerbArgs.Text(kv.Value);
+        if (granted["permissions"] is JsonObject perms) foreach (var kv in perms) grant[kv.Key] = ServiceVerbArgs.Text(kv.Value);
         var repos = (granted["repositories"] as JsonArray ?? []).Where(r => r is not null)
-            .Select(r => (Name: VerbArgs.Text(r!["name"]), Full: VerbArgs.Text(r["full_name"]))).ToList();
+            .Select(r => (Name: ServiceVerbArgs.Text(r!["name"]), Full: ServiceVerbArgs.Text(r["full_name"]))).ToList();
         var okPerms = grant.TryGetValue("contents", out var contents) && string.Equals(contents, "write", StringComparison.OrdinalIgnoreCase)
             && grant.Keys.All(k => k.Equals("contents", StringComparison.OrdinalIgnoreCase) || (k.Equals("metadata", StringComparison.OrdinalIgnoreCase) && string.Equals(grant[k], "read", StringComparison.OrdinalIgnoreCase)));
         var okRepo = repos.Count == 1 && string.Equals(repos[0].Name, repo, StringComparison.OrdinalIgnoreCase)
@@ -71,7 +71,7 @@ static class GitCredentialVerb
     // The credential helper of the runner image reads it with `date -d`, which takes this form as well as ISO 8601; v2 keeps the form, as every consumer of v1's answer has seen it.
     internal static string ExpiresAt(JsonNode? expires)
     {
-        var text = VerbArgs.Text(expires);
+        var text = ServiceVerbArgs.Text(expires);
         return DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
             ? t.ToString(CultureInfo.InvariantCulture) : text;
     }
