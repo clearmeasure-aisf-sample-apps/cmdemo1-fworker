@@ -271,7 +271,7 @@ public sealed class QcPortTests
         var r = new Rig();
         var (code, o) = await r.Call("qc-request", new { item = 5, pr = 9 });
         Assert.Equal((10, "trust-confirm-needed", "secret-like"), (code, o["code"]!.ToString(), string.Join(",", ((JsonArray)o["reasons"]!).Select(x => x!.ToString()))));
-        Assert.Equal([("inspect-facts", "{\"item\":5}")], r.Router.Calls);
+        Assert.Equal([("inspect-facts", "{\"item\":5,\"pr\":9}")], r.Router.Calls);
     }
 
     [Fact]

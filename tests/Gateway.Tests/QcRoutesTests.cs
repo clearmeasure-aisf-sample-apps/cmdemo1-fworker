@@ -33,7 +33,7 @@ public sealed class QcRoutesTests : IDisposable
         public Task PatchComment(long commentId, string body, CancellationToken ct) => Task.CompletedTask;
         public Task<JsonObject> MarkReady(JsonObject pull, CancellationToken ct) => Task.FromResult(pull);
         public Task<string> ServerLogin(CancellationToken ct) => Task.FromResult("bot");
-        public Task<IReadOnlyList<string>> MandatoryCodes(int item, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>>([]);
+        public Task<IReadOnlyList<string>> MandatoryCodes(int item, int pr, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>>([]);
     }
 
     static QcService Service(Quiet q) => new(QcConfig.From(JsonNode.Parse("{\"owner\":\"o\",\"repo\":\"r\",\"label\":\"l\",\"columns\":{\"validation\":\"V\"}}"), _ => null), q, q, q, new InMemoryQcIndex());

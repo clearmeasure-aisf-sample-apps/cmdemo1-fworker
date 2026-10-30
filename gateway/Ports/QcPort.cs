@@ -242,9 +242,9 @@ sealed class QcItemsAdapter(QcGitHubClient github, IJournalStore store, JournalL
 /// <summary>The inspector's facts through the verb router: the rule script's inspect-facts until W9.5 answers it on v2. Resolved at the first call (the router is built after the verbs it routes).</summary>
 sealed class QcFactsAdapter(Func<IVerbRouter> router) : IQcFacts
 {
-    public async Task<IReadOnlyList<string>> MandatoryCodes(int item, CancellationToken ct)
+    public async Task<IReadOnlyList<string>> MandatoryCodes(int item, int pr, CancellationToken ct)
     {
-        var answer = await router().RunAsync("inspect-facts", new JsonObject { ["item"] = item }.ToJsonString(), TimeSpan.FromSeconds(120));
+        var answer = await router().RunAsync("inspect-facts", new JsonObject { ["item"] = item, ["pr"] = pr }.ToJsonString(), TimeSpan.FromSeconds(120));
         JsonObject? o = null; try { o = JsonNode.Parse(answer.Output) as JsonObject; } catch (JsonException) { }
         if (answer.Code != 0)
             throw new QcReject(answer.Code, QcJson.Str(o, "code") is { Length: > 0 } c ? c : "error", QcJson.Str(o, "reason"), o is null ? null : (JsonObject)o.DeepClone());

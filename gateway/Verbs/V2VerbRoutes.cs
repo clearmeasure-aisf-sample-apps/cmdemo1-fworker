@@ -60,6 +60,9 @@ sealed class V2VerbRoutes
 /// <summary>S1 with v2 routes: a registered verb is answered by v2, every other verb by the router below (v1, possibly with the saga feed).</summary>
 sealed class V2VerbRouter(IVerbRouter below, V2VerbRoutes routes) : IVerbRouter
 {
+    /// <summary>The router every other verb goes to (v1, possibly with the saga feed).</summary>
+    public IVerbRouter Below => below;
+
     public Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout) =>
         routes.TryGet(verb, out var handler) ? handler(stdin, timeout) : below.RunAsync(verb, stdin, timeout);
 }

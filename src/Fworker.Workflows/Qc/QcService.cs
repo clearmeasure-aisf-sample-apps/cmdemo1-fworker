@@ -216,7 +216,7 @@ public sealed partial class QcService
     {
         cfg.Validate();
         var login = await github.ServerLogin(ct);
-        var codes = await facts.MandatoryCodes(item, ct);
+        var codes = await facts.MandatoryCodes(item, QcJson.Int(pr, "number"), ct);
         return QcRules.TrustReasons(cfg, Login(pr), login, codes);
     }
 

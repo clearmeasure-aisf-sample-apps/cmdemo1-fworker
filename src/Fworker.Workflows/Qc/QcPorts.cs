@@ -66,7 +66,7 @@ public interface IQcGitHub
 /// <summary>The inspector's facts of a pull request (Get-InspectFacts): the codes of the reasons that need a person, from which the trust of a run is decided.</summary>
 public interface IQcFacts
 {
-    Task<IReadOnlyList<string>> MandatoryCodes(int item, CancellationToken ct);
+    Task<IReadOnlyList<string>> MandatoryCodes(int item, int pr, CancellationToken ct);
 }
 
 /// <summary>The index of the items that have a live record, so the sweep reaches an item that left Functional Testing (qc-items.json of the state directory in v1).</summary>

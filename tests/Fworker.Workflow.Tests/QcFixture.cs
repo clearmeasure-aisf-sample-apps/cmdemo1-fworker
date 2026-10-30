@@ -147,7 +147,7 @@ public sealed class FakeQcWorld : IQcItems, IQcGitHub, IQcFacts
 
     // ---- IQcFacts -------------------------------------------------------------------------------------------------------------------------------------
 
-    public Task<IReadOnlyList<string>> MandatoryCodes(int item, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>>([.. Mandatory]);
+    public Task<IReadOnlyList<string>> MandatoryCodes(int item, int pr, CancellationToken ct) => Task.FromResult<IReadOnlyList<string>>([.. Mandatory]);
 
     // ---- what the offer comments hold -----------------------------------------------------------------------------------------------------------------
 
