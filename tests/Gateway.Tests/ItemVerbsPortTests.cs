@@ -96,8 +96,10 @@ public sealed class ItemVerbsPortTests : IDisposable
             env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); V2Config(env); env.Apply();
             using var host = new GatewayHost();
             Assert.True(Task.Run(() => host.Server).Wait(TimeSpan.FromSeconds(60)), "the gateway of an acting v2 environment did not finish starting");
-            Assert.Equal(0, host.Services.GetRequiredService<V2VerbRoutes>().Count);
-            Assert.IsType<V2VerbFeed>(host.Services.GetRequiredService<IVerbRouter>());
+            // (the read models and the service verbs register without GH_TOKEN, on the App or the credentials they have: only the item verbs are pinned here)
+            var noCredential = host.Services.GetRequiredService<V2VerbRoutes>();
+            Assert.All(ItemRoutes.Verbs, v => Assert.False(noCredential.TryGet(v, out _), v));
+            Assert.IsType<V2VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());   // (the other groups' routes put it in front; the item verbs fall through to v1 behind the saga's feed)
         }
         // the kill switch puts the environment back on v1: no route, the router of v1
         using (var env = new GatewayEnvironment())
