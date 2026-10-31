@@ -69,7 +69,16 @@ function Start-TestEnv([hashtable]$Config = @{}, [hashtable]$Merge = @{}) {
     $env:FACTORY_API_PORT = "$($script:ApiPort)"; $env:FACTORY_WEBHOOK_PORT = "$($script:HookPort)"; $env:FACTORY_SWEEP_SECONDS = $(if ($env:TEST_SWEEP_SECONDS) { $env:TEST_SWEEP_SECONDS } else { '2' })
     $script:Procs += Start-Process dotnet -ArgumentList $gwDll -PassThru -RedirectStandardOutput (Join-Path $work 'gateway.out') -RedirectStandardError (Join-Path $work 'gateway.err')
     $env:FACTORY_URL = "http://127.0.0.1:$($script:ApiPort)"; $env:FACTORY_TOKEN = 'test-token'
-    Wait-Until -Seconds 30 -Message 'fake and gateway to answer' { try { (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/_fake/state" -TimeoutSec 2) -and (Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/ready" -TimeoutSec 2) } catch { $false } } | Out-Null
+    $answered = Wait-Until -Seconds 30 -Message 'fake and gateway to answer' { try { (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/_fake/state" -TimeoutSec 2) -and (Invoke-RestMethod "http://127.0.0.1:$($script:ApiPort)/ready" -TimeoutSec 2) } catch { $false } }
+    # A fake that could not bind its port (an outgoing connection of the machine was given it between the suite's probe and this start: "Address already in use") ends at once, and every later call of the
+    # scenario would fail with "connection refused" and say nothing of why: it is told here, with what the fake wrote.
+    if (-not $answered) {
+        $fakeProc = $script:Procs[$script:Procs.Count - 2]
+        if ($fakeProc.HasExited) {
+            $why = ''; try { $why = ((Get-Content -Raw (Join-Path $work 'fake.err')) -split "`n" | Select-Object -First 2) -join ' ' } catch { }
+            throw "the fake GitHub exited with $($fakeProc.ExitCode) at its start (port $($script:FakePort)): $why"
+        }
+    }
 }
 
 function Assert-NoServerErrors([string]$Suite) {
@@ -122,6 +131,14 @@ function Restart-Gateway([switch]$Graceful) {
     $gwDll = Join-Path $script:Root 'gateway/bin/Release/net10.0/FactoryWorker.Gateway.dll'
     $script:Procs[1] = Start-Process dotnet -ArgumentList $gwDll -PassThru -RedirectStandardOutput (Join-Path $script:Work "gateway-$([guid]::NewGuid().ToString('N').Substring(0,4)).out") -RedirectStandardError (Join-Path $script:Work "gateway-restarted.err")
     [void](Wait-Until -Seconds 30 { try { [bool](Invoke-RestMethod "$(Get-GatewayBase)/ready" -TimeoutSec 2) } catch { $false } })
+    Wait-V2HostRunning
+}
+# -Engine v2 (FACTORY_DB_CONNECTION is set): /ready does not wait for the Wolverine host, which starts in the background after the schema (a few seconds, more on a loaded runner), and a command
+# dispatched before it runs is refused ("the Wolverine host is not up": a runtime start answers "no capacity", a journal line is refused). run.ps1 waits for it after the first start of a suite;
+# this is the same wait after a restart. It gives up quietly after 60 s (a gateway that does not run the host, such as a standby, is not told off here: the scenario's own checks say what failed).
+function Wait-V2HostRunning([int]$Seconds = 60) {
+    if (-not $env:FACTORY_DB_CONNECTION) { return }
+    [void](Wait-Until -Seconds $Seconds { try { $w = (Invoke-RestMethod "$(Get-GatewayBase)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 10).wolverine; $null -ne $w -and "$($w.state)" -eq 'running' } catch { $false } })
 }
 function Stop-TestEnv { Stop-ClientHost; foreach ($p in $script:Procs) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { } }; $script:Procs = @() }
 

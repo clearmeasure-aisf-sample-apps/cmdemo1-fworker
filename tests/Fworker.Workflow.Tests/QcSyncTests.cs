@@ -168,6 +168,40 @@ public sealed class QcSyncTests
         Assert.Equal([(5, 9, "head-changed")], Teardowns(late));
     }
 
+    // Another writer saves the item between the sync's read and its write (a verb, the sweep's other steps, a webhook): the sync reads again and does its step, and the sweep's answer has no error. It was
+    // answered as {"code":"error","reason":"qc: the state of item N changed since it was read ..."} and the suites that fail on a sweep error failed with it.
+    [Fact]
+    public async Task AStateThatMovesUnderTheSync_IsReadAgain_AndTheStepIsDone_WithNoError()
+    {
+        var h = Validated();
+        await h.Start(); await h.Place(); await h.Ready();
+        h.World.Push(9, FakeQcWorld.Sha2);
+        var moved = 0;
+        h.World.BeforeSave = item => { if (moved++ < 2) h.World.Items[item].Revision++; };   // two writers in a row win the race; the third attempt finds the revision it read
+        var (c, o) = await h.Call("qc-sync");
+        Assert.Equal(0, c);
+        Assert.Empty((JsonArray)o["errors"]!);
+        Assert.Single(Actions(o), a => a == "qc-stale");        // once, from the attempt that saved (not once for each attempt)
+        Assert.Equal("stale", h.State());
+        Assert.Single((JsonArray)o["records"]!);                // and the record once, not once for each attempt
+    }
+
+    [Fact]
+    public async Task AStateThatKeepsMoving_IsAnErrorOfTheItem_AfterThreeAttempts()
+    {
+        var h = Validated();
+        await h.Start(); await h.Place(); await h.Ready();
+        h.World.Push(9, FakeQcWorld.Sha2);
+        var tries = 0;
+        h.World.BeforeSave = item => { tries++; h.World.Items[item].Revision++; };
+        var (c, o) = await h.Call("qc-sync");
+        Assert.Equal(0, c);
+        Assert.Equal(3, tries);
+        var e = Assert.Single(((JsonArray)o["errors"]!).Select(x => (JsonObject)x!));
+        Assert.Contains("changed since it was read", QcJson.Str(e, "reason"));
+        Assert.Equal("ready", h.State());
+    }
+
     [Fact]
     public async Task ARunningEnvironmentPastItsLifetimeIsTornDown()
     {

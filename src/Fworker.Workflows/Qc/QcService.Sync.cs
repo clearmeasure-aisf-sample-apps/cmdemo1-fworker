@@ -49,7 +49,7 @@ public sealed partial class QcService
             if (!it.Open || !QcJson.NameIn(cfg.Label, it.Labels) || QcJson.NameIn(cfg.RivalLabel, it.Labels)) continue;
             var inVal = string.Equals(it.Column ?? "", cfg.ValidationColumn, StringComparison.OrdinalIgnoreCase);
             if (!inVal && !indexed.Contains(it.Number)) continue;
-            try { await SyncItem(it, inVal, open, res, dry, now, gateApproval, ct); }
+            try { await SyncItemRetrying(it, inVal, open, res, dry, now, gateApproval, ct); }
             catch (QcReject e)
             {
                 if (e.Code is "github-not-found" or "item-not-found") res.Actions.Add(new JsonObject { ["item"] = it.Number, ["action"] = "qc-skip", ["reason"] = "vanished-during-sweep" });
@@ -58,6 +58,26 @@ public sealed partial class QcService
             catch (Exception e) when (e is not OperationCanceledException) { res.Errors.Add(new JsonObject { ["item"] = it.Number, ["code"] = "error", ["reason"] = $"qc: {e.Message}" }); }
         }
         return res;
+    }
+
+    // A state comment that moved under the sync (a verb, the sweep's other steps or a webhook wrote the item between this sync's read and its write) is read again and the item synced again, up to three
+    // times, as WithRetry does for a verb and Update-State of the rule scripts does: the conflict is the normal outcome of two writers, not an error of the sweep (it was logged as one, "qc: the state of
+    // item N changed since it was read", and failed the invariant of the suites that no sweep error is logged). Each attempt collects into a result of its own, so that an attempt that fails halfway
+    // leaves nothing behind in the sweep's answer; the third conflict is raised as before.
+    async Task SyncItemRetrying(QcBoardItem it, bool inVal, IReadOnlyList<JsonObject> open, SyncResult res, bool dry, DateTime now, bool gateApproval, CancellationToken ct)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var mine = new SyncResult();
+            try { await SyncItem(it, inVal, open, mine, dry, now, gateApproval, ct); }
+            catch (QcStateConflictException) when (attempt < 3) { continue; }
+            foreach (var x in mine.Actions) res.Actions.Add(x!.DeepClone());
+            foreach (var x in mine.Records) res.Records.Add(x!.DeepClone());
+            foreach (var x in mine.Teardowns) res.Teardowns.Add(x!.DeepClone());
+            foreach (var x in mine.Approvals) res.Approvals.Add(x!.DeepClone());
+            foreach (var x in mine.Errors) res.Errors.Add(x!.DeepClone());
+            return;
+        }
     }
 
     static void Teardown(SyncResult res, int item, JsonObject rec, string reason) =>
