@@ -24,9 +24,12 @@ saga | ^saga: a code item | profile=saga-feature
 # the failed jobs with the saga's own lift of the park once master is green at a later commit), the demotion of a PASS whose pull request was closed, and a person's merge (merge pickup). v1 does these in `sync-board` for every item; the
 # scenarios have nothing to play on v1 (they pass there at once) and the suites auto and owner test the script. The expiry of a park (timing.parkHours, a day), the clear-hold of an approved inspector hold, the owner that waits out
 # a hold (idleReleaseMinutes, an hour) and the settle's re-arm run on timers or on state no scenario of Tier 1 can reach in its time: they are tested by Fworker.Workflow.Tests (SweepStepsTests, ItemStepsTests, WorkItemTrackedTests).
-# (two claims of two scenarios each, so that the job saga runs the four sweep scenarios on its two lanes: each waits for the watcher's minute)
-saga | ^saga: sweep step: a (merged code item|PASS whose) | profile=saga-feature
-saga | ^saga: sweep step: a (red master|merge by a person) | profile=saga-feature
+# (one claim for each: a session holds one work item and the saga's owner keeps it until the delivery, so a second scenario of a group needs a new session, and the verbs of a second item in a gateway that has run another
+# one were taken by the saga too late now and then; each scenario therefore starts its own gateway, as the scenarios of the docs and the feature plan do, and the job saga runs them on its two lanes)
+saga | ^saga: sweep step: a merged code item | profile=saga-feature
+saga | ^saga: sweep step: a red master | profile=saga-feature
+saga | ^saga: sweep step: a PASS whose | profile=saga-feature
+saga | ^saga: sweep step: a merge by a person | profile=saga-feature
 
 # ---- whole suites ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous

@@ -9,16 +9,8 @@
 # The suite is claimed by v2-claims.txt twice, with the profile of each plan (the scenario of the docs plan with saga-docs, the one of the feature plan with saga-feature).
 $script:SagaOwner = 'sg1'
 
-# the owner session that gives the intake its free slot (a connected owner session with capacity); started once. A session holds one work item (plant.oneItemPerSession). On v1 the session that has merged its item is idle and the gateway restarts it, so it takes the next one; on v2 the saga's owner keeps the item until it is
-# delivered (the Deliver step), so the session is not idle and the intake finds no free slot in it. The next scenario of a group therefore plays with a new session under a new name (sg2, sg3, ...; the first stays
-# sg1, which the golden files of the first scenarios record) and the one that played is stopped.
-$script:SagaOwnerNo = 1; $script:SagaOwnerPlayed = $false
+# the owner session that gives the intake its free slot (a connected owner session with capacity); started once, left running for the suite's other scenarios
 function Saga-EnsureOwner {
-    if ($script:SagaOwnerPlayed -and $script:GoldenEngine -eq 'v2') {
-        Stop-OwnerClient $script:SagaOwner
-        $script:SagaOwnerNo++; $script:SagaOwner = "sg$($script:SagaOwnerNo)"
-    }
-    $script:SagaOwnerPlayed = $true
     $up = $false; try { $up = @((Get-Plant).plant.workers | Where-Object { $_.name -eq $script:SagaOwner -and $_.connected }).Count -gt 0 } catch { }
     if ($up) { return }
     if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
@@ -28,9 +20,6 @@ function Saga-EnsureOwner {
     Check "the owner session $($script:SagaOwner) is connected" $up "client $(if ($p.HasExited) { "ended with exit $($p.ExitCode)" } else { 'running' }); events: $(@(Get-WorkerEvents $script:SagaOwner | ForEach-Object { $_.event }) -join ',')"
 }
 function Saga-Col([int]$n) { "$((Get-FakeIssue $n).column)" }
-# v2: the saga's own step, read from the dashboard. The card (and the verb's answer) can be ahead of the saga, which takes the messages of a verb in turn: a verb sent before the saga has entered the step
-# is a message for the step before and is dropped, so a scenario that goes on at the card's word alone loses its pull request (or its completion) now and then. On v1 there is no saga: true.
-function Saga-StepIs([int]$n, [string]$Step) { if ($script:GoldenEngine -ne 'v2') { return $true }; $v = Saga-View $n; return ($null -ne $v -and "$($v.step)" -eq $Step) }
 # the merge calls the fake saw for the pull request: PUT .../pulls/N/merge (and the asynchronous form), all sources
 function Saga-FakeLog { , @(foreach ($e in @(Fake 'log')) { foreach ($l in @($e)) { "$l" } }) }   # (the log as one string per request, whether the answer comes enumerated or as one array)
 function Saga-MergeCalls([int]$pr) { @((Saga-FakeLog) | Where-Object { $_ -match "^PUT /repos/[^/]+/[^/]+/pulls/$pr/merge" }).Count }
@@ -60,15 +49,13 @@ function Saga-Play([string]$Title, [string]$Body, [bool]$DocsOnly, [string[]]$La
     $r = Fo $w @('append-body', '--item', $n, '--column', 'Technical Design', '--content-file', (TmpFile "sgtd$n.md" $sec)); CheckExit "design #$n append" $r 0
     $r = Fo $w @('record-review', '--item', $n, '--column', 'Technical Design', '--role', 'reviewer', '--text-file', (TmpFile "sgrv-td$n.md" "Section present and complete.`nREVIEW: COMPLETE")); CheckExit "design #$n review" $r 0
     $c = Fo $w @('complete', '--item', $n, '--column', 'Technical Design', '--review-ref', $r.review_ref, '--comment', 'REVIEW: COMPLETE - design done'); CheckExit "design #$n complete" $c 0
-    $dv = Wait-Until -Seconds 90 { (Saga-Col $n) -eq 'Development' -and (Saga-StepIs $n 'Develop') }
-    Check "#$n continues into Development" $dv "column $(Saga-Col $n)"
+    Check "#$n continues into Development" ((Wait-Until -Seconds 40 { (Saga-Col $n) -eq 'Development' })) "column $(Saga-Col $n)"
     Fake 'push-branch' @{ branch = "factory-worker/$n-development"; files = @($file); profile = 'green' } | Out-Null
     $r = Fo $w @('open-pr', '--item', $n, '--head', "factory-worker/$n-development", '--title', 'Saga trial','--body-file', (TmpFile "sgpr$n.md" 'change')); CheckExit "open-pr #$n" $r 0
     $pr = [int]$r.pullRequest.number
     $rv = Fo $w @('record-review', '--item', $n, '--column', 'Development', '--role', 'reviewer', '--text-file', (TmpFile "sgrv-dev$n.md" "Diff matches the plan.`nREVIEW: COMPLETE")); CheckExit "development #$n review" $rv 0
     $c = Fo $w @('complete', '--item', $n, '--column', 'Development', '--review-ref', $rv.review_ref, '--comment', 'PR open, CI green. REVIEW: COMPLETE'); CheckExit "development #$n complete" $c 0
-    $ft = Wait-Until -Seconds 90 { (Saga-Col $n) -eq 'Functional Testing' -and (Saga-StepIs $n 'Verify') }
-    Check "#$n is in Functional Testing" $ft "column $(Saga-Col $n)"
+    Check "#$n is in Functional Testing" ((Wait-Until -Seconds 40 { (Saga-Col $n) -eq 'Functional Testing' })) "column $(Saga-Col $n)"
     return @{ n = $n; pr = $pr }
 }
 # The PASS of Functional Testing by the owner session
