@@ -61,7 +61,7 @@ static class GatewayWolverineExtensions
                 if (journalSink is not null && c.Instance.Home is { } sessionHome)
                     journalSink.OnSessionGone = async (item, key) =>
                     {
-                        if (workItems.Ownership?.Owns(item) != true) return;
+                        if (workItems.Ownership is not { } goneOwnership || !await goneOwnership.OwnsOrFindAsync(item)) return;
                         var id = new Fworker.Contracts.Ids.ItemId(sessionHome, item);
                         var at = DateTimeOffset.UtcNow;
                         // (a host that is not up takes neither: the slot then ends at its time limit, which the scheduler tells the saga as a lost session)

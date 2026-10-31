@@ -25,31 +25,41 @@ using Wolverine;
 /// The items of the home repository that have a saga which has not completed, as the numbers v1's sweep knows them by. Read from the saga's table before each sweep (a point query by status,
 /// bounded in time); a read that fails keeps the last answer, because a v2 item must not be taken by v1 for the length of an outage.
 /// </summary>
-sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, string?>? columnOf = null, Fworker.Workflows.Adoption.ReadoptionGate? readoption = null)
+sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, string?>? columnOf = null, Fworker.Workflows.Adoption.ReadoptionGate? readoption = null, TimeSpan? findLimit = null)
 {
-    volatile IReadOnlyDictionary<int, string> offerKeys = new Dictionary<int, string>();
-    volatile HashSet<int> owned = [];
-    volatile IReadOnlyList<(int Item, string Column)> offers = [];
-    volatile IReadOnlyDictionary<int, SlotOffer> slots = new Dictionary<int, SlotOffer>();
-    volatile IReadOnlyList<WorkItemState> states = [];
-    volatile bool loaded;
-    public int Count => owned.Count;
+    /// <summary>
+    /// What one read of the saga's table says, as one immutable value: the owned items, the offers, the slots and the states all come from the same read, so a reader never mixes two (an offer from one read and the slot of
+    /// another). <see cref="Started"/> numbers the read by the order in which the reads began; a read is published only if it began after the one that is published, so a late, older read cannot overwrite a newer set.
+    /// </summary>
+    sealed record Snapshot(long Started, HashSet<int> Owned, IReadOnlyList<(int Item, string Column)> Offers, IReadOnlyDictionary<int, string> OfferKeys, IReadOnlyDictionary<int, SlotOffer> Slots, IReadOnlyList<WorkItemState> States, bool Full);
+
+    volatile Snapshot snapshot = new(0, [], [], new Dictionary<int, string>(), new Dictionary<int, SlotOffer>(), [], false);
+    long lookupsDownUntil;   // (ticks: a lookup that failed holds the next ones back for a moment)
+    long reads;
+    readonly object publishing = new();
+    readonly System.Collections.Concurrent.ConcurrentDictionary<int, Lazy<Task<bool>>> finding = new();
+
+    /// <summary>The longest a point lookup of one item waits for the table (<see cref="OwnsOrFindAsync"/>).</summary>
+    public static readonly TimeSpan FindLimit = TimeSpan.FromSeconds(3);
+    readonly TimeSpan findWait = findLimit ?? FindLimit;
+
+    public int Count => snapshot.Owned.Count;
 
     /// <summary>
     /// W9.10e: whether the saga's table has been read successfully at least once (or the set was given). Until then nobody knows which items are v2's, so the sweep acts on no item at all and incremental passes wait
     /// (Sweeper): an empty set that only means "not read yet" would let v1 settle, merge or park an item that has a saga. After the first read a failed read keeps the last answer, as before.
     /// </summary>
-    public bool Loaded => loaded;
+    public bool Loaded => snapshot.Full;
 
-    public bool Owns(int item) => owned.Contains(item);
+    public bool Owns(int item) => snapshot.Owned.Contains(item);
 
-    public IReadOnlyCollection<int> Items => owned;
+    public IReadOnlyCollection<int> Items => snapshot.Owned;
 
     /// <summary>
     /// W9.10k: the states the last successful read returned, for the items of the home repository: what the plant is fed from for them (SagaSweepFeed: the owners' leases, the parks, the release queue) and what the release
     /// check counts (SagaFlight).
     /// </summary>
-    public IReadOnlyList<WorkItemState> States => states;
+    public IReadOnlyList<WorkItemState> States => snapshot.States;
 
     /// <summary>The Status column a step is worked in (the docs plan's columns), null for a step no session works.</summary>
     public string? Column(StepKind step) => columnOf?.Invoke(step);
@@ -57,17 +67,15 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     /// <summary>
     /// What the plant is offered for the saga's items (W6.6): an open, unparked item on a step that a session works, in that step's column. The sweep's own offers for these items are dropped (SweepV2Filter), so
     /// the saga is what says that an item waits for a session; the sessions and the plant that places them are v1's. Empty without the columns of the docs plan.
-    /// </summary>
-    /// <summary>
     /// W9.9b (review): after a break an item whose row is still the old generation and that the adoption has not examined is not offered (ReadoptionGate): v1 may have moved or merged it since, and the plant would start a
     /// session on a stale Develop. The gate is asked at each read, so the offer is back as soon as the adoption has examined the item (Adopted) or the gate is released; the sweep's full pass repeats it.
     /// </summary>
-    public IReadOnlyList<(int Item, string Column)> Offers => readoption is null ? offers : offers.Where(o => !Awaiting(o.Item)).ToList();
+    public IReadOnlyList<(int Item, string Column)> Offers => OffersOf(snapshot);
 
-    bool Awaiting(int item) => readoption is not null && offerKeys.TryGetValue(item, out var key) && readoption.Refuses(key);
+    IReadOnlyList<(int Item, string Column)> OffersOf(Snapshot s) => readoption is null ? s.Offers : s.Offers.Where(o => !(s.OfferKeys.TryGetValue(o.Item, out var key) && readoption.Refuses(key))).ToList();
 
     /// <summary>W9.10j: the slot of the scheduler that an offered item holds, by item: the runtime it is on and the saga's arm. An item of a plan that does not use the scheduler has none (the plant places its session).</summary>
-    public IReadOnlyDictionary<int, SlotOffer> Slots => slots;
+    public IReadOnlyDictionary<int, SlotOffer> Slots => snapshot.Slots;
 
     /// <summary>
     /// The offers as the sweep prints them, for the items <paramref name="hasOwner"/> says no session holds: an item with an owner is not offered again (the plant would take the offer for a session that is gone and drop the
@@ -76,48 +84,118 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     public List<JsonObject> OfferNodes(Func<int, bool> hasOwner, IReadOnlyCollection<int>? only = null)
     {
         var nodes = new List<JsonObject>();
-        foreach (var (item, column) in Offers)
+        var s = snapshot;   // (offers and slots of one read)
+        foreach (var (item, column) in OffersOf(s))
             if (!hasOwner(item) && (only is null || only.Contains(item)))
             {
                 var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = "handoff", ["v2"] = true };
                 // W9.10j: the slot the scheduler granted: the plant starts the session on its runtime, under the saga's arm, and the manager keeps the execution apart from its own counts
-                if (slots.TryGetValue(item, out var slot)) { node["slot"] = slot.SlotId; node["runtime"] = slot.Runtime; node["arm"] = slot.ArmId; }
+                if (s.Slots.TryGetValue(item, out var slot)) { node["slot"] = slot.SlotId; node["runtime"] = slot.Runtime; node["arm"] = slot.ArmId; }
                 nodes.Add(node);
             }
         return nodes;
     }
 
-    /// <summary>Reads the owned items; false when the read failed and the last answer stands.</summary>
+    Snapshot Build(long started, IEnumerable<WorkItemState> all, bool full)
+    {
+        var set = new HashSet<int>(); var wanted = new List<(int, string)>(); var keys = new Dictionary<int, string>(); var granted = new Dictionary<int, SlotOffer>(); var homeStates = new List<WorkItemState>();
+        foreach (var state in all)
+        {
+            if (!ItemId.TryParse(state.Item, out var id) || id.Repository != home) continue;
+            set.Add(id.Number); homeStates.Add(state);
+            // (an item that asked the scheduler for a slot (W7.3) is offered only once it holds one: a hold, a full runtime or a runtime that is off keeps the session from being offered)
+            if (state.Status == WorkItemStatus.Open && !state.Parked && !state.SlotAsked && state.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && columnOf?.Invoke(state.Step) is { Length: > 0 } column)
+            {
+                wanted.Add((id.Number, column)); keys[id.Number] = state.Item;
+                if (state.SlotId.Length > 0 && state.SlotRuntime.Length > 0) granted[id.Number] = new SlotOffer(state.SlotId, state.SlotRuntime, state.ArmId);
+            }
+        }
+        return new Snapshot(started, set, wanted, keys, granted, homeStates, full);
+    }
+
+    /// <summary>Publishes a read if it began after the published one; false when a newer read is there already (its answer stands).</summary>
+    bool Publish(Snapshot read)
+    {
+        lock (publishing)
+        {
+            if (read.Started <= snapshot.Started) return false;
+            snapshot = read;
+            return true;
+        }
+    }
+
+    /// <summary>Reads the owned items; false when the read failed and the last answer stands. A read that began before the published one is dropped (true: it read well, and a newer answer is there).</summary>
     public async Task<bool> RefreshAsync(CancellationToken ct = default)
     {
+        var started = Interlocked.Increment(ref reads);
         try
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct); limit.CancelAfter(TimeSpan.FromSeconds(10));
             var states = await store.OwnedStates(limit.Token);
-            var set = new HashSet<int>(); var wanted = new List<(int, string)>(); var keys = new Dictionary<int, string>(); var granted = new Dictionary<int, SlotOffer>(); var homeStates = new List<WorkItemState>();
-            foreach (var state in states)
-            {
-                if (!ItemId.TryParse(state.Item, out var id) || id.Repository != home) continue;
-                set.Add(id.Number); homeStates.Add(state);
-                // (an item that asked the scheduler for a slot (W7.3) is offered only once it holds one: a hold, a full runtime or a runtime that is off keeps the session from being offered)
-                if (state.Status == WorkItemStatus.Open && !state.Parked && !state.SlotAsked && state.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && columnOf?.Invoke(state.Step) is { Length: > 0 } column)
-                {
-                    wanted.Add((id.Number, column)); keys[id.Number] = state.Item;
-                    if (state.SlotId.Length > 0 && state.SlotRuntime.Length > 0) granted[id.Number] = new SlotOffer(state.SlotId, state.SlotRuntime, state.ArmId);
-                }
-            }
-            owned = set; offers = wanted; offerKeys = keys; slots = granted; this.states = homeStates; loaded = true;
+            Publish(Build(started, states, full: true));
             return true;
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
         {
-            Console.Error.WriteLine($"v2 ownership: {e.GetType().Name}; the last answer stands ({owned.Count} items)");
+            Console.Error.WriteLine($"v2 ownership: {e.GetType().Name}; the last answer stands ({Count} items)");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the saga owns the item, for a caller that is told of the item by someone else (a session's verb, a park, a runtime failure, a session that is gone). The set is read before each sweep, and a saga can start after that
+    /// read: the sweep reads the set first and the board after, and the intake starts a saga between the two. An item that is not in the set is therefore looked for in the table by its key (one point read, not the whole table),
+    /// at most one read at a time for an item (a caller that comes while the read is in flight waits for it), bounded by <see cref="FindLimit"/>. A saga that is found is added to the published set, as a read of its own (so a read
+    /// that began before it cannot take it out again). A table that does not answer, or answers late, leaves the answer as it was: false, and nothing is published.
+    /// </summary>
+    public Task<bool> OwnsOrFindAsync(int item)
+    {
+        if (Owns(item)) return Task.FromResult(true);
+        // a table that has just failed a lookup is not asked again at once (each call would wait for the limit): the answer is "not owned" until the pause is over
+        if (DateTime.UtcNow.Ticks < Interlocked.Read(ref lookupsDownUntil)) return Task.FromResult(false);
+        var flight = finding.GetOrAdd(item, n => new Lazy<Task<bool>>(() => FindAsync(n)));
+        return Await(item, flight);
+    }
+
+    async Task<bool> Await(int item, Lazy<Task<bool>> flight)
+    {
+        try { return await flight.Value; }
+        finally { finding.TryRemove(new KeyValuePair<int, Lazy<Task<bool>>>(item, flight)); }
+    }
+
+    async Task<bool> FindAsync(int item)
+    {
+        var started = Interlocked.Increment(ref reads);
+        try
+        {
+            using var limit = new CancellationTokenSource(findWait);
+            var record = await store.Load(new ItemId(home, item).ToString(), limit.Token).WaitAsync(findWait);
+            lock (publishing)
+            {
+                var cur = snapshot;
+                // a read that began after this lookup is published: it is the newer word (the saga may have completed meanwhile), and this lookup adds nothing
+                if (cur.Started > started) return cur.Owned.Contains(item);
+                if (record?.State is not { } state || state.Status == WorkItemStatus.Completed) return cur.Owned.Contains(item);
+                if (cur.Owned.Contains(item)) return true;
+                var found = Build(started, cur.States.Where(s => s.Item != state.Item).Append(state), cur.Full);
+                found.Owned.UnionWith(cur.Owned);   // (the items Set gave)
+                snapshot = found;
+                return true;
+            }
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            Interlocked.Exchange(ref lookupsDownUntil, DateTime.UtcNow.AddSeconds(2).Ticks);
+            Console.Error.WriteLine($"v2 ownership: the saga of #{item} was not looked up: {e.GetType().Name}");
             return false;
         }
     }
 
     /// <summary>For a test or a host without a database: the owned items as given.</summary>
-    public void Set(IEnumerable<int> items) { owned = items.ToHashSet(); loaded = true; }
+    public void Set(IEnumerable<int> items)
+    {
+        lock (publishing) { var cur = snapshot; snapshot = cur with { Started = Interlocked.Increment(ref reads), Owned = items.ToHashSet(), Full = true }; }
+    }
 }
 
 /// <summary>The slot of the scheduler that the saga of an offered item holds (W9.10j).</summary>

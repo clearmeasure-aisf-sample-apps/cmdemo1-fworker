@@ -166,6 +166,10 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 if (items != null) foreach (var i in items) hub.RequestSweep(i);
                 return unconfirmedOut;
             }
+            // The set was read before the script ran, and the script read the board after: a saga's card reaches a working column only after its row is committed (the projection follows the saga's decisions), so a
+            // card the script saw there has a row by now, and the set is read again before the filter drops v1's word about it. Read once at the start only, the sweep offered an item that has a saga to the plant
+            // (a v1 offer with no slot, and the capacity of the scheduler counted twice) in the seconds between the saga's start and the next sweep. A read that fails leaves the set as it was.
+            if (V2 != null) await V2.RefreshAsync();
             if (V2 != null && V2.Count > 0)
             {
                 SweepV2Filter.Apply(j, V2.Owns);
