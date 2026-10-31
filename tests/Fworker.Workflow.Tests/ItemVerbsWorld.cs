@@ -2,6 +2,8 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
+using BaseFailures = Fworker.Workflows.ReadModels.BaseFailures;
+using ChecksFacts = Fworker.Workflows.ReadModels.ChecksFacts;
 using Fworker.Workflows.WorkItem.Verbs;
 using Xunit;
 
@@ -11,7 +13,7 @@ namespace Fworker.Workflow.Tests;
 /// W9.2: a GitHub of the item verbs' tests, in memory: the issues of one repository with their cards on a Projects board, their comments, the claim refs, the pull requests and their files. It answers the REST and GraphQL calls the
 /// verbs make (the wire port), records every write the way the golden files of tests/scenarios/golden show them (method, path, status, body), keeps the state comments (the state port) and journals through the real JournalLedger.
 /// </summary>
-sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, IItemRefusals, IItemV1, IJournalStore
+sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, IItemRefusals, IItemChecks, IItemQc, IJournalStore
 {
     public const string Owner = "acme", Repo = "orders", Login = "factory-bot";
     public static readonly string[] Columns = ["Todo", "Technical Design", "Development", "Functional Testing", "Release Queue", "Done"];
@@ -36,10 +38,19 @@ sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, II
     public readonly Dictionary<int, int> Refusals = [];
     public readonly List<string> Writes = [];
     public readonly List<string> Reads = [];
-    public readonly List<(string Verb, string Stdin)> V1Calls = [];
+    public readonly List<(int Item, string Assignment, string Holder)> QcAccepts = [];
+    public readonly Dictionary<string, ChecksFacts> HeadChecks = [];
+    public readonly List<string> CheckReads = [];
+    public readonly Dictionary<string, List<JsonObject>> ActionRuns = [];
+    public readonly Dictionary<string, string> Compares = [];
+    public readonly List<string> MasterScripts = [];
+    public bool NoMasterScripts;
+    public bool RefuseRetarget;
     public readonly List<string> Log = [];
     public DateTime Now = new(2026, 10, 29, 12, 0, 0, DateTimeKind.Utc);
-    public ItemRawAnswer? V1Answer;
+    public BaseFailures BaseResult = new(true, [], []);
+    public ItemRefusal? QcRefusal;
+    public bool HasQc = true;
     public long NextId = 1000;
     public int NextPull = 100;
     public bool FailNextStateSave;
@@ -50,14 +61,15 @@ sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, II
 
     sealed class Clock(ItemWorld w) : IItemClock { public DateTime UtcNow => w.Now; }
 
-    public ItemWorld(bool messaging = false, Func<string, string?>? env = null)
+    public ItemWorld(bool messaging = false, Func<string, string?>? env = null, bool qc = true)
     {
+        HasQc = qc;
         var root = JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "config", "instance.json")));
         Config = ItemVerbConfig.From(root, env ?? (_ => null), "", messaging, false);
         clock = new Clock(this);
         ledger = new JournalLedger(this, new JournalSettings(30, []), () => Now, _ => { });
         var gh = new ItemGitHub(this, Config, clock);
-        Verbs = new ItemVerbs(gh, new ItemBoard(gh, clock), new ItemPulls(gh, this), this, this, this, this, this, clock);
+        Verbs = new ItemVerbs(gh, new ItemBoard(gh, clock), new ItemPulls(gh, this), this, this, this, this, this, HasQcOrNull(), clock);
     }
 
     static string RepoRoot()
@@ -136,7 +148,13 @@ sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, II
         var im = Regex.Match(rest, @"^issues/(\d+)(/comments)?(\?.*)?$");
         if (im.Success)
         {
-            var n = int.Parse(im.Groups[1].Value); var issue = Issues[n];
+            var n = int.Parse(im.Groups[1].Value);
+            if (!Issues.TryGetValue(n, out var issue))
+            {
+                // a comment on a pull request (an issue of GitHub's, but not an item of the board)
+                if (m == "POST" && im.Groups[2].Success) { Write(m, path, 201, call.Body); return Task.FromResult(Ok(201, new JsonObject { ["id"] = NextId++ })); }
+                throw new InvalidOperationException($"the fake GitHub has no issue {n}");
+            }
             if (im.Groups[2].Success && m == "GET")
             {
                 var items = new JsonArray(issue.Comments.Select(c => (JsonNode)new JsonObject { ["id"] = c.Id, ["user"] = new JsonObject { ["login"] = c.Login }, ["body"] = c.Body, ["created_at"] = c.CreatedAt }).ToArray());
@@ -169,7 +187,24 @@ sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, II
         }
         if (m == "GET" && Regex.IsMatch(rest, @"^git/ref/heads/master$")) return Task.FromResult(Ok(200, new JsonObject { ["object"] = new JsonObject { ["sha"] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } }));
         // pull requests
-        if (m == "GET" && Regex.IsMatch(rest, @"^pulls\?state=open")) return Task.FromResult(Ok(200, new JsonArray(Pulls.Where(p => p.Open).Select(p => PullJson(p)).ToArray())));
+        if (m == "GET" && Regex.IsMatch(rest, @"^pulls\?state=open"))
+        {
+            // head=owner:branch and base=branch narrow the list as GitHub does
+            IEnumerable<Pull> list = Pulls.Where(p => p.Open);
+            if (Regex.Match(rest, @"[?&]head=([^&]+)") is { Success: true } hq) list = list.Where(p => $"{Config.Owner}:{p.Head}" == Uri.UnescapeDataString(hq.Groups[1].Value));
+            if (Regex.Match(rest, @"[?&]base=([^&]+)") is { Success: true } bq) list = list.Where(p => p.Base == Uri.UnescapeDataString(bq.Groups[1].Value));
+            return Task.FromResult(Ok(200, new JsonArray(list.Select(p => PullJson(p)).ToArray())));
+        }
+        var cm = Regex.Match(rest, @"^compare/(.+?)\.\.\.(.+)$");
+        if (m == "GET" && cm.Success)
+            return Task.FromResult(Compares.TryGetValue($"{cm.Groups[1].Value}...{cm.Groups[2].Value}", out var cmp) ? Ok(200, new JsonObject { ["status"] = cmp }) : Ok(404, new JsonObject { ["message"] = "Not Found" }));
+        var runs = Regex.Match(rest, @"^actions/runs\?head_sha=([0-9a-f]+)");
+        if (m == "GET" && runs.Success) return Task.FromResult(Ok(200, new JsonObject { ["workflow_runs"] = new JsonArray((ActionRuns.TryGetValue(runs.Groups[1].Value, out var rl) ? rl : []).Select(r => (JsonNode)r.DeepClone()).ToArray()) }));
+        var rerun = Regex.Match(rest, @"^actions/runs/(\d+)/rerun-failed-jobs$");
+        if (m == "POST" && rerun.Success) { Write(m, path, 201, null); return Task.FromResult(Ok(201, null)); }
+        if (m == "GET" && rest.StartsWith("contents/src/Database/scripts/Update", StringComparison.Ordinal))
+            return Task.FromResult(NoMasterScripts ? Ok(404, new JsonObject { ["message"] = "Not Found" }) : Ok(200, new JsonArray(MasterScripts.Select(f => (JsonNode)new JsonObject { ["name"] = f }).ToArray())));
+        if (m == "DELETE" && rest.StartsWith("git/refs/heads/", StringComparison.Ordinal)) { Write(m, path, 204, null); return Task.FromResult(Ok(204, null)); }
         var pm2 = Regex.Match(rest, @"^pulls/(\d+)(/files)?(\?.*)?$");
         if (pm2.Success)
         {
@@ -181,7 +216,16 @@ sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, II
                 return Task.FromResult(Ok(200, page == 1 ? new JsonArray(p.Files.Select(f => (JsonNode)new JsonObject { ["filename"] = f.File, ["status"] = f.Status }).ToArray()) : new JsonArray()));
             }
             if (m == "GET") return Task.FromResult(Ok(200, PullJson(p)));
-            if (m == "PATCH") { if (call.Body!["body"] is { } b) p.Body = b.ToString(); Write(m, path, 200, call.Body); return Task.FromResult(Ok(200, PullJson(p))); }
+            if (m == "PATCH")
+            {
+                if (call.Body!["base"] is not null && RefuseRetarget) { Write(m, path, 422, call.Body); return Task.FromResult(Ok(422, new JsonObject { ["message"] = "Validation Failed: pull request is part of a stack" })); }
+                if (call.Body!["body"] is { } b) p.Body = b.ToString();
+                if (call.Body["title"] is { } t) p.Title = t.ToString();
+                if (call.Body["base"] is { } bb) p.Base = bb.ToString();
+                if (call.Body["state"]?.ToString() == "closed") p.Open = false;
+                Write(m, path, 200, call.Body);
+                return Task.FromResult(Ok(200, PullJson(p)));
+            }
         }
         if (m == "POST" && rest == "pulls")
         {
@@ -204,13 +248,19 @@ sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, II
 
     static JsonNode PullJson(Pull p) => new JsonObject
     {
-        ["number"] = p.Number, ["html_url"] = $"https://github.com/o/r/pull/{p.Number}", ["title"] = p.Title, ["body"] = p.Body, ["state"] = p.Open ? "open" : "closed", ["merged"] = p.Merged, ["draft"] = p.Draft,
+        ["number"] = p.Number, ["node_id"] = $"PR_{p.Number}", ["html_url"] = $"https://github.com/o/r/pull/{p.Number}", ["title"] = p.Title, ["body"] = p.Body, ["state"] = p.Open ? "open" : "closed", ["merged"] = p.Merged, ["draft"] = p.Draft,
         ["merge_commit_sha"] = p.Merged ? "bbbb" : null, ["head"] = new JsonObject { ["ref"] = p.Head, ["sha"] = p.Sha }, ["base"] = new JsonObject { ["ref"] = p.Base }, ["changed_files"] = p.Files.Count,
     };
 
     ItemGhAnswer GraphQl(JsonNode body)
     {
         var q = body["query"]!.ToString(); var v = (JsonObject)body["variables"]!;
+        if (q.Contains("markPullRequestReadyForReview"))
+        {
+            Pulls.First(p => $"PR_{p.Number}" == v["id"]!.ToString()).Draft = false;
+            Writes.Add($"POST /graphql markPullRequestReadyForReview 200 {Sorted(body)}");
+            return Ok(200, new JsonObject { ["data"] = new JsonObject { ["markPullRequestReadyForReview"] = new JsonObject() } });
+        }
         if (q.Contains("updateProjectV2ItemFieldValue"))
         {
             var card = v["i"]!.ToString(); var opt = v["o"]!.ToString();
@@ -357,15 +407,36 @@ sealed class ItemWorld : IItemWire, IItemStateStore, IItemJournal, IItemLock, II
 
     // ---- locks, refusals, v1 --------------------------------------------------------------------------------------------------------------------------
 
-    public async Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct) { Log.Add($"lock {item}"); try { return await body(); } finally { Log.Add($"unlock {item}"); } }
+    /// <summary>An item whose lock another operation holds for ever: a verb that asks for it gets the busy refusal.</summary>
+    public int? Busy;
+
+    public async Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct) { if (Busy == item) throw new ItemBusyException(item); Log.Add($"lock {item}"); try { return await body(); } finally { Log.Add($"unlock {item}"); } }
 
     public Task Add(int item, CancellationToken ct) { Refusals[item] = Refusals.GetValueOrDefault(item) + 1; return Task.CompletedTask; }
     public Task Reset(int item, CancellationToken ct) { Refusals.Remove(item); return Task.CompletedTask; }
     public Task<int> Count(int item, CancellationToken ct) => Task.FromResult(Refusals.GetValueOrDefault(item));
 
-    public Task<ItemRawAnswer?> Run(string verb, string stdin, TimeSpan timeout, CancellationToken ct)
+    // ---- the checks and the QC gate (the ports of W9.10q) ---------------------------------------------------------------------------------------------
+
+    /// <summary>The checks of a head as the gateway judges them (<c>Get-ChecksFor</c>): a status and the names that failed, which are gates ("Build result", "secret-scan") or not.</summary>
+    public static ChecksFacts Facts(string status, string[]? failed = null, string[]? nongateFailed = null, string[]? nongateCancelled = null, string[]? pending = null)
     {
-        V1Calls.Add((verb, stdin));
-        return Task.FromResult(V1Answer);
+        failed ??= []; nongateFailed ??= []; nongateCancelled ??= []; pending ??= [];
+        return new ChecksFacts
+        {
+            Status = status, Total = 3, Failed = failed.Length, FailedChecks = failed, PendingChecks = pending, NongateFailed = nongateFailed, NongateCancelled = nongateCancelled,
+            Gates = [new("Build result", failed.Contains("Build result") ? "failure" : status == "pending" ? "pending" : "success"), new("secret-scan", failed.Contains("secret-scan") ? "failure" : "success")],
+        };
+    }
+
+    public Task<ChecksFacts> ChecksFor(string sha, CancellationToken ct) { CheckReads.Add(sha); return Task.FromResult(HeadChecks.TryGetValue(sha, out var f) ? f : Facts("success")); }
+    public Task<BaseFailures> BaseFailures(IReadOnlyCollection<string> names, CancellationToken ct) => Task.FromResult(BaseResult);
+
+    IItemQc? HasQcOrNull() => HasQc ? this : null;
+    public Task<JsonObject> Accept(int item, string assignment, string holder, CancellationToken ct)
+    {
+        QcAccepts.Add((item, assignment, holder));
+        if (QcRefusal is not null) throw QcRefusal;
+        return Task.FromResult(new JsonObject { ["ok"] = true, ["id"] = item, ["accepted"] = true, ["kind"] = "qc-env", ["role"] = "qc", ["assignment"] = assignment });
     }
 }

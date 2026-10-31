@@ -61,14 +61,17 @@ sealed class MergeVerbHandlers(Func<MergeVerbParts?> find, Func<string, string, 
     {
         var instance = services.GetRequiredService<InstanceConfig>();
         if (instance.Home is not { } home || services.GetService<WorkItemParts>() is not { } saga) return null;
-        var settings = MergeVerbSettingsReader.From(instance.Root, saga.Docs.Settings.ColumnOf);
+        var settings = MergeVerbSettingsReader.From(instance.Root, saga.Docs.Settings.ColumnOf) with { DefaultBranch = instance.DefaultBranch };
         var host = services.GetRequiredService<WolverineHostService>();
         var clients = GitHubClients.Make(Environment.GetEnvironmentVariable);
         if (clients is null) return null;
         var db = services.GetService<DatabaseOptions>()?.ConnectionString;
         Func<FactoryDbContext>? open = db is null ? null : () => WorkItemWiring.Open(db);
         var name = instance.Root?["name"]?.ToString() is { Length: > 0 } n ? n : "factory-worker";
-        var verbs = new MergeVerbService(home, saga.Store, new GitHubItemLabels(clients), m => host.PublishAsync(m), settings);
+        // W9.10q: the migration-number collision of the script's merge, and the model ladder's refusal count (the file the rule scripts and the item verbs count in)
+        var dir = RuleStateDirectory.Resolve(Environment.GetEnvironmentVariable);
+        Directory.CreateDirectory(dir);
+        var verbs = new MergeVerbService(home, saga.Store, new GitHubItemLabels(clients), m => host.PublishAsync(m), settings, migrations: new GitHubMergeMigrations(clients, home, instance.DefaultBranch), refusals: new ItemVerbsRefusals(dir));
         var update = new BaseUpdateService(new GitHubBaseUpdate(clients, home, instance.DefaultBranch), new SagaBaseUpdateItems(saga.Store, home, open), new BackmergeSettings(name));
         return new MergeVerbParts(verbs, update, saga.Store, home);
     }
@@ -90,6 +93,8 @@ sealed class MergeVerbHandlers(Func<MergeVerbParts?> find, Func<string, string, 
             Console.Error.WriteLine($"merge verb {verb} on v2: {e.GetType().Name}: {e.Message}");
             return MergeVerbReplies.InternalError(verb, $"{e.GetType().Name}: {e.Message}");
         }
+        // a refusal 10 that v2 answered is one data point of the model ladder, as the script counts its own (factory.ps1: complete, record-review, validation-verdict, approve-pr, merge, open-pr, append-body)
+        if (answer is { } v2Answer && verb is "merge" or "approve-pr") await p.Verbs.CountRefusal(body, v2Answer);
         return answer ?? await Script(verb, stdin, timeout);
     }
 

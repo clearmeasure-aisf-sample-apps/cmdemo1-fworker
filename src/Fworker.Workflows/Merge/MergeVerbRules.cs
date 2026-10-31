@@ -14,7 +14,8 @@ namespace Fworker.Workflows.Merge;
 /// <param name="HoldLabels"><c>holdLabels</c> (hold:owner when the configuration names none): a person holds the item while one is on it.</param>
 /// <param name="ValidationColumn"><c>columns.validation</c>: the column a PASS is merged from.</param>
 /// <param name="ColumnOf">The card column of a step (null when the step has none of its own: the merge happens in the validation column).</param>
-public sealed record MergeVerbSettings(string MergePolicy, string AutoMergeLabel, IReadOnlyList<string> HoldLabels, string ValidationColumn, Func<StepKind, string?> ColumnOf)
+/// <param name="DefaultBranch"><c>defaultBranch</c>: the base branch the migration numbers are compared with.</param>
+public sealed record MergeVerbSettings(string MergePolicy, string AutoMergeLabel, IReadOnlyList<string> HoldLabels, string ValidationColumn, Func<StepKind, string?> ColumnOf, string DefaultBranch = "master")
 {
     public bool Auto => string.Equals(MergePolicy, "auto", StringComparison.Ordinal);
 

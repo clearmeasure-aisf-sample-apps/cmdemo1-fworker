@@ -55,13 +55,14 @@ function Saga-Play([string]$Title, [string]$Body, [bool]$DocsOnly, [string[]]$La
     $pr = [int]$r.pullRequest.number
     $rv = Fo $w @('record-review', '--item', $n, '--column', 'Development', '--role', 'reviewer', '--text-file', (TmpFile "sgrv-dev$n.md" "Diff matches the plan.`nREVIEW: COMPLETE")); CheckExit "development #$n review" $rv 0
     $c = Fo $w @('complete', '--item', $n, '--column', 'Development', '--review-ref', $rv.review_ref, '--comment', 'PR open, CI green. REVIEW: COMPLETE'); CheckExit "development #$n complete" $c 0
-    Check "#$n is in Functional Testing" ((Wait-Until -Seconds 40 { (Saga-Col $n) -eq 'Functional Testing' })) "column $(Saga-Col $n)"
+    Check "#$n is in Functional Testing" ((Wait-Until -Seconds 40 { (Saga-Col $n) -eq 'Functional Testing' })) "column $(Saga-Col $n); decisions $((Saga-Actions $n) -join ', '); view $((Saga-View $n) | ConvertTo-Json -Compress -Depth 4)"
     return @{ n = $n; pr = $pr }
 }
 # The PASS of Functional Testing by the owner session
 function Saga-Pass($x) {
     $w = $script:SagaOwner
     $rv = Fo $w @('record-review', '--item', $x.n, '--column', 'Functional Testing', '--role', 'reviewer', '--text-file', (TmpFile "sgrv-ft$($x.n).md" "Criteria exercised.`nREVIEW: COMPLETE")); CheckExit "validation #$($x.n) review" $rv 0
+    if (-not $rv.review_ref) { Write-Host "    (the saga's view of #$($x.n): column $(Saga-Col $x.n); decisions $((Saga-Actions $x.n) -join ', '); $((Saga-View $x.n) | ConvertTo-Json -Compress -Depth 4))" }
     $v = Fo $w @('validation-verdict', '--item', $x.n, '--passed', 'true', '--summary-file', (TmpFile "sgvs$($x.n).md" 'Both criteria met.'), '--pr', $x.pr, '--review-ref', $rv.review_ref)
     CheckExit "the PASS verdict of #$($x.n)" $v 0
     return $v

@@ -155,7 +155,6 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | ticker-journal | `gateway/PlantTicker.cs` | 1 | journal | runner | W9.8 | W9.9a | The ticker's journal lines (#477). |
 | owner-release | `gateway/Ports/ItemStepsPort.cs` | 2 | get-item, release | router | W9.10f | - | OwnerRelease: the saga's ReleaseOwner (an owner that waited out a hold) reads the claim with get-item and gives it up with release, through the verb router (v2's item verbs where the engine acts); no script of its own. |
 | plant-restore-claim | `gateway/PlantRestoreCorrection.cs` | 1 | get-item | router | W9.10k | - | PlantRestoreCorrection: at start the plant restored from the database is corrected from the claim of each owned saga item, read with get-item through the verb router (v2's item verbs where the engine acts); no script of its own. |
-| item-verbs-v1 | `gateway/Ports/ItemVerbsPort.cs` | 1 | by argument | runner | W9.10q | W9.10q | ItemVerbsV1, the IItemV1 plumbing: it goes with the fallbacks. |
 | item-admin-feed | `gateway/Ports/ItemVerbsPort.cs` | 1 | by argument | router | W9.2 | - | ItemAdminFeed forwards to the router it wraps (no script). |
 | qc-calls | `gateway/Qc.cs` | 1 | by argument | runner | W9.1 | W9.9a | QcHub runs the qc-* verbs (QcService in W9.1). |
 | qc-facts | `gateway/Ports/QcPort.cs` | 1 | inspect-facts | router | W9.5 | - | QcFactsAdapter asks the router for the inspector's facts; the router answers on v2 or runs the script. |
@@ -169,14 +168,8 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 
 | Entry | Kind | File | Sites | Owner | Leaves | What it is |
 |---|---|---|---|---|---|---|
-| qc-accept | item-v1 | `src/Fworker.Workflows/WorkItem/Verbs/ItemVerbs.Claim.cs` | 1 | W9.1 | W9.1 | The accept of a QC environment (#541 marks it W9.1, #544 marks it W9.2: W9.1 owns it). |
-| complete-development | item-v1 | `src/Fworker.Workflows/WorkItem/Verbs/ItemVerbs.Flow.cs` | 1 | W9.10q | W9.10q | The red-head ruling and the migration check of complete in Development (marked W9.5, which merged without them). |
-| open-pr-copilot | item-v1 | `src/Fworker.Workflows/WorkItem/Verbs/ItemVerbs.Pr.cs` | 1 | W9.10q | W9.10q | open-pr for a copilot/* branch (marked W9.4, not in #545). |
-| item-pr-owner-task | item-v1 | `src/Fworker.Workflows/WorkItem/Verbs/ItemVerbs.Read.cs` | 1 | W9.10q | W9.10q | item-pr for an owner task (Resolve-OwnerPr). |
 | merge-peer-approved | merge-script | `src/Fworker.Workflows/Merge/MergeVerbService.cs` | 2 | W9.11b | W9.11b | A merge policy other than auto: the inspector's approval of the current head and the QC gate. **exception until W9.11b.** |
 | merge-hybrid-script | merge-script | `gateway/Verbs/MergeVerbs.cs` | 5 | W9.9b | W9.11b | The hybrid composition: the script answers merge, approve-pr, clear-hold and base-watch for an item the saga does not own. **exception until W9.11b.** |
-| merge-refusal-counter | behavior-gap | `gateway/Verbs/MergeVerbs.cs` | 0 | W9.10q | W9.10q | v2 refusals of merge do not feed the model ladder's counter (Add-Refusal), #542. |
-| merge-migration-collision | behavior-gap | `src/Fworker.Workflows/Merge/MergeVerbService.cs` | 0 | W9.10q | W9.10q | The script refuses a merge when another pull request took the same DbUp script number (Get-MigrationCollision, Verbs.Merge.ps1:190); the v2 merge verb does not check it, #542. |
 
 ### Exceptions
 
