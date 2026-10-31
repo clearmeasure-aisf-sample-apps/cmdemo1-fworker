@@ -86,7 +86,9 @@ static class AdoptionWiring
         var settings = parts.Docs.Settings;
         var columns = new AdoptionColumns(settings.ColumnOf(StepKind.Design) ?? "", settings.ColumnOf(StepKind.Develop) ?? "", settings.ColumnOf(StepKind.Verify) ?? "", settings.DoneColumn, settings.HoldColumns);
         var gates = new ItemGateConfig(settings.AutoMergeLabel, Str("videoLabel", "video"), settings.HoldLabels);
-        var mapping = new AdoptionSettings(settings.Policy, columns, DocsOnlySettingsReader.From(root), gates, settings.SlotRuntime);
+        // the saga carries every plan where none is named (the saga on its own, as the unit tests run it); the gateway's engine carries only the plans of intake.v2Plans, and with none named (config/instance.json) nothing is v2's to adopt:
+        // v1's items stay v1's, and every Tier 1 scenario of a plain v2 run has items in v1's hands that must stay there
+        var mapping = new AdoptionSettings(settings.Policy with { CarriedPlans = settings.Policy.CarriedPlans ?? [] }, columns, DocsOnlySettingsReader.From(root), gates, settings.SlotRuntime);
         var branch = Str("defaultBranch", "master");
         // the trains of the home repository's deployables: every environment of the chain (the train of an environment that has no state yet is just not there)
         Func<IReadOnlyList<string>> trainKeys = () => catalog()?.Current.Deployables.Where(d => d.Repository == home).SelectMany(d => DeliveryPolicy.Chain.Select(e => TrainKey.Of(d.Name, e))).ToList() ?? [];
