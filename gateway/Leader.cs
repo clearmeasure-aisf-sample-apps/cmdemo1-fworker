@@ -86,6 +86,8 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
     public void UseSqlLease(ISqlLease lease, bool fencesActing) { sql = lease; sqlFences = fencesActing; }
     public bool HasSqlLease => sql != null;
     public bool SqlFences => sql != null && sqlFences;
+    /// <summary>This process holds the SQL lock right now. The scripts of the schema ran before the lock was first tried (SqlLease.TryAcquireAsync), so the tables exist whenever this is true.</summary>
+    public bool SqlHeld => sql is { Held: true };
     /// <summary>The epoch of the SQL term this process took last (0: none, or no database).</summary>
     public long SqlEpoch => sql?.Epoch ?? 0;
     /// <summary>The epoch the claims of the idempotency ledger carry (W0.1): the SQL term where there is one, else the ref's.</summary>

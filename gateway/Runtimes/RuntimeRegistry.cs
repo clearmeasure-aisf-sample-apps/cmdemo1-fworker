@@ -4,6 +4,8 @@
 sealed class RuntimeRegistry
 {
     public RuntimeManager? CaeJob { get; init; }
+    // the adapter behind CaeJob: the command port of the v2 engine starts and stops its executions through it (without it every cae-job start was refused "runtime off" where the engine acts)
+    public CaeJobRuntime? CaeJobRuntime { get; init; }
     public CursorCloudRuntime? CursorRuntime { get; init; }
     public RuntimeManager? Cursor { get; init; }
     public CopilotCloudRuntime? CopilotRuntime { get; init; }

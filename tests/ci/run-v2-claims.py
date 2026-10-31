@@ -7,6 +7,8 @@ The claims are RUN by `tests/scenarios/run-all.ps1 -Engine v2` (the matrix jobs 
 suites and shards of suites, as `suites:` does for the v1 shards); this script is the static check of the list, and runs in the job "Every scenario is
 in exactly one shard". It fails (exit 1) on:
   - a line that is not understood, a claim twice, a suite claimed whole and also by another claim, a v1-only declaration without a reason or for a suite that is claimed;
+  - a `v1-only-scenarios <suite> | <regex> | <reason>` line (the scenarios of a suite claimed whole that stay on v1: run.ps1 -Engine v2 neither lists nor runs them) without a reason, for a suite that is not
+    claimed whole, or whose regular expression matches no scenario of the suite;
   - (unless --parse-only; needs pwsh) a claim for a suite that run.ps1 -ListSuites does not list, and a claim that lists no scenario (run.ps1 -ListScenarios): a renamed suite
     or scenario cannot leave a claim empty and green;
   - (with --workflow) a claimed suite that no matrix entry of the v2 jobs runs, one that two entries run, a shard set that is not g = 0..n-1 of one n, a shard of a suite whose
@@ -22,12 +24,22 @@ PROFILES = ("plain", "saga-docs", "saga-feature")
 
 
 def parse(path):
-    claims, v1only = [], []
+    claims, v1only, v1scen = [], [], []
     with open(path, encoding="utf-8") as fh:
         for no, raw in enumerate(fh, 1):
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
+            m = re.fullmatch(r"v1-only-scenarios\s+([a-z0-9-]+)\s*\|\s*(.+?)\s+\|\s+(.+)", line)
+            if m:
+                try:
+                    re.compile(m.group(2))
+                except re.error as e:
+                    raise SystemExit(f"{path}:{no}: '{m.group(2)}' is not a regular expression: {e}")
+                v1scen.append({"line": no, "suite": m.group(1), "only": m.group(2), "reason": m.group(3).strip()})
+                continue
+            if line.startswith("v1-only-scenarios"):
+                raise SystemExit(f"{path}:{no}: a v1-only-scenarios declaration is 'v1-only-scenarios <suite> | <regex> | <reason>'")
             m = re.fullmatch(r"v1-only\s+([a-z0-9-]+)\s*\|\s*(.+)", line)
             if m:
                 v1only.append({"line": no, "suite": m.group(1), "reason": m.group(2).strip()})
@@ -57,10 +69,10 @@ def parse(path):
             claims.append({"line": no, "suite": suite, "only": only, "profile": profile})
     if not claims:
         raise SystemExit(f"{path}: no claim (an empty list would make the job green without running anything)")
-    return claims, v1only
+    return claims, v1only, v1scen
 
 
-def structure(path, claims, v1only):
+def structure(path, claims, v1only, v1scen):
     problems = []
     seen = set()
     for c in claims:
@@ -80,6 +92,9 @@ def structure(path, claims, v1only):
     for v in v1only:
         if v["suite"] in by_suite:
             problems.append(f"{path}:{v['line']}: {v['suite']} is declared v1-only and is claimed")
+    for x in v1scen:
+        if not any(not c["only"] for c in by_suite.get(x["suite"], [])):
+            problems.append(f"{path}:{x['line']}: {x['suite']} has scenarios declared v1-only and is not claimed whole (claim the suite whole, or leave the scenario out of the claims by their regular expressions)")
     return by_suite, problems
 
 
@@ -170,13 +185,15 @@ def main(argv):
     if len(rest) != 1:
         raise SystemExit(__doc__)
     path = rest[0]
-    claims, v1only = parse(path)
-    by_suite, problems = structure(path, claims, v1only)
+    claims, v1only, v1scen = parse(path)
+    by_suite, problems = structure(path, claims, v1only, v1scen)
     if parse_only:
         for c in claims:
             print(f"line {c['line']}: suite {c['suite']}" + (f", scenarios matching /{c['only']}/" if c["only"] else ", every scenario") + f", profile {c['profile']}")
         for v in v1only:
             print(f"line {v['line']}: suite {v['suite']} stays on v1: {v['reason']}")
+        for x in v1scen:
+            print(f"line {x['line']}: suite {x['suite']}, scenarios matching /{x['only']}/ stay on v1: {x['reason']}")
         for p in problems:
             print("problem:", p)
         return 1 if problems else 0
@@ -201,6 +218,16 @@ def main(argv):
     for v in v1only:
         if v["suite"] not in known:
             problems.append(f"{path}:{v['line']}: {v['suite']} is not a suite of run.ps1 -ListSuites")
+    # a v1-only scenario line names a suite of run.ps1 and matches at least one scenario of it: a renamed scenario cannot leave the line empty (and its scenario running on v2 unnoticed)
+    for x in v1scen:
+        if x["suite"] not in known:
+            problems.append(f"{path}:{x['line']}: {x['suite']} is not a suite of run.ps1 -ListSuites")
+            continue
+        found = listed(pwsh, run_ps1, {"suite": x["suite"], "only": x["only"]})
+        if not found:
+            problems.append(f"{path}:{x['line']}: /{x['only']}/ matches no scenario of {x['suite']}")
+        else:
+            print(f"v1-only scenarios {x['suite']} /{x['only']}/: {len(found)} scenarios")
     if workflow:
         problems += matrix_problems(workflow, by_suite)
     whole = {s for s, mine in by_suite.items() if any(not c["only"] for c in mine)}

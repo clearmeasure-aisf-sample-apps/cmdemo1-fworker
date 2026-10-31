@@ -73,10 +73,10 @@ Rules of the runners:
   A suite's groups listen on `10000 + 1000 * slot + 100 * group` and up, and the jobs move the machine's ephemeral port range to 50000-60999 so that an
   outgoing connection cannot hold such a port: the step "Ephemeral ports above the test ports" fails when the last slot reaches 50000 (slot 40).
 - The v2 engine has a second Tier 1, the matrix jobs `Tier 1 (v2 ...)` of `tests.yml`: they run the suites and scenarios named in `tests/scenarios/v2-claims.txt` again with
-  `run-all.ps1 -Engine v2` (`run.ps1 -Engine v2 -V2Profile`; `FACTORY_ENVIRONMENT` v2ci, or the suite's own name where it sets one (tdd for copilot, promote, envscope),
+  `run-all.ps1 -Engine v2` (`run.ps1 -Engine v2 -V2Profile`; `FACTORY_ENVIRONMENT` v2ci, or the suite's own name where it sets one (tdd for copilot, promote, envscope), or unset as in v1 (tdd) for owner, messaging, cursor, cursor-deadline and runtime,
   `engine.v2Environments` naming it, `FACTORY_DB_CONNECTION` a database of its own on the SQL Server of `FACTORY_TEST_SQL`; a machine without one exits 2). A claim names its profile:
   `saga-docs` and `saga-feature` turn the engine's intake on, so that the Todo items of the suite `saga` start sagas. The entries of the matrix name their suites after `claims:` (not `suites:`:
-  they are not shards), and `python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml` (run by the coverage job) proves that every claim is in exactly one of them.
+  they are not shards), and `python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml --require-complete` (run by the coverage job) proves that every claim is in exactly one of them and that every suite of `run.ps1 -ListSuites` is claimed whole or declared `v1-only`; a scenario of a claimed suite that tests v1's behaviour is declared `v1-only-scenarios <suite> | <regex> | <reason>` (run.ps1 -Engine v2 neither lists nor runs it).
   Where v2 writes differently on purpose, `tests/scenarios/golden/v2-differences.txt` says so. `Tests result` reports the jobs and does not fail on them until `V2_BLOCKING` there is set to true
   (after the first green run of `Tests` on master). The job `Image starts without a database` runs the built image with no `FACTORY_DB_CONNECTION`. The unit tests that need a SQL Server are `[SqlFact]`:
   without `FACTORY_TEST_SQL` a run reports them as skipped.

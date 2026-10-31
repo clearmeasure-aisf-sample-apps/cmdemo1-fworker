@@ -41,6 +41,34 @@ public sealed class GitHubTokenProviderTests
         Assert.Null(p.AppLogin);
     }
 
+    // FACTORY_AUTHOR_APP=1 is the rule scripts' switch for the App as the identity (Get-GhToken): GH_TOKEN is then not looked at, and the login of the state comments is the App's
+    [Fact]
+    public void AuthorApp_PutsTheAppBeforeGhToken_WhenItIsConfigured()
+    {
+        var ghp = "ghp_" + new string('A', 26);
+        var p = GitHubTokenProvider.FromEnvironment(Env(("GH_TOKEN", ghp), ("FACTORY_AUTHOR_APP", "1"), ("FACTORY_APP_AUTHOR_ID", "1"), ("FACTORY_APP_AUTHOR_INSTALLATION", "2"), ("FACTORY_APP_AUTHOR_SLUG", "my-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)), Client(new Mint()))!;
+        Assert.Equal("my-app[bot]", p.AppLogin);
+        // not configured completely: GH_TOKEN stays the identity, and without it there is none
+        var q = GitHubTokenProvider.FromEnvironment(Env(("GH_TOKEN", ghp), ("FACTORY_AUTHOR_APP", "1"), ("FACTORY_APP_AUTHOR_ID", "1")))!;
+        Assert.Null(q.AppLogin);
+        Assert.Null(GitHubTokenProvider.FromEnvironment(Env(("FACTORY_AUTHOR_APP", "1"), ("FACTORY_APP_AUTHOR_ID", "1"))));
+        // the switch off or not 1: GH_TOKEN wins as before
+        Assert.Null(GitHubTokenProvider.FromEnvironment(Env(("GH_TOKEN", ghp), ("FACTORY_AUTHOR_APP", "0"), ("FACTORY_APP_AUTHOR_ID", "1"), ("FACTORY_APP_AUTHOR_INSTALLATION", "2"), ("FACTORY_APP_AUTHOR_SLUG", "my-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)), Client(new Mint()))!.AppLogin);
+    }
+
+    // every port of the gateway asks for a provider: one installation token per App and API for the process, not one per port
+    [Fact]
+    public void TheGatewaysProviders_OfOneApp_AreOne_AndOfAnotherAppAnother()
+    {
+        var a1 = GitHubTokenProvider.FromEnvironment(Env(("FACTORY_APP_AUTHOR_ID", "7001"), ("FACTORY_APP_AUTHOR_INSTALLATION", "7002"), ("FACTORY_APP_AUTHOR_SLUG", "shared-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)))!;
+        var a2 = GitHubTokenProvider.FromEnvironment(Env(("FACTORY_APP_AUTHOR_ID", "7001"), ("FACTORY_APP_AUTHOR_INSTALLATION", "7002"), ("FACTORY_APP_AUTHOR_SLUG", "shared-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)))!;
+        var b = GitHubTokenProvider.FromEnvironment(Env(("FACTORY_APP_AUTHOR_ID", "7001"), ("FACTORY_APP_AUTHOR_INSTALLATION", "7003"), ("FACTORY_APP_AUTHOR_SLUG", "shared-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)))!;
+        var withClient = GitHubTokenProvider.FromEnvironment(Env(("FACTORY_APP_AUTHOR_ID", "7001"), ("FACTORY_APP_AUTHOR_INSTALLATION", "7002"), ("FACTORY_APP_AUTHOR_SLUG", "shared-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)), Client(new Mint()))!;
+        Assert.Same(a1, a2);
+        Assert.NotSame(a1, b);
+        Assert.NotSame(a1, withClient);
+    }
+
     [Fact]
     public void NoIdentity_IsNull()
     {
