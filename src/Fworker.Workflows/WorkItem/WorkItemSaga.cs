@@ -302,6 +302,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 AskSlot a => new SlotWanted(item, state.Generation, a.ArmId, a.Key, a.Phase, a.Resume, a.ColumnDepth, a.Footprint, a.FromPullRequest, a.At, a.TopRank),
                 EndSession e => new Capacity.SessionEnded(item, e.Key, e.SlotId),
                 ClearSlot x => new Capacity.ClearItem(item, x.Key, x.Reason),
+                StartSession st => new SessionStartRequested(item, state.Generation, st.ArmId, st.Key, st.SlotId, st.Runtime, st.Host, st.Phase),
                 ChangeFootprint f => new Capacity.FootprintChanged(item, f.Key, f.Files),
                 LeaveTrain l => new Merge.MergeTrainLeft(item.Repository.ToString(), item, l.Reason),
                 ReleaseOwner r => new OwnerReleaseRequested(item, r.Key, r.Reason),

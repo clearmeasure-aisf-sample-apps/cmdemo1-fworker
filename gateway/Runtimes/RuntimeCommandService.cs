@@ -78,6 +78,9 @@ public sealed class RuntimeCommandService
     public void Stopped(RuntimeSessionStopped m) => managerOf(m.Runtime)?.CompleteStop(m.WorkerName, m.Ok, m.Error);
 }
 
+/// <summary>W9.10j: the Wolverine host that carries the runtime commands is not running, so the command was not sent. Nothing was started; the manager settles the start like "no capacity" and the offer waits for the host.</summary>
+public sealed class WolverineHostDownException() : InvalidOperationException("the Wolverine host is not up");
+
 public static class RuntimeCommandHandlers
 {
     public const string Queue = "runtime-commands";
@@ -102,7 +105,8 @@ static class RuntimeCommandWiring
         foreach (var m in runtimes.Managers)
         {
             var kind = m.Kind;
-            m.DispatchStart = t => Publish(host, new StartRuntimeSession(RuntimeKeys.Start(kind, t.Name), kind, t.Name, t.Item, t.Phase, t.Profile, t.Nonce, t.Role));
+            m.DispatchStart = t => Publish(host, new StartRuntimeSession(RuntimeKeys.Start(kind, t.Name), kind, t.Name, t.Item, t.Phase, t.Profile, t.Nonce, t.Role, t.Arm, t.Slot));
+            m.DispatchReady = () => host.State == WolverineHostService.Phase.Running;   // W9.10j: no start is offered while the host that carries it is down
             m.DispatchStop = (name, reason) => Publish(host, new StopRuntimeSession(RuntimeKeys.Stop(kind, name), kind, name, reason));
         }
         ledger ??= new InMemoryIdempotencyLedger();   // SQL where the gateway has its database (SqlCommandStores)
@@ -132,7 +136,7 @@ static class RuntimeCommandWiring
 
     static async Task Publish<T>(WolverineHostService host, T command) where T : notnull
     {
-        if (!await host.PublishAsync(command)) throw new InvalidOperationException("the Wolverine host is not up");
+        if (!await host.PublishAsync(command)) throw new WolverineHostDownException();
     }
 
     /// <summary>The lookup of an expired claim for a command that starts a worker through Octopus: Found when a Start runbook run carries the worker's name, Absent when none does or the command names no worker.</summary>

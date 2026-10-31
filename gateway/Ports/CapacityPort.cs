@@ -5,6 +5,8 @@ using Fworker.Workflows.Capacity;
 // the limits of a runtime: what the plant's manager runs and has started today is counted as outside the scheduler's ledger (RuntimeManager.Load), and a host's report counts the containers it runs that the
 // scheduler did not grant. The Octopus runtime's host reports (W7.4) are its HostReported input. Nothing sends a RequestSlot yet: the feature plan (W7.3) and the docs plan's steps do, and the scheduler is idle until they do. There is no flag; the settings are config/instance.json's
 // (schedule.fileOverlap, scheduler, runtimes.octopus).
+// W9.10j: the executions the manager started for a slot of this ledger are not "outside" it (RuntimeManager.Load leaves them out: the ledger counts each session once), and the sessions of the slots it grants are started
+// by the saga (SessionStartRequested, Ports/SessionStartPort.cs) on the slot's runtime; the reaper (CapacityReaper, ReapStale) drops what the ledger keeps of an item no saga has in flight.
 
 /// <summary>What the gateway builds for the scheduler: its service, the history writer and the settings it reads.</summary>
 sealed record CapacityParts(CapacityService Service, CapacityHistory History, CapacitySettings Settings);
@@ -35,6 +37,30 @@ static class CapacityWiring
         var (running, today, blocked) = manager.Load();
         return new RuntimeOutside(running, today, blocked);
     };
+
+    /// <summary>
+    /// W9.10j: what each runtime's manager reads of the scheduler's persisted ledger (<see cref="RuntimeManager.ReadLedger"/>): the day's count of grants of that runtime and the slots it holds, by item number. The manager reads it
+    /// when it counts the day again (after a restart, at midnight) and adopts the executions it finds, so the grants made before a restart are subtracted from what it reports as outside the ledger once, not counted twice.
+    /// Only the items of <paramref name="home"/> (the work-orders repository the plant's items belong to) are matched by number.
+    /// </summary>
+    public static void ConnectLedger(RuntimeRegistry registry, ICapacityStore store, Fworker.Contracts.Ids.RepoId? home)
+    {
+        foreach (var manager in registry.Managers)
+        {
+            var kind = manager.Kind;
+            manager.ReadLedger = async ct => LedgerDayOf(await store.Load(CapacityKeys.Factory, ct), kind, home);
+        }
+    }
+
+    /// <summary>The manager's view of the ledger for one runtime; null when the ledger has no row yet (it has counted nothing).</summary>
+    internal static RuntimeManager.LedgerDay? LedgerDayOf(CapacityRecord? record, string kind, Fworker.Contracts.Ids.RepoId? home)
+    {
+        if (record?.State is not { } state) return null;
+        var slots = new List<RuntimeManager.LedgerSlotRef>();
+        foreach (var slot in state.Slots.Values.Where(s => s.Runtime == kind).OrderBy(s => s.SlotId, StringComparer.Ordinal))
+            if (Fworker.Contracts.Ids.ItemId.TryParse(slot.Item, out var id) && (home is null || id.Repository == home)) slots.Add(new RuntimeManager.LedgerSlotRef(id.Number, slot.SlotId));
+        return new RuntimeManager.LedgerDay(state.Day, state.ExecutionsToday.GetValueOrDefault(kind), slots);
+    }
 
     /// <summary>
     /// W7.4: every host report of the Octopus runtime becomes the scheduler's <see cref="HostReported"/> input (the containers running on the host and its metrics). Called only where the engine acts, so v1 and the

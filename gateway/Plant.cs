@@ -67,6 +67,8 @@ sealed class Assignment
     public string Pin = "";
     public DateTime PinRetryAt;
     public DateTime LastWaiting;
+    // W9.10j (an item of a saga that asked the scheduler for a slot): the slot the scheduler granted, the runtime it is on and the saga's arm. The session is started on that runtime (RouteRuntime), under that slot.
+    public string Slot = "", SlotRuntime = "", Arm = "";
     // why no worker was chosen, as an enumerated code, and since when (worker-messaging.md 3.9); cleared by an offer
     public DateTime? WaitingSince;
     public string WaitingCode = "";
@@ -2007,6 +2009,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
                     Kind = kind, Role = role, Mode = o["mode"]?.ToString() ?? (o["reason"]?.ToString() == "relaunch" ? "resume" : "first"), Reason = o["reason"]?.ToString() ?? "", Pr = o["pr"]?.GetValue<int>() ?? 0, CreatedAt = DateTime.UtcNow
                 };
                 if (ReferenceEquals(a, ex) && o["column"]?.ToString() is { Length: > 0 } nc) a.Column = nc;   // a waiting assignment follows its card (issue 97)
+                if (kind == "own-item") { a.Slot = o["slot"]?.ToString() ?? ""; a.SlotRuntime = a.Slot.Length > 0 ? o["runtime"]?.ToString() ?? "" : ""; a.Arm = o["arm"]?.ToString() ?? ""; }   // W9.10j: the scheduler's slot of a saga item
                 assignments[key] = a;
                 if (!ReferenceEquals(a, ex)) DeclineTakenBack(a);      // a new assignment: not first to the worker it was just taken back from
                 if (string.IsNullOrEmpty(pin))
