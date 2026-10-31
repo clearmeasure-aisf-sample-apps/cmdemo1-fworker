@@ -366,6 +366,21 @@ public sealed class JournalLedgerTests
         Assert.Equal(now.Ticks.ToString(), JournalKeys.OrTicks(null, now));
     }
 
+    [Fact]
+    public async Task ThePlantStepsLines_BoardAddedAndReplenish_AreWrittenByTheLedger_ButAreNoEventOfTheJournalVerb()
+    {
+        // W9.10g: Invoke-BoardGuard and Invoke-Replenish call Add-Journal with these events, which Verb_journal does not accept from a caller
+        var r = new Rig();
+        var holder = new ItemState { State = new JsonObject { ["schema"] = 1, ["item"] = 7 } };
+        Assert.True(await r.Ledger.AddTo(7, holder, "board-added", new Dictionary<string, object?> { ["column"] = "Technical Design" }, "7"));
+        Assert.Equal("\U0001F3ED Plant manager: the item has the factory label but had no column on the board: the sweep put it in Technical Design, where it is offered like any new item.\n\n<!-- plant event=board-added key=7 -->",
+            r.Plant(7).Single().Body);
+        Assert.DoesNotContain("board-added", JournalEvents.Supported);
+        Assert.DoesNotContain("replenish", JournalEvents.Supported);
+        Assert.Contains("board-added", JournalEvents.Writable);
+        Assert.Contains("replenish", JournalEvents.Writable);
+    }
+
     static int Cnt(JsonObject kinds, string k) => JournalJson.Int((JsonObject)kinds[k]!, "count");
 
     // ---- the text of the posted comment and of a fold, pinned to the script -----------------------------------------------------------------
