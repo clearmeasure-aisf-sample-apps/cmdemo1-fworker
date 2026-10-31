@@ -172,6 +172,7 @@ sealed partial class Plant
                 var age = Math.Max(0, (now - last).TotalSeconds);   // a window lengthened past now reads as just offered, never as more than the full wait
                 if (age < RecentOfferSeconds) reasons.Add(new JsonObject { ["code"] = "recent-offer", ["worker"] = a.Worker, ["item"] = a.Item, ["secondsLeft"] = (int)Math.Ceiling(RecentOfferSeconds - age) });
             }
+            AddSagaFlight(reasons);   // W9.10k: what the engine has in flight (a merge asked and not answered, a granted slot whose session the plant does not hold yet)
             var today = ReleasesToday(now); var limit = Msg.OperatorMaxSelfMergesPerDay; var quiet = reasons.Count == 0;
             var code = !quiet ? "not-quiet" : today >= limit ? "daily-limit" : "";
             var o = new JsonObject { ["ok"] = code == "", ["quiet"] = quiet, ["allowed"] = code == "", ["reasons"] = reasons, ["releasesToday"] = today, ["limit"] = limit,

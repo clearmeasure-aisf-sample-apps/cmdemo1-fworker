@@ -416,6 +416,11 @@ sealed class KeeperSagaPort(V2Ownership? ownership, RepoId home, Func<object, Ta
 
     public async Task Closed(int item, string reason, string key) => await Send(new ParkWorkItem(new ItemId(home, item), 0, key, reason));
 
+    // W9.10k: the plant manager's release-owner and requeue
+    public async Task OwnerReleased(int item, string reason, string key) => await Send(new OwnerReleaseAsked(new ItemId(home, item), 0, key, reason));
+
+    public async Task Requeued(int item, string reason, string key) => await Send(new RequeueWorkItem(new ItemId(home, item), 0, key, reason));
+
     // the verb's answer is the caller's, whatever the saga takes: a message the host did not take is logged (the saga's lease and the board's reconciler catch up)
     async Task Send(WorkItemInput input)
     {

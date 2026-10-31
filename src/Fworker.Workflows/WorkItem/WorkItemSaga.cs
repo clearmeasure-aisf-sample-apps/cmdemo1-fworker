@@ -119,6 +119,8 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
             case PullRequestClosed pc: return SweepFlow.Closed(c, pc);
             case ApprovalSeen a: return SweepFlow.Approved(c, a);
             case RearmSettle r: return SweepFlow.Rearm(c, r);
+            case OwnerReleaseAsked r: return SweepFlow.ReleaseAsked(c, r);
+            case RequeueWorkItem q: return SweepFlow.Requeue(c, q);
             case ChecksObserved o: return FeatureFlow.Checks(c, o);
             case SlotAssigned a: return FeatureFlow.Assigned(c, a);
             case SlotHeld h: return FeatureFlow.Held(c, h);

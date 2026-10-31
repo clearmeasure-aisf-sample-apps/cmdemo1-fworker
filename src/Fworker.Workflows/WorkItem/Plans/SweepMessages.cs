@@ -65,6 +65,20 @@ public sealed record ApprovalSeen(ItemId Item, int Generation, string Key, int P
 [MessageIdentity("workitem.rearm-settle")]
 public sealed record RearmSettle(ItemId Item, int Generation, string Key, string Reason) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
 
+/// <summary>
+/// W9.10k: the plant manager ended the lease of the item's owner (manager-action release-owner). The saga records the decision and asks the gateway to give the claim up (<see cref="ReleaseOwner"/>, published as
+/// <see cref="OwnerReleaseRequested"/>), so that the item is offered again; it changes no step and no park. The key names the call: the same call is applied once.
+/// </summary>
+[MessageIdentity("workitem.owner-release-asked")]
+public sealed record OwnerReleaseAsked(ItemId Item, int Generation, string Key, string Reason) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+
+/// <summary>
+/// W9.10k: the plant manager put the item back to be offered at once (manager-action requeue). The saga records the decision; the offer itself comes from its state (a step a session works, no owner, not parked), which the
+/// gateway reads at its next sweep after dropping the offer that waited. Refused for an item that is parked, delivered or on a step no session works.
+/// </summary>
+[MessageIdentity("workitem.requeue")]
+public sealed record RequeueWorkItem(ItemId Item, int Generation, string Key, string Reason) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+
 /// <summary>The owner session of the item gives it up (published as <see cref="OwnerReleaseRequested"/>): the claim and its ref go, the next trigger assigns the item again.</summary>
 public sealed record ReleaseOwner(string Key, string Reason) : StateCommand(Key);
 

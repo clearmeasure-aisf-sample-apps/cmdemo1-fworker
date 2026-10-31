@@ -18,7 +18,8 @@ static class BoardReconcilerJob
         http ??= new HttpClient(new GitHubAuthHandler(tokens)) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
         var budget = c.GitHubBudget;
         var reader = new HttpBoardReader(http, new ProviderCredentialSource(tokens),
-            (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } }));
+            (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } }),
+            withLabels: c.Engine.V2Acts);   // W9.10k: the labels of the cards feed the plant's pins, priorities and runtime labels for the saga's items; read only where the engine acts
         var reconciler = new BoardReconciler(reader, () => catalog.Current, json => inbox.Publish(new IngressInboxMessage("poll", json)), () => c.Leader.MayAct, () => budget.Low().Low, store: seen);
         if (interval is { } every) reconciler.Meter.IntervalSeconds = (int)every.TotalSeconds;
         c.BoardReconciler = reconciler;   // W9.8: the verb sync-board runs a pass of this one on demand (it remembers what it published)
