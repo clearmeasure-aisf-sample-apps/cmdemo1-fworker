@@ -23,7 +23,7 @@ namespace Fworker.Workflows.Adoption;
 /// <summary>The saga's row kept changing under the adoption: another writer moved it more often than the run's tries.</summary>
 public sealed class AdoptionConflictException(string item) : Exception($"the work item {item} kept changing under the adoption");
 
-public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports, Func<DateTimeOffset>? clock = null)
+public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports, Func<DateTimeOffset>? clock = null, ReadoptionGate? gate = null)
 {
     const int Attempts = 4;
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
@@ -160,8 +160,10 @@ public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports,
         await Ledger(r, ct);
         foreach (var q in r.QcRows) if (await SaveQc(q, ct)) report.QcRows++;
         if (r.MergedRow is { } merged) await Merged(report, merged, r, ct);
-        if (!r.Save || r.State is null) return true;
+        if (!r.Save || r.State is null) { gate?.Adopted(key); return true; }
         if (!await ports.Items.Save(key, r.State, expectedRevision, ct)) return false;
+        // (the row is in the generation of this term: the inputs of the item pass the hold of a start after a break, and the messages published below with them)
+        gate?.Adopted(key);
         // The decision of the adoption is never projected (the comment is where it came from): the projections' versions are brought to it, or the rule of the upsert would find "decisions the projection has not written" for ever
         // and keep the row against every later comment. Decisions the saga makes afterwards are numbered after it.
         if (r.Decision is { } decision) await ports.Projected.Advance(key, decision.Sequence, now(), ct);

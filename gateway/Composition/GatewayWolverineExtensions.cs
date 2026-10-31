@@ -30,6 +30,7 @@ static class GatewayWolverineExtensions
         ShadowOctopusPort? octopusPort = null; var shadowHolder = new DeliveryShadowHolder();
         var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null; PlantStepJobs? plantSteps = null;
         var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
+        var readoption = new Fworker.Workflows.Adoption.ReadoptionGate();   // W9.9b (review): the hold on old-generation inputs between the host's start and the adoption of a term after a break
         AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
         services.AddSingleton(sp =>
         {
@@ -52,7 +53,7 @@ static class GatewayWolverineExtensions
                 // W6.6: the docs plan's steps run in it; the board it moves cards on is the catalog's, read when the first card moves
                 // W7.3: a fix-forward round of the feature plan reaches the owner session as the trigger v1's sweep sends (the plant is resolved when the trigger is sent, not here: building the plant needs the host)
                 var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), boardRef: () => sp.GetService<ISystemCatalog>()?.Current.Board,
-                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; }, locks: sp.GetRequiredService<IItemLock>());
+                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; }, locks: sp.GetRequiredService<IItemLock>(), readoption: readoption);
                 WorkItemWiring.Attach(host, workItems);
                 workItemParts = workItems;
                 v2Ownership = workItems.Ownership;
@@ -146,10 +147,13 @@ static class GatewayWolverineExtensions
                     jobs.Add(RecurringJobSlots.BacklogLow, ct => steps.BacklogLow(ct));
                     // W9.9b: the adoption of v1's items, pending Sign-offs and merges, once per term of the lease and after the plant is restored (the job asks AdoptionJob, whose heartbeat is the engine's marker)
                     var adopting = AdoptionWiring.Make(c, workItems, cs, host, () => sp.GetService<ISystemCatalog>(), mergedDeriver, plantRestored, new Fworker.Workflows.Merge.SqlMergeTrainStore(() => ItemMergedWiring.Open(cs)),
-                        new Fworker.Workflows.Delivery.SqlTrainStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Capacity.SqlCapacityStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Qc.SqlQcEnvironmentStore(() => ItemMergedWiring.Open(cs)), Environment.GetEnvironmentVariable);
+                        new Fworker.Workflows.Delivery.SqlTrainStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Capacity.SqlCapacityStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Qc.SqlQcEnvironmentStore(() => ItemMergedWiring.Open(cs)), Environment.GetEnvironmentVariable, readoption: readoption);
                     if (adopting is not null)
                     {
                         adoption = adopting;
+                        // after a break the saga's old-generation inputs wait for the adoption (ReadoptionGate): held from here, decided by the host before its listeners start, released by the adoption job
+                        readoption.Hold("the host has not started yet", newTerm: true);
+                        host.BeforeHost = ct => readoption.Begin(adopting.Markers, DateTimeOffset.UtcNow, ct);
                         jobs.Add(RecurringJobSlots.Adoption, async ct =>
                         {
                             var did = await adopting.Job.Tick(ct);

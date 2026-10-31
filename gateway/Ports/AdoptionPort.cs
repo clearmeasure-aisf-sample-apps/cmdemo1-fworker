@@ -78,7 +78,7 @@ static class AdoptionWiring
     /// merged items (null: the merged items are not backfilled and the trains' candidates are left).
     /// </summary>
     public static AdoptionParts? Make(GatewayComposition c, WorkItemParts parts, string connectionString, WolverineHostService host, Func<ISystemCatalog?> catalog, ItemMergedDeriver? deriver, Func<bool> restored,
-        IMergeTrainStore mergeTrains, ITrainStore trains, ICapacityStore capacity, IQcEnvironmentStore qc, Func<string, string?> env, HttpClient? http = null)
+        IMergeTrainStore mergeTrains, ITrainStore trains, ICapacityStore capacity, IQcEnvironmentStore qc, Func<string, string?> env, HttpClient? http = null, ReadoptionGate? readoption = null)
     {
         if (c.Instance.Home is not { } home || parts.Docs.Facts is not IAdoptionGitHub github || parts.Docs.Issues is not { } issues || parts.Docs.Boards is not { } boards || parts.Docs.Versions is not { } versions) return null;
         var root = c.Instance.Root;
@@ -100,9 +100,9 @@ static class AdoptionWiring
         var markers = new SqlEngineMarkers(() => ItemMergedWiring.Open(connectionString));
         var ports = new AdoptionPorts(reads, parts.Store, new ProjectedSequences(versions), capacity, mergeTrains, trains, qc, new SqlMergedItemStore(() => ItemMergedWiring.Open(connectionString)), new DeliveredBackfillTable(delivered), deriver,
             m => host.PublishAsync(m), (m, due) => host.ScheduleAsync(m, due));
-        var runner = new AdoptionRunner(options, ports);
+        var runner = new AdoptionRunner(options, ports, gate: readoption);
         var node = Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node;
-        var job = new AdoptionJob(runner, markers, () => c.Leader.MayAct, () => c.Leader.ClaimEpoch, () => restored() && !c.GitHubBudget.Low().Low, node);
+        var job = new AdoptionJob(runner, markers, () => c.Leader.MayAct, () => c.Leader.ClaimEpoch, () => restored() && !c.GitHubBudget.Low().Low, node, readoption: readoption);
         return new AdoptionParts(runner, job, markers);
     }
 

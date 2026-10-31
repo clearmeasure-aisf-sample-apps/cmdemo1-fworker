@@ -6,14 +6,19 @@ namespace Fworker.Workflows.Adoption;
 // a process that loses the lease and takes it again begins a new term) and after the plant is restored, so that the owners' claims the plant renews are in place before the saga's rows are compared with them. A run that is partial (an
 // item or a part failed) is tried again at the next minute, up to MaxAttempts; a run that ends "aborted" (the lease was lost during it) is left to the next holder. The heartbeat of the engine ("acted" marker) is written once the
 // term's adoption is over and then every minute, never before: a start whose run broke off finds the same evidence of a break (W9.10n) again, and decides the same way (the decision is also kept in memory for the term).
+// After a break the term is not over before a run is "done": items whose reads failed were not fenced, and an "acted" heartbeat written then would hide the break from the next start. So a partial run of such a term is tried again
+// past MaxAttempts, with growing pauses (up to RetryCap), and the status says so (breakPending). Until then the ReadoptionGate holds the saga's old-generation inputs (it is also held by the host's start, WolverineHostService).
 
-public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, Func<bool> mayAct, Func<long> epoch, Func<bool> ready, string holder, Func<DateTimeOffset>? clock = null, int maxAttempts = 5, TimeSpan? gap = null)
+public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, Func<bool> mayAct, Func<long> epoch, Func<bool> ready, string holder, Func<DateTimeOffset>? clock = null, int maxAttempts = 5, TimeSpan? gap = null, ReadoptionGate? readoption = null)
 {
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
     readonly object gate = new();
     long? termEpoch, doneEpoch;
     (bool Break, string Why)? termBreak;
     int attempts;
+    DateTimeOffset? retryAt;
+    /// <summary>The longest pause between two tries of a term after a break whose adoption is not done.</summary>
+    public static readonly TimeSpan RetryCap = TimeSpan.FromMinutes(5);
     string state = "idle", waitingFor = "";
     DateTimeOffset? doneAt;
 
@@ -25,6 +30,7 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         bool finished; lock (gate) finished = doneEpoch == e;
         if (finished)
         {
+            readoption?.Release();   // (a term that is over holds nothing: it was no break, or its run was done)
             await Heartbeat(e, ct);
             return "heartbeat";
         }
@@ -32,8 +38,7 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         (bool Break, string Why) decided;
         lock (gate)
         {
-            if (termEpoch != e) { termEpoch = e; termBreak = null; attempts = 0; }
-            attempts++; state = "running"; waitingFor = "";
+            if (termEpoch != e) { termEpoch = e; termBreak = null; attempts = 0; retryAt = null; }
         }
         try
         {
@@ -45,14 +50,22 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
             lock (gate) { state = "waiting"; waitingFor = "engine-markers"; }
             return "waiting: engine-markers";
         }
+        if (decided.Break) readoption?.Hold(decided.Why); else readoption?.Release();
+        lock (gate)
+        {
+            // after a break the tries go on past maxAttempts, with growing pauses
+            if (decided.Break && retryAt is { } at && now() < at) { state = "partial"; waitingFor = "retry-backoff"; return "waiting: retry-backoff"; }
+            attempts++; state = "running"; waitingFor = "";
+        }
         var report = await runner.Run(decided.Break, decided.Why, () => mayAct() && epoch() == e, ct);
         lock (gate)
         {
             state = report.Outcome;
-            if (report.Outcome == "done" || (report.Outcome == "partial" && attempts >= maxAttempts)) { doneEpoch = e; doneAt = now(); }
+            if (report.Outcome == "done" || (report.Outcome == "partial" && attempts >= maxAttempts && !decided.Break)) { doneEpoch = e; doneAt = now(); }
+            else if (report.Outcome == "partial" && decided.Break && attempts >= maxAttempts) retryAt = now() + TimeSpan.FromTicks(Math.Min(RetryCap.Ticks, TimeSpan.FromMinutes(1).Ticks << Math.Min(attempts - maxAttempts, 10)));
         }
         bool over; lock (gate) over = doneEpoch == e;
-        if (over) await Heartbeat(e, ct);
+        if (over) { readoption?.Release(); await Heartbeat(e, ct); }
         return report.Outcome;
     }
 
@@ -67,8 +80,10 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
     {
         lock (gate)
         {
-            var o = new JsonObject { ["state"] = state, ["waitingFor"] = waitingFor.Length == 0 ? null : waitingFor, ["attempts"] = attempts, ["done"] = doneEpoch is { } d && d == termEpoch, ["doneAt"] = doneAt?.ToString("o") };
+            var o = new JsonObject { ["state"] = state, ["waitingFor"] = waitingFor.Length == 0 ? null : waitingFor, ["attempts"] = attempts, ["done"] = doneEpoch is { } d && d == termEpoch, ["doneAt"] = doneAt?.ToString("o"),
+                ["breakPending"] = termBreak is { Break: true } && doneEpoch != termEpoch, ["retryAt"] = retryAt is { } r && doneEpoch != termEpoch ? r.ToString("o") : null };
             if (runner.Last is { } last) o["last"] = last.ToJson();
+            if (readoption is not null) o["hold"] = readoption.Block();
             return o;
         }
     }

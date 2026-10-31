@@ -46,6 +46,9 @@ public sealed class AdoptionWiringTests
         var block = await host.Services.GetRequiredService<V2Health>().Block(default);
         var adoption = Assert.IsType<JsonObject>(block["adoption"]);
         Assert.Equal("idle", (string?)adoption["state"]);   // (not yet run: the lease is off in the tests and the job waits for its first minute)
+        // (review of #602: the saga's old-generation inputs are held from the building of the host until the host has decided the break and the adoption has run; the host decides before its listeners start)
+        Assert.True((bool)adoption["hold"]!["held"]!);
+        Assert.NotNull(host.Services.GetRequiredService<WolverineHostService>().BeforeHost);
         Assert.Equal(1, RecurringJobSlots.Default().Slots.Count(s => s.Name == RecurringJobSlots.Adoption));
     }
 
@@ -67,6 +70,7 @@ public sealed class AdoptionWiringTests
         using var env = Env("shadow");
         using var host = Start();
         Assert.Null(host.Services.GetService<RecurringJobRegistry>());
+        Assert.Null(host.Services.GetRequiredService<WolverineHostService>().BeforeHost);   // (tdd's shadow run holds nothing)
         Assert.False((await host.Services.GetRequiredService<V2Health>().Block(default)).ContainsKey("adoption"));
         Assert.DoesNotContain(host.Services.GetServices<IHostedService>(), h => h is KillSwitchMarkerService);
     }

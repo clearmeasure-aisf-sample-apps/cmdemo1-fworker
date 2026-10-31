@@ -44,6 +44,11 @@ sealed class WolverineHostService : IHostedService
     public Action<IServiceCollection, WolverineOptions>? RuntimeCommands { get; set; }
     /// <summary>Applies the scripts of Fworker.Database and checks the schema against them; replaceable by a test. The report says whether the schema is good.</summary>
     public Func<string, CancellationToken, Task<SchemaReport>> Schema { get; set; }
+    /// <summary>
+    /// W9.9b (review): what runs after the schema is good and before the Wolverine host is built and started, so before its listeners recover the inbox and the outbox and before its scheduled jobs are polled (the gateway sets it where
+    /// the engine acts: it reads the engine's markers and holds the saga's old-generation inputs after a break, ReadoptionGate.Begin). A failure of it is a failed attempt of the start, which is tried again.
+    /// </summary>
+    public Func<CancellationToken, Task>? BeforeHost { get; set; }
     readonly FactorySchemaStatus schemaStatus;
 
     public WolverineHostService(DatabaseOptions database, WolverineHostOptions options, GatewayLeader leader, FactorySchemaStatus? schemaStatus = null)
@@ -92,6 +97,7 @@ sealed class WolverineHostService : IHostedService
                 int attempt;
                 lock (gate) attempt = ++attempts;
                 await ApplySchema(attempt, ct);
+                if (BeforeHost is { } before) await before(ct);
                 h = HostFactory(connectionString, options);
                 await h.StartAsync(ct);
                 if (ct.IsCancellationRequested)
