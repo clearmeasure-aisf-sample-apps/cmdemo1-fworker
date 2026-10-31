@@ -119,6 +119,8 @@ public static class MergeTrain
     {
         var item = l.Item.ToString();
         var e = s.Line.Find(x => x.Item == item);
+        // W9.10n: a leave of an earlier instance of the item (re-adopted or reopened since) does not take the new instance's place in the line (0: any, as for a merge seen elsewhere)
+        if (e is not null && l.Generation != 0 && e.Generation != 0 && e.Generation != l.Generation) return;
         if (e is not null) { s.Line.Remove(e); Decide(s, o, MergeTrainActions.Dequeued, item, e.Generation, now, l.Reason); }
     }
 

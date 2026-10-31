@@ -44,9 +44,12 @@ public abstract record CapacityInput(string Key) : IMessage;
 public sealed record RequestSlot(ItemId Item, string Key, int Generation, string Runtime, string Phase, PlanRank Rank, bool Generated, bool Resume, int ColumnDepth, DateTimeOffset RequestedAt,
     IReadOnlyList<string> RequiredToolchains, Footprint Footprint) : CapacityInput(Key);
 
-/// <summary>The item no longer wants a slot or is no longer in flight (merged, parked, closed, left the range): its request, its footprint and its file-overlap hold go. A slot it still holds stays until the session ends.</summary>
+/// <summary>
+/// The item no longer wants a slot or is no longer in flight (merged, parked, closed, left the range): its request, its footprint and its file-overlap hold go. A slot it still holds stays until the session ends.
+/// W9.10n: <paramref name="Generation"/> is the instance of the item that sends it (0: any); a clear of an earlier instance than the one the ledger holds entries for (a re-adopted or reopened item has asked again) is stale and clears nothing.
+/// </summary>
 [MessageIdentity("capacity.clear-item")]
-public sealed record ClearItem(ItemId Item, string Key, string Reason) : CapacityInput(Key);
+public sealed record ClearItem(ItemId Item, string Key, string Reason, int Generation = 0) : CapacityInput(Key);
 
 /// <summary>
 /// The session of the item's slot ended (the session's own end signal, confirmed by the host report): the slot is free at once. <paramref name="SlotId"/> names the slot it ended (empty: the item's current one).
@@ -79,9 +82,9 @@ public sealed record ReapStale(DateTimeOffset ReadAt, IReadOnlyList<string> Live
 [MessageIdentity("capacity.host-reported")]
 public sealed record HostReported(string Key, string Host, string Runtime, int Running, HostMetrics Metrics, DateTimeOffset At) : CapacityInput(Key);
 
-/// <summary>The pull request's changed files replace the footprint of an item in flight (D6: what was pushed is what the item touches).</summary>
+/// <summary>The pull request's changed files replace the footprint of an item in flight (D6: what was pushed is what the item touches). W9.10n: <paramref name="Generation"/> as in <see cref="ClearItem"/>.</summary>
 [MessageIdentity("capacity.footprint-changed")]
-public sealed record FootprintChanged(ItemId Item, string Key, IReadOnlyList<string> Files) : CapacityInput(Key);
+public sealed record FootprintChanged(ItemId Item, string Key, IReadOnlyList<string> Files, int Generation = 0) : CapacityInput(Key);
 
 /// <summary>The scheduler's own timer: <paramref name="Due"/> is the time it was scheduled for. It frees the slots whose time ran out, ends the holds and the host blocks that ran out, and plans again.</summary>
 [MessageIdentity("capacity.wake")]

@@ -27,7 +27,7 @@ public sealed record MergeTrainAnswered(string Key, MergeRequested Request, Merg
 
 /// <summary>An item no longer waits for its turn (merged by a person or the queue, closed, taken elsewhere): its place in the line is released.</summary>
 [MessageIdentity("merge.train.left")]
-public sealed record MergeTrainLeft(string Key, ItemId Item, string Reason) : MergeTrainInput(Key);
+public sealed record MergeTrainLeft(string Key, ItemId Item, string Reason, int Generation = 0) : MergeTrainInput(Key);
 
 /// <summary>
 /// The turn: the train lets this request through to the merge. <paramref name="FirstTurn"/> is true for the first time the item gets the turn (the merge port then brings a branch that is behind up to date, once per

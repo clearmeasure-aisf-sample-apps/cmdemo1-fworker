@@ -12,26 +12,42 @@ namespace Fworker.Workflows.Adoption;
 /// live session of the step it is on. A revision that moved only because the saga's own projection (or v1's verb, or the train's writer) wrote the comment finds the same state in it and changes nothing but the revision it was read at:
 /// <c>Keep</c> carries what the comment does not hold (the failure and launch budgets, the mechanical fixes, the idle follow-ups, the reviews of other steps, the release of an owner, the approver), so that the comment of a row the saga
 /// ran is not a newer reading of it. It is idempotent: the same snapshot adopted twice gives the same row.
+/// W9.10n: <c>afterInterval</c> says that v1 acted since the engine last did (the kill switch FACTORY_V2_OFF was on). Then the comment is v1's word and the guards above no longer hold the row back, an item whose row the
+/// comment changed is a new instance (generation + 1, a new arm, the timers and commands of the old one end as NotFound or Stale, the ledger's entries of the old one are fenced), an open row for an item the comment shows
+/// ended is closed, and an ended instance that the comment shows open again is reopened as the next generation. An item the comment does not change keeps its instance: v1 did nothing that its timers could contradict.
 /// </summary>
 public static class AdoptionReconciler
 {
     /// <param name="existing">The saga's row of the item (the open instance or the last, completed one); null when it has none.</param>
     /// <param name="projectedSequence">The version the state comment's projection has applied for the item (ProjectionVersions, target "comment"): the sequence of the last decision written to the comment.</param>
     /// <param name="cardProjectedSequence">The version the card projection has applied for the item (ProjectionVersions, target "card"): the sequence of the last decision that moved the card. The card is where the saga wants it once this reaches <see cref="WorkItemState.CardSeq"/>.</param>
-    public static AdoptionResult Reconcile(WorkItemState? existing, long projectedSequence, long cardProjectedSequence, AdoptionMapping mapping, DateTimeOffset now)
+    /// <param name="afterInterval">v1 acted since the engine last did (W9.10n). The mapping must then have been made for <see cref="AdoptionFence.GenerationFor"/> of the row, so that an instance opened here is named by its own generation.</param>
+    public static AdoptionResult Reconcile(WorkItemState? existing, long projectedSequence, long cardProjectedSequence, AdoptionMapping mapping, DateTimeOffset now, bool afterInterval = false)
     {
-        if (mapping.Skipped) return new AdoptionResult(AdoptionKind.Skipped, mapping.SkipReason!, null, null, [], [], null, null, [], null, mapping.Notes);
+        if (mapping.Skipped)
+        {
+            // v1 ended the item while the engine was off: the saga's open instance has nothing left to do, and nothing of it may act (its timers find a completed instance)
+            if (afterInterval && existing is { IsOpen: true } && AdoptionFence.V1Ended(mapping.SkipReason!, existing)) return Close(existing, mapping, now);
+            return new AdoptionResult(AdoptionKind.Skipped, mapping.SkipReason!, null, null, [], [], null, null, [], null, mapping.Notes);
+        }
         var mapped = mapping.State!;
+        if (afterInterval && existing is not null && mapped.Generation != existing.Generation + 1)
+            throw new ArgumentException($"the item {existing.Item} was mapped for generation {mapped.Generation}; a re-adoption after a break maps it for {existing.Generation + 1} (AdoptionFence.GenerationFor)", nameof(mapping));
         if (existing is null) return Adopt(mapped, mapping, now);
-        // the instance ended (W9.10n fences the re-adoption of an item that v1 reopened or finished meanwhile): it is not this rule's to bring back
-        if (!existing.IsOpen) return Beside(AdoptionKind.Skipped, "the saga's instance of the item is completed", existing, mapping);
+        if (!existing.IsOpen)
+        {
+            // v1 opened the item again (the comment is newer than the ended instance's and shows it open and not merged): the next generation, from the comment. Without a break an ended instance is not this rule's to bring back.
+            if (afterInterval && mapped.CommentRev > existing.CommentRev && mapped.MergeCommit.Length == 0) return Reopen(existing, mapped, mapping, now);
+            return Beside(AdoptionKind.Skipped, "the saga's instance of the item is completed", existing, mapping);
+        }
         if (mapped.CommentRev <= existing.CommentRev) return Beside(AdoptionKind.Kept, $"the state comment (revision {mapped.CommentRev}) is not newer than the one adopted (revision {existing.CommentRev})", existing, mapping);
-        if (existing.Sequence > projectedSequence) return Beside(AdoptionKind.Kept, $"the saga has decisions the comment lacks (sequence {existing.Sequence}, projected {projectedSequence}): the projection writes them", existing, mapping);
+        // (after a break the guards below do not apply: the decisions the projection never wrote, and the card it never moved, were not seen by v1, which acted on the comment alone)
+        if (!afterInterval && existing.Sequence > projectedSequence) return Beside(AdoptionKind.Kept, $"the saga has decisions the comment lacks (sequence {existing.Sequence}, projected {projectedSequence}): the projection writes them", existing, mapping);
         // the step is read from the card's column, and the card is a projection target of its own that lags the comment's: the saga entered a step the card does not show yet (a restart between the two writes). The column is
         // the step the saga has left; taking it would open a new arm and end the session of the step the item is on. (Verify and Merge share the validation column, and a merged item's step is the comment's, not the card's.)
-        if (existing.CardSeq > cardProjectedSequence && mapped.Step != StepKind.Deliver && ColumnStep(mapped.Step) != ColumnStep(existing.Step))
+        if (!afterInterval && existing.CardSeq > cardProjectedSequence && mapped.Step != StepKind.Deliver && ColumnStep(mapped.Step) != ColumnStep(existing.Step))
             return Beside(AdoptionKind.Kept, $"the card is behind the saga (step entered at sequence {existing.CardSeq}, card projected {cardProjectedSequence}): its column is the step the saga has left", existing, mapping);
-        return Update(existing, mapped, mapping, now);
+        return Update(existing, mapped, mapping, now, afterInterval);
     }
 
     // the step the card's column stands for: the validation column holds both Verify and Merge
@@ -45,10 +61,10 @@ public static class AdoptionReconciler
         return Result(AdoptionKind.Adopted, $"adopted on the {state.Plan} plan at {state.Step}", state, d, mapping, withSlot: true);
     }
 
-    static AdoptionResult Update(WorkItemState existing, WorkItemState mapped, AdoptionMapping mapping, DateTimeOffset now)
+    static AdoptionResult Update(WorkItemState existing, WorkItemState mapped, AdoptionMapping mapping, DateTimeOffset now, bool afterInterval)
     {
         var next = WorkItemState.FromJson(mapped.ToJson());
-        Keep(existing, next, now);
+        Keep(existing, next, now, newGeneration: false);
         // the comment's revision is not part of the comparison: only whether the state changed
         var probe = WorkItemState.FromJson(next.ToJson()); probe.CommentRev = existing.CommentRev;
         var changed = Changes(existing, probe);
@@ -57,15 +73,61 @@ public static class AdoptionReconciler
             var same = WorkItemState.FromJson(existing.ToJson()); same.CommentRev = mapped.CommentRev;
             return Result(AdoptionKind.Unchanged, $"the state comment (revision {mapped.CommentRev}) says what the saga's row says", same, null, mapping, withSlot: false);
         }
+        if (afterInterval)
+        {
+            // v1 changed the item while the engine was off: a new instance. The old one's timers and commands name its generation, so they end as NotFound (the saga) or Stale (the scheduler and the line)
+            next = WorkItemState.FromJson(mapped.ToJson());
+            Keep(existing, next, now, newGeneration: true);
+            var reasons = new[] { $"from v1's state, revision {next.CommentRev}", $"new generation {next.Generation} (v1 acted while the engine was off)", string.Join(", ", changed.Take(8)) + (changed.Count > 8 ? ", ..." : "") };
+            var fenced = Decide(next, now, reasons);
+            next.LastKey = $"adopt|{next.CommentRev}"; next.Emitted = [fenced];
+            return Result(AdoptionKind.Updated, $"the state comment (revision {next.CommentRev}) won, generation {existing.Generation} ended and {next.Generation} began: {string.Join(", ", changed.Take(8))}", next, fenced, mapping, withSlot: true)
+                with { Fence = new LedgerFence(existing.ItemId, next.Generation), FencedFrom = existing.Generation };
+        }
         var d = Decide(next, now, $"from v1's state, revision {next.CommentRev}", string.Join(", ", changed.Take(8)) + (changed.Count > 8 ? ", ..." : ""));
         next.LastKey = $"adopt|{next.CommentRev}"; next.Emitted = [d];
         return Result(AdoptionKind.Updated, $"the state comment (revision {next.CommentRev}) won: {string.Join(", ", changed.Take(8))}", next, d, mapping, withSlot: true);
     }
 
-    // what the saga alone knows survives the comment: the identity and the history of the instance, the keys, the arm while the step is the same, the slot it holds
-    static void Keep(WorkItemState existing, WorkItemState next, DateTimeOffset now)
+    // W9.10n: the open instance of an item v1 ended while the engine was off. As the saga's own Complete leaves a state (no lease, park or timer), with the session, the scheduler's entries and the place in the line asked back; no new generation
+    // (nothing is left of the instance for a later input to act on: it finds a completed instance)
+    static AdoptionResult Close(WorkItemState existing, AdoptionMapping mapping, DateTimeOffset now)
     {
-        next.Generation = existing.Generation; next.Sequence = existing.Sequence; next.Keys = [.. existing.Keys]; next.StartedAt = existing.StartedAt; next.Source = existing.Source; next.CardSeq = existing.CardSeq;
+        var s = WorkItemState.FromJson(existing.ToJson());
+        s.Status = WorkItemStatus.Completed; s.CompletedAt = now;
+        s.LeaseDue = null; s.SettleUntil = null; s.Parked = false; s.ParkReason = ""; s.ParkUntil = null; s.OwnerIdleDue = null; s.OwnerReleased = false;
+        s.MergeRequest = null; s.MergeRetryAt = null; s.MasterDue = null; s.MergeAwaitingChecks = false;
+        var outbox = new List<StateCommand>();
+        if (s.SlotId.Length > 0) outbox.Add(new EndSession($"end|{s.Item}|{s.SlotId}", s.SlotId));
+        if (s.SlotKnown) outbox.Add(new ClearSlot($"clear|{s.Item}|{s.Generation}|adopted-closed|{s.Sequence}", "v1 ended the item"));
+        if (s.TrainEntered && s.MergeCommit.Length == 0) outbox.Add(new LeaveTrain($"leave|{s.Item}|{s.Generation}|{s.Sequence}", "v1 ended the item"));
+        s.SlotId = ""; s.SlotRuntime = ""; s.SlotHost = ""; s.SlotKnown = false; s.SlotAsked = false; s.SlotWait = ""; s.TrainEntered = false;
+        s.Outbox = outbox;
+        var d = new WorkItemDecided(s.ItemId, s.Generation, ++s.Sequence, WorkItemActions.AdoptedClosed, s.Plan, null, s.ArmId.Length == 0 ? null : s.ArmId, [$"v1 ended the item: {mapping.SkipReason}"], now);
+        s.LastKey = $"adopt-closed|{mapping.SkipReason}"; s.Emitted = [d];
+        return new AdoptionResult(AdoptionKind.Closed, $"v1 ended the item ({mapping.SkipReason}): the saga's generation {s.Generation} is closed", s, d, [], WorkItemSaga.CommandsOf(s), null, null, [], null, mapping.Notes)
+        {
+            Fence = new LedgerFence(s.ItemId, null), FencedFrom = null,
+        };
+    }
+
+    // W9.10n: the instance ended and v1 opened the item again: a new instance from the comment, its decisions numbered after the old one's (as the saga's own reopen does)
+    static AdoptionResult Reopen(WorkItemState existing, WorkItemState mapped, AdoptionMapping mapping, DateTimeOffset now)
+    {
+        var state = WorkItemState.FromJson(mapped.ToJson());
+        state.Sequence = existing.Sequence;
+        var d = Decide(state, now, $"from v1's state, revision {state.CommentRev}", $"reopened: generation {existing.Generation} had ended, v1 opened the item again", $"{state.Plan} plan, {state.Step}{(state.Parked ? $", parked: {state.ParkReason}" : "")}");
+        state.LastKey = $"adopt|{state.CommentRev}"; state.Emitted = [d];
+        return Result(AdoptionKind.Reopened, $"v1 opened the item again: generation {state.Generation} on the {state.Plan} plan at {state.Step}", state, d, mapping, withSlot: true)
+            with { Fence = new LedgerFence(state.ItemId, state.Generation), FencedFrom = existing.Generation };
+    }
+
+    // what the saga alone knows survives the comment: the identity and the history of the instance, the keys, the arm while the step is the same, the slot it holds
+    static void Keep(WorkItemState existing, WorkItemState next, DateTimeOffset now, bool newGeneration)
+    {
+        // (a new generation is the mapping's own: it was mapped for it, with its arm, its slot id and its request keys)
+        if (!newGeneration) next.Generation = existing.Generation;
+        next.Sequence = existing.Sequence; next.Keys = [.. existing.Keys]; next.StartedAt = existing.StartedAt; next.Source = existing.Source; next.CardSeq = existing.CardSeq;
         next.AutoUnparks = new Dictionary<string, int>(existing.AutoUnparks);
         next.DesignMarker ??= existing.DesignMarker;
         if (next.Footprint.Count == 0) { next.Footprint = [.. existing.Footprint]; next.FootprintFromPullRequest = existing.FootprintFromPullRequest; }
@@ -81,7 +143,7 @@ public static class AdoptionReconciler
         }
 
         // the same arm: the same plan, step and status, parked or not, and for a PASS the same head (a new verdict is new work)
-        var sameArm = existing.Step == next.Step && existing.Parked == next.Parked && existing.Status == next.Status && existing.Plan == next.Plan
+        var sameArm = !newGeneration && existing.Step == next.Step && existing.Parked == next.Parked && existing.Status == next.Status && existing.Plan == next.Plan
             && (next.Step != StepKind.Merge || string.Equals(existing.VerdictHead, next.VerdictHead, StringComparison.OrdinalIgnoreCase));
         KeepWhatTheCommentDoesNotHold(existing, next, sameArm);
         if (sameArm)
@@ -100,6 +162,12 @@ public static class AdoptionReconciler
                 next.MergeBlockedReason = existing.MergeBlockedReason; next.MergeRetryAt = existing.MergeRetryAt; next.MergeAwaitingChecks = existing.MergeAwaitingChecks; next.MergeRequestEmitted = existing.MergeRequestEmitted; next.TrainEntered = existing.TrainEntered;
                 next.ChecksHead = existing.ChecksHead; next.ChecksState = existing.ChecksState; next.ChecksFailed = [.. existing.ChecksFailed];
             }
+            return;
+        }
+        if (newGeneration)
+        {
+            // the arm, the slot request and the outbox are the mapping's (generation + 1): what the old instance held is fenced by the generation, not asked back by commands that the new instance's number would make stale
+            next.SlotStamp = existing.SlotStamp;
             return;
         }
         // another step, another park, another plan: a new arm, as the saga's own Enter makes it, and the old arm's session and place in the line go back
