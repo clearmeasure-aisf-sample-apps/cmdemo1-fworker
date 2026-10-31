@@ -149,7 +149,8 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(prompts);
         var runtimeSettings = RuntimeSettings.Load(scriptsDir);
         if (c.Credentials.HomeClaim != "") runtimeSettings.Launch = new LaunchFields(c.Credentials.HomeClaim, "https://github.com/" + c.Credentials.HomeClaim + ".git", c.Instance.DefaultBranch);
-        var runtimeManager = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new RuntimeManager(runtimeSettings, new CaeJobRuntime(runtimeSettings.CaeJob), runtimeNonces) : null;
+        var caeJobRuntime = ownerMode && tokenSecret.Length > 0 && runtimeSettings.AnyOn ? new CaeJobRuntime(runtimeSettings.CaeJob) : null;
+        var runtimeManager = caeJobRuntime is null ? null : new RuntimeManager(runtimeSettings, caeJobRuntime, runtimeNonces);
         // the api mode, v1 Cursor Cloud Agents (gateway/Runtimes/CursorCloudRuntime.cs, agents-roles-launch.md 10): api.cursor.enabled and a key (CURSOR_API_KEY)
         // and the gateway's public URL; the bootstrap prompt is read from prompts/ (CursorPromptBuilder, gateway/Templates/RuntimePrompts.cs)
         var cursorSettings = CursorCloudSettings.Load(scriptsDir, Environment.GetEnvironmentVariable);
@@ -203,7 +204,7 @@ static class GatewayServiceCollectionExtensions
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["runtime"] = "cursor-cloud", ["enabled"] = cursorManager != null, ["configured"] = cursorSettings.Enabled, ["key"] = cursorSettings.ApiKey != "", ["gatewayUrl"] = cursorSettings.GatewayUrl != "" }.ToJsonString());
         var registry = new RuntimeRegistry
         {
-            CaeJob = runtimeManager, CursorRuntime = cursorRuntime, Cursor = cursorManager, CopilotRuntime = copilotRuntime, Copilot = copilotManager,
+            CaeJob = runtimeManager, CaeJobRuntime = caeJobRuntime, CursorRuntime = cursorRuntime, Cursor = cursorManager, CopilotRuntime = copilotRuntime, Copilot = copilotManager,
             OctopusRuntime = octopusRuntime, Octopus = octopusManager, CopilotCiRelease = copilotCiRelease, CopilotCodes = copilotCodes,
         };
         services.AddSingleton(runtimeSettings);

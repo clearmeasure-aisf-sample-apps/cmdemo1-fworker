@@ -56,6 +56,19 @@ public sealed class GitHubTokenProviderTests
         Assert.Null(GitHubTokenProvider.FromEnvironment(Env(("GH_TOKEN", ghp), ("FACTORY_AUTHOR_APP", "0"), ("FACTORY_APP_AUTHOR_ID", "1"), ("FACTORY_APP_AUTHOR_INSTALLATION", "2"), ("FACTORY_APP_AUTHOR_SLUG", "my-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)), Client(new Mint()))!.AppLogin);
     }
 
+    // every port of the gateway asks for a provider: one installation token per App and API for the process, not one per port
+    [Fact]
+    public void TheGatewaysProviders_OfOneApp_AreOne_AndOfAnotherAppAnother()
+    {
+        var a1 = GitHubTokenProvider.FromEnvironment(Env(("FACTORY_APP_AUTHOR_ID", "7001"), ("FACTORY_APP_AUTHOR_INSTALLATION", "7002"), ("FACTORY_APP_AUTHOR_SLUG", "shared-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)))!;
+        var a2 = GitHubTokenProvider.FromEnvironment(Env(("FACTORY_APP_AUTHOR_ID", "7001"), ("FACTORY_APP_AUTHOR_INSTALLATION", "7002"), ("FACTORY_APP_AUTHOR_SLUG", "shared-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)))!;
+        var b = GitHubTokenProvider.FromEnvironment(Env(("FACTORY_APP_AUTHOR_ID", "7001"), ("FACTORY_APP_AUTHOR_INSTALLATION", "7003"), ("FACTORY_APP_AUTHOR_SLUG", "shared-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)))!;
+        var withClient = GitHubTokenProvider.FromEnvironment(Env(("FACTORY_APP_AUTHOR_ID", "7001"), ("FACTORY_APP_AUTHOR_INSTALLATION", "7002"), ("FACTORY_APP_AUTHOR_SLUG", "shared-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)), Client(new Mint()))!;
+        Assert.Same(a1, a2);
+        Assert.NotSame(a1, b);
+        Assert.NotSame(a1, withClient);
+    }
+
     [Fact]
     public void NoIdentity_IsNull()
     {

@@ -23,6 +23,7 @@ internal static class SeamsRegistration
             var rts = sp.GetRequiredService<RuntimeRegistry>();
             return new V1CommandPort(kind => kind switch
             {
+                "cae-job" => rts.CaeJobRuntime,
                 "cursor-cloud" => rts.CursorRuntime,
                 "copilot-cloud" => rts.CopilotRuntime,
                 "octopus" => rts.OctopusRuntime,

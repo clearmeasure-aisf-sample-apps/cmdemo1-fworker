@@ -48,6 +48,20 @@ public sealed class GitHubTokenProvider
         var appFirst = env("FACTORY_AUTHOR_APP") == "1" && appComplete;
         if (!appFirst && !Unset(env("GH_TOKEN"))) return new GitHubTokenProvider(env("GH_TOKEN")!.Trim(), null, null, null, null, null, now);
         if (!appComplete) return null;
+        if (http is null && now is null)
+        {
+            // One installation token per App and API for the whole process, as the rule scripts keep one in their token cache file: every port of the gateway asks for a provider, and a provider each would mint a token each
+            // (six for two verbs, W9.9c prep). A caller that brings its own client or clock (tests) gets a provider of its own.
+            var shared = $"{env("GITHUB_API_URL")}|{id!.Trim()}|{inst!.Trim()}|{env("FACTORY_APP_AUTHOR_SLUG")}|{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key!)))}";
+            return Shared.GetOrAdd(shared, _ => Make(env, id, inst, key, null, null));
+        }
+        return Make(env, id, inst, key, http, now);
+    }
+
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, GitHubTokenProvider> Shared = new();
+
+    static GitHubTokenProvider Make(Func<string, string?> env, string? id, string? inst, string? key, HttpClient? http, Func<DateTimeOffset>? now)
+    {
         if (http is null)
         {
             var api = env("GITHUB_API_URL");

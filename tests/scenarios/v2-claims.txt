@@ -78,6 +78,9 @@ qc-worker
 # caused. On v2 the verdict answers next=merge and the merge is the merge verb's, the sweep's or the saga's, a moment later (ItemVerbs.Flow.cs, W9.3, W9.10e), with the session's merge call writing the comment of a session's merge: the
 # checks of these scenarios (the verdict answer carries the merge, the merge is in the caused writes of the verdict call) are the inline merge's, which W9.11 removes with the sweep and the verdict script; the saga suite proves the merge on v2.
 v1-only-scenarios owner | ^pass-merge: a PASS on an Auto Merge item with green checks is merged by the verdict call itself | the verdict call's inline merge (Verb_merge -Gateway) is v1's; on v2 the merge follows the verdict (W9.3)
+v1-only-scenarios owner | ^pass-merge: checks still running at the verdict | the verdict answer carries v1's inline merge (waiting, checks-pending); W9.11 removes it
+v1-only-scenarios owner | ^pass-merge: a pull request that cannot be merged takes the existing demote path once | the demote on a refused merge is part of the verdict call's inline merge on v1; W9.11 removes it
+v1-only-scenarios owner | ^pass-merge: a push after the verdict voids it | the answer of the verdict call carries v1's inline merge; W9.11 removes it
 v1-only-scenarios owner | ^pass-merge: a branch behind its base is brought up to date by the gateway, its merge commit is verified and merged | the gateway's update and merge inside the verdict call is v1's inline merge; W9.11 removes it
 v1-only-scenarios owner | ^pass-merge: a push that lands while the gateway's update of the branch is still pending is not merged | the gateway's update and merge inside the verdict call is v1's inline merge; W9.11 removes it
 v1-only-scenarios owner | ^pass-merge: a PASS for a head other than the current one is refused, and a verdict without a head is never merged by the gateway | the answer of the verdict call carries v1's inline merge; W9.11 removes it
