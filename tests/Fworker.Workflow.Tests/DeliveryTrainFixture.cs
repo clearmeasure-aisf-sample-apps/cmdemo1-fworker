@@ -151,6 +151,9 @@ sealed class TrainFixture
     /// <summary>The evidence of the previous environment matures: reads 5 and 10 minutes after the first.</summary>
     public async Task Mature() { await After(TimeSpan.FromMinutes(5)); await After(TimeSpan.FromMinutes(5)); }
 
+    /// <summary>The timer a result asked for fires: the clock moves to its due time and the wake is the message the handler's Outgoing builds for it (stamped, or unstamped for a transient retry).</summary>
+    public Task<TrainResult> Fire(TrainResult result) { Now = result.WakeAt!.Value; return Send(DeliveryTrainHandlers.WakeFor(result, Key)!); }
+
     /// <summary>Moves the clock and wakes the train, as the timer does.</summary>
     public Task<TrainResult> After(TimeSpan span) { Now += span; return Wake(); }
 }

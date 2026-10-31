@@ -36,9 +36,15 @@ public static class DeliveryTrainHandlers
     {
         var o = new OutgoingMessages();
         foreach (var m in result.Messages) o.Add(m);
-        if (result.WakeAt is { } due) o.Add(new TrainWake(key, due).ScheduledAt(due));
+        if (WakeFor(result, key) is { } wake) o.Add(wake.ScheduledAt(result.WakeAt!.Value));
         return o;
     }
+
+    /// <summary>
+    /// The timer of a result as the message that fires it. The train's own wake carries its due time (a timer that is not the pending one is stale and is dropped while one is pending). The transient
+    /// retry carries none: it is not the pending wake, which stays in the state, and with a due time it would be dropped as stale and swallowed.
+    /// </summary>
+    public static TrainWake? WakeFor(TrainResult result, string key) => result.WakeAt is { } due ? new TrainWake(key, result.Retry ? null : due) : null;
 }
 
 /// <summary>

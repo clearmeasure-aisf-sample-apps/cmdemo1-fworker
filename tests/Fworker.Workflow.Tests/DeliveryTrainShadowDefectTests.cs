@@ -359,9 +359,39 @@ public class DeliveryTrainShadowDefectTests
         Assert.Empty(done.Messages);
         // the read answers again: the wake judges the state the saved inputs made
         f.Reads.Fail = null;
-        await f.After(DeliveryTrainService.TransientRetry);
+        await f.Fire(done);
         Assert.Contains(f.Of<TrainDecided>(), d => d is { Action: "waiting", Release: "1.0.2" });
         Assert.NotNull(seen); Assert.NotNull(tdd);
+    }
+
+    [Fact]
+    public async Task TheTransientRetry_WhileAnotherWakeIsPending_IsNotStale_AndEvaluates_AsOutgoingStampsIt()
+    {
+        var f = new TrainFixture("tdd"); await f.Baseline();   // (the tdd train settles the deployment itself, with a read that no release is judged around)
+        f.Range('d', 'a'); await f.Merge(7, 'a');
+        f.Reads.Running["tdd"] = "1.0.2";
+        await f.Release("1.0.2", 'a'); await f.Deploy("1.0.2", "Tdd", "Started");
+        // a train that waits has a wake to come (SafetyWake, a poll or a command retry)
+        var rec = (await f.Store.Load(f.Key, default))!; rec.State.WakeDue = f.Now + DeliveryTrainService.SafetyWake;
+        Assert.True(await f.Store.Save(f.Key, rec.State, rec.Revision, default));
+        var pending = f.State.WakeDue;
+        f.Now += TimeSpan.FromMinutes(1);
+        f.Reads.Fail = new HttpRequestException("403");
+        var failed = await f.Deploy("1.0.2", "Tdd", "Succeeded");   // the delivery to tdd is settled with a read of GitHub, which fails
+        Assert.True(failed.Retry);
+        Assert.Equal(f.Now + DeliveryTrainService.TransientRetry, failed.WakeAt);
+        Assert.Equal(pending, f.State.WakeDue);   // (the failed look kept nothing: the pending wake stands)
+        // the retry goes out with no due time: it is not a timer of the train's pending wake and must never count as stale
+        Assert.Null(DeliveryTrainHandlers.WakeFor(failed, f.Key)!.Due);
+        var scheduled = DeliveryTrainHandlers.Outgoing(failed, f.Key);
+        Assert.Single(scheduled);
+        // the train's own wake still carries its due time
+        Assert.Equal(pending, DeliveryTrainHandlers.WakeFor(new TrainResult([], pending), f.Key)!.Due);
+        f.Reads.Fail = null;
+        var reads = f.Reads.Probes + f.Reads.Compares;
+        await f.Fire(failed);
+        Assert.True(f.Reads.Probes + f.Reads.Compares > reads, "the retry must evaluate though another wake is pending");
+        Assert.Contains("1.0.2", f.State.Settled);
     }
 
     [Fact]
