@@ -515,15 +515,13 @@ function Invoke-SyncBoard($a) {
     $skipItems = @{}
     if (Test-Has $a 'skip_items') { foreach ($x in @($a.skip_items)) { $si = 0; if ([int]::TryParse("$x", [ref]$si) -and $si -gt 0) { $skipItems[$si] = $true } } }
     $low = (Test-Has $a 'low') -and $a.low
-    # plant_steps and skip_steps (W9.10g): the plant-wide steps of the sweep (claim-ref-reap, board-guard, qc-sync, replenish, design-waiting) are recurring jobs of the gateway where the engine acts.
-    # A pass with plant_steps is a plant pass: the board list is read once and only those steps run (no item loop, no intake, no seen state, no resume point). skip_steps names the steps an ordinary pass leaves to
-    # the jobs (claim-ref-reap, board-guard, qc-sync, replenish; the gateway also leaves the keeper's count out of the pass; the gap stays with the sweep, issue 94). Absent where the engine does not act: v1 sweeps as before.
-    $plantSteps = @{}; $skipSteps = @{}
-    if (Test-Has $a 'plant_steps') { foreach ($x in @($a.plant_steps)) { if ("$x") { $plantSteps["$x"] = $true } } }
+    # skip_steps (W9.10g): the plant-wide steps of the sweep (claim-ref-reap, board-guard, qc-sync, replenish) are recurring jobs of the gateway where the engine acts (PlantSteps in src/Fworker.Workflows/Reconcilers, in C#;
+    # the QC sync is QcService's). skip_steps names the steps an ordinary pass leaves to them (the gateway also leaves the keeper's count out of the pass; the gap stays with the sweep, issue 94). Absent where the engine does
+    # not act: v1 sweeps as before.
+    $skipSteps = @{}
     if (Test-Has $a 'skip_steps') { foreach ($x in @($a.skip_steps)) { if ("$x") { $skipSteps["$x"] = $true } } }
-    $plantPass = $plantSteps.Count -gt 0 -and -not (Test-Has $a 'items')
-    # whether a step runs in this pass: a plant pass runs the steps it names; an ordinary pass runs the steps it was not told to leave
-    $wants = { param([string]$step) if ($plantPass) { $plantSteps.ContainsKey($step) } else { -not $skipSteps.ContainsKey($step) } }
+    # whether a step runs in this pass: one that it was not told to leave
+    $wants = { param([string]$step) -not $skipSteps.ContainsKey($step) }
     $skipped = @()
     $seenFile = Get-SeenFile
     $seen = if (Test-Path $seenFile) { Get-Content -Raw $seenFile | ConvertFrom-Json -AsHashtable } else { @{} }
@@ -560,7 +558,7 @@ function Invoke-SyncBoard($a) {
     $last = Get-LastColumn
     # a full sweep that was cut short begins where it stopped, so the items at the end of the board are not starved by the ones at the front
     $resumeFile = Join-Path (Get-StateDir) 'sweep-resume.json'
-    if ($null -eq $only -and -not $dry -and -not $plantPass -and (Test-Path $resumeFile)) {
+    if ($null -eq $only -and -not $dry -and (Test-Path $resumeFile)) {
         try {
             $rn = [int]((Get-Content -Raw $resumeFile | ConvertFrom-Json -AsHashtable).item)
             $ri = -1; for ($k = 0; $k -lt @($list).Count; $k++) { if ([int]@($list)[$k].number -eq $rn) { $ri = $k; break } }
@@ -568,11 +566,7 @@ function Invoke-SyncBoard($a) {
         } catch { }
     }
     $unparkCtx = @{ free_workers = $(if (Test-Has $a 'free_workers') { [int]$a.free_workers } else { 0 }) }
-    # a plant pass reads no item: the count of the keeper's column is all it takes from the list (W9.10g)
-    if ($plantPass -and $plantSteps.ContainsKey('design-waiting')) {
-        foreach ($it in $list) { if ((Test-NameIn $c.label $it.labels) -and $it.open -and "$($it.column)" -ieq $designCol) { $designWaiting++ } }
-    }
-    foreach ($it in $(if ($plantPass) { @() } else { $list })) {
+    foreach ($it in $list) {
         if ($script:LeaseFence -and -not (Test-LeaseHeld)) { $fenced = Get-LeaseFenceInfo 'sweep-item'; break }   # (W0.1: before each item, so a superseded gateway acts on no more of them)
         # a closed item is still followed when its merged pull request closed it and the flow after the merge is not finished
         if (-not (Test-NameIn $c.label $it.labels)) { continue }
@@ -871,16 +865,16 @@ function Invoke-SyncBoard($a) {
         else { $kept += $o }
     }
     $offers = $kept
-    if (-not $dry -and -not $fenced -and -not $plantPass) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
+    if (-not $dry -and -not $fenced) { $seen | ConvertTo-Json -Depth 5 | Set-Content $seenFile }
     $steps['items'] = [int]((Get-Date) - $sweepT0).TotalMilliseconds
     if ($partial) { $skipped += 'items-deferred'; $steps['items-viewed'] = $viewed.Count }
-    if ($null -eq $only -and -not $dry -and -not $plantPass) {
+    if ($null -eq $only -and -not $dry) {
         try { if ($partial) { @{ item = $resumeAt; at = ConvertTo-Iso (Get-UtcNow) } | ConvertTo-Json -Compress | Set-Content $resumeFile } elseif (Test-Path $resumeFile) { Remove-Item -Force $resumeFile } } catch { }
     }
     $stepT = Get-Date
     # claim refs with no live claim behind them (issue 47): removed at once for a closed item, after a lease for an open one
     if ($null -ne $only) { }
-    elseif (-not (& $wants 'claim-ref-reap')) { if (-not $plantPass) { $skipped += 'claim-ref-reap-job' } }
+    elseif (-not (& $wants 'claim-ref-reap')) { $skipped += 'claim-ref-reap-job' }
     elseif ($low) { $skipped += 'claim-ref-reap' }
     elseif ((Get-Date) -gt $script:SweepDeadline) { $skipped += 'claim-ref-reap-deferred' }
     elseif (-not $dry) {
@@ -890,8 +884,7 @@ function Invoke-SyncBoard($a) {
     }
     $steps['claim-ref-reap'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # work intake (issue 104): with a worker slot free and nothing waiting in Technical Design, the next item comes onto the board from Todo (a full sweep only: it needs the whole board)
-    if ($plantPass) { }
-    elseif (-not $dry -and $null -eq $only -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'intake-deferred' }
+    if (-not $dry -and $null -eq $only -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'intake-deferred' }
     elseif (-not $dry -and $null -eq $only) {
         try { $in = Invoke-Intake $a $list $offers $unconfirmed $pins $seen $seenFile; if ($in) { $actions += $in.action; $offers += $in.offer } }
         catch [FactoryReject] { $errors += @{ item = 0; code = $_.Exception.Code; reason = "intake: $($_.Exception.Message)" } }
@@ -901,7 +894,7 @@ function Invoke-SyncBoard($a) {
     # the board guard: open labelled issues without a card are put on the board in the intake column (they are offered from the next sweeps); it
     # needs the whole board, so a full sweep only, and not on a low budget (it lists every labelled issue)
     if ($null -ne $only) { }
-    elseif (-not (& $wants 'board-guard')) { if (-not $plantPass) { $skipped += 'board-guard-job' } }
+    elseif (-not (& $wants 'board-guard')) { $skipped += 'board-guard-job' }
     elseif ($low) { $skipped += 'board-guard' }
     elseif ((Get-Date) -gt $script:SweepDeadline) { $skipped += 'board-guard-deferred' }
     elseif (-not $dry) {
@@ -912,9 +905,9 @@ function Invoke-SyncBoard($a) {
     $steps['board-guard'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     # PR QC environments: offers and teardowns only, never a start (design pr-qc-environment.md 3.5)
     $qcRecords = @(); $qcTeardowns = @(); $qcApprovals = @()
-    # qc-sync is a plant step only as the verb of the same name (QcService, the gateway's job); the script's own step runs in an ordinary pass that was not told to leave it
-    $qcStep = (Test-QcEnabled) -and $null -eq $only -and -not $plantPass -and (& $wants 'qc-sync')
-    if ((Test-QcEnabled) -and $null -eq $only -and -not $plantPass -and -not (& $wants 'qc-sync')) { $skipped += 'qc-sync-job' }
+    # the gateway's QC sync job (the verb qc-sync, QcService) takes this step over where the engine acts; the script's own step runs in a pass that was not told to leave it
+    $qcStep = (Test-QcEnabled) -and $null -eq $only -and (& $wants 'qc-sync')
+    if ((Test-QcEnabled) -and $null -eq $only -and -not (& $wants 'qc-sync')) { $skipped += 'qc-sync-job' }
     if ($qcStep -and $low) { $skipped += 'qc-sync' }
     if ($qcStep -and -not $low -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'qc-sync-deferred' }
     elseif ($qcStep -and -not $low) {
@@ -924,7 +917,7 @@ function Invoke-SyncBoard($a) {
     }
     $steps['qc-sync'] = [int]((Get-Date) - $stepT).TotalMilliseconds; $stepT = Get-Date
     $replenish = $null
-    if ($null -eq $only -and -not $dry -and -not (& $wants 'replenish')) { if (-not $plantPass) { $skipped += 'replenish-job' } }
+    if ($null -eq $only -and -not $dry -and -not (& $wants 'replenish')) { $skipped += 'replenish-job' }
     elseif ($null -eq $only -and -not $dry -and (Get-Date) -gt $script:SweepDeadline) { $skipped += 'replenish-deferred' }
     elseif ($null -eq $only -and -not $dry) {
         # backpressure input (Replenish.ps1): the gateway's last plan; $null (no plan counted yet) is passed as a variable, a $(...) that yields nothing would drop the argument
@@ -939,7 +932,7 @@ function Invoke-SyncBoard($a) {
     if (-not $fenced -and $script:LeaseFence -and $script:LeaseFence.lost) { $fenced = Get-LeaseFenceInfo 'sweep-tail' }
     $stepsText = ($steps.Keys | ForEach-Object { "$_=$($steps[$_])" }) -join ' '
     [Console]::Error.WriteLine("sync-board steps (ms): $stepsText total=$([int]((Get-Date) - $sweepT0).TotalMilliseconds)")
-    return @{ ok = $true; steps = $steps; elapsed_ms = [int]((Get-Date) - $sweepT0).TotalMilliseconds; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only -or $partial -or ($plantPass -and -not $plantSteps.ContainsKey('design-waiting'))) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only -or $partial -or $plantPass) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); plant = $plantPass; partial = $partial; viewed = $(if ($partial) { @($viewed) } else { $null }); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; fenced = $fenced; at = ConvertTo-Iso (Get-UtcNow) }
+    return @{ ok = $true; steps = $steps; elapsed_ms = [int]((Get-Date) - $sweepT0).TotalMilliseconds; replenish = $replenish; offers = $offers; design_waiting = $(if ($null -ne $only -or $partial) { $null } else { $designWaiting }); held = $held; parks = $parks; actions = $actions; errors = $errors; owners = $owners; owned = $owned; settling = $settling; release_queue = $(if ($dry -or $null -ne $only -or $partial) { $null } else { $releaseQueue }); pins = $pins; runtimes = $rtLabels; profiles = $profiles; priorities = $priorities; holds = $holds; triggers = $triggers; unconfirmed = $unconfirmed; pass_unmerged = $passUnmerged; unparked = $unparked; flags = $flags; qc = $qcRecords; qc_teardowns = $qcTeardowns; qc_approvals = $qcApprovals; incremental = ($null -ne $only); partial = $partial; viewed = $(if ($partial) { @($viewed) } else { $null }); items = $(if ($null -ne $only) { @($only) } else { $null }); skipped = $skipped; fenced = $fenced; at = ConvertTo-Iso (Get-UtcNow) }
 }
 
 # ---- work intake (issue 104) -----------------------------------------------------------------------------------------
