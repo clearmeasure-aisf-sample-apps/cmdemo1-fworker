@@ -59,7 +59,7 @@ public sealed record AdoptionQcRow(string Key, string Repository, string ItemKey
 public sealed record AdoptionSlot(string SlotId, ItemId Item, int Generation, string Runtime, string? Host, string Phase, DateTimeOffset GrantedAt, DateTimeOffset ExpiresAt, IReadOnlyList<string> Footprint);
 
 /// <summary>An item between Development and merged that holds no slot (its PASS waits for the merge): the scheduler keeps it among the items in flight for the file-overlap rule until it is cleared.</summary>
-public sealed record AdoptionFlight(ItemId Item, IReadOnlyList<string> Footprint, DateTimeOffset Since);
+public sealed record AdoptionFlight(ItemId Item, IReadOnlyList<string> Footprint, DateTimeOffset Since, int Generation = 0);
 
 public enum AdoptionKind
 {
@@ -71,6 +71,10 @@ public enum AdoptionKind
     Unchanged,
     /// <summary>The saga row stays as it is (the comment is not newer, or the saga has decisions its projection has not written yet).</summary>
     Kept,
+    /// <summary>W9.10n, after a break of the engine: v1 acted on the item and the comment says it is over (settled, merged docs, a card in Done, an issue closed before the saga merged it): the saga's open row is closed.</summary>
+    Closed,
+    /// <summary>W9.10n, after a break of the engine: the saga's instance had ended and v1 opened the item again (the comment shows it open and not merged): the next generation starts from the comment.</summary>
+    Reopened,
     /// <summary>The item is not the saga's to hold (a closed issue, a settled item, a column of no step, a plan this engine does not carry): nothing is made; see the reason.</summary>
     Skipped,
 }
@@ -86,5 +90,14 @@ public sealed record AdoptionResult(AdoptionKind Kind, string Reason, WorkItemSt
     AdoptionSlot? Slot, AdoptionFlight? Flight, IReadOnlyList<AdoptionQcRow> QcRows, MergedItem? MergedRow, IReadOnlyList<string> Notes)
 {
     /// <summary>Whether the state is to be saved: a new row, a changed one, or only the revision moved on.</summary>
-    public bool Save => Kind is AdoptionKind.Adopted or AdoptionKind.Updated or AdoptionKind.Unchanged;
+    public bool Save => Kind is AdoptionKind.Adopted or AdoptionKind.Updated or AdoptionKind.Unchanged or AdoptionKind.Closed or AdoptionKind.Reopened;
+
+    /// <summary>
+    /// W9.10n: set when the result opened a new generation or closed the instance: the ledger is to be fenced for the item (<see cref="AdoptionLedger.Fence"/>, before the adopted slot is applied) and the merge line validated
+    /// (<see cref="AdoptionTrainRows.ValidateMergeLine"/>). Null for the results that leave the instance as it is.
+    /// </summary>
+    public LedgerFence? Fence { get; init; }
+
+    /// <summary>W9.10n: the generation the row had before this result opened a new one (<see cref="AdoptionKind.Updated"/> after a break, <see cref="AdoptionKind.Reopened"/>); null otherwise.</summary>
+    public int? FencedFrom { get; init; }
 }

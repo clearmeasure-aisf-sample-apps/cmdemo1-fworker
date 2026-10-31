@@ -63,6 +63,8 @@ public sealed class InFlightItem
     public string Item { get; set; } = "";
     public Footprint Footprint { get; set; } = Footprint.Empty;
     public DateTimeOffset Since { get; set; }
+    /// <summary>W9.10n: the instance of the item (its saga's generation) that put it in flight; 0 in a state saved before it, or when the request named none.</summary>
+    public int Generation { get; set; }
 }
 
 /// <summary>The hold of a waiting item, kept while it waits so that an expired hold keeps admitting (an item is not held twice) and the limit is on the whole wait.</summary>

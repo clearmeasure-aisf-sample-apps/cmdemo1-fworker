@@ -13,6 +13,26 @@ namespace Fworker.Workflows.Adoption;
 public static class AdoptionLedger
 {
     /// <summary>
+    /// W9.10n: the ledger without what it holds for the item that belongs to another instance than <paramref name="fence"/> keeps (null: nothing of the item stays). A slot, a waiting request, a place among the items in flight and a
+    /// file-overlap hold of an instance that ended or was replaced by a re-adoption (v1 acted on the item in between, so its session, its request and its footprint are no longer the item's) are removed, so that the item asks again
+    /// as the new instance and holds nobody back. An entry that names no generation (a state saved before the field, a request made without one) goes too when the fence opens a new instance (<c>KeepGeneration</c> set), because
+    /// anything the ledger held before the instance was opened is older; the entries of the kept generation stay, which is what makes it safe to run again (the adopted slot is applied after it). Run it before <see cref="Apply"/>.
+    /// A copy; the state given is not changed.
+    /// </summary>
+    public static CapacityState Fence(CapacityState ledger, LedgerFence fence)
+    {
+        var next = ledger.Copy();
+        var item = fence.Item.ToString();
+        bool Old(int generation) => fence.KeepGeneration is not { } keep || generation != keep;
+        if (next.Slots.TryGetValue(item, out var slot) && Old(slot.Request.Generation)) next.Slots.Remove(item);
+        if (next.Queue.TryGetValue(item, out var queued) && Old(queued.Generation)) next.Queue.Remove(item);
+        if (next.InFlight.TryGetValue(item, out var flight) && Old(flight.Generation)) next.InFlight.Remove(item);
+        // (a hold belongs to the waiting request: it goes with it, or with the item that ended)
+        if (!next.Queue.ContainsKey(item)) next.Holds.Remove(item);
+        return next;
+    }
+
+    /// <summary>
     /// The ledger with the adopted slot and the item among those in flight. The slot is what a live owner's session already holds: it is not a grant, so the executions of the day do not count it (the session started before, and the
     /// runtime's reading counts it as running). An item that holds a slot in the ledger already keeps it. A copy; the state given is not changed.
     /// </summary>
@@ -29,11 +49,11 @@ public static class AdoptionLedger
                 next.Slots[item] = new LedgerSlot { SlotId = slot.SlotId, Item = item, Runtime = slot.Runtime, Host = slot.Host, Kind = SlotKind.Guaranteed, GrantedAt = slot.GrantedAt, ExpiresAt = slot.ExpiresAt, Request = request };
                 next.Queue.Remove(item);
                 // past Technical Design the item is a holder of the file-overlap rule until it is cleared
-                if (request.PastDesign && !next.InFlight.ContainsKey(item)) { next.InFlight[item] = new InFlightItem { Item = item, Footprint = request.Footprint, Since = slot.GrantedAt }; next.Slots[item].EnteredFlight = true; }
+                if (request.PastDesign && !next.InFlight.ContainsKey(item)) { next.InFlight[item] = new InFlightItem { Item = item, Footprint = request.Footprint, Since = slot.GrantedAt, Generation = slot.Generation }; next.Slots[item].EnteredFlight = true; }
             }
         }
         if (flight is not null && !next.InFlight.ContainsKey(flight.Item.ToString()))
-            next.InFlight[flight.Item.ToString()] = new InFlightItem { Item = flight.Item.ToString(), Footprint = Footprint(flight.Footprint), Since = flight.Since };
+            next.InFlight[flight.Item.ToString()] = new InFlightItem { Item = flight.Item.ToString(), Footprint = Footprint(flight.Footprint), Since = flight.Since, Generation = flight.Generation };
         return next;
     }
 
