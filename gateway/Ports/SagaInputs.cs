@@ -34,7 +34,7 @@ sealed class SagaInputs(V2Ownership ownership, IWorkItemStore store, RepoId home
     static readonly TimeSpan[] Pauses = [TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(1)];
     readonly Func<TimeSpan, Task> wait = delay ?? Task.Delay;
 
-    public bool Owns(int item) => ownership.Owns(item);
+    public Task<bool> Owns(int item) => ownership.OwnsOrFindAsync(item);
 
     /// <summary>The item was parked outside the saga (the runtime adapters, the credit guard). A repeated park of the same moment is the saga's duplicate.</summary>
     public Task<bool> Parked(int item, string reason, string key) =>
@@ -51,7 +51,7 @@ sealed class SagaInputs(V2Ownership ownership, IWorkItemStore store, RepoId home
     /// </summary>
     public async Task<bool> ResumeIfParked(int item, string? key = null)
     {
-        if (!ownership.Owns(item)) return false;
+        if (!await ownership.OwnsOrFindAsync(item)) return false;
         var id = new ItemId(home, item);
         try
         {
@@ -64,7 +64,7 @@ sealed class SagaInputs(V2Ownership ownership, IWorkItemStore store, RepoId home
     /// <summary>One count against the step's budgets, under the arm of the step the item is on now (a budget message for another arm would be stale). Nothing for an item whose saga is not open.</summary>
     public async Task<bool> Budget(int item, BudgetKind kind, string key, string reason)
     {
-        if (!ownership.Owns(item)) return false;
+        if (!await ownership.OwnsOrFindAsync(item)) return false;
         var id = new ItemId(home, item);
         try
         {
@@ -77,7 +77,7 @@ sealed class SagaInputs(V2Ownership ownership, IWorkItemStore store, RepoId home
     /// <summary>The start of the item's session was refused. For an item the scheduler holds nothing of, the scheduler answers NotFound and nothing more.</summary>
     public async Task<bool> StartRefused(int item, string key, string outcome)
     {
-        if (!ownership.Owns(item)) return false;
+        if (!await ownership.OwnsOrFindAsync(item)) return false;
         var id = new ItemId(home, item);
         try { return await Deliver(id, "start-refused", () => publishRefusal(new StartRefused(id, key, "", outcome))); }
         catch (Exception e) { Console.Error.WriteLine($"v2 start-refused feed for {id}: {e.GetType().Name}"); return false; }
@@ -85,7 +85,7 @@ sealed class SagaInputs(V2Ownership ownership, IWorkItemStore store, RepoId home
 
     async Task<bool> Send(int item, string what, Func<WorkItemInput> make)
     {
-        if (!ownership.Owns(item)) return false;
+        if (!await ownership.OwnsOrFindAsync(item)) return false;
         var id = new ItemId(home, item);
         try { return await Deliver(id, what, make()); }
         catch (Exception e) { Console.Error.WriteLine($"v2 {what} feed for {id}: {e.GetType().Name}"); return false; }

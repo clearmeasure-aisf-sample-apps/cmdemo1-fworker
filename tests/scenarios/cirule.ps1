@@ -108,12 +108,12 @@ $CiRuleScenarios['ci rule: a park that expires, and one an operator releases, st
     $body = [regex]::Replace("$($sc.body)", '("until"\s*:\s*")[^"]+(")', "`${1}$past`${2}")
     Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/comments/$($sc.id)" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json' | Out-Null
     Check 'the sweep removes the expired park and the demotions' (Wait-Until -Seconds 60 { $s = Ci-State $a; -not $s.Contains('park') -and -not $s.Contains('demotions') }) ((Ci-State $a) | ConvertTo-Json -Compress -Depth 4)
-    Check 'the journal says the park expired and the counts start again' ((Ci-Comments $a '*expired*count from 0 again*plant event=unparked*').Count -eq 1) (((Get-FakeIssue $a).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(200, $_.body.Length)) }) -join ' | ')
+    Check 'the journal says the park expired and the counts start again' (Wait-Until -Seconds 20 { (Ci-Comments $a '*expired*count from 0 again*plant event=unparked*').Count -eq 1 }) (((Get-FakeIssue $a).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(200, $_.body.Length)) }) -join ' | ')
     $b = & $park3 'Park released'
     $r = F 'op' @('unpark', '--item', $b, '--reason', 'the criterion was reworded')
     CheckExit 'the operator releases the park' $r 0
     Check 'unpark says the counters were reset, and the state has none' ($r.countersReset -eq $true -and -not (Ci-State $b).Contains('demotions') -and -not (Ci-State $b).Contains('fix_forward_rounds')) ($r | ConvertTo-Json -Compress -Depth 4)
-    Check 'its journal line says so' ((Ci-Comments $b '*released early*count from 0 again*plant event=unparked*').Count -eq 1)
+    Check 'its journal line says so' (Wait-Until -Seconds 20 { (Ci-Comments $b '*released early*count from 0 again*plant event=unparked*').Count -eq 1 })
 }
 
 # The merge path (the owner suite: the gateway merges a PASS by itself). A PASS whose head turns red on a check master fails too is re-run once,
@@ -148,5 +148,6 @@ $CiRuleOwnerScenarios['ci rule (gateway merge): a PASS whose head is red for a r
     Ci-SetHead (Get-Head $x.pr) @('Integration Build (SQLite)') 9401
     Check 'the failed jobs are re-run once before deciding' (Wait-Until -Seconds 60 { (Ci-Comments $x.n '*re-running the failed jobs once*before deciding*').Count -eq 1 })
     Check 'still red after it, with master passing that check: demoted to Development as before' (Wait-Until -Seconds 60 { (Get-FakeIssue $x.n).column -eq 'Development' -and [int](Ci-State $x.n)['demotions'] -eq 1 }) "column $((Get-FakeIssue $x.n).column)"
-    Check 'the demotion says it was still red after the re-run; nothing was merged' ((Ci-Comments $x.n '*merge failed*still red after one re-run*').Count -eq 1 -and -not (Get-FakePr $x.pr).merged) (((Get-FakeIssue $x.n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(200, $_.body.Length)) }) -join ' | ')
+    # (the demotion saves the state and then posts its comment: the state check above can pass before the comment is there, which a loaded runner shows)
+    Check 'the demotion says it was still red after the re-run; nothing was merged' ((Wait-Until -Seconds 20 { (Ci-Comments $x.n '*merge failed*still red after one re-run*').Count -eq 1 }) -and -not (Get-FakePr $x.pr).merged) (((Get-FakeIssue $x.n).comments | ForEach-Object { $_.body.Substring(0, [Math]::Min(200, $_.body.Length)) }) -join ' | ')
 }

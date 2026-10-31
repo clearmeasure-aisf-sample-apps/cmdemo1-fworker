@@ -155,7 +155,7 @@ public sealed class KeeperCommands(VerbContext cx)
         }
         await KeeperJournal(n, st, "amend-criteria", call, $"amended a criterion (decision {id}; the original is kept in the body){(follow is { } f2 ? $", follow-up #{f2}" : "")}{(unparked ? ", released the park" : "")}");
         await cx.State.Save(n, st);
-        if (unparked && cx.Saga.Owns(n)) await cx.Saga.Resumed(n, $"keeper-unpark|{cx.Ticks}");
+        if (unparked && await cx.Saga.Owns(n)) await cx.Saga.Resumed(n, $"keeper-unpark|{cx.Ticks}");
         return o;
     }
 
@@ -211,7 +211,7 @@ public sealed class KeeperCommands(VerbContext cx)
         await cx.AddComment(n, $"split by the backlog keeper into {Refs(made)}; this item is closed as split.", session);
         await cx.GitHub.CloseIssue(n, "not_planned");
         await cx.GitHub.RemoveClaimRef(n);
-        if (cx.Saga.Owns(n)) await cx.Saga.Closed(n, "split", $"keeper-split|{cx.Ticks}");
+        if (await cx.Saga.Owns(n)) await cx.Saga.Closed(n, "split", $"keeper-split|{cx.Ticks}");
         return new JsonObject { ["ok"] = true, ["id"] = n, ["item"] = n, ["created"] = VerbContext.Ints(made), ["closed"] = true, ["closed_prs"] = VerbContext.Ints(prs) };
     }
 

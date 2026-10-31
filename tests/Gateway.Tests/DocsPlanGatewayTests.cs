@@ -642,6 +642,23 @@ public sealed class V2VerbFeedTests
         Assert.Empty(rig.Inputs);
     }
 
+    // The sweep reads the set of the saga's items before the board; the intake can start a saga between the two, the card then moves, the sweep offers the item, and a session that is quick sends its design before the next read.
+    // The feed used to skip every call while it knew no saga (Count 0) or not that item, and the saga never heard the design: its completion was refused, and the review of the next column was taken for the design's.
+    [Fact]
+    public async Task ASagaThatStartedAfterTheOwnershipWasRead_StillHearsTheDesignAndTheCompletion()
+    {
+        var rig = new Rig();
+        await rig.Svc.Handle(new StartWorkItem(Item, "intake", "docs"));   // (no Own.RefreshAsync: the set is the one read before the start)
+        Assert.False(rig.Own.Owns(7));
+        var feed = rig.Feed(new Inner(0, """{"ok":true,"appended":true}"""));
+        await feed.RunAsync("append-body", Body("append-body", new { content = Section + "\n<!-- aisf:docs-only -->" }), TimeSpan.FromSeconds(1));
+        Assert.IsType<DesignRecorded>(Assert.Single(rig.Inputs));
+        Assert.True(rig.Own.Owns(7));
+        rig.Published.Clear();
+        await rig.Feed(new Inner(0, """{"ok":true,"completed":true,"moved_to":"Development"}""")).RunAsync("complete", Body("complete"), TimeSpan.FromSeconds(1));
+        Assert.IsType<StepCompleted>(Assert.Single(rig.Inputs));
+    }
+
     [Fact]
     public async Task AReviewAndTheCompletionsOfTheColumns_GoToTheSaga_InTheOrderTheyHappened()
     {
@@ -727,15 +744,17 @@ public sealed class V2VerbFeedTests
         // a verb the saga has no input for
         await rig.Feed(ok).RunAsync("comment", Body("comment"), TimeSpan.FromSeconds(1));
         Assert.Empty(rig.Inputs);
-        // a feature item, and an ownership that is empty (the store is not even read)
+        // a feature item, and an ownership that is empty (an item the set lacks is looked up by its key, twice for this call: before the script, for the flags, and after it; nothing is fed)
         var feature = new Rig(); await feature.Svc.Handle(new StartWorkItem(Item, "intake")); await feature.Own.RefreshAsync();
         await feature.Feed(ok).RunAsync("complete", Body("complete"), TimeSpan.FromSeconds(1));
         Assert.Empty(feature.Inputs);
         var empty = new Rig();
         var counting = new CountingStore(empty.Store);
-        var feed = new V2VerbFeed(ok, new V2Ownership(counting, Home), counting, Home, Settings(), m => Task.FromResult(true));
+        var told = new List<WorkItemInput>();
+        var feed = new V2VerbFeed(ok, new V2Ownership(counting, Home), counting, Home, Settings(), m => { told.Add(m); return Task.FromResult(true); });
         await feed.RunAsync("complete", Body("complete"), TimeSpan.FromSeconds(1));
-        Assert.Equal(0, counting.Loads);
+        Assert.Equal(2, counting.Loads);
+        Assert.Empty(told);
     }
 
     sealed class CountingStore(IWorkItemStore inner) : IWorkItemStore

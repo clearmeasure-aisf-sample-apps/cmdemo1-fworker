@@ -410,7 +410,7 @@ sealed class KeeperFileLocks(IItemLock items, Func<string, string?>? env = null,
 /// <summary>The word to the saga: an item the saga owns, whose park a verb released or which a verb closed.</summary>
 sealed class KeeperSagaPort(V2Ownership? ownership, RepoId home, Func<object, Task<bool>> publish) : IKeeperSaga
 {
-    public bool Owns(int item) => ownership?.Owns(item) == true;
+    public async Task<bool> Owns(int item) => ownership is not null && await ownership.OwnsOrFindAsync(item);
 
     public async Task Resumed(int item, string key) => await Send(new ResumeWorkItem(new ItemId(home, item), 0, key));
 
