@@ -23,6 +23,12 @@ public interface IMergedItemStore
     /// out. The rows are written in one transaction, so a derivation that fails leaves none of its items claimed for a message that may never come back.
     /// </summary>
     Task<IReadOnlyList<MergedItem>> TryRecordAll(IReadOnlyList<MergedItem> rows, CancellationToken ct);
+
+    /// <summary>
+    /// W9.9b: which of the (item, merge commit) pairs have a row, as "owner/repo#N|commit" with the commit in lower case: the set the adoption validates the delivery trains' candidates against
+    /// (<see cref="Fworker.Workflows.Adoption.AdoptionTrainRows.ValidateCandidates"/>).
+    /// </summary>
+    Task<IReadOnlySet<string>> Held(IReadOnlyCollection<(string ItemKey, string Commit)> pairs, CancellationToken ct);
 }
 
 public sealed class SqlMergedItemStore(Func<FactoryDbContext> open) : IMergedItemStore
@@ -65,6 +71,16 @@ public sealed class SqlMergedItemStore(Func<FactoryDbContext> open) : IMergedIte
         return kept;
     }
 
+    public async Task<IReadOnlySet<string>> Held(IReadOnlyCollection<(string ItemKey, string Commit)> pairs, CancellationToken ct)
+    {
+        var held = new HashSet<string>(StringComparer.Ordinal);
+        if (pairs.Count == 0) return held;
+        var keys = pairs.Select(p => p.ItemKey).Distinct().ToList();
+        await using var db = open();
+        foreach (var row in await db.MergedItems.AsNoTracking().Where(x => keys.Contains(x.ItemKey)).Select(x => new { x.ItemKey, x.Commit }).ToListAsync(ct)) held.Add($"{row.ItemKey}|{row.Commit.ToLowerInvariant()}");
+        return held;
+    }
+
     async Task<bool> TryRecord(MergedItem row, CancellationToken ct)
     {
         await using var db = open();
@@ -96,6 +112,11 @@ public sealed class InMemoryMergedItemStore : IMergedItemStore
     public Task<bool> PullRequestTakenByOther(string itemKey, int pullRequest, Guid messageId, CancellationToken ct)
     {
         lock (rows) return Task.FromResult(rows.Values.Any(x => x.ItemKey == itemKey && x.PullRequest == pullRequest && x.MessageId != messageId));
+    }
+
+    public Task<IReadOnlySet<string>> Held(IReadOnlyCollection<(string ItemKey, string Commit)> pairs, CancellationToken ct)
+    {
+        lock (rows) return Task.FromResult<IReadOnlySet<string>>(rows.Values.Select(r => $"{r.ItemKey}|{r.Commit.ToLowerInvariant()}").ToHashSet(StringComparer.Ordinal));
     }
 
     public Task<IReadOnlyList<MergedItem>> TryRecordAll(IReadOnlyList<MergedItem> batch, CancellationToken ct)
@@ -136,6 +157,17 @@ public sealed class DeliveredToTable(Func<FactoryDbContext> open) : IDeliveredLo
             row2.Release = e.Release; row2.DeliveredAt = at;
             await again.SaveChangesAsync(ct);
         }
+    }
+
+    /// <summary>
+    /// W9.9b: records the release an item reached in an environment only when the table has none for the pair (the adoption's backfill from the trains and from v1's state: what the table holds already is the train's own and newer).
+    /// True when a row was written.
+    /// </summary>
+    public async Task<bool> RecordIfAbsent(DeliveredTo e, DateTimeOffset at, CancellationToken ct = default)
+    {
+        if (await ReleaseOf(e.Item, e.Environment, ct) is not null) return false;
+        await Record(e, at, ct);
+        return true;
     }
 
     public async Task Remove(Undelivered e, CancellationToken ct = default)

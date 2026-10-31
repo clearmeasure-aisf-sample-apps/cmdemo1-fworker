@@ -603,6 +603,57 @@
         }
       }
     },
+    "factory.EngineMarkers": {
+      "columns": {
+        "At": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Detail": {
+          "type": "nvarchar",
+          "maxLength": 400,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Holder": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Name": {
+          "type": "nvarchar",
+          "maxLength": 80,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_EngineMarkers": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Name"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
     "factory.IdempotencyClaims": {
       "columns": {
         "ClaimedAt": {

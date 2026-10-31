@@ -346,3 +346,66 @@ $SagaScenarios['saga: slots: three sessions against a day budget of three are st
         try { [void](Fake 'octo-reset') } catch { }
     }
 }
+
+# ---- W9.9b (#361, the second pull request): the adoption at a start with v1 items in flight (v2 only) -----------------------------------------------------------------------------------------
+# Where the engine acts it reads, at every start, every open item of the board with its state comment and maps it to a saga (docs/design/fworker-wolverine-implementation.md "W9.9b as built"). The items of this
+# scenario are what v1 leaves behind: one in Development with a live owner claim (v1's session still holds it), one in Technical Design that nobody holds yet. Neither has a saga; the gateway is started; the
+# adoption makes the two rows (the slot of the owner's session goes to the scheduler's ledger where the scheduler is on: AdoptionRunnerTests A1; it is off in this profile) and reports it in the v2 block of /api/v1/status (adopted, upserted, skipped by reason). The next start is the restart of a gateway
+# that adopted already: nothing is adopted again, nothing is decided again (the decisions of the item are the same). v1 has no engine to adopt for (the suites auto and owner test the sweep).
+function Adopt-Last {
+    try { return (Invoke-RestMethod "$(Get-GatewayBase)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 5).v2.adoption } catch { return $null }
+}
+# the latest run of the adoption (the block has none before the first); $null while there is none
+function Adopt-Run { $a = Adopt-Last; if ($null -eq $a) { return $null }; $p = $a.PSObject.Properties['last']; if ($p) { return $p.Value }; return $null }
+function Adopt-State([int]$n, [hashtable]$More) {
+    $iso = { param($t) $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+    $s = [ordered]@{ schema = 1; item = $n; rev = 3; updated = (& $iso (Get-Date).AddMinutes(-5)) }
+    foreach ($k in $More.Keys) { $s[$k] = $More[$k] }
+    $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n" + ($s | ConvertTo-Json -Compress -Depth 8) + "`n```````n"
+    [void](Gh-As 'fake-operator' "issues/$n/comments" @{ body = $body })
+}
+
+$SagaScenarios['saga: adoption: a start with v1 items in flight adopts them (the item with its owner, the item in Technical Design), reports it in the v2 status, and the next start adopts nothing again'] = {
+    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: v1 has no engine to adopt for (the sweep of the rule script owns the items; suites auto and owner)' $true; return }
+    Saga-NumbersAbove 90
+    # no owner session of an earlier scenario is left to be offered the items
+    if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+    $iso = { param($t) $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+    $a = New-Item-Fake 'Adoption developing' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Development'
+    $b = New-Item-Fake 'Adoption designing' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Technical Design'
+    $items = @($a, $b)
+    try {
+        $now = Get-Date
+        Adopt-State $a @{ design = @{ docs_only = $false }; claim = @{ holder = 'w1'; column = 'Development'; started = (& $iso $now.AddMinutes(-20)); heartbeat = (& $iso $now.AddMinutes(-1)); lease_until = (& $iso $now.AddMinutes(40)); launches = 1; owner = $true; worker = 'w1'; assignment = 'a1' } }
+        Adopt-State $b @{ design = @{ docs_only = $false } }
+        Check 'neither item has a saga before the start' ($null -eq (Saga-View $a) -and $null -eq (Saga-View $b)) "views: $((Saga-View $a) | ConvertTo-Json -Compress -Depth 3) $((Saga-View $b) | ConvertTo-Json -Compress -Depth 3)"
+
+        Restart-Gateway
+        $adopted = Wait-Until -Seconds 150 { $x = Adopt-Run; $null -ne $x -and "$($x.outcome)" -eq 'done' -and [int]$x.adopted -ge 2 }
+        $x = Adopt-Run
+        Check 'the adoption of the start is done and adopted both items (v2 status: adoption.last)' $adopted ((Adopt-Last) | ConvertTo-Json -Compress -Depth 5)
+        if (-not $adopted) { return }
+        Check 'the report counts the rows it made as upserted, and names no error' ([int]$x.upserted -ge 2 -and [int]$x.errors -eq 0 -and $x.afterBreak -eq $false) ($x | ConvertTo-Json -Compress -Depth 4)
+        Check 'the items it skipped are counted by reason (the fillers have no state comment)' ([int]$x.skipped -ge 1 -and $null -ne $x.skippedBy.PSObject.Properties['no-state-comment']) ($x.skippedBy | ConvertTo-Json -Compress)
+        # (the views are read at most every 5 seconds, the health block every 10: an answer from before the adoption can still stand)
+        [void](Wait-Until -Seconds 40 { $null -ne (Saga-View $a) -and $null -ne (Saga-View $b) })
+        $va = Saga-View $a; $vb = Saga-View $b
+        Check "#$a is the saga's, in Develop" ($null -ne $va -and "$($va.step)" -eq 'Develop') ($va | ConvertTo-Json -Compress -Depth 4)
+        Check "#$b is the saga's, in Design" ($null -ne $vb -and "$($vb.step)" -eq 'Design') ($vb | ConvertTo-Json -Compress -Depth 4)
+        Check 'each has the one decision of the adoption' ((@(Saga-Actions $a) -eq 'adopted').Count -eq 1 -and (@(Saga-Actions $b) -eq 'adopted').Count -eq 1) "#${a}: $((Saga-Actions $a) -join ','); #${b}: $((Saga-Actions $b) -join ',')"
+        Check 'the cards stay where v1 left them' ((Saga-Col $a) -eq 'Development' -and (Saga-Col $b) -eq 'Technical Design') "columns $(Saga-Col $a) / $(Saga-Col $b)"
+
+        # the next start: the same database, a new process. The rule of the upsert finds the rows in place and the comments as they were
+        $decisions = @(Saga-Actions $a).Count + @(Saga-Actions $b).Count
+        Restart-Gateway
+        $again = Wait-Until -Seconds 150 { $y = Adopt-Run; $null -ne $y -and "$($y.outcome)" -eq 'done' }
+        $y = Adopt-Run
+        Check 'the second start runs the adoption to its end' $again ((Adopt-Last) | ConvertTo-Json -Compress -Depth 5)
+        if (-not $again) { return }
+        Check 'and adopts nothing: both rows are kept, nothing is written again' ([int]$y.adopted -eq 0 -and [int]$y.upserted -eq 0 -and ([int]$y.kept + [int]$y.unchanged) -ge 2) ($y | ConvertTo-Json -Compress -Depth 4)
+        Check 'the decisions of the two items are the same as after the first start' ((@(Saga-Actions $a).Count + @(Saga-Actions $b).Count) -eq $decisions) "#${a}: $((Saga-Actions $a) -join ','); #${b}: $((Saga-Actions $b) -join ',')"
+    } finally {
+        # the items stay the saga's: parked, so that no session is offered them to the scenarios after this one
+        foreach ($n in $items) { try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { } }
+    }
+}

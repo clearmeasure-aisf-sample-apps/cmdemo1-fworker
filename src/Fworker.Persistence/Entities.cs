@@ -302,6 +302,15 @@ public class PlantStateRow
     public string Document { get; set; } = "";
 }
 
+/// <summary>A marker of the engine (W9.9b, script 290): "acted" is the heartbeat of the acting v2 process, "v1-ran" the start of a process that the kill switch turned back to v1. The adoption reads them to tell whether v1 may have acted in between.</summary>
+public class EngineMarkerRow
+{
+    public string Name { get; set; } = "";
+    public DateTimeOffset At { get; set; }
+    public string Holder { get; set; } = "";
+    public string Detail { get; set; } = "";
+}
+
 /// <summary>
 /// The state of one QC gate (W9.0 for W9.1, refactor R9): one row per repository and pull request, the key "owner/repo!N" in lower case. The state is a JSON document owned by Fworker.Workflows.Qc (the
 /// environment record, its attempt and assignment, the verdict), saved with a revision so that two writers cannot both win. The columns beside the document are the ones read without opening it: the pull

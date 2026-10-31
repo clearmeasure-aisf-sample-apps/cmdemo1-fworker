@@ -213,6 +213,18 @@ public sealed class WolverineHostServiceTests
     }
 
     [Fact]
+    public async Task BeforeHost_RunsAfterTheSchemaIsGood_AndBeforeTheHostIsBuiltOrStarted_AndAFailureOfItIsRetried()
+    {
+        var order = new List<string>(); var tries = 0;
+        var svc = Service(Leader(), (_, _) => { lock (order) order.Add("build"); return new FakeHost(); }, (_, _) => { lock (order) order.Add("schema"); return Task.FromResult(GoodReport); });
+        svc.BeforeHost = _ => { lock (order) order.Add("before"); return ++tries < 2 ? throw new InvalidOperationException("the markers could not be read") : Task.CompletedTask; };
+        await svc.StartAsync(CancellationToken.None);
+        await Until(() => svc.State == WolverineHostService.Phase.Running);
+        lock (order) Assert.Equal(["schema", "before", "schema", "before", "build"], order);   // (W9.9b review: the hold on the old instance's inputs is decided before the listeners start)
+        await svc.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
     public async Task AFailingStart_IsRetriedInTheBackground_UntilItWorks()
     {
         var tries = 0; var hosts = new List<FakeHost>();

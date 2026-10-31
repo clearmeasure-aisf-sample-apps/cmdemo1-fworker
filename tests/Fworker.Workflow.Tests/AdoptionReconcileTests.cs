@@ -58,6 +58,20 @@ public class AdoptionReconcileTests
     }
 
     [Fact]
+    public void R3b_ARowOfAPlanWithoutSlotsAndNoClaim_KeepsItsLease_WhenALaterStartFindsTheCommentOnANewRevision_W99b()
+    {
+        // the lease of a new arm is now + the step's lease: it moves with the clock, and a start later must not read that as the comment saying something new
+        var noSlots = Settings(p => p with { FeatureRules = new FeaturePlanRules(false) });
+        const string design = "\"design\": { \"docs_only\": false }";
+        var first = AdoptionReconciler.Reconcile(null, 0, 0, AdoptionMapper.Map(Snapshot(Design, State(rev: 5, extra: design)), noSlots, Now), Now);
+        Assert.NotNull(first.State!.LeaseDue);
+        var later = Now.AddMinutes(10);
+        var again = AdoptionReconciler.Reconcile(first.State, first.State.Sequence, 0, AdoptionMapper.Map(Snapshot(Design, State(rev: 6, extra: design)), noSlots, later), later);
+        Assert.Equal((AdoptionKind.Unchanged, first.State.LeaseDue, 6), (again.Kind, again.State!.LeaseDue, again.State.CommentRev));
+        Assert.Null(again.Decision);
+    }
+
+    [Fact]
     public void R4_ACommentThatIsNotNewerLeavesTheRowAlone()
     {
         var first = AdoptionReconciler.Reconcile(null, 0, 0, Map(Develop, State(rev: 5, extra: Claimed())), Now);
@@ -365,6 +379,20 @@ public class AdoptionReconcileTests
         train.SignOffs.Add(new TrainSignOff { InterruptionId = "I-1", TaskId = "T-1", Version = "1.0.7", Since = Now.AddHours(-1), Answered = true, AnsweredAt = Now.AddMinutes(-2) });
         var next = AdoptionTrain.SignOffs(train, [Wait()], AdoptionTrain.Promotions(Item.ToString(), Promoted()));
         Assert.Equal(train.ToJson(), next.ToJson());
+    }
+
+    [Fact]
+    public void T6b_ASignOffTheTrainKnowsAndHasNotAnswered_LearnsWhoseItIs_W99b()
+    {
+        // the watcher's poll came first: the train stamped the Sign-off with its own clock and does not count the release as requested ("a deployment the gateway did not create")
+        var train = TrainState.New("cmdemo1-ui/tdd");
+        train.SignOffs.Add(new TrainSignOff { InterruptionId = "I-1", DeploymentId = "D-1", TaskId = "T-1", Version = "1.0.7", Since = Now });
+        var next = AdoptionTrain.SignOffs(train, [Wait()], AdoptionTrain.Promotions(Item.ToString(), Promoted(waitSince: TimeSpan.FromMinutes(25))));
+        var so = Assert.Single(next.SignOffs);
+        Assert.Equal((Now - TimeSpan.FromMinutes(25), false, 1), (so.Since, so.Answered, next.RequestNumbers["1.0.7"]));
+        Assert.Equal([Item.ToString()], next.RequestItems["1.0.7"]);
+        Assert.Equal(next.ToJson(), AdoptionTrain.SignOffs(next, [Wait()], AdoptionTrain.Promotions(Item.ToString(), Promoted(waitSince: TimeSpan.FromMinutes(25)))).ToJson());   // (the same train again)
+        Assert.Empty(train.Requested);   // (a copy)
     }
 
     [Fact]
