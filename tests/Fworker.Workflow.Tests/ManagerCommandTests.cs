@@ -124,6 +124,28 @@ public sealed class ManagerCommandTests
         await w.Refused("manager-action", Act("release-owner", null, "stalled-owner"), 10, "no-owner");
     }
 
+    // W9.10k: an item the saga owns hears of the manager's release of its owner and of its requeue, as it hears of the unpark (the saga is what offers the item, so it must know)
+    [Fact]
+    public async Task ReleaseOwnerAndRequeue_TellTheSagaOfAnItemItOwns_AndNoOneElse()
+    {
+        var released = World(); released.SagaOwned.Add(5);
+        released.State(5)["claim"] = new JsonObject { ["holder"] = "alice", ["owner"] = true, ["lease_until"] = "2026-10-29T13:00:00.000Z" };
+        await released.Run("manager-action", Act("release-owner", null, "stalled-owner"));
+        Assert.Equal(["owner-released 5"], released.SagaCalls);
+
+        var requeued = World(); requeued.SagaOwned.Add(5);
+        await requeued.Run("manager-action", Act("requeue", null, "stuck-offer"));
+        Assert.Equal(["requeued 5"], requeued.SagaCalls);
+
+        // an item without a saga: v1's, nothing is said; a refused call says nothing either
+        var v1 = World(); v1.State(5)["claim"] = new JsonObject { ["holder"] = "alice", ["owner"] = true, ["lease_until"] = "2026-10-29T13:00:00.000Z" };
+        await v1.Run("manager-action", Act("release-owner", null, "stalled-owner"));
+        var v1Requeue = World(); await v1Requeue.Run("manager-action", Act("requeue", null, "stuck-offer"));
+        var refused = World(); refused.SagaOwned.Add(5);
+        await refused.Refused("manager-action", Act("release-owner", null, "stalled-owner"), 10, "no-owner");
+        Assert.Empty(v1.SagaCalls); Assert.Empty(v1Requeue.SagaCalls); Assert.Empty(refused.SagaCalls);
+    }
+
     [Fact]
     public async Task Requeue_OffersTheItemAtOnce_AndRefusesWhatIsNotToBeOffered()
     {

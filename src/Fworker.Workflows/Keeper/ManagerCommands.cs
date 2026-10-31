@@ -191,7 +191,13 @@ public sealed class ManagerCommands(VerbContext cx)
         o["journaled"] = await cx.Journal(n, st, "manager-action", new Dictionary<string, JsonNode?> { ["action"] = action, ["policy"] = policy, ["by"] = by, ["reason"] = reason, ["detail"] = detail, ["session"] = session },
             $"{action}|{now.Ticks}");
         await cx.State.Save(n, st);
-        if (unparked && cx.Saga.Owns(n)) await cx.Saga.Resumed(n, $"manager-unpark|{now.Ticks}");
+        // an item the saga owns hears of what changes its flow (W9.10k: the release of its owner and its requeue as well as the unpark), so that its state and its history say what the manager did
+        if (cx.Saga.Owns(n))
+        {
+            if (unparked) await cx.Saga.Resumed(n, $"manager-unpark|{now.Ticks}");
+            else if (action.Equals("release-owner", StringComparison.OrdinalIgnoreCase)) await cx.Saga.OwnerReleased(n, reason, $"manager-release|{now.Ticks}");
+            else if (action.Equals("requeue", StringComparison.OrdinalIgnoreCase)) await cx.Saga.Requeued(n, reason, $"manager-requeue|{now.Ticks}");
+        }
         o["actions_today"] = recent.Count + 1; o["limit"] = Rules.ManagerPerItemPerDay;
         return o;
     }

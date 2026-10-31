@@ -47,9 +47,27 @@ public sealed class DeliveryActingShadowHostTests
         public IReadOnlyList<DeliveryPolicy> ForRepository(RepoId repository) => inner.ForRepository(repository).Select(Fast).ToList();
     }
 
+    sealed class Capture(List<string> lines) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string category) => new Sink(lines, category);
+        public void Dispose() { }
+        sealed class Sink(List<string> lines, string category) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel level) => true;
+            public void Log<TState>(LogLevel level, EventId id, TState state, Exception? error, Func<TState, Exception?, string> format)
+            {
+                var text = format(state, error);
+                if (level >= LogLevel.Warning || text.Contains("Train", StringComparison.Ordinal) || text.Contains("Shadow", StringComparison.Ordinal))
+                    lock (lines) lines.Add($"{DateTime.UtcNow:HH:mm:ss.fff} {level} {category.Split('.').Last()}: {text}{(error is null ? "" : " | " + error.GetType().Name + ": " + error.Message)}");
+            }
+        }
+    }
+
     sealed class Rig : IAsyncDisposable
     {
         public readonly IHost Host;
+        public readonly List<string> Log = [];   // (what the host logged about the train's messages, shown when the decision does not arrive)
         public readonly DeliveryShadow Shadow;
         public readonly InMemoryShadowComparisonStore Store = new();
         public int ExecutorCalls;   // each PromoteRelease or AnswerSignOff that reaches the executor asks for the Octopus key once (none is set, so none reaches Octopus)
@@ -71,9 +89,12 @@ public sealed class DeliveryActingShadowHostTests
             var ledger = new InMemoryIdempotencyLedger();
             var executor = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, octopus), new AnswerSignOffHandler(ledger, octopus));
             Host = new HostBuilder()
-                .ConfigureLogging(l => l.SetMinimumLevel(LogLevel.Critical))
+                .ConfigureLogging(l => { l.SetMinimumLevel(LogLevel.Debug); l.AddProvider(new Capture(Log)); })
                 .UseWolverine(w =>
                 {
+                    // as the gateway's host (WolverineHostService): no handler is found by convention, Configure names the ones it needs. Without this the host scans the assembly Wolverine takes for the application, which depends on what
+                    // earlier tests in the process did, and finds the gateway's SignOffWaitHandler, whose recorder this host does not register: the chain of TrainDecided then fails to compile and the decision is moved to the error queue.
+                    w.Discovery.DisableConventionalDiscovery();
                     w.Services.AddSingleton(delivered);   // (the gateway's ItemMergedWiring.Attach registers it)
                     DeliveryActingWiring.Configure(w.Services, w, parts, new InMemoryTrainStore(), executor, durable: false);
                 })
@@ -121,10 +142,14 @@ public sealed class DeliveryActingShadowHostTests
         await rig.Start();
         await rig.ReleaseGoesThroughTdd();
         Assert.True(await Until(() => rig.Recorded >= 1), "the train did not decide to promote, or its ShadowCommand was not handled");
+        // (the decision and the command are separate messages: the command can be recorded before the shadow has the decision, so the tick below waits for both)
+        Assert.True(await Until(() => rig.Decisions >= 1), $"the train's decision did not reach the shadow; its status: {rig.Shadow.Status()["v2"]!.ToJsonString()}; log: {string.Join(" // ", rig.Log.TakeLast(40))}");
         // the AutoPromoter's pass says the same (what AddGatewayBackground's OnActions gives the holder's shadow)
         rig.Shadow.ObserveV1(new JsonArray(JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new { item = 7, action = "promoted", release = "1.0.2", environment = "Uat", task = "ServerTasks-9", items = new[] { 7 } }))));
         await rig.Shadow.Tick(default);
-        var row = Assert.Single(rig.Store.All, x => x.Release == "1.0.2" && x.V2Action == "promote");
+        var rows = rig.Store.All.Where(x => x.Release == "1.0.2" && x.V2Action == "promote").ToList();
+        Assert.True(rows.Count == 1, $"rows: {rows.Count} of {rig.Store.All.Count}; status {rig.Shadow.Status()["v2"]!.ToJsonString()}; log: {string.Join(" // ", rig.Log.TakeLast(40))}");
+        var row = rows[0];
         Assert.Equal(ShadowOutcomes.Match, row.Outcome);
         var report = await rig.Shadow.Report(10, null, default);
         var command = (JsonObject)((JsonArray)report["recentCommands"]!)[0]!;

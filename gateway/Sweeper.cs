@@ -21,6 +21,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     // W9.10g: the plant-wide steps (claim-ref reap, board guard, QC sync, replenish, the keeper's backlog count) are recurring jobs of the engine (PlantStepJobs): the sweep leaves them out (skip_steps) and applies none of
     // their results. Set only where the engine acts, together with the jobs.
     public bool PlantJobs { get; init; }
+    // W9.10k: the plant's input for the items that have a saga (owners' leases, parks, pins, priorities, runtime labels, the release queue), built from the saga's state and the cards' labels. Set only where the engine acts, with V2.
+    public SagaPlantFeed? Feed { get; init; }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -167,6 +169,12 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             if (V2 != null && V2.Count > 0)
             {
                 SweepV2Filter.Apply(j, V2.Owns);
+                // W9.10k: what the sweep would have said of those items, from the saga's state and the cards' labels (a full pass: an incremental pass names none of them)
+                if (items == null && Feed != null)
+                {
+                    try { await Feed.RefreshViewsAsync(); Feed.Apply(j); }
+                    catch (Exception e) when (e is not OperationCanceledException) { Console.Error.WriteLine($"saga feed: {e.GetType().Name}"); }
+                }
                 // W6.6: the offers for the saga's items come from the saga's state, for the items the pass read (an incremental pass named none of them: it never offers an item it did not read)
                 if (ownerMode && j["offers"] is JsonArray planned)
                     foreach (var offer in V2.OfferNodes(plant.HasOwner, items))

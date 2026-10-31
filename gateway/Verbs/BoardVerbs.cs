@@ -233,8 +233,6 @@ sealed class BoardVerbs(BoardVerbParts p)
         if (answer is null) return new VerbAnswer(code, output);
         JsonObject body;
         try { body = string.IsNullOrWhiteSpace(stdin) ? new JsonObject() : JsonNode.Parse(stdin) as JsonObject ?? new JsonObject(); } catch (System.Text.Json.JsonException) { body = new JsonObject(); }
-        // W9.10g: a plant pass (plant_steps: the plant-wide steps of the sweep, which the recurring jobs ask for) reads the board for those steps only; the reconciler has its own job
-        if (body["plant_steps"] is JsonArray { Count: > 0 }) return new VerbAnswer(code, output);
         HashSet<int>? only = null;
         if (body["items"] is JsonArray items)
         {

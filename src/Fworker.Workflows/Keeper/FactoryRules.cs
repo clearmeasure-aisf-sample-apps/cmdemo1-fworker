@@ -27,6 +27,8 @@ public sealed class FactoryRules
     public string AutoMergeLabel { get; init; } = "";
     public string TestLabel { get; init; } = "";
     public string VideoLabel { get; init; } = "";
+    /// <summary>The label of the other factory (<c>rivalLabel</c>): an issue that carries both is ambiguous and nobody's.</summary>
+    public string RivalLabel { get; init; } = "";
     public string OwnerHoldLabel { get; init; } = "hold:owner";
     public string PriorityTop { get; init; } = "priority:top";
     public string PriorityHigh { get; init; } = "priority:high";
@@ -59,7 +61,7 @@ public sealed class FactoryRules
         return new FactoryRules
         {
             Name = Text(root, "name"), Owner = Text(root, "owner"), Repo = Text(root, "repo"), Label = Text(root, "label"),
-            AutoMergeLabel = Text(root, "autoMergeLabel"), TestLabel = Text(root, "testLabel"), VideoLabel = Text(root, "videoLabel"),
+            AutoMergeLabel = Text(root, "autoMergeLabel"), RivalLabel = Text(root, "rivalLabel"), TestLabel = Text(root, "testLabel"), VideoLabel = Text(root, "videoLabel"),
             OwnerHoldLabel = Text(root, "ownerHoldLabel", "hold:owner"),
             PriorityTop = Text(priority, "top", "priority:top"), PriorityHigh = Text(priority, "high", "priority:high"),
             AiColumns = List(columns, "ai") ?? [], BodySections = sections,

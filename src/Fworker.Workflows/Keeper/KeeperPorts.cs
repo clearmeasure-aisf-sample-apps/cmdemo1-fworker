@@ -97,6 +97,12 @@ public interface IVerbLocks
 {
     Task<IAsyncDisposable> Item(int item);
     Task<IAsyncDisposable> Intake();
+
+    /// <summary>W9.10g: <c>Use-ItemLock $n {...} $seconds</c> with a wait of its own (the claim-ref reap takes it without waiting, the guard's journal line waits 3 seconds). A port that knows no other wait uses its own.</summary>
+    Task<IAsyncDisposable> Item(int item, TimeSpan wait) => Item(item);
+
+    /// <summary>W9.10g: <c>Use-IntakeLock {...} $seconds</c> (the board guard takes it without waiting).</summary>
+    Task<IAsyncDisposable> Intake(TimeSpan wait) => Intake();
 }
 
 /// <summary>What the WorkItemSaga must be told when a keeper or manager verb changes an item it owns. Nothing is said about an item no saga owns.</summary>
@@ -110,6 +116,12 @@ public interface IKeeperSaga
 
     /// <summary>The item was split and closed: the saga stops its lease and takes no step message until a person resumes it.</summary>
     Task Closed(int item, string reason, string key);
+
+    /// <summary>W9.10k: the plant manager ended the lease of the item's owner (manager-action release-owner): the saga records it and asks the gateway to give the claim up.</summary>
+    Task OwnerReleased(int item, string reason, string key);
+
+    /// <summary>W9.10k: the plant manager put the item back to be offered (manager-action requeue): the saga records it.</summary>
+    Task Requeued(int item, string reason, string key);
 }
 
 /// <summary>No saga owns anything.</summary>
@@ -118,4 +130,6 @@ public sealed class NoSaga : IKeeperSaga
     public bool Owns(int item) => false;
     public Task Resumed(int item, string key) => Task.CompletedTask;
     public Task Closed(int item, string reason, string key) => Task.CompletedTask;
+    public Task OwnerReleased(int item, string reason, string key) => Task.CompletedTask;
+    public Task Requeued(int item, string reason, string key) => Task.CompletedTask;
 }

@@ -62,7 +62,10 @@ sealed partial class V2ItemViews
         finally { reading.Release(); }
     }
 
-    Snapshot? Current() => last is { } l && now() - l.ReadAt < Fresh ? l : null;
+    /// <summary>W9.10k: the last good answer without a read (null before the first), for the patrol digest, which runs under the plant's lock and cannot wait on the database. Whoever refreshes the views (the sweep) keeps it fresh.</summary>
+    public Answer? Latest => last is { } l ? new Answer(l.Set, l.ReadAt, true, null) : null;
+
+    Snapshot? Current() =>last is { } l && now() - l.ReadAt < Fresh ? l : null;
 
     // ---- the three views ------------------------------------------------------------------------------------------------------------------------------------------------------------
 

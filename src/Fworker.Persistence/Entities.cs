@@ -255,6 +255,54 @@ public class BoardSeenRow
 }
 
 /// <summary>
+/// One offer or accepted assignment of the plant (W9.10k, script 240): the id is the one the workers' item tokens name. The gateway's plant state store replaces the rows in one transaction with the other plant rows; EF only maps the table.
+/// </summary>
+public class PlantAssignmentRow
+{
+    public string Id { get; set; } = "";
+    public int Item { get; set; }
+    public string Kind { get; set; } = "";
+    public string Role { get; set; } = "";
+    public string BoardColumn { get; set; } = "";
+    public string Mode { get; set; } = "";
+    public string Reason { get; set; } = "";
+    public string Worker { get; set; } = "";
+    public int PullRequest { get; set; }
+    public string Pin { get; set; } = "";
+    public bool Accepted { get; set; }
+    public DateTimeOffset? AcceptedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public string SlotId { get; set; } = "";
+    public string SlotRuntime { get; set; } = "";
+    public string ArmId { get; set; } = "";
+}
+
+/// <summary>The session that owns an item (Kind "owner") or the bot that holds it (Kind "bot") (W9.10k, script 240).</summary>
+public class PlantHolderRow
+{
+    public int Item { get; set; }
+    public string Kind { get; set; } = "";
+    public string Holder { get; set; } = "";
+}
+
+/// <summary>A name that is drained (W9.10k, script 240): by the operator (Kind "operator") or by the plant manager (Kind "manager").</summary>
+public class PlantDrainRow
+{
+    public string Name { get; set; } = "";
+    public string Kind { get; set; } = "";
+}
+
+/// <summary>The rest of the plant's hand-over as one JSON document (row "plant"), with the epoch of the term that wrote it and who (W9.10k, script 240).</summary>
+public class PlantStateRow
+{
+    public string Name { get; set; } = "";
+    public long Epoch { get; set; }
+    public string Holder { get; set; } = "";
+    public DateTimeOffset SavedAt { get; set; }
+    public string Document { get; set; } = "";
+}
+
+/// <summary>
 /// The state of one QC gate (W9.0 for W9.1, refactor R9): one row per repository and pull request, the key "owner/repo!N" in lower case. The state is a JSON document owned by Fworker.Workflows.Qc (the
 /// environment record, its attempt and assignment, the verdict), saved with a revision so that two writers cannot both win. The columns beside the document are the ones read without opening it: the pull
 /// requests of one repository that are not over ("Waiting for PR QC") and the item the pull request belongs to.

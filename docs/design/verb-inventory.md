@@ -154,6 +154,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | plant-expire-claim | `gateway/PlantHooks.cs` | 1 | expire-claim | runner | W9.2 | W9.9a | Claim expiry of an assigned item. |
 | ticker-journal | `gateway/PlantTicker.cs` | 1 | journal | runner | W9.8 | W9.9a | The ticker's journal lines (#477). |
 | owner-release | `gateway/Ports/ItemStepsPort.cs` | 2 | get-item, release | router | W9.10f | - | OwnerRelease: the saga's ReleaseOwner (an owner that waited out a hold) reads the claim with get-item and gives it up with release, through the verb router (v2's item verbs where the engine acts); no script of its own. |
+| plant-restore-claim | `gateway/PlantRestoreCorrection.cs` | 1 | get-item | router | W9.10k | - | PlantRestoreCorrection: at start the plant restored from the database is corrected from the claim of each owned saga item, read with get-item through the verb router (v2's item verbs where the engine acts); no script of its own. |
 | item-admin-feed | `gateway/Ports/ItemVerbsPort.cs` | 1 | by argument | router | W9.2 | - | ItemAdminFeed forwards to the router it wraps (no script). |
 | qc-calls | `gateway/Qc.cs` | 1 | by argument | runner | W9.1 | W9.9a | QcHub runs the qc-* verbs (QcService in W9.1). |
 | qc-facts | `gateway/Ports/QcPort.cs` | 1 | inspect-facts | router | W9.5 | - | QcFactsAdapter asks the router for the inspector's facts; the router answers on v2 or runs the script. |
@@ -162,7 +163,6 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | owner-ci-release | `gateway/Runtimes/OwnerCiReleaseService.cs` | 2 | by argument | runner | W9.4 | W9.9a | OwnerCiReleaseService runs ci-release. |
 | owner-ci-journal | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | journal | runner | W9.8 | W9.9a | Its journal lines. |
 | sweep-board | `gateway/Sweeper.cs` | 1 | sync-board | runner | W9.8 | W9.10g | The sweep: sync-board (the reconciler of W9.8, the item and plant-wide steps of W9.10e to W9.10g). |
-| plant-step-jobs | `gateway/Ports/PlantStepJobs.cs` | 1 | sync-board | runner | W9.10g | W9.10g | The plant-wide steps of the sweep as recurring jobs (sync-board plant_steps: claim-ref reap, board guard, replenish, backlog-low); the QC sync is the verb qc-sync (QcService). The steps are still the script's rules; the second pull request of W9.10g ports them and deletes this entry. |
 
 ### The fallbacks of verbs that have a v2 owner
 

@@ -31,6 +31,10 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<IncidentRow> Incidents => Set<IncidentRow>();
     public DbSet<LeadershipRow> Leadership => Set<LeadershipRow>();
     public DbSet<BoardSeenRow> BoardSeen => Set<BoardSeenRow>();
+    public DbSet<PlantAssignmentRow> PlantAssignments => Set<PlantAssignmentRow>();
+    public DbSet<PlantHolderRow> PlantHolders => Set<PlantHolderRow>();
+    public DbSet<PlantDrainRow> PlantDrains => Set<PlantDrainRow>();
+    public DbSet<PlantStateRow> PlantState => Set<PlantStateRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -236,6 +240,48 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.HasKey(x => new { x.Repository, x.Number });
             e.Property(x => x.Repository).HasMaxLength(200);
             e.Property(x => x.StatusColumn).HasMaxLength(200);
+        });
+
+        b.Entity<PlantAssignmentRow>(e =>
+        {
+            e.ToTable("PlantAssignments");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Id).HasMaxLength(60);
+            e.Property(x => x.Kind).HasMaxLength(20).IsRequired();
+            e.Property(x => x.Role).HasMaxLength(60).IsRequired();
+            e.Property(x => x.BoardColumn).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Mode).HasMaxLength(60).IsRequired();
+            e.Property(x => x.Reason).HasMaxLength(60).IsRequired();
+            e.Property(x => x.Worker).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Pin).HasMaxLength(100).IsRequired();
+            e.Property(x => x.SlotId).HasMaxLength(100).IsRequired();
+            e.Property(x => x.SlotRuntime).HasMaxLength(100).IsRequired();
+            e.Property(x => x.ArmId).HasMaxLength(100).IsRequired();
+        });
+
+        b.Entity<PlantHolderRow>(e =>
+        {
+            e.ToTable("PlantHolders");
+            e.HasKey(x => new { x.Item, x.Kind });
+            e.Property(x => x.Kind).HasMaxLength(10);
+            e.Property(x => x.Holder).HasMaxLength(100).IsRequired();
+        });
+
+        b.Entity<PlantDrainRow>(e =>
+        {
+            e.ToTable("PlantDrains");
+            e.HasKey(x => new { x.Name, x.Kind });
+            e.Property(x => x.Name).HasMaxLength(100);
+            e.Property(x => x.Kind).HasMaxLength(10);
+        });
+
+        b.Entity<PlantStateRow>(e =>
+        {
+            e.ToTable("PlantState");
+            e.HasKey(x => x.Name);
+            e.Property(x => x.Name).HasMaxLength(40);
+            e.Property(x => x.Holder).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Document).IsRequired();
         });
 
         b.Entity<CatalogCopy>(e =>
