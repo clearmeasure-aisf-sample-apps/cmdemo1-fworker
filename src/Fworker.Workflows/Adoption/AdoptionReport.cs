@@ -50,8 +50,11 @@ public sealed class AdoptionReport
     {
         Errors++;
         var kind = e.GetType().Name;
-        ErrorKinds[kind] = ErrorKinds.GetValueOrDefault(kind) + 1;
+        lock (Gate) ErrorKinds[kind] = ErrorKinds.GetValueOrDefault(kind) + 1;
     }
+
+    /// <summary>The two dictionaries are written by the run while the status reads the report (<see cref="ToJson"/>): both sides hold this.</summary>
+    public object Gate { get; } = new();
 
     /// <summary>The mapping's reason without its detail: "column-of-no-step: Todo" is "column-of-no-step".</summary>
     public static string Code(string reason)
@@ -60,14 +63,21 @@ public sealed class AdoptionReport
         return i < 0 ? reason : reason[..i];
     }
 
-    public JsonObject ToJson() => new()
+    public JsonObject ToJson()
+    {
+        KeyValuePair<string, int>[] skippedBy, errorKinds;
+        lock (Gate) { skippedBy = SkippedBy.ToArray(); errorKinds = ErrorKinds.ToArray(); }
+        return Json(skippedBy, errorKinds);
+    }
+
+    JsonObject Json(KeyValuePair<string, int>[] skippedBy, KeyValuePair<string, int>[] errorKinds) => new()
     {
         ["outcome"] = Outcome, ["startedAt"] = StartedAt.ToString("o"), ["finishedAt"] = FinishedAt?.ToString("o"),
         ["afterBreak"] = AfterBreak, ["breakWhy"] = BreakWhy,
         ["cards"] = Cards, ["read"] = Read,
         ["adopted"] = Adopted, ["upserted"] = Upserted, ["updated"] = Updated, ["unchanged"] = Unchanged, ["kept"] = Kept, ["closed"] = Closed, ["reopened"] = Reopened,
-        ["skipped"] = Skipped, ["skippedBy"] = new JsonObject(SkippedBy.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
-        ["conflicts"] = Conflicts, ["publishFailed"] = PublishFailed, ["errors"] = Errors, ["errorKinds"] = new JsonObject(ErrorKinds.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
+        ["skipped"] = Skipped, ["skippedBy"] = new JsonObject(skippedBy.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
+        ["conflicts"] = Conflicts, ["publishFailed"] = PublishFailed, ["errors"] = Errors, ["errorKinds"] = new JsonObject(errorKinds.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
         ["qcRows"] = QcRows, ["mergedRows"] = MergedRows, ["mergedPublished"] = MergedPublished, ["mergedFromPulls"] = MergedFromPulls,
         ["deliveredToWritten"] = DeliveredToWritten, ["signOffs"] = SignOffs, ["candidatesRemoved"] = CandidatesRemoved, ["mergeLineRemoved"] = MergeLineRemoved,
     };
