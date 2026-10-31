@@ -322,7 +322,7 @@ if ($Engine -eq 'v2' -and $env:FACTORY_TEST_SQL) {
 #  - saga-docs: the intake is on and names the docs plan: a Todo item whose body carries the docs-only marker starts a WorkItemSaga (DocsIntakeJob: every minute on the leader, the first run 30 s after the start).
 #  - saga-feature: docs and feature. scheduler.featureSlots is OFF in both saga profiles: with it on (config/instance.json) a feature item asks the CapacityScheduler for a slot at every step and is offered to a session only
 #    once it holds one, and the scheduler grants only on a runtime that is on; the suites of Tier 1 have no runtime for it (the octopus suite's is the fake Octopus), so the item would wait for ever (audit of 2026-10-30, finding 20:
-#    "state in W9.9 that the batch runs with featureSlots false"). The slots are a claim of their own, with a runtime (the octopus suite), when W9.10j makes the saga start the sessions.
+#    "state in W9.9 that the batch runs with featureSlots false"). The slots are a claim of their own (W9.10j, second pull request): the scenario 'saga: slots: ...' turns scheduler.featureSlots and the fake Octopus runtime on in the configuration of its own gateway (saga.ps1) and runs on this profile.
 # A suite's own Extra is applied first, the profile over it.
 $script:V2Profiles = @{
     # 'plain' leaves the host's timers at their defaults: with the recurring jobs at their floor the octopus scenario 'journal order' (accept while the offered and launched lines are in flight) fails on v2 (seen after #572); the plain profile is as master's run
