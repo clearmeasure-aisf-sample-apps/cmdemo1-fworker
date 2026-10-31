@@ -943,6 +943,8 @@ function Invoke-Intake($a, $List, $Offers, $Unconfirmed, $Pins, $Seen, [string]$
     $set = Get-IntakeSettings
     if (-not $set.enabled -or -not (Test-Has $a 'intake') -or -not (Test-Has $a.intake 'freeSlots') -or [int]$a.intake.freeSlots -le 0) { return $null }
     $c = Get-Cfg; $td = "$(@($c.columns.ai)[0])"
+    # an empty board arrives as $null (a function that outputs nothing, handed on as an argument, binds $null), and `$null | Where-Object { $_.open }` runs the block once on $null: an error under strict mode
+    if ($null -eq $List) { $List = @() }
     $v2Plans = @(); if (Test-Has $a.intake 'v2Plans') { $v2Plans = @(@($a.intake.v2Plans) | ForEach-Object { "$_".Trim().ToLowerInvariant() } | Where-Object { $_ }) }
     $byNumber = @{}; foreach ($x in $List) { $byNumber[[int]$x.number] = $x }
     # something already waits in Technical Design for a session: no intake (an item pinned to one worker waits for that worker, not for a slot)
