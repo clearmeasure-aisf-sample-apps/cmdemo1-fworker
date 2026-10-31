@@ -62,6 +62,7 @@ public sealed record SlotWanted(ItemId Item, int Generation, string ArmId, strin
 [JsonDerivedType(typeof(ClearSlot), "clear")]
 [JsonDerivedType(typeof(ChangeFootprint), "footprint")]
 [JsonDerivedType(typeof(LeaveTrain), "leave")]
+[JsonDerivedType(typeof(ReleaseOwner), "release")]
 public abstract record StateCommand(string Key);
 
 /// <summary>Ask for a slot for a session of <paramref name="Phase"/> (published as <see cref="SlotWanted"/>).</summary>

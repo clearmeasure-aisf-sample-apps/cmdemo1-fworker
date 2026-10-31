@@ -186,6 +186,7 @@ public sealed class FeaturePlanWiringTests
             var started = Task.Run(() => host.Server);
             Assert.True(started.Wait(TimeSpan.FromSeconds(60)), "the gateway of an acting v2 environment did not finish starting");
             Assert.Equal(expected, host.Services.GetRequiredService<RecurringJobRegistry>().Has(RecurringJobSlots.FeatureChecks));
+            Assert.True(host.Services.GetRequiredService<RecurringJobRegistry>().Has(RecurringJobSlots.ItemSteps));   // W9.10f: the sweep's item steps are the saga's wherever the engine acts (a closed pull request is a demotion on the docs plan too)
         }
     }
 
@@ -203,6 +204,7 @@ public sealed class FeaturePlanWiringTests
         var jobs = host.Services.GetRequiredService<RecurringJobRegistry>();
         Assert.True(jobs.Has(RecurringJobSlots.SagaRearm));   // W9.10o: the repair of a save whose timer or command was never sent
         Assert.True(jobs.Has(RecurringJobSlots.LedgerPurge));   // W9.10o: the successes of the idempotency ledger do not live for ever
+        Assert.True(jobs.Has(RecurringJobSlots.ItemSteps));   // W9.10f: master's CI after a merge, a closed pull request, an approved hold
         Assert.NotNull(host.Services.GetService<V2Health>());
     }
 

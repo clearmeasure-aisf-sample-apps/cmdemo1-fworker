@@ -30,10 +30,10 @@ function Saga-WritesOf($Writes, [string]$Source, [string]$Method, [string]$PathP
 
 # The owner session's whole path for one item pulled by the intake: accept the offer, the design (docs-only or not), the development with its pull request, the validation and the PASS.
 # Returns @{ n; pr } with the item and its pull request; every step is a check, so a broken step is named where it breaks.
-function Saga-Play([string]$Title, [string]$Body, [bool]$DocsOnly) {
+function Saga-Play([string]$Title, [string]$Body, [bool]$DocsOnly, [string[]]$Labels = $null) {
     Saga-EnsureOwner
     $w = $script:SagaOwner
-    $n = New-Item-Fake $Title $Body $OwnerLabels 'Todo'
+    $n = New-Item-Fake $Title $Body $(if ($Labels) { $Labels } else { $OwnerLabels }) 'Todo'
     $file = $(if ($DocsOnly) { 'docs/saga-trial.md' } else { 'src/SagaTrial.cs' })   # (no item number in a name: the golden file is the same whichever scenario ran before; the pull request of a code item changes code: a pull request of documentation only is refused for an item whose design is not docs-only)
     # v1: the next sweep; v2: the intake job (every minute on the leader, the first run 30 s after the start)
     $pulled = Wait-Until -Seconds 200 { (Saga-Col $n) -eq 'Technical Design' }
@@ -106,4 +106,85 @@ $SagaScenarios['saga: a code item pulled from Todo (the feature plan) is designe
     if (-not $x) { return }
     $v = Saga-Pass $x
     Saga-CheckMerged $x 'feature'
+}
+
+# ---- W9.10f: the sweep's item steps in the saga (v2 only) ---------------------------------------------------------------------------------------------------------------
+# What v1's sweep does for every item after the PASS (the settle's wait for master CI and its parks, the demotion of a PASS whose pull request was closed) the saga does for the items it owns, with the watcher
+# `item-steps` (every minute on the leader; the profile's first run is at once). On v1 the rule script does them and the scenarios of the suites `auto` and `owner` test that, so these scenarios have nothing to
+# play there. They read the saga through the dashboard (the `v2Items` block: step, park and the newest decisions); the comments of the rule script's settle are not written on v2 (the saga's history is the record).
+function Saga-V2Only { if ($script:GoldenEngine -eq 'v2') { return $true }; Check 'v2 only: on v1 the sweep of the rule script does this step (suite auto)' $true; return $false }
+function Saga-View([int]$n) {
+    try {
+        $d = Invoke-RestMethod "$(Get-GatewayBase)/api/v1/dashboard" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 5
+        foreach ($r in @($d.v2Items.repositories)) { foreach ($i in @($r.items)) { if ([int]$i.number -eq $n) { return $i } } }
+    } catch { }
+    return $null
+}
+function Saga-Actions([int]$n) { $v = Saga-View $n; if ($null -eq $v) { return @() }; return @($v.history | ForEach-Object { "$($_.action)" }) }
+# the fake numbers its issues from 1 in every scenario, while the saga's database keeps what the scenarios before started (an item that is open is not started again): a scenario of this group takes numbers above those
+function Saga-NumbersAbove([int]$Count) { foreach ($i in 1..$Count) { Fake 'issue' @{ title = "filler $i"; body = 'x'; labels = @(); column = 'Done' } | Out-Null } }
+
+$SagaScenarios['saga: sweep step: a merged code item waits for the CI of master, and a green master ends the wait'] = {
+    if (-not (Saga-V2Only)) { return }
+    Saga-NumbersAbove 10
+    $x = Saga-Play 'Saga master green' "Change the code, as the criteria say.`n`n- criterion one" $false
+    if (-not $x) { return }
+    Saga-Pass $x | Out-Null
+    Check "the pull request of #$($x.n) is merged by the gateway" (Wait-Until -Seconds 150 { (Get-FakePr $x.pr).merged }) "merged $((Get-FakePr $x.pr).merged)"
+    $green = Wait-Until -Seconds 240 { 'master-green' -in (Saga-Actions $x.n) }
+    Check 'the saga judged master green for the merge commit (decision master-green)' $green "decisions: $((Saga-Actions $x.n) -join ', ')"
+    $v = Saga-View $x.n
+    Check 'the item waits for its delivery, not parked' ($null -ne $v -and "$($v.step)" -eq 'Deliver' -and -not $v.parked) ($v | ConvertTo-Json -Compress -Depth 4)
+}
+
+$SagaScenarios['saga: sweep step: a red master after the one re-run parks the merged item master-broken, and a green master lifts the park by itself'] = {
+    if (-not (Saga-V2Only)) { return }
+    Saga-NumbersAbove 20
+    Fake 'config' @{ masterRed = $true; rerunSeconds = 3; rerunConclusion = 'failure' } | Out-Null
+    $x = Saga-Play 'Saga master broken' "Change the code, as the criteria say.`n`n- criterion one" $false
+    if (-not $x) { return }
+    Saga-Pass $x | Out-Null
+    Check "the pull request of #$($x.n) is merged by the gateway" (Wait-Until -Seconds 150 { (Get-FakePr $x.pr).merged }) "merged $((Get-FakePr $x.pr).merged)"
+    $parked = Wait-Until -Seconds 300 { 'master-broken' -in (Saga-Actions $x.n) }
+    Check 'the saga parked the item master-broken once the new attempt of the failed jobs had failed' $parked "decisions: $((Saga-Actions $x.n) -join ', ')"
+    Check 'the failed jobs were re-run once' ((Get-FakeState).reruns -eq 1) "reruns $((Get-FakeState).reruns)"
+    $v = Saga-View $x.n
+    Check 'the item is parked master-broken in its Deliver step' ($null -ne $v -and $v.parked -and "$($v.parkReason)" -like 'master-broken*' -and "$($v.step)" -eq 'Deliver') ($v | ConvertTo-Json -Compress -Depth 4)
+    # master goes green again at a later commit that contains the merge (a person merges another change, its Build passes): the park is lifted by the saga itself (no person), and the wait is over
+    Fake 'master-merge' @{ files = @('docs/later.md') } | Out-Null
+    $lifted = Wait-Until -Seconds 240 { $w = Saga-View $x.n; $null -ne $w -and -not $w.parked -and 'master-green' -in (Saga-Actions $x.n) }
+    Check 'the park was lifted by the saga when master was green again (decisions resumed and master-green)' $lifted "decisions: $((Saga-Actions $x.n) -join ', ')"
+}
+
+$SagaScenarios['saga: sweep step: a PASS whose pull request was closed without merging is void, and the item goes back to Development'] = {
+    if (-not (Saga-V2Only)) { return }
+    Saga-NumbersAbove 30
+    $x = Saga-Play 'Saga closed pull request' "Change the code, as the criteria say.`n`n- criterion one" $false
+    if (-not $x) { return }
+    # a person holds the item (hold:owner) before the verdict: the PASS is recorded and the merge waits, so the pull request can be closed before the gateway merges it
+    Gh-As 'fake-operator' "issues/$($x.n)/labels" @{ labels = @('hold:owner') } | Out-Null
+    Saga-Pass $x | Out-Null
+    Check 'the item is in its Merge step with the PASS, the merge waits for the hold' (Wait-Until -Seconds 90 { $v = Saga-View $x.n; $null -ne $v -and "$($v.step)" -eq 'Merge' }) ((Saga-View $x.n) | ConvertTo-Json -Compress -Depth 4)
+    Check 'the pull request is not merged' (-not (Get-FakePr $x.pr).merged)
+    Fake 'pr' @{ number = $x.pr; open = $false } | Out-Null
+    $back = Wait-Until -Seconds 240 { $v = Saga-View $x.n; $null -ne $v -and "$($v.step)" -eq 'Develop' -and 'demoted' -in (Saga-Actions $x.n) }
+    Check 'the saga demoted the item to Development (decision demoted)' $back "view $((Saga-View $x.n) | ConvertTo-Json -Compress -Depth 4)"
+    Check 'the card follows the saga to Development' (Wait-Until -Seconds 60 { (Saga-Col $x.n) -eq 'Development' }) "column $(Saga-Col $x.n)"
+}
+
+$SagaScenarios['saga: sweep step: a merge by a person ends the Merge step wherever the item was, and the wait for master CI begins'] = {
+    if (-not (Saga-V2Only)) { return }
+    Saga-NumbersAbove 40
+    $x = Saga-Play 'Saga merged by a person' "Change the code, as the criteria say.`n`n- criterion one" $false
+    if (-not $x) { return }
+    # a person merges the item's pull request while it is validated (the item has no PASS): the merge reaches the saga as the merge webhook says it (ItemMerged)
+    $mm = Fake 'master-merge' @{ number = $x.pr }
+    Bu-MergeHook $x.pr "factory-worker/$($x.n)-development" "$($mm.sha)" | Out-Null
+    $merged = Wait-Until -Seconds 150 { 'merged' -in (Saga-Actions $x.n) }
+    Check 'the saga took the merge of the person (decision merged)' $merged "decisions: $((Saga-Actions $x.n) -join ', ')"
+    Check 'the gateway made no merge call of its own' ((Saga-MergeCalls $x.pr) -eq 0) "merge calls: $(Saga-MergeCalls $x.pr)"
+    $green = Wait-Until -Seconds 240 { 'master-green' -in (Saga-Actions $x.n) }
+    Check 'the saga judged master green for the merge commit (decision master-green)' $green "decisions: $((Saga-Actions $x.n) -join ', ')"
+    $v = Saga-View $x.n
+    Check 'the item waits for its delivery, not parked' ($null -ne $v -and "$($v.step)" -eq 'Deliver' -and -not $v.parked) ($v | ConvertTo-Json -Compress -Depth 4)
 }
