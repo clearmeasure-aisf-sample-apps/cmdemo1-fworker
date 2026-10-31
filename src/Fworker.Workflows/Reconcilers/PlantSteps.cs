@@ -299,12 +299,17 @@ public sealed class PlantSteps(VerbContext cx, IPlantGitHub github, IClaimOrphan
                 + "- The page is accurate against the code and existing documentation.\n"
                 + "- Only Markdown files under `docs/` change; no source code, tests, scripts, workflows or configuration.";
             var labels = new[] { "enhancement", Rules.AutoMergeLabel, Rules.Label, Rules.EnvLabel }.Where(l => !string.IsNullOrEmpty(l)).Distinct(StringComparer.Ordinal).ToList();
-            var n = await github.CreateIssue(topic.Title, body, labels);
-            s["replenished"] = new JsonObject { ["item"] = n, ["at"] = Ps.Iso(cx.Now) };
-            await cx.State.Save(d.Number, st);   // first: a failure below must not create a second item
-            var info = await github.GetItemInfo(n);
-            if (string.IsNullOrEmpty(info.CardId)) { await github.AddToBoard(info.NodeId); info = await github.GetItemInfo(n); }
-            if (!string.Equals(info.Column ?? "", Rules.KeeperColumn, StringComparison.OrdinalIgnoreCase)) await github.MoveCard(info, Rules.KeeperColumn);
+            // Issue 411: from the issue to its card's column under the board-intake lock, as KeeperCommands does: the board guard (the script's or the job) places a card only under it.
+            int n;
+            await using (await cx.Locks.Intake())
+            {
+                n = await github.CreateIssue(topic.Title, body, labels);
+                s["replenished"] = new JsonObject { ["item"] = n, ["at"] = Ps.Iso(cx.Now) };
+                await cx.State.Save(d.Number, st);   // first: a failure below must not create a second item
+                var info = await github.GetItemInfo(n);
+                if (string.IsNullOrEmpty(info.CardId)) { await github.AddToBoard(info.NodeId); info = await github.GetItemInfo(n); }
+                if (!string.Equals(info.Column ?? "", Rules.KeeperColumn, StringComparison.OrdinalIgnoreCase)) await github.MoveCard(info, Rules.KeeperColumn);
+            }
             await using (await cx.Locks.Item(d.Number, TimeSpan.FromSeconds(3))) await cx.Journal(d.Number, null, "replenish", [new("new", n), new("title", topic.Title)], "");
             used.Add(topic.Title.ToLowerInvariant());
             open++; today++; created.Add(n);
