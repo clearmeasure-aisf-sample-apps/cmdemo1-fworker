@@ -110,6 +110,39 @@ public sealed class LedgerRestartTests
         Assert.Equal(1, m.Load().Running);   // item 8 only
     }
 
+    /// <summary>The Octopus shape: a task history that counts every launch of the day, and a list that is empty at the first reading (the start task ended; only a host's report finds the container).</summary>
+    sealed class HistoryListRuntime(int launches, List<RuntimeInstance> running) : IWorkerRuntime, IRunHistory
+    {
+        public string Kind => "cursor-cloud"; public int MaxConcurrent => 100;
+        public Task<ProvisionResult> Provision(ProvisionRequest r, CancellationToken ct) => Task.FromResult(new ProvisionResult(true, "x", "", ""));
+        public Task Deprovision(string workerName, string reason, CancellationToken ct) => Task.CompletedTask;
+        public Task<IReadOnlyList<RuntimeInstance>> List(CancellationToken ct) => Task.FromResult<IReadOnlyList<RuntimeInstance>>(running.ToList());
+        public Task<int> LaunchesSince(DateTime sinceUtc, CancellationToken ct) => Task.FromResult(launches);
+    }
+
+    [Fact]
+    public async Task SessionsTheHistoryCountsAndOnlyAHostReportFindsLater_AreTheLedgersWhenTheyAreAdopted()
+    {
+        // #562, the Tier 1 scenario of the second pull request found it: after a restart the history says two launches, the ledger holds two slots, and the list is empty at the first reading (an Octopus start
+        // task ends at once; the host's report finds the container). The seed cannot tell a slot granted and not begun from a session not adopted yet and leaves the ledger's share at 0: until the
+        // adoption the two sessions count twice (the scheduler's day budget is then spent by half). The adoption is what shows the session has begun.
+        var running = new List<RuntimeInstance>();
+        var m = NewManager(new HistoryListRuntime(2, running));
+        m.ReadLedger = _ => Task.FromResult<RuntimeManager.LedgerDay?>(Ledger(2, (1, "s1"), (2, "s2")));
+        await m.Poll(CancellationToken.None);
+        Assert.Equal((0, 2, (string?)null), m.Load());   // (before the adoption: the sessions are indistinguishable from slots not begun)
+        running.Add(Running(1) with { Adopted = true });
+        await m.Poll(CancellationToken.None);
+        Assert.Equal((0, 1, (string?)null), m.Load());
+        running.Add(Running(2) with { Adopted = true });
+        await m.Poll(CancellationToken.None);
+        Assert.Equal((0, 0, (string?)null), m.Load());
+        // a session of the plant's own on another item stays outside the ledger
+        running.Add(Running(50) with { Adopted = true });
+        await m.Poll(CancellationToken.None);
+        Assert.Equal((1, 0, (string?)null), m.Load());
+    }
+
     sealed class ListRuntime(List<RuntimeInstance> running) : IWorkerRuntime
     {
         public string Kind => "cursor-cloud"; public int MaxConcurrent => 100;

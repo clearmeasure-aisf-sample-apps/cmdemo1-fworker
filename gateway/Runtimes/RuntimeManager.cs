@@ -613,6 +613,9 @@ sealed class RuntimeManager : IRuntimeManager
                 foreach (var i in list.Where(i => i.Adopted && i.Status is "Running" or "Processing" && !execs.ContainsKey(i.WorkerName) && !ledgerFailed))
                 {
                     execs[i.WorkerName] = new Exec { Name = i.WorkerName, Item = i.Item, Phase = i.Phase, Execution = i.Execution, Status = i.Status, StartedAt = now, Slot = LedgerSlotOf(ledger, i.Item) };
+                    // W9.10j (#562, second pull request): a runtime whose start task ends at once (Octopus: the container lives on, the host's report is what finds it) has its sessions in the history but not in its list at the first
+                    // reading, so the seed counted their slots as granted and not begun and left the ledger's share at 0. The adoption is the proof that the session has begun: its launch is in `today` already and is the ledger's.
+                    if (execs[i.WorkerName].Slot != "" && !seedLedger) ledgerToday = Math.Min(today, ledgerToday + 1);
                     Log("adopted", i.WorkerName, i.Item, i.Execution);
                 }
             if (seedLedger && ledger != null) SeedLedger(ledger);
