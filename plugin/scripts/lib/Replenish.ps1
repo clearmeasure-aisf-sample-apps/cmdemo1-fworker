@@ -117,12 +117,17 @@ Created by the fworker gateway to keep activity going: work item #$($d.number) f
 - Only Markdown files under ``docs/`` change; no source code, tests, scripts, workflows or configuration.
 "@
         $labels = @('enhancement', "$($c.autoMergeLabel)", "$($c.label)", $envLabel) | Where-Object { $_ } | Select-Object -Unique
-        $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues" -Body @{ title = $topic.title; body = $body; labels = @($labels) }
-        $n = [int]$r.number
-        $s.replenished = @{ item = $n; at = (ConvertTo-Iso (Get-UtcNow)) }; Save-State $d.number $st   # first: a failure below must not create a second item
-        $info = Get-ItemInfo $n
-        if (-not $info.cardId) { [void](Add-ToBoard $info.nodeId); $info = Get-ItemInfo $n }
-        if ("$($info.column)" -ine $Column) { Move-Card $info $Column }
+        # Issue 411: from the issue to its card's column under the board-intake lock (Use-IntakeLock, Core.ps1), as New-KeeperItem does. Without it the sweep's board
+        # guard (another process of the gateway, every few seconds) finds the new issue without a card in between and places it itself, so this add and move never happen.
+        $n = Use-IntakeLock {
+            $r = Invoke-Gh -Method POST -Path "$(Get-RepoPath)/issues" -Body @{ title = $topic.title; body = $body; labels = @($labels) }
+            $made = [int]$r.number
+            $s.replenished = @{ item = $made; at = (ConvertTo-Iso (Get-UtcNow)) }; [void](Save-State $d.number $st)   # first: a failure below must not create a second item
+            $info = Get-ItemInfo $made
+            if (-not $info.cardId) { [void](Add-ToBoard $info.nodeId); $info = Get-ItemInfo $made }
+            if ("$($info.column)" -ine $Column) { [void](Move-Card $info $Column) }
+            $made
+        }
         [void](Add-Journal $d.number $null 'replenish' @{ new = $n; title = $topic.title })
         [void]$used.Add($topic.title.ToLowerInvariant())
         $open++; $today++; $res.created += $n

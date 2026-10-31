@@ -250,7 +250,10 @@ public sealed class PlantStepsTests
         Assert.Equal(1, (int)res.Replenish["open"]!);   // the finished item is closed; the new one counted
         // the state comment is saved before the card is moved: a failure below must not create a second item
         Assert.True(r.World.Writes.IndexOf("SAVE state 70") < r.World.Writes.IndexOf($"moveCard {made} Technical Design"));
+        // issue 411: the issue is created and its card put in its column under the board-intake lock, or the board guard places the card in between (the add and the move are then not this call's)
+        Assert.Equal(1, r.World.IntakeLocks);
         Assert.Empty((await r.Steps.Replenish(0, 1)).Replenish!["created"]!.AsArray());   // the next pass does not repeat it
+        Assert.Equal(1, r.World.IntakeLocks);   // a pass that creates nothing takes no lock
     }
 
     [Fact]
