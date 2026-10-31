@@ -121,6 +121,8 @@ public sealed class DeliveryActingShadowHostTests
         await rig.Start();
         await rig.ReleaseGoesThroughTdd();
         Assert.True(await Until(() => rig.Recorded >= 1), "the train did not decide to promote, or its ShadowCommand was not handled");
+        // (the decision and the command are separate messages: the command can be recorded before the shadow has the decision, so the tick below waits for both)
+        Assert.True(await Until(() => rig.Decisions >= 1), "the train's decision did not reach the shadow");
         // the AutoPromoter's pass says the same (what AddGatewayBackground's OnActions gives the holder's shadow)
         rig.Shadow.ObserveV1(new JsonArray(JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new { item = 7, action = "promoted", release = "1.0.2", environment = "Uat", task = "ServerTasks-9", items = new[] { 7 } }))));
         await rig.Shadow.Tick(default);

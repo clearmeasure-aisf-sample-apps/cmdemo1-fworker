@@ -380,7 +380,10 @@ u. **Done (2026-10-14): the plant survives a graceful restart** (enhancement 5, 
    `refs/factory/<instance>/plant-snapshot`; the next start reads it back before its first sweep and restores it (an unanswered offer gets a fresh
    window and is pushed again when its worker reconnects, or at once to a worker already reconnected). The start removes the ref after reading it,
    so a snapshot is restored once. A snapshot older than `timing.plantSnapshotMaxAgeMinutes` (30) is ignored, and an
-   outright kill (out of memory) writes none. `/status` shows `plantSnapshot.restore`. `FACTORY_PLANT_SNAPSHOT=0` switches it off. Messages,
+   outright kill (out of memory) writes none. `/status` shows `plantSnapshot.restore`. `FACTORY_PLANT_SNAPSHOT=0` switches it off. (W9.10k: where the
+   engine acts, the same hand-over is kept in the database, `factory.PlantAssignments`, `PlantHolders`, `PlantDrains` and `PlantState`, written on every
+   change and at the stop, read first at start (`restore.how` `sql`; the ref only when the database holds nothing yet) and corrected from `WorkItems` and the
+   claims before the first sweep (`restore.corrected`). tdd, in the shadow run, keeps the ref.) Messages,
    questions and presence are still in memory only. That was the behaviour without the leader lease (`FACTORY_LEADER_LEASE=0`); with it,
    entry x.
 x. **Done (2026-10-14, issue 94): one acting gateway across releases** (`gateway/Leader.cs`, `plugin/scripts/lib/Leader.ps1`). In single-revision

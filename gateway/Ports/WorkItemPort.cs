@@ -30,6 +30,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     volatile HashSet<int> owned = [];
     volatile IReadOnlyList<(int Item, string Column)> offers = [];
     volatile IReadOnlyDictionary<int, SlotOffer> slots = new Dictionary<int, SlotOffer>();
+    volatile IReadOnlyList<WorkItemState> states = [];
     volatile bool loaded;
     public int Count => owned.Count;
 
@@ -42,6 +43,15 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     public bool Owns(int item) => owned.Contains(item);
 
     public IReadOnlyCollection<int> Items => owned;
+
+    /// <summary>
+    /// W9.10k: the states the last successful read returned, for the items of the home repository: what the plant is fed from for them (SagaSweepFeed: the owners' leases, the parks, the release queue) and what the release
+    /// check counts (SagaFlight).
+    /// </summary>
+    public IReadOnlyList<WorkItemState> States => states;
+
+    /// <summary>The Status column a step is worked in (the docs plan's columns), null for a step no session works.</summary>
+    public string? Column(StepKind step) => columnOf?.Invoke(step);
 
     /// <summary>
     /// What the plant is offered for the saga's items (W6.6): an open, unparked item on a step that a session works, in that step's column. The sweep's own offers for these items are dropped (SweepV2Filter), so
@@ -77,11 +87,11 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct); limit.CancelAfter(TimeSpan.FromSeconds(10));
             var states = await store.OwnedStates(limit.Token);
-            var set = new HashSet<int>(); var wanted = new List<(int, string)>(); var granted = new Dictionary<int, SlotOffer>();
+            var set = new HashSet<int>(); var wanted = new List<(int, string)>(); var granted = new Dictionary<int, SlotOffer>(); var homeStates = new List<WorkItemState>();
             foreach (var state in states)
             {
                 if (!ItemId.TryParse(state.Item, out var id) || id.Repository != home) continue;
-                set.Add(id.Number);
+                set.Add(id.Number); homeStates.Add(state);
                 // (an item that asked the scheduler for a slot (W7.3) is offered only once it holds one: a hold, a full runtime or a runtime that is off keeps the session from being offered)
                 if (state.Status == WorkItemStatus.Open && !state.Parked && !state.SlotAsked && state.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && columnOf?.Invoke(state.Step) is { Length: > 0 } column)
                 {
@@ -89,7 +99,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
                     if (state.SlotId.Length > 0 && state.SlotRuntime.Length > 0) granted[id.Number] = new SlotOffer(state.SlotId, state.SlotRuntime, state.ArmId);
                 }
             }
-            owned = set; offers = wanted; slots = granted; loaded = true;
+            owned = set; offers = wanted; slots = granted; this.states = homeStates; loaded = true;
             return true;
         }
         catch (Exception e) when (!ct.IsCancellationRequested)

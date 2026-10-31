@@ -95,6 +95,8 @@ sealed class LeadershipService : IHostedService
         {
             if (snapshots.On) _ = Task.Run(snapshots.LoadOnceAsync);
             leader.StartActing();
+            // W9.10k: the plant in the database is written on every change here too (the snapshot ref of this mode is written at the stop only)
+            if (snapshots.On && snapshots.Sql != null) _ = Task.Run(() => snapshots.LoopAsync(lifetime.ApplicationStopping));
             return Task.CompletedTask;
         }
         _ = Task.Run(async () =>

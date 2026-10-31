@@ -25,6 +25,9 @@ public sealed class BoardReconciler(IBoardReader reader, Func<CatalogSnapshot> c
     readonly SemaphoreSlim gate = new(1, 1);   // one pass at a time: "seen" is a plain Dictionary, and two passes would publish the same card twice
     bool seenLoaded;
 
+    /// <summary>The cards of the last pass that read the board (W9.10k: the plant reads the labels of the items the engine owns from them). Empty before the first pass; a dry pass leaves it as it was.</summary>
+    public IReadOnlyList<BoardCard> LastCards { get; private set; } = [];
+
     /// <summary>What the reconciler costs GitHub, per pass (W9.10g).</summary>
     public BoardReconcileMeter Meter { get; } = new();
 
@@ -61,6 +64,7 @@ public sealed class BoardReconciler(IBoardReader reader, Func<CatalogSnapshot> c
         var metered = reader as IMeteredBoardReader; var before = metered?.Requests ?? 0;
         var cards = await reader.Read(board, ct);
         var requests = (int)((metered?.Requests ?? 0) - before);
+        if (!dry) LastCards = cards;
         if (!mayAct()) return new("not-leader", cards.Count, 0, requests);   // the lease was lost while the board was read: nothing of it is published
         var repos = snap.Repositories.Select(r => r.Id).ToHashSet();
         var current = new HashSet<string>(); var published = 0;

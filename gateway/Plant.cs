@@ -902,6 +902,7 @@ sealed partial class Plant(string secret, Func<int, string, JsonObject, string, 
         foreach (var a in assignments.Values.Where(a => a.WaitingSince != null && a.Worker == "" && !a.Accepted && !IsQc(a)).OrderBy(a => a.Item)) d.Waiting.Add((a.Item, GatedCode(a.WaitingCode), a.WaitingSince!.Value));
         foreach (var g in refusals.Where(x => (now - x.At).TotalMinutes <= 60).GroupBy(x => (x.Item, x.Code))) d.Refusals.Add((g.Key.Item, GatedCode(g.Key.Code), g.Count()));
         foreach (var g in parks.Where(x => (now - x.At).TotalHours <= 24).GroupBy(x => (x.Item, x.Code))) d.Parks.Add((g.Key.Item, g.Key.Code, g.Min(x => x.At)));
+        AddSagaParks(d);   // W9.10k: the parked items of the engine's views
         foreach (var q in OpenQuestions().OrderBy(q => q.N))
         {
             d.OpenQuestions++;

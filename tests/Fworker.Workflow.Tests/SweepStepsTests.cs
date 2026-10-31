@@ -499,4 +499,48 @@ public class SweepStepsTests
         Assert.Equal(WorkItemOutcome.Applied, (await fx.Send(expired)).Decision.Outcome);
         Assert.False(fx.State.Parked);
     }
+
+    // ---- the plant manager's release-owner and requeue (W9.10k) -------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task TheManagersReleaseOfAnOwner_IsRecordedOnly_AndSendsNoReleaseCommand_OncePerCall()
+    {
+        var fx = await At(StepKind.Develop);
+        var step = fx.State.Step; var arm = fx.State.ArmId; var lease = fx.State.LeaseDue;
+        var r = await fx.Send(new OwnerReleaseAsked(Item, 0, "manager-release|1", "stalled owner"));
+        Assert.Equal(WorkItemOutcome.Applied, r.Decision.Outcome);
+        // the verb ended the lease itself; a command without a holder would release whoever holds the claim when it runs (a session that accepted the re-offered item)
+        Assert.Empty(r.Sent);
+        Assert.Contains(WorkItemActions.OwnerReleaseAsked, fx.Actions);
+        // nothing else about the item changes: the step, the arm and the lease are what they were
+        Assert.Equal((step, arm, lease), (fx.State.Step, fx.State.ArmId, fx.State.LeaseDue));
+        // the same call again is applied once; another call is another release
+        Assert.Equal(WorkItemOutcome.Duplicate, (await fx.Send(new OwnerReleaseAsked(Item, 0, "manager-release|1", "stalled owner"))).Decision.Outcome);
+        Assert.Equal(WorkItemOutcome.Applied, (await fx.Send(new OwnerReleaseAsked(Item, 0, "manager-release|2", ""))).Decision.Outcome);
+        // a delivered or completed item has no owner to release
+        var merged = await At(StepKind.Deliver);
+        Assert.Equal(WorkItemOutcome.Applied, (await merged.Send(new OwnerReleaseAsked(Item, 0, "manager-release|3", "x"))).Decision.Outcome);   // (open, on its Deliver step: the claim may still be there)
+        Assert.Equal(WorkItemOutcome.NotFound, (await merged.Send(new OwnerReleaseAsked(Item, 2, "manager-release|4", "x"))).Decision.Outcome);   // another generation
+    }
+
+    [Fact]
+    public async Task TheManagersRequeue_IsRecordedForAnItemASessionCanTake_AndRefusedForAnyOther()
+    {
+        var fx = await At(StepKind.Develop);
+        var arm = fx.State.ArmId;
+        var r = await fx.Send(new RequeueWorkItem(Item, 0, "manager-requeue|1", "stuck offer"));
+        Assert.Equal(WorkItemOutcome.Applied, r.Decision.Outcome);
+        Assert.Contains(WorkItemActions.Requeued, fx.Actions);
+        Assert.Equal(arm, fx.State.ArmId);   // (the arm stands: the session that is working it, if any, still answers it)
+        Assert.Empty(r.Sent);
+        Assert.Equal(WorkItemOutcome.Duplicate, (await fx.Send(new RequeueWorkItem(Item, 0, "manager-requeue|1", "stuck offer"))).Decision.Outcome);
+
+        await fx.Send(new ParkWorkItem(Item, 0, "park-1", "a person said so"));
+        Assert.Equal(WorkItemOutcome.Refused, (await fx.Send(new RequeueWorkItem(Item, 0, "manager-requeue|2", ""))).Decision.Outcome);   // parked: unpark offers it again
+
+        var merge = await At(StepKind.Merge);
+        Assert.Equal(WorkItemOutcome.Refused, (await merge.Send(new RequeueWorkItem(Item, 0, "manager-requeue|3", ""))).Decision.Outcome);   // no session works the Merge step
+        var deliver = await At(StepKind.Deliver);
+        Assert.Equal(WorkItemOutcome.Refused, (await deliver.Send(new RequeueWorkItem(Item, 0, "manager-requeue|4", ""))).Decision.Outcome);
+    }
 }
