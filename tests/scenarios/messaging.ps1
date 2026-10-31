@@ -31,6 +31,18 @@ function Msg-Json($Response) {
 }
 # The state comment and every comment that is not the plant's own journal line: a manager's reads and refusals must leave them as they were.
 function Msg-State([int]$n) { , @((Get-FakeIssue $n).comments | Where-Object { $_.body -notmatch '<!-- plant event=' } | ForEach-Object { $_.body }) }
+# Msg-State with the part of the item's state comment that the plant writes by itself taken out (journal, updated, rev): the gateway folds its plant events
+# (matched, waiting) into that comment on its own clock, so a read before and a read after a few verbs can differ though the verbs wrote nothing. What is left
+# (claim, flow, reviews, pr) is what a verb can change.
+function Msg-StateStable([int]$n) {
+    , @((Get-FakeIssue $n).comments | Where-Object { $_.body -notmatch "<!-- plant event=" } | ForEach-Object { $_.body } | ForEach-Object {
+        if ($_ -match '(?s)^(<!-- factory-state:[^\r\n]*-->.*?```json\r?\n)(.*?)(\r?\n```)') {
+            $head = $Matches[1]; $tail = $Matches[3]; $o = $Matches[2] | ConvertFrom-Json
+            foreach ($k in 'journal', 'updated', 'rev') { $o.PSObject.Properties.Remove($k) }
+            $head + ($o | ConvertTo-Json -Depth 12 -Compress) + $tail
+        } else { $_ }
+    })
+}
 function Msg-Flip([string]$Token) { $Token.Substring(0, $Token.Length - 1) + $(if ($Token[-1] -eq '0') { '1' } else { '0' }) }
 
 # Starts a second gateway with the given environment (a $null value removes the variable) and waits for it to stop. A gateway that
@@ -1637,12 +1649,12 @@ $ManagerScenarios = [ordered]@{
     Check 'pr-checks runs for the supervisor' ((Msg-Json $pc).code -ne 'forbidden' -and (Msg-Json $pc).exit -eq 0) "$($pc.StatusCode) $($pc.Content)"
     $gd = Msg-Verb 'get-delivery' $m1 @{ item = $n; commit = $head }
     Check 'get-delivery runs for the supervisor' ((Msg-Json $gd).code -ne 'forbidden') "$($gd.StatusCode) $($gd.Content)"
-    $before = Msg-State $n
+    $before = Msg-StateStable $n
     foreach ($v in 'merge', 'approve-pr', 'release', 'comment', 'accept', 'claim-item', 'complete', 'model-tier') {
         $r = Msg-Verb $v $m1 @{ item = $n; column = 'Development'; pr = $pr; body = 'x'; text = 'x' }
         Check "the supervisor cannot call $v" ($r.StatusCode -eq 403 -and (Msg-Json $r).reason -ceq "the manager role cannot call '$v'") "$($r.StatusCode) $(Msg-Json $r | ConvertTo-Json -Compress -Depth 6)"
     }
-    $after = Msg-State $n
+    $after = Msg-StateStable $n
     Check 'the comments are unchanged by the supervisor reads and refusals' ($before.Count -ge 1 -and (($before -join "`n") -ceq ($after -join "`n"))) "$($before.Count) before, $($after.Count) after"
 }
 
