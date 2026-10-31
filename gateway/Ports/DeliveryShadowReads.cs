@@ -134,6 +134,16 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
         return (new CommitItemLookup(0, ""), Finality.No);
     }
 
+    /// <summary>
+    /// A read of the merge derivation that GitHub refuses (a rate limit, a 5xx) is a fault a later look gets past, as every other refused read of this class is: the train (DeliveryTrainService.IsTransient) saves the
+    /// input and looks again after a pause. The reader's own MergeFactsException is not one of its kinds (the train's project does not reference Integrations), and it used to end in the dead letters.
+    /// </summary>
+    static async Task<T> Refused<T>(Func<Task<T>> read)
+    {
+        try { return await read(); }
+        catch (Fworker.Integrations.GitHub.MergeFactsException e) { throw new HttpRequestException(e.Message, e); }
+    }
+
     /// <summary>The gateway's state comment of an item (the first comment with its marker), or null.</summary>
     async Task<JsonObject?> ReadState(RepoId repository, int number, CancellationToken ct)
     {

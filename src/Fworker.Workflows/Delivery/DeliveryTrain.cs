@@ -28,7 +28,8 @@ public interface IDeliveredLookup
 }
 
 /// <summary>What one input made the train do: the messages to publish (decisions, delivered-to events, commands) and when to wake it.</summary>
-public sealed record TrainResult(IReadOnlyList<object> Messages, DateTimeOffset? WakeAt)
+/// <param name="Retry">The timer is the transient-retry look (<see cref="DeliveryTrainService.TransientRetry"/>), not the train's pending wake: it goes out with no due time, so that it is never stale and always evaluates.</param>
+public sealed record TrainResult(IReadOnlyList<object> Messages, DateTimeOffset? WakeAt, bool Retry = false)
 {
     public static readonly TrainResult None = new([], null);
 }
@@ -87,6 +88,9 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             var now = clock();
             var stale = false;
             if (input is TrainWake { Due: { } due }) { if (due == state.WakeDue) state.WakeDue = null; else stale = true; }   // (a timer that is not the pending one only looks again)
+            // A timer that is not the pending one, while the pending one is still to come, has nothing to add: the pending one looks at everything. It costs no read of GitHub or of the app (a restart's replay
+            // leaves hundreds of these) and keeps nothing. A stale timer with no pending one still looks, which heals a lost timer.
+            if (stale && state.WakeDue is { } pending && pending > now) return TrainResult.None;
             var gated = state.ReplayingSince is { } since && now - since < ReplayLimit;
             if (!gated && state.ReplayingSince is not null) { state.ReplayingSince = null; state.RepublishPending = true; }   // the end marker was lost: the hold ran out, which is the end of the replay too
             TrainRun? run = null; DateTimeOffset? wake = null;
@@ -104,7 +108,7 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
                 try { await run.Evaluate(ct, republish); }
                 catch (Exception e) when (IsTransient(e, ct))
                 {
-                    return new TrainResult([], now + TransientRetry);   // nothing of this look is kept; the input is saved
+                    return new TrainResult([], now + TransientRetry, Retry: true);   // nothing of this look is kept; the input is saved (the pending wake stays; the retry is a timer of its own, see TrainResult.Retry)
                 }
                 wake = run.NextWake(stale);
                 if (wake is { } next && (state.WakeDue is not { } cur || cur <= now || next < cur)) state.WakeDue = next;

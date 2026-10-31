@@ -149,6 +149,6 @@ static class DeliveryActingWiring
         w.PublishMessage<DeliveryCommandFinished>().ToLocalQueue(DeliveryExecutorHandlers.Queue);
         if (durable) w.LocalQueue(DeliveryExecutorHandlers.Queue).UseDurableInbox();
         // the same backstop as the shadow run: GitHub or the app not answering is tried again with growing pauses and then scheduled again every few minutes, never to the dead letters
-        w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().Or<TrainConflictException>().Or<TimeoutException>().Or<System.Data.Common.DbException>().RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5));
+        w.Policies.OnException<HttpRequestException>().Or<Fworker.Integrations.GitHub.MergeFactsException>().Or<TaskCanceledException>().Or<TrainConflictException>().Or<TimeoutException>().Or<System.Data.Common.DbException>().RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5));
     }
 }

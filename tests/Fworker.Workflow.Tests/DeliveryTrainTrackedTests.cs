@@ -27,7 +27,7 @@ public class DeliveryTrainTrackedTests
         {
             var r = await svc.Handle(m, cancellation);
             foreach (var o in r.Messages) await context.PublishAsync(o);
-            if (r.WakeAt is { } due) await context.PublishAsync(new TrainWake(m.Key, due), new DeliveryOptions { ScheduledTime = due });
+            if (r.WakeAt is { } due) await context.PublishAsync(DeliveryTrainHandlers.WakeFor(r, m.Key)!, new DeliveryOptions { ScheduledTime = due });
         }
     }
 

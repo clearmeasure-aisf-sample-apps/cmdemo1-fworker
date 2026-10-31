@@ -9,7 +9,7 @@ using Microsoft.Data.SqlClient;
 // W9.10o (docs/design/fworker-wolverine-implementation.md W9.10o, owner default of 2026-10-30 instead of #462 and #463): the health of the v2 engine as a block of /api/v1/status ("v2"), so that running the cutover does not
 // need a database client. Where the Wolverine host runs (shadow or v2) and the schema is good it carries:
 //  - deadLetters: the messages that ended in the dead letters, by message type and exception type, with the oldest failure; the count that must be 0 at the cutover gate;
-//  - incoming, scheduled, outgoing: the durable envelopes of the host. Wolverine stores no creation time for an incoming or outgoing envelope, so their "oldestSeenSeconds" is since this process first saw the
+//  - incoming, scheduled, outgoing: the durable envelopes of the host (scheduled also says how many fall due within 5 and 30 minutes and groups them by message type, "byType"); Wolverine stores no creation time for an incoming or outgoing envelope, so their "oldestSeenSeconds" is since this process first saw the
 //    envelope still there; a scheduled envelope has its due time, so its oldest overdue age is exact;
 //  - jobs: the latest run of each recurring job (when, how long, how it ended) and the re-arm of the sagas (what it looked at and sent);
 //  - capacity, mergeTrains, deliveryTrains, idempotencyLedger: summaries of the ledger of slots, the merge lines, the delivery trains and the idempotency ledger;
@@ -27,7 +27,8 @@ sealed record V2Facts(
 sealed record DeadLetterGroup(string MessageType, string ExceptionType, int Count, DateTimeOffset? OldestFailedAt);
 /// <summary>Incoming (not yet handled) or outgoing (not yet sent) envelopes: how many, the most attempts one took, and their ids (to see how long this process has seen each).</summary>
 sealed record EnvelopeFacts(int Count, int MaxAttempts, IReadOnlyList<Guid> Ids);
-sealed record ScheduledFacts(int Count, int Overdue, DateTimeOffset? OldestDue, DateTimeOffset? NextDue, IReadOnlyList<ScheduledGroup>? ByType = null);
+/// <summary>The scheduled envelopes: the totals, how many fall due within 5 and 30 minutes (a batch of timers hides behind a single nextDue), and the groups by message type.</summary>
+sealed record ScheduledFacts(int Count, int Overdue, DateTimeOffset? OldestDue, DateTimeOffset? NextDue, IReadOnlyList<ScheduledGroup>? ByType = null, int DueIn5Minutes = 0, int DueIn30Minutes = 0);
 /// <summary>The scheduled envelopes of one message type: how many, how many are due, the oldest due time among those, the next due time among the rest.</summary>
 sealed record ScheduledGroup(string MessageType, int Count, int Overdue, DateTimeOffset? OldestDue, DateTimeOffset? NextDue);
 sealed record LedgerFacts(int Entries, int Failures, DateTimeOffset? Oldest);
@@ -122,6 +123,7 @@ sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, Engine
         {
             ["count"] = f.Scheduled.Count, ["overdue"] = f.Scheduled.Overdue, ["oldestOverdueSeconds"] = f.Scheduled.OldestDue is { } due && due < at ? (long)(at - due).TotalSeconds : null,
             ["nextDue"] = f.Scheduled.NextDue?.ToString("o"),
+            ["dueIn5Minutes"] = f.Scheduled.DueIn5Minutes, ["dueIn30Minutes"] = f.Scheduled.DueIn30Minutes,
             // by message type (the biggest 20 groups): a backlog of timers shows what it is made of (a wake storm is TrainWake, a stuck job is its own type)
             ["byType"] = new JsonArray((f.Scheduled.ByType ?? []).OrderByDescending(g => g.Count).ThenBy(g => g.MessageType, StringComparer.Ordinal).Take(20).Select(g => (JsonNode?)new JsonObject
             {
@@ -221,12 +223,16 @@ sealed class SqlV2HealthSource(Func<SqlConnection> open, Func<DateTimeOffset>? n
             $"SELECT TOP ({V2Health.MaxIds}) id FROM wolverine.wolverine_outgoing_envelopes", ct);
 
         ScheduledFacts scheduled;
-        await using (var cmd = new SqlCommand("SELECT COUNT(*), SUM(CASE WHEN execution_time <= @now THEN 1 ELSE 0 END), MIN(CASE WHEN execution_time <= @now THEN execution_time END), MIN(CASE WHEN execution_time > @now THEN execution_time END) FROM wolverine.wolverine_incoming_envelopes WHERE status = 'Scheduled'", c))
+        await using (var cmd = new SqlCommand("SELECT COUNT(*), SUM(CASE WHEN execution_time <= @now THEN 1 ELSE 0 END), MIN(CASE WHEN execution_time <= @now THEN execution_time END), MIN(CASE WHEN execution_time > @now THEN execution_time END), "
+            + "SUM(CASE WHEN execution_time > @now AND execution_time <= @in5 THEN 1 ELSE 0 END), SUM(CASE WHEN execution_time > @now AND execution_time <= @in30 THEN 1 ELSE 0 END) FROM wolverine.wolverine_incoming_envelopes WHERE status = 'Scheduled'", c))
         {
             cmd.Parameters.Add("@now", SqlDbType.DateTimeOffset).Value = at;
+            cmd.Parameters.Add("@in5", SqlDbType.DateTimeOffset).Value = at.AddMinutes(5);
+            cmd.Parameters.Add("@in30", SqlDbType.DateTimeOffset).Value = at.AddMinutes(30);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             await r.ReadAsync(ct);
-            scheduled = new ScheduledFacts(r.GetInt32(0), r.IsDBNull(1) ? 0 : r.GetInt32(1), r.IsDBNull(2) ? null : r.GetDateTimeOffset(2), r.IsDBNull(3) ? null : r.GetDateTimeOffset(3));
+            scheduled = new ScheduledFacts(r.GetInt32(0), r.IsDBNull(1) ? 0 : r.GetInt32(1), r.IsDBNull(2) ? null : r.GetDateTimeOffset(2), r.IsDBNull(3) ? null : r.GetDateTimeOffset(3),
+                null, r.IsDBNull(4) ? 0 : r.GetInt32(4), r.IsDBNull(5) ? 0 : r.GetInt32(5));
         }
         var scheduledTypes = new List<ScheduledGroup>();
         await using (var cmd = new SqlCommand("SELECT TOP (50) message_type, COUNT(*), SUM(CASE WHEN execution_time <= @now THEN 1 ELSE 0 END), MIN(CASE WHEN execution_time <= @now THEN execution_time END), MIN(CASE WHEN execution_time > @now THEN execution_time END) FROM wolverine.wolverine_incoming_envelopes WHERE status = 'Scheduled' GROUP BY message_type ORDER BY COUNT(*) DESC", c))
