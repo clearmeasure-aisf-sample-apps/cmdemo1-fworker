@@ -169,7 +169,7 @@ static class MergeTrainSettingsReader
 
 /// <summary>What the docs plan needs of GitHub (W6.6). Every reader is null without a credential (GH_TOKEN or the author App): the merge then answers "merge-unavailable" (a wait), the card stays where it is, nothing is read for the intake.</summary>
 sealed record DocsPlanParts(DocsPlanSettings Settings, DocsMergePort Merge, DocsProjection Projection, IMergeFactsReader? Facts, IBoardReader? Boards, PullRequestHeads? Heads, Func<BoardRef?> Board,
-    IProjectionVersions? Versions = null, ProjectionEcho? Echo = null, IItemIssueReader? Issues = null)
+    IProjectionVersions? Versions = null, ProjectionEcho? Echo = null, IItemIssueReader? Issues = null, SagaStateProjection? State = null, PromotionStateWriter? Promotions = null)
 {
     /// <summary>The intake job; null when it cannot read the board and the items. The caller brings the plant's facts (free slots, whether a design waits) and the lease.</summary>
     public DocsIntakeJob? IntakeJob(WorkItemIntake intake, RepoId home, IReadOnlyList<string> aiColumns, Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow) =>
@@ -202,7 +202,7 @@ static class DocsOnlySettingsReader
 static class WorkItemWiring
 {
     /// <summary>The saga's parts on the database of the host. The docs-only test is D4's, with the settings of the configuration; the docs plan's rules are those of <see cref="DocsPlanSettingsReader"/>.</summary>
-    public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null, Func<BoardRef?>? boardRef = null, Func<string, string?>? env = null, HttpClient? http = null, Func<int, JsonObject, bool>? route = null)
+    public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null, Func<BoardRef?>? boardRef = null, Func<string, string?>? env = null, HttpClient? http = null, Func<int, JsonObject, bool>? route = null, IItemLock? locks = null)
     {
         Func<FactoryDbContext> open = () => Open(connectionString);
         var root = c.Instance.Root;
@@ -213,19 +213,21 @@ static class WorkItemWiring
         var train = MergeTrainSettingsReader.From(root, w => Console.Error.WriteLine("merge train: " + w));
         var merge = new MergeTrainParts(new MergeTrainService(new SqlMergeTrainStore(open), train), new MergeTrainHistory(open), train);
         var queue = new MergeQueueCount(store);
-        var docsParts = MakeDocsPlan(c, settings, open, connectionString, boardRef ?? (() => null), env ?? Environment.GetEnvironmentVariable, http, queue);
+        var docsParts = MakeDocsPlan(c, settings, open, connectionString, boardRef ?? (() => null), env ?? Environment.GetEnvironmentVariable, http, queue, store, locks);
         var slotSettings = SlotRequestSettings.From(root, CapacitySettings.From(root, c.Engine.Environment), settings.SlotRuntime);
         var feature = new FeaturePlanParts(new SlotRequestPort(docsParts.Facts, slotSettings), new FeatureNotice(route ?? ((_, _) => false), settings.ColumnOf(StepKind.Develop) ?? "Development"), queue, slotSettings);
         return new WorkItemParts(service, new WorkItemHistory(open), store, ownership, IntakeSettings.From(root, Environment.GetEnvironmentVariable), docsParts, merge, feature);
     }
 
-    static DocsPlanParts MakeDocsPlan(GatewayComposition c, DocsPlanSettings settings, Func<FactoryDbContext> open, string connectionString, Func<BoardRef?> boardRef, Func<string, string?> env, HttpClient? http, MergeQueueCount queue)
+    static DocsPlanParts MakeDocsPlan(GatewayComposition c, DocsPlanSettings settings, Func<FactoryDbContext> open, string connectionString, Func<BoardRef?> boardRef, Func<string, string?> env, HttpClient? http, MergeQueueCount queue, IWorkItemStore store, IItemLock? locks)
     {
         var tokens = GitHubTokenProvider.FromEnvironment(env);   // GH_TOKEN, else the author App's installation token (the token of the rule scripts)
         // (the projection versions and the echo of the card projection are the ingress inbox's too: it asks the echo before a card event reaches the saga)
         var versions = new SqlProjectionVersions(open); var echo = new ProjectionEcho(versions);
-        if (tokens is null) return new DocsPlanParts(settings, new DocsMergePort(null, null, settings), new DocsProjection(() => null, settings), null, null, null, boardRef, versions, echo);
         var root = c.Instance.Root;
+        // W9.10i: the state comment follows the saga (the rollback path); with no credential there is no comment to write, and the projection is a no-op
+        var stateSettings = V1StateSettings.From(root, settings);
+        if (tokens is null) return new DocsPlanParts(settings, new DocsMergePort(null, null, settings), new DocsProjection(() => null, settings), null, null, null, boardRef, versions, echo, null, new SagaStateProjection(() => null, store, settings, stateSettings));
         string Str(string name, string fallback) => root?[name]?.ToString() is { Length: > 0 } s ? s : fallback;
         var api = env("GITHUB_API_URL");
         http ??= new HttpClient(new GitHubAuthHandler(tokens)) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
@@ -238,7 +240,12 @@ static class WorkItemWiring
         var facts = new HttpMergeFactsReader(http, creds, Str("name", "factory-worker"), Str("videoLabel", "video"), observe);
         BoardColumnProjection? card = null;
         BoardColumnProjection? Card() => card ??= boardRef() is { } board ? new BoardColumnProjection(http, creds, board, versions, echo) : null;
-        return new DocsPlanParts(settings, new DocsMergePort(merge, facts, settings, () => budget.Low().Low, queue.Busy), new DocsProjection(Card, settings), facts, new HttpBoardReader(http, creds, observe), new PullRequestHeads(clients), boardRef, versions, echo, facts);
+        // the comment is written as the journal is: the first one of the gateway's login that carries the marker (Get-State, Save-State); the store reaches GitHub when a decision first needs it, with the login of the gateway's identity
+        var comment = c.Instance.Home is { } home
+            ? new StateCommentProjection(new LazyJournalStore(async ct => new GitHubJournalStore(await clients.For(home, ct), JournalCommandWiring.Identity(c, env, http, tokens))), versions, echo, locks: locks) : null;
+        var promotions = comment is not null && c.Instance.Home is { } promotionHome ? new PromotionStateWriter(comment, promotionHome) : null;
+        return new DocsPlanParts(settings, new DocsMergePort(merge, facts, settings, () => budget.Low().Low, queue.Busy), new DocsProjection(Card, settings), facts, new HttpBoardReader(http, creds, observe), new PullRequestHeads(clients), boardRef, versions, echo, facts,
+            new SagaStateProjection(() => comment, store, settings, stateSettings), promotions);
     }
 
     public static FactoryDbContext Open(string connectionString) => new(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer(connectionString).Options);
@@ -257,6 +264,8 @@ static class WorkItemWiring
             // the docs plan's merge (MergeRequested, answered with MergeAttempted) and the card that follows the saga's decisions
             services.AddSingleton(parts.Docs.Merge);
             services.AddSingleton(parts.Docs.Projection);
+            // W9.10i: the state comment follows the saga's decisions in the format v1 reads (the rollback path)
+            if (parts.Docs.State is { } stateProjection) services.AddSingleton(stateProjection);
             // W7.3: the feature plan's slot requests (the saga's SlotWanted becomes the scheduler's RequestSlot) and the notice of a fix-forward round to the owner session
             services.AddSingleton(parts.Feature.Slots);
             services.AddSingleton(parts.Feature.Notice);
@@ -274,6 +283,13 @@ static class WorkItemWiring
             w.Discovery.IncludeType(typeof(MergeTrainPortHandler));
             w.Discovery.IncludeType(typeof(MergeTrainHistoryHandler));
             w.Discovery.IncludeType(typeof(DocsProjectionHandler));
+            if (parts.Docs.State is not null)
+            {
+                // W9.10i: one at a time on a queue of its own, durable: a decision that was published is projected after a restart too, and GitHub being slow holds up nothing else
+                w.Discovery.IncludeType(typeof(SagaStateProjectionHandler));
+                w.PublishMessage<ProjectStateComment>().ToLocalQueue(SagaStateProjectionHandler.Queue);
+                w.LocalQueue(SagaStateProjectionHandler.Queue).Sequential().UseDurableInbox();
+            }
             w.Discovery.IncludeType(typeof(SlotRequestHandler));
             w.Discovery.IncludeType(typeof(FeatureNoticeHandler));
             WorkItemTopology.Route(w);

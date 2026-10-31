@@ -117,6 +117,7 @@ public sealed class ProjectionTests
         public readonly InMemoryProjectionVersions Versions = new();
         public readonly ProjectionEcho Echo;
         public readonly StateCommentProjection State;
+        public readonly GitHubJournalStore Store;
         public readonly BoardColumnProjection Board;
         public readonly List<string> Log = [];
         public DateTime Now = new(2026, 10, 28, 9, 0, 0, DateTimeKind.Utc);
@@ -128,6 +129,7 @@ public sealed class ProjectionTests
             var client = new GitHubClientFactory(http, cred, new GitHubBudget()).For(Repo).GetAwaiter().GetResult();
             var store = new GitHubJournalStore(client, new JournalIdentity(Name, _ => Task.FromResult(Login), []), () => Now, Log.Add);
             Echo = new ProjectionEcho(Versions);
+            Store = store;
             State = new StateCommentProjection(store, Versions, Echo);
             Board = new BoardColumnProjection(http, cred, new BoardRef("o", 3), Versions, Echo, () => new DateTimeOffset(Now));
         }
@@ -491,5 +493,132 @@ public sealed class ProjectionTests
         Assert.True(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("column 3"), window));
         echo.Forget(Key);
         Assert.False(echo.WroteRecently(Key, ProjectionTargets.Card, ProjectionEcho.ColumnFingerprint("column 3"), window));
+    }
+
+    // ---- W9.10i: an edit that changes nothing writes nothing; the promotion records ------------------------------------------------------------
+
+    [Fact]
+    public async Task AnEditThatChangesNothing_WritesNothing_AndRecordsTheVersion_SoV1sOwnVerbsAreNotMadeToConflict()
+    {
+        var r = new Rig();
+        var own = r.Api.Add(Login, ItemStateComment.Body(Name, 7, new JsonObject { ["schema"] = 1, ["item"] = 7, ["rev"] = 4, ["park"] = new JsonObject { ["reason"] = "stuck" } }));
+        r.Api.Calls.Clear();
+        Assert.Equal(ProjectionOutcome.Unchanged, await r.State.Apply(Item, 3, s => s["park"] = new JsonObject { ["reason"] = "stuck" }));
+        Assert.DoesNotContain(r.Api.Calls, c => c.StartsWith("PATCH") || c.StartsWith("POST"));
+        Assert.Equal(4, (int)GetStateReads(r.Api.Comments.Single(c => c.Id == own.Id).Body)["rev"]!);   // the revision did not move
+        Assert.Equal(3, await r.Versions.Applied(Key, ProjectionTargets.Comment));
+        Assert.Equal(ProjectionOutcome.Stale, await r.State.Apply(Item, 3, s => s["x"] = 1));
+        Assert.Equal(ProjectionOutcome.Applied, await r.State.Apply(Item, 4, s => s.Remove("park")));
+        Assert.Equal(5, (int)GetStateReads(r.Api.Comments.Single(c => c.Id == own.Id).Body)["rev"]!);
+    }
+
+    [Fact]
+    public async Task AnEditThatChangesNothing_OnAnItemWithNoStateComment_CreatesNone()
+    {
+        var r = new Rig();
+        Assert.Equal(ProjectionOutcome.Unchanged, await r.State.Apply(Item, 1, _ => { }));
+        Assert.Empty(r.Api.Comments);
+    }
+
+    [Fact]
+    public async Task AnUpdateWithNoVersion_IsRetriedOnAConflict_AndWritesNothingWhenItChangesNothing()
+    {
+        var r = new Rig();
+        var own = r.Api.Add(Login, ItemStateComment.Body(Name, 7, new JsonObject { ["schema"] = 1, ["item"] = 7, ["rev"] = 1 }));
+        var interferences = 0;
+        r.Api.AfterListing = () => { if (interferences++ == 0) r.Api.Replace(own.Id, ItemStateComment.Body(Name, 7, new JsonObject { ["schema"] = 1, ["item"] = 7, ["rev"] = 2, ["other"] = "kept" })); };
+        Assert.Equal(ProjectionOutcome.Applied, await r.State.Update(Item, s => s["mine"] = true));
+        var s = GetStateReads(r.Api.Comments.Single().Body);
+        Assert.Equal((3, "kept", true), ((int)s["rev"]!, s["other"]!.ToString(), (bool)s["mine"]!));
+        r.Api.Calls.Clear();
+        Assert.Equal(ProjectionOutcome.Unchanged, await r.State.Update(Item, x => x["mine"] = true));
+        Assert.DoesNotContain(r.Api.Calls, c => c.StartsWith("PATCH") || c.StartsWith("POST"));
+        Assert.Equal(0, await r.Versions.Applied(Key, ProjectionTargets.Comment));   // (no version of its own: the saga's versions are not touched)
+    }
+
+    sealed class SpyLock : Fworker.Contracts.Seams.IItemLock
+    {
+        public readonly List<int> Taken = [];
+        public readonly List<string> Order = [];
+        public bool Busy;
+        public Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct)
+        {
+            if (Busy) throw new Fworker.Contracts.Seams.ItemBusyException(item);
+            Taken.Add(item); Order.Add($"lock {waitSeconds}");
+            return body();
+        }
+    }
+
+    [Fact]
+    public async Task TheReadTheEditAndTheSave_AreOneStepUnderTheItemsLock_AndABusyLockWritesNothing()
+    {
+        var r = new Rig(); var spy = new SpyLock();
+        var locked = new StateCommentProjection(r.Store, r.Versions, r.Echo, locks: spy);
+        r.Api.OnCommentWrite = _ => spy.Order.Add("write");
+        Assert.Equal(ProjectionOutcome.Applied, await locked.Apply(Item, 1, s => s["x"] = 1));
+        Assert.Equal(ProjectionOutcome.Applied, await locked.Update(Item, s => s["y"] = 2));
+        Assert.Equal([7, 7], spy.Taken);
+        Assert.Equal([$"lock {StateCommentProjection.LockWaitSeconds}", "write", $"lock {StateCommentProjection.LockWaitSeconds}", "write"], spy.Order);   // the write is inside the step
+        Assert.Equal(ProjectionOutcome.Stale, await locked.Apply(Item, 1, s => s["z"] = 3));
+        Assert.Equal(2, spy.Taken.Count);   // (a version that is not newer is skipped before the lock)
+        spy.Busy = true; r.Api.Calls.Clear();
+        await Assert.ThrowsAsync<Fworker.Contracts.Seams.ItemBusyException>(() => locked.Apply(Item, 2, s => s["z"] = 3));
+        await Assert.ThrowsAsync<Fworker.Contracts.Seams.ItemBusyException>(() => locked.Update(Item, s => s["z"] = 3));
+        Assert.Empty(r.Api.Calls);
+        Assert.Equal(1, await r.Versions.Applied(Key, ProjectionTargets.Comment));
+    }
+
+    static JsonObject MergedState() =>
+        new() { ["schema"] = 1, ["item"] = 7, ["rev"] = 1, ["merge"] = new JsonObject { ["sha"] = "abc", ["awaiting"] = "release-queue", ["release"] = "1.0.2" } };
+
+    [Fact]
+    public void ThePromotedRecord_IsMergePromotedEnvironment_WithTheTaskAndTheRelease_AndOnlyOnAnItemWithAMergeRecord()
+    {
+        var at = new DateTime(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
+        var merged = MergedState();
+        Assert.True(PromotionRecord.SetPromoted(merged, "uat", "ServerTasks-9", "1.0.2", at));
+        var record = (JsonObject)merged["merge"]!["promoted"]!["uat"]!;
+        Assert.Equal(("ServerTasks-9", "1.0.2", "2026-10-30T12:00:00.000Z"), (record["task"]!.ToString(), record["release"]!.ToString(), record["at"]!.ToString()));
+        Assert.Equal("release-queue", merged["merge"]!["awaiting"]!.ToString());   // the rest of the merge record is v1's
+        Assert.False(PromotionRecord.SetPromoted(merged, "uat", "ServerTasks-9", "1.0.2", at.AddMinutes(5)));   // again: nothing changes, `at` stays
+        Assert.Equal("2026-10-30T12:00:00.000Z", merged["merge"]!["promoted"]!["uat"]!["at"]!.ToString());
+        Assert.True(PromotionRecord.SetPromoted(merged, "uat", "ServerTasks-12", "1.0.3", at.AddHours(1)));   // a later request for the environment replaces it
+        Assert.Equal("ServerTasks-12", merged["merge"]!["promoted"]!["uat"]!["task"]!.ToString());
+        Assert.False(PromotionRecord.SetPromoted(new JsonObject { ["schema"] = 1 }, "uat", "ServerTasks-9", "1.0.2", at));   // no merge record: v1 writes none either
+    }
+
+    [Fact]
+    public void TheSignOffWait_IsKeptForTheTaskItWasRecordedWith_AndSetOnce()
+    {
+        var at = new DateTime(2026, 10, 30, 12, 0, 0, DateTimeKind.Utc);
+        var s = MergedState();
+        Assert.False(PromotionRecord.SetSignOffWait(s, "uat", "ServerTasks-9", at));   // no deployment recorded yet
+        PromotionRecord.SetPromoted(s, "uat", "ServerTasks-9", "1.0.2", at);
+        Assert.False(PromotionRecord.SetSignOffWait(s, "uat", "ServerTasks-8", at));   // another task's wait is not this one's
+        Assert.True(PromotionRecord.SetSignOffWait(s, "uat", "ServerTasks-9", at.AddMinutes(3)));
+        Assert.Equal("2026-10-30T12:03:00.000Z", s["merge"]!["promoted"]!["uat"]!["signoff_wait_since"]!.ToString());
+        Assert.False(PromotionRecord.SetSignOffWait(s, "uat", "ServerTasks-9", at.AddHours(1)));   // since when it waits does not move
+        PromotionRecord.SetPromoted(s, "uat", "ServerTasks-12", "1.0.3", at.AddHours(2));   // a new deployment starts its own wait
+        Assert.Null(s["merge"]!["promoted"]!["uat"]!["signoff_wait_since"]);
+    }
+
+    [Fact]
+    public async Task ThePromotionWriter_RecordsTheDeploymentOnTheItemsOfTheReleaseOfTheHomeRepository_AndTheWaitOnTheFirstOnly()
+    {
+        var r = new Rig();
+        var log = new List<string>();
+        var writer = new PromotionStateWriter(r.State, Repo, log.Add);
+        // the fake serves the comments of issue 7 only: an item whose comments GitHub refuses is logged, the others are written; an item of another repository is none of this writer's
+        r.Api.Add(Login, ItemStateComment.Body(Name, 7, MergedState()));
+        var command = new Fworker.Contracts.Commands.PromoteRelease("PromoteRelease|orders|1.0.2|uat|1", "orders", "orders-project", "1.0.2", "uat", ["o/r#8", "o/r#7", "x/y#3"]);
+        await writer.Promoted(command, "ServerTasks-9", new DateTimeOffset(2026, 10, 30, 12, 0, 0, TimeSpan.Zero));
+        Assert.Equal("ServerTasks-9", GetStateReads(r.StateComment().Body)["merge"]!["promoted"]!["uat"]!["task"]!.ToString());
+        Assert.Contains(log, l => l.Contains("o/r#8"));
+        Assert.DoesNotContain(r.Api.Calls, c => c.Contains("/x/y/"));
+        r.Api.Calls.Clear();
+        await writer.Promoted(command, "ServerTasks-9", new DateTimeOffset(2026, 10, 30, 12, 5, 0, TimeSpan.Zero));   // the command's retry
+        Assert.DoesNotContain(r.Api.Calls, c => c.StartsWith("PATCH") || c.StartsWith("POST"));
+        await writer.SignOffWaiting(["o/r#7", "o/r#8"], "uat", "ServerTasks-9", new DateTimeOffset(2026, 10, 30, 12, 10, 0, TimeSpan.Zero));   // the first item only
+        Assert.Equal("2026-10-30T12:10:00.000Z", GetStateReads(r.StateComment().Body)["merge"]!["promoted"]!["uat"]!["signoff_wait_since"]!.ToString());
     }
 }
