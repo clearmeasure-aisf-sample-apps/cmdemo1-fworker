@@ -14,9 +14,12 @@ public sealed class BoardReadException(string message) : Exception(message);
 /// state and repository. No label filter: the scope of an environment is the consumer's. The answer's rate-limit headers go to <paramref name="observe"/> (resource, remaining, reset, limit), which the gateway hands to its budget.
 /// The HttpClient's BaseAddress is the API root (GITHUB_API_URL or api.github.com); at most <see cref="MaxPages"/> pages of 100 are read.
 /// </summary>
-public sealed class HttpBoardReader(HttpClient http, IGitHubCredentialSource credentials, Action<string, string?, string?, string?>? observe = null) : IBoardReader
+public sealed class HttpBoardReader(HttpClient http, IGitHubCredentialSource credentials, Action<string, string?, string?, string?>? observe = null) : IMeteredBoardReader
 {
     public const int MaxPages = 20;
+    long requests;
+    /// <summary>The GraphQL requests made (a page of 100 cards each; one point of the GraphQL budget each).</summary>
+    public long Requests => Interlocked.Read(ref requests);
     const string Query = """
         query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(number:$n){ items(first:100, after:$after){ pageInfo{ hasNextPage endCursor }
           nodes{ id fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
@@ -34,6 +37,7 @@ public sealed class HttpBoardReader(HttpClient http, IGitHubCredentialSource cre
             req.Headers.Authorization = new("Bearer", cred.Token);
             req.Headers.Accept.ParseAdd("application/vnd.github+json");
             req.Headers.UserAgent.ParseAdd("factory-worker-gateway");
+            Interlocked.Increment(ref requests);
             using var resp = await http.SendAsync(req, ct);
             static string? H(HttpResponseMessage r, string n) => r.Headers.TryGetValues(n, out var v) ? v.FirstOrDefault() : null;
             if (H(resp, "x-ratelimit-resource") is { } res) observe?.Invoke(res,H(resp, "x-ratelimit-remaining"), H(resp, "x-ratelimit-reset"), H(resp, "x-ratelimit-limit"));

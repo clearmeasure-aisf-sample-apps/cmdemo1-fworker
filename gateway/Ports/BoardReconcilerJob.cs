@@ -10,7 +10,7 @@ using Fworker.Workflows.Reconcilers;
 // skips its non-essential reads, and the reads of this job report to it.
 static class BoardReconcilerJob
 {
-    public static Func<CancellationToken, Task>? Make(GatewayComposition c, ISystemCatalog catalog, IngressInboxPort inbox, Func<string, string?> env, HttpClient? http = null)
+    public static Func<CancellationToken, Task>? Make(GatewayComposition c, ISystemCatalog catalog, IngressInboxPort inbox, Func<string, string?> env, HttpClient? http = null, IBoardSeenStore? seen = null, TimeSpan? interval = null)
     {
         var tokens = GitHubTokenProvider.FromEnvironment(env);   // GH_TOKEN, else the author App's installation token
         if (tokens is null) return null;
@@ -19,12 +19,13 @@ static class BoardReconcilerJob
         var budget = c.GitHubBudget;
         var reader = new HttpBoardReader(http, new ProviderCredentialSource(tokens),
             (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } }));
-        var reconciler = new BoardReconciler(reader, () => catalog.Current, json => inbox.Publish(new IngressInboxMessage("poll", json)), () => c.Leader.MayAct, () => budget.Low().Low);
+        var reconciler = new BoardReconciler(reader, () => catalog.Current, json => inbox.Publish(new IngressInboxMessage("poll", json)), () => c.Leader.MayAct, () => budget.Low().Low, store: seen);
+        if (interval is { } every) reconciler.Meter.IntervalSeconds = (int)every.TotalSeconds;
         c.BoardReconciler = reconciler;   // W9.8: the verb sync-board runs a pass of this one on demand (it remembers what it published)
         return async ct =>
         {
             var r = await reconciler.Run(ct);
-            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["boardReconciler"] = r.Outcome, ["cards"] = r.Cards, ["published"] = r.Published }.ToJsonString());
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["boardReconciler"] = r.Outcome, ["cards"] = r.Cards, ["published"] = r.Published, ["requests"] = r.Requests }.ToJsonString());
         };
     }
 }

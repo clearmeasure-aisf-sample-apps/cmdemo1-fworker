@@ -207,6 +207,11 @@ public sealed class FeaturePlanWiringTests
         Assert.True(jobs.Has(RecurringJobSlots.ItemSteps));   // W9.10f: master's CI after a merge, a closed pull request, an approved hold
         Assert.True(jobs.Has(RecurringJobSlots.CapacityReap));   // W9.10j: what the scheduler keeps of an item whose saga never cleared it
         Assert.NotNull(host.Services.GetService<V2Health>());
+        // W9.10g: the plant-wide steps of the sweep, the retention and the faster reconciler are jobs of the engine, and the sweep knows it leaves the steps to them
+        foreach (var slot in new[] { RecurringJobSlots.ClaimRefReap, RecurringJobSlots.BoardGuard, RecurringJobSlots.QcSync, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow, RecurringJobSlots.RetentionPrune })
+            Assert.True(jobs.Has(slot), slot);
+        Assert.NotNull(host.Services.GetService<PlantStepJobs>());
+        Assert.Contains(host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>(), h => h is Sweeper { PlantJobs: true });
     }
 
     [Fact]
@@ -217,7 +222,7 @@ public sealed class FeaturePlanWiringTests
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); env.Apply();
         using var host = new GatewayHost();
         _ = host.Server;
-        foreach (var t in new[] { typeof(WorkItemParts), typeof(FeaturePlanParts), typeof(SlotRequestPort), typeof(FeatureNotice), typeof(V2Ownership) })
+        foreach (var t in new[] { typeof(WorkItemParts), typeof(FeaturePlanParts), typeof(SlotRequestPort), typeof(FeatureNotice), typeof(V2Ownership), typeof(PlantStepJobs) })
             Assert.DoesNotContain(host.Captured!, d => d.ServiceType == t);
     }
 }

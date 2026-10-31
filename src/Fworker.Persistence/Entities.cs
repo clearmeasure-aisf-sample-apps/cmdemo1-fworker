@@ -242,6 +242,19 @@ public class LeadershipRow
 }
 
 /// <summary>
+/// What the board reconciler last saw of one card (W9.10g, script 200): the issue's repository ("owner/repo", lower case) and number, the Status column it stood in and whether the issue was open. It makes the
+/// reconciler's memory survive a restart; the reconciler writes and removes the rows, EF only maps the table.
+/// </summary>
+public class BoardSeenRow
+{
+    public string Repository { get; set; } = "";
+    public int Number { get; set; }
+    public string? StatusColumn { get; set; }
+    public bool IsOpen { get; set; }
+    public DateTimeOffset SeenAt { get; set; }
+}
+
+/// <summary>
 /// The state of one QC gate (W9.0 for W9.1, refactor R9): one row per repository and pull request, the key "owner/repo!N" in lower case. The state is a JSON document owned by Fworker.Workflows.Qc (the
 /// environment record, its attempt and assignment, the verdict), saved with a revision so that two writers cannot both win. The columns beside the document are the ones read without opening it: the pull
 /// requests of one repository that are not over ("Waiting for PR QC") and the item the pull request belongs to.
