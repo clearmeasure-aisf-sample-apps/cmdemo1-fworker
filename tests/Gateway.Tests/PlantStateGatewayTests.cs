@@ -367,7 +367,7 @@ public sealed class PlantStateGatewayTests
         var sent = new List<object>();
         var ownership = await Owned(State(12));
         var port = new KeeperSagaPort(ownership, Home, m => { sent.Add(m); return Task.FromResult(true); });
-        Assert.True(port.Owns(12)); Assert.False(port.Owns(99));
+        Assert.True(await port.Owns(12)); Assert.False(await port.Owns(99));
         await port.OwnerReleased(12, "stalled owner", "manager-release|1");
         await port.Requeued(12, "stuck offer", "manager-requeue|2");
         var release = Assert.IsType<OwnerReleaseAsked>(sent[0]); var requeue = Assert.IsType<RequeueWorkItem>(sent[1]);

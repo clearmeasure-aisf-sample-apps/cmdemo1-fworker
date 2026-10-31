@@ -31,12 +31,14 @@ public sealed class OwnershipLookupTests
         public Func<string, CancellationToken, Task>? OnLoad;
         public Func<int, Task>? AfterRead;   // (after the rows were read: the answer is as old as that)
         public Func<Task>? AfterLoad;        // (after a row was read by its key)
+        public bool FailReads;               // (the table cannot be read as a whole)
         public async Task<WorkItemRecord?> Load(string itemKey, CancellationToken ct) { Interlocked.Increment(ref Loads); if (OnLoad is { } h) await h(itemKey, ct); var r = await Inner.Load(itemKey, ct); if (AfterLoad is { } a) await a(); return r; }
         public Task<bool> Save(string itemKey, WorkItemState state, int expectedRevision, CancellationToken ct) => Inner.Save(itemKey, state, expectedRevision, ct);
         public Task<IReadOnlyList<string>> OwnedItems(CancellationToken ct) => Inner.OwnedItems(ct);
         public async Task<IReadOnlyList<WorkItemState>> OwnedStates(CancellationToken ct)
         {
             var n = Interlocked.Increment(ref Reads);
+            if (FailReads) throw new TimeoutException("the table");
             var rows = await Inner.OwnedStates(ct);
             if (AfterRead is { } h) await h(n);
             return rows;
@@ -183,21 +185,73 @@ public sealed class OwnershipLookupTests
     }
 
     [Fact]
-    public async Task TheSetIsNotLoaded_UntilAFullReadIsPublished_ALookupDoesNotLoadIt()
+    public async Task ALookupThatLandsDuringAFullRead_DoesNotDropIt_AndTheSetIsLoadedWhenItEnds()
     {
         var rig = new Rig();
         await rig.Svc.Handle(new StartWorkItem(Item, "intake", "docs"));
         await rig.Svc.Handle(new StartWorkItem(new ItemId(Home, 8), "intake", "docs"));
         var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         rig.Store.AfterRead = n => n == 1 ? first.Task : Task.CompletedTask;
-        var startup = rig.Own.RefreshAsync();                               // (the first read of the table, held back)
+        var startup = rig.Own.RefreshAsync();                               // (the first read of the table: it saw items 7 and 8, and is held back)
         await Task.Delay(50);
-        Assert.True(await rig.Own.OwnsOrFindAsync(7));                      // (a lookup finds one item meanwhile)
+        Assert.True(await rig.Own.OwnsOrFindAsync(7));                      // (a lookup finds one of them meanwhile)
         Assert.False(rig.Own.Loaded);                                       // (one item is not the set: the sweep must not act on it)
-        first.SetResult(); await startup;
-        Assert.False(rig.Own.Loaded);                                       // (the held read began before the lookup and is not published)
-        Assert.True(await rig.Own.RefreshAsync());
-        Assert.True(rig.Own.Loaded); Assert.True(rig.Own.Owns(8)); Assert.True(rig.Own.Owns(7));
+        first.SetResult();
+        Assert.True(await startup);
+        Assert.True(rig.Own.Loaded);                                        // (true of a refresh means a read at least that new is published)
+        Assert.True(rig.Own.Owns(8)); Assert.True(rig.Own.Owns(7));
+    }
+
+    // A restart: the sessions reconnect and call verbs of saga items while the first read of the table is in flight. Each lookup used to take a place in the order of the reads and the read was dropped, with
+    // its answer "true": the sweep then ran with a set of the looked-up items only, and v1 acted on every other item of the sagas.
+    [Fact]
+    public async Task ManyLookupsDuringTheFirstRead_LeaveTheSetOfThatRead_AndTheSweepWaitsForIt()
+    {
+        var rig = new Rig();
+        for (var n = 1; n <= 5; n++) await rig.Svc.Handle(new StartWorkItem(new ItemId(Home, n), "intake", "docs"));
+        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Store.AfterRead = n => n == 1 ? first.Task : Task.CompletedTask;
+        var startup = rig.Own.RefreshAsync();                               // (it saw items 1 to 5)
+        await Task.Delay(50);
+        for (var n = 6; n <= 15; n++) await rig.Svc.Handle(new StartWorkItem(new ItemId(Home, n), "intake", "docs"));   // (started after its read)
+        Assert.All(await Task.WhenAll(Enumerable.Range(6, 10).Select(n => rig.Own.OwnsOrFindAsync(n))), Assert.True);
+        Assert.False(rig.Own.Loaded); Assert.Equal(10, rig.Own.Count);
+        first.SetResult(); Assert.True(await startup);
+        Assert.True(rig.Own.Loaded);
+        Assert.Equal(Enumerable.Range(1, 15), rig.Own.Items.Order());      // (the read's items, and those the lookups found after it began)
+    }
+
+    [Fact]
+    public async Task TheSweepDoesNotRunWhileOnlyLookedUpItemsAreKnown()
+    {
+        var rig = new Rig();
+        for (var n = 1; n <= 3; n++) await rig.Svc.Handle(new StartWorkItem(new ItemId(Home, n), "intake", "docs"));
+        rig.Store.FailReads = true;                                         // (the table cannot be read as a whole)
+        Assert.True(await rig.Own.OwnsOrFindAsync(2));
+        Assert.False(rig.Own.Loaded);
+        var runner = new Runner("/nonexistent/factory.ps1");
+        var routes = new V2VerbRoutes();
+        var calls = 0;
+        routes.Add(BoardRoutes.Verbs, "sync-board", (_, _) => { Interlocked.Increment(ref calls); return Task.FromResult(new VerbAnswer(20, "{}")); });
+        runner.Routes = routes;
+        var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30);
+        var hub = new EventHub();
+        var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
+        var sweeper = new Sweeper(runner, hub, plant, qc, 3600, true, null, Task.CompletedTask) { MayAct = () => true, V2 = rig.Own };
+        await sweeper.StartAsync(default);
+        try { await Task.Delay(TimeSpan.FromSeconds(5)); Assert.Equal(0, Volatile.Read(ref calls)); Assert.False(rig.Own.Loaded); }
+        finally { await sweeper.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task TheKeepersAndTheInputsOfTheSaga_FindASagaThatStartedAfterTheRead()
+    {
+        var rig = new Rig(); await rig.StartedAfterTheRead();
+        var port = new KeeperSagaPort(rig.Own, Home, m => Task.FromResult(true));
+        Assert.True(await port.Owns(7)); Assert.False(await port.Owns(99));
+        var other = new Rig(); await other.StartedAfterTheRead();
+        var inputs = new SagaInputs(other.Own, other.Store, Home, m => Task.FromResult(true), _ => Task.FromResult(true), _ => Task.CompletedTask);
+        Assert.True(await inputs.Owns(7));
     }
 
     [Fact]

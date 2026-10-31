@@ -28,12 +28,14 @@ using Wolverine;
 sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, string?>? columnOf = null, Fworker.Workflows.Adoption.ReadoptionGate? readoption = null, TimeSpan? findLimit = null)
 {
     /// <summary>
-    /// What one read of the saga's table says, as one immutable value: the owned items, the offers, the slots and the states all come from the same read, so a reader never mixes two (an offer from one read and the slot of
-    /// another). <see cref="Started"/> numbers the read by the order in which the reads began; a read is published only if it began after the one that is published, so a late, older read cannot overwrite a newer set.
+    /// What the reads of the saga's table say, as one immutable value: the owned items, the offers, the slots and the states come from the same read, so a reader never mixes two (an offer from one read and the slot of another).
+    /// <see cref="FullStarted"/> is the number of the full read this value is made of (the reads are numbered by the order in which they began; 0: none yet), and a full read is published only if it began after it, so a late,
+    /// older read cannot overwrite a newer set. <see cref="Found"/> are the sagas that a point lookup added (<see cref="OwnsOrFindAsync"/>), each with the number of the moment it was published: lookups take no place in the order of the
+    /// full reads (a full read is never dropped because a lookup landed during it); a full read that began before a lookup was published may have read before the saga's row was committed, so it keeps the item.
     /// </summary>
-    sealed record Snapshot(long Started, HashSet<int> Owned, IReadOnlyList<(int Item, string Column)> Offers, IReadOnlyDictionary<int, string> OfferKeys, IReadOnlyDictionary<int, SlotOffer> Slots, IReadOnlyList<WorkItemState> States, bool Full);
+    sealed record Snapshot(long FullStarted, IReadOnlyDictionary<int, long> Found, HashSet<int> Owned, IReadOnlyList<(int Item, string Column)> Offers, IReadOnlyDictionary<int, string> OfferKeys, IReadOnlyDictionary<int, SlotOffer> Slots, IReadOnlyList<WorkItemState> States);
 
-    volatile Snapshot snapshot = new(0, [], [], new Dictionary<int, string>(), new Dictionary<int, SlotOffer>(), [], false);
+    volatile Snapshot snapshot = new(0, new Dictionary<int, long>(), [], [], new Dictionary<int, string>(), new Dictionary<int, SlotOffer>(), []);
     long lookupsDownUntil;   // (ticks: a lookup that failed holds the next ones back for a moment)
     long reads;
     readonly object publishing = new();
@@ -49,7 +51,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     /// W9.10e: whether the saga's table has been read successfully at least once (or the set was given). Until then nobody knows which items are v2's, so the sweep acts on no item at all and incremental passes wait
     /// (Sweeper): an empty set that only means "not read yet" would let v1 settle, merge or park an item that has a saga. After the first read a failed read keeps the last answer, as before.
     /// </summary>
-    public bool Loaded => snapshot.Full;
+    public bool Loaded => snapshot.FullStarted > 0;
 
     public bool Owns(int item) => snapshot.Owned.Contains(item);
 
@@ -96,7 +98,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         return nodes;
     }
 
-    Snapshot Build(long started, IEnumerable<WorkItemState> all, bool full)
+    Snapshot Build(long fullStarted, IEnumerable<WorkItemState> all, IReadOnlyDictionary<int, long> found)
     {
         var set = new HashSet<int>(); var wanted = new List<(int, string)>(); var keys = new Dictionary<int, string>(); var granted = new Dictionary<int, SlotOffer>(); var homeStates = new List<WorkItemState>();
         foreach (var state in all)
@@ -110,21 +112,30 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
                 if (state.SlotId.Length > 0 && state.SlotRuntime.Length > 0) granted[id.Number] = new SlotOffer(state.SlotId, state.SlotRuntime, state.ArmId);
             }
         }
-        return new Snapshot(started, set, wanted, keys, granted, homeStates, full);
+        return new Snapshot(fullStarted, found, set, wanted, keys, granted, homeStates);
     }
 
-    /// <summary>Publishes a read if it began after the published one; false when a newer read is there already (its answer stands).</summary>
-    bool Publish(Snapshot read)
+    /// <summary>
+    /// Publishes a full read if it began after the published one; false when a newer full read is there already (its answer stands). The sagas that lookups found after this read began are kept, whatever the read saw: it may have
+    /// read before their rows were committed. A lookup never makes this return false.
+    /// </summary>
+    bool PublishFull(long started, IReadOnlyList<WorkItemState> states)
     {
         lock (publishing)
         {
-            if (read.Started <= snapshot.Started) return false;
-            snapshot = read;
+            var cur = snapshot;
+            if (started <= cur.FullStarted) return false;
+            var read = states.Where(st => ItemId.TryParse(st.Item, out var id) && id.Repository == home).ToList();
+            var seen = read.Select(st => ItemId.TryParse(st.Item, out var rid) ? rid.Number : 0).ToHashSet();
+            var found = new Dictionary<int, long>();
+            foreach (var (item, stamp) in cur.Found)
+                if (stamp > started && !seen.Contains(item) && cur.States.FirstOrDefault(st => ItemId.TryParse(st.Item, out var id) && id.Number == item) is { } kept) { read.Add(kept); found[item] = stamp; }
+            snapshot = Build(started, read, found);
             return true;
         }
     }
 
-    /// <summary>Reads the owned items; false when the read failed and the last answer stands. A read that began before the published one is dropped (true: it read well, and a newer answer is there).</summary>
+    /// <summary>Reads the owned items; false when the read failed and the last answer stands. A read that began before the published full one is dropped (true: it read well, and a newer full read is published): true always means a read at least this new is published.</summary>
     public async Task<bool> RefreshAsync(CancellationToken ct = default)
     {
         var started = Interlocked.Increment(ref reads);
@@ -132,7 +143,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct); limit.CancelAfter(TimeSpan.FromSeconds(10));
             var states = await store.OwnedStates(limit.Token);
-            Publish(Build(started, states, full: true));
+            PublishFull(started, states);
             return true;
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -173,13 +184,14 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
             lock (publishing)
             {
                 var cur = snapshot;
-                // a read that began after this lookup is published: it is the newer word (the saga may have completed meanwhile), and this lookup adds nothing
-                if (cur.Started > started) return cur.Owned.Contains(item);
+                // a full read that began after this lookup is published: it is the newer word (the saga may have completed meanwhile), and this lookup adds nothing
+                if (cur.FullStarted > started) return cur.Owned.Contains(item);
                 if (record?.State is not { } state || state.Status == WorkItemStatus.Completed) return cur.Owned.Contains(item);
                 if (cur.Owned.Contains(item)) return true;
-                var found = Build(started, cur.States.Where(s => s.Item != state.Item).Append(state), cur.Full);
-                found.Owned.UnionWith(cur.Owned);   // (the items Set gave)
-                snapshot = found;
+                var found = new Dictionary<int, long>(cur.Found) { [item] = Interlocked.Increment(ref reads) };
+                var added = Build(cur.FullStarted, cur.States.Where(st => st.Item != state.Item).Append(state), found);
+                added.Owned.UnionWith(cur.Owned);   // (the items Set gave)
+                snapshot = added;
                 return true;
             }
         }
@@ -194,7 +206,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     /// <summary>For a test or a host without a database: the owned items as given.</summary>
     public void Set(IEnumerable<int> items)
     {
-        lock (publishing) { var cur = snapshot; snapshot = cur with { Started = Interlocked.Increment(ref reads), Owned = items.ToHashSet(), Full = true }; }
+        lock (publishing) { var cur = snapshot; snapshot = cur with { FullStarted = Interlocked.Increment(ref reads), Found = new Dictionary<int, long>(), Owned = items.ToHashSet() }; }
     }
 }
 

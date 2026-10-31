@@ -34,7 +34,7 @@ sealed class SagaInputs(V2Ownership ownership, IWorkItemStore store, RepoId home
     static readonly TimeSpan[] Pauses = [TimeSpan.FromMilliseconds(250), TimeSpan.FromSeconds(1)];
     readonly Func<TimeSpan, Task> wait = delay ?? Task.Delay;
 
-    public bool Owns(int item) => ownership.Owns(item);
+    public Task<bool> Owns(int item) => ownership.OwnsOrFindAsync(item);
 
     /// <summary>The item was parked outside the saga (the runtime adapters, the credit guard). A repeated park of the same moment is the saga's duplicate.</summary>
     public Task<bool> Parked(int item, string reason, string key) =>
