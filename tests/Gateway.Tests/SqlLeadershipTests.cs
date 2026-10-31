@@ -91,6 +91,10 @@ internal sealed class FakeRefServer
     readonly object gate = new();
     long epoch; string? holder; DateTime until; bool released; long? plantEpoch;
     public long Epoch { get { lock (gate) return epoch; } }
+    /// <summary>The record as the next process reads it (the predecessor of its write).</summary>
+    public System.Text.Json.Nodes.JsonObject Record() { lock (gate) return new() { ["holder"] = holder, ["epoch"] = epoch, ["released"] = released, ["plant_epoch"] = released ? plantEpoch : null }; }
+    /// <summary>A test control: the release of the lease fails (GitHub did not answer).</summary>
+    public bool FailRelease;
 
     public Func<string, string, TimeSpan, Task<(int Code, string Output)>> Run(Func<Task>? beforeAcquire = null) => async (verb, stdin, timeout) =>
     {
@@ -111,6 +115,7 @@ internal sealed class FakeRefServer
                 }
                 case "release":
                 {
+                    if (FailRelease) return (1, "");
                     var mine = (long?)input["epoch"] == epoch && who == holder;
                     if (mine) { released = true; plantEpoch = (long?)input["plant_epoch"]; }
                     return (0, new System.Text.Json.Nodes.JsonObject { ["ok"] = true, ["released"] = mine, ["leader"] = mine }.ToJsonString());
@@ -517,19 +522,88 @@ public sealed class SqlLeadershipRulesTests
     }
 
     [Fact]
-    public async Task AProcessThatGivesUpTheLockBeforeItActed_ReleasesItsRefNamingTheSnapshotItWouldHaveRestored_SoTheNewcomerDoesNotWaitForOne()
+    public async Task AProcessThatGivesUpTheLockWhileItRestores_HandsOverLikeAnyHolder_AndTheNewcomerWaitsForItsSnapshot_NotForTheOneBeforeIt()
     {
         var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
         await SeedRef(refs, "O", release: false);
+        var nodes = new SqlLeadershipSupport.Nodes();
         var a = FakeLeader(refs, locks.NewLease()); var b = FakeLeader(refs, locks.NewLease());
-        var predA = await a.AcquireAllAsync(cts.Token);                   // A holds the lock and wrote the ref (epoch 2); it restores, it has not acted
+        SqlLeadershipSupport.HandOver(a, nodes, "A");
+        var predA = await a.AcquireAllAsync(cts.Token);                   // A holds the lock and the ref (epoch 2) and now restores from O: it has not acted
         Assert.Equal("O", predA!["holder"]!.ToString());
         Assert.Equal(GatewayLeader.Role.Starting, a.State);
-        var predB = await b.AcquireAllAsync(cts.Token).WaitAsync(TimeSpan.FromSeconds(20));   // B starts: it asks, A (which never acted, so writes no snapshot) makes room
+        var predB = await b.AcquireAllAsync(cts.Token).WaitAsync(TimeSpan.FromSeconds(20));   // B starts: it asks, A's loop makes room (the lock goes, A is still Starting) and B writes the ref over A's
         Assert.Equal(a.Holder, predB!["holder"]!.ToString());
-        Assert.True((bool)predB["released"]!);                            // A's record says so ...
-        Assert.Equal(1L, (long)predB["plant_epoch"]!);                    // ... and names O's snapshot, the one A would have restored from: B restores from that, and does not wait for A's
+        Assert.False((bool)predB["released"]!);                           // A's record is not released: A's hand-over writes a snapshot of its own epoch, and that is what B restores from
+        Assert.Equal(2L, (long)predB["epoch"]!);
+        Assert.False(await a.ConfirmAsync());                             // A finds the ref B's: it hands over (the snapshot under A's epoch), the newcomer's wait ends with it
+        await SqlLeadershipSupport.Until(() => nodes.Snapshot().Contains("A:snapshot"));
+        Assert.Equal(GatewayLeader.Role.Superseded, a.State);
         Assert.Equal(3, b.Epoch);
+    }
+
+    [Fact]
+    public async Task AProcessThatLosesTheLockOnceItsRefIsWritten_ReleasesItsRecordNamingTheSnapshotItWouldHaveRestored_SoTheNewcomerDoesNotWaitForOne()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        await SeedRef(refs, "O", release: false);
+        var leaseA = locks.NewLease(); var leaseB = locks.NewLease();
+        // B writes the ref once A's record is there and released
+        var b = FakeLeader(refs, leaseB, () => SqlLeadershipSupport.Until(() => refs.Epoch >= 2 && (bool)refs.Record()["released"]!));
+        Task<System.Text.Json.Nodes.JsonObject?>? bStart = null; var writes = 0;
+        var a = FakeLeader(refs, leaseA, async () =>
+        {
+            if (Interlocked.Increment(ref writes) != 1) return;
+            await Task.Delay(200); leaseA.Lose();                         // the lock goes before A's write lands (a newer process asked), and B takes it
+            await b.AcquireSqlAsync(cts.Token);
+            bStart = Task.Run(() => b.AcquireAllAsync(cts.Token));
+        });
+        _ = Task.Run(() => a.AcquireAllAsync(cts.Token));
+        var predB = await Task.Run(async () => { await SqlLeadershipSupport.Until(() => bStart != null); return await bStart!; }).WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.Equal(a.Holder, predB!["holder"]!.ToString());
+        Assert.True((bool)predB["released"]!);                            // A's record, written without the lock behind it, says nothing will follow it ...
+        Assert.Equal(1L, (long)predB["plant_epoch"]!);                    // ... and names O's snapshot, the one A would have restored from
+    }
+
+    [Fact]
+    public async Task ARecordReleasedForWantOfAPredecessor_NamesNoSnapshot_NotAnEpochlessOne()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        var lease = locks.NewLease(); var writes = 0; System.Text.Json.Nodes.JsonObject? between = null;
+        var a = FakeLeader(refs, lease, async () =>
+        {
+            var n = Interlocked.Increment(ref writes);
+            if (n == 1) { await Task.Delay(200); lease.Lose(); }
+            else between = refs.Record();                                 // what stands in the ref between A's release and its second write
+        });
+        await a.AcquireAllAsync(cts.Token);
+        Assert.True((bool)between!["released"]!);
+        Assert.Equal(-1L, (long)between["plant_epoch"]!);                 // -1: no snapshot holds the plant; 0 would accept one written before the lease existed
+    }
+
+    [Fact]
+    public async Task AStandbyThatStopsHoldingARecordItWroteWithoutTheLock_ReleasesItBeforeTheLock_SoNobodyWaitsForTheRefToRunOut()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        await SeedRef(refs, "O", release: false);
+        var leaseA = locks.NewLease(); var leaseB = locks.NewLease(); var writes = 0;
+        var a = FakeLeader(refs, leaseA, async () =>
+        {
+            if (Interlocked.Increment(ref writes) != 1) return;
+            await Task.Delay(200); leaseA.Lose();
+            Assert.True((await leaseB.TryAcquireAsync("B", false, cts.Token)).Acquired);   // another process holds the lock: A waits for it, a loser of the start race
+            refs.FailRelease = true;                                                        // and the release of its own record (after the write) did not get through
+        });
+        var start = Task.Run(() => a.AcquireAllAsync(cts.Token));
+        await SqlLeadershipSupport.Until(() => a.State == GatewayLeader.Role.Superseded);
+        Assert.False((bool)refs.Record()["released"]!);                   // A's record stands: nobody acts for it, and it runs out in 360 s
+        Assert.Equal(a.Holder, refs.Record()["holder"]!.ToString());
+        refs.FailRelease = false;
+        await a.ReleaseStandbyAsync();                                    // SIGTERM of the standby (LeadershipService)
+        Assert.True((bool)refs.Record()["released"]!);
+        Assert.Equal(1L, (long)refs.Record()["plant_epoch"]!);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
     }
 
     [Fact]

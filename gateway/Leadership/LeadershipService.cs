@@ -73,7 +73,7 @@ sealed class LeadershipService : IHostedService
                 if (was is not (GatewayLeader.Role.Acting or GatewayLeader.Role.Starting))
                 {   // superseded: its final snapshot was written when it stood down; one still being written is given its time
                     snapshots.WaitForWrite(TimeSpan.FromSeconds(10));
-                    try { leader.ReleaseSqlAsync().WaitAsync(TimeSpan.FromSeconds(10)).GetAwaiter().GetResult(); } catch (TimeoutException) { }   // (W9.10b) a standby that holds nothing (or a lock still held) lets go
+                    try { leader.ReleaseStandbyAsync().WaitAsync(TimeSpan.FromSeconds(15)).GetAwaiter().GetResult(); } catch (TimeoutException) { }   // (W9.10b) a standby that holds nothing (or a lock still held, or a ref record it wrote without the lock) lets go
                     runner.DrainFencedAsync(TimeSpan.Zero).GetAwaiter().GetResult();   // (W0.1) a fenced script still running must not hold the stop up: it refuses its writes anyway
                     Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"{was.ToString().ToLowerInvariant()}\"}}"); return;
                 }
