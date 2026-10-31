@@ -53,6 +53,15 @@ sealed class SqlLease : ISqlLease
         this.prepare = prepare; this.requestFreshSeconds = Math.Max(1, requestFreshSeconds);
     }
 
+    /// <summary>The command timeout of the holder's look at its lock (seconds).</summary>
+    public const int CheckTimeoutSeconds = 10;
+    /// <summary>How long a look may run before the lock counts as gone whatever the command is doing: a dead socket can hold a command past its timeout (the driver's timeout needs the socket to answer).</summary>
+    internal TimeSpan CheckWatchdog { get; set; } = TimeSpan.FromSeconds(2 * CheckTimeoutSeconds);
+    /// <summary>For a test: runs inside the look, where the query would run (it can stand for a command stuck on a dead socket).</summary>
+    internal Func<CancellationToken, Task>? InCheck { get; set; }
+    /// <summary>For a test: the lock counts as held without a database behind it.</summary>
+    internal void MarkHeldForTest(long term) => SetHeld(true, term);
+
     public bool Held { get { lock (gate) return held; } }
     public long Epoch { get { lock (gate) return epoch; } }
     void SetHeld(bool value, long? term = null) { lock (gate) { held = value; if (term is { } t) epoch = t; } }
@@ -174,8 +183,13 @@ sealed class SqlLease : ISqlLease
         try
         {
             if (!Held) return new SqlLeaseCheck(SqlLeaseState.Lost);
+            // the watchdog: a look that is still running after twice its command timeout (the socket is dead and the driver has not noticed) must not leave Held true, which is what lets this process act (MayAct);
+            // the connection is not touched (the lock stays the server's until the step-down releases it), only the claim to act goes
+            var overran = 0;
+            using var watchdog = new Timer(_ => { Interlocked.Exchange(ref overran, 1); SetHeld(false); }, null, CheckWatchdog, Timeout.InfiniteTimeSpan);
             try
             {
+                if (InCheck is { } hook) await hook(ct);
                 var c = conn ?? throw new InvalidOperationException("no connection");
                 // the session's own view of the lock (a reconnected session has none), and the row: the term must still be ours
                 // (a lock that does not show is asked for once more before it counts as gone)
@@ -184,7 +198,7 @@ sealed class SqlLease : ISqlLease
                     await using var cmd = Command(c, """
                         SELECT APPLOCK_MODE(N'public', @r, N'Session'), l.Epoch, l.Holder, l.TakeoverBy, CASE WHEN l.TakeoverAt >= DATEADD(SECOND, -@fresh, SYSDATETIMEOFFSET()) THEN 1 ELSE 0 END
                         FROM (SELECT 1 AS One) d LEFT JOIN factory.Leadership l ON l.Id = 1;
-                        """, 10);
+                        """, CheckTimeoutSeconds);
                     await using var r = await cmd.ExecuteReaderAsync(ct);
                     if (!await r.ReadAsync(ct)) return Lost("no answer");
                     var mode = r.GetString(0);
@@ -196,6 +210,7 @@ sealed class SqlLease : ISqlLease
                         return Lost(mode != "Exclusive" ? "the lock is gone" : "the term is another's");
                     }
                     var by = r.IsDBNull(3) ? null : r.GetString(3);
+                    if (Volatile.Read(ref overran) == 1) return Lost("the look took too long");
                     if (by != null && by != holder && r.GetInt32(4) == 1) return new SqlLeaseCheck(SqlLeaseState.TakeoverRequested, by);
                     return new SqlLeaseCheck(SqlLeaseState.Held);
                 }

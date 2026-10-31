@@ -250,6 +250,8 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
             if (j["unchanged"] is null) { standbyCurrent = j["current"]?.DeepClone() as JsonObject; sha = j["sha"]?.ToString() ?? ""; }
             if (j["etag"]?.ToString() is { Length: > 0 } et) etag = et;
             cur = standbyCurrent;
+            // another process wrote the ref since this one did: that is a new term, and the predecessor kept from this process's earlier write is no longer the one to restore from
+            if (carriedPredecessor != null && cur?["holder"]?.ToString() is { Length: > 0 } writer && writer != Holder) carriedPredecessor = null;
         }
         var released = cur?["released"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb;
         var lapsed = cur == null || (Time(cur["until"]) is { } u && u < DateTime.UtcNow);
@@ -285,10 +287,30 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
         if (!take) return;
         lock (gate) { sha = ""; etag = ""; }
         JsonObject? pred;
-        try { pred = await AcquireAsync(ct); } catch (OperationCanceledException) { return; }
+        try { pred = await AcquireAsync(ct, SqlFences); }
+        catch (OperationCanceledException) { return; }
+        catch (SqlLockLostException) { return; }   // (W9.10b) the lock went between the take of the lock and the write of the ref: nothing was written, the next check starts again
+        // the lock can also go during the write: the ref is then written by a process that does not hold the lock, so it neither restores nor acts; the next check takes the lock again and the ref once more,
+        // and the restore then still waits for the real predecessor (the first holder that was not this process), not for this process's own record
+        pred = KeepPredecessor(pred);
+        if (SqlFences && !sql!.Held) { Log(new JsonObject { ["gateway"] = "leader", ["sqlLostBeforeActing"] = true, ["holder"] = Holder, ["where"] = "standby" }); return; }
+        lock (gate) carriedPredecessor = null;
         Log(new JsonObject { ["gateway"] = "leader", ["reacquired"] = Epoch, ["after"] = released ? "released" : lapsed ? "lapsed" : "sql-lock-free" });
         if (OnReacquired is { } f) await f(pred);
         StartActing();
+    }
+
+    // The predecessor of the ref as the restore must wait for it: the record of the first write whose holder is not this process. A later write by this very process (after the lock was lost and taken again) names
+    // this process's own earlier write as its predecessor, and a restore that waited for the final snapshot of that would never see one (issue 94: the plant of the real predecessor dropped, nobody acting for
+    // leaderHandoverSeconds). Returns what the restore uses so far.
+    JsonObject? carriedPredecessor;
+    JsonObject? KeepPredecessor(JsonObject? written)
+    {
+        lock (gate)
+        {
+            if (carriedPredecessor == null && written != null && written["holder"]?.ToString() != Holder) carriedPredecessor = written.DeepClone() as JsonObject;
+            return carriedPredecessor ?? written;
+        }
     }
 
     // ---- W9.10b ---------------------------------------------------------------------------------------------------------------------------------
@@ -312,8 +334,8 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
             }
             try
             {
-                var pred = await AcquireAsync(ct, SqlFences);
-                if (!SqlFences || sql!.Held) return pred;
+                var pred = KeepPredecessor(await AcquireAsync(ct, SqlFences));
+                if (!SqlFences || sql!.Held) { lock (gate) carriedPredecessor = null; return pred; }
             }
             catch (SqlLockLostException) { }
             Log(new JsonObject { ["gateway"] = "leader", ["sqlLostBeforeActing"] = true, ["holder"] = Holder });
@@ -352,12 +374,26 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
             {
                 var got = await sql.TryAcquireAsync(Holder, request, ct);
                 if (got.Acquired) { SqlTaken(got); SqlGranted(); return; }
+                // a miss that is not the newest process's own ask (it concedes to a newer one, or it only waits its turn): this process has lost the start race and waits behind another, which is what a
+                // superseded process is, so it says so (the status and /ready say "replaced" and not a start that never ends)
+                if (got.Conceded || !request) MarkLostStartRace();
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception e) { NoteSqlFailure(e); failed = true; }
             pause = failed ? Math.Min(30, Math.Max(cfg.SqlCheckSeconds, pause * 2)) : cfg.SqlCheckSeconds;
             await Task.Delay(TimeSpan.FromSeconds(pause), ct);
         }
+    }
+
+    void MarkLostStartRace()
+    {
+        bool marked;
+        lock (gate)
+        {
+            marked = role == Role.Starting;
+            if (marked) { role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = new JsonObject { ["via"] = "sql", ["why"] = "start-race" }; standbyCurrent = null; etag = ""; }
+        }
+        if (marked) Log(new JsonObject { ["gateway"] = "leader", ["superseded"] = Epoch, ["before"] = "acting", ["via"] = "sql", ["why"] = "start-race", ["holder"] = Holder });
     }
 
     // the lock came after this process already acts on the ref (the shadow run): the node starts now

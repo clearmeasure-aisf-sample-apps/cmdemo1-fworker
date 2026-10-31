@@ -175,7 +175,7 @@ internal sealed class FakeLockServer
 
     public sealed class FakeLease(FakeLockServer s) : ISqlLease
     {
-        bool held; long myEpoch; bool requested, conceded;
+        bool held; long myEpoch; bool requested, conceded; string? me;
         /// <summary>A transient failure of the holder's look: it counts the lock as lost, but the server still holds it until the holder releases (the connection did not drop).</summary>
         public bool FailChecks;
         public bool Held { get { lock (s.gate) return held; } }
@@ -185,7 +185,7 @@ internal sealed class FakeLockServer
         {
             lock (s.gate)
             {
-                s.Attempts++;
+                s.Attempts++; me = holder;
                 if (s.Down) throw new InvalidOperationException("the database does not answer");
                 if (held && s.owner == this) return Task.FromResult(new SqlLeaseAcquire(true, myEpoch));
                 if (s.owner != null)
@@ -219,7 +219,11 @@ internal sealed class FakeLockServer
             lock (s.gate) { if (s.Down) throw new InvalidOperationException("down"); return Task.FromResult(new SqlLeasePeek(s.owner == null, s.lastHolder, s.epoch)); }
         }
 
-        public Task ReleaseAsync() { lock (s.gate) { if (s.owner == this) s.owner = null; held = false; requested = conceded = false; } return Task.CompletedTask; }
+        /// <summary>The holder looks and finds its lock gone (the connection dropped): the server has released it, and the holder knows.</summary>
+        public void Lose() { lock (s.gate) { if (s.owner == this) s.owner = null; held = false; } }
+
+        // like the real lease: a stopping newcomer withdraws its own takeover request, so that the holder need not step down for it
+        public Task ReleaseAsync() { lock (s.gate) { if (s.owner == this) s.owner = null; if (me != null && s.requestedBy == me) s.requestedBy = null; held = false; requested = conceded = false; } return Task.CompletedTask; }
     }
 }
 
@@ -363,10 +367,14 @@ public sealed class SqlLeadershipRulesTests
     public async Task TwoNearSimultaneousStarts_ConvergeToExactlyOneActor_AndNeverTwoNodes()
     {
         var locks = new FakeLockServer(); var refs = new FakeRefServer(); var nodes = new SqlLeadershipSupport.Nodes();
-        var n1 = new FakeProcess("N1", locks, refs, nodes); var n2 = new FakeProcess("N2", locks, refs, nodes);
+        // the bad ordering, forced: N1 holds the lock and is slow to write the ref; N2 starts meanwhile, asks, N1 makes room (its lock is gone before its ref is written) and N2 takes the lock and the ref,
+        // and only then does N1's write land, over N2's, from a process that no longer holds the lock
+        var n1 = new FakeProcess("N1", locks, refs, nodes, beforeRefWrite: () => Task.Delay(500)); var n2 = new FakeProcess("N2", locks, refs, nodes);
         try
         {
-            n1.Start(); n2.Start();
+            n1.Start();
+            await SqlLeadershipSupport.Until(() => n1.Lease.Held);
+            n2.Start();
             await SqlLeadershipSupport.Until(() => n1.Acts ^ n2.Acts, 30);
             await Task.Delay(1500);   // and it stays one: nobody flips, nobody is left without
             Assert.True(n1.Acts ^ n2.Acts);
@@ -397,6 +405,115 @@ public sealed class SqlLeadershipRulesTests
         finally { n1.Stop(); n2.Stop(); await n1.Service.StopAsync(CancellationToken.None); await n2.Service.StopAsync(CancellationToken.None); }
     }
 
+    static async Task SeedRef(FakeRefServer refs, string holder, bool release)
+    {
+        var run = refs.Run();
+        var (code, _) = await run("leader-lease", new System.Text.Json.Nodes.JsonObject { ["action"] = "acquire", ["holder"] = holder, ["ttl_seconds"] = 360 }.ToJsonString(), TimeSpan.FromSeconds(5));
+        Assert.Equal(0, code);
+        if (release) await run("leader-lease", new System.Text.Json.Nodes.JsonObject { ["action"] = "release", ["holder"] = holder, ["epoch"] = 1 }.ToJsonString(), TimeSpan.FromSeconds(5));
+    }
+
+    static GatewayLeader FakeLeader(FakeRefServer refs, FakeLockServer.FakeLease lease, Func<Task>? beforeRefWrite = null)
+    {
+        var leader = new GatewayLeader(refs.Calls_(beforeRefWrite), new LeaderSettings { On = true, CheckSeconds = 0.05, SqlCheckSeconds = 0.05 }, "0.0.0");
+        leader.UseSqlLease(lease, fencesActing: true);
+        return leader;
+    }
+
+    [Fact]
+    public async Task TheLockIsLostAfterTheRefWasWritten_TheStartKeepsTheRealPredecessor_NotItsOwnRecord()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        await SeedRef(refs, "OLD", release: false);
+        var lease = locks.NewLease(); var writes = 0;
+        var leader = FakeLeader(refs, lease, async () => { if (Interlocked.Increment(ref writes) == 1) { await Task.Delay(200); lease.Lose(); } });   // the first write goes out with the lock already gone (the lock's loop is steady by then)
+        var pred = await leader.AcquireAllAsync(cts.Token);
+        Assert.Equal(2, writes);                                          // the ref was written twice: the second write names the process's own first write as its predecessor
+        Assert.Equal("OLD", pred!["holder"]!.ToString());                 // ... and the restore still waits for the final snapshot of the real predecessor
+        Assert.True(lease.Held);
+        Assert.Equal(3, leader.Epoch);                                    // the seeded record was epoch 1, the two writes 2 and 3
+    }
+
+    [Fact]
+    public async Task AProcessThatLostTheStartRace_IsSuperseded_AtTheFirstPassiveMiss_AndActsWhenItGetsTheLock()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        var holder = locks.NewLease(); Assert.True((await holder.TryAcquireAsync("W", false, cts.Token)).Acquired);
+        var leader = FakeLeader(refs, locks.NewLease());
+        Assert.Equal(GatewayLeader.Role.Starting, leader.State);
+        var waiting = Task.Run(() => leader.AcquireSqlAsync(cts.Token, request: false), cts.Token);   // the passive loop of a process that is not the newest
+        await SqlLeadershipSupport.Until(() => leader.State == GatewayLeader.Role.Superseded);
+        Assert.True(leader.Replaced); Assert.False(leader.MayAct);
+        Assert.False(waiting.IsCompleted);                                // it keeps waiting for the lock
+        await holder.ReleaseAsync();
+        await waiting;
+        leader.StartActing();                                             // ... and acts when it has it
+        Assert.Equal(GatewayLeader.Role.Acting, leader.State); Assert.True(leader.MayAct);
+    }
+
+    [Fact]
+    public async Task AProcessWhoseRequestWasOverwrittenByANewerOne_IsSuperseded_WhileItWaits()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        var holder = locks.NewLease(); Assert.True((await holder.TryAcquireAsync("W", false, cts.Token)).Acquired);
+        var b = FakeLeader(refs, locks.NewLease());
+        var waiting = Task.Run(() => b.AcquireSqlAsync(cts.Token), cts.Token);                      // asks, as the newest process
+        await SqlLeadershipSupport.Until(() => locks.Attempts > 2);
+        Assert.Equal(GatewayLeader.Role.Starting, b.State);                                           // the newest process that is still the newest has lost nothing
+        Assert.False((await locks.NewLease().TryAcquireAsync("C", true, cts.Token)).Acquired);       // a still newer process asks: B's request is overwritten
+        await SqlLeadershipSupport.Until(() => b.State == GatewayLeader.Role.Superseded);
+        await holder.ReleaseAsync(); cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+    }
+
+    [Fact]
+    public async Task AStandbyThatLosesTheLockWhileItWritesTheRef_NeitherRestoresNorActs_AndTakesBothAgainWithTheRealPredecessor()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        await SeedRef(refs, "OLD", release: true);   // the old holder let go: the standby may take both
+        var lease = locks.NewLease(); var writes = 0;
+        var s = FakeLeader(refs, lease, () => { if (Interlocked.Increment(ref writes) == 1) lease.Lose(); return Task.CompletedTask; });
+        var reacquired = new List<(string? Holder, bool Held)>();
+        s.OnReacquired = pred => { lock (reacquired) reacquired.Add((pred?["holder"]?.ToString(), lease.Held)); return Task.CompletedTask; };
+        s.StartActing(); s.MarkSupersededForTest();
+        _ = Task.Run(() => s.LoopAsync(cts.Token));
+        await SqlLeadershipSupport.Until(() => s.State == GatewayLeader.Role.Acting && lease.Held);
+        (string? Holder, bool Held)[] seen; lock (reacquired) seen = reacquired.ToArray();
+        Assert.Equal(2, writes);
+        Assert.Single(seen);                                              // the restore ran once, with the lock held, not after the write that came without it
+        Assert.True(seen[0].Held);
+        Assert.Equal("OLD", seen[0].Holder);                               // ... and from the real predecessor
+        Assert.True(s.MayAct);
+    }
+
+    [Fact]
+    public async Task ALockCheckThatRunsLongerThanTwiceItsTimeout_ClearsHeld_WhateverTheCommandIsDoing()
+    {
+        var lease = new SqlLease("Server=unused;Database=unused", _ => Task.CompletedTask, 20) { CheckWatchdog = TimeSpan.FromMilliseconds(200) };
+        var stuck = new TaskCompletionSource(); lease.InCheck = _ => stuck.Task;   // a command on a dead socket: it neither finishes nor times out
+        lease.MarkHeldForTest(1);
+        Assert.True(lease.Held);
+        var check = lease.CheckAsync("H", CancellationToken.None);
+        await SqlLeadershipSupport.Until(() => !lease.Held, 10);
+        Assert.False(check.IsCompleted);                                  // the look is still stuck, and the process already acts no more
+        stuck.SetResult();
+        var result = await check;
+        Assert.Equal(SqlLeaseState.Lost, result.State);                   // a look that overran never answers "held"
+        Assert.False(lease.Held);
+    }
+
+    [Fact]
+    public async Task ARequestOfAStoppingNewcomer_IsWithdrawnByItsRelease()
+    {
+        var locks = new FakeLockServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var a = locks.NewLease(); var b = locks.NewLease();
+        Assert.True((await a.TryAcquireAsync("A", true, cts.Token)).Acquired);
+        Assert.False((await b.TryAcquireAsync("B", true, cts.Token)).Acquired);
+        Assert.Equal(SqlLeaseState.TakeoverRequested, (await a.CheckAsync("A", cts.Token)).State);
+        await b.ReleaseAsync();                                           // B stops: its request goes with it
+        Assert.Equal(SqlLeaseState.Held, (await a.CheckAsync("A", cts.Token)).State);
+    }
+
     [Fact]
     public async Task WhereTheEngineActs_AProcessThatActsOnTheRefWithoutTheLock_StandsDown()
     {
@@ -406,8 +523,8 @@ public sealed class SqlLeadershipRulesTests
         leader.StartActing();   // the lock was let go between the take of the lock and of the ref
         _ = Task.Run(() => leader.SqlLoopAsync(cts.Token));
         await SqlLeadershipSupport.Until(() => leader.State == GatewayLeader.Role.Superseded);
+        await SqlLeadershipSupport.Until(() => nodes.Snapshot().Contains("A:snapshot"));   // (the role changes before the hand-over callback has run)
         Assert.False(leader.MayAct);
-        Assert.Contains("A:snapshot", nodes.Snapshot());
     }
 
     [Fact]
