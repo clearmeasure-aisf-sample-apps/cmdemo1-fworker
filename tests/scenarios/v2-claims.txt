@@ -73,6 +73,29 @@ qc-worker
 #   W9.6 the keeper's and the manager's verbs (manager-action, amend-criteria, split-item, create-item, set-priority, link-dependency): manager, 'act:', 'keeper:' and 'mgr:' scenarios
 #   W9.10g the plant-wide steps as recurring jobs (the claim-ref reap, the board guard, the replenishment): auto, owner and manager scenarios
 #   W9.10k the manager's actions on an item a saga owns and the plant that comes back from SQL (manager-actions.ps1, v2 only: v1 has no saga and the scenarios say so): manager, 'act: saga item:'
+# ---- scenarios of a claimed suite that stay on v1 (`v1-only-scenarios <suite> | <regex> | <reason>`: run.ps1 -Engine v2 neither lists nor runs them; the line must match a scenario) --------------------------------------
+# The inline merge of the verdict call. On v1 validation-verdict runs Verb_merge -Gateway itself, so the PASS is merged in the call that records it and the golden writes hold "the gateway squash-merged PR" among the writes the call
+# caused. On v2 the verdict answers next=merge and the merge is the merge verb's, the sweep's or the saga's, a moment later (ItemVerbs.Flow.cs, W9.3, W9.10e), with the session's merge call writing the comment of a session's merge: the
+# checks of these scenarios (the verdict answer carries the merge, the merge is in the caused writes of the verdict call) are the inline merge's, which W9.11 removes with the sweep and the verdict script; the saga suite proves the merge on v2.
+v1-only-scenarios owner | ^pass-merge: a PASS on an Auto Merge item with green checks is merged by the verdict call itself | the verdict call's inline merge (Verb_merge -Gateway) is v1's; on v2 the merge follows the verdict (W9.3)
+v1-only-scenarios owner | ^pass-merge: a branch behind its base is brought up to date by the gateway, its merge commit is verified and merged | the gateway's update and merge inside the verdict call is v1's inline merge; W9.11 removes it
+v1-only-scenarios owner | ^pass-merge: a push that lands while the gateway's update of the branch is still pending is not merged | the gateway's update and merge inside the verdict call is v1's inline merge; W9.11 removes it
+v1-only-scenarios owner | ^pass-merge: a PASS for a head other than the current one is refused, and a verdict without a head is never merged by the gateway | the answer of the verdict call carries v1's inline merge; W9.11 removes it
+v1-only-scenarios owner | ^pass-merge: a hand-made two-parent merge pushed by a worker while the gateway's update is pending is not merged | the gateway's update and merge inside the verdict call is v1's inline merge; W9.11 removes it
+v1-only-scenarios owner | ^base update \(conflict mode\): right before the gateway merges a PASS | the update right before the verdict call's inline merge is v1's; W9.11 removes it
+v1-only-scenarios owner | ^owner: the owner is released at item.merged, its session is told session.end, and the gateway settles the item to Done | the golden writes of the verdict call hold v1's inline merge comment; the release at the merge on v2 is proved by the saga suite
+v1-only-scenarios owner | ^settle: a merged item whose master Build stays red keeps its settle state | the golden writes of the verdict call hold v1's inline merge comment; the master-green wait on v2 is proved by the saga suite (sweep step: a red master)
+v1-only-scenarios owner | ^settle: a stranded merged item is re-armed by the sweep and settled | the golden writes of the verdict call hold v1's inline merge comment; the settle on v2 is the saga's (sweep steps, WorkItemTracked tests)
+v1-only-scenarios owner | ^migration number: the gateway does not merge a PASS whose DbUp number was taken on master meanwhile | the refusal is part of the verdict call's inline merge on v1; the rule is C# in MergeVerbService (MigrationNumbers) and pinned by its unit tests
+v1-only-scenarios qc | ^qc: auto-merge, docs-only and fork items get no offer | the golden writes of the verdict call hold v1's inline merge comment (the QC offer rules are proved by the rest of the suite)
+v1-only-scenarios qc | ^qc: gate under the auto policy nothing changed | the golden writes of the verdict call hold v1's inline merge comment (the label rule is proved by the rest of the suite)
+# The rule-script runner and the GitHub-ref lease and snapshot, which W9.11b removes (the lease is the SQL application lock of W9.10b, the plant is in SQL from W9.10k and the verbs are C#).
+v1-only-scenarios owner | ^runner gate: at most runner.maxProcesses rule scripts at once | the Runner's slots and queue are v1's: the verbs are C# on v2, and W9.11b removes the Runner
+v1-only-scenarios qc | ^qc: runner pool a call that does not finish in time | the runner pool's timeout of a rule-script call is v1's: the verb is C# on v2, and W9.11b removes the pool
+v1-only-scenarios owner | ^leader: two gateways overlap | the GitHub-ref lease and the snapshot ref are v1's: the lease is the SQL application lock (W9.10b) and the plant is in SQL (W9.10k), proved by the Fworker.Workflow.Tests and the manager's 'act: saga item:' scenarios
+v1-only-scenarios owner | ^leader: a graceful stop releases the lease | the GitHub-ref lease and the snapshot ref are v1's: the lease is the SQL application lock (W9.10b) and the plant is in SQL (W9.10k)
+# The rule scripts' item lock is a file in the state directory; on v2 the item lock is the gateway's own (ItemLocks, W9.10l) and the file is not looked at.
+v1-only-scenarios manager | ^mgr: the escalation comment waits out a busy item lock | the scenario holds the rule scripts' lock file (FACTORY_STATE_DIR/item-N.lock); the C# journal takes the gateway's item lock, which W9.10l tests
 # auto and owner: gatewayMerge is off for auto (the session's own merge verb is tested there) and owner sessions are on for owner; both are the suites' own settings, as on v1.
 auto
 owner

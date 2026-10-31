@@ -180,7 +180,16 @@ $SuiteDefs = @(
 
 # ---- which scenarios run: Run-Suite runs them and -ListScenarios -Suite prints them, through the same functions, so the two cannot differ ----------
 function Get-OnlyNames($Set) { @($Set.Keys | Where-Object { -not $Only -or $_ -match $Only }) }
-function Get-TierNames([string[]]$Names) { @(foreach ($n in @($Names)) { if ($n -and ($Tier -eq 'full' -or (Get-ScenarioTier $n) -eq 'fast')) { $n } }) }
+function Get-TierNames([string[]]$Names, [string]$SuiteName = '') {
+    # -Engine v2: the scenarios that v2-claims.txt declares v1-only for this suite (`v1-only-scenarios <suite> | <regex> | <reason>`) are neither listed nor run on v2 (run-v2-claims.py checks the lines)
+    $v1only = @(Get-V2V1OnlyPatterns $SuiteName)
+    @(foreach ($n in @($Names)) { if ($n -and ($Tier -eq 'full' -or (Get-ScenarioTier $n) -eq 'fast') -and -not ($v1only | Where-Object { $n -match $_ })) { $n } })
+}
+function Get-V2V1OnlyPatterns([string]$SuiteName) {
+    if ($Engine -ne 'v2' -or -not $SuiteName) { return @() }
+    $f = Join-Path $PSScriptRoot 'v2-claims.txt'; if (-not (Test-Path -LiteralPath $f)) { return @() }
+    @([IO.File]::ReadAllLines($f) | ForEach-Object { $m = [regex]::Match($_.Trim(), '^v1-only-scenarios\s+(?<s>[a-z0-9-]+)\s*\|\s*(?<r>.+?)\s+\|\s+(?<why>.+)$'); if ($m.Success -and $m.Groups['s'].Value -eq $SuiteName) { $m.Groups['r'].Value } })
+}
 # The share of group $Index (from 0) of $Count of a suite's scenarios, kept in suite order; every scenario is in exactly one group. Seconds per scenario
 # come from scenario-stats.json (run-all.ps1 -Tier full rewrites it); one it does not know counts as 30 s, about the mean seen in CI for the long
 # suites (owner 29, auto 46, manager 19 s per scenario). owner: contiguous runs, cut only where a scenario of $OwnerBarriers (owner.ps1) starts, so
@@ -233,7 +242,7 @@ if ($Group -ge $Groups) { Write-Host "-Group $Group is outside -Groups $Groups (
 # nothing else; without -Group the whole suite. A guard can prove with it that every scenario of a suite runs in exactly one of its groups.
 if ($ListScenarios) {
     $d0 = @($SuiteDefs | Where-Object { $_.Name -eq $Suite })[0]
-    $n0 = @(Get-TierNames @(Get-OnlyNames $d0.Set))
+    $n0 = @(Get-TierNames @(Get-OnlyNames $d0.Set) $Suite)
     if ($Groups -gt 1 -and $Group -ge 0) { $n0 = @(Select-GroupShare $Suite $n0 $Groups $Group) }
     foreach ($k0 in $n0) { "$Suite`t$k0`t$(Get-ScenarioTier $k0)" }
     exit 0
@@ -313,6 +322,7 @@ foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
 # gateway's DbUp creates it (FACTORY_DB_CREATE, tests only) and applies the scripts of src/Fworker.Database, a run never meets the tables of another, and the CI job's SQL Server container goes with the job.
 # The connection string carries the password: it is never printed.
 $script:V2EnvName = 'v2ci'
+$V2DefaultEnvSuites = @('owner', 'messaging', 'cursor', 'cursor-deadline', 'runtime')   # (see Invoke-SuiteDef)
 $script:V2Connection = ''
 if ($Engine -eq 'v2' -and $env:FACTORY_TEST_SQL) {
     $v2Db = 'fworker_v2ci_' + ($label.ToLowerInvariant() -replace '[^a-z0-9]', '_') + '_' + [guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -383,7 +393,7 @@ function Count-GatewayVerbs { foreach ($f in Get-ChildItem -Path $script:Work -F
 $script:Skipped = New-Object System.Collections.ArrayList
 function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
     $names = @(Get-OnlyNames $Set)
-    $runNames = @(Get-TierNames $names)
+    $runNames = @(Get-TierNames $names $script:SuiteName)
     foreach ($n in $names) { if ($runNames -notcontains $n) { [void]$script:Skipped.Add(@{ suite = $script:SuiteName; name = $n }) } }
     if ($Groups -gt 1 -and $Group -ge 0) { $runNames = @(Select-GroupShare $script:SuiteName $runNames $Groups $Group) }   # this child's share
     if ($runNames.Count -eq 0) {
@@ -415,8 +425,11 @@ function Invoke-SuiteDef($Def) {
     $script:UseClientHost = $Def.ContainsKey('ClientHost') -and [bool]$Def.ClientHost
     $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; if ($Engine -eq 'v2') {
         # the suite's own environment name where it sets one (copilot, promote, envscope: tdd), else the CI-only name
-        $script:V2EnvName = $(if ($envs.ContainsKey('FACTORY_ENVIRONMENT') -and "$($envs['FACTORY_ENVIRONMENT'])".Trim()) { "$($envs['FACTORY_ENVIRONMENT'])".Trim() } else { 'v2ci' })
-        $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName; $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection; $envs['FACTORY_DB_CREATE'] = '1'
+        # A suite in $V2DefaultEnvSuites runs as v1 runs it, with FACTORY_ENVIRONMENT unset, which the gateway reads as tdd (W9.9c prep, #361): its scenarios check the name (the dashboard, the agent names of Cursor, the scale-to-zero
+        # warning) or the baked runtime settings that apply in tdd, in a local gateway or with no name only (RuntimeSettings.Load: caeJob is off in any other environment, v2ci included)
+        $script:V2EnvName = $(if ($envs.ContainsKey('FACTORY_ENVIRONMENT') -and "$($envs['FACTORY_ENVIRONMENT'])".Trim()) { "$($envs['FACTORY_ENVIRONMENT'])".Trim() } elseif ($V2DefaultEnvSuites -contains $Def.Name) { 'tdd' } else { 'v2ci' })
+        if ($V2DefaultEnvSuites -notcontains $Def.Name -or $envs.ContainsKey('FACTORY_ENVIRONMENT')) { $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName }
+        $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection; $envs['FACTORY_DB_CREATE'] = '1'
         # a saga profile: the intake is the config's (intake.enabled), not an environment switch that the rule script and the engine would both read
         if ($script:IsSagaProfile) { $envs.Remove('FACTORY_INTAKE') }
     }

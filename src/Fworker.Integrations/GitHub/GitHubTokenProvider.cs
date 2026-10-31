@@ -41,9 +41,13 @@ public sealed class GitHubTokenProvider
     /// <summary>The provider for the environment, or null when it has neither GH_TOKEN nor the App's id, installation and key. <paramref name="http"/> mints the App token (tests); the default reaches GITHUB_API_URL or api.github.com.</summary>
     public static GitHubTokenProvider? FromEnvironment(Func<string, string?> env, HttpClient? http = null, Func<DateTimeOffset>? now = null)
     {
-        if (!Unset(env("GH_TOKEN"))) return new GitHubTokenProvider(env("GH_TOKEN")!.Trim(), null, null, null, null, null, now);
         var id = env("FACTORY_APP_AUTHOR_ID"); var inst = env("FACTORY_APP_AUTHOR_INSTALLATION"); var key = env("FACTORY_APP_AUTHOR_KEY");
-        if (Unset(id) || Unset(inst) || Unset(key)) return null;
+        var appComplete = !Unset(id) && !Unset(inst) && !Unset(key);
+        // FACTORY_AUTHOR_APP=1 names the App as the gateway's identity and GH_TOKEN is then not looked at (Get-GhToken, Get-ServerLogin in plugin/scripts/lib/Core.ps1; ServiceGitHub): the state comments it adopts and writes
+        // are told apart by that login. With the App not configured completely, GH_TOKEN stays what it was.
+        var appFirst = env("FACTORY_AUTHOR_APP") == "1" && appComplete;
+        if (!appFirst && !Unset(env("GH_TOKEN"))) return new GitHubTokenProvider(env("GH_TOKEN")!.Trim(), null, null, null, null, null, now);
+        if (!appComplete) return null;
         if (http is null)
         {
             var api = env("GITHUB_API_URL");

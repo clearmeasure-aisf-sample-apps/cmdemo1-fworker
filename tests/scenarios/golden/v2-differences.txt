@@ -85,3 +85,7 @@
 + + gateway POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **sg1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|sg1 -->"}
 + + gateway STATE factory-worker v1 #{#1}
 + ~ gateway PUT /repos/{repo}/pulls/{#2}/merge 200 {"merge_method":"squash","sha":"{sha}"}
+
+@ copilot/copilot-a-task-that-ends-by-itself-ends-its-worker-and-reports-its-premium-reque-0c0f2361
+- ~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: the execution of cop-{session} ended (start-failed); offering to the next worker.\n\n<!-- plant event=reassigned key=rtend|a-{id}|cop-{session} -->"}
+# why: the fake refuses the create with a 500, which is transient: the start command tries it again after 2 s with the same worker (RuntimeCommandService.RetryPauses), so no execution ends as start-failed and the item is not offered to a next worker; a 4xx refusal is a failure at once (V1CommandPort.Classify, W9.9c prep); issue: #361

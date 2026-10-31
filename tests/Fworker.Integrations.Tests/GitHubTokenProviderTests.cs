@@ -41,6 +41,21 @@ public sealed class GitHubTokenProviderTests
         Assert.Null(p.AppLogin);
     }
 
+    // FACTORY_AUTHOR_APP=1 is the rule scripts' switch for the App as the identity (Get-GhToken): GH_TOKEN is then not looked at, and the login of the state comments is the App's
+    [Fact]
+    public void AuthorApp_PutsTheAppBeforeGhToken_WhenItIsConfigured()
+    {
+        var ghp = "ghp_" + new string('A', 26);
+        var p = GitHubTokenProvider.FromEnvironment(Env(("GH_TOKEN", ghp), ("FACTORY_AUTHOR_APP", "1"), ("FACTORY_APP_AUTHOR_ID", "1"), ("FACTORY_APP_AUTHOR_INSTALLATION", "2"), ("FACTORY_APP_AUTHOR_SLUG", "my-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)), Client(new Mint()))!;
+        Assert.Equal("my-app[bot]", p.AppLogin);
+        // not configured completely: GH_TOKEN stays the identity, and without it there is none
+        var q = GitHubTokenProvider.FromEnvironment(Env(("GH_TOKEN", ghp), ("FACTORY_AUTHOR_APP", "1"), ("FACTORY_APP_AUTHOR_ID", "1")))!;
+        Assert.Null(q.AppLogin);
+        Assert.Null(GitHubTokenProvider.FromEnvironment(Env(("FACTORY_AUTHOR_APP", "1"), ("FACTORY_APP_AUTHOR_ID", "1"))));
+        // the switch off or not 1: GH_TOKEN wins as before
+        Assert.Null(GitHubTokenProvider.FromEnvironment(Env(("GH_TOKEN", ghp), ("FACTORY_AUTHOR_APP", "0"), ("FACTORY_APP_AUTHOR_ID", "1"), ("FACTORY_APP_AUTHOR_INSTALLATION", "2"), ("FACTORY_APP_AUTHOR_SLUG", "my-app"), ("FACTORY_APP_AUTHOR_KEY", Pem)), Client(new Mint()))!.AppLogin);
+    }
+
     [Fact]
     public void NoIdentity_IsNull()
     {
