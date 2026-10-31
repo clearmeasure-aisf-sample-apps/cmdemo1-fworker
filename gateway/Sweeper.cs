@@ -47,7 +47,11 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             if (V2 != null && Adoption != null)
             {
                 var term = Adoption.Settled();
-                if (term is null) { WarnWaiting("the adoption of this term has not finished; v1 acts on no item until it has"); try { await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } continue; }
+                if (term is null)
+                {
+                    WarnWaiting("the adoption of this term has not finished; v1 acts on no item until it has");
+                    try { await Adoption.PokeAsync(ct); } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; } catch (Exception e) { Console.Error.WriteLine($"adoption poke: {e.GetType().Name}"); }
+                    try { await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } continue; }
                 if (adoptedTerm != term)
                 {
                     if (!await OwnershipRead(ct)) { try { await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } continue; }

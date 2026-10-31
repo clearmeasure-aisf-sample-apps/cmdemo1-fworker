@@ -33,12 +33,16 @@ static class GatewayWolverineExtensions
         var readoption = new Fworker.Workflows.Adoption.ReadoptionGate();   // W9.9b (review): the hold on old-generation inputs between the host's start and the adoption of a term after a break
         AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
         // cutover review: the sweep waits for the adoption of its term (AdoptionGate); registered below where the engine acts, set up here because the status block and the host's wiring close over `adoption`
-        var adoptionGate = new AdoptionGate(() => adoption is not null, e => adoption!.Job.IsDone(e), () => c.Leader.MayAct, () => c.Leader.ClaimEpoch);
+        WolverineHostService? hostForPoke = null;
+        // (the sweep asks for the term's first look of the adoption itself once the host runs: the recurring job's first look comes later, and the sweep waits for it)
+        var adoptionGate = new AdoptionGate(() => adoption is not null, e => adoption!.Job.IsDone(e), () => c.Leader.MayAct, () => c.Leader.ClaimEpoch,
+            poke: async ct => { if (adoption is { } a && hostForPoke is { State: WolverineHostService.Phase.Running }) { var did = await a.Job.TickIfFirst(ct); if (did is not (null or "heartbeat" or "not-leader")) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["adoption"] = did, ["report"] = a.Runner.Last?.ToJson() }.ToJsonString()); } });
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return adoptionGate; });
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
             var host = new WolverineHostService(sp.GetRequiredService<DatabaseOptions>(), sp.GetRequiredService<WolverineHostOptions>(), sp.GetRequiredService<GatewayLeader>(), sp.GetRequiredService<FactorySchemaStatus>());
+            hostForPoke = host;
             if (c.Engine.V2Acts)
             {
                 // W3.3: the Copilot launch runs under a reservation, settled by CopilotReconcileService (a hosted service of AddGatewayBackground)

@@ -207,7 +207,7 @@ public sealed class CutoverSafetyTests
         public readonly HashSet<long> DoneEpochs = [];
         public readonly Sweeper Sweeper;
 
-        public Rig()
+        public Rig(Func<Rig, Func<CancellationToken, Task>>? poke = null)
         {
             var runner = new Runner("/nonexistent/factory.ps1");
             var routes = new V2VerbRoutes();
@@ -220,7 +220,7 @@ public sealed class CutoverSafetyTests
             var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30);
             var hub = new EventHub();
             var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
-            var gate = new AdoptionGate(() => true, e => { lock (DoneEpochs) return DoneEpochs.Contains(e); }, () => true, () => Interlocked.Read(ref Epoch));
+            var gate = new AdoptionGate(() => true, e => { lock (DoneEpochs) return DoneEpochs.Contains(e); }, () => true, () => Interlocked.Read(ref Epoch), poke: poke?.Invoke(this));
             Sweeper = new Sweeper(runner, hub, plant, qc, 3600, false, null, Task.CompletedTask) { MayAct = () => true, V2 = new V2Ownership(Store, Home), Adoption = gate };
         }
 
@@ -245,6 +245,20 @@ public sealed class CutoverSafetyTests
             Assert.True(await r.WaitForCall(15));
             // the loop read the table after the adoption and before the pass (the pass reads it once more itself): at least two reads came after the flip
             Assert.True(r.Calls[0].Reads >= readsWhenAdopted + 2, $"reads at the pass {r.Calls[0].Reads}, when adopted {readsWhenAdopted}");
+        }
+        finally { await r.Sweeper.StopAsync(default); }
+    }
+
+    [Fact]
+    public async Task TheWaitingSweep_AsksForTheTermsFirstLookOfTheAdoptionItself()
+    {
+        var pokes = 0;
+        var r = new Rig(rig => ct => { Interlocked.Increment(ref pokes); rig.Adopted(1); return Task.CompletedTask; });
+        await r.Sweeper.StartAsync(default);
+        try
+        {
+            Assert.True(await r.WaitForCall(15));
+            Assert.True(pokes >= 1);
         }
         finally { await r.Sweeper.StopAsync(default); }
     }

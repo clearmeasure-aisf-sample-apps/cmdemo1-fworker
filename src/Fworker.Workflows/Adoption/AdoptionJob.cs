@@ -25,6 +25,25 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
     /// <summary>One look: waits, runs the adoption of the term, or writes the heartbeat. Returns what it did ("not-leader", "waiting: ...", "heartbeat", or the run's outcome).</summary>
     public async Task<string> Tick(CancellationToken ct)
     {
+        await oneTick.WaitAsync(ct);
+        try { return await TickCore(ct); } finally { oneTick.Release(); }
+    }
+
+    readonly SemaphoreSlim oneTick = new(1, 1);
+
+    /// <summary>
+    /// Cutover review: the sweep waits for the adoption of the term, and the recurring job's first look can be late (the scheduler starts with the host). So the sweep asks for the term's FIRST look itself: it runs only when no look has begun
+    /// in this term and none is running; later looks (the retries, with their pauses and attempt counts) stay with the recurring job. Returns null when it did nothing.
+    /// </summary>
+    public async Task<string?> TickIfFirst(CancellationToken ct)
+    {
+        bool Begun() { lock (gate) return termEpoch == epoch() && attempts > 0; }
+        if (Begun() || !await oneTick.WaitAsync(0, ct)) return null;
+        try { return Begun() ? null : await TickCore(ct); } finally { oneTick.Release(); }
+    }
+
+    async Task<string> TickCore(CancellationToken ct)
+    {
         if (!mayAct()) { lock (gate) { state = "not-leader"; } return "not-leader"; }
         var e = epoch();
         bool finished; lock (gate) finished = doneEpoch == e;

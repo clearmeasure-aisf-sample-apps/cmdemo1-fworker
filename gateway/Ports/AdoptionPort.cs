@@ -150,8 +150,11 @@ sealed class KillSwitchMarkerService(IEngineMarkers markers, string holder, Func
 /// first time the adoption has been over in this process, /ready answers 503 "adoption". A process that never adopts is an outage for the operator to decide (FACTORY_V2_OFF=1 hands the factory back to v1, whose marker the next adoption fences);
 /// a v1 pass on items the adoption has not examined is the unfenced case this exists to prevent. Where this process has no adoption (no GitHub identity: nothing could be read) there is nothing to wait for.
 /// </summary>
-sealed class AdoptionGate(Func<bool> hasAdoption, Func<long, bool> isDone, Func<bool> mayAct, Func<long> epoch, Func<DateTimeOffset>? clock = null, TimeSpan? limit = null)
+sealed class AdoptionGate(Func<bool> hasAdoption, Func<long, bool> isDone, Func<bool> mayAct, Func<long> epoch, Func<DateTimeOffset>? clock = null, TimeSpan? limit = null, Func<CancellationToken, Task>? poke = null)
 {
+    /// <summary>Asks for the term's first look of the adoption now instead of at the recurring job's next tick (the wiring: only while the Wolverine host runs). The sweep calls it while it waits.</summary>
+    public Task PokeAsync(CancellationToken ct) => poke?.Invoke(ct) ?? Task.CompletedTask;
+
     public static readonly TimeSpan Limit = TimeSpan.FromMinutes(10);
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
     readonly TimeSpan bound = limit ?? Limit;
