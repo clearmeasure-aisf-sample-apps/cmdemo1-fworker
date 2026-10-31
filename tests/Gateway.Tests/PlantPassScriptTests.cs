@@ -5,8 +5,8 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W9.10g: the plant pass of the real sync-board (plugin/scripts/lib/Verbs.Sweep.ps1) against the fake GitHub: <c>plant_steps</c> runs only the steps it names and reads no item, and <c>skip_steps</c> leaves steps out of an ordinary
-/// pass. The rule script is the real one (pwsh, factory.ps1 --server sync-board); the board is the Tier 1 suites' fake. The tests return at once where pwsh or the fake (dotnet build tests/FakeGitHub -c Release) is not there.
+/// W9.10g: <c>skip_steps</c> of the real sync-board (plugin/scripts/lib/Verbs.Sweep.ps1) against the fake GitHub: an ordinary pass leaves the steps out that the gateway's recurring jobs take (the jobs are C#: PlantSteps), and the first full pass after a gap
+/// still renews the claims that ran out inside it. The rule script is the real one (pwsh, factory.ps1 --server sync-board); the board is the Tier 1 suites' fake. The tests return at once where pwsh or the fake (dotnet build tests/FakeGitHub -c Release) is not there.
 /// </summary>
 public sealed class PlantPassScriptTests : IDisposable
 {
@@ -51,58 +51,12 @@ public sealed class PlantPassScriptTests : IDisposable
     string? ColumnOf(int n) => rig!.State()["issues"]!.AsArray().First(i => i!["number"]!.GetValue<int>() == n)!["column"]?.ToString();
 
     [Fact]
-    public async Task APlantPassForTheBoardGuardPlacesTheIssue_AndDoesNothingElse()
-    {
-        if (rig is null || !HasPwsh()) return;
-        var lonely = Unplaced();
-        var waiting = rig.NewItem("Waits in Technical Design", ["factory worker"], "Technical Design");
-        var (exit, a) = await SyncBoard(new JsonObject { ["plant_steps"] = new JsonArray("board-guard") });
-        Assert.Equal(0, exit);
-        Assert.True(a["plant"]!.GetValue<bool>());
-        Assert.Equal("Technical Design", ColumnOf(lonely));
-        Assert.Contains(a["actions"]!.AsArray(), x => x!["action"]!.ToString() == "board-added" && x["item"]!.GetValue<int>() == lonely);
-        Assert.Empty(a["offers"]!.AsArray());                                       // no item was read: no offers, no owners, no parks
-        Assert.Null(a["design_waiting"]);                                           // the count is a step of its own
-        Assert.Null(a["release_queue"]);
-        Assert.Empty(Skipped(a));                                                   // every other step is not "skipped": it was not asked for
-        Assert.Equal("Technical Design", ColumnOf(waiting));
-    }
-
-    [Fact]
-    public async Task APlantPassForTheKeepersCount_CountsTheKeepersColumn_AndPlacesNothing()
-    {
-        if (rig is null || !HasPwsh()) return;
-        var lonely = Unplaced();
-        rig.NewItem("Waits 1", ["factory worker"], "Technical Design"); rig.NewItem("Waits 2", ["factory worker"], "Technical Design");
-        rig.NewItem("Builds", ["factory worker"], "Development"); rig.NewItem("Not ours", ["bug"], "Technical Design");
-        var (exit, a) = await SyncBoard(new JsonObject { ["plant_steps"] = new JsonArray("design-waiting") });
-        Assert.Equal(0, exit);
-        Assert.Equal(2, a["design_waiting"]!.GetValue<int>());
-        Assert.Null(ColumnOf(lonely));                                              // the board guard was not asked for
-        Assert.Empty(a["actions"]!.AsArray());
-    }
-
-    [Fact]
-    public async Task APlantPassForTheReapAndTheReplenishment_RunsAndAnswers_OnABoardWithNothingToDo()
-    {
-        if (rig is null || !HasPwsh()) return;
-        rig.NewItem("Builds", ["factory worker"], "Development");
-        var (exit, a) = await SyncBoard(new JsonObject { ["plant_steps"] = new JsonArray("claim-ref-reap", "replenish"), ["free_workers"] = 1, ["replenish_waiting"] = 0 });
-        Assert.Equal(0, exit);
-        Assert.Empty(a["errors"]!.AsArray());
-        Assert.True(a["steps"]!.AsObject().ContainsKey("claim-ref-reap"));
-        Assert.Null(a["fenced"]);
-        Assert.Empty(a["offers"]!.AsArray());
-    }
-
-    [Fact]
     public async Task AnOrdinaryPassThatIsToldToLeaveTheStepsOut_LeavesThemOut_AndOneThatIsNotTold_DoesThemAsBefore()
     {
         if (rig is null || !HasPwsh()) return;
         var lonely = Unplaced();
         var (exit, left) = await SyncBoard(new JsonObject { ["skip_steps"] = new JsonArray("claim-ref-reap", "board-guard", "qc-sync", "replenish") });
         Assert.Equal(0, exit);
-        Assert.False(left["plant"]!.GetValue<bool>());
         Assert.Null(ColumnOf(lonely));                                              // the board guard is the job's
         Assert.Contains("board-guard-job", Skipped(left)); Assert.Contains("claim-ref-reap-job", Skipped(left)); Assert.Contains("replenish-job", Skipped(left));
         Assert.NotNull(left["design_waiting"]);                                     // the item loop still counts the keeper's column
@@ -158,16 +112,5 @@ public sealed class PlantPassScriptTests : IDisposable
         Assert.True(ClaimOf(inside).ContainsKey("gap_renewed"));
         Assert.True(DateTime.Parse(ClaimOf(inside)["lease_until"]!.ToString(), null, System.Globalization.DateTimeStyles.AdjustToUniversal) > now);
         Assert.False(ClaimOf(before).ContainsKey("gap_renewed"));
-    }
-
-    [Fact]
-    public async Task APassThatNamesItemsIsNeverAPlantPass()
-    {
-        if (rig is null || !HasPwsh()) return;
-        var n = rig.NewItem("Builds", ["factory worker"], "Development");
-        var (exit, a) = await SyncBoard(new JsonObject { ["plant_steps"] = new JsonArray("board-guard"), ["items"] = new JsonArray(n) });
-        Assert.Equal(0, exit);
-        Assert.False(a["plant"]!.GetValue<bool>());
-        Assert.True(a["incremental"]!.GetValue<bool>());
     }
 }
