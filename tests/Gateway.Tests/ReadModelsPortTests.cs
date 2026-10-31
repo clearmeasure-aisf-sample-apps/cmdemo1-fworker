@@ -278,8 +278,12 @@ public sealed class ReadModelsPortTests : IDisposable
         var result = await l.Use(7, async () =>
         {
             Assert.True(File.Exists(Path.Combine(state, "item-7.lock")));
-            // the same item again cannot get in: busy after the time it may wait
-            var busy = await Assert.ThrowsAsync<ItemBusyException>(() => l.Use(7, () => Task.FromResult(1), 1, default));
+            // a call of the same item from inside the held lock is the same operation (copilot-settle's takeover calls open-pr): it runs at once, with no wait
+            Assert.Equal(5, await l.Use(7, () => Task.FromResult(5), 1, default));
+            Assert.Empty(waits);
+            // another flow of work for the same item cannot get in: busy after the time it may wait
+            Task<int> Stranger() { using var _ = ExecutionContext.SuppressFlow(); return Task.Run(() => l.Use(7, () => Task.FromResult(1), 1, default)); }
+            var busy = await Assert.ThrowsAsync<ItemBusyException>(Stranger);
             Assert.Equal((7, "another operation on item 7 is running"), (busy.Item, busy.Message));
             Assert.NotEmpty(waits); Assert.All(waits, w => Assert.Equal(TimeSpan.FromMilliseconds(300), w));
             // another item is free
