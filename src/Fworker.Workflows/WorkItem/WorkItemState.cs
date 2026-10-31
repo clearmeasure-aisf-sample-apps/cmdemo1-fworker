@@ -151,6 +151,13 @@ public sealed class WorkItemState
     /// <summary>Who approved the pull request that cleared the inspector's hold.</summary>
     public string ApprovedBy { get; set; } = "";
 
+    // ---- adoption (W9.10m, Adoption/*): optional field, absent in a state saved before it ------------------------------------------------------------------------------
+    /// <summary>
+    /// The revision of the item's state comment this state was last brought to by adoption (0: never adopted; the item was started by the saga itself). The rule of the reconciliation is that the comment wins at a start
+    /// when its revision is newer than this one (Adoption/AdoptionReconciler.cs).
+    /// </summary>
+    public int CommentRev { get; set; }
+
     static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Converters = { new JsonStringEnumConverter() } };
 
     public string ToJson() => JsonSerializer.Serialize(this, Json);
