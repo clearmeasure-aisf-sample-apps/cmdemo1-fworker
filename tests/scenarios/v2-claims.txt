@@ -30,6 +30,9 @@ saga | ^saga: sweep step: a merged code item | profile=saga-feature
 saga | ^saga: sweep step: a red master | profile=saga-feature
 saga | ^saga: sweep step: a PASS whose | profile=saga-feature
 saga | ^saga: sweep step: a merge by a person | profile=saga-feature
+# W9.10j (#562): the scheduler on (the scenario turns scheduler.featureSlots back on and the Octopus runtime of the fake on, with a day budget of 3), three sessions started across a gateway restart, the fourth item held by the budget.
+# The profile only turns the intake on; the scenario sets the rest in the configuration of its gateway (one gateway of its own, like the other claims of the suite).
+saga | ^saga: slots: | profile=saga-feature
 
 # ---- whole suites ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # W3 gate: runtime start and stop, and runbook runs, against the fake Octopus. The start is a command on v2; the caller that needs v1's synchronous

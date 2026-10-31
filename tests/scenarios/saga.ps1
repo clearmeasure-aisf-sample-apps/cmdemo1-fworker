@@ -6,7 +6,7 @@
 #   v1  the rule script's intake (FACTORY_INTAKE=1) pulls the card; the verbs, the gateway's merge after the PASS and the sweep do the rest, the merge is a `rule` write with a record in the state comment;
 #   v2  the engine's intake (config intake.enabled with intake.v2Plans, profile saga-docs or saga-feature of run.ps1; the rule script's intake skips the plans of intake.v2Plans, W9.10e) starts the
 #       WorkItemSaga; the verbs are v2's; the merge is the saga's own call through the merge train (source `gateway`), the card goes to Done by the gateway's projection and no comment says that it merged.
-# The suite is claimed by v2-claims.txt twice, with the profile of each plan (the scenario of the docs plan with saga-docs, the one of the feature plan with saga-feature).
+# The suite is claimed by v2-claims.txt by scenarios, with the profile of each plan (the scenario of the docs plan with saga-docs, the others with saga-feature; the last scenario, W9.10j's slots, turns the scheduler on itself).
 $script:SagaOwner = 'sg1'
 
 # the owner session that gives the intake its free slot (a connected owner session with capacity); started once, left running for the suite's other scenarios
@@ -210,4 +210,127 @@ $SagaScenarios['saga: sweep step: a merge by a person ends the Merge step wherev
     Check 'the saga judged master green for the merge commit (decision master-green)' $green "decisions: $((Saga-Actions $x.n) -join ', ')"
     $v = Saga-View $x.n
     Check 'the item waits for its delivery, not parked' ($null -ne $v -and "$($v.step)" -eq 'Deliver' -and -not $v.parked) ($v | ConvertTo-Json -Compress -Depth 4)
+}
+
+# ---- W9.10j (#562, the second pull request): the sessions of the scheduler's slots against the fake Octopus, across a gateway restart (v2 only) ---------------------------------------------------------
+# The audit of 2026-10-30 (finding 20): the scheduler counted each session of its own ledger once and the runtime's manager counted it again, so the day budget and the concurrency were reached at half, and a restart brought
+# the double count back. The unit and wiring tests of the first pull request pin the arithmetic; this is the proof through the gateway: the scheduler is on (scheduler.featureSlots), the runtime is the fake Octopus (one Start
+# worker run is one session), the day budget is 3, and the gateway is killed between the second and the third session. More than half the budget in sessions (three of three) must be started, none of them held for
+# runtime-budget before the budget is spent, the manager must not count the ledger's sessions again after the restart, and the fourth item must wait for the budget (it is the budget, not a double count, that holds it).
+# The runtime's side is played as the host does: the hosts report the containers of the runs, and the container's worker redeems its nonce and takes the item (the intake pulls the next item only when no item waits in
+# Technical Design for an owner). v1 has no scheduler: its sessions are the plant's (suites octopus and runtime).
+$script:SlotsBudget = 3
+function Slots-HostOf([string]$Machine) { switch ($Machine) { 'Machines-1' { return 'host-a' } 'Machines-2' { return 'host-b' } default { return '' } } }
+# every host reports the containers of the Start worker runs that are executing (a run the report does not list ends: reportGraceSeconds)
+function Slots-Report {
+    # (the Start worker task of a detached worker ends at once; the container lives on until a Stop worker run names it)
+    $state = Oct-State
+    $stopped = @($state.runs | Where-Object { $_.runbook -eq 'Stop worker' } | ForEach-Object { "$($_.values.Name)" })
+    $runs = @($state.runs | Where-Object { $_.runbook -eq 'Start worker' -and $_.state -in 'Executing', 'Success' -and "$($_.values.Name)" -notin $stopped })
+    foreach ($h in 'host-a', 'host-b', 'host-c') {
+        $cs = @($runs | Where-Object { @($_.machines).Count -gt 0 -and (Slots-HostOf "$($_.machines[0])") -eq $h } | ForEach-Object { @{ name = "fw-$($_.values.Name)"; item = [int]$_.values.Item; state = 'running'; startedAt = (Get-Date).ToUniversalTime().ToString('o') } })
+        [void](Oct-Report $h $cs)
+    }
+}
+# waits for the condition and keeps the hosts' reports coming (every 2 s)
+function Slots-WaitFor([int]$Seconds, [scriptblock]$Cond) {
+    $end = (Get-Date).AddSeconds($Seconds); $last = [DateTime]::MinValue
+    while ((Get-Date) -lt $end) {
+        if (((Get-Date) - $last).TotalSeconds -ge 2) { Slots-Report; $last = Get-Date }
+        if (& $Cond) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+function Slots-Runs([int]$n) { , @((Oct-State).runs | Where-Object { $_.runbook -eq 'Start worker' -and "$($_.values.Item)" -eq "$n" }) }
+function Slots-AllRuns { , @((Oct-State).runs | Where-Object { $_.runbook -eq 'Start worker' }) }
+# the container of a run takes the item: it redeems the nonce, connects as the worker and accepts the offer
+function Slots-Take([int]$n, $Run) {
+    $name = "$($Run.values.Name)"
+    $r = Rt-Redeem "$($Run.values.Nonce)"
+    Check "the nonce of the run for #$n is redeemed" ($r.status -eq 200) ($r | ConvertTo-Json -Compress)
+    if ($r.status -ne 200) { return $name }
+    Start-RuntimeClient $name "$($r.body.token)"
+    $own = Rt-Own $name $n; CheckExit "the worker $name owns #$n" $own 0
+    return $name
+}
+function Slots-Reasons([int]$n) { $v = Saga-View $n; if ($null -eq $v) { return '' }; (@($v.history | ForEach-Object { "$($_.action) $(@($_.reasons) -join ' ')" }) -join ' | ') }
+
+$SagaScenarios['saga: slots: three sessions against a day budget of three are started, one after the other and across a gateway restart, the fourth item waits for the budget'] = {
+    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the scheduler is the v2 engine''s; v1''s sessions are the plant''s (suites octopus and runtime)' $true; return }
+    Saga-NumbersAbove 60
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $envNames = 'OCTOPUS_RUNBOOK_API_KEY', 'FACTORY_OCTOPUS_HOST_TOKEN', 'FACTORY_TRANSCRIPT_SAVE_SECONDS', 'FACTORY_INTAKE_WIP'
+    $oldEnv = @{}; foreach ($e in $envNames) { $oldEnv[$e] = [Environment]::GetEnvironmentVariable($e) }
+    $items = @(); $clients = @()
+    try {
+        $cfg = $orig | ConvertFrom-Json -AsHashtable
+        $cfg.scheduler.featureSlots = $true
+        $cfg.messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+        $cfg.runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = "http://127.0.0.1:$($script:FakePort)"; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
+            agent = 'codex'; perHostCapacity = 2; overflowRoles = @(); overflowMax = 0; maxConcurrent = 10; maxExecutionsPerDay = $script:SlotsBudget; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 600; listSeconds = 1; reportGraceSeconds = 2 } }
+        $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+        $env:OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()); $env:FACTORY_OCTOPUS_HOST_TOKEN = [guid]::NewGuid().ToString('N'); $env:FACTORY_TRANSCRIPT_SAVE_SECONDS = '2'; $env:FACTORY_INTAKE_WIP = '10'
+        [void](Fake 'octo-reset'); Oct-Machines $OctDefaultMachines
+        # an owner session with room for four items gives the intake its free slots (the runtime's workers come later)
+        if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+        Restart-Gateway
+        [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+        Start-OwnerClient $script:SagaOwner 'persistent-local' '--capacity 4 --no-auto-accept'
+        $clients += $script:SagaOwner
+        Slots-Report
+        $st = Oct-Status
+        Check 'the Octopus runtime is on with the day budget of the scenario' ($st.enabled -eq $true -and $st.maxExecutionsPerDay -eq $script:SlotsBudget) ($st | ConvertTo-Json -Compress -Depth 4)
+
+        # the first two sessions, before the restart: each item is pulled by the intake, granted a slot, started on the runtime and taken by its worker
+        foreach ($k in 1, 2) {
+            $n = New-Item-Fake "Slots session $k" "Change the code, as the criteria say.`n`n- criterion one" ($OctLabels) 'Todo'
+            $items += $n
+            Check "the intake pulls #$n from Todo (session $k)" (Slots-WaitFor 200 { (Saga-Col $n) -eq 'Technical Design' }) "column $(Saga-Col $n); $(Slots-Reasons $n)"
+            Check "the scheduler's slot starts the session of #$n on the Octopus runtime (session $k)" (Slots-WaitFor 90 { (Slots-Runs $n).Count -ge 1 }) "runs: $((Slots-Runs $n).Count); $(Slots-Reasons $n); runtime: $((Oct-Status) | ConvertTo-Json -Compress -Depth 3)"
+            if ((Slots-Runs $n).Count -lt 1) { return }
+            $clients += (Slots-Take $n (Slots-Runs $n)[0])
+        }
+        $before = Slots-AllRuns
+        $st = Oct-Status
+        Check 'two sessions are running and counted once each by the runtime (today 2)' ($before.Count -eq 2 -and $st.running -eq 2 -and $st.today -eq 2) ($st | ConvertTo-Json -Compress -Depth 4)
+
+        # the gateway dies and comes back: its memory is gone, the scheduler's ledger and the runtime's history are not
+        Restart-Gateway
+        Check 'the Wolverine host runs again' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+        Slots-Report
+        Check 'the runtime adopts both sessions from its history and does not count them again' (Slots-WaitFor 30 { $s = Oct-Status; $s.relisted -and $s.running -eq 2 -and $s.today -le 2 }) ((Oct-Status) | ConvertTo-Json -Compress -Depth 4)
+        Start-Sleep -Seconds 6; Slots-Report
+        Check 'no second session is started for an item that has one' ((Slots-AllRuns).Count -eq 2) ((Slots-AllRuns) | ForEach-Object { "$($_.values.Item)" })
+        # the plant lost its owners with the restart: the workers are offered their items again and take them (a waiting offer would hold the intake back)
+        foreach ($n in $items) { $w = @($clients | Where-Object { $_ -like "oct-$n-*" })[0]; if ($w) { $own = Rt-Own $w $n; CheckExit "the worker $w owns #$n again" $own 0 } }
+
+        # the third session: more than half of the budget (the restart already counted the first two)
+        $n3 = New-Item-Fake 'Slots session 3' "Change the code, as the criteria say.`n`n- criterion one" ($OctLabels) 'Todo'
+        $items += $n3
+        Check "the intake pulls #$n3 from Todo (session 3)" (Slots-WaitFor 200 { (Saga-Col $n3) -eq 'Technical Design' }) "column $(Saga-Col $n3); $(Slots-Reasons $n3)"
+        Check "the third session starts after the restart: the budget of $($script:SlotsBudget) was not spent by two sessions counted twice" (Slots-WaitFor 90 { (Slots-Runs $n3).Count -ge 1 }) "runs: $((Slots-Runs $n3).Count); $(Slots-Reasons $n3); runtime: $((Oct-Status) | ConvertTo-Json -Compress -Depth 3)"
+        if ((Slots-Runs $n3).Count -lt 1) { return }
+        $clients += (Slots-Take $n3 (Slots-Runs $n3)[0])
+        $st = Oct-Status
+        Check 'three sessions in all, the budget is spent exactly' ((Slots-AllRuns).Count -eq $script:SlotsBudget -and $st.today -eq $script:SlotsBudget) ($st | ConvertTo-Json -Compress -Depth 4)
+        Check 'none of the three was held for the budget before it was spent' (@($items | Where-Object { (Slots-Reasons $_) -match 'runtime-budget' }).Count -eq 0) (($items | ForEach-Object { "#$_ $(Slots-Reasons $_)" }) -join ' || ')
+
+        # the fourth item: the budget is spent, so the scheduler holds it, and no run is made
+        $n4 = New-Item-Fake 'Slots session 4' "Change the code, as the criteria say.`n`n- criterion one" ($OctLabels) 'Todo'
+        $items += $n4
+        Check "the intake pulls #$n4 from Todo (the item the budget holds)" (Slots-WaitFor 200 { (Saga-Col $n4) -eq 'Technical Design' }) "column $(Saga-Col $n4)"
+        Check "the scheduler holds #$n4 for the day budget (runtime-budget)" (Slots-WaitFor 60 { (Slots-Reasons $n4) -match 'runtime-budget' }) "decisions: $(Slots-Reasons $n4)"
+        Start-Sleep -Seconds 5
+        Check "no session is started for #${n4}: the day budget of $($script:SlotsBudget) is the limit" ((Slots-Runs $n4).Count -eq 0 -and (Slots-AllRuns).Count -eq $script:SlotsBudget) "runs: $((Slots-AllRuns).Count)"
+    } finally {
+        foreach ($n in $items) { Rt-Close $n }
+        foreach ($c in $clients) { if ($c -and $script:Workers.ContainsKey($c)) { Stop-OwnerClient $c } }
+        try { foreach ($r in @((Oct-State).runs | Where-Object { $_.state -eq 'Executing' })) { [void](Fake 'octo-task' @{ id = $r.task; state = 'Success' }) } } catch { }
+        Set-Content -Path $cfgPath -Value $orig -NoNewline
+        foreach ($e in $envNames) { [Environment]::SetEnvironmentVariable($e, $oldEnv[$e]) }
+        Restart-Gateway
+        [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+        try { [void](Fake 'octo-reset') } catch { }
+    }
 }
