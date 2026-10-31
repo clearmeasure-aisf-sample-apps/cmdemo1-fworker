@@ -107,6 +107,11 @@ static class GatewayWolverineExtensions
                     var stepReads = new Fworker.Workflows.Delivery.ItemStepReads(new DeliveryKitSource(() => kitHost.Value));
                     var itemSteps = new ItemStepsJob(workItems.Store, home, stepReads, stepReads, m => host.PublishAsync(m), () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low, masterWatch: workItems.Docs.Settings.CarriesFeature);
                     jobs.Add(RecurringJobSlots.ItemSteps, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["itemSteps"] = await itemSteps.Run(ct) }.ToJsonString()));
+                    // W9.10j: the saga starts the session of the slot the scheduler granted (the offer is made from the saga's state, on the slot's runtime), and the reaper tells the scheduler which items are in flight so that
+                    // what it keeps of an item whose saga never cleared it is dropped
+                    if (workItems.Ownership is { } sessionOwnership) SessionStartWiring.Attach(host, new SessionStartPort(sessionOwnership, () => sp.GetService<Plant>()));
+                    var reaper = new CapacityReaper(workItems.Store, m => host.PublishAsync(m), () => c.Leader.MayAct);
+                    jobs.Add(RecurringJobSlots.CapacityReap, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["capacityReap"] = await reaper.Run(ct) }.ToJsonString()));
                     ItemStepsWiring.Attach(host, new OwnerRelease(() => sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), (item, holder) => sp.GetService<Plant>()?.ManagerReleased(item, holder)));
                     // W9.10o: the repair of the window between a saga's save and its outbox (the timer or command that was never sent), and the purge of the old successes of the idempotency ledger
                     if (workItems.Store is IWorkItemAges ages)

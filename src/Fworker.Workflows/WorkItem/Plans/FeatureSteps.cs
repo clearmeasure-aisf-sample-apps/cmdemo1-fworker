@@ -203,6 +203,8 @@ static class FeatureFlow
         s.EverGranted = true; s.SlotAsked = false; s.SlotWait = ""; s.SlotStamp = a.At;
         if (s.LeaseDue is null && c.StepOf(s.Step).Lease(c.Policy) is { } lease) { s.LeaseDue = c.Now + lease; c.TimerChanged = true; }
         c.Decide(WorkItemActions.SlotGranted, a.Host is { Length: > 0 } ? $"{a.Runtime} on {a.Host}" : a.Runtime, a.Phase);
+        // W9.10j: the saga starts the session of its slot (the gateway offers it on the slot's runtime, under this arm)
+        c.StartSession(a.SlotId, a.Runtime, a.Host, a.Phase);
         return StepAnswer.Applied;
     }
 

@@ -5,6 +5,8 @@ using Fworker.Workflows.Capacity;
 // the limits of a runtime: what the plant's manager runs and has started today is counted as outside the scheduler's ledger (RuntimeManager.Load), and a host's report counts the containers it runs that the
 // scheduler did not grant. The Octopus runtime's host reports (W7.4) are its HostReported input. Nothing sends a RequestSlot yet: the feature plan (W7.3) and the docs plan's steps do, and the scheduler is idle until they do. There is no flag; the settings are config/instance.json's
 // (schedule.fileOverlap, scheduler, runtimes.octopus).
+// W9.10j: the executions the manager started for a slot of this ledger are not "outside" it (RuntimeManager.Load leaves them out: the ledger counts each session once), and the sessions of the slots it grants are started
+// by the saga (SessionStartRequested, Ports/SessionStartPort.cs) on the slot's runtime; the reaper (CapacityReaper, ReapStale) drops what the ledger keeps of an item no saga has in flight.
 
 /// <summary>What the gateway builds for the scheduler: its service, the history writer and the settings it reads.</summary>
 sealed record CapacityParts(CapacityService Service, CapacityHistory History, CapacitySettings Settings);

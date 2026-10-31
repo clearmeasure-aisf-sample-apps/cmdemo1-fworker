@@ -60,6 +60,7 @@ public sealed record SlotWanted(ItemId Item, int Generation, string ArmId, strin
 [JsonDerivedType(typeof(AskSlot), "slot")]
 [JsonDerivedType(typeof(EndSession), "end")]
 [JsonDerivedType(typeof(ClearSlot), "clear")]
+[JsonDerivedType(typeof(StartSession), "start")]
 [JsonDerivedType(typeof(ChangeFootprint), "footprint")]
 [JsonDerivedType(typeof(LeaveTrain), "leave")]
 [JsonDerivedType(typeof(ReleaseOwner), "release")]
@@ -70,6 +71,19 @@ public sealed record AskSlot(string Key, string ArmId, string Phase, bool Resume
 
 /// <summary>The item's session needs no slot any more (published as the scheduler's <c>SessionEnded</c>): <paramref name="SlotId"/> names the slot.</summary>
 public sealed record EndSession(string Key, string SlotId) : StateCommand(Key);
+
+/// <summary>
+/// The grant of <paramref name="SlotId"/> is the item's and its session is to start on <paramref name="Runtime"/> (and <paramref name="Host"/>), under the arm the grant was made for (published as <see cref="SessionStartRequested"/>).
+/// The key names the slot, so a grant told twice (or a redelivered input) is one start.
+/// </summary>
+public sealed record StartSession(string Key, string ArmId, string SlotId, string Runtime, string? Host, string Phase) : StateCommand(Key);
+
+/// <summary>
+/// W9.10j: the item's saga asks the gateway to start the session of the slot it was granted (design wolverine-factory.md 3.2: "after SlotGranted the saga sends StartSession with its arm id"). The gateway starts it on the
+/// slot's runtime (the requested one, not the plant's own choice), with the arm id and the slot on the start command; a start that cannot be made settles like "no capacity" (the slot goes back, the request waits again).
+/// </summary>
+[MessageIdentity("workitem.session-start-requested")]
+public sealed record SessionStartRequested(ItemId Item, int Generation, string ArmId, string Key, string SlotId, string Runtime, string? Host, string Phase) : ItemCommand(Item);
 
 /// <summary>The item is no longer in flight for the scheduler: merged, parked, completed or handed back (published as the scheduler's <c>ClearItem</c>).</summary>
 public sealed record ClearSlot(string Key, string Reason) : StateCommand(Key);

@@ -62,6 +62,19 @@ public sealed record SessionEnded(ItemId Item, string Key, string SlotId, int? M
 [MessageIdentity("capacity.start-refused")]
 public sealed record StartRefused(ItemId Item, string Key, string SlotId, string Outcome) : CapacityInput(Key);
 
+/// <summary>
+/// W9.10j, the reaper: the items the sagas have in flight (<paramref name="Live"/>, qualified item ids, read from the sagas' table at <paramref name="ReadAt"/>). What the ledger keeps of an item that is not among them
+/// (its request, its place among the items in flight, its file-overlap hold) was left by a saga that never sent <see cref="ClearItem"/> (the message was lost, the saga was closed by hand, the instance is gone) and would
+/// hold other items back for ever. Only entries older than <paramref name="Grace"/> before the read are reaped, so a request made after the read is never taken for a stale one, and an item that holds a slot is left
+/// alone (its slot ends with the session or at its time limit; the next pass reaps the rest). It carries no key: reaping twice is the same as reaping once.
+/// </summary>
+[MessageIdentity("capacity.reap-stale")]
+public sealed record ReapStale(DateTimeOffset ReadAt, IReadOnlyList<string> Live, TimeSpan Grace) : CapacityInput("")
+{
+    /// <summary>How long an entry must have been in the ledger before the reaper may take it for left behind.</summary>
+    public static readonly TimeSpan DefaultGrace = TimeSpan.FromMinutes(5);
+}
+
 /// <summary>What a host report says about a host (reconcile-hosts.sh): the containers running on it (every <c>fw-*</c>, an exiting one included) and its metrics.</summary>
 [MessageIdentity("capacity.host-reported")]
 public sealed record HostReported(string Key, string Host, string Runtime, int Running, HostMetrics Metrics, DateTimeOffset At) : CapacityInput(Key);

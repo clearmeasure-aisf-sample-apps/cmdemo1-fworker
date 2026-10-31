@@ -88,8 +88,13 @@ sealed class RuntimeManager : IRuntimeManager
         public DateTime StartedAt = DateTime.UtcNow;
         public DateTime? RegisteredAt, EndedAt;
         public bool Ended;
+        // W9.10j: the slot of the scheduler's ledger this execution was started for ("" for a session the plant offered on its own) and the arm of the saga that asked for it
+        public string Slot = "", Arm = "";
+        // W9.10j: the stop of this execution failed this many times; the next try is due at StopRetryAt (Poll)
+        public int StopFailures;
+        public DateTime StopRetryAt;
     }
-    public sealed record Ticket(string Name, int Item, string Phase, string Profile, string Nonce, string Role = "");
+    public sealed record Ticket(string Name, int Item, string Phase, string Profile, string Nonce, string Role = "", string Slot = "", string Arm = "");
 
     readonly object gate = new();
     readonly RuntimeSettings cfg;
@@ -105,6 +110,9 @@ sealed class RuntimeManager : IRuntimeManager
     readonly Dictionary<int, int> idleFollowUps = new();
     readonly List<JsonObject> last = new();
     DateTime day = DateTime.UtcNow.Date; int today;
+    // W9.10j: the executions begun today for a slot of the scheduler's ledger. The ledger counts its grants itself (what runs and the day's), so what this manager tells the scheduler it runs outside the ledger (Load) is its
+    // own count less these; the manager's own limits (CanStart) still count every execution, as the plant sees all of them. Counted since this process started: after a restart the day's earlier grants are in both counts again.
+    int ledgerToday;
     int startFailuresInRow; bool healthy = true; string unhealthyWhy = "";
     bool relisted;
     // W0.2: the UTC day for which `today` was last counted from the runtime's task history (IRunHistory); `today` is a cache of that count plus the
@@ -173,7 +181,15 @@ sealed class RuntimeManager : IRuntimeManager
         }
     }
 
-    public (bool Ok, string Code) CanStart()
+    public (bool Ok, string Code) CanStart() => CanStart(false);
+
+    /// <summary>
+    /// Whether a session may be started now. <paramref name="ledgerGranted"/> (W9.10j): the session is for a slot the scheduler granted. The scheduler has admitted it against the runtime's concurrency and the day's budget
+    /// (counting what this manager runs outside the ledger), so those two are not asked again here: asking would count the ledger's own sessions twice, and the item would wait for a place the scheduler already gave it.
+    /// What is no shortage of slots still holds: the runtime is off, its executions are not counted yet, it is unhealthy, its quota is spent, and the Wolverine host that carries the start is not running (the offer
+    /// waits for the host; a start dispatched into a host that is down would be lost).
+    /// </summary>
+    public (bool Ok, string Code) CanStart(bool ledgerGranted)
     {
         lock (gate)
         {
@@ -183,6 +199,8 @@ sealed class RuntimeManager : IRuntimeManager
             if (cae is IRunHistory && countedDay != day) return (false, "runtime-relisting");   // a new UTC day: until the day's runs are counted from the history
             if (!healthy) return (false, "runtime-unhealthy");
             if (lim.Blocked() is { Length: > 0 } why) return (false, why);
+            if (DispatchStart != null && DispatchReady?.Invoke() == false) return (false, "host-not-running");
+            if (ledgerGranted) return (true, "");
             if (execs.Values.Count(e => !e.Ended) >= lim.MaxConcurrent) return (false, "runtime-at-capacity");
             if (today >= lim.MaxExecutionsPerDay) return (false, "runtime-budget");
             return (true, "");
@@ -200,11 +218,15 @@ sealed class RuntimeManager : IRuntimeManager
             if (!relisted || (cae is IRunHistory && countedDay != day)) blocked = "runtime-relisting";
             else if (!healthy) blocked = "runtime-unhealthy";
             else if (lim.Blocked() is { Length: > 0 } why) blocked = why;
-            return (execs.Values.Count(e => !e.Ended), today, blocked);
+            // the executions begun for the ledger's slots are the ledger's own: it counts them itself (W9.10j)
+            return (execs.Values.Count(e => !e.Ended && e.Slot == ""), Math.Max(0, today - ledgerToday), blocked);
         }
     }
 
-    public Ticket Begin(int item, string phase, string profile, string role = "")
+    Ticket IRuntimeManager.Begin(int item, string phase, string profile, string role) => Begin(item, phase, profile, role);
+
+    /// <summary>Reserves a worker name and a nonce for a session. <paramref name="slot"/> and <paramref name="arm"/> (W9.10j): the slot of the scheduler's ledger the session is started for, and the arm of the saga that asked for it.</summary>
+    public Ticket Begin(int item, string phase, string profile, string role = "", string slot = "", string arm = "")
     {
         var name = $"{lim.Prefix}-{item}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(3)).ToLowerInvariant()}";
         var expires = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + lim.TokenSeconds;
@@ -212,12 +234,13 @@ sealed class RuntimeManager : IRuntimeManager
             : nonces.Mint(name, cae.Kind, expires, TimeSpan.FromSeconds(Math.Max(lim.AckSeconds, 60) + 600));
         lock (gate)
         {
-            Roll(); today++; execs[name] = new Exec { Name = name, Item = item, Phase = phase };
+            Roll(); today++; if (slot != "") ledgerToday++;
+            execs[name] = new Exec { Name = name, Item = item, Phase = phase, Slot = slot, Arm = arm };
             // another phase of the item started: the item made progress, the count in a row starts again
             foreach (var k in launches.Keys.Where(k => k.Item == item && k.Phase != phase).ToList()) launches.Remove(k);
             launches[(item, phase)] = launches.GetValueOrDefault((item, phase)) + 1;
         }
-        return new Ticket(name, item, phase, profile, nonce, role);
+        return new Ticket(name, item, phase, profile, nonce, role, slot, arm);
     }
 
     public void Registered(string name)
@@ -230,13 +253,22 @@ sealed class RuntimeManager : IRuntimeManager
     // a session started outside the plant (the Copilot owner's fix-forward of a red master) counts against the daily cap
     public void CountExternal() { lock (gate) { Roll(); today++; } }
 
-    void Roll() { var d = DateTime.UtcNow.Date; if (d != day) { day = d; today = 0; } }
+    void Roll() { var d = DateTime.UtcNow.Date; if (d != day) { day = d; today = 0; ledgerToday = 0; } }
+
+    // Under the lock: the execution of this name never started and is refunded: the day's count goes back by one, and the ledger's share with it when the execution was begun for a slot
+    void RefundToday(string name)
+    {
+        today = Math.Max(0, today - 1);
+        if (execs.TryGetValue(name, out var e) && e.Slot != "") ledgerToday = Math.Max(0, ledgerToday - 1);
+    }
 
     // ---- outside the plant's lock -----------------------------------------------------------------------------------------------------------
     // v2 (W3.1): set where the engine mode is V2. The start and the stop are then commands dispatched through the Wolverine outbox, and their results come
     // back as CompleteStart and CompleteStop; null is v1, which calls the adapter here and is unchanged.
     public Func<Ticket, Task>? DispatchStart { get; set; }
     public Func<string, string, Task>? DispatchStop { get; set; }
+    // W9.10j: whether the host that carries the dispatched commands is running; a start is not offered while it is not (CanStart). Null: always.
+    public Func<bool>? DispatchReady { get; set; }
 
     public async Task Provision(Ticket t) => await ProvisionDispatched(t);
 
@@ -301,7 +333,27 @@ sealed class RuntimeManager : IRuntimeManager
         finally { LaunchDone(t); }
     }
 
-    public void CompleteStop(string name, bool ok, string error) => Log(ok ? "deprovision" : "deprovision-failed", name, 0, error);
+    public void CompleteStop(string name, bool ok, string error)
+    {
+        Log(ok ? "deprovision" : "deprovision-failed", name, 0, error);
+        if (!ok) StopFailed(name); else StopDone(name);
+    }
+
+    void StopDone(string name) { lock (gate) { if (execs.TryGetValue(name, out var e)) e.StopFailures = 0; } }
+
+    // W9.10j: a stop that failed is tried again (Poll) with a pause that doubles, MaxStopAttempts times in all; the runtime's own reports (the list that shows the execution ended, the host report that shows the container
+    // gone) end the record in Poll before that. After the last try the record is ended here as "stop-failed": the container may still run, and then the host's report counts it outside the ledger.
+    public const int MaxStopAttempts = 4;
+    public TimeSpan StopRetryPause { get; set; } = TimeSpan.FromSeconds(30);
+    void StopFailed(string name)
+    {
+        lock (gate)
+        {
+            if (!execs.TryGetValue(name, out var e) || e.Ended) return;
+            e.StopFailures++;
+            e.StopRetryAt = DateTime.UtcNow + TimeSpan.FromTicks(StopRetryPause.Ticks << Math.Min(e.StopFailures - 1, 6));
+        }
+    }
 
     // true: the start was dispatched as a command, the rest happens in CompleteStart
     async Task<bool> ProvisionCore(Ticket t)
@@ -313,7 +365,7 @@ sealed class RuntimeManager : IRuntimeManager
         if ((MayAct ?? Plant?.MayAct)?.Invoke() == false)
         {
             nonces.Forget(t.Name);
-            lock (gate) { today = Math.Max(0, today - 1); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            lock (gate) { RefundToday(t.Name); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
             Log("provision-fenced", t.Name, t.Item, "lease-lost: this process no longer holds the leader lease; nothing was started");
             await End(t.Name, "fenced", failed: false, startFailure: false);
             return false;
@@ -322,6 +374,9 @@ sealed class RuntimeManager : IRuntimeManager
         {
             // the command carries the ticket's nonce and the idempotency key of the worker name; the outbox holds it until the transaction commits
             try { await DispatchStart(t); Log("provision-dispatched", t.Name, t.Item, cae.Kind); return true; }
+            // W9.10j: the Wolverine host that carries the command is not running (a restart, a hand-over): nothing was started and nothing failed. It settles like "no capacity": the execution and the launch are given back, the
+            // scheduler's slot goes back and the request waits again; the offer waits for the host (CanStart)
+            catch (WolverineHostDownException) { await Settle(t, new ProvisionResult(false, "", "no capacity"), span); return false; }
             catch (Exception e) { await Settle(t, new ProvisionResult(false, "", "start-error: " + e.GetType().Name), span); return false; }
         }
         ProvisionResult r;
@@ -360,7 +415,7 @@ sealed class RuntimeManager : IRuntimeManager
         // the runtime has no free host now (the octopus runtime): the item queues, no failure, no launch counted
         if (r.Error == "no capacity")
         {
-            lock (gate) { today = Math.Max(0, today - 1); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            lock (gate) { RefundToday(t.Name); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
             Refused(t.Item, $"refused|{t.Name}", "host-full");   // (the scheduler's slot goes back and the request waits again: no host had room)
             await End(t.Name, "no-capacity", failed: false, startFailure: false);
             return;
@@ -396,11 +451,11 @@ sealed class RuntimeManager : IRuntimeManager
         if (DispatchStop != null)
         {
             try { await DispatchStop(name, reason); Log("deprovision-dispatched", name, 0, reason); }
-            catch (Exception e) { span?.SetStatus(ActivityStatusCode.Error, e.Message); Log("deprovision-failed", name, 0, e.Message); }
+            catch (Exception e) { span?.SetStatus(ActivityStatusCode.Error, e.Message); Log("deprovision-failed", name, 0, e.Message); StopFailed(name); }
             return;
         }
         try { await cae.Deprovision(name, reason, CancellationToken.None); Log("deprovision", name, 0, reason); }
-        catch (Exception e) { span?.SetStatus(ActivityStatusCode.Error, e.Message); Log("deprovision-failed", name, 0, e.Message); }
+        catch (Exception e) { span?.SetStatus(ActivityStatusCode.Error, e.Message); Log("deprovision-failed", name, 0, e.Message); }   // (v1 stops and does not retry: only the commands of the v2 engine do, StopFailed)
     }
 
     // The execution has ended (or was never started): the plant takes back what the worker still held, a failure is counted against the item and
@@ -416,7 +471,7 @@ sealed class RuntimeManager : IRuntimeManager
             // W9.10h: the host had no room (the start refused with exit 75): a wait like "no capacity", not a failure. The execution and its launch are given back, nothing counts against the item or the runtime's health
             if (outcome == "host-full")
             {
-                today = Math.Max(0, today - 1);
+                RefundToday(e.Name);
                 if (launches.TryGetValue((e.Item, e.Phase), out var lc)) { if (lc <= 1) launches.Remove((e.Item, e.Phase)); else launches[(e.Item, e.Phase)] = lc - 1; }
             }
             // a failure is counted before the plant takes the item back (RuntimeEnded): a plan in between would otherwise see the phase not yet
@@ -452,7 +507,7 @@ sealed class RuntimeManager : IRuntimeManager
         if (idle) Spend(e.Item, Fworker.Workflows.WorkItem.BudgetKind.IdleFollowUp, $"idle|{name}", "the follow-up ended without connecting or pushing");
         else if (pushed) Spend(e.Item, Fworker.Workflows.WorkItem.BudgetKind.Registered, $"pushed|{name}", "the follow-up pushed");
         var settled = false;
-        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked" or "no-capacity" or "host-full" or "fenced")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
+        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked" or "no-capacity" or "host-full" or "fenced" or "stop-failed")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
         // the phase is done pending checks: the next Development task (a fix-forward round) is counted afresh; fixForwardMaxRounds caps those
         if (settled) lock (gate) launches.Remove((e.Item, e.Phase));
         var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome, e.Url) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }
@@ -554,6 +609,19 @@ sealed class RuntimeManager : IRuntimeManager
         {
             await Deprovision(n, why);
             if (why == "never-registered") await End(n, why, failed: true, startFailure: true);
+        }
+        // W9.10j: the stops that failed are tried again when their pause is over; after the last try the record ends (the host's report counts a container that still runs as outside the ledger)
+        List<(string Name, string Reason, bool GiveUp)> again;
+        lock (gate) again = execs.Values.Where(e => !e.Ended && e.StopReason != "" && e.StopFailures > 0 && (e.StopFailures >= MaxStopAttempts || DateTime.UtcNow >= e.StopRetryAt)).Select(e => (e.Name, e.StopReason, e.StopFailures >= MaxStopAttempts)).ToList();
+        foreach (var (n, reason, giveUp) in again)
+        {
+            if (giveUp) { Log("stop-given-up", n, 0, reason); await End(n, "stop-failed", failed: false, startFailure: false); }
+            else
+            {
+                Log("stop-retry", n, 0, reason);
+                lock (gate) { if (execs.TryGetValue(n, out var re)) re.StopRetryAt = DateTime.UtcNow + StopRetryPause; }   // (a dispatched stop answers later: no second try before then)
+                await Deprovision(n, reason);
+            }
         }
     }
 

@@ -486,12 +486,12 @@ public class CapacitySchedulerTests
     public void EveryMessage_HasAStableIdentity_UniqueAndInTheCapacityFamily()
     {
         var types = typeof(CapacityInput).Assembly.GetTypes().Where(t => t.Namespace == "Fworker.Workflows.Capacity" && !t.IsAbstract && (typeof(CapacityInput).IsAssignableFrom(t) || typeof(IEvent).IsAssignableFrom(t))).ToList();
-        Assert.Equal(10, types.Count);   // seven inputs and three events
+        Assert.Equal(11, types.Count);   // eight inputs (the reaper, W9.10j) and three events
         var names = types.Select(MessageIdentity.NameOf).ToList();
         Assert.All(names, n => Assert.StartsWith("capacity.", n));
         Assert.Equal(names.Count, names.Distinct().Count());
         // every input is routed to the scheduler's queue
-        Assert.Equal(7, CapacityTopology.Inputs.Count());
+        Assert.Equal(8, CapacityTopology.Inputs.Count());
     }
 
     [Fact]

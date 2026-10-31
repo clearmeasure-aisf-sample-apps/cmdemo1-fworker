@@ -53,7 +53,9 @@ sealed partial class Plant
         if (any == null || a.Kind != "own-item" || !((Runtimes?.On ?? false) || (Cursor?.On ?? false) || (Copilot?.On ?? false) || (Octopus?.On ?? false))) return (false, null);
         var label = runtimeLabels[a.Item.ToString()]?.ToString() ?? "";
         var ownerRt = OwnerRuntime(a.Item); var owned = ownerRt != null;
-        var runtime = ownerRt ?? any.Settings.RouteFor(a.Column, label);
+        // W9.10j: an item of a saga that holds a slot of the scheduler starts its session where the slot is (the runtime the scheduler granted), not where the plant's routing would put it; an item a Copilot task or Cursor agent owns stays with its owner
+        var ledger = !owned && a.Slot.Length > 0 && a.SlotRuntime.Length > 0;
+        var runtime = ownerRt ?? (ledger ? a.SlotRuntime : any.Settings.RouteFor(a.Column, label));
         if (runtime == "local") return (false, null);
         var rm = RuntimeFor(runtime);
         if (rm == null) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = "runtime-unknown"; return (true, null); }   // a kind this gateway has no adapter for
@@ -66,16 +68,33 @@ sealed partial class Plant
             return (true, null);
         }
         // a connected session first (runtimes.preferConnected), except for an item labelled for the api mode: that label is the operator's choice
-        if (rm.Settings.PreferConnected && !owned && !(rm.Kind is "cursor-cloud" or "copilot-cloud" && label == rm.Kind) && Choose(a, null).Worker != null) return (false, null);
-        var (ok, code) = rm.CanStart();
+        if (rm.Settings.PreferConnected && !owned && !ledger && !(rm.Kind is "cursor-cloud" or "copilot-cloud" && label == rm.Kind) && Choose(a, null).Worker != null) return (false, null);
+        var (ok, code) = rm.CanStart(ledger);
+        if (!ok && ledger) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = code; Journal(a.Item, "waiting", new JsonObject { ["reason"] = $"the scheduler granted slot {a.Slot} on {a.SlotRuntime} and that runtime cannot start a worker now ({code}); the offer waits for it" }, ""); return (true, null); }
         if (!ok) { if (label != "" || owned) { a.WaitingSince ??= DateTime.UtcNow; a.WaitingCode = code; Journal(a.Item, "waiting", new JsonObject { ["reason"] = owned ? $"the item is owned by a {(ownerRt == "cursor-cloud" ? "Cursor agent" : "Copilot task")}; it is resumed once the runtime can start a session ({code})" : $"the item is labelled runtime:{label} and that runtime cannot start a worker now ({code})" }, ""); return (true, null); } return (false, null); }
-        var t = rm.Begin(a.Item, a.Column, itemProfiles[a.Item.ToString()]?.ToString() ?? "");
+        var t = rm.Begin(a.Item, a.Column, itemProfiles[a.Item.ToString()]?.ToString() ?? "", slot: ledger ? a.Slot : "", arm: ledger ? a.Arm : "");
         pendingProvisions.Add((rm, t));
         a.Pin = t.Name; a.Worker = t.Name; a.AckBy = DateTime.UtcNow.AddSeconds(rm.AckSeconds); a.WaitingSince = null; a.WaitingCode = "";
         Journal(a.Item, "offered", new JsonObject { ["worker"] = t.Name, ["type"] = "runtime", ["runtime"] = rm.Kind, ["ackSeconds"] = rm.AckSeconds }, "off|" + a.Id + "|" + t.Name);
         ReserveLaunched(a.Item, t.Name);   // the launched line's place, before the worker's acceptance can queue its assigned line
         Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["plant"] = "runtime-route", ["item"] = a.Item, ["phase"] = a.Column, ["worker"] = t.Name, ["label"] = label }.ToJsonString());
         return (true, null);
+    }
+
+    /// <summary>
+    /// W9.10j: the offers of the items whose sagas the scheduler granted a slot, planned for those items only and outside a sweep (the saga's session start, Ports/SessionStartPort.cs). The items' runtime labels and model
+    /// profiles stay as the last sweep read them: an incremental pass replaces the labels of the items it names, and this one read none.
+    /// </summary>
+    public void PlanSagaOffers(JsonArray offers, IReadOnlyCollection<int> items)
+    {
+        JsonObject labels = new(), profiles = new();
+        lock (gate)
+            foreach (var i in items)
+            {
+                if (runtimeLabels[i.ToString()] is { } l) labels[i.ToString()] = l.DeepClone();
+                if (itemProfiles[i.ToString()] is { } p) profiles[i.ToString()] = p.DeepClone();
+            }
+        Plan(offers, null, null, null, items, null, DateTime.UtcNow, items, labels, profiles);
     }
 
     // After the plant's lock: the executions decided in it are started.
