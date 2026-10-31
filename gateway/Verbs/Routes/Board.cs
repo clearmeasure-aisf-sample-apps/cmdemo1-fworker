@@ -17,13 +17,5 @@ static class BoardRoutes
         routes.Add(Verbs, "transcript-save", verbs.TranscriptSave);
         routes.Add(Verbs, "transcript-load", verbs.TranscriptLoad);
         routes.Add(Verbs, "transcript-prune", verbs.TranscriptPrune);
-        // the gateway's own calls of the verbs that no longer need a rule script (the journal lines of the ticker and the back-merge, the webhook's translation) take the same route as a verb call does
-        if (services.GetService(typeof(Runner)) is Runner runner)
-            runner.V2Own = async (verb, stdin, timeout) =>
-            {
-                if (!BoardWiring.OwnCalls.Contains(verb) || !routes.TryGet(verb, out var handler)) return null;
-                var answer = await handler(stdin, timeout);
-                return (answer.Code, answer.Output);
-            };
     }
 }

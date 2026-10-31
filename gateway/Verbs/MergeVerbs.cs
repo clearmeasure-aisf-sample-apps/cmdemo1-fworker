@@ -37,7 +37,7 @@ sealed class MergeVerbHandlers(Func<MergeVerbParts?> find, Func<string, string, 
         }
         async Task<VerbAnswer> Script(string verb, string stdin, TimeSpan timeout)
         {
-            var (code, output) = await services.GetRequiredService<Runner>().RunAsync(verb, stdin, timeout);
+            var (code, output) = await services.GetRequiredService<Runner>().RunScriptAsync(verb, stdin, timeout);   // not RunAsync: that asks this route again (W9.9a)
             return new VerbAnswer(code, output);
         }
         // what the Runner does before it starts the script of these calls, which v2 answers without it: the calls of the gateway itself that can wait are not made while the GitHub budget is low (GitHubBudget.DeferredCalls),

@@ -139,4 +139,47 @@ public sealed class V2VerbRoutesTests : IDisposable
         var source = File.ReadAllText(Path.Combine(Root(), "gateway", "Endpoints", "EndpointModules.cs"));
         Assert.Contains("is { Count: > 0 } routes ? new V2VerbRouter(router, routes) : router", source);
     }
+
+    // ---- W9.9a: the Runner asks the routes, whoever calls --------------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task TheRunnerAsksTheRoutesFirst_AVerbWithARouteIsV2s_AnyOtherVerbIsTheScripts()
+    {
+        var routes = new V2VerbRoutes();
+        routes.Add(ItemRoutes.Verbs, "claim-item", (stdin, _) => Task.FromResult(new VerbAnswer(0, "v2:" + stdin)));
+        routes.Add(BoardRoutes.Verbs, "journal", (stdin, _) => Task.FromResult(new VerbAnswer(0, "v2:journal")));
+        var runner = new Runner(Path.Combine(dir, "no-such-factory.ps1")) { Routes = routes };
+        Assert.Equal((0, "v2:{\"item\":3}"), await runner.RunAsync("claim-item", "{\"item\":3}", TimeSpan.FromSeconds(5)));
+        Assert.Equal((0, "v2:journal"), await runner.RunAsync("journal", "{}", TimeSpan.FromSeconds(5)));   // BaseUpdate and PlantTicker (#477)
+        // no route: the rule script, which this test does not have; a failed start is not a v2 answer
+        Assert.NotEqual(0, (await runner.RunAsync("auto-promote", "{}", TimeSpan.FromSeconds(5))).Code);
+        Assert.Null(new Runner(Path.Combine(dir, "no-such-factory.ps1")).Routes);   // where the engine does not act the table is never set
+    }
+
+    [Fact]
+    public void ThePerPullRequestBridgesAreGone_AndNoRouteFallsBackToTheRunnerThatWouldAskItAgain()
+    {
+        var gateway = Directory.EnumerateFiles(Path.Combine(Root(), "gateway"), "*.cs", SearchOption.AllDirectories).Where(f => !f.Contains("/obj/") && !f.Contains("/bin/")).ToList();
+        Assert.NotEmpty(gateway);
+        foreach (var file in gateway)
+        {
+            var text = ArchitectureTests.Code(File.ReadAllText(file));
+            foreach (var gone in new[] { "DeliveryVerbBridge", "ServiceVerbCalls", "V2Own ", "V2Own=", "BoardWiring.OwnCalls" })
+                Assert.False(text.Contains(gone, StringComparison.Ordinal), $"{Path.GetRelativePath(Root(), file)} still uses {gone}, which W9.9a removed");
+            // a route's own fallback is Runner.RunScriptAsync: Runner.RunAsync would ask the same route again
+            var rel = Path.GetRelativePath(Root(), file).Replace('\\', '/');
+            if (rel != "gateway/Verbs/VerbRouters.cs" && (rel.StartsWith("gateway/Verbs/", StringComparison.Ordinal) || rel.StartsWith("gateway/Ports/", StringComparison.Ordinal) || rel.StartsWith("gateway/Identity/", StringComparison.Ordinal)))   // (V1VerbRouter is the router below the routes: the script)
+                Assert.False(System.Text.RegularExpressions.Regex.IsMatch(text, @"Runner>\(\)\.RunAsync|\brunner\.RunAsync"), $"{rel} calls Runner.RunAsync from a route; call RunScriptAsync");
+        }
+    }
+
+    [Fact]
+    public void TheTableIsBuiltAtStart_BeforeTheFirstCallOfTheGatewayItself()
+    {
+        var text = File.ReadAllText(Path.Combine(Root(), "gateway", "Composition", "GatewayHostingExtensions.cs"));
+        var built = text.IndexOf("GetRequiredService<V2VerbRoutes>()", StringComparison.Ordinal);
+        Assert.True(built > 0, "UseGatewayLifetime must build the table of routes");
+        Assert.True(built < text.IndexOf("GetRequiredService<BaseWatch>()", StringComparison.Ordinal));
+        Assert.True(built < text.IndexOf("GetRequiredService<RevocationService>()", StringComparison.Ordinal), "the read of the revocations at start is a call of the gateway itself");
+    }
 }

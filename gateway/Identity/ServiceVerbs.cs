@@ -6,7 +6,7 @@ using Fworker.Contracts.Seams;
 // (GitCredentialVerb.cs), operator-releases, operator-release (gateway/Operator/OperatorReleaseVerbs.cs) and metrics (MetricsVerb.cs). Each answers as its rule script (Owner.ps1, Apps.ps1, OperatorRelease.ps1,
 // Metrics.ps1) answers the same input: the same JSON fields, the same exit codes and codes of refusal, the same calls to GitHub. They touch credentials and authorization (the revoked names, the item's git
 // credential, the operator's release record), so they change nothing that decides who may call: VerbPolicy, Auth and the endpoints that call them are the ones of v1. What moves is only what runs the rule: the
-// internal callers (RevocationService, OperatorReleaseLoader, the revoke and record-release endpoints, the metrics endpoint) go through ServiceVerbCalls, which is the rule script (Runner) unless the engine acts,
+// internal callers (RevocationService, OperatorReleaseLoader, the revoke and record-release endpoints, the metrics endpoint) call the Runner, which asks the route first where the engine acts (W9.9a) and runs the rule script elsewhere,
 // and the verb pipeline reaches git-credential and metrics through the route table (gateway/Verbs/Routes/Services.cs).
 
 /// <summary>The arguments of a verb as the rule scripts' <c>Need</c> and <c>Test-Has</c> read them from the JSON hashtable (ConvertFrom-Json -AsHashtable: names are case sensitive): a null is absent, a missing one is a usage refusal.</summary>
@@ -142,29 +142,12 @@ sealed class ServiceVerbs(ServiceGitHub gh, GitHubBudget? budget)
     }
 }
 
-/// <summary>
-/// The call of a service verb by the gateway itself (the read of the revoked names and of the operator's releases at start, a revocation, a release record, the metrics): the rule script, unless the engine acts and
-/// the verb is one of v2's. Resolved at the call, so the kill switch (FACTORY_V2_OFF, which makes the engine v1) is the rule script again for the next call.
-/// </summary>
-sealed class ServiceVerbCalls(Runner runner, ServiceVerbs v2, EngineOptions engine)
-{
-    public bool OnV2(string verb) => engine.V2Acts && ServiceVerbs.Handles(verb);
-
-    public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
-    {
-        if (!OnV2(verb)) return await runner.RunAsync(verb, stdin, timeout);
-        var answer = await v2.RunAsync(verb, stdin, timeout);
-        return (answer.Code, answer.Output);
-    }
-}
-
 static class ServiceVerbRegistration
 {
-    /// <summary>The service verbs and the call of them by the gateway itself. Singletons made when first used; nothing here runs unless the engine acts.</summary>
+    /// <summary>The service verbs (the gateway's own calls reach their routes through the Runner, W9.9a). Singletons made when first used; nothing here runs unless the engine acts.</summary>
     public static IServiceCollection AddGatewayServiceVerbs(this IServiceCollection services, GatewayComposition c)
     {
         services.AddSingleton(sp => new ServiceVerbs(new ServiceGitHub(c.Instance, Environment.GetEnvironmentVariable), c.GitHubBudget));
-        services.AddSingleton(sp => new ServiceVerbCalls(c.Runner, sp.GetRequiredService<ServiceVerbs>(), c.Engine));
         return services;
     }
 }

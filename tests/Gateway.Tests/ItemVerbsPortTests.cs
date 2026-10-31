@@ -88,6 +88,7 @@ public sealed class ItemVerbsPortTests : IDisposable
             var routes = host.Services.GetRequiredService<V2VerbRoutes>();
             Assert.All(ItemRoutes.Verbs, v => Assert.True(routes.TryGet(v, out _), v));
             Assert.False(routes.TryGet("auto-promote", out _));   // another group's verb is not registered by this one
+            Assert.Same(routes, host.Services.GetRequiredService<Runner>().Routes);   // W9.9a: the gateway's own calls ask the same table, from the start (the host built it before any of them)
             Assert.IsType<V2VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
         }
         // no credential, no routes: the verbs stay v1's (behind the saga's feed, as W6.6 left them)
@@ -108,6 +109,7 @@ public sealed class ItemVerbsPortTests : IDisposable
             using var host = new GatewayHost();
             _ = host.Server;
             Assert.Equal(0, host.Services.GetRequiredService<V2VerbRoutes>().Count);
+            Assert.Null(host.Services.GetRequiredService<Runner>().Routes);   // W9.9a: every call of the gateway itself stays the rule script
             Assert.IsType<V1VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
         }
     }

@@ -13,12 +13,11 @@ sealed class CopilotCiReleaseService : BackgroundService
     readonly Plant plant;
     readonly Runner runner;
     readonly ILeadership leader;
-    readonly DeliveryVerbBridge? bridge;   // W9.4: where the engine acts, the verb ci-release is answered by its v2 route
     readonly CancellationToken applicationStopping;
     public TimeSpan Interval { get; }
 
-    public CopilotCiReleaseService(CopilotCiRelease release, RuntimeManager manager, CopilotCloudRuntime? runtime, Plant plant, Runner runner, ILeadership leader, CancellationToken applicationStopping, TimeSpan interval, DeliveryVerbBridge? bridge = null)
-    { this.bridge = bridge; this.release = release; this.manager = manager; this.runtime = runtime; this.plant = plant; this.runner = runner; this.leader = leader; this.applicationStopping = applicationStopping; Interval = interval; }
+    public CopilotCiReleaseService(CopilotCiRelease release, RuntimeManager manager, CopilotCloudRuntime? runtime, Plant plant, Runner runner, ILeadership leader, CancellationToken applicationStopping, TimeSpan interval)
+    { this.release = release; this.manager = manager; this.runtime = runtime; this.plant = plant; this.runner = runner; this.leader = leader; this.applicationStopping = applicationStopping; Interval = interval; }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -35,7 +34,8 @@ sealed class CopilotCiReleaseService : BackgroundService
                 // (with the owned items: an unlabelled item a Copilot task owns, from before tdd's default became cursor-cloud)
                 var items = plant.CopilotItems().Concat(runtime?.Owners().Select(o => o.Item) ?? Enumerable.Empty<int>()).Distinct().Order().ToArray();
                 var routeAll = manager.Settings.RouteFor("Development", "") == "copilot-cloud";
-                await release.Pass(items, routeAll, (verb, stdin) => bridge is null ? runner.RunAsync(verb, stdin, TimeSpan.FromSeconds(120)) : bridge.RunAsync(verb, stdin, TimeSpan.FromSeconds(120)),
+                await release.Pass(items, routeAll, (verb, stdin) => runner.RunAsync(verb, stdin, TimeSpan.FromSeconds(120)),   // (W9.9a: where the engine acts the Runner asks the verb's v2 route first)
+
                     async (item, fields, key) => await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = fields["refused"] is null ? "ci-released" : "ci-release-refused", ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)));
             }
             catch (Exception e) { Console.Error.WriteLine($"ci-release: {e.GetType().Name}"); }

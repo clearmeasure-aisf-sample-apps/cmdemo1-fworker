@@ -145,8 +145,9 @@ public sealed class QcRoutesTests : IDisposable
 
     // ---- QcHub reaches the routes ---------------------------------------------------------------------------------------------------------------------
 
-    static QcHub Hub(Func<V2VerbRoutes?>? routes) =>
-        new(new Runner("/nonexistent/factory.ps1"), new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30), new EventHub(), new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24), routes);
+    // (W9.9a: the hub calls the Runner, which asks the routes first; there is no table of the hub's own)
+    static QcHub Hub(Runner runner) =>
+        new(runner, new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30), new EventHub(), new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
 
     [Fact]
     public async Task WhereARouteExistsTheHubsPersistedHalfIsTheServicesAnswer()
@@ -155,7 +156,7 @@ public sealed class QcRoutesTests : IDisposable
         var seen = new List<(string Verb, string Stdin)>();
         routes.Add(QcRoutes.Verbs, "qc-teardown", (stdin, _) => { seen.Add(("qc-teardown", stdin)); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true,\"verb\":\"qc-teardown\",\"outcome\":\"already\",\"pr\":9,\"exit\":0}")); });
         routes.Add(QcRoutes.Verbs, "qc-reset", (stdin, _) => { seen.Add(("qc-reset", stdin)); return Task.FromResult(new VerbAnswer(12, "{\"ok\":false,\"verb\":\"qc-reset\",\"code\":\"no-environment\",\"reason\":\"none\",\"exit\":12}")); });
-        var hub = Hub(() => routes);
+        var hub = Hub(new Runner("/nonexistent/factory.ps1") { Routes = routes });
         var (code, o) = await hub.DoTeardown(new JsonObject { ["item"] = 5, ["pr"] = 9, ["reason"] = "person" });
         Assert.Equal((0, "already"), (code, o["code"]!.ToString()));
         var (rc, ro) = await hub.DoReset(new JsonObject { ["item"] = 5, ["pr"] = 9 }, "operator");
@@ -167,9 +168,10 @@ public sealed class QcRoutesTests : IDisposable
     [Fact]
     public async Task TheRoutesAreLookedUpAtEachCall_SoAHubBuiltBeforeThemFindsThem()
     {
-        V2VerbRoutes? routes = null;
-        var hub = Hub(() => routes);
-        routes = new V2VerbRoutes();
+        var runner = new Runner("/nonexistent/factory.ps1");
+        var hub = Hub(runner);
+        var routes = new V2VerbRoutes();
+        runner.Routes = routes;
         routes.Add(QcRoutes.Verbs, "qc-teardown", (_, _) => Task.FromResult(new VerbAnswer(0, "{\"ok\":true,\"outcome\":\"already\",\"pr\":9,\"exit\":0}")));
         var (code, o) = await hub.DoTeardown(new JsonObject { ["item"] = 5, ["pr"] = 9 });
         Assert.Equal((0, "already"), (code, o["code"]!.ToString()));

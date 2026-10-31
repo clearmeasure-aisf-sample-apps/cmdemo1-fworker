@@ -40,7 +40,7 @@ sealed class BaseUpdateSettings
     }
 }
 
-sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool ownerMode, V2VerbRoutes? v2 = null) : BackgroundService
+sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool ownerMode) : BackgroundService
 {
     sealed class PendingUpdate { public int Item, Pr; public string Expected = ""; public DateTime At; public bool Running; }
     readonly object gate = new();
@@ -61,12 +61,8 @@ sealed class BaseWatch(Runner runner, Plant plant, BaseUpdateSettings cfg, bool 
 
     public bool AutoUpdateBranch { get { lock (gate) return cfg.AutoUpdateBranch; } set { lock (gate) cfg.AutoUpdateBranch = value; } }
 
-    // W9.3: base-watch and base-update-branch are v2's where the engine acts (gateway/Verbs/MergeVerbs.cs answers for the items the saga owns and hands the rest to the script); else the rule script, as before
-    async Task<(int Code, string Output)> Call(string verb, string stdin, TimeSpan timeout)
-    {
-        if (v2 is not null && v2.TryGet(verb, out var handler)) { var answer = await handler(stdin, timeout); return (answer.Code, answer.Output); }
-        return await runner.RunAsync(verb, stdin, timeout);
-    }
+    // W9.3, W9.9a: base-watch and base-update-branch are v2's where the engine acts (gateway/Verbs/MergeVerbs.cs answers for the items the saga owns and hands the rest to the script); the Runner asks that route first, else the rule script, as before
+    Task<(int Code, string Output)> Call(string verb, string stdin, TimeSpan timeout) => runner.RunAsync(verb, stdin, timeout);
 
     // a pull request merged into the default branch (webhook): one trigger for a burst, with the latest head; at most 3 debounce windows late
     public void OnMerged(int pr)

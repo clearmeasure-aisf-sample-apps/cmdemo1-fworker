@@ -46,7 +46,7 @@ public class ArchitectureInventoryTests
     /// <summary>The exceptions that may exist; a new one is a decision, so it is a visible edit of this list.</summary>
     static readonly string[] DeclaredExceptions = ["auto-promote", "leader-lease", "plant-snapshot", "merge-peer-approved", "merge-hybrid-script"];
 
-    static readonly string[] Kinds = ["runner", "bridge", "router"];
+    static readonly string[] Kinds = ["runner", "router"];
 
     /// <summary>The rows of the plan (the first cell of its tables).</summary>
     static readonly HashSet<string> PlanRows = File.ReadAllLines(Path.Combine(RepoRoot(), "docs", "design", "fworker-wolverine-implementation.md"))

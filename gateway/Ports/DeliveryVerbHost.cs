@@ -23,27 +23,6 @@ sealed class CauseHandler : DelegatingHandler
     }
 }
 
-/// <summary>
-/// The gateway's own calls of the delivery verbs (the CI release, the Copilot owner and settle, the demo upload, ...) go through the runner; where a v2 route answers the verb they go to the route instead. Created with the
-/// runtimes, connected when the routes are built (<see cref="DeliveryRoutes.Register"/>), so a gateway where the engine does not act always runs the rule script.
-/// </summary>
-sealed class DeliveryVerbBridge(Func<string, string, TimeSpan, Task<(int Code, string Output)>> runner)
-{
-    volatile V2VerbRoutes? routes;
-
-    public void Connect(V2VerbRoutes routes) => this.routes = routes;
-
-    public async Task<(int Code, string Output)> RunAsync(string verb, string stdin, TimeSpan timeout)
-    {
-        if (routes is { } r && DeliveryRoutes.Verbs.Contains(verb) && r.TryGet(verb, out var handler))
-        {
-            var answer = await handler(stdin, timeout);
-            return (answer.Code, answer.Output);
-        }
-        return await runner(verb, stdin, timeout);
-    }
-}
-
 /// <summary>Where the verb feed of the item saga (V2VerbFeed) is told of a verb a v2 route answered, so a session's call is still a sign of life for the step's lease. Connected when the feed is composed.</summary>
 sealed class V2ActivityTap
 {

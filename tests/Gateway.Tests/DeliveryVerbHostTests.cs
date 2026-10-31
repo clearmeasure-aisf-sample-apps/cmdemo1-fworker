@@ -218,21 +218,18 @@ public class DeliveryVerbHostTests
         Assert.Equal(["private-build"], seen);
     }
 
-    // ---- the bridge: the gateway's own calls of these verbs --------------------------------------------------------------------------------------------
+    // ---- the gateway's own calls of these verbs (W9.9a: the Runner asks the routes, there is no bridge) -------------------------------------------------------------
 
     [Fact]
-    public async Task TheBridge_RunsTheScript_UntilTheRoutesAreConnected_ThenTheRouteForTheVerbsOfTheGroup()
+    public async Task TheRunner_AnswersAVerbOfTheGroupFromItsRoute_AndOnlyWhenTheRoutesAreSet()
     {
-        var ran = new List<string>();
-        var bridge = new DeliveryVerbBridge((verb, stdin, timeout) => { ran.Add(verb); return Task.FromResult((0, "{\"from\":\"script\"}")); });
-        Assert.Equal((0, "{\"from\":\"script\"}"), await bridge.RunAsync("ci-release", "{}", TimeSpan.FromSeconds(1)));
+        var runner = new Runner("/nonexistent/factory.ps1");
         var routes = new V2VerbRoutes();
         routes.Add(DeliveryRoutes.Verbs, "ci-release", (stdin, timeout) => Task.FromResult(new VerbAnswer(0, "{\"from\":\"v2\"}")));
-        bridge.Connect(routes);
-        Assert.Equal((0, "{\"from\":\"v2\"}"), await bridge.RunAsync("ci-release", "{}", TimeSpan.FromSeconds(1)));
-        Assert.Equal((0, "{\"from\":\"script\"}"), await bridge.RunAsync("settle", "{}", TimeSpan.FromSeconds(1)));      // (no route for it)
-        Assert.Equal((0, "{\"from\":\"script\"}"), await bridge.RunAsync("journal", "{}", TimeSpan.FromSeconds(1)));     // (not a verb of the group: never routed here)
-        Assert.Equal(["ci-release", "settle", "journal"], ran);
+        Assert.NotEqual(0, (await runner.RunAsync("ci-release", "{}", TimeSpan.FromSeconds(5))).Code);   // no routes: the rule script, which this test does not have
+        runner.Routes = routes;
+        Assert.Equal((0, "{\"from\":\"v2\"}"), await runner.RunAsync("ci-release", "{}", TimeSpan.FromSeconds(1)));
+        Assert.NotEqual(0, (await runner.RunAsync("settle", "{}", TimeSpan.FromSeconds(5))).Code);      // (no route for it)
     }
 
     // ---- the executor's outcome (retry rule and messages) --------------------------------------------------------------------------------------------------

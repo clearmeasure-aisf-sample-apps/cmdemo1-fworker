@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Fworker.Contracts.Seams;
 using Xunit;
 
 /// <summary>
@@ -18,14 +19,17 @@ public class SweeperGapTests
         public Rig(bool leaderOn)
         {
             var runner = new Runner("/nonexistent/factory.ps1");
-            runner.V2Own = (verb, stdin, _) =>
+            // (W9.9a: the Runner answers a verb that has a route from the table, as it does where the engine acts)
+            var routes = new V2VerbRoutes();
+            routes.Add(BoardRoutes.Verbs, "sync-board", (stdin, _) =>
             {
-                if (verb == "sync-board") lock (Calls) Calls.Add((JsonObject)JsonNode.Parse(stdin)!);
-                return Task.FromResult<(int, string)?>((Code, new JsonObject { ["ok"] = true, ["offers"] = new JsonArray(), ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["unconfirmed"] = new JsonArray() }.ToJsonString()));
-            };
+                lock (Calls) Calls.Add((JsonObject)JsonNode.Parse(stdin)!);
+                return Task.FromResult(new VerbAnswer(Code, new JsonObject { ["ok"] = true, ["offers"] = new JsonArray(), ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["unconfirmed"] = new JsonArray() }.ToJsonString()));
+            });
+            runner.Routes = routes;
             var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30);
             var hub = new EventHub();
-            var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24), () => null);
+            var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
             Sweeper = new Sweeper(runner, hub, plant, qc, 3600, false, null, Restored.Task) { MayAct = () => true, LeaderOn = leaderOn, Gap = Gap, PlantJobs = true };
         }
 

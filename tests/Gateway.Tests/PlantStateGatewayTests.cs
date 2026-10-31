@@ -282,12 +282,14 @@ public sealed class PlantStateGatewayTests
         var plant = NewPlant(); plant.Restore(Seed(), 30);
         var ownership = await Owned(State(12, StepKind.Develop, s => s.LeaseDue = DateTimeOffset.UtcNow.AddMinutes(30)), State(13, StepKind.Verify, s => { s.Parked = true; s.ParkReason = "master-broken: x"; }));
         var runner = new Runner("/nonexistent/factory.ps1");
-        runner.V2Own = (verb, _, _) => Task.FromResult<(int, string)?>((0, new JsonObject { ["ok"] = true, ["offers"] = new JsonArray(), ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["unconfirmed"] = new JsonArray(),
+        var routes = new V2VerbRoutes();   // (W9.9a: the Runner answers a verb that has a route from the table)
+        routes.Add(BoardRoutes.Verbs, "sync-board", (_, _) => Task.FromResult(new VerbAnswer(0, new JsonObject { ["ok"] = true, ["offers"] = new JsonArray(), ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["unconfirmed"] = new JsonArray(),
             ["owned"] = new JsonObject(), ["owners"] = new JsonObject(), ["pins"] = new JsonObject(), ["parks"] = new JsonArray(), ["release_queue"] = new JsonArray(),
             // (what v1 said of the saga items: the filter takes it out, the feed puts the saga's own in)
-            ["held"] = new JsonArray() }.ToJsonString()));
+            ["held"] = new JsonArray() }.ToJsonString())));
+        runner.Routes = routes;
         var hub = new EventHub();
-        var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24), () => null);
+        var qc = new QcHub(runner, plant, hub, new QcSettings(), "https://gateway.example.test", "gateway-" + new string('k', 24));
         var feed = new SagaPlantFeed(ownership, plant.OwnerNameOf, _ => null, Rules);
         var sweeper = new Sweeper(runner, hub, plant, qc, 3600, true, null, Task.CompletedTask) { MayAct = () => true, PlantJobs = true, V2 = ownership, Feed = feed };
         await sweeper.StartAsync(default);

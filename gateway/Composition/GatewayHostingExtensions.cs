@@ -53,6 +53,8 @@ static class GatewayHostingExtensions
         plant.RestoredTask = sp.GetRequiredService<ISnapshotCoordinator>().Restored;
         sp.GetRequiredService<QcHub>();
         sp.GetRequiredService<Messenger>();
+        // W9.9a: the table of the verbs v2 answers is built here, before the first call of the gateway itself: the Runner asks it (Runner.Routes, set by V2VerbRoutes.Build). BaseWatch used to resolve it
+        sp.GetRequiredService<V2VerbRoutes>();
         sp.GetRequiredService<BaseWatch>();
         // Revocations (gateway/Identity/RevocationService.cs): resolved where the start used to set them up, so their start-up lines and the check of
         // the test switch keep their place; the read of the generations starts with the host. Until it succeeds no session credential is accepted.

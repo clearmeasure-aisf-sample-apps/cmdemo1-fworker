@@ -14,7 +14,7 @@ sealed class ReleasesLoadedFilter(IOperatorReleaseLoader loader) : IEndpointFilt
 // The operator session's two enforced checks (Operator.cs, docs/design/operator-session.md), for the active operator session and the operator. The
 // release records are refs in GitHub, written by the rule scripts and read once at start. Guards, in this order: the operator session enabled (then
 // owner mode and messaging), the admin or the active operator session, the records read.
-sealed class OperatorReleaseEndpoints(Plant plant, ServiceVerbCalls verbs, RevocationService revocations, SagaPlantFeed? saga = null) : IEndpointModule
+sealed class OperatorReleaseEndpoints(Plant plant, Runner verbs, RevocationService revocations, SagaPlantFeed? saga = null) : IEndpointModule
 {
     // its own gate (a flood of records must never delay a revoke)
     readonly SemaphoreSlim releaseGate = new(1, 1);

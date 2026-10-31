@@ -13,7 +13,7 @@ static class DeliveryRoutes
 
     /// <summary>
     /// Registers each routed verb. The host (GitHub, the state comment, Octopus) is made at the first call, not here: the table is built while the container is. The gateway's own calls of these verbs
-    /// (the CI release, the Copilot owner and settle, the demo upload) go through the bridge, which is connected to the routes here.
+    /// (the CI release, the Copilot owner and settle, the demo upload) reach the routes through the Runner (W9.9a).
     /// </summary>
     public static void Register(V2VerbRoutes routes, IServiceProvider services)
     {
@@ -23,6 +23,5 @@ static class DeliveryRoutes
             var name = verb;
             routes.Add(Verbs, name, (stdin, timeout) => host.Value.Run(name, stdin, timeout));
         }
-        services.GetService<DeliveryVerbBridge>()?.Connect(routes);
     }
 }

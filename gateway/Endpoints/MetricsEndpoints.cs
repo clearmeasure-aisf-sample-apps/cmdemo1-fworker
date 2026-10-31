@@ -37,7 +37,7 @@ sealed class MetricsAccessFilter(GatewayOptions gateway, MessagingSettings messa
 // since=24h or 7d (none is read as 7d, the script's default), with no max and no fresh: its answers come from two cache entries, so it causes at most
 // one computation per entry in 120 s while they succeed, and one in 30 s while they fail. The supervisor's call is a step of its hourly budget, like a
 // read verb (SupervisorBudget).
-sealed class MetricsEndpoints(MetricsCache cache, ServiceVerbCalls verbs) : IEndpointModule
+sealed class MetricsEndpoints(MetricsCache cache, Runner verbs) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes) =>
         routes.MapGet("/api/v1/metrics", async (HttpContext c) => { return await Metrics(c); })
