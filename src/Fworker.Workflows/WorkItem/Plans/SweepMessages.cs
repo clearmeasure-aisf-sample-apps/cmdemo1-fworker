@@ -84,7 +84,7 @@ public sealed record ReleaseOwner(string Key, string Reason) : StateCommand(Key)
 
 /// <summary>The gateway releases the owner of the item (the claim in its state comment and the claim ref). Idempotent: an item with no claim is released already.</summary>
 [MessageIdentity("workitem.release-owner")]
-public sealed record OwnerReleaseRequested(ItemId Item, string Key, string Reason) : ItemCommand(Item);
+public sealed record OwnerReleaseRequested(ItemId Item, string Key, string Reason, int Generation = 0) : ItemCommand(Item);
 
 /// <summary>The words of the park reasons the sweep's steps use (the codes of the state comment's park, as v1 writes them).</summary>
 public static class SweepParks

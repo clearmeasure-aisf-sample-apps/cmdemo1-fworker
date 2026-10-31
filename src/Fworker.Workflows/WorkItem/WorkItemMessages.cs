@@ -179,6 +179,8 @@ public static class WorkItemActions
     // adoption (W9.10m)
     /// <summary>The saga took the item over from v1's state at a start (the state comment, the card, the pull request): the reasons say what was mapped or what changed.</summary>
     public const string Adopted = "adopted";
+    /// <summary>W9.10n: a re-adoption found the item ended by v1 (settled, merged, finished) and closed the saga's open instance. Not one of the decisions the state comment's projection writes: the comment is where it came from.</summary>
+    public const string AdoptedClosed = "adopted-closed";
     // the plant manager's actions (W9.10k)
     public const string OwnerReleaseAsked = "owner-release-asked";
     public const string Requeued = "requeued";

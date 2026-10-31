@@ -24,7 +24,9 @@ public static class AdoptionMapper
 
     public const string AwaitingChecksPark = "development:awaiting-checks";
 
-    public static AdoptionMapping Map(AdoptionSnapshot s, AdoptionSettings cfg, DateTimeOffset now)
+    /// <param name="generation">The generation of the instance the mapping stands for: 1 for an item the saga has no row for; W9.10n: the next one when a re-adoption after the kill switch opens a new instance (<see cref="AdoptionFence.GenerationFor"/>).
+    /// It names the arm, the adopted slot and the slot request, and a slot the ledger holds for an earlier instance is not taken for this one's.</param>
+    public static AdoptionMapping Map(AdoptionSnapshot s, AdoptionSettings cfg, DateTimeOffset now, int generation = 1)
     {
         // ---- is it the saga's? -----------------------------------------------------------------------------------------------------------------------
         if (!s.IssueOpen) return Skip("issue-closed");
@@ -65,7 +67,7 @@ public static class AdoptionMapper
         var item = s.Item;
         var state = new WorkItemState
         {
-            Item = item.ToString(), Generation = 1, Plan = plan, Step = step, Status = WorkItemStatus.Open, ArmSeq = 1, ArmId = "1.1",
+            Item = item.ToString(), Generation = generation, Plan = plan, Step = step, Status = WorkItemStatus.Open, ArmSeq = 1, ArmId = $"{generation}.1",
             StartedAt = StartedOf(st, now), Source = $"adopted from v1 (state revision {rev})", CommentRev = rev,
         };
         state.DesignMarker = V1State.NullableBool(V1State.Obj(st, "design"), "docs_only") ?? (step > StepKind.Design ? false : null);
@@ -108,7 +110,7 @@ public static class AdoptionMapper
         {
             state.LeaseDue = now + (cfg.Policy.LeaseOf(StepKind.Merge) ?? TimeSpan.Zero);
             MergeRequest(state, cfg, now);
-            if (cfg.Policy.Schedules(plan)) { state.SlotKnown = true; flight = new AdoptionFlight(item, state.Footprint, now); }
+            if (cfg.Policy.Schedules(plan)) { state.SlotKnown = true; flight = new AdoptionFlight(item, state.Footprint, now, state.Generation); }
         }
 
         // ---- the merge (row M) and the delivery (row D) ----------------------------------------------------------------------------------------
@@ -195,7 +197,8 @@ public static class AdoptionMapper
             state.LeaseDue = V1State.At(claim, "lease_until");
             state.EverGranted = true;
             if (!owner) { notes.Add("a live claim of a session that is not an owner holds no slot: the lease only"); return; }
-            if (s.HeldSlot is { } held)
+            // (a slot the ledger holds for an earlier instance of the item is that instance's: W9.10n clears it, it is not this one's)
+            if (s.HeldSlot is { } held && (held.Request.Generation == 0 || held.Request.Generation == state.Generation))
             {
                 state.SlotId = held.SlotId; state.SlotRuntime = held.Runtime; state.SlotHost = held.Host ?? "";
                 state.SlotKnown = true;

@@ -191,14 +191,29 @@ public sealed class CapacityScheduler(CapacitySettings settings, Func<string, Ru
         }
         held.Request.Phase = r.Phase;
         if (!r.Footprint.IsEmpty) held.Request.Footprint = r.Footprint;
-        state.InFlight[item] = new InFlightItem { Item = item, Footprint = held.Request.Footprint, Since = now };
+        state.InFlight[item] = new InFlightItem { Item = item, Footprint = held.Request.Footprint, Since = now, Generation = held.Request.Generation };
         held.EnteredFlight = true;
         return false;
     }
 
+    /// <summary>
+    /// W9.10n: the instance (generation) the ledger holds entries of the item for: the waiting request's, else the slot's, else the one in flight; 0 when it holds none or they name none. A command of another instance
+    /// (an item that was re-adopted after the kill switch, or reopened, asked again as a new generation) is no business of these entries.
+    /// </summary>
+    public static int GenerationOf(CapacityState state, string item)
+    {
+        if (state.Queue.TryGetValue(item, out var q) && q.Generation != 0) return q.Generation;
+        if (state.Slots.TryGetValue(item, out var s) && s.Request.Generation != 0) return s.Request.Generation;
+        if (state.InFlight.TryGetValue(item, out var f) && f.Generation != 0) return f.Generation;
+        return 0;
+    }
+
+    static bool OtherInstance(CapacityState state, string item, int generation) => generation != 0 && GenerationOf(state, item) is var held && held != 0 && held != generation;
+
     static Answer Clear(CapacityState state, ClearItem c)
     {
         var item = c.Item.ToString();
+        if (OtherInstance(state, item, c.Generation)) return new Answer(CapacityOutcome.Stale, $"the ledger holds the item's generation {GenerationOf(state, item)}, not {c.Generation}");
         var any = state.Queue.Remove(item);
         any |= state.InFlight.Remove(item);
         any |= state.Holds.Remove(item);
@@ -263,6 +278,7 @@ public sealed class CapacityScheduler(CapacitySettings settings, Func<string, Ru
     static Answer Footprints(CapacityState state, FootprintChanged f)
     {
         if (!state.InFlight.TryGetValue(f.Item.ToString(), out var flight)) return new Answer(CapacityOutcome.NotFound, "the item is not in flight");
+        if (OtherInstance(state, f.Item.ToString(), f.Generation)) return new Answer(CapacityOutcome.Stale, $"the ledger holds the item's generation {GenerationOf(state, f.Item.ToString())}, not {f.Generation}");
         flight.Footprint = Footprint.Resolve(flight.Footprint, f.Files);
         return Answer.Applied;
     }
@@ -405,7 +421,7 @@ public sealed class CapacityScheduler(CapacitySettings settings, Func<string, Ru
         if (request.PastDesign)
         {
             if (state.InFlight.TryGetValue(request.Item, out var flight)) { if (!request.Footprint.IsEmpty) flight.Footprint = request.Footprint; }
-            else { state.InFlight[request.Item] = new InFlightItem { Item = request.Item, Footprint = request.Footprint, Since = now }; slot.EnteredFlight = true; }
+            else { state.InFlight[request.Item] = new InFlightItem { Item = request.Item, Footprint = request.Footprint, Since = now, Generation = request.Generation }; slot.EnteredFlight = true; }
         }
         notes.Add(Granted(slot, now));
     }
