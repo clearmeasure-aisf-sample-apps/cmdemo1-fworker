@@ -17,12 +17,16 @@ using Fworker.Workflows.Reconcilers;
 // the ones the sweep skipped on a low budget). A pass the lease ended is dropped: the steps stop before their next write and what they read is not applied.
 
 /// <summary>The plant-wide steps of the sweep as jobs. One instance for the gateway; each method is one job and answers how the run ended.</summary>
-sealed class PlantStepJobs(Func<IPlantSteps?> steps, Func<Plant?> plant, Func<QcHub?> qc, GitHubBudget budget, V2Ownership? ownership, Func<bool> mayAct, Func<bool> restored, bool ownerMode, TimeSpan? readyWait = null)
+sealed class PlantStepJobs(Func<IPlantSteps?> steps, Func<Plant?> plant, Func<QcHub?> qc, GitHubBudget budget, V2Ownership? ownership, Func<bool> mayAct, Func<bool> restored, bool ownerMode, TimeSpan? readyWait = null, TimeSpan? passTimeout = null)
 {
     /// <summary>The steps the sweep leaves to the jobs (sync-board skip_steps). The keeper's count is not a step of an ordinary pass: the gateway simply does not apply it.</summary>
     public static readonly string[] SweepSkips = ["claim-ref-reap", "board-guard", "qc-sync", "replenish"];
 
-    static readonly TimeSpan PassTimeout = TimeSpan.FromSeconds(280);
+    readonly TimeSpan passTimeout = passTimeout ?? TimeSpan.FromSeconds(280);
+
+    // The C# step cannot be killed on the timeout the way the script's pwsh was (Runner.RunProcessAsync): WaitAsync only stops this job waiting. So the Task of each job is kept, and a run that finds the previous one of its job
+    // still going answers "busy" and starts nothing: two copies of a step (replenish reads the item and saves it without the item lock, as the script did) would create the same issue twice.
+    readonly Dictionary<string, Task> inflight = new(StringComparer.Ordinal);
 
     /// <summary>The runs by outcome, for the status block and the tests.</summary>
     public Dictionary<string, int> Outcomes { get; } = new(StringComparer.Ordinal);
@@ -85,6 +89,7 @@ sealed class PlantStepJobs(Func<IPlantSteps?> steps, Func<Plant?> plant, Func<Qc
 
     async Task<string> Pass(string job, CancellationToken ct, bool budgetGated, Func<IPlantSteps, IReadOnlySet<int>, Plant?, Task<PlantStepResult>> run, Action<JsonNode, Plant?>? apply = null)
     {
+        lock (inflight) if (inflight.TryGetValue(job, out var previous) && !previous.IsCompleted) { Note(job, "busy"); return "busy"; }
         if (await NotNowAsync(budgetGated, ct) is { } why) { Note(job, why); return why; }
         if (steps() is not { } plantSteps) { Note(job, "no-github"); return "no-github"; }
         // the saga's items are not v1's: the reap leaves their refs alone
@@ -92,7 +97,16 @@ sealed class PlantStepJobs(Func<IPlantSteps?> steps, Func<Plant?> plant, Func<Qc
         var skip = ownership is null ? new HashSet<int>() : ownership.Items.ToHashSet();
         var clock = Stopwatch.StartNew();
         PlantStepResult result;
-        try { result = await run(plantSteps, skip, plant()).WaitAsync(PassTimeout, ct); }
+        Task<PlantStepResult> started;
+        lock (inflight)
+        {
+            if (inflight.TryGetValue(job, out var previous) && !previous.IsCompleted) { Note(job, "busy"); return "busy"; }   // (a second run that passed the first look while this one waited for the restore)
+            var p = plant();
+            started = Task.Run(() => run(plantSteps, skip, p));
+            inflight[job] = started;
+        }
+        _ = started.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);   // (a step that ends after its timeout is not unobserved)
+        try { result = await started.WaitAsync(passTimeout, ct); }
         catch (PlantStepFenced) { Note(job, "fenced"); Console.WriteLine(Line(job, "fenced")); return "fenced"; }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception e) { Note(job, "failed"); Console.WriteLine(Line(job, "failed", ("error", e.GetType().Name), ("out", e.Message.Length > 300 ? e.Message[..300] : e.Message))); return "failed"; }

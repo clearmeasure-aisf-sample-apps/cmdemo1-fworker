@@ -17,10 +17,12 @@ public class PlantStepJobsTests
         public PlantStepResult Result = new();
         public Exception? Fails;
         public Action? Inside;
+        public Task? Hold;   // the step does not end before this does
 
         Task<PlantStepResult> Run(string step)
         {
             Calls.Add(step); Inside?.Invoke();
+            if (Hold is { } hold) return hold.ContinueWith(_ => Result);
             return Fails is { } f ? Task.FromException<PlantStepResult>(f) : Task.FromResult(Result);
         }
 
@@ -38,9 +40,9 @@ public class PlantStepJobsTests
         public bool May = true, Restored = true, HasSteps = true;
         public PlantStepJobs Jobs;
 
-        public Rig(bool ownerMode = true, TimeSpan? readyWait = null)
+        public Rig(bool ownerMode = true, TimeSpan? readyWait = null, TimeSpan? passTimeout = null)
         {
-            Jobs = new PlantStepJobs(() => HasSteps ? Steps : null, () => Plant, () => null, Budget, null, () => May, () => Restored, ownerMode, readyWait ?? TimeSpan.Zero);
+            Jobs = new PlantStepJobs(() => HasSteps ? Steps : null, () => Plant, () => null, Budget, null, () => May, () => Restored, ownerMode, readyWait ?? TimeSpan.Zero, passTimeout);
         }
     }
 
@@ -161,6 +163,23 @@ public class PlantStepJobsTests
         Assert.Equal("failed", await r.Jobs.BoardGuard(default));
         Assert.Equal("failed", await r.Jobs.ClaimRefReap(default));
         Assert.Equal(1, r.Jobs.Outcomes["board-guard:failed"]);
+    }
+
+    [Fact]
+    public async Task AStepThatOutlivesTheTimeout_IsNotStartedAgainByTheNextTick_UntilItEnds()
+    {
+        var gate = new TaskCompletionSource();
+        var r = new Rig(passTimeout: TimeSpan.FromMilliseconds(200)) { Steps = { Hold = gate.Task } };
+        Assert.Equal("failed", await r.Jobs.Replenish(default));   // the job stops waiting; the step goes on
+        Assert.Equal("busy", await r.Jobs.Replenish(default));     // the next tick must not start a second copy beside it
+        Assert.Equal("busy", await r.Jobs.Replenish(default));
+        Assert.Equal(["replenish"], r.Steps.Calls);
+        Assert.Equal(2, r.Jobs.Outcomes["replenish:busy"]);
+        gate.SetResult();
+        await Task.Delay(100);
+        r.Steps.Hold = null;
+        Assert.Equal("ok", await r.Jobs.Replenish(default));        // it ended: the job runs again
+        Assert.Equal(["replenish", "replenish"], r.Steps.Calls);
     }
 
     // ---- the intervals --------------------------------------------------------------------------------------------------------------------------------------
