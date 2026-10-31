@@ -17,7 +17,9 @@ public sealed record WorkItemPolicy(
     DocsPlanRules? Docs = null,
     IReadOnlyList<string>? CarriedPlans = null,
     FeaturePlanRules? FeatureRules = null,
-    SweepRules? Sweep = null)
+    SweepRules? Sweep = null,
+    TimeSpan? SettleCapWindow = null,
+    bool V1PromotesProd = false)
 {
     public static readonly WorkItemPolicy Default = new(new Dictionary<StepKind, TimeSpan?>
     {
@@ -52,6 +54,17 @@ public sealed record WorkItemPolicy(
     public bool WatchesMaster(string plan) => Sweep is { MasterWatch: true } && WorkPlans.IsCode(plan);
 
     public TimeSpan Settle => SettleWindow ?? TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// <see cref="V1PromotesProd" /> says that v1's AutoPromoter promotes prod from this gateway (delivery.autoPromote enabled, prod among its environments, gatewayEnvironment this one); a gateway where nothing does never holds.
+    /// Where the final environment is before prod (tdd: v2 delivers there), v1's AutoPromoter still promotes the release on to uat and prod, and it takes its items from the Release Queue (the state's merge.awaiting
+    /// release-queue, which the projection writes only while the item is Settling). So the settle window does not complete an item whose release has not reached prod: it holds, until the DeliveredTo(prod) of the
+    /// prod train or until <see cref="SettleCap"/> after the delivery.
+    /// </summary>
+    public bool HoldsForProd => V1PromotesProd && !string.Equals(FinalEnvironment, "prod", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The longest an item is held in Settling for prod, counted from the delivery to the final environment (default 14 days; a safety cap, so that an item never waits for a prod that does not come).</summary>
+    public TimeSpan SettleCap => SettleCapWindow ?? TimeSpan.FromDays(14);
 
     public TimeSpan? LeaseOf(StepKind step) => Leases.TryGetValue(step, out var l) ? l : null;
 }

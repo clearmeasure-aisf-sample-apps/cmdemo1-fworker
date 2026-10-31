@@ -89,6 +89,7 @@ static class GatewayServiceCollectionExtensions
         }
         // fencing (W0.1): the rule scripts that act on the board run under this process's lease epoch and refuse their writes once it is lost (Runner.InjectLease)
         c.Runner.Lease = () => leader.FenceLease;
+        c.Runner.Inert = () => c.Engine.NoDatabase;   // cutover review: with no database only the housekeeping and the reading verbs reach the rule script (InertVerbs)
         c.Runner.MayAct = () => leader.MayAct;   // the routes of a fenced verb (Runner.RunAsync) refuse the same way once the lease is lost
         // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
         var sweepGap = new SweepGap();
@@ -264,7 +265,7 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, gw.PublicUrl, gw.TokenSecret));
         // master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs); only the acting gateway
         var leader = c.Leader;
-        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode) { MayAct = () => leader.MayAct });
+        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase });
         // the operator session's recorded releases (gateway/Operator/OperatorReleaseLoader.cs): read once at start, after the revocations' read has started
         var skipRevocations = c.Revocation.SkipRevocations;
         services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, skipRevocations, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));
@@ -307,8 +308,11 @@ static class GatewayServiceCollectionExtensions
         var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : c.Timing.SweepMinSeconds);
         var githubBudget = c.GitHubBudget; var leaderOn = c.LeaderOn; var sweepGap = c.SweepGap;
         var v2Sweep = c.Engine.V2Acts && c.Instance.Home != null;   // W6.1: v1's sweep leaves the items that have a saga alone
+        // Cutover review: v1's intake is off wherever intake.v2Plans names plans and the engine does not act on them (see Sweeper.IntakeOff): the kill switch, uat and prod (their image has intake.enabled true for tdd's engine), a v2 environment with no database.
+        // Where v2 is configured and there is no database the sweeper holds an ownership that is never loaded (EngineOptions.NoDatabase): it sweeps nothing at all.
+        var intakeOff = !v2Sweep && Fworker.Workflows.Intake.IntakeSettings.From(c.Instance.Root, Environment.GetEnvironmentVariable).V2Plans.Count > 0;
         if (v2Sweep) services.AddSingleton(sp => SagaPlantWiring.Make(c, sp));   // W9.10k: the plant's input for the saga's items, and the sources of the patrol's parks and the release check's in-flight work
-        services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : null, V2Plans = v2Sweep ? sp.GetService<WorkItemParts>()?.Intake.V2Plans ?? [] : [], PlantJobs = v2Sweep && sp.GetService<PlantStepJobs>() is not null, Feed = v2Sweep ? sp.GetRequiredService<SagaPlantFeed>() : null });   // (W9.10e: v1's intake leaves the Todo items of these plans to the engine's)
+        services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : c.Engine.NoDatabase ? V2Ownership.NeverLoaded() : null, Adoption = v2Sweep ? sp.GetRequiredService<AdoptionGate>() : null, IntakeOff = intakeOff, V2Plans = v2Sweep ? sp.GetService<WorkItemParts>()?.Intake.V2Plans ?? [] : [], PlantJobs = v2Sweep && sp.GetService<PlantStepJobs>() is not null, Feed = v2Sweep ? sp.GetRequiredService<SagaPlantFeed>() : null });   // (W9.10e: v1's intake leaves the Todo items of these plans to the engine's)
         // The automatic promotion: a loop of its own after the sweep, its own call (verb auto-promote), timeout and leader gate; it never runs inside the sweep
         // W9.4 stopped this loop wherever the engine acts; W9.10p (owner decision 2026-10-30): the app's uat and prod stay with it until the train takes them over (delivery.autoPromote.trainActs, W9.12)
         var promoteOn = AutoPromoter.Runs(c.Instance, c.Engine.V2Acts); var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
@@ -336,9 +340,9 @@ static class GatewayServiceCollectionExtensions
                 rmx.OnStartRefused = (item, key, outcome) => _ = saga.StartRefused(item, key, outcome);
             }
             rmx.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
-            return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct };
+            return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase };
         });
-        services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct });
+        services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase });
         c.SweepMinSeconds = sweepMinSeconds;
         // C5c: the loops Program.cs started after Build(), in that order: the Copilot CI release, the Copilot owner watch, the Cursor owner watch
         services.AddGatewayCloudOwners(c);
@@ -350,6 +354,10 @@ static class GatewayServiceCollectionExtensions
         return services;
     }
 
+    // Cutover review: the lease as the loops that act on items see it. Where v2 is configured and there is no database (EngineOptions.NoDatabase) nothing may act: the lease is held (status, hand-over) but MayAct is false.
+    internal static ILeadership ActingLeadership(GatewayComposition c, IServiceProvider sp) =>
+        c.Engine.NoDatabase ? new InertLeadership(sp.GetRequiredService<ILeadership>()) : sp.GetRequiredService<ILeadership>();
+
     // The CI release and the owner watches of the cloud runtimes (gateway/Runtimes/Owner*.cs, task C5c), where Program.cs started them: the CI release
     // where the Copilot runtime is on and api.copilot.ciRelease; one CloudOwnerWatch per cloud runtime that is on. The Copilot watch's registration
     // also sets the Copilot credit guard (OverBudget), which parks through the plant; the host makes every hosted service before it starts any.
@@ -359,7 +367,7 @@ static class GatewayServiceCollectionExtensions
         var copilotRuntime = rts.CopilotRuntime; var copilotManager = rts.Copilot; var cursorRuntime = rts.CursorRuntime; var cursorManager = rts.Cursor;
         if (copilotManager != null && copilotSettings.CiRelease)
             services.AddHostedService(sp => new CopilotCiReleaseService(rts.CopilotCiRelease, copilotManager, copilotRuntime, sp.GetRequiredService<Plant>(), sp.GetRequiredService<Runner>(),
-                sp.GetRequiredService<ILeadership>(), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds)));
+                ActingLeadership(c, sp), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds)));
         // two registrations of one implementation type: AddSingleton<IHostedService> adds each (AddHostedService would keep only the first, as with RuntimeLoop)
         if (copilotRuntime != null && copilotManager != null)
             services.AddSingleton<IHostedService>(sp =>
@@ -373,11 +381,11 @@ static class GatewayServiceCollectionExtensions
                     plant.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "credit-guard" });
                     if (saga is not null) await saga.Parked(item, "credit-guard", SagaKeys.ParkKey(output, "credit-guard", phase));
                 };
-                return new CloudOwnerWatch(copilotRuntime, copilotManager, sp.GetRequiredService<CopilotOwnerVerbs>(), sp.GetRequiredService<ILeadership>(),
+                return new CloudOwnerWatch(copilotRuntime, copilotManager, sp.GetRequiredService<CopilotOwnerVerbs>(), ActingLeadership(c, sp),
                     sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, new CloudOwnerWatchOptions { IntervalSeconds = copilotSettings.CiReleaseSeconds, MasterFixer = copilotRuntime });
             });
         if (cursorRuntime != null && cursorManager != null)
-            services.AddSingleton<IHostedService>(sp => new CloudOwnerWatch(cursorRuntime, cursorManager, sp.GetRequiredService<CopilotOwnerVerbs>(), sp.GetRequiredService<ILeadership>(),
+            services.AddSingleton<IHostedService>(sp => new CloudOwnerWatch(cursorRuntime, cursorManager, sp.GetRequiredService<CopilotOwnerVerbs>(), ActingLeadership(c, sp),
                 sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, new CloudOwnerWatchOptions { IntervalSeconds = cursorSettings.OwnerWatchSeconds }));
     }
 
@@ -413,7 +421,7 @@ static class GatewayServiceCollectionExtensions
             Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-config", ["enabled"] = mgrCopSettings.Enabled, ["maxPerDay"] = mgrCopSettings.MaxPerDay, ["cooldownMinutes"] = mgrCopSettings.CooldownMinutes, ["maxMinutes"] = mgrCopSettings.MaxMinutes }.ToJsonString());
             return manager;
         });
-        services.AddSingleton(sp => new ManagerCopilotService(sp.GetRequiredService<ManagerCopilot>(), sp.GetRequiredService<ILeadership>(),
+        services.AddSingleton(sp => new ManagerCopilotService(sp.GetRequiredService<ManagerCopilot>(), ActingLeadership(c, sp),
             sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, ManagerCopilotService.IntervalFor(sp.GetRequiredService<CopilotCloudSettings>().ListSeconds)));
         services.AddHostedService(sp => sp.GetRequiredService<ManagerCopilotService>());
     }

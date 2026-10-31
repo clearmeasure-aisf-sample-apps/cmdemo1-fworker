@@ -48,6 +48,15 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     public int Count => snapshot.Owned.Count;
 
     /// <summary>
+    /// Cutover review: an ownership that is never loaded, for a gateway whose environment is configured for v2 and has no database (EngineOptions.NoDatabase). The sweep asks it and waits for ever, so v1 acts on no item;
+    /// it reads nothing and logs nothing. Not registered as a service (the engine that owns the service does not act): only the sweeper holds it.
+    /// </summary>
+    public static V2Ownership NeverLoaded() => new(new InMemoryWorkItemStore(), default) { Unavailable = true };
+
+    /// <summary>Set by <see cref="NeverLoaded"/>: the table cannot be read, and <see cref="Loaded"/> stays false.</summary>
+    public bool Unavailable { get; init; }
+
+    /// <summary>
     /// W9.10e: whether the saga's table has been read successfully at least once (or the set was given). Until then nobody knows which items are v2's, so the sweep acts on no item at all and incremental passes wait
     /// (Sweeper): an empty set that only means "not read yet" would let v1 settle, merge or park an item that has a saga. After the first read a failed read keeps the last answer, as before.
     /// </summary>
@@ -140,6 +149,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     /// <summary>Reads the owned items; false when the read failed and the last answer stands. A read that began before the published full one is dropped (true: it read well, and a newer full read is published): true always means a read at least this new is published.</summary>
     public async Task<bool> RefreshAsync(CancellationToken ct = default)
     {
+        if (Unavailable) return false;
         var started = Interlocked.Increment(ref reads);
         try
         {
@@ -316,7 +326,7 @@ static class WorkItemWiring
     {
         Func<FactoryDbContext> open = () => Open(connectionString);
         var root = c.Instance.Root;
-        var settings = DocsPlanSettingsReader.From(root);
+        var settings = DocsPlanSettingsReader.From(root, env);
         var store = new SqlWorkItemStore(open);
         var service = new WorkItemService(store, new WorkItemSaga(docs ?? new DomainDocsOnlyPort(DocsOnlySettingsReader.From(root)), settings.Policy), readoption: readoption);
         var ownership = c.Instance.Home is { } home ? new V2Ownership(store, home, settings.ColumnOf, readoption) : null;

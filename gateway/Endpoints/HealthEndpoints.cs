@@ -21,7 +21,7 @@ sealed class BuildInfo
 }
 
 // /health, /alive, /ready, / and /_build: open to every caller (the middleware authenticates /api and /mcp only).
-sealed class HealthEndpoints(BuildInfo build, PluginArchive plugin, PromptStore prompts, GatewayLeader leader, RevocationService revocations, GatewayOptions gateway, FactorySchemaStatus schema) : IEndpointModule
+sealed class HealthEndpoints(BuildInfo build, PluginArchive plugin, PromptStore prompts, GatewayLeader leader, RevocationService revocations, GatewayOptions gateway, FactorySchemaStatus schema, AdoptionGate? adoption = null) : IEndpointModule
 {
     public void Map(IEndpointRouteBuilder routes)
     {
@@ -40,9 +40,12 @@ sealed class HealthEndpoints(BuildInfo build, PluginArchive plugin, PromptStore 
     // the prompt files (gateway/Mcp/Prompts.cs, agents-roles-launch.md 5) are loaded once, and a broken one keeps /ready at 503;
     // where a database is configured and v2 acts (Engine.V2Acts; in shadow the schema shows in /api/v1/status only), the schema of the database is applied and checked first (FactorySchemaStatus):
     // {"ready":false,"waitingFor":"schema","state":"upgrading"|"failed","attempts":N,"since":"...","failedScript":...,"lastFailure":...}, until the first good verification of the process
+    // where v2 is configured and no database is (EngineOptions.NoDatabase): {"ready":false,"waitingFor":"database"} for good (/health stays 200); where v2 acts and the adoption of the term has not finished 10 minutes after the process could act,
+    // and none has finished in this process yet (AdoptionGate): {"ready":false,"waitingFor":"adoption","since":...}
     IResult Ready() => leader.Replaced ? Results.Json(new { ready = false, waitingFor = "nothing", replaced = true, reason = "a newer gateway process holds the lease" }, statusCode: 503)
         : prompts.Errors.Count > 0 ? Results.Json(new { ready = false, waitingFor = "prompts", errors = prompts.Errors }, statusCode: 503)
         : !revocations.IsLoaded ? Results.Json(new { ready = false, waitingFor = "revocations", attempts = revocations.FailedAttempts, since = revocations.Since.ToString("o") }, statusCode: 503)
         : schema.Waiting() is { } waiting ? Results.Json(waiting, statusCode: 503)
+        : adoption?.ReadyWaiting() is { } adopting ? Results.Json(adopting, statusCode: 503)
         : Results.Text("ok");
 }

@@ -25,7 +25,7 @@ using Microsoft.EntityFrameworkCore;
 public sealed record DocsPlanSettings(
     string AutoMergeLabel, IReadOnlyList<string> HoldLabels, int MergeQueueDepth, bool UpdateBranchWhenBehind, int MaxUpdates,
     IReadOnlyDictionary<StepKind, string> Columns, string DoneColumn, string DocsMarker, string DesignSection, DocsPlanRules Rules, IReadOnlyList<string> CarriedPlans,
-    string ReleaseColumn = "", string FinalEnvironment = "prod", bool FeatureSlots = true, string SlotRuntime = "", IReadOnlyList<string>? HoldColumnNames = null, SweepRules? Sweep = null)
+    string ReleaseColumn = "", string FinalEnvironment = "prod", bool FeatureSlots = true, string SlotRuntime = "", IReadOnlyList<string>? HoldColumnNames = null, SweepRules? Sweep = null, bool V1PromotesProd = false)
 {
     /// <summary>The card of an item on that step; null when the step has none of its own (the merge happens in the validation column).</summary>
     public string? ColumnOf(StepKind step) => Columns.TryGetValue(step, out var c) ? c : null;
@@ -41,7 +41,7 @@ public sealed record DocsPlanSettings(
     /// </summary>
     public WorkItemPolicy Policy => WorkItemPolicy.Default with
     {
-        Docs = Rules, CarriedPlans = CarriedPlans.Count == 0 ? null : CarriedPlans, FinalEnvironment = FinalEnvironment,
+        Docs = Rules, CarriedPlans = CarriedPlans.Count == 0 ? null : CarriedPlans, FinalEnvironment = FinalEnvironment, V1PromotesProd = V1PromotesProd,
         FeatureRules = CarriedPlans.Contains(WorkPlans.Feature, StringComparer.OrdinalIgnoreCase) ? new FeaturePlanRules(FeatureSlots) : null,
         Sweep = Sweep is { } sweep ? sweep with { MasterWatch = CarriesFeature } : null,
     };
@@ -52,7 +52,7 @@ public sealed record DocsPlanSettings(
 
 public static class DocsPlanSettingsReader
 {
-    public static DocsPlanSettings From(JsonNode? root)
+    public static DocsPlanSettings From(JsonNode? root, Func<string, string?>? env = null)
     {
         var columns = new Dictionary<StepKind, string>();
         string? design = null, section = null;
@@ -75,7 +75,24 @@ public static class DocsPlanSettingsReader
         return new DocsPlanSettings(Text(root, "autoMergeLabel") ?? "Auto Merge", Strings(root, "holdLabels"), Int(root, "mergeQueueDepth") ?? 0, policyAuto && autoUpdate,
             Int(timing, "outOfDateMergeAttempts") ?? 4, columns, Text(root?["columns"], "done") ?? "Done", Text(root, "docsOnlyMarker") ?? "<!-- aisf:docs-only -->", section ?? "", rules,
             Strings(intake, "v2Plans").Select(p => p.ToLowerInvariant()).ToList(),
-            Strings(Node(root, "columns"), "hold").FirstOrDefault() ?? "", Text(Node(root, "delivery"), "finalEnvironment") ?? "prod", featureSlots, Text(scheduler, "runtime") ?? "", Strings(Node(root, "columns"), "hold"), Sweep(root, timing));
+            Strings(Node(root, "columns"), "hold").FirstOrDefault() ?? "", Text(Node(root, "delivery"), "finalEnvironment") ?? "prod", featureSlots, Text(scheduler, "runtime") ?? "", Strings(Node(root, "columns"), "hold"), Sweep(root, timing), V1PromotesProd: PromotesProd(root, env ?? Environment.GetEnvironmentVariable));
+    }
+
+    /// <summary>
+    /// Whether v1's AutoPromoter promotes prod from this gateway: delivery.autoPromote.enabled, prod among its environments and gatewayEnvironment naming this gateway's FACTORY_ENVIRONMENT (the conditions of
+    /// <c>InstanceConfig.AutoPromoteHere</c> and of the rule script). Where it does not, nothing waits in the Release Queue for prod and a settle window must not hold for it.
+    /// </summary>
+    static bool PromotesProd(JsonNode? root, Func<string, string?> env)
+    {
+        try
+        {
+            var ap = root?["delivery"]?["autoPromote"];
+            if (ap?["enabled"] is not JsonValue ev || !ev.TryGetValue<bool>(out var on) || !on) return false;
+            if (ap["environments"] is not JsonArray envs || !envs.Any(e => string.Equals(e?.ToString(), "prod", StringComparison.OrdinalIgnoreCase))) return false;
+            var gw = ap["gatewayEnvironment"]?.ToString() ?? "";
+            return gw.Length > 0 && string.Equals(env("FACTORY_ENVIRONMENT") ?? "", gw, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     /// <summary>W9.10f: <c>timing.parkHours</c> (24), <c>timing.masterGreenTimeoutMinutes</c> (30), <c>timing.autoUnparkMax</c> (3) and <c>idleReleaseMinutes</c> (60), as the sweep reads them.</summary>

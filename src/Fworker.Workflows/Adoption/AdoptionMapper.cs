@@ -29,7 +29,7 @@ public static class AdoptionMapper
 
     /// <param name="generation">The generation of the instance the mapping stands for: 1 for an item the saga has no row for; W9.10n: the next one when a re-adoption after the kill switch opens a new instance (<see cref="AdoptionFence.GenerationFor"/>).
     /// It names the arm, the adopted slot and the slot request, and a slot the ledger holds for an earlier instance is not taken for this one's.</param>
-    public static AdoptionMapping Map(AdoptionSnapshot s, AdoptionSettings cfg, DateTimeOffset now, int generation = 1)
+    public static AdoptionMapping Map(AdoptionSnapshot s, AdoptionSettings cfg, DateTimeOffset now, int generation = 1, (DateTimeOffset Since, DateTimeOffset Until)? gap = null)
     {
         // ---- is it the saga's? -----------------------------------------------------------------------------------------------------------------------
         if (!s.IssueOpen) return Skip("issue-closed");
@@ -106,9 +106,11 @@ public static class AdoptionMapper
 
         // ---- the claim, the lease and the slot (row L) --------------------------------------------------------------------------------------------
         AdoptionSlot? slot = null; AdoptionFlight? flight = null;
-        var liveClaim = V1State.ClaimLive(claim, now);
+        // cutover review: an owner's claim whose lease ran out inside the gap (no gateway was up) is live: the sweep's renewal (Invoke-GapRenew) would have made it so, and the adoption now comes before that sweep
+        var gapRenewed = gap is { } g && claim is not null && V1State.Bool(claim, "owner") && !V1State.Bool(claim, "taken_back") && !V1State.ClaimLive(claim, now) && V1State.At(claim, "lease_until") is { } lapsed && lapsed >= g.Since && lapsed <= g.Until;
+        var liveClaim = V1State.ClaimLive(claim, now) || gapRenewed;
         var owner = liveClaim && V1State.Bool(claim, "owner");
-        if (!state.Parked && step is StepKind.Design or StepKind.Develop or StepKind.Verify) Session(s, cfg, state, claim, liveClaim, owner, now, notes, out slot);
+        if (!state.Parked && step is StepKind.Design or StepKind.Develop or StepKind.Verify) Session(s, cfg, state, claim, liveClaim, owner, now, notes, out slot, gapRenewed);
         else if (!state.Parked && step == StepKind.Merge)
         {
             state.LeaseDue = now + (cfg.Policy.LeaseOf(StepKind.Merge) ?? TimeSpan.Zero);
@@ -184,21 +186,21 @@ public static class AdoptionMapper
     }
 
     // L: a live owner's session keeps its lease and holds a slot; an item with no live session asks for one (an item that was claimed before asks again as an owned item, rank 2)
-    static void Session(AdoptionSnapshot s, AdoptionSettings cfg, WorkItemState state, JsonObject? claim, bool live, bool owner, DateTimeOffset now, List<string> notes, out AdoptionSlot? slot)
+    static void Session(AdoptionSnapshot s, AdoptionSettings cfg, WorkItemState state, JsonObject? claim, bool live, bool owner, DateTimeOffset now, List<string> notes, out AdoptionSlot? slot, bool gapRenewed = false)
     {
         slot = null;
         var lease = cfg.Policy.LeaseOf(state.Step);
         if (!cfg.Policy.Schedules(state.Plan))
         {
             // the plan has no slots: the lease of the claim, else the lease a new arm gets
-            state.LeaseDue = live ? V1State.At(claim, "lease_until") : lease is { } l ? now + l : null;
+            state.LeaseDue = live ? (gapRenewed ? (lease is { } gl ? now + gl : null) : V1State.At(claim, "lease_until")) : lease is { } l ? now + l : null;
             if (!live && state.LeaseDue is not null) notes.Add(NewArmLease);
             return;
         }
         var phase = state.Step switch { StepKind.Design => "design", StepKind.Develop => "develop", _ => "verify" };
         if (live)
         {
-            state.LeaseDue = V1State.At(claim, "lease_until");
+            state.LeaseDue = gapRenewed ? (lease is { } renewedLease ? now + renewedLease : null) : V1State.At(claim, "lease_until");
             state.EverGranted = true;
             if (!owner) { notes.Add("a live claim of a session that is not an owner holds no slot: the lease only"); return; }
             // (a slot the ledger holds for an earlier instance of the item is that instance's: W9.10n clears it, it is not this one's)

@@ -12,7 +12,7 @@ function Kp-Open([string]$Name = 'backlog-keeper') { $s = Msg-Open "name=$Name&k
 # One verb of the keeper through the real client, against the second gateway
 function Kp-F([string[]]$FactoryArgs) { Msg-WithEnv @{ FACTORY_KEEPER_TOKEN = (Kp-Token); FACTORY_URL = $script:MsgBase; FACTORY_WORKER_TOKEN = $null; FACTORY_SUPERVISOR_TOKEN = $null } { $script:KpOut = F 'backlog-keeper' $FactoryArgs }; return $script:KpOut }
 # An admin verb call against the second gateway (the scripted worker's steps)
-function Kp-Admin([string[]]$FactoryArgs) { Msg-WithEnv @{ FACTORY_URL = $script:MsgBase } { $script:KpOut = F 'w1' $FactoryArgs }; return $script:KpOut }
+function Kp-Admin([string[]]$FactoryArgs) { Msg-WithEnv @{ FACTORY_URL = $script:MsgBase } { $script:KpOut = F 'w1' $FactoryArgs }; if ($FactoryArgs[0] -eq 'sync-board' -and $script:KpOut -is [System.Collections.IDictionary] -and -not $script:KpOut.Contains('replenish')) { $script:KpOut['replenish'] = @{ skipped = "(sync-board answered without a replenish block: $($script:KpOut | ConvertTo-Json -Depth 4 -Compress))" } }; return $script:KpOut }   # (an answer that is an error, not a sweep, fails the check with its text; under StrictMode a missing key would throw 'The property replenish cannot be found' and hide it)
 function Kp-Body([int]$n) { "$((Get-FakeIssue $n).body)" }
 function Kp-State([int]$n) {
     $sc = @((Get-FakeIssue $n).comments | Where-Object { $_.body -like '<!-- factory-state:*' })

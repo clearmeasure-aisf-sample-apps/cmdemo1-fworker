@@ -31,6 +31,8 @@ public sealed class WorkItemState
     /// <summary>When the current step has no sign of life by, and null for a step without a lease, a parked item or an item that completed.</summary>
     public DateTimeOffset? LeaseDue { get; set; }
     public DateTimeOffset? SettleUntil { get; set; }
+    /// <summary>The settle window ended with the release not in prod (WorkItemPolicy.HoldsForProd): SettleUntil is now the cap, and DeliveredTo(prod) completes the item before it.</summary>
+    public bool SettleHeld { get; set; }
     public bool Parked { get; set; }
     public string ParkReason { get; set; } = "";
     /// <summary>The budgets (delivery-speed.md 18.1.3): failures and launches by phase (a step's name), idle follow-ups for the item.</summary>

@@ -17,7 +17,15 @@ sealed class EngineOptions
     public EngineMode Configured { get; init; }
     /// <summary>What runs: <see cref="Configured"/>, or V1 while the kill switch is on.</summary>
     public EngineMode Mode => KillSwitch ? EngineMode.V1 : Configured;
-    public bool V2Acts => Mode == EngineMode.V2;
+    /// <summary>
+    /// The file names v2 for this environment, the kill switch is off, and there is no usable database (FACTORY_DB_CONNECTION missing or malformed). v2 cannot act, and v1 must not take its place: with no database no "v1-ran" marker can be
+    /// written, so a later adoption would not know that v1 had acted. The gateway stays inert: nothing sweeps, /ready answers 503 "database", /health stays 200. Set by <see cref="ForDatabase"/>.
+    /// </summary>
+    public bool NoDatabase { get; init; }
+    public bool V2Acts => Mode == EngineMode.V2 && !NoDatabase;
+
+    /// <summary>The same options, with <see cref="NoDatabase"/> decided by whether a database is configured.</summary>
+    public EngineOptions ForDatabase(bool databaseConfigured) => new() { Environment = Environment, KillSwitch = KillSwitch, Configured = Configured, NoDatabase = Mode == EngineMode.V2 && !databaseConfigured };
     public bool ShadowRuns => Mode == EngineMode.Shadow;
 
     // FACTORY_V2_OFF: 1, true, yes or on (any case) is on; unset, empty, 0, false or anything else is off. A kill switch errs on the side of being thrown.
@@ -39,10 +47,12 @@ sealed class EngineOptions
     public bool Reported => Configured != EngineMode.V1 || KillSwitch;
 
     // the block of /api/v1/status
-    public JsonObject Status() => new()
+    public JsonObject Status()
     {
-        ["mode"] = Label(Mode), ["configured"] = Label(Configured), ["killSwitch"] = KillSwitch, ["environment"] = Environment,
-    };
+        var o = new JsonObject { ["mode"] = Label(Mode), ["configured"] = Label(Configured), ["killSwitch"] = KillSwitch, ["environment"] = Environment };
+        if (NoDatabase) { o["inert"] = true; o["waitingFor"] = "database"; }   // v2 is configured and cannot act; v1 does not act in its place
+        return o;
+    }
 
     public static string Label(EngineMode m) => m switch { EngineMode.V2 => "v2", EngineMode.Shadow => "shadow", _ => "v1" };
 

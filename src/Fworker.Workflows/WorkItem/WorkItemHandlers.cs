@@ -90,7 +90,11 @@ public static class WorkItemRouting
 /// <summary>The item history of the saga's decisions (4.7): one row per envelope, so a message handled twice writes it once. Public because Wolverine's generated code refers to it.</summary>
 public static class WorkItemHistoryHandler
 {
-    public static async Task Handle(WorkItemDecided m, WorkItemHistory history, Envelope envelope, CancellationToken ct) => await history.Record(m, envelope.Id, ct);
+    public static async Task Handle(WorkItemDecided m, WorkItemHistory history, Envelope envelope, CancellationToken ct)
+    {
+        await history.Record(m, envelope.Id, ct);
+        if (m.Action == WorkItemActions.SettleCapExpired) Console.Error.WriteLine($"WARNING settle cap: {m.Item} was completed at the cap with its release {(m.Reasons.Count > 1 && m.Reasons[1].Length > 0 ? m.Reasons[1] : "(unknown)")} not in prod; v1's AutoPromoter did not deliver it");
+    }
 }
 
 public sealed class WorkItemHistory(Func<FactoryDbContext> open)

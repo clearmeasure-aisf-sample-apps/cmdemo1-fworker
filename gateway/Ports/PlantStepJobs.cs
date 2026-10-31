@@ -17,7 +17,7 @@ using Fworker.Workflows.Reconcilers;
 // the ones the sweep skipped on a low budget). A pass the lease ended is dropped: the steps stop before their next write and what they read is not applied.
 
 /// <summary>The plant-wide steps of the sweep as jobs. One instance for the gateway; each method is one job and answers how the run ended.</summary>
-sealed class PlantStepJobs(Func<IPlantSteps?> steps, Func<Plant?> plant, Func<QcHub?> qc, GitHubBudget budget, V2Ownership? ownership, Func<bool> mayAct, Func<bool> restored, bool ownerMode, TimeSpan? readyWait = null, TimeSpan? passTimeout = null)
+sealed class PlantStepJobs(Func<IPlantSteps?> steps, Func<Plant?> plant, Func<QcHub?> qc, GitHubBudget budget, V2Ownership? ownership, Func<bool> mayAct, Func<bool> restored, bool ownerMode, TimeSpan? readyWait = null, TimeSpan? passTimeout = null, Func<IReadOnlyCollection<int>>? excluded = null)
 {
     /// <summary>The steps the sweep leaves to the jobs (sync-board skip_steps). The keeper's count is not a step of an ordinary pass: the gateway simply does not apply it.</summary>
     public static readonly string[] SweepSkips = ["claim-ref-reap", "board-guard", "qc-sync", "replenish"];
@@ -95,6 +95,7 @@ sealed class PlantStepJobs(Func<IPlantSteps?> steps, Func<Plant?> plant, Func<Qc
         // the saga's items are not v1's: the reap leaves their refs alone
         if (ownership is not null) { try { await ownership.RefreshAsync(ct); } catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch { } }
         var skip = ownership is null ? new HashSet<int>() : ownership.Items.ToHashSet();
+        if (excluded?.Invoke() is { } left) skip.UnionWith(left);   // (cutover review: after a break the claim refs of an item the adoption could not fence are not reaped either)
         var clock = Stopwatch.StartNew();
         PlantStepResult result;
         Task<PlantStepResult> started;

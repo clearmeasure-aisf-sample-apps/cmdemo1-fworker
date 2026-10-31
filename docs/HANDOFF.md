@@ -102,6 +102,13 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   release waits in the Release Queue and each item is told why, once per reason. `delivery.autoPromote` (off in the source defaults, on for
   the tdd gateway in `config/deploy.overrides.json`); design `docs/design/auto-promote.md`. Needs the Octopus permissions listed there granted
   to the gateway's Octopus account (owner action). When it is live, cmdemo1-system's `ui-auto-promote.yml` stops promoting ui.
+- **When a v2 item is Done relative to uat and prod** (W9.10p, the cutover to `delivery.finalEnvironment` tdd): v2 delivers at tdd and the app's uat and prod promotions stay with v1's `AutoPromoter`, which
+  takes its items from the Release Queue (`merge.awaiting` release-queue, written by the state projection only while the saga is Settling). So the 24 hour settle window (`WorkItemPolicy.Settle`) does not complete
+  an item whose release is not in prod: at the end of the window the saga decides `settle-held` and keeps the item Settling, in the Release Queue, and the item is Done when the prod train publishes
+  `DeliveredTo(prod)` (v1's AutoPromoter deployed the release, or a later one that carries the commit, to prod), or at the safety cap (`WorkItemPolicy.SettleCap`, 14 days after the delivery to tdd; the decision
+  `completed` names the cap). `/api/v1/status` shows it as `v2Items.settleHeldForProd` (count) and `settleHeld`/`settleUntil` per item. A final environment of prod (the default) is unchanged: the window completes the item.
+  The hold applies only where v1's AutoPromoter promotes prod from this gateway (`delivery.autoPromote.enabled`, prod among its `environments`, `gatewayEnvironment` this `FACTORY_ENVIRONMENT`); elsewhere (v2ci, another gateway) the window completes the item at tdd. It takes effect only once `delivery.finalEnvironment` is tdd (#609).
+  When the cap ends the hold the saga decides `settle-cap-expired` (naming the release) before `completed`, the gateway logs a warning naming the item and its release, and `/api/v1/status` and `/api/v1/digest` list the item under `settleCapExpired`. A prod-train compare that cannot be read (more than 250 commits, or no earlier prod deployment) publishes no `DeliveredTo(prod)`, which leaves the item to the 14-day cap. The re-adoption mapper hands a held item back to v1 as delivered-and-settled.
 - **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so, and the worker connect prompt says an item is owned until its pull request is merged; changing that text changes a hash pinned by the operator suite, a protected path, so it needs the owner's review), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
 - **Messaging and the supervisor are on for every registered worker** (`allowedWorkers` and `allowedAskers` are `*`), set in
@@ -835,14 +842,30 @@ The tdd gateway runs the v2 engine from the pull request "W9.9c: the tdd cutover
 for the measured batch (#437 option A; their day budgets are counted in memory): switch them back on in the same file afterwards. That also stops the
 Copilot on-demand manager of tdd, which needs the Copilot runtime.
 
-- **Kill switch.** `FACTORY_V2_OFF=1` in cmdemo1-system `system.json` (tdd fworker settings) makes tdd run v1 again without a release of this repository. Once the
-  safety pull request (`cm-ai-ops-bot/cutover-safety`) has landed, v1's intake stays off under it as well; until then, check that before relying on it.
+- **Kill switch.** `FACTORY_V2_OFF=1` in cmdemo1-system `system.json` (tdd fworker settings) makes tdd run v1 again without a release of this repository. Under it v1's intake
+  stays off (the sweep sends no `intake` block, section 6c), so v1 takes no item: the gateway then only settles and promotes what already exists.
 - **Rollback.** `FACTORY_V2_OFF=1` as above, or a revert of the cutover pull request (about 4 minutes to tdd).
 - **Before the deploy.** Confirm that no item is owned by a running Copilot task or Cursor agent (those runtimes are switched off by this change). Deploy with the
   plant quiet: no running sessions and no PASS waiting to merge.
 - **After the deploy.** Check the start-up line `runtime: octopus, enabled`, `/ready` 200 and `/_build` as in the release rule of CLAUDE.md.
-- **Done.** When a v2 item reaches Done relative to uat and prod is changed by a separate pull request (`cm-ai-ops-bot/settle-until-prod`); read that one for the rule.
+- **Done.** A v2 item is Done relative to uat and prod as the paragraph "When a v2 item is Done relative to uat and prod" above says (#611): with `delivery.finalEnvironment` tdd the settle window does not complete an item whose release is not in prod; the item stays Settling in the Release Queue until the prod train publishes it or the safety cap ends the hold.
 - The drills and the measured batch are recorded later, on #268.
+- Cutover safety (v1 intake off where the engine does not act, no database: inert and `/ready` 503, no v1 sweep before the term's adoption): section 6c below.
+
+## 6c. Cutover safety (review of the tdd cutover)
+
+Three rules the gateway keeps around the switch to v2 (tests: `tests/Gateway.Tests/CutoverSafetyTests.cs`, job "Image starts without a database"):
+
+- **v1's intake is off wherever the engine does not act on `intake.v2Plans`.** The image has `intake.enabled` true for the engine's intake; v1's intake leaves a Todo item alone only because the sweep hands it the plans of the engine
+  (`Sweeper.AddV2Arguments`). So where `intake.v2Plans` names plans and v2 does not act (the kill switch `FACTORY_V2_OFF`, uat and prod, a v2 environment with no database) the sweep sends no `intake` block at all
+  (`Sweeper.IntakeOff`): v1 takes no item, as before the cutover. `FACTORY_INTAKE=1` cannot bring it back, the script has no block to act on. With `v2Plans` empty (the source defaults, the Tier 1 suites) nothing changes.
+- **v2 configured and no usable database (`FACTORY_DB_CONNECTION` missing or malformed): inert, not crashed, not v1.** `EngineOptions.NoDatabase`: `V2Acts` is false, no v2 service is registered, the sweeper holds an ownership that
+  is never loaded (`V2Ownership.NeverLoaded`) and sweeps nothing, `/ready` answers 503 `{"waitingFor":"database"}`, `/health` stays 200, `/api/v1/status` `engine` says `inert`. The AutoPromoter (uat and prod), the dashboard and
+  the status keep running. v1 is not the fallback on purpose: with no database no `v1-ran` marker can be written, and a later adoption would not know that v1 had acted. The way out is the variable, or `FACTORY_V2_OFF=1`.
+- **No v1 sweep pass before the term's adoption.** Where v2 acts the sweep waits until the adoption of this process's term in the lease is over (`AdoptionJob.IsDone`, `AdoptionGate`), then reads the saga's table again before its
+  first pass. The sweep begins once a run of the term has finished: done, or partial with no break outstanding (items the run could not read stay v1's, as before); after a break only a done run counts (the fencing). A run that cannot finish is retried by its job and the sweep keeps waiting, so v1's steps (the PASS merge, settling, card moves) do not run beside an adoption or on items a break left unfenced. The wait is shown, not cut short: after 10 minutes
+  `/api/v1/status` `v2.adoption.sweep` says `overdue: true` and, until the first adoption of the process has finished, `/ready` answers 503 `{"waitingFor":"adoption"}` (a release is then an outage: find the cause in
+  `v2.adoption`, or set `FACTORY_V2_OFF=1`). A later term (lease lost and taken again) waits again and shows the wait, but `/ready` does not flip back.
 
 ## 7. History in one paragraph
 

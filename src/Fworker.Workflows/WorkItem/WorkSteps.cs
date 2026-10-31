@@ -44,7 +44,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.ArmId = $"{State.Generation}.{State.ArmSeq}";
         State.Status = WorkItemStatus.Open;
         State.Parked = false; State.ParkReason = ""; ClearParkTimers();
-        State.SettleUntil = null;
+        State.SettleUntil = null; State.SettleHeld = false;
         State.LeaseDue = StepOf(step).Lease(Policy) is { } lease ? Now + lease : null;
         State.MergeRequest = null; State.MergeRetryAt = null;   // (a merge asked of an earlier arm is no longer waited for)
         TimerChanged = true;
@@ -66,7 +66,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
     public void Complete(string reason)
     {
         State.Status = WorkItemStatus.Completed;
-        State.LeaseDue = null; State.SettleUntil = null; State.Parked = false; State.ParkReason = ""; ClearParkTimers();
+        State.LeaseDue = null; State.SettleUntil = null; State.SettleHeld = false; State.Parked = false; State.ParkReason = ""; ClearParkTimers();
         State.CompletedAt = Now;
         State.MergeRequest = null; State.MergeRetryAt = null; State.MasterDue = null;
         TimerChanged = true;
@@ -96,7 +96,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
     public void HandBack(string reason)
     {
         State.Status = WorkItemStatus.Completed;
-        State.LeaseDue = null; State.SettleUntil = null; State.Parked = false; State.ParkReason = ""; ClearParkTimers();
+        State.LeaseDue = null; State.SettleUntil = null; State.SettleHeld = false; State.Parked = false; State.ParkReason = ""; ClearParkTimers();
         State.MergeRequest = null; State.MergeRetryAt = null; State.MasterDue = null;
         State.CompletedAt = Now;
         TimerChanged = true;
@@ -134,6 +134,7 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.ArmId = $"{State.Generation}.{State.ArmSeq}";
         State.LeaseDue = null;
         State.SettleUntil = Now + Policy.Settle;
+        State.SettleHeld = false;
         TimerChanged = true;
         Decide(WorkItemActions.Settling, reason, $"until {State.SettleUntil:O}");
     }
@@ -295,10 +296,35 @@ public sealed class DeliverStep : WorkStep
             case MergeFactsRead f: return MergeFacts(c, f);
             case SettleWindowElapsed:
                 if (c.State.Status != WorkItemStatus.Settling) return StepAnswer.Stale("the item is not inside its settle window");
-                c.Complete("the settle window ended");
-                return StepAnswer.Applied;
+                return SettleEnded(c);
             default: return base.Handle(c, input);
         }
+    }
+
+    const string Prod = "prod";
+
+    /// <summary>
+    /// The settle window ended. Where v1's AutoPromoter still takes the release on to prod (a final environment before prod) the item is held in Settling, and so in the Release Queue, until its release is in prod
+    /// (Delivered has prod) or the cap after the delivery ends: a failing health gate, a held Sign-off or a weekend must not drop the release from the queue.
+    /// </summary>
+    static StepAnswer SettleEnded(StepContext c)
+    {
+        if (!c.Policy.HoldsForProd || c.State.Delivered.ContainsKey(Prod)) { c.Complete(c.Policy.HoldsForProd ? "the settle window ended and the release is in prod" : "the settle window ended"); return StepAnswer.Applied; }
+        if (c.State.SettleHeld)
+        {
+            // the end is not silent: a decision of its own (the history, the status and the digest show it; the gateway logs a warning), then the completion
+            var why = $"the settle cap of {c.Policy.SettleCap.TotalDays:0.##} days ended with the release not in prod";
+            c.State.Delivered.TryGetValue(c.Policy.FinalEnvironment.ToLowerInvariant(), out var release);
+            c.Decide(WorkItemActions.SettleCapExpired, why, release ?? "");
+            c.Complete(why);
+            return StepAnswer.Applied;
+        }
+        c.State.SettleHeld = true;
+        c.State.ArmSeq++; c.State.ArmId = $"{c.State.Generation}.{c.State.ArmSeq}";   // (a new arm: the cap's timer is not a redelivery of the window's)
+        c.State.SettleUntil = (c.State.SettleUntil ?? c.Now) + (c.Policy.SettleCap > c.Policy.Settle ? c.Policy.SettleCap - c.Policy.Settle : TimeSpan.Zero);
+        c.TimerChanged = true;
+        c.Decide(WorkItemActions.SettleHeld, "the settle window ended with the release not in prod", $"until {c.State.SettleUntil:O}");
+        return StepAnswer.Applied;
     }
 
     static StepAnswer Delivered(StepContext c, DeliverySeen d)
@@ -307,6 +333,12 @@ public sealed class DeliverStep : WorkStep
         var already = c.State.Delivered.TryGetValue(env, out var release) && release == d.Release;
         c.State.Delivered[env] = d.Release;
         SweepFlow.DeliveredSoMasterWasGreen(c);
+        // held for prod and now there: the window is over, so the item is done
+        if (env == Prod && c.State.Status == WorkItemStatus.Settling && c.State.SettleHeld && c.Policy.HoldsForProd)
+        {
+            c.Complete($"the release reached prod ({d.Release})");
+            return StepAnswer.Applied;
+        }
         if (!c.Plan.Has(StepKind.Deliver)) return StepAnswer.Refused($"the {c.Plan.Name} plan has nothing to deliver");
         if (env != c.Policy.FinalEnvironment.ToLowerInvariant() || c.State.Status == WorkItemStatus.Settling) return already ? StepAnswer.Refused("the delivery was recorded") : StepAnswer.Applied;
         if (c.State.Step != StepKind.Deliver)

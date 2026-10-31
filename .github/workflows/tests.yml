@@ -23,7 +23,7 @@
 # sagas). Those scenarios also run, as before, in the shards. An entry of the v2 matrix names its suites after `claims:`, not `suites:`, so "Every scenario is in exactly one shard" does not read it
 # (it runs tests/ci/run-v2-claims.py, which proves that every claim of the file is in exactly one v2 entry), and the jobs upload v2-results-*, not suite-results-*, so "Tests result" does not count
 # their scenarios a second time. They are required: "Tests result" fails when one fails (V2_BLOCKING there, true since the first green run of Tests on master). The job "Image starts without a database"
-# builds the image and starts it with no FACTORY_DB_CONNECTION (the kill-switch case of W2.0): /ready must answer 200.
+# builds the image and starts it with no FACTORY_DB_CONNECTION three ways (uat; tdd with v2 configured; tdd with the kill switch): /ready must answer 200, 503 "database" (v2 inert, up), 200.
 name: Tests
 
 on:
@@ -706,10 +706,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # The image starts without a database (issue 459, the kill-switch case of W2.0): the image of the Dockerfile is built here (the Build's own
-  # image job is a sibling of this workflow's caller, not an input of it) and run with no FACTORY_DB_CONNECTION, as the uat and prod gateways run;
-  # /ready must answer 200 within two minutes, or the job fails with the container's log. No GitHub credential: GH_TOKEN is the vault placeholder
-  # unset, so the gateway has no GitHub identity and does not wait for revocations. The secrets it requires at start, and owner mode (the deployed settings need it), are given here; the secrets are made at run time.
+  # The image starts without a database (issue 459, the kill-switch case of W2.0; since the tdd cutover, W9.9c, also the v2 case): the image of the Dockerfile is built here (the Build's own
+  # image job is a sibling of this workflow's caller, not an input of it) and run three times with no FACTORY_DB_CONNECTION, each time on a gateway with no GitHub identity (GH_TOKEN is the vault
+  # placeholder unset, so it does not wait for revocations) and with the secrets it requires at start and owner mode (the deployed settings need it; the secrets are made at run time):
+  #  1. as uat (FACTORY_ENVIRONMENT=uat, where uat and prod run v1 with no database): /ready answers 200 within two minutes;
+  #  2. as tdd with v2 configured (engine.v2Environments names tdd: the file of the image with that one setting made, so that the run means the same before and after the cutover reached the overrides) and no database:
+  #     the container stays up, /health answers 200 and /ready answers 503 {"waitingFor":"database"} for at least 30 seconds: v2 is inert, it does not crash and v1 does not take its place (EngineOptions.NoDatabase);
+  #  3. as tdd with v2 configured, no database and the kill switch FACTORY_V2_OFF=1: /ready answers 200 (v1 runs).
+  # Any other answer fails the job with the container's log.
   image-start:
     name: Image starts without a database
     runs-on: ubuntu-24.04
@@ -720,35 +724,75 @@ jobs:
       - name: Build the image
         run: docker build --file Dockerfile --build-arg VERSION=0.0.0 --tag fworker-start-check:ci .
 
-      - name: Run it without FACTORY_DB_CONNECTION; /ready answers 200
+      - name: Run it without FACTORY_DB_CONNECTION as uat, as tdd with v2 configured, and as tdd with the kill switch
         run: |
           set -euo pipefail
           dev_token="$(openssl rand -hex 24)"; webhook_secret="$(openssl rand -hex 24)"; token_secret="$(openssl rand -hex 24)"
           echo "::add-mask::$dev_token"; echo "::add-mask::$webhook_secret"; echo "::add-mask::$token_secret"
-          # FACTORY_ENVIRONMENT=uat: the gateway defaults to tdd, where v2 acts since W9.9c and needs the database (the kill switch FACTORY_V2_OFF=1 is the tdd case without one); uat and prod run v1 with none.
-          # FACTORY_OWNER_MODE=1 and FACTORY_TOKEN_SECRET are what the deployed app is given (system.json): the image's configuration turns messaging and
+          # the image's own configuration with tdd named for v2 (the cutover pull request does it in config/deploy.overrides.json; this makes the case the same before and after it)
+          docker create --name fworker-config fworker-start-check:ci >/dev/null
+          docker cp fworker-config:/app/config/instance.json "$RUNNER_TEMP/instance.image.json"
+          docker rm fworker-config >/dev/null
+          jq '.engine = ((.engine // {}) + {v2Environments: ["tdd"], shadowEnvironments: []})' "$RUNNER_TEMP/instance.image.json" > "$RUNNER_TEMP/instance.v2.json"
+          chmod 644 "$RUNNER_TEMP/instance.v2.json"
+
+          # start NAME [docker args...]: FACTORY_OWNER_MODE=1 and FACTORY_TOKEN_SECRET are what the deployed app is given (system.json): the image's configuration turns messaging and
           # the manager on, and the gateway refuses to start for either without owner mode (MessagingSettings.Load), and owner mode without a token secret
-          docker run --detach --name fworker-start --publish 18080:8080 \
-            -e FACTORY_DEV_TOKEN="$dev_token" -e FACTORY_WEBHOOK_SECRET="$webhook_secret" -e FACTORY_TOKEN_SECRET="$token_secret" -e FACTORY_OWNER_MODE=1 -e GH_TOKEN=unset \
-            -e FACTORY_ENVIRONMENT=uat \
-            fworker-start-check:ci
-          container_env="$(docker exec fworker-start env 2>/dev/null || true)"
-          if grep -q '^FACTORY_DB_CONNECTION=' <<<"$container_env"; then echo "::error::the container has FACTORY_DB_CONNECTION set"; exit 1; fi
+          start() {
+            local name="$1"; shift
+            docker rm --force "$name" >/dev/null 2>&1 || true
+            docker run --detach --name "$name" --publish 18080:8080 \
+              -e FACTORY_DEV_TOKEN="$dev_token" -e FACTORY_WEBHOOK_SECRET="$webhook_secret" -e FACTORY_TOKEN_SECRET="$token_secret" -e FACTORY_OWNER_MODE=1 -e GH_TOKEN=unset \
+              "$@" fworker-start-check:ci >/dev/null
+            if grep -q '^FACTORY_DB_CONNECTION=' <<<"$(docker exec "$name" env 2>/dev/null || true)"; then echo "::error::the container has FACTORY_DB_CONNECTION set"; exit 1; fi
+          }
+          running() { [ "$(docker inspect --format '{{.State.Running}}' "$1")" = "true" ]; }
+          fail() { echo "::error::$2"; docker logs "$1" 2>&1 | tail -n 80; exit 1; }
+          ready_200() {
+            local name="$1" code=000
+            for i in $(seq 1 60); do
+              running "$name" || fail "$name" "the container stopped before it was ready"
+              code="$(curl -s -o "$RUNNER_TEMP/ready.json" -w '%{http_code}' http://127.0.0.1:18080/ready || true)"
+              [ "$code" = "200" ] && break
+              sleep 2
+            done
+            echo "$name /ready: $code"; cat "$RUNNER_TEMP/ready.json" 2>/dev/null || true; echo
+            [ "$code" = "200" ] || fail "$name" "/ready did not answer 200 within 2 minutes (last answer: $code)"
+            curl -fsS http://127.0.0.1:18080/_build; echo
+            curl -fsS -o /dev/null http://127.0.0.1:18080/health
+          }
+
+          echo "== 1. uat, no database"
+          start fworker-start-uat -e FACTORY_ENVIRONMENT=uat
+          ready_200 fworker-start-uat
+          docker rm --force fworker-start-uat >/dev/null
+
+          echo "== 2. tdd, v2 configured, no database: inert"
+          start fworker-start-v2 -e FACTORY_ENVIRONMENT=tdd -v "$RUNNER_TEMP/instance.v2.json:/app/config/instance.v2.json:ro" -e FACTORY_CONFIG=/app/config/instance.v2.json
           code=000
-          for i in $(seq 1 60); do
-            if [ "$(docker inspect --format '{{.State.Running}}' fworker-start)" != "true" ]; then echo "::error::the container stopped before it was ready"; break; fi
+          for i in $(seq 1 60); do   # (it answers within two minutes; then it must go on answering the same for 30 seconds)
+            running fworker-start-v2 || fail fworker-start-v2 "the container stopped: v2 with no database must stay up"
             code="$(curl -s -o "$RUNNER_TEMP/ready.json" -w '%{http_code}' http://127.0.0.1:18080/ready || true)"
-            if [ "$code" = "200" ]; then break; fi
+            if [ "$code" = "503" ] && grep -q '"waitingFor":"database"' "$RUNNER_TEMP/ready.json"; then break; fi
             sleep 2
           done
           echo "/ready: $code"; cat "$RUNNER_TEMP/ready.json" 2>/dev/null || true; echo
-          if [ "$code" != "200" ]; then echo "::error::/ready did not answer 200 within 2 minutes (last answer: $code)"; docker logs fworker-start 2>&1 | tail -n 80; exit 1; fi
-          curl -fsS http://127.0.0.1:18080/_build; echo
-          curl -fsS -o /dev/null http://127.0.0.1:18080/health
+          if [ "$code" != "503" ] || ! grep -q '"waitingFor":"database"' "$RUNNER_TEMP/ready.json"; then fail fworker-start-v2 "/ready did not answer 503 waitingFor database (last answer: $code)"; fi
+          for i in $(seq 1 15); do
+            running fworker-start-v2 || fail fworker-start-v2 "the container stopped within 30 seconds of its start"
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/health || true)" = "200" ] || fail fworker-start-v2 "/health did not answer 200"
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/ready || true)" = "503" ] || fail fworker-start-v2 "/ready stopped answering 503"
+            sleep 2
+          done
+          docker rm --force fworker-start-v2 >/dev/null
 
-      - name: Stop the container
+          echo "== 3. tdd, v2 configured, no database, kill switch"
+          start fworker-start-off -e FACTORY_ENVIRONMENT=tdd -e FACTORY_V2_OFF=1 -v "$RUNNER_TEMP/instance.v2.json:/app/config/instance.v2.json:ro" -e FACTORY_CONFIG=/app/config/instance.v2.json
+          ready_200 fworker-start-off
+
+      - name: Stop the containers
         if: always()
-        run: docker rm --force fworker-start || true
+        run: docker rm --force fworker-start-uat fworker-start-v2 fworker-start-off fworker-config || true
 
   # Every scenario of every suite runs in exactly one shard: the scenarios each matrix entry lists (run.ps1 -ListScenarios -Suite s, with
   # -Groups n -Group g for a shard, every group of an @all/n), added up, are exactly those of run.ps1 -ListScenarios (the full tier), none

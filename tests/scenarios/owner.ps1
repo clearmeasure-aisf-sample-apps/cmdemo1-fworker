@@ -1176,6 +1176,8 @@ $OwnerScenarios['owner: auto-unpark: a red-shard park is lifted once the pull re
     Check 'journalled once as unparked by the sweep, and counted' ((Get-SweepUnparks $n) -eq 1 -and [int]$st.auto_unparks.'fix-forward-exhausted' -eq 1) ($st.auto_unparks | ConvertTo-Json -Compress)
     Check 'handed to its column, so it is offered at once' ($st.handoff.column -eq 'Development' -or $st.ContainsKey('claim'))
     # at the limit (autoUnparkMax 3) a park is a person's again
+    # (let the passes the push and the first lift started settle before the park is written again: this check failed once in about ten runs when the edit crossed a write of the gateway; the exact crossing was not found)
+    Wait-Sweeps -Count 2 -MinSeconds 3
     Set-ItemState $n { param($st) $st.Remove('claim'); $st.Remove('handoff'); $st.auto_unparks = @{ 'fix-forward-exhausted' = 3 }; $st.park = (New-TestPark 'fix-forward-exhausted' @{ pr = $pr; head = $old }) }
     Wait-Sweeps -Count 3 -MinSeconds 12     # the sweeps that would lift it
     Check 'lifted three times already: left parked' ((Get-ItemState $n).ContainsKey('park'))
