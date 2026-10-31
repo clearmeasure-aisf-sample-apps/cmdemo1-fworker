@@ -16,17 +16,12 @@ public sealed class ItemRefusal(int exit, string code, string reason, JsonObject
     public JsonObject Extra { get; } = extra ?? new JsonObject();
 }
 
-/// <summary>What a verb answers: the exit code and the answer's fields (the verb, ok and exit are added by <see cref="ItemVerbRunner"/>). <see cref="Raw"/> is the script's own text when v1 answered the call.</summary>
-public sealed record ItemVerbAnswer(int Exit, JsonObject Body, string? Raw = null)
+/// <summary>What a verb answers: the exit code and the answer's fields (the verb, ok and exit are added by <see cref="ItemVerbRunner"/>).</summary>
+public sealed record ItemVerbAnswer(int Exit, JsonObject Body)
 {
     /// <summary>The answer as the script prints it: one line of JSON.</summary>
-    public string Text => Raw ?? Body.ToJsonString();
+    public string Text => Body.ToJsonString();
 }
-
-/// <summary>
-/// The call is one this port leaves to the rule script (the reason says why). Thrown before anything was written, and caught outside the item's lock: the script takes the lock itself. See <see cref="IItemV1"/>.
-/// </summary>
-public sealed class ItemDelegated(string reason) : Exception(reason);
 
 /// <summary>The PowerShell semantics of the rule scripts that a C# port has to keep.</summary>
 public static class Ps
@@ -171,10 +166,13 @@ public static class Ps
 /// <c>_lease</c> are taken out, the verb runs under the item's lock unless it is one of the verbs without one, and the answer is the verb's fields with <c>verb</c>, <c>ok</c> (true unless the handler set it) and <c>exit</c>.
 /// A refusal is <c>ok: false</c> with its code and reason and its own fields; a fault of the handler is the internal-error of the script (exit 20, retry after 30 s).
 /// </summary>
-public sealed class ItemVerbRunner(IItemLock locks, IItemRefusals refusals, IItemV1? v1 = null)
+public sealed class ItemVerbRunner(IItemLock locks, IItemRefusals refusals)
 {
     /// <summary><c>$NoLockVerbs</c> of factory.ps1, restricted to the verbs this group owns.</summary>
     public static readonly IReadOnlySet<string> NoLockVerbs = new HashSet<string>(StringComparer.Ordinal) { "get-item", "item-pr" };
+
+    /// <summary>A verb that runs without the item's lock: the verbs above, and the accept of a QC environment, whose gate (<see cref="IItemQc"/>) takes the lock itself, as <c>Invoke-QcAccept</c> does.</summary>
+    static bool Unlocked(string verb, JsonObject args) => NoLockVerbs.Contains(verb) || (verb == "accept" && Ps.Eq(Ps.Text(args, "kind"), "qc-env"));
 
     /// <summary>The verbs whose refusal 10 is one data point of the model ladder (Add-Refusal).</summary>
     static readonly IReadOnlySet<string> LadderVerbs = new HashSet<string>(StringComparer.Ordinal) { "complete", "record-review", "validation-verdict", "approve-pr", "merge", "open-pr", "append-body" };
@@ -194,17 +192,9 @@ public sealed class ItemVerbRunner(IItemLock locks, IItemRefusals refusals, IIte
             if (Ps.Has(args, "_lease")) args.Remove("_lease");
             var call = new ItemCall(verb, args, session, cause, ct);
             JsonObject body;
-            if (Ps.Has(args, "item") && !NoLockVerbs.Contains(verb)) body = await locks.Use(Ps.Int(args, "item"), () => handler(call), IItemLock.DefaultWaitSeconds, ct);
+            if (Ps.Has(args, "item") && !Unlocked(verb, args)) body = await locks.Use(Ps.Int(args, "item"), () => handler(call), IItemLock.DefaultWaitSeconds, ct);
             else body = await handler(call);
             return Finish(verb, body, 0);
-        }
-        catch (ItemDelegated d)
-        {
-            var raw = v1 is null ? null : await v1.Run(verb, stdin, TimeSpan.FromSeconds(580), ct);
-            if (raw is null)
-                return Finish(verb, new JsonObject { ["ok"] = false, ["verb"] = verb, ["code"] = "v1-unavailable", ["reason"] = $"{verb}: {d.Message}; the gateway has no v1 to ask" }, 30, refused: true);
-            JsonObject body; try { body = JsonNode.Parse(raw.Output) as JsonObject ?? new JsonObject(); } catch (System.Text.Json.JsonException) { body = new JsonObject(); }
-            return new ItemVerbAnswer(raw.Exit, body, raw.Output);
         }
         catch (ItemBusyException b)
         {

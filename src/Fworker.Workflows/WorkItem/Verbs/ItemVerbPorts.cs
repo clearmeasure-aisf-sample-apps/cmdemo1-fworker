@@ -53,16 +53,24 @@ public interface IItemRefusals
     Task<int> Count(int item, CancellationToken ct);
 }
 
-/// <summary>The script's own answer to a call: the exit code and the text it printed.</summary>
-public sealed record ItemRawAnswer(int Exit, string Output);
+/// <summary>
+/// The checks of a head, as the CI rule of the completion of Development reads them (W9.10q): <c>Get-ChecksFor</c> and <c>Get-BaseFailures</c>, over the checks read model of the gateway (<see cref="Fworker.Workflows.ReadModels.ChecksReadModel"/>).
+/// A refusal of GitHub is an <see cref="ItemRefusal"/> as for every other read of the verbs.
+/// </summary>
+public interface IItemChecks
+{
+    Task<Fworker.Workflows.ReadModels.ChecksFacts> ChecksFor(string sha, CancellationToken ct);
+    /// <summary>Which of these checks fail on the base branch now (<c>Get-BaseFailures</c>).</summary>
+    Task<Fworker.Workflows.ReadModels.BaseFailures> BaseFailures(IReadOnlyCollection<string> names, CancellationToken ct);
+}
 
 /// <summary>
-/// The calls that stay the rule script's for now (an accept of a QC environment is W9.1's, the completion of Development leans on the red-head ruling and the migration check of W9.5, the pull requests of the Copilot owner task
-/// are W9.4's): the call runs unchanged on v1 and its answer is the script's. Null where the gateway has no v1 to ask; the verb then refuses (30, v1-unavailable).
+/// The accept of a QC environment (the <c>accept</c> verb with kind qc-env), which is the QC gate's (<c>Invoke-QcAccept</c>: <see cref="Fworker.Workflows.Qc.QcService.Accept"/>). It takes the item's lock itself, so the verb does not hold it.
+/// A refusal of the QC gate is an <see cref="ItemRefusal"/>. Null in the composition where the gateway has no QC service: the verb then refuses (30, qc-unavailable).
 /// </summary>
-public interface IItemV1
+public interface IItemQc
 {
-    Task<ItemRawAnswer?> Run(string verb, string stdin, TimeSpan timeout, CancellationToken ct);
+    Task<JsonObject> Accept(int item, string assignment, string holder, CancellationToken ct);
 }
 
 /// <summary>The time, for the tests.</summary>

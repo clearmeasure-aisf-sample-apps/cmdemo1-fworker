@@ -6,6 +6,7 @@ using Fworker.Contracts.Ids;
 using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
+using Fworker.Workflows.Qc;
 using Fworker.Workflows.WorkItem;
 using Fworker.Workflows.WorkItem.Verbs;
 
@@ -14,7 +15,7 @@ using Fworker.Workflows.WorkItem.Verbs;
 //    writes it sends the cause id of the request, so the writes of a v2 verb are told from the background's as a script's are.
 //  - ItemVerbsState: Get-State and Save-State of the item's state comment, and Add-Journal into the holder in hand, over the journal store and ledger of Fworker.Integrations (the comment is in v1's format, so v1 can take every item back).
 //  - ItemVerbsRefusals: the refusals file of the model ladder, a file the rule scripts use (so the ladder sees a script of v1 and a v2 verb). The lock of an item is the gateway's one IItemLock (ItemLocks.cs, W9.10l).
-//  - ItemVerbsV1: the calls that stay the script's for now, through the runner.
+//  - ItemChecksAdapter (ItemChecksPort.cs) and the QC gate: the checks of a head for the CI rule of the completion of Development, and the accept of a QC environment (W9.10q: nothing is left to the rule script).
 // Only where the engine acts: ItemRoutes.Register builds it, and V2VerbRoutes.Build calls that only for Engine.V2Acts.
 
 /// <summary>The wire to GitHub of the item verbs.</summary>
@@ -134,16 +135,6 @@ sealed class ItemVerbsRefusals(string dir) : IItemRefusals
     }
 }
 
-/// <summary>The calls that stay the rule script's: through the runner, as the router of v1 runs them.</summary>
-sealed class ItemVerbsV1(Runner runner) : IItemV1
-{
-    public async Task<ItemRawAnswer?> Run(string verb, string stdin, TimeSpan timeout, CancellationToken ct)
-    {
-        var (code, output) = await runner.RunAsync(verb, stdin, timeout);
-        return new ItemRawAnswer(code, output);
-    }
-}
-
 /// <summary>The item verbs as a router: the answer of the port in the shape the verb pipeline takes.</summary>
 sealed class ItemVerbsRouter(ItemVerbs verbs) : IVerbRouter
 {
@@ -211,9 +202,13 @@ static class ItemVerbsWiring
             var state = new ItemVerbsState(journalStore, login, ledger);
             var dir = RuleStateDirectory.Resolve(env);
             Directory.CreateDirectory(dir);
-            var v1 = services.GetService(typeof(Runner)) is Runner runner ? new ItemVerbsV1(runner) : null;
+            // the checks of a head, for the CI rule of the completion of Development: the checks read model of W9.5 on this gateway's wire and identity
+            Action<string, string?, string?, string?>? observe = budget is null ? null : (resource, remaining, reset, limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
+            var checks = new ItemChecksAdapter(ReadModelParts.Build(instance, observe, env, locks: locks).Checks);
+            // the accept of a QC environment is the QC gate's (QcService.Accept); a gateway without QC refuses it
+            var qc = services.GetService(typeof(QcService)) is QcService qcService ? new ItemQcAdapter(qcService) : null;
             var board = new ItemBoard(gh, new SystemItemClock());
-            var verbs = new ItemVerbs(gh, board, new ItemPulls(gh, state), state, state, locks, new ItemVerbsRefusals(dir), v1);
+            var verbs = new ItemVerbs(gh, board, new ItemPulls(gh, state), state, state, locks, new ItemVerbsRefusals(dir), checks, qc);
             IVerbRouter router = new ItemVerbsRouter(verbs);
             // the saga hears what the script did (the feed of the hybrid composition) and what a person does to a park
             if (services.GetService(typeof(WorkItemParts)) is WorkItemParts { Ownership: { } ownership } parts && services.GetService(typeof(WolverineHostService)) is WolverineHostService host)

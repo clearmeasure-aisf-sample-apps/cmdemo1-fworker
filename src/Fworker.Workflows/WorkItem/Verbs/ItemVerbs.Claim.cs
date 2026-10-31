@@ -136,12 +136,13 @@ public sealed partial class ItemVerbs
         return o;
     }
 
-    // Verb_accept: the answer to a directed assignment. Own-item: the per-item claim (every claim rule applies). Bot job: a separate bot lease. A QC environment's accept is W9.1's (Invoke-QcAccept).
+    // Verb_accept: the answer to a directed assignment. Own-item: the per-item claim (every claim rule applies). Bot job: a separate bot lease. A QC environment's accept is the QC gate's (Invoke-QcAccept, QcService.Accept), which takes the item's lock itself.
     async Task<JsonObject> Accept(ItemCall c)
     {
         var n = c.Item; var assignment = c.NeedText("assignment"); var holder = c.NeedText("holder");
         var kind = c.Has("kind") ? c.Text("kind") : "own-item";
-        if (Ps.Eq(kind, "qc-env")) throw ToV1("the accept of a QC environment is the QC gate's (W9.1)");
+        if (Ps.Eq(kind, "qc-env"))
+            return await (qc ?? throw new ItemRefusal(30, "qc-unavailable", "accept: the gateway has no QC gate to accept a QC environment")).Accept(n, assignment, holder, c.Ct);
         if (Ps.Eq(kind, "bot-job"))
         {
             var role = c.Has("role") ? c.Text("role") : "inspector";

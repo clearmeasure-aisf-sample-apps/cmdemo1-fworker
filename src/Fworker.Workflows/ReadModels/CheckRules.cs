@@ -298,3 +298,6 @@ public sealed class BaseHistory
     public string Reason { get; init; } = "";
     public IReadOnlyList<(string Sha, IReadOnlyDictionary<string, JsonNode> Runs)> Commits { get; init; } = [];
 }
+
+/// <summary>Which of some checks fail on the base branch now (<c>Get-BaseFailures</c>, Prs.ps1): the ones whose newest finished conclusion there failed, and the ones that passed. Not available when the base branch's checks could not be read.</summary>
+public sealed record BaseFailures(bool Available, IReadOnlyList<string> Preexisting, IReadOnlyList<string> Green);

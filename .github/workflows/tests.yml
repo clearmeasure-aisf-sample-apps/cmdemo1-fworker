@@ -241,13 +241,18 @@ jobs:
             dotnet build "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --verbosity quiet
           done
 
-      # Every port Tier 1 listens on is below 40000: a suite's slot range 6100-8999, a group's 10000 + 1000 * slot + 100 * group + 0..99 (slot
-      # at most 29, group at most 9: at most 39999). Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of
-      # one suite could take the port a group of a high slot (23 and up: 33000 and up) is about to listen on. This moves that range above them.
+      # Every port Tier 1 listens on is below 50000: a suite's slot range 6100-9199, a group's 10000 + 1000 * slot + 100 * group + 0..99 (group
+      # at most 9). Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of one suite could take the port a
+      # group of a high slot (23 and up: 33000 and up) is about to listen on. This moves that range above them, and fails when a suite appended
+      # at the end of run.ps1 puts a range into it: the slot that did (30, the suite saga: 40000-40999) behind a range of 40000-60999 made the
+      # fake or the suite of a claim fail to bind (exit 3, "Address already in use") in most runs of the job "Tier 1 (v2 saga)".
       - name: Ephemeral ports above the test ports
         run: |
           set -euo pipefail
-          sudo sysctl -w net.ipv4.ip_local_port_range="40000 60999"
+          slots=$(pwsh -NoProfile -File tests/scenarios/run.ps1 -ListSuites | grep -c .)
+          top=$((10000 + 1000 * (slots - 1) + 999))
+          if [ "$top" -ge 50000 ]; then echo "::error::the $slots suites of run.ps1 reach port $top, into the ephemeral range 50000-60999: lower the range's start in the workflow only if there is room above the ports"; exit 1; fi
+          sudo sysctl -w net.ipv4.ip_local_port_range="50000 60999"
           cat /proc/sys/net/ipv4/ip_local_port_range
 
       - name: Smoke
@@ -538,12 +543,17 @@ jobs:
             dotnet build "$project" --configuration Release -nodeReuse:false -p:UseSharedCompilation=false --verbosity quiet
           done
 
-      # Every port Tier 1 listens on is below 40000: a suite's slot range 6100-9199, a group's (and a claim by scenarios') 10000 + 1000 * slot + 100 * n + 0..99 (slot at most 29, n at most 9: at most 39999).
-      # Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of one suite could take the port a group of a high slot is about to listen on: this moves that range above them.
+      # Every port Tier 1 listens on is below 50000: a suite's slot range 6100-9199, a group's (and a claim by scenarios') 10000 + 1000 * slot + 100 * n + 0..99 (n at most 9).
+      # Linux hands out outgoing (ephemeral) ports from 32768-60999 by default, so a client socket of one suite could take the port a group of a high slot is about to listen on: this moves that range above them,
+      # and fails when a suite appended to run.ps1 puts a range into it. The range used to start at 40000, and the suite saga, slot 30, listens on 40000-40999: its claims (L29 to L32 of v2-claims.txt) failed
+      # with exit 3 (the probe of run.ps1: "port ... is already in use") or with a fake that could not bind, in most runs of the job "Tier 1 (v2 saga)".
       - name: Ephemeral ports above the test ports
         run: |
           set -euo pipefail
-          sudo sysctl -w net.ipv4.ip_local_port_range="40000 60999"
+          slots=$(pwsh -NoProfile -File tests/scenarios/run.ps1 -ListSuites | grep -c .)
+          top=$((10000 + 1000 * (slots - 1) + 999))
+          if [ "$top" -ge 50000 ]; then echo "::error::the $slots suites of run.ps1 reach port $top, into the ephemeral range 50000-60999: lower the range's start in the workflow only if there is room above the ports"; exit 1; fi
+          sudo sysctl -w net.ipv4.ip_local_port_range="50000 60999"
           cat /proc/sys/net/ipv4/ip_local_port_range
 
       - name: The claims ${{ matrix.claims }} on the v2 engine (full tier)

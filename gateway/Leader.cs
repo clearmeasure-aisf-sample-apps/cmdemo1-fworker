@@ -163,7 +163,7 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
     public void StartActing()
     {
         bool began;
-        lock (gate) { began = role is Role.Starting or Role.Superseded or Role.Off; if (role is Role.Starting or Role.Superseded) role = Role.Acting; }
+        lock (gate) { began = role is Role.Starting or Role.Superseded or Role.Off; if (role is Role.Starting or Role.Superseded) { role = Role.Acting; refWrittenNotActed = false; carriedPredecessor = null; } }
         acting.TrySetResult();
         // W9.10a: only now (lease taken, the predecessor's snapshot seen, the lease confirmed) may a node that acts start; outside the lock, and a callback that throws never breaks the lease
         // (W9.10b: and the SQL lock held; in the shadow run it may come later, SqlGranted then starts the node)
@@ -195,7 +195,7 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
         JsonNode? j = null; try { j = JsonNode.Parse(output); } catch { }
         if (code != 0 || j == null || (j["leader"] is JsonValue lv && lv.TryGetValue<bool>(out var lb) && lb)) return true;   // unreadable: as Hold does, it keeps the lease
         var cur = j["current"] as JsonObject;
-        lock (gate) { role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = cur?.DeepClone() as JsonObject; standbyCurrent = cur?.DeepClone() as JsonObject; etag = ""; sha = j["sha"]?.ToString() ?? ""; }
+        lock (gate) { role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = cur?.DeepClone() as JsonObject; standbyCurrent = cur?.DeepClone() as JsonObject; etag = ""; sha = j["sha"]?.ToString() ?? ""; refWrittenNotActed = false; carriedPredecessor = null; }   // (its hand-over writes the snapshot the newcomer waits for)
         Log(new JsonObject { ["gateway"] = "leader", ["superseded"] = Epoch, ["by"] = cur?.DeepClone(), ["before"] = "acting" });
         await SupersedeAsync(cur);
         return false;
@@ -285,10 +285,63 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
         if (!take) return;
         lock (gate) { sha = ""; etag = ""; }
         JsonObject? pred;
-        try { pred = await AcquireAsync(ct); } catch (OperationCanceledException) { return; }
+        try { pred = await AcquireAsync(ct, SqlFences); }
+        catch (OperationCanceledException) { return; }
+        catch (SqlLockLostException) { return; }   // (W9.10b) the lock went between the take of the lock and the write of the ref: nothing was written, the next check starts again
+        // the lock can also go during the write: the ref is then written by a process that does not hold the lock, so it neither restores nor acts; the next check takes the lock again and the ref once more,
+        // and the restore then still waits for the real predecessor (the latest record this process did not write), not for this process's own record
+        pred = KeepPredecessor(pred);
+        if (SqlFences && !sql!.Held)
+        {
+            Log(new JsonObject { ["gateway"] = "leader", ["sqlLostBeforeActing"] = true, ["holder"] = Holder, ["where"] = "standby" });
+            await ReleaseUnusedRefAsync();   // the record just written has no lock behind it and no snapshot will follow it
+            return;
+        }
+        EndTerm();   // the ref is written with the lock held: from here the process restores and hands over like any holder, and a record of its own is followed by a snapshot
         Log(new JsonObject { ["gateway"] = "leader", ["reacquired"] = Epoch, ["after"] = released ? "released" : lapsed ? "lapsed" : "sql-lock-free" });
         if (OnReacquired is { } f) await f(pred);
         StartActing();
+    }
+
+    // The predecessor the restore uses: the latest record of the ref that this process did not write itself. When the lock goes after the ref was written, the process writes the ref again, and that second
+    // write names the process's own first write as its predecessor; a restore that waited for the final snapshot of that would wait leaderHandoverSeconds for one that never comes (issue 94: the plant
+    // of the real predecessor dropped, nobody acting meanwhile). So a record of this process's own, written since the start of this term (refWrittenNotActed), is not a predecessor: the one kept stays,
+    // or none when the first write found no ref at all. A record of another process always is (it wrote the ref in between), and so is this process's own record of an earlier term (a standby that
+    // acted before). StartActing ends the term. The status shows the predecessor the restore uses.
+    JsonObject? carriedPredecessor;
+    bool refWrittenNotActed;
+    JsonObject? KeepPredecessor(JsonObject? written)
+    {
+        lock (gate)
+        {
+            var own = refWrittenNotActed && written?["holder"]?.ToString() == Holder;
+            if (!own) carriedPredecessor = written?.DeepClone() as JsonObject;
+            refWrittenNotActed = true;
+            predecessor = carriedPredecessor?.DeepClone() as JsonObject;
+            return carriedPredecessor?.DeepClone() as JsonObject;
+        }
+    }
+
+    // The ref is written and the lock is held: the term of "written, not yet confirmed with the lock" ends. What follows (the restore, the confirmation, a step-down while it restores) hands over like any
+    // holder, with the final snapshot of its own epoch, which the newcomer waits for; only a record written without the lock behind it is released unused (ReleaseUnusedRefAsync).
+    void EndTerm() { lock (gate) { refWrittenNotActed = false; carriedPredecessor = null; } }
+
+    // A process that wrote the ref and gives up its lock before it acted (a newer process asked, the connection dropped) leaves a record that no snapshot will ever follow (SqlStepDownAsync with no hand-over
+    // writes none): the newcomer would wait leaderHandoverSeconds for it and then drop the real plant. So the record is released naming the snapshot that holds the plant, the one the process itself would have
+    // restored from (a release names it for the successor, ReleaseAsync). Before the lock is let go, so that the newcomer's write follows it.
+    public async Task ReleaseUnusedRefAsync(TimeSpan? timeout = null)
+    {
+        long plantEpoch;
+        lock (gate)
+        {
+            if (!sqlFences || !refWrittenNotActed || epoch == 0) return;
+            var c = carriedPredecessor;
+            static long L(JsonNode? n) => long.TryParse(n?.ToString(), out var l) ? l : 0;
+            // (no predecessor: -1, which the restore reads as "no snapshot holds the plant" without waiting; 0 would accept a snapshot without an epoch, one of before the lease)
+            plantEpoch = c == null ? -1 : c["released"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb && c["plant_epoch"] is { } pe ? L(pe) : L(c["epoch"]);
+        }
+        try { await ReleaseAsync(plantEpoch, timeout ?? TimeSpan.FromSeconds(20)); }
+        catch (Exception e) { try { Console.Error.WriteLine($"leader unused ref release: {e.GetType().Name}"); } catch { } }
     }
 
     // ---- W9.10b ---------------------------------------------------------------------------------------------------------------------------------
@@ -312,8 +365,9 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
             }
             try
             {
-                var pred = await AcquireAsync(ct, SqlFences);
-                if (!SqlFences || sql!.Held) return pred;
+                var pred = KeepPredecessor(await AcquireAsync(ct, SqlFences));
+                if (!SqlFences || sql!.Held) { EndTerm(); return pred; }
+                await ReleaseUnusedRefAsync();   // written without the lock behind it: no snapshot will follow this record, so it is released before the lock is taken again
             }
             catch (SqlLockLostException) { }
             Log(new JsonObject { ["gateway"] = "leader", ["sqlLostBeforeActing"] = true, ["holder"] = Holder });
@@ -352,12 +406,26 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
             {
                 var got = await sql.TryAcquireAsync(Holder, request, ct);
                 if (got.Acquired) { SqlTaken(got); SqlGranted(); return; }
+                // a miss that is not the newest process's own ask (it concedes to a newer one, or it only waits its turn): this process has lost the start race and waits behind another, which is what a
+                // superseded process is, so it says so (the status and /ready say "replaced" and not a start that never ends)
+                if (got.Conceded || !request) MarkLostStartRace();
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception e) { NoteSqlFailure(e); failed = true; }
             pause = failed ? Math.Min(30, Math.Max(cfg.SqlCheckSeconds, pause * 2)) : cfg.SqlCheckSeconds;
             await Task.Delay(TimeSpan.FromSeconds(pause), ct);
         }
+    }
+
+    void MarkLostStartRace()
+    {
+        bool marked; Role was;
+        lock (gate)
+        {
+            was = role; marked = role == Role.Starting;
+            if (marked) { role = Role.Superseded; supersededAt = DateTime.UtcNow; supersededBy = new JsonObject { ["via"] = "sql", ["why"] = "start-race" }; standbyCurrent = null; etag = ""; }
+        }
+        if (marked) Log(new JsonObject { ["gateway"] = "leader", ["superseded"] = Epoch, ["before"] = was.ToString().ToLowerInvariant(), ["via"] = "sql", ["why"] = "start-race", ["holder"] = Holder });
     }
 
     // the lock came after this process already acts on the ref (the shadow run): the node starts now
@@ -430,7 +498,14 @@ sealed class GatewayLeader(IRuleScriptCalls runner, LeaderSettings cfg, string v
             if (handOver) { if (OnSuperseded is { } f) await f(new JsonObject { ["holder"] = by, ["via"] = "sql" }); }
             else await RunBeforeHandOverAsync("sql-" + why);
         }
-        finally { await ReleaseSqlAsync(); lock (gate) handingOver--; }
+        finally { if (!handOver) await ReleaseUnusedRefAsync(); await ReleaseSqlAsync(); lock (gate) handingOver--; }
+    }
+
+    /// <summary>The stop of a process that stands by: a record of the ref it wrote without the lock (and could not release then) is released, then the SQL lock. Without it nobody acts until the ref runs out.</summary>
+    public async Task ReleaseStandbyAsync()
+    {
+        await ReleaseUnusedRefAsync(TimeSpan.FromSeconds(8));
+        await ReleaseSqlAsync();
     }
 
     /// <summary>Lets the SQL lock go (and ends its connection). A no-op without a SQL lease.</summary>

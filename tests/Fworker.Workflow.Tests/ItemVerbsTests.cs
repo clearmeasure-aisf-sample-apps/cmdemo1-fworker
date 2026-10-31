@@ -424,17 +424,25 @@ public class ItemVerbsTests
     }
 
     [Fact]
-    public async Task Accept_OfAQcEnvironment_IsTheScripts_AndWithoutAV1ItSaysSo()
+    public async Task Accept_OfAQcEnvironment_IsTheQcGates_WhichTakesTheItemLockItself()
     {
         var w = World(1);
-        w.V1Answer = new ItemRawAnswer(0, "{\"ok\":true,\"verb\":\"accept\",\"kind\":\"qc-env\",\"exit\":0}");
         var a = await w.Call("accept", new { item = 1, assignment = "q-1", holder = "qc1", kind = "qc-env" });
-        Assert.Equal("qc-env", a["kind"]!.ToString());
-        Assert.Equal("accept", w.V1Calls.Single().Verb); Assert.Contains("\"qc-env\"", w.V1Calls.Single().Stdin);
+        Assert.Equal("qc-env", a["kind"]!.ToString()); Assert.Equal("accept", a["verb"]!.ToString()); Assert.Equal(0, (int)a["exit"]!);
+        Assert.Equal([(1, "q-1", "qc1")], w.QcAccepts);
+        Assert.Empty(w.Log);      // the verb holds no lock: Invoke-QcAccept's gate takes it
         Assert.Empty(w.Writes);
-        w.V1Answer = null;
-        var no = await w.Call("accept", new { item = 1, assignment = "q-1", holder = "qc1", kind = "qc-env" }, 30);
-        Assert.Equal("v1-unavailable", no["code"]!.ToString());
+        // the gate's refusal is the verb's: a QC assignment that is no longer current
+        w.QcRefusal = new ItemRefusal(11, "stale-assignment", "this QC assignment is no longer current");
+        var stale = await w.Call("accept", new { item = 1, assignment = "q-0", holder = "qc1", kind = "qc-env" }, 11);
+        Assert.Equal("stale-assignment", stale["code"]!.ToString()); Assert.False((bool)stale["ok"]!);
+        // an own-item accept is still under the lock
+        w.QcRefusal = null;
+        await w.Call("accept", new { item = 1, assignment = "a-1", holder = "alice" });
+        Assert.Equal(["lock 1", "unlock 1"], w.Log);
+        // a gateway without a QC gate says so
+        var none = new ItemWorld(qc: false); none.AddIssue(1);
+        Assert.Equal("qc-unavailable", (await none.Call("accept", new { item = 1, assignment = "q-1", holder = "qc1", kind = "qc-env" }, 30))["code"]!.ToString());
     }
 
     // ---- release, expire-claim, my-items -------------------------------------------------------------------------------------------------------------------
@@ -611,18 +619,6 @@ public class ItemVerbsTests
         Assert.False((bool)fail["completed"]!); Assert.True((bool)fail["parked"]!); Assert.Equal("worker-failure", fail["reason"]!.ToString());
         Assert.Contains("worker reported **FAILURE** for **Technical Design**; item parked for review. could not build", w.Issues[4].Comments.Last().Body);
         Assert.Equal("worker-failure", w.State(4)["park"]!["reason"]!.ToString()); Assert.Null(w.State(4)["claim"]); Assert.Empty(w.ClaimRefs);
-    }
-
-    [Fact]
-    public async Task Complete_InDevelopment_IsTheScriptsUntilTheCiRuleIsPorted()
-    {
-        var w = World(1, "Development");
-        w.V1Answer = new ItemRawAnswer(10, "{\"ok\":false,\"verb\":\"complete\",\"code\":\"checks-not-green\",\"reason\":\"red\",\"exit\":10}");
-        var a = await w.Call("complete", new { item = 1, holder = "alice" }, 10);
-        Assert.Equal("checks-not-green", a["code"]!.ToString());
-        Assert.Equal("complete", w.V1Calls.Single().Verb);
-        Assert.Equal(["lock 1", "unlock 1"], w.Log);   // the lock is let go before the script runs: the script takes it
-        Assert.Empty(w.Writes);
     }
 
     // ---- validation-verdict --------------------------------------------------------------------------------------------------------------------------------
@@ -821,16 +817,16 @@ public class ItemVerbsTests
     }
 
     [Fact]
-    public async Task OpenPr_GitHubRefusingThePullRequestIsAGateRefusal_AndACopilotBranchIsTheScripts()
+    public async Task OpenPr_GitHubRefusingThePullRequestIsAGateRefusal()
     {
         var w = World(1, "Development", "x");
         w.RejectPulls = true;
         var a = await w.Call("open-pr", new { item = 1, head = "factory-worker/1-fix", title = "t" }, 10);
         Assert.Equal("pr-not-created", a["code"]!.ToString()); Assert.Contains("No commits between master and factory-worker/1-fix", a["detail"]!.ToString());
         Assert.Null(w.States.GetValueOrDefault(1)?["pr"]);
-        w.V1Answer = new ItemRawAnswer(0, "{\"ok\":true,\"verb\":\"open-pr\",\"created\":false,\"exit\":0}");
-        await w.Call("open-pr", new { item = 1, head = "copilot/fix-the-total", title = "t" });
-        Assert.Equal("open-pr", w.V1Calls.Single().Verb);
+        // a copilot/* branch with no draft on it is opened the same way (the takeover finds nothing), and refused the same way
+        var c = await w.Call("open-pr", new { item = 1, head = "copilot/fix-the-total", title = "t" }, 10);
+        Assert.Equal("pr-not-created", c["code"]!.ToString());
     }
 
     [Fact]
@@ -868,7 +864,7 @@ public class ItemVerbsTests
     }
 
     [Fact]
-    public async Task ItemPr_FindsTheOpenPullRequestOfTheItem_AnOwnerTaskIsTheScripts()
+    public async Task ItemPr_FindsTheOpenPullRequestOfTheItem()
     {
         var w = World(1, "Development", "x");
         var none = await w.Call("item-pr", new { item = 1 });
@@ -876,10 +872,8 @@ public class ItemVerbsTests
         var pr = w.AddPull(1);
         var a = await w.Call("item-pr", new { item = 1 });
         Assert.True((bool)a["found"]!); Assert.Equal(pr.Number, (int)a["number"]!); Assert.Equal(pr.Head, a["branch"]!.ToString());
-        Assert.Empty(w.Log);   // item-pr holds no lock of its own
-        w.States[1] = new JsonObject { ["schema"] = 1, ["item"] = 1, ["rev"] = 1, ["copilot_task"] = new JsonObject { ["branch"] = "copilot/x" } }; w.StateComments[1] = 4;
-        w.V1Answer = new ItemRawAnswer(0, "{\"ok\":true,\"verb\":\"item-pr\",\"found\":true,\"number\":9,\"branch\":\"copilot/x\",\"exit\":0}");
-        Assert.Equal(9, (int)(await w.Call("item-pr", new { item = 1 }))["number"]!);
+        // item-pr holds no lock of the runner's: the resolution of an owner task takes the lock itself (Verb_item_pr), for every item
+        Assert.Equal(["lock 1", "unlock 1", "lock 1", "unlock 1"], w.Log);
     }
 
     // ---- state conflicts -----------------------------------------------------------------------------------------------------------------------------------

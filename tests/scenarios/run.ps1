@@ -241,7 +241,7 @@ if ($ListScenarios) {
 if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
     # Group port ranges lie above every suite slot (6100 + 100 * slot, up to 8999): 10000 + 1000 * slot + 100 * group. TEST_PORT_BASE moves the first group; TEST_FAKE_PORT and TEST_API_PORT name one port each, so they cannot apply to several groups and are not passed on.
     # The ranges of slots 23 and up (33000 and up) lie in Linux's default ephemeral range (32768-60999), where an outgoing connection can take a port
-    # before its group listens on it: CI (.github/workflows/tests.yml) moves the ephemeral range to 40000-60999 first; a local run of such a group can collide.
+    # before its group listens on it: CI (.github/workflows/tests.yml) moves the ephemeral range to 50000-60999 first (and fails when the ports of the suites reach it); a local run of such a group can collide.
     $base0 = $(if ($env:TEST_PORT_BASE) { [int]$env:TEST_PORT_BASE } else { 10000 + 1000 * @($SuiteDefs | ForEach-Object { $_.Name }).IndexOf($Suite) })
     $gDir = Join-Path ([IO.Path]::GetTempPath()) "factory-groups-$([guid]::NewGuid().ToString('N').Substring(0,6))"; New-Item -ItemType Directory -Force -Path $gDir | Out-Null
     $swAll = [Diagnostics.Stopwatch]::StartNew(); $kids = @(); $tot = 0; $fails = @(); $sc = @(); $skip = [ordered]@{}; $vc = 0; $vs = 0.0; $gv = 0; $cc = 0; $bad = $false; $quar = @()
@@ -300,7 +300,11 @@ Write-Host "suite $label : ports $($script:PortBase)-$($script:PortBase + 99) (f
 # (variable names here must not collide, case-insensitively, with the globals of the scenario files: $L, $L2, ...)
 # A suite needs its ports free (a leftover process of an earlier run would answer in place of this suite's own fake and gateway).
 foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
-    $probeSock = $null; try { $probeSock = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port); $probeSock.Start() } catch { Write-Host "port $port is already in use: another run, or a process outside the tests"; exit 3 } finally { if ($probeSock) { $probeSock.Stop() } }
+    $probeSock = $null; try { $probeSock = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port); $probeSock.Start() } catch {
+        Write-Host "port $port is already in use: another run, or a process outside the tests (or an outgoing connection that was given it: the ephemeral range of the machine, cat /proc/sys/net/ipv4/ip_local_port_range, must lie above the ports of the suites)"
+        # who has it, for the log of a CI job (ss is on the runners; a machine without it prints nothing)
+        try { & ss -tanp "( sport = :$port or dport = :$port )" 2>&1 | Select-Object -First 8 | ForEach-Object { Write-Host "  $_" } } catch { }
+        exit 3 } finally { if ($probeSock) { $probeSock.Stop() } }
 }
 
 # -Engine v2: the environment name and the database of this process. The CI-only name 'v2ci' is in no list of config/instance.json (Run-Suite adds the name in use to engine.v2Environments of the test

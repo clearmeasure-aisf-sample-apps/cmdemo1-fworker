@@ -24,6 +24,42 @@ public sealed class GitHubItemLabels(GitHubClientFactory clients) : IItemLabels
     }
 }
 
+/// <summary>
+/// <c>Get-MigrationCollision</c> (Prs.ps1) for the merge verb (W9.10q): the files of the pull request and, when it adds a DbUp script, the contents listing of the scripts directory on the base branch (a 404 is an empty directory). The rule is
+/// <see cref="MigrationNumbers"/>. A fault throws, and the verb answers the rule script's internal error.
+/// </summary>
+public sealed class GitHubMergeMigrations(GitHubClientFactory clients, RepoId home, string defaultBranch) : IMergeMigrations
+{
+    async Task<(int Status, JsonNode? Json)> Get(string relative, CancellationToken ct)
+    {
+        var client = await clients.For(home, ct);
+        using var resp = await client.Send(HttpMethod.Get, relative, null, ct);
+        var text = await resp.Content.ReadAsStringAsync(ct);
+        JsonNode? json = null;
+        if (text.Length > 0) { try { json = JsonNode.Parse(text); } catch (System.Text.Json.JsonException) { } }
+        return ((int)resp.StatusCode, json);
+    }
+
+    public async Task<MigrationCollision?> CollisionOf(int pullRequest, CancellationToken ct)
+    {
+        var files = new List<(string File, string Status)>();
+        for (var page = 1; ; page++)
+        {
+            var (status, json) = await Get($"pulls/{pullRequest}/files?per_page=100&page={page}", ct);
+            if (status is < 200 or >= 300) throw new HttpRequestException($"GitHub answered {status} to a read of the files of PR #{pullRequest}");
+            var chunk = json as JsonArray ?? [];
+            files.AddRange(chunk.Select(f => (f?["filename"]?.ToString() ?? "", f?["status"]?.ToString() ?? "")));
+            if (chunk.Count < 100) break;
+        }
+        if (!MigrationNumbers.Touches(files)) return null;
+        var (code, listing) = await Get($"contents/{MigrationNumbers.Directory}?ref={Uri.EscapeDataString(defaultBranch)}", ct);
+        if (code is 404) return MigrationNumbers.Find(files, []);
+        if (code is < 200 or >= 300) throw new HttpRequestException($"GitHub answered {code} to a read of the migration scripts");
+        var names = listing switch { JsonArray a => a.Select(x => x?["name"]?.ToString() ?? "").ToList(), JsonObject o => [o["name"]?.ToString() ?? ""], _ => [] };
+        return MigrationNumbers.Find(files, MigrationNumbers.ScriptsOnBase(names));
+    }
+}
+
 /// <summary>The calls of BaseUpdate.ps1 against the home repository: branches, compare, pulls, the files of a pull request and GitHub's update branch.</summary>
 public sealed class GitHubBaseUpdate(GitHubClientFactory clients, RepoId home, string defaultBranch) : IBaseUpdateGitHub
 {
