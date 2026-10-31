@@ -180,6 +180,19 @@ sealed class WolverineHostService : IHostedService
         return true;
     }
 
+    /// <summary>The same for a message the host is to deliver at <paramref name="due"/> (W9.9b: the timers of an adopted work item); a due time that has passed delivers it at once.</summary>
+    public async Task<bool> ScheduleAsync<T>(T message, DateTimeOffset due) where T : notnull
+    {
+        IHost? h;
+        lock (gate) h = phase == Phase.Running ? host : null;
+        if (h == null) return false;
+        using var scope = h.Services.CreateScope();
+        var bus = scope.ServiceProvider.GetRequiredService<IMessageBus>();
+        if (due <= DateTimeOffset.UtcNow) await bus.PublishAsync(message);
+        else await bus.PublishAsync(message, new DeliveryOptions { ScheduledTime = due });
+        return true;
+    }
+
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         lock (gate) shuttingDown = true;

@@ -285,6 +285,9 @@ static class GatewayServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<LeadershipService>());
         // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
         if (c.WolverineHost) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
+        // W9.9b: a process that the kill switch turned back to v1 in an environment the configuration names for v2 leaves the marker the engine's next adoption reads (nothing is made or written in any other case)
+        if (c.Engine.KillSwitch && c.Engine.Configured == EngineMode.V2 && c.Database.Configured && c.Instance.Home != null)
+            services.AddHostedService(sp => new KillSwitchMarkerService(new Fworker.Workflows.Adoption.SqlEngineMarkers(() => ItemMergedWiring.Open(c.Database.ConnectionString!)), Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node));
         if (c.Engine.V2Acts) services.AddHostedService(sp => sp.GetRequiredService<CopilotReconcileService>());   // W3.3
         // W4.2: the Octopus watcher, read only; v1 promotes with the rule scripts. W5.2: it also runs in the shadow run of the delivery train (slower, a smaller call budget)
         var shadowTrain = c.Engine.ShadowRuns && c.WolverineHost && c.Instance.Home != null;

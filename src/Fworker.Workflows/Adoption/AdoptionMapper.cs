@@ -22,6 +22,9 @@ public static class AdoptionMapper
     /// <summary>The codes of v1's parks that count a budget of the step the item is on.</summary>
     static readonly HashSet<string> RelaunchParks = ["watchdog-relaunch-budget", "session-relaunch-budget", "validation-no-verdict"];
 
+    /// <summary>W9.9b: the note of a mapping whose lease is not a claim's but the one a new arm gets (now + the step's lease): it changes with the clock, so a row that keeps its arm keeps its own lease (<see cref="AdoptionReconciler"/>).</summary>
+    public const string NewArmLease = "the lease is a new arm's, the claim holds none";
+
     public const string AwaitingChecksPark = "development:awaiting-checks";
 
     /// <param name="generation">The generation of the instance the mapping stands for: 1 for an item the saga has no row for; W9.10n: the next one when a re-adoption after the kill switch opens a new instance (<see cref="AdoptionFence.GenerationFor"/>).
@@ -189,6 +192,7 @@ public static class AdoptionMapper
         {
             // the plan has no slots: the lease of the claim, else the lease a new arm gets
             state.LeaseDue = live ? V1State.At(claim, "lease_until") : lease is { } l ? now + l : null;
+            if (!live && state.LeaseDue is not null) notes.Add(NewArmLease);
             return;
         }
         var phase = state.Step switch { StepKind.Design => "design", StepKind.Develop => "develop", _ => "verify" };

@@ -30,7 +30,7 @@ static class GatewayWolverineExtensions
         ShadowOctopusPort? octopusPort = null; var shadowHolder = new DeliveryShadowHolder();
         var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null; PlantStepJobs? plantSteps = null;
         var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
-        V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
+        AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
@@ -136,13 +136,26 @@ static class GatewayWolverineExtensions
                     // W9.10g: the plant-wide steps of the sweep as jobs of the leader (PlantStepJobs.cs; the sweep leaves them out where this exists), and the retention prune
                     var restoredSince = DateTime.UtcNow;
                     Fworker.Workflows.Reconcilers.PlantSteps? stepsMade = null;   // (made at the first run: the instance configuration and the GitHub identity are in the container by then; null where there is no identity, the jobs then say no-github)
+                    Func<bool> plantRestored = () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60));   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)
                     var steps = plantSteps = new PlantStepJobs(() => stepsMade ??= KeeperWiring.MakePlantSteps(sp, () => c.Leader.MayAct), () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, workItems.Ownership, () => c.Leader.MayAct,
-                        () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60)), c.Gateway.OwnerMode);   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)
+                        plantRestored, c.Gateway.OwnerMode);
                     jobs.Add(RecurringJobSlots.ClaimRefReap, ct => steps.ClaimRefReap(ct));
                     jobs.Add(RecurringJobSlots.BoardGuard, ct => steps.BoardGuard(ct));
                     jobs.Add(RecurringJobSlots.QcSync, ct => steps.QcSync(ct));
                     jobs.Add(RecurringJobSlots.Replenish, ct => steps.Replenish(ct));
                     jobs.Add(RecurringJobSlots.BacklogLow, ct => steps.BacklogLow(ct));
+                    // W9.9b: the adoption of v1's items, pending Sign-offs and merges, once per term of the lease and after the plant is restored (the job asks AdoptionJob, whose heartbeat is the engine's marker)
+                    var adopting = AdoptionWiring.Make(c, workItems, cs, host, () => sp.GetService<ISystemCatalog>(), mergedDeriver, plantRestored, new Fworker.Workflows.Merge.SqlMergeTrainStore(() => ItemMergedWiring.Open(cs)),
+                        new Fworker.Workflows.Delivery.SqlTrainStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Capacity.SqlCapacityStore(() => ItemMergedWiring.Open(cs)), new Fworker.Workflows.Qc.SqlQcEnvironmentStore(() => ItemMergedWiring.Open(cs)), Environment.GetEnvironmentVariable);
+                    if (adopting is not null)
+                    {
+                        adoption = adopting;
+                        jobs.Add(RecurringJobSlots.Adoption, async ct =>
+                        {
+                            var did = await adopting.Job.Tick(ct);
+                            if (did is not ("heartbeat" or "not-leader")) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["adoption"] = did, ["report"] = adopting.Runner.Last?.ToJson() }.ToJsonString());
+                        });
+                    }
                     var retention = new Fworker.Workflows.Reconcilers.RetentionPrune(() => ItemMergedWiring.Open(cs), Fworker.Workflows.Reconcilers.RetentionSettings.From(c.Instance.Root));
                     jobs.Add(RecurringJobSlots.RetentionPrune, async ct =>
                     {
@@ -225,7 +238,7 @@ static class GatewayWolverineExtensions
             {
                 _ = sp.GetRequiredService<WolverineHostService>();
                 var cs = WolverineHostService.WithConnectTimeout(healthConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block());
+                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => adoption?.Job.Block());
             });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)

@@ -96,6 +96,20 @@ public sealed class V2HealthTests
     }
 
     [Fact]
+    public async Task W99b_TheAdoptionBlock_IsThereWhereTheEngineActs_EvenWhileTheSchemaIsNotGood_AndNowhereElse()
+    {
+        var engine = new EngineOptions { Environment = "tdd", Configured = EngineMode.V2 };
+        var block = new JsonObject { ["state"] = "running", ["last"] = new JsonObject { ["adopted"] = 2, ["upserted"] = 2, ["skipped"] = 1, ["skippedBy"] = new JsonObject { ["settled"] = 1 } } };
+        var acting = new V2Health(new Source(), new FactorySchemaStatus(required: true), engine, () => null, () => null, adoption: () => block);
+        var o = await acting.Block(default);
+        Assert.Equal((false, 2, 1), ((bool)o["available"]!, (int)o["adoption"]!["last"]!["adopted"]!, (int)o["adoption"]!["last"]!["skippedBy"]!["settled"]!));
+        var shadow = new V2Health(new Source(), Good(), new EngineOptions { Environment = "tdd", Configured = EngineMode.Shadow }, () => null, () => null, adoption: () => block);
+        Assert.False((await shadow.Block(default)).ContainsKey("adoption"));
+        var none = new V2Health(new Source(), Good(), engine, () => null, () => null, adoption: () => null);
+        Assert.False((await none.Block(default)).ContainsKey("adoption"));
+    }
+
+    [Fact]
     public async Task WhileTheSchemaIsNotGood_TheBlockSaysItCannotRead_AndTouchesNothing()
     {
         var (health, source, _) = Make(new FactorySchemaStatus(required: true));

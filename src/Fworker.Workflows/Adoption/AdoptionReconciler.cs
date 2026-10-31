@@ -63,8 +63,9 @@ public static class AdoptionReconciler
 
     static AdoptionResult Update(WorkItemState existing, WorkItemState mapped, AdoptionMapping mapping, DateTimeOffset now, bool afterInterval)
     {
+        var newArmLease = mapping.Notes.Contains(AdoptionMapper.NewArmLease);
         var next = WorkItemState.FromJson(mapped.ToJson());
-        Keep(existing, next, now, newGeneration: false);
+        Keep(existing, next, now, newGeneration: false, newArmLease);
         // the comment's revision is not part of the comparison: only whether the state changed
         var probe = WorkItemState.FromJson(next.ToJson()); probe.CommentRev = existing.CommentRev;
         var changed = Changes(existing, probe);
@@ -77,7 +78,7 @@ public static class AdoptionReconciler
         {
             // v1 changed the item while the engine was off: a new instance. The old one's timers and commands name its generation, so they end as NotFound (the saga) or Stale (the scheduler and the line)
             next = WorkItemState.FromJson(mapped.ToJson());
-            Keep(existing, next, now, newGeneration: true);
+            Keep(existing, next, now, newGeneration: true, newArmLease);
             var reasons = new[] { $"from v1's state, revision {next.CommentRev}", $"new generation {next.Generation} (v1 acted while the engine was off)", string.Join(", ", changed.Take(8)) + (changed.Count > 8 ? ", ..." : "") };
             var fenced = Decide(next, now, reasons);
             next.LastKey = $"adopt|{next.CommentRev}"; next.Emitted = [fenced];
@@ -123,7 +124,7 @@ public static class AdoptionReconciler
     }
 
     // what the saga alone knows survives the comment: the identity and the history of the instance, the keys, the arm while the step is the same, the slot it holds
-    static void Keep(WorkItemState existing, WorkItemState next, DateTimeOffset now, bool newGeneration)
+    static void Keep(WorkItemState existing, WorkItemState next, DateTimeOffset now, bool newGeneration, bool newArmLease)
     {
         // (a new generation is the mapping's own: it was mapped for it, with its arm, its slot id and its request keys)
         if (!newGeneration) next.Generation = existing.Generation;
@@ -151,7 +152,8 @@ public static class AdoptionReconciler
             next.ArmSeq = existing.ArmSeq; next.ArmId = existing.ArmId; next.Outbox = [.. existing.Outbox];
             if (next.Status == WorkItemStatus.Settling && existing.SettleUntil is { } until) next.SettleUntil = until;
             // a renewed lease is the later of the two; the slot the saga holds is the scheduler's grant, not the claim's
-            if (existing.LeaseDue is { } lease && next.LeaseDue is { } claimLease) next.LeaseDue = lease > claimLease ? lease : claimLease;
+            // (a lease that is not a claim's but a new arm's is now + the step's lease: it moves with every start, so the row keeps its own, or every start whose comment had a new revision would renew it and write a decision)
+            if (existing.LeaseDue is { } lease && next.LeaseDue is { } claimLease) next.LeaseDue = newArmLease || lease > claimLease ? lease : claimLease;
             if (existing.SlotId.Length > 0) { next.SlotId = existing.SlotId; next.SlotRuntime = existing.SlotRuntime; next.SlotHost = existing.SlotHost; next.SlotAsked = false; next.SlotWait = ""; next.SlotKnown = true; next.AskSeq = existing.AskSeq; }
             else if (existing.SlotAsked && next.SlotAsked) { next.AskSeq = existing.AskSeq; next.SlotWait = existing.SlotWait; }
             next.SlotStamp = existing.SlotStamp;
