@@ -12,7 +12,8 @@ public sealed record WorkItemHistoryLine(DateTimeOffset At, long Sequence, strin
 
 /// <summary>One item of the v2 engine: the row of its saga with the newest decisions of its current generation (newest first).</summary>
 public sealed record WorkItemView(string Item, int Number, string Repository, int Generation, string Status, string Plan, string Step, bool Parked, string ParkReason, int PullRequest,
-    DateTimeOffset StartedAt, DateTimeOffset? CompletedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LeaseDue, IReadOnlyDictionary<string, string> Delivered, IReadOnlyList<WorkItemHistoryLine> History)
+    DateTimeOffset StartedAt, DateTimeOffset? CompletedAt, DateTimeOffset UpdatedAt, DateTimeOffset? LeaseDue, IReadOnlyDictionary<string, string> Delivered, IReadOnlyList<WorkItemHistoryLine> History,
+    DateTimeOffset? SettleUntil = null, bool SettleHeld = false)
 {
     public bool IsOpen => Status != WorkItemStatus.Completed;
 }
@@ -63,7 +64,7 @@ public sealed class SqlWorkItemViewSource(Func<FactoryDbContext> open) : IWorkIt
                 .Select(h => Line(h.At, h.Detail)).ToList();
             var number = Contracts.Ids.ItemId.TryParse(r.ItemKey, out var id) ? id.Number : 0;
             items.Add(new WorkItemView(r.ItemKey, number, r.Repository, r.Generation, r.Status, r.Plan, r.Step, state.Parked, state.ParkReason ?? "", state.PullRequest,
-                state.StartedAt, state.CompletedAt, r.UpdatedAt, state.LeaseDue, state.Delivered ?? [], lines));
+                state.StartedAt, state.CompletedAt, r.UpdatedAt, state.LeaseDue, state.Delivered ?? [], lines, state.SettleUntil, state.SettleHeld));
         }
         return new WorkItemViewSet(items, truncated);
     }

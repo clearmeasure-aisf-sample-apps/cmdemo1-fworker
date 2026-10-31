@@ -587,7 +587,20 @@ public sealed class FeatureFeedTests
     const string Head = "aaa1111111111111111111111111111111111111";
     const string Section = "## Technical Design\nthe design";
 
-    static DocsPlanSettings Settings(bool feature = true) => DocsPlanSettingsReader.From(JsonNode.Parse(
+    [Theory]
+    [InlineData(true, """["uat","prod"]""", "tdd-gw", true)]
+    [InlineData(false, """["uat","prod"]""", "tdd-gw", false)]   // (the promotion is off)
+    [InlineData(true, """["uat"]""", "tdd-gw", false)]            // (prod is not among its environments)
+    [InlineData(true, """["uat","prod"]""", "other-gw", false)]   // (it promotes from another gateway)
+    [InlineData(true, """["uat","prod"]""", "", false)]
+    public void TheSettleHoldForProdNeedsV1ToPromoteProdFromThisGateway(bool enabled, string environments, string gatewayEnvironment, bool holds)
+    {
+        var cfg = JsonNode.Parse("{\"delivery\":{\"finalEnvironment\":\"tdd\",\"autoPromote\":{\"enabled\":" + (enabled ? "true" : "false") + ",\"environments\":" + environments + ",\"gatewayEnvironment\":\"" + gatewayEnvironment + "\"}}}");
+        var policy = DocsPlanSettingsReader.From(cfg, n => n == "FACTORY_ENVIRONMENT" ? "tdd-gw" : null).Policy;
+        Assert.Equal(holds, policy.HoldsForProd);
+    }
+
+    static DocsPlanSettings Settings(bool feature = true) =>DocsPlanSettingsReader.From(JsonNode.Parse(
         $$$"""{"columns":{"ai":["Technical Design","Development","Functional Testing"],"development":"Development","validation":"Functional Testing","done":"Done"},"requiredBodySection":{"Technical Design":"## Technical Design"},"intake":{"v2Plans":[{{{(feature ? "\"docs\",\"feature\"" : "\"docs\"")}}}]}}"""));
 
     sealed class Inner(int code, string output) : IVerbRouter
