@@ -827,6 +827,18 @@ owner sets (`docs/design/operator-session.md` section 5):
 - no push access for that account to the work-orders repository (`cmdemo1-workorders`): the session improves the factory, it never
   works on the application.
 
+## 6b. v2 cutover (W9.9c)
+
+The tdd gateway runs the v2 engine from the pull request "W9.9c: the tdd cutover (v2 acts on tdd)" (`config/deploy.overrides.json`):
+`engine.v2Environments` is `["tdd"]` and `engine.shadowEnvironments` is empty; `intake.enabled` true with `intake.v2Plans` `["docs","feature"]`;
+`scheduler.runtime` `octopus`; `delivery.finalEnvironment` `tdd` (uat and prod keep the v1 `AutoPromoter`). The Copilot and Cursor runtimes are off on tdd
+for the measured batch (#437 option A; their day budgets are counted in memory): switch them back on in the same file afterwards. That also stops the
+Copilot on-demand manager of tdd, which needs the Copilot runtime.
+
+- **Kill switch.** `FACTORY_V2_OFF=1` in cmdemo1-system `system.json` (tdd fworker settings) makes tdd run v1 again without a release of this repository.
+- **Rollback.** `FACTORY_V2_OFF=1` as above, or a revert of the cutover pull request (about 4 minutes to tdd).
+- The drills and the measured batch are recorded later, on #268.
+
 ## 7. History in one paragraph
 
 2026-10-10: plugin, rule scripts and a local gateway; ten trial items. 2026-10-11: owner sessions, plant manager, dashboard, PR QC

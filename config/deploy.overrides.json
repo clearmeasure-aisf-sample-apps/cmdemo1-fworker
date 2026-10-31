@@ -17,7 +17,26 @@
     "enabled": true
   },
   "engine": {
-    "shadowEnvironments": ["tdd"]
+    "v2Environments": ["tdd"],
+    "shadowEnvironments": []
+  },
+  "intake": {
+    "enabled": true,
+    "v2Plans": ["docs", "feature"]
+  },
+  "scheduler": {
+    "runtime": "octopus",
+    "featureSlots": true
+  },
+  "schedule": {
+    "fileOverlap": { "enabled": false }
+  },
+  "gatewayMerge": true,
+  "catalog": {
+    "enabled": false
+  },
+  "recurringJobs": {
+    "boardReconcilerSeconds": 120
   },
   "wolverine": {
     "scheduledJobSeconds": 60,
@@ -29,11 +48,12 @@
     "healthPath": "/_healthcheck/detailed"
   },
   "delivery": {
-    "autoPromote": { "enabled": true, "environments": ["uat", "prod"], "gatewayEnvironment": "tdd" }
+    "autoPromote": { "enabled": true, "environments": ["uat", "prod"], "gatewayEnvironment": "tdd" },
+    "finalEnvironment": "tdd"
   },
   "api": {
     "cursor": {
-      "enabled": true,
+      "enabled": false,
       "maxConcurrent": 3,
       "maxMinutes": 60,
       "maxExecutionsPerDay": 30,
@@ -54,6 +74,7 @@
       "ciReleaseSeconds": 120,
       "environments": {
         "tdd": {
+          "enabled": false,
           "gatewayUrl": "https://ca-cmdemo1-tdd-fworker.graybush-19a6e13b.southcentralus.azurecontainerapps.io",
           "manager": { "enabled": true }
         },

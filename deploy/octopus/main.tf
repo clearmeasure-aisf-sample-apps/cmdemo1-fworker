@@ -14,6 +14,10 @@
 # change holds octopusdeploy_variable.sensitive: `terraform state rm octopusdeploy_variable.sensitive` first, or the apply deletes them.
 # The scripts are deploy/octopus/scripts/*.sh (tested by tests/octopus/runbooks.test.sh).
 #
+# State (2026-10-31): no Terraform state exists for the live project (Projects-1083). The project was brought to the W7.4 version through the
+# Octopus API on 2026-10-31 (variable set version 28, runbook snapshots 3669, 3671, 3672). A plan or apply without a state would therefore
+# create everything again: import the existing project, variable set, runbooks and trigger first, and read the plan before any apply.
+#
 # Host admission (W7.4): local.settings carries Fworker.PerHostCapacity, PerHostBurst, ReserveMb, MinDiskMb and HostFullWaitSeconds. With
 # PerHostCapacity set, start-worker.sh counts the running fw-* containers itself and ends a start the host cannot take with "host-full" and
 # exit code 75, which the gateway reads as a wait, not a failure. They reach the project only by this apply (terraform apply by hand).

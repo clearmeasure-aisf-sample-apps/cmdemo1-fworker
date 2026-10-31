@@ -61,15 +61,14 @@ public class CapacitySettingsTests
     }
 
     [Fact]
-    public void TheTddImage_HasTheFourRuntimesOfTheEnvironmentWithTheirLimits()
+    public void TheTddImage_HasTheTwoRuntimesOfTheEnvironmentWithTheirLimits()
     {
         var s = CapacitySettings.From(Effective(), "tdd");
-        Assert.Equal(["cae-job", "copilot-cloud", "cursor-cloud", "octopus"], s.Runtimes.Keys.Order());
+        // W9.9c, #437 option A: the Copilot and Cursor runtimes are off on tdd for the measured batch (their day counts live in memory); switch them back on in the overrides afterwards
+        Assert.Equal(["cae-job", "octopus"], s.Runtimes.Keys.Order());
         var octopus = s.Runtimes["octopus"];
         Assert.Equal((2, 30, 2, 2, true), (octopus.MaxConcurrent, octopus.MaxExecutionsPerDay, octopus.PerHostCapacity, octopus.PerHostBurst, octopus.HasHosts));
         Assert.Equal((2, 30, false), (s.Runtimes["cae-job"].MaxConcurrent, s.Runtimes["cae-job"].MaxExecutionsPerDay, s.Runtimes["cae-job"].HasHosts));
-        Assert.Equal((3, 30), (s.Runtimes["cursor-cloud"].MaxConcurrent, s.Runtimes["cursor-cloud"].MaxExecutionsPerDay));
-        Assert.Equal((3, 30), (s.Runtimes["copilot-cloud"].MaxConcurrent, s.Runtimes["copilot-cloud"].MaxExecutionsPerDay));
         Assert.All(s.Runtimes.Values, r => Assert.Null(r.Toolchains));   // no toolchain list: unrestricted
     }
 
@@ -146,8 +145,9 @@ public class CapacitySettingsTests
     {
         var s = CapacitySettings.From(Effective(), "tdd");
         var only = s.Only(["octopus", "cursor-cloud"]);
-        Assert.Equal(["cursor-cloud", "octopus"], only.Runtimes.Keys.Order());
-        Assert.Equal(4, s.Runtimes.Count);   // (the original is untouched)
+        Assert.Equal(["octopus"], only.Runtimes.Keys.Order());   // cursor-cloud is off on tdd: Only keeps what is on
+        Assert.Equal(["cae-job", "octopus"], s.Only(["octopus", "cae-job"]).Runtimes.Keys.Order());
+        Assert.Equal(2, s.Runtimes.Count);   // (the original is untouched)
         Assert.Empty(s.Only([]).Runtimes);
     }
 }
