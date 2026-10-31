@@ -119,7 +119,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         var unconfirmedOut = new List<int>();
         if (V2 != null)
         {
-            await V2.RefreshAsync();
+            await V2.RefreshAsync(ct);
             if (items != null)
             {
                 var mine = items.Where(V2.Owns).ToList();
