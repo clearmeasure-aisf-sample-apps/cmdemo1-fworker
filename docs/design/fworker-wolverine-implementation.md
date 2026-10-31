@@ -940,6 +940,7 @@ GitHub that the first saga found were fixed in `tests/FakeGitHub` (the single-is
   differ now and then (`keeper: split-item ...`, `mgr: text that comes from a message ...`, `copilot: a red master after the merge ...`) and the 4-requests check of the promote cold pass are quarantined under #415 (`$script:GoldenCausedFlaky`);
   the quarantine of the golden misses moved from the closed #386 to #415. The unit tests that need a SQL Server are `[SqlFact]` (88 tests): without `FACTORY_TEST_SQL` they are reported as skipped. The committed `tests/ci/__pycache__` file is removed.
 - *Not here.* `V2_BLOCKING` stays false: it becomes true after the first green run of `Tests` on master, which the main session starts after the merge batch and records on #268.
+  (Done 2026-10-31: `Tests` dispatched on master f7dd889a, after the claim list was made complete by W9.9c prep #603, run 41227931900 green, all 46 v2 jobs; `V2_BLOCKING` true from the pull request that sets it.)
 
 **W9.10e as built (#557): v1 leaves the saga's items alone.** Only where the engine acts (`Engine.V2Acts`); tdd stays in the shadow run and its v1 sweep is called as it always was (no `skip_items`, no `intake.v2Plans`, no `Loaded` wait).
 - *The owned set into the script.* The Sweeper adds `skip_items` (the numbers `V2Ownership` holds) to every `sync-board` call (`Sweeper.AddV2Arguments`). `Verbs.Sweep.ps1` skips those items in its item loop before it reads their state, so the settle and the master-CI watch,

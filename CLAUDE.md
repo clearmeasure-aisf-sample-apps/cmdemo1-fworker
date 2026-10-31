@@ -77,8 +77,8 @@ Rules of the runners:
   `engine.v2Environments` naming it, `FACTORY_DB_CONNECTION` a database of its own on the SQL Server of `FACTORY_TEST_SQL`; a machine without one exits 2). A claim names its profile:
   `saga-docs` and `saga-feature` turn the engine's intake on, so that the Todo items of the suite `saga` start sagas. The entries of the matrix name their suites after `claims:` (not `suites:`:
   they are not shards), and `python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml --require-complete` (run by the coverage job) proves that every claim is in exactly one of them and that every suite of `run.ps1 -ListSuites` is claimed whole or declared `v1-only`; a scenario of a claimed suite that tests v1's behaviour is declared `v1-only-scenarios <suite> | <regex> | <reason>` (run.ps1 -Engine v2 neither lists nor runs it).
-  Where v2 writes differently on purpose, `tests/scenarios/golden/v2-differences.txt` says so. `Tests result` reports the jobs and does not fail on them until `V2_BLOCKING` there is set to true
-  (after the first green run of `Tests` on master). The job `Image starts without a database` runs the built image with no `FACTORY_DB_CONNECTION`. The unit tests that need a SQL Server are `[SqlFact]`:
+  Where v2 writes differently on purpose, `tests/scenarios/golden/v2-differences.txt` says so. `Tests result` fails when one of them fails (`V2_BLOCKING` true there, since the
+  first green run of `Tests` on master), so they are part of the required `Build result`. The job `Image starts without a database` runs the built image with no `FACTORY_DB_CONNECTION`. The unit tests that need a SQL Server are `[SqlFact]`:
   without `FACTORY_TEST_SQL` a run reports them as skipped.
 - `run-all.ps1` rewrites `tests/scenarios/suite-times.json` (and a full run `scenario-stats.json`): commit them only when the timings
   really changed.
