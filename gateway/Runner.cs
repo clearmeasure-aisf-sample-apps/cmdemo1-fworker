@@ -96,9 +96,14 @@ sealed class Runner(string entry) : IRuleScriptCalls
     /// <summary>Whether this process may act now (the leader lease, and the SQL lock where the engine acts: <c>GatewayLeader.MayAct</c>); null (the default) is always. Set with <see cref="Lease"/>; only a routed fenced verb asks it here, the script path has the lease in its input.</summary>
     public Func<bool>? MayAct { get; set; }
 
+    /// <summary>Cutover review: true while the gateway is inert for want of a database; set by the composition (EngineOptions.NoDatabase). See <see cref="InertVerbs"/>.</summary>
+    public Func<bool>? Inert { get; set; }
+
     /// <summary>The rule script, whatever v2 answers: what a v2 route that cannot answer (no ledger, no translator, a merge for an item the saga does not own) falls back to. A route must call this and never <see cref="RunAsync"/>, which would ask the route again.</summary>
     public async Task<(int Code, string Output)> RunScriptAsync(string verb, string stdin, TimeSpan timeout)
     {
+        // cutover review: v2 configured and no database (EngineOptions.NoDatabase): the rule script runs for the gateway's own housekeeping and for the verbs that read, and for nothing else, whoever asks
+        if (Inert?.Invoke() == true && !InertVerbs.RunnerMayRun(verb)) { var refused = InertVerbs.Refusal(verb); return (refused.Code, refused.Output); }
         // a call of the gateway itself that can wait (a journal line, the back-merge check, the metrics) is not started while the budget is low
         if (Budget is { } b && GitHubBudget.DeferredCalls.Contains(verb) && b.Low() is { Low: true } low)
         {

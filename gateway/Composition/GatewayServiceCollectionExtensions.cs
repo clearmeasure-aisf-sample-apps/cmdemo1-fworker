@@ -89,6 +89,7 @@ static class GatewayServiceCollectionExtensions
         }
         // fencing (W0.1): the rule scripts that act on the board run under this process's lease epoch and refuse their writes once it is lost (Runner.InjectLease)
         c.Runner.Lease = () => leader.FenceLease;
+        c.Runner.Inert = () => c.Engine.NoDatabase;   // cutover review: with no database only the housekeeping and the reading verbs reach the rule script (InertVerbs)
         c.Runner.MayAct = () => leader.MayAct;   // the routes of a fenced verb (Runner.RunAsync) refuse the same way once the lease is lost
         // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
         var sweepGap = new SweepGap();

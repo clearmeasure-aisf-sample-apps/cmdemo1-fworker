@@ -206,12 +206,52 @@ public sealed class CutoverSafetyTests
         var below = new Below(); var router = new InertVerbRouter(below);
         foreach (var verb in InertVerbRouter.ReadOnly) Assert.Equal(0, (await router.RunAsync(verb, "{}", TimeSpan.FromSeconds(1))).Code);
         Assert.Equal(InertVerbRouter.ReadOnly.Count, below.Calls.Count);
-        foreach (var verb in new[] { "claim-item", "merge", "complete", "move-next", "approve-pr", "qc-request", "create-item", "park-item", "accept", "release" })
+        // (item-pr retargets, renames, closes and readies a pull request; wait-for-checks re-runs a job and saves the re-run: neither is read-only)
+        foreach (var verb in new[] { "claim-item", "merge", "complete", "move-next", "approve-pr", "qc-request", "create-item", "park-item", "accept", "release", "item-pr", "wait-for-checks" })
         {
             var a = await router.RunAsync(verb, "{}", TimeSpan.FromSeconds(1));
             Assert.Equal(20, a.Code); Assert.Equal("database", JsonNode.Parse(a.Output)!["code"]!.ToString());
         }
         Assert.Equal(InertVerbRouter.ReadOnly.Count, below.Calls.Count);   // (none of the refused reached v1)
+    }
+
+    // The choke point: every call of the rule script, whoever makes it (QcHub.Ps, the item admin and demo endpoints, the webhook's ingest-event), goes through Runner. The runner here has no script at all: a call that reached v1 would throw.
+    [Theory]
+    [InlineData("qc-report")] [InlineData("unpark-item")] [InlineData("resettle-item")] [InlineData("publish-demo")] [InlineData("ingest-event")] [InlineData("item-pr")] [InlineData("wait-for-checks")] [InlineData("sync-board")] [InlineData("merge")]
+    public async Task TheRunner_OfAnInertGateway_RefusesWhatChangesAnything_NeverStartingTheScript(string verb)
+    {
+        var runner = new Runner("/nonexistent/factory.ps1") { Inert = () => true };
+        var (code, output) = await runner.RunAsync(verb, "{\"item\":7}", TimeSpan.FromSeconds(5));
+        Assert.Equal(20, code); Assert.Equal("database", JsonNode.Parse(output)!["code"]!.ToString());
+        (code, output) = await runner.RunScriptAsync(verb, "{\"item\":7}", TimeSpan.FromSeconds(5));
+        Assert.Equal(20, code); Assert.Equal("database", JsonNode.Parse(output)!["code"]!.ToString());
+    }
+
+    [Theory]
+    [InlineData("leader-lease")] [InlineData("plant-snapshot-save")] [InlineData("plant-snapshot-load")] [InlineData("revocations")] [InlineData("revoke-worker")] [InlineData("operator-release")] [InlineData("auto-promote")] [InlineData("operator-releases")] [InlineData("transcript-save")] [InlineData("get-item")]
+    public async Task TheRunner_OfAnInertGateway_StillRunsTheHousekeepingAndTheReadingVerbs(string verb)
+    {
+        // (the script is not there: the call gets as far as starting it, and the refusal "database" is not what comes back)
+        var runner = new Runner("/nonexistent/factory.ps1") { Inert = () => true };
+        string? code = null;
+        try { var (_, output) = await runner.RunScriptAsync(verb, "{}", TimeSpan.FromSeconds(5)); code = JsonNode.Parse(output)?["code"]?.ToString(); } catch (Exception) { code = "started"; }
+        Assert.NotEqual("database", code);
+    }
+
+    [Fact]
+    public async Task APipelineCall_OfQcReport_WithNoDatabase_IsRefused_AndNeverReachesV1()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = new GatewayEnvironment();
+        Cutover(env, database: false, killSwitch: false);
+        env.Apply(); WriteAnswer(env);
+        using var host = new GatewayHost();
+        _ = host.Server;
+        var a = await host.SendAsync("POST", "/api/v1/verbs/qc-report", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken, "{\"item\":7,\"environment\":\"qc-7\",\"verdict\":\"PASS\"}");
+        Assert.NotInRange(a.Status, 200, 299);
+        var log = File.Exists(env.StubLog + ".in") ? File.ReadAllText(env.StubLog + ".in") : "";
+        Assert.DoesNotContain("qc-report", log);          // (the stub rule script was never asked)
+        Assert.DoesNotContain("qc-", log);
     }
 
     [Fact]

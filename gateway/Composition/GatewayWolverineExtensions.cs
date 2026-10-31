@@ -160,7 +160,7 @@ static class GatewayWolverineExtensions
                     Fworker.Workflows.Reconcilers.PlantSteps? stepsMade = null;   // (made at the first run: the instance configuration and the GitHub identity are in the container by then; null where there is no identity, the jobs then say no-github)
                     Func<bool> plantRestored = () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60));   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)
                     var steps = plantSteps = new PlantStepJobs(() => stepsMade ??= KeeperWiring.MakePlantSteps(sp, () => c.Leader.MayAct), () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, workItems.Ownership, () => c.Leader.MayAct,
-                        () => plantRestored() && adoptionGate.Settled() is not null, c.Gateway.OwnerMode);   // (the plant-wide steps wait for the adoption of the term as the sweep does)
+                        () => plantRestored() && adoptionGate.Settled() is not null, c.Gateway.OwnerMode, excluded: () => adoptionGate.Excluded());   // (the plant-wide steps wait for the adoption of the term as the sweep does, and leave out what it could not fence)
                     jobs.Add(RecurringJobSlots.ClaimRefReap, ct => steps.ClaimRefReap(ct));
                     jobs.Add(RecurringJobSlots.BoardGuard, ct => steps.BoardGuard(ct));
                     jobs.Add(RecurringJobSlots.QcSync, ct => steps.QcSync(ct));

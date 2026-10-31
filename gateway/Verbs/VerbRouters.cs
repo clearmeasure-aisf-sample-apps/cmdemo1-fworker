@@ -25,19 +25,37 @@ static class VerbRouterFactory
     };
 }
 
-// Cutover review: the router of a gateway whose environment is configured for v2 and has no database (EngineOptions.NoDatabase). v2 cannot act and v1 must not take its place (no "v1-ran" marker can be written), so every verb that
-// changes anything is refused with code "database" and exit 20 (the caller retries later, as for a budget); the verbs that only read pass through. Nothing a session could do on a saga item reaches v1's scripts.
-sealed class InertVerbRouter(IVerbRouter below) : IVerbRouter
+// Cutover review: what a gateway whose environment is configured for v2 and has no database (EngineOptions.NoDatabase) lets through. v2 cannot act and v1 must not take its place (no "v1-ran" marker can be written), so every verb that
+// changes anything is refused with code "database" and exit 20 (the caller retries later, as for a budget). Two places refuse: the router in front of the verb endpoint (InertVerbRouter) and, as the choke point of every call of the
+// rule script whoever makes it (the QC hub, the item admin endpoints, the demo endpoint, the webhook's ingest-event, the loops), Runner.RunScriptAsync.
+static class InertVerbs
 {
-    /// <summary>The verbs that read and write nothing (kebab-case, as on the wire).</summary>
+    /// <summary>The verbs that write nothing at all (kebab-case, as on the wire). Not item-pr (it can retarget, rename, close and ready a pull request and saves state) and not wait-for-checks (it re-runs a job and saves the re-run).</summary>
     public static readonly IReadOnlySet<string> ReadOnly = new HashSet<string>(StringComparer.Ordinal)
     {
-        "get-item", "my-items", "inspect-facts", "pr-checks", "wait-for-checks", "metrics", "qc-view", "qc-list", "get-delivery", "backlog", "item-pr", "revocations", "operator-releases", "transcript-load", "plant-snapshot-load",
+        "get-item", "my-items", "inspect-facts", "pr-checks", "metrics", "qc-view", "qc-list", "get-delivery", "backlog", "revocations", "operator-releases", "transcript-load", "plant-snapshot-load",
     };
 
+    /// <summary>The gateway's own housekeeping, which keeps the process and its lease alive and writes nothing about an item: the leader lease, the plant snapshot, the revocations (reading and revoking a worker: a credential action that writes no item), the operator's release record, the automatic promotion of uat and prod, the transcripts.</summary>
+    public static readonly IReadOnlySet<string> Housekeeping = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "leader-lease", "plant-snapshot-save", "plant-snapshot-load", "plant-snapshot-await", "plant-snapshot-clear", "revocations", "revoke-worker", "auto-promote", "operator-releases", "operator-release", "transcript-save", "transcript-load", "transcript-prune",
+    };
+
+    public static bool RunnerMayRun(string verb) => ReadOnly.Contains(verb) || Housekeeping.Contains(verb);
+
+    public static VerbAnswer Refusal(string verb) =>
+        BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one, or FACTORY_V2_OFF=1", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 });
+}
+
+// The router in front of the verb endpoint of such a gateway: the verbs that only read pass through, every other is refused.
+sealed class InertVerbRouter(IVerbRouter below) : IVerbRouter
+{
+    /// <summary>The verbs that read and write nothing.</summary>
+    public static IReadOnlySet<string> ReadOnly => InertVerbs.ReadOnly;
+
     public Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout) =>
-        ReadOnly.Contains(verb) ? below.RunAsync(verb, stdin, timeout)
-        : Task.FromResult(BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one, or FACTORY_V2_OFF=1", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 }));
+        InertVerbs.ReadOnly.Contains(verb) ? below.RunAsync(verb, stdin, timeout) : Task.FromResult(InertVerbs.Refusal(verb));
 }
 
 // The leader lease as the loops of a gateway with no database see it: it is held (status, hand-over), but nothing may act.
