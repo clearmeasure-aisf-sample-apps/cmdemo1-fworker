@@ -123,6 +123,8 @@ function Add-Journal([int]$Item, $St, [string]$Event, [hashtable]$Fields = @{}, 
         $s = $St.state
         if (-not (Test-Has $s 'journal')) { $s.journal = @{ keys = @(); count = 0 } }
         $j = $s.journal
+        # a line without a key takes the ticks of now, as the C# journal does (JournalKeys.OrTicks): the key "event|" would make every later distinct event of that kind a repeat of the first
+        if ("$Key" -eq '') { $Key = [string](Get-UtcNow).Ticks }
         $k = "$Event|$Key"
         if (@($j.keys) -contains $k) { return $false }
         $Fields.item = $Item
@@ -234,7 +236,7 @@ function Verb_journal($a) {
         if ($posted) { $st.state.journal.waiting_at = ConvertTo-Iso (Get-UtcNow); Save-State $n $st }
         return @{ ok = $true; id = $n; posted = $posted }
     }
-    $key = if (Test-Has $a 'key') { "$($a.key)" } else { [string](Get-UtcNow).Ticks }
+    $key = if ((Test-Has $a 'key') -and "$($a.key)" -ne '') { "$($a.key)" } else { [string](Get-UtcNow).Ticks }
     # a routine release is machine-read state only (journal.ciReleased, last 20): no issue comment. The read and the save run under the item lock
     # factory.ps1 already holds for this verb ('journal' is not in $NoLockVerbs). A second Use-ItemLock here opened the same lock file again in the
     # same process, and on Linux that conflicts with the first open: every routine release waited the full 45 s, was refused item-busy and was

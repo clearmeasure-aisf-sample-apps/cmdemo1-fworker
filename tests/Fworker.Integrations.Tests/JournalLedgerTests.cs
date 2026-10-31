@@ -337,6 +337,35 @@ public sealed class JournalLedgerTests
         await Assert.ThrowsAsync<JournalRefusedException>(() => r.Ledger.AddTo(7, holder, "no-such-event", fields, "k"));
     }
 
+    // ---- the empty key (#477): the ticks, as Add-Journal does (tests/smoke.ps1 holds the script's side of the same rule) ---------------------
+
+    [Fact]
+    public async Task ALineWithAnEmptyKey_TakesTheTicksOfNow_SoTwoDifferentEventsAreNeverOne_WhicheverCallWritesThem()
+    {
+        var r = new Rig();
+        Assert.True((await r.Line(7, "released", "", ("worker", "w1"), ("reason", "first"))).Posted);
+        Assert.True((await r.Line(7, "released", "", ("worker", "w2"), ("reason", "second"))).Posted);
+        var holder = new ItemState { State = new JsonObject { ["schema"] = 1, ["item"] = 8 } };
+        var fields = new Dictionary<string, object?> { ["worker"] = "w1", ["reason"] = "first" };
+        Assert.True(await r.Ledger.AddTo(8, holder, "released", fields, ""));
+        Assert.True(await r.Ledger.AddInHand(8, holder, "released", fields, ""));
+        Assert.Equal(2, r.Plant(7).Count());
+        Assert.Equal(2, r.Plant(8).Count());
+        var keys = JournalJson.Strings(r.J(7), "keys").Concat(JournalJson.Strings((JsonObject)holder.State["journal"]!, "keys")).ToList();
+        Assert.Equal(4, keys.Distinct().Count());
+        Assert.All(keys, k => Assert.Matches(@"^released\|\d{10,}$", k));   // never "released|"
+        Assert.DoesNotContain(r.Plant(7), c => c.Body.Contains("key= -->"));
+    }
+
+    [Fact]
+    public void OrTicks_KeepsAKey_AndTakesTheTicksOfNowForAnEmptyOrMissingOne()
+    {
+        var now = new DateTime(2026, 10, 27, 9, 0, 0, DateTimeKind.Utc);
+        Assert.Equal("off|a-1|w1", JournalKeys.OrTicks("off|a-1|w1", now));
+        Assert.Equal(now.Ticks.ToString(), JournalKeys.OrTicks("", now));
+        Assert.Equal(now.Ticks.ToString(), JournalKeys.OrTicks(null, now));
+    }
+
     static int Cnt(JsonObject kinds, string k) => JournalJson.Int((JsonObject)kinds[k]!, "count");
 
     // ---- the text of the posted comment and of a fold, pinned to the script -----------------------------------------------------------------

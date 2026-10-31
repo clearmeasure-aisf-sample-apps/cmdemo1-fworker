@@ -730,8 +730,8 @@ W9.12 when the W5 gate is recorded, and W9.13.
 | `wolverine.scheduledJobSeconds` | at its floor (60) | the saga's timers fire within a minute |
 
 **The readiness checklist** (W9.9c; each line closed or re-scoped on its issue before the merge):
-- #477 (C# journal): the App token done (#498); `BaseUpdate` and `PlantTicker` go through the router (W9.9a, done: the Runner asks the routes); the empty key aligned;
-  the wiring test added;
+- #477 (C# journal): the App token done (#498); `BaseUpdate` and `PlantTicker` go through the router (W9.9a, done: the Runner asks the routes); the empty key aligned (done: an empty key is the ticks of now in both writers, `JournalKeys.OrTicks` and `Add-Journal`, so two distinct events of one kind are never one);
+  the wiring test added (done: `JournalCommandWiringTests`);
 - #479 (Copilot reconciler): W9.10c;
 - #496 (train parity): the newest-only difference declared; the event-time question carried by the W5 gate; save and outbox in
   W9.10o; hand-written handlers accepted (#491);
