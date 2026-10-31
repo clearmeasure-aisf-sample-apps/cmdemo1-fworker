@@ -69,10 +69,10 @@ public sealed class MergeVerbRoutesTests
         public Func<string, string>? ScriptAnswer;
         public MergeVerbHandlers Handlers;
 
-        public Rig(string policy = "auto", bool parts = true, params string[] labels)
+        public Rig(string policy = "auto", bool parts = true, Fworker.Workflows.WorkItem.Verbs.IItemRefusals? refusals = null, IMergeMigrations? migrations = null, params string[] labels)
         {
             var settings = new MergeVerbSettings(policy, "Auto Merge", ["hold:owner"], "Functional Testing", _ => null);
-            var verbs = new MergeVerbService(Home, Store, new Labels(labels), m => { Published.Add(m); return Task.FromResult(true); }, settings, new MergeVerbWait(TimeSpan.Zero, 1), _ => Task.CompletedTask);
+            var verbs = new MergeVerbService(Home, Store, new Labels(labels), m => { Published.Add(m); return Task.FromResult(true); }, settings, new MergeVerbWait(TimeSpan.Zero, 1), _ => Task.CompletedTask, migrations: migrations, refusals: refusals);
             var update = new BaseUpdateService(Gh, new Items(Store), new BackmergeSettings("factory-worker"), _ => Task.CompletedTask);
             MergeVerbParts? p = parts ? new MergeVerbParts(verbs, update, Store, Home) : null;
             Handlers = new MergeVerbHandlers(() => p, (verb, stdin, _) =>
@@ -147,6 +147,47 @@ public sealed class MergeVerbRoutesTests
         var a = await rig.Handlers.Merge("{\"item\":7}", Timeout);
         Assert.Equal((10, "held-by-label"), (a.Code, J(a.Output)["code"]!.ToString()));
         Assert.Empty(rig.Published);
+    }
+
+    sealed class Counted : Fworker.Workflows.WorkItem.Verbs.IItemRefusals
+    {
+        public readonly List<int> Added = [];
+        public Task Add(int item, CancellationToken ct) { Added.Add(item); return Task.CompletedTask; }
+        public Task Reset(int item, CancellationToken ct) => Task.CompletedTask;
+        public Task<int> Count(int item, CancellationToken ct) => Task.FromResult(Added.Count(x => x == item));
+    }
+
+    sealed class Collides(MigrationCollision? c) : IMergeMigrations
+    {
+        public Task<MigrationCollision?> CollisionOf(int pullRequest, CancellationToken ct) => Task.FromResult(c);
+    }
+
+    [Fact]
+    public async Task ARefusal10_ThatV2Answers_IsOneDataPointOfTheModelLadder_AsTheScriptCountsItsOwn()
+    {
+        var counted = new Counted();
+        var rig = new Rig(labels: "hold:owner", refusals: counted);
+        await rig.Own(7);
+        Assert.Equal(10, (await rig.Handlers.Merge("{\"item\":7}", Timeout)).Code);                       // held-by-label
+        Assert.Equal(10, (await rig.Handlers.ApprovePr("{\"item\":7,\"text\":\"fine\"}", Timeout)).Code);   // not-required under auto
+        Assert.Equal([7, 7], counted.Added);
+        Assert.Equal(10, (await rig.Handlers.ClearHold("{\"item\":7}", Timeout)).Code);                   // not-held: clear-hold is no verb of the ladder
+        Assert.Equal([7, 7], counted.Added);
+        // an item the saga does not own is the script's, which counts its own refusals (nothing is counted twice)
+        rig.ScriptAnswer = _ => "{\"ok\":false,\"verb\":\"merge\",\"code\":\"wrong-column\",\"exit\":10}";
+        await rig.Handlers.Merge("{\"item\":9}", Timeout);
+        Assert.Equal([7, 7], counted.Added);
+    }
+
+    [Fact]
+    public async Task AMigrationNumberCollision_IsTheMergeVerbsRefusal_AndCountsLikeAnyRefusal()
+    {
+        var counted = new Counted();
+        var rig = new Rig(labels: "Auto Merge", refusals: counted, migrations: new Collides(new MigrationCollision("src/Database/scripts/Update/040_A.sql", "src/Database/scripts/Update/040_B.sql", "041")));
+        await rig.Own(7);
+        var a = await rig.Handlers.Merge("{\"item\":7,\"pr\":11}", Timeout);
+        Assert.Equal((10, "migration-number-taken", "041"), (a.Code, J(a.Output)["code"]!.ToString(), J(a.Output)["next"]!.ToString()));
+        Assert.Equal([7], counted.Added); Assert.Empty(rig.Published); Assert.Empty(rig.Script);
     }
 
     [Fact]
@@ -330,6 +371,31 @@ public sealed class MergeVerbRoutesTests
         Assert.Equal(["GET /repos/acme/orders/issues/7", "GET /repos/acme/orders/issues/8"], fake.Requests);
         var broken = new GitHubItemLabels(Clients(new Fake(_ => (HttpStatusCode.InternalServerError, "{}"))));
         await Assert.ThrowsAsync<HttpRequestException>(() => broken.LabelsOf(new ItemId(Home, 7), default));
+    }
+
+    [Fact]
+    public async Task TheMigrationCheck_ReadsTheFilesOfThePullRequest_AndTheScriptsDirectoryOfTheBaseBranchOnlyWhenItAddsOne()
+    {
+        const string Dir = "src/Database/scripts/Update/";
+        var fake = new Fake(r =>
+        {
+            var p = r.RequestUri!.PathAndQuery;
+            if (p.StartsWith("/repos/acme/orders/pulls/11/files")) return (HttpStatusCode.OK, "[{\"filename\":\"" + Dir + "040_AddOrders.sql\",\"status\":\"added\"},{\"filename\":\"src/App.cs\",\"status\":\"modified\"}]");
+            if (p.StartsWith("/repos/acme/orders/pulls/12/files")) return (HttpStatusCode.OK, "[{\"filename\":\"src/App.cs\",\"status\":\"modified\"}]");
+            if (p.StartsWith("/repos/acme/orders/pulls/13/files")) return (HttpStatusCode.OK, "[{\"filename\":\"" + Dir + "041_New.sql\",\"status\":\"added\"}]");
+            if (p.StartsWith("/repos/acme/orders/pulls/14/files")) return (HttpStatusCode.InternalServerError, "{}");
+            if (p.StartsWith("/repos/acme/orders/contents/" + Dir.TrimEnd('/') + "?ref=master")) return (HttpStatusCode.OK, "[{\"name\":\"039_A.sql\"},{\"name\":\"040_TakenFirst.sql\"},{\"name\":\"notes.txt\"}]");
+            return (HttpStatusCode.NotFound, "{}");
+        });
+        var check = new GitHubMergeMigrations(Clients(fake), Home, "master");
+        Assert.Equal(new MigrationCollision(Dir + "040_AddOrders.sql", Dir + "040_TakenFirst.sql", "041"), await check.CollisionOf(11, default));
+        Assert.Null(await check.CollisionOf(12, default));
+        Assert.Null(await check.CollisionOf(13, default));   // 041 is free on the base branch
+        Assert.Equal(2, fake.Requests.Count(x => x.StartsWith("GET /repos/acme/orders/contents/src/Database/scripts/Update?ref=master")));   // pull requests 11 and 13 only
+        await Assert.ThrowsAsync<HttpRequestException>(() => check.CollisionOf(14, default));
+        // a base branch without the directory: an empty one
+        var none = new GitHubMergeMigrations(Clients(new Fake(r => r.RequestUri!.PathAndQuery.Contains("/files") ? (HttpStatusCode.OK, "[{\"filename\":\"" + Dir + "001_A.sql\",\"status\":\"added\"}]") : (HttpStatusCode.NotFound, "{}"))), Home, "master");
+        Assert.Null(await none.CollisionOf(11, default));
     }
 
     [Fact]

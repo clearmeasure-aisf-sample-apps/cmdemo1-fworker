@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace Fworker.Workflows.WorkItem.Verbs;
 
-// The verbs on the item's pull request: open-pr and update-pr (Verbs.Pr.ps1 Verb_open_pr, Verb_update_pr). The branches of the Copilot cloud agent (copilot/*) are the script's still (W9.4: Use-CopilotDraft, Close-PrWithBranch).
+// The verbs on the item's pull request: open-pr and update-pr (Verbs.Pr.ps1 Verb_open_pr, Verb_update_pr). The branches of the Copilot cloud agent (copilot/*) are taken over as the script does (W9.10q: ItemOwnerPrs, Use-CopilotDraft and Close-PrWithBranch).
 
 public sealed partial class ItemVerbs
 {
@@ -30,15 +30,44 @@ public sealed partial class ItemVerbs
         // the Copilot cloud agent pushes only copilot/* branches: such a branch is the item's when the item is the Copilot runtime's (no other runtime: label routes it elsewhere)
         var copilotHead = Ps.Match(head, "^copilot/[A-Za-z0-9._/-]{1,150}$") && !info.Labels.Any(l => Ps.Match(l, "^runtime:") && !Ps.Eq(l, "runtime:copilot-cloud"));
         if (!copilotHead && !Ps.Match(head, $"^{Regex.Escape(Cfg.Name)}/{n}-")) throw new ItemRefusal(10, "bad-branch-name", $"the branch must be named '{Cfg.Name}/{n}-<something>' so the pull request belongs to the item");
-        if (copilotHead) throw ToV1("the pull request of a Copilot branch is opened with the script's takeover of the draft (W9.4)");
         if (!Ps.Match(title, $"(^|[^0-9])#{n}([^0-9]|$)")) title = $"{title} (#{n})";
         var baseBranch = c.Has("base") ? c.Text("base") : Cfg.DefaultBranch;
         var body = c.Has("body") ? c.Text("body") : "";
         var existing = await pulls.FindItemPr(n, c.Ct);
+        // the item already has its pull request on another branch (fix-forward, rework): a Copilot task started from that branch and pushed its own (CopilotCloudRuntime.BaseRef); the new branch must hold the old one's commits, then it becomes
+        // the item's pull request and the old one is closed as superseded, its branch deleted
+        var prev = existing is not null && !Ps.Eq(Ps.Text(existing["head"], "ref"), head) ? existing : null;
+        if (prev is not null && copilotHead)
+        {
+            var cmp = await gh.Allow("GET", $"{gh.RepoPath}/compare/{Ps.Text(prev["head"], "sha")}...{head}", [404], null, c.Ct);
+            if (cmp.Allowed || !Ps.NameIn(Ps.Text(cmp.Body, "status"), ["ahead", "identical"]))
+                throw new ItemRefusal(10, "not-on-item-branch", $"#{n} already has its pull request #{Ps.Text(prev, "number")} on '{Ps.Text(prev["head"], "ref")}'; '{head}' does not hold its commits. Work on a branch made from '{Ps.Text(prev["head"], "ref")}' (the task's own branch is) and pass that.");
+        }
+        if (copilotHead && !(existing is not null && Ps.Eq(Ps.Text(existing["head"], "ref"), head))) existing = await ownerPrs.UseCopilotDraft(n, head, title, prev is not null ? Ps.Int(prev, "number") : 0, c.Session, c.Ct);
+        if (prev is not null && copilotHead && existing is null)
+        {
+            // no draft on the branch: the item's pull request is opened on it below, then the old one is superseded
+            await pulls.AssertPushGate(n, info, (await store.Read(n, c.Ct)).State, "", null, c.Ct);
+            var made = await gh.Allow("POST", $"{gh.RepoPath}/pulls", [422], new JsonObject { ["title"] = title, ["head"] = head, ["base"] = Cfg.DefaultBranch, ["body"] = PrBodyText(body, n), ["draft"] = false }, c.Ct);
+            if (made.Allowed) throw new ItemRefusal(10, "pr-not-created", $"GitHub refused to create the pull request on '{head}': {Ps.Text(made.Body, "message")}");
+            var madeState = await store.Read(n, c.Ct);
+            madeState.State["pr"] = new JsonObject { ["number"] = made.Body!["number"]?.DeepClone(), ["branch"] = head, ["url"] = made.Body["html_url"]?.DeepClone() };
+            await store.Save(n, madeState, c.Ct);
+            existing = await pulls.GetPr(Ps.Int(made.Body, "number"), c.Ct);
+        }
+        if (prev is not null && copilotHead && existing is not null && Ps.Int(existing, "number") != Ps.Int(prev, "number"))
+        {
+            await pulls.AssertPushGate(n, info, (await store.Read(n, c.Ct)).State, Ps.Text(existing["head"], "sha"), Ps.Int(existing, "number"), c.Ct);
+            await ownerPrs.CloseStrayDrafts(n, [Ps.Text(prev["head"], "ref"), head], Ps.Int(existing, "number"), c.Session, c.Ct);
+            await ownerPrs.ClosePrWithBranch(prev, n, $"Superseded by #{Ps.Int(existing, "number")}, the pull request of #{n} now: it holds this branch's commits and the fix. Closed by the factory worker gateway.", c.Session, c.Ct);
+        }
         var gs = (await store.Read(n, c.Ct)).State;
         if (existing is not null && Ps.Eq(Ps.Text(existing["head"], "ref"), head))
         {
+            if (copilotHead) await ownerPrs.CloseStrayDrafts(n, [head], Ps.Int(existing, "number"), c.Session, c.Ct);
             await pulls.AssertPushGate(n, info, gs, Ps.Text(existing["head"], "sha"), Ps.Int(existing, "number"), c.Ct);
+            // the gateway's own resolution (Resolve-OwnerPr) may have adopted this branch's pull request before this call: it still names the item
+            if (copilotHead) existing = await ownerPrs.SetItemTitle(existing, n, title, true, c.Ct) ?? existing;
             var bo0 = await pulls.GetBuildOwed(info, Ps.Int(existing, "number"), gs, c.Ct);
             var o0 = new JsonObject { ["ok"] = true, ["id"] = n, ["created"] = false, ["pullRequest"] = PullRequestAnswer(existing, head) };
             ItemPulls.AddTo(o0, bo0);

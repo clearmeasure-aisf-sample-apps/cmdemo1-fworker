@@ -24,7 +24,7 @@ public sealed partial class ItemVerbs
         return r;
     }
 
-    // Verb_complete. The completion of Development (a real pull request with green checks: the CI rule, the migration check) is the script's until the checks read model is the gateway's (W9.5).
+    // Verb_complete. The completion of Development (a real pull request with green checks: the CI rule, the migration check) is CompleteDevelopment (ItemVerbs.Development.cs).
     async Task<JsonObject> Complete(ItemCall c)
     {
         var n = c.Item;
@@ -37,7 +37,6 @@ public sealed partial class ItemVerbs
         if (Ps.Eq(col, Cfg.ColumnValidation)) throw new ItemRefusal(10, "use-validation-verdict", $"completion in '{col}' is a validation verdict, not a completion");
         if (Ps.NameIn(col, Cfg.ColumnsHold)) throw new ItemRefusal(10, "hold-column", $"'{col}' is a hold column");
         if (!Ps.NameIn(col, Cfg.ColumnsAi)) throw new ItemRefusal(10, "not-ai-column", $"'{col}' is not a column this worker completes");
-        if (Ps.Eq(col, Cfg.ColumnDevelopment)) throw ToV1("the completion of Development leans on the CI rule (W9.5)");
         var st = await store.Read(n, c.Ct); var s = st.State;
         if (Ps.Has(s, "claim") && ItemRules.ClaimLive(s, Now) && !Ps.Eq(Ps.Text(s["claim"], "holder"), holder)) throw new ItemRefusal(40, "claim-held", $"the claim is held by {Ps.Text(s["claim"], "holder")}");
         if (!succeeded)
@@ -69,9 +68,14 @@ public sealed partial class ItemVerbs
             var rv = Ps.Has(s, "reviews") ? Ps.CiGet(s["reviews"] as JsonObject, col) as JsonObject : null;
             if (rv is null || !Ps.Has(rv, "ref") || !Ps.Truthy(rv["ref"]) || !Ps.Eq(Ps.Text(rv, "ref"), reference)) throw new ItemRefusal(10, "review-ref-invalid", "no recorded REVIEW: COMPLETE matches review_ref; call record-review first");
         }
-        // leaving the design column always leaves an explicit decision behind: no design append recorded one, so it is not docs-only
-        if (Cfg.HasSection(col) && !(Ps.Has(s, "design") && Ps.Has(s["design"], "docs_only"))) s["design"] = new JsonObject { ["docs_only"] = false, ["at"] = Ps.Iso(Now) };
-        return await FinishColumnExit(n, info, st, comment, c);
+        if (!Ps.Eq(col, Cfg.ColumnDevelopment))
+        {
+            // leaving the design column always leaves an explicit decision behind: no design append recorded one, so it is not docs-only
+            if (Cfg.HasSection(col) && !(Ps.Has(s, "design") && Ps.Has(s["design"], "docs_only"))) s["design"] = new JsonObject { ["docs_only"] = false, ["at"] = Ps.Iso(Now) };
+            return await FinishColumnExit(n, info, st, comment, c);
+        }
+        // 3. Development: a real pull request with green checks
+        return await CompleteDevelopment(n, info, st, col, comment, c);
     }
 
     /// <summary><c>Invoke-Demote</c>: a failed validation or merge sends the item back to Development, up to the demotion limit, then parks it for a human.</summary>

@@ -1,3 +1,4 @@
+using Fworker.Contracts.Seams;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -100,13 +101,16 @@ public sealed partial class ItemVerbs
         return new JsonObject { ["ok"] = true, ["holder"] = name, ["items"] = items };
     }
 
-    // Verb_item_pr: the item's open pull request for the Copilot runtime. An item with an owner task (copilot_task.branch in its state) is resolved by the script (Resolve-OwnerPr, W9.4); every other item is a lookup.
+    // Verb_item_pr: the item's open pull request for the Copilot runtime. An item with an owner task (copilot_task.branch in its state) is resolved first (Resolve-OwnerPr, ItemOwnerPrs); every other item is a lookup.
     async Task<JsonObject> ItemPr(ItemCall c)
     {
         var n = c.Item;
-        var s = (await store.Read(n, c.Ct)).State;
-        if (Ps.Has(s, "copilot_task") && Ps.Text(s["copilot_task"], "branch").Length > 0 && !(Ps.Has(s["copilot_task"], "done_at") && Ps.Truthy(s["copilot_task"]!["done_at"]))) throw ToV1("the pull request of an owner task is resolved by the script (Resolve-OwnerPr)");
-        var pr = await pulls.FindItemPr(n, c.Ct);
+        // an owner task's item: the open pull request of the task's branch (a recorded one that was closed or superseded is replaced). item-pr runs without the item lock (NoLockVerbs): the resolution writes the state, so it takes the lock;
+        // busy: what the state records (the plain lookup)
+        OwnerPrFound? ow = null;
+        try { ow = await locks.Use(n, () => ownerPrs.Resolve(n, c.Session, c.Ct), 20, c.Ct); }
+        catch (ItemBusyException) { }
+        var pr = ow is not null ? ow.Pr : await pulls.FindItemPr(n, c.Ct);
         if (pr is null) return new JsonObject { ["ok"] = true, ["id"] = n, ["found"] = false };
         return new JsonObject { ["ok"] = true, ["id"] = n, ["found"] = true, ["number"] = Ps.Int(pr, "number"), ["branch"] = Ps.Text(Ps.Get(pr, "head"), "ref") };
     }

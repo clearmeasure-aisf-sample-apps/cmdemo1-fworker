@@ -817,7 +817,7 @@ as before. The pipeline in front of the route is the same for both engines (auth
 **W9.3 as built (#355): the merge train verbs on v2.** `approve-pr`, `merge`, `clear-hold`, `base-watch` and `base-update-branch` are registered by `gateway/Verbs/Routes/Merge.cs` where the engine acts. Owner decisions of
 2026-10-28 apply (hybrid composition, tdd only, the W7 scope cut: no merge queue, no smoke evidence, no overflow). No table was added (`MergeTrains` and `WorkItems` are enough; the QC record is read from `QcEnvironments`, W9.0).
 - **Hybrid:** a verb is v2's for an item the WorkItemSaga owns, and the rule script's (`Runner`, as before) for every other item, for merge policy other than `auto` (the inspector's review, the approval of the current head,
-  the QC gate and the migration-number collision of `Verb_merge` are `peer-approved` rules, which stay on v1 as W6.2 declared) and whenever the saga's parts cannot be found (no host, no GitHub credential: not remembered, the next
+  the QC gate of `Verb_merge` are `peer-approved` rules, which stay on v1 as W6.2 declared; the migration-number collision is refused by the v2 verb since W9.10q) and whenever the saga's parts cannot be found (no host, no GitHub credential: not remembered, the next
   call tries again). One call is answered by exactly one of them. `MergeVerbHandlers` (`gateway/Verbs/MergeVerbs.cs`) finds the parts at the first call: the host is built after the route table.
 - **`merge`** (`MergeVerbRules`, `MergeVerbService` in `Fworker.Workflows.Merge`): the script's checks in its order and with its codes, exits and texts, on the saga's state (`already-merged`, `item-closed`, `wrong-column`,
   `no-pass-verdict`, then the labels read from the issue: `held-by-label`, `pr-mismatch`, `no-auto-merge-label`, and `held` for a parked saga). The merge itself is the saga's: its Merge step asks the repository's MergeTrainSaga
@@ -858,8 +858,8 @@ each as the rule script answers it for the same input: the same fields and exit 
   of a verb (`rule`) from the gateway's own loops as it did.
 - **The saga:** the router is wrapped in `V2VerbFeed` (the decision verbs `append-body`, `record-review`, `complete`, `validation-verdict` and the lease renewals, as in W6.6 and W7.3) and `ItemAdminFeed`: `park-item` and
   `unpark-item` tell the saga of an item it owns (`ParkWorkItem`, `ResumeWorkItem`) so its lease stops at the park and its step is armed again at the unpark.
-- **Left to the script, through `IItemV1` (the runner), before anything is written and after the item's lock is let go:** the `accept` of a QC environment (W9.1), the `complete` of Development with the red-head ruling and the
-  migration check of the CI rule (W9.5), and the pull request of a `copilot/*` branch or an owner task (`open-pr`, `item-pr`; W9.4). A gateway without a v1 answers `v1-unavailable` (30) for them.
+- **Left to the script until W9.10q, through `IItemV1` (the runner), before anything was written and after the item's lock was let go:** the `accept` of a QC environment (W9.1), the `complete` of Development with the red-head ruling and the
+  migration check of the CI rule (W9.5), and the pull request of a `copilot/*` branch or an owner task (`open-pr`, `item-pr`; W9.4). W9.10q ported them and deleted `IItemV1`, `ItemDelegated` and `ItemVerbsV1` (see "W9.10q as built").
 - **Declared difference:** the inline merge of a PASS in `validation-verdict` (`Verb_merge -Gateway`) is not made in the call. The answer says `next: merge` as before; the merge is the sweep's and the saga's right after (a verdict
   asks for a sweep), and `merge` called by the session still answers `already-merged`. W9.3 (the merge train verbs) closes it, and
   W9.10e (done) makes the sweep leave an owned item alone and the verdict make no inline merge for it. The Tier 1 suite `auto` runs with `gatewayMerge` off, so none of its scenarios sees it.
@@ -1157,6 +1157,21 @@ The table (one `Fworker.Workflow.Tests` case per row, `AdoptionMappingTests` and
 
 - *Not here.* The reads that fill a snapshot, the writes of the results, the backfill of `DeliveredTo` from Octopus's history and of `MergedItems` from the merged pull requests, the validation or reset of train rows built in shadow, and the result in the status block (W9.9b); the fence of a re-adoption after `FACTORY_V2_OFF` (W9.10n). The merge line
   (`MergeTrainState`) has no state of v1 to adopt: v1's queue is in memory, so an adopted PASS asks to enter it (M1) and the train rebuilds it.
+
+**W9.10q as built (#588): the item verb fallbacks closed.** Only where the engine acts (`Engine.V2Acts`: the item verbs and the merge verbs are registered only there); tdd stays in the shadow run and its v1 is unchanged. The item verbs run no
+rule script any more: `IItemV1`, `ItemDelegated`, `ToV1` and `ItemVerbsV1` are deleted, and the inventory (`verb-inventory.json`) lists no item verb fallback (its two entries left are the merge verb's `peer-approved` rules). Each port is the script's
+branches, with its fields, codes, exits and texts, proved by `ItemVerbFallbacksTests`, `MigrationNumbersTests` and `MergeVerbTests` on the in-memory GitHub of the item verbs' tests.
+- *The completion of Development* (`ItemVerbs.Development.cs`, `ItemCiRule`): the item's open pull request, `empty-pr`, `development-docs-only-pr`, the migration check, then the one CI rule for the checks of the head (`Get-RedHeadRuling`: `running`,
+  `rerun` once per head, `rerun-wait`, `deferred`, `master-defect` with its cache, its report once per set of checks and its fixed state, `red`), the awaiting-checks park with exit 21, and `ftWithPendingChecks`. The checks come through a new port,
+  `IItemChecks`, over the checks read model (`ChecksReadModel.ChecksFor`, and the new `BaseFailures` for `Get-BaseFailures`); `ItemChecksAdapter` (`gateway/Ports/ItemChecksPort.cs`) turns its refusals into the verbs'.
+- *`open-pr` for a `copilot/*` branch and `item-pr` for an owner task* (`ItemOwnerPrs`): `Use-CopilotDraft` (the takeover of the draft: retarget or close a stacked one, name the item, mark it ready, record it), `Close-PrWithBranch`,
+  `Close-StrayCopilotDrafts`, `Set-PrItemTitle`, `Set-PrReady` and `Resolve-OwnerPr` (a successor branch, a newer recorded pull request, the retarget and the consolidation of a stack), as the script has them; `item-pr` takes the item's lock for the
+  resolution and answers from the state when it is busy. The delivery verbs have the same rules on their own ports (`Delivery.Verbs.OwnerPrs`); they are not shared because the two sets of ports differ (the item verbs' wire and state).
+- *The accept of a QC environment* was a sixth fallback that the inventory attributed to W9.1 and that W9.1 left in the code. It is `QcService.Accept` through `IItemQc` (`ItemQcAdapter`); the verb holds no lock, as the gate takes the item's lock itself.
+- *The merge verb* (`MergeVerbService`): the migration-number collision (`MigrationNumbers`, the pure rule of `Get-MigrationCollision`, and `GitHubMergeMigrations` for the pull request's files and the scripts directory of the base branch) is a refusal 10
+  `migration-number-taken` of the session's call with the script's fields, and a refusal 10 of `merge` or `approve-pr` that v2 answers counts for the model ladder (`CountRefusal`, the refusals file the item verbs and the scripts count in).
+  *Not ported:* the script's gateway-mode branch of the same check (the sweep's own merge demotes the item to Development with the renumbering text). The saga's own merge call (its retry timer, the C# direct merge) does not ask the migration
+  check, so a collision is refused only at a session's `merge` call. That is the scope of the issue (the merge verb); the saga's merge step is W7.2's and a gap for the owner to place.
 
 **W9.10k as built (#563, first pull request; the second one carries the Tier 1 scenarios, see Tests): the plant survives a restart and is fed from saga state.** Only where the engine acts (`Engine.V2Acts`); tdd stays in the shadow run and v1 is unchanged (nothing below is made, registered or called
 there: the store, the feed, the correction and the new inputs are built by the composition only for an acting engine with a database and a home repository). Script `240_AddPlantState.sql` (the reserved range 240 to 249) builds four tables, expand-only.

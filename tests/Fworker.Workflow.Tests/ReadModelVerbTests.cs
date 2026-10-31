@@ -393,6 +393,26 @@ public sealed class ReadModelVerbTests
     }
 
     [Fact]
+    public async Task BaseFailures_AreTheChecksWhoseNewestFinishedConclusionOnTheBaseBranchFailedOrPassed_AndAnUnreadableBaseBranchIsNotAvailable()
+    {
+        // Get-BaseFailures (the CI rule of the completion of Development, W9.10q): the newest finished conclusion on the last 5 commits of the default branch
+        var rig = Red();
+        rig.Api.On($"GET {Rig.Repo}/commits", 200, new JsonArray(new JsonObject { ["sha"] = "b1" }, new JsonObject { ["sha"] = "b2" }));
+        rig.Api.On($"GET {Rig.Repo}/commits/b1/check-runs", 200, Runs(("Integration", "completed", "failure"), ("Lint", "completed", "success"), ("Skipped one", "completed", "skipped"), ("Timed", "completed", "timed_out"), ("Going", "in_progress", null)));
+        rig.Api.On($"GET {Rig.Repo}/commits/b2/check-runs", 200, Runs(("Integration", "completed", "success"), ("Never green", "completed", "failure")));
+        var f = await rig.Checks.BaseFailures(["Integration", "Lint", "Skipped one", "Timed", "Going", "Absent", "Never green"], default);
+        Assert.True(f.Available);
+        Assert.Equal(["Integration", "Timed", "Never green"], f.Preexisting);   // newest first: b1's failure stands over b2's success
+        Assert.Equal(["Lint", "Skipped one"], f.Green);                          // a running check and a check the base never ran are neither
+        // the base branch cannot be read: not available, never an error
+        var down = Red(); down.Api.On($"GET {Rig.Repo}/commits", 500, new JsonObject { ["message"] = "boom" });
+        var d = await down.Checks.BaseFailures(["Integration"], default);
+        Assert.False(d.Available); Assert.Empty(d.Preexisting); Assert.Empty(d.Green);
+        var gone = Red(); gone.Api.Fail = new HttpRequestException("no route");
+        Assert.False((await gone.Checks.BaseFailures(["Integration"], default)).Available);
+    }
+
+    [Fact]
     public async Task WaitForChecks_TheRerunIsOfTheOnlyFailedCheckThatTheBaseBranchFailsToo_OncePerHead_AndOnlyWhenGitHubAllowsIt()
     {
         var rig = Red();

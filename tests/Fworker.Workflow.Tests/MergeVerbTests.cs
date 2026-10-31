@@ -3,6 +3,7 @@ using Fworker.Contracts.Seams;
 using Fworker.Contracts.Ids;
 using Fworker.Workflows.Merge;
 using Fworker.Workflows.WorkItem;
+using Fworker.Workflows.WorkItem.Verbs;
 using Xunit;
 using static Fworker.Workflow.Tests.SagaFixture;
 
@@ -57,11 +58,11 @@ public class MergeVerbTests
         public int Pauses;
         public readonly MergeVerbService Service;
 
-        public Harness(SagaFixture fx, Labels? labels = null, string policy = "auto", int looks = 3)
+        public Harness(SagaFixture fx, Labels? labels = null, string policy = "auto", int looks = 3, IMergeMigrations? migrations = null, IItemRefusals? refusals = null)
         {
             Fx = fx;
             Service = new MergeVerbService(Home, fx.Store, labels ?? new Labels("Auto Merge"), async m => { Published.Add(m); if (Accepts) await fx.Send(m); return Accepts; },
-                Settings(policy), new MergeVerbWait(TimeSpan.Zero, looks), async _ => { Pauses++; if (OnPause is not null) await OnPause(); }, () => T0);
+                Settings(policy), new MergeVerbWait(TimeSpan.Zero, looks), async _ => { Pauses++; if (OnPause is not null) await OnPause(); }, () => T0, migrations, refusals);
         }
 
         public async Task<(int Code, JsonObject Body)> Merge(string json)
@@ -73,6 +74,67 @@ public class MergeVerbTests
     }
 
     static string Item7 => "{\"item\":7}";
+
+    sealed class Migrations(MigrationCollision? answer) : IMergeMigrations
+    {
+        public readonly List<int> Asked = [];
+        public Task<MigrationCollision?> CollisionOf(int pullRequest, CancellationToken ct) { Asked.Add(pullRequest); return Task.FromResult(answer); }
+    }
+
+    sealed class Refusals : IItemRefusals
+    {
+        public readonly List<int> Added = [];
+        public bool Fails;
+        public Task Add(int item, CancellationToken ct) { if (Fails) throw new IOException("the state directory is read only"); Added.Add(item); return Task.CompletedTask; }
+        public Task Reset(int item, CancellationToken ct) => Task.CompletedTask;
+        public Task<int> Count(int item, CancellationToken ct) => Task.FromResult(Added.Count(x => x == item));
+    }
+
+    // ---- W9.10q: the migration number collision and the model ladder's count of refusals ---------------------------------------------------------
+
+    [Fact]
+    public async Task ADbUpNumberAnotherPullRequestTook_IsRefusedAsTheScriptDoes_AndTheSagaIsNotAsked()
+    {
+        var fx = await AtMerge();
+        var pr = fx.State.PullRequest;
+        var migrations = new Migrations(new MigrationCollision("src/Database/scripts/Update/040_AddOrders.sql", "src/Database/scripts/Update/040_TakenFirst.sql", "041"));
+        var h = new Harness(fx, migrations: migrations);
+        var (code, body) = await h.Merge(Item7);
+        Assert.Equal((10, "migration-number-taken", false), (code, body["code"]!.ToString(), body["ok"]!.GetValue<bool>()));
+        Assert.Equal($"merge refused: PR #{pr} adds src/Database/scripts/Update/040_AddOrders.sql, but src/Database/scripts/Update/040_TakenFirst.sql on master already has that number; the branch's script must be renumbered to 041 (never the one on master: DbUp runs a renamed script again)", body["reason"]!.ToString());
+        Assert.Equal((pr, "src/Database/scripts/Update/040_AddOrders.sql", "src/Database/scripts/Update/040_TakenFirst.sql", "041", "merge", 10),
+            (body["prNumber"]!.GetValue<int>(), body["script"]!.ToString(), body["taken_by"]!.ToString(), body["next"]!.ToString(), body["verb"]!.ToString(), body["exit"]!.GetValue<int>()));
+        Assert.Equal([pr], migrations.Asked); Assert.Empty(h.Published); Assert.Equal(StepKind.Merge, fx.State.Step);
+        // no collision: the saga is asked as before
+        var free = new Migrations(null);
+        var (code2, body2) = await new Harness(await Waiting(), migrations: free).Merge(Item7);
+        Assert.Equal(0, code2); Assert.Equal("waiting", body2["outcome"]!.ToString()); Assert.Single(free.Asked);
+    }
+
+    [Fact]
+    public async Task ARefusal10_OfMergeOrApprovePr_IsOneDataPointOfTheModelLadder()
+    {
+        var refusals = new Refusals();
+        var h = new Harness(await AtMerge(), policy: "auto", refusals: refusals);
+        var refused = new VerbAnswer(10, "{\"ok\":false}");
+        await h.Service.CountRefusal((JsonObject)JsonNode.Parse(Item7)!, refused);
+        await h.Service.CountRefusal((JsonObject)JsonNode.Parse("{\"item\":\"7\"}")!, refused);   // the item as text counts as the script reads it
+        Assert.Equal([7, 7], refusals.Added);
+        // only a refusal 10 on an item: a wait (21), a fault (20), a usage error (2), a success and a call without an item are none
+        foreach (var code in new[] { 0, 2, 11, 20, 21, 30 }) await h.Service.CountRefusal((JsonObject)JsonNode.Parse(Item7)!, new VerbAnswer(code, "{}"));
+        await h.Service.CountRefusal((JsonObject)JsonNode.Parse("{}")!, refused);
+        Assert.Equal([7, 7], refusals.Added);
+        // approve-pr under auto is a refusal 10 ("not-required"), counted with the answer it gave
+        var a = h.Service.ApprovePr((JsonObject)JsonNode.Parse("{\"item\":7,\"text\":\"fine\"}")!)!.Value;
+        Assert.Equal(10, a.Code);
+        await h.Service.CountRefusal((JsonObject)JsonNode.Parse("{\"item\":7,\"text\":\"fine\"}")!, a);
+        Assert.Equal([7, 7, 7], refusals.Added);
+        // a file of the state directory that cannot be written is not the verb's fault
+        refusals.Fails = true;
+        await h.Service.CountRefusal((JsonObject)JsonNode.Parse(Item7)!, refused);
+        // and a service made without a counter counts nothing
+        await new Harness(new SagaFixture()).Service.CountRefusal((JsonObject)JsonNode.Parse(Item7)!, refused);
+    }
 
     // ---- the script's checks, in its order --------------------------------------------------------------------------------------------------
 

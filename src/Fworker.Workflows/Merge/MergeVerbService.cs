@@ -2,19 +2,27 @@ using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
 using Fworker.Contracts.Seams;
 using Fworker.Workflows.WorkItem;
+using Fworker.Workflows.WorkItem.Verbs;
 
 namespace Fworker.Workflows.Merge;
 
 // W9.3 (#355): `merge`, `approve-pr` and `clear-hold` for the items the WorkItemSaga owns. The merge itself is the saga's: its Merge step asks the repository's MergeTrainSaga for the turn and the merge port runs the C# direct merge
 // (W6.2, W7.2). So the verb a session calls does not merge on its own: it applies the script's checks to the saga's state, asks the saga to make its merge call now (its retry timer, delivered at once), waits a short while for
 // the answer and says what the saga did, in the shape of Verb_merge's answers (merged, already-merged, waiting, demoted, parked, or its refusals). An item the saga does not own, and a merge policy other than auto
-// (the approval of the current head, the QC gate, the migration number collision), are the script's: `Merge` answers null and the caller runs the verb on v1.
+// (the approval of the current head, the QC gate), are the script's: `Merge` answers null and the caller runs the verb on v1. W9.10q: the migration number collision of the script (Get-MigrationCollision) is refused here as there,
+// and a refusal 10 of `merge` or `approve-pr` counts for the model ladder (Add-Refusal) as it does when the script answers.
 
 /// <summary>Where a verb reads whether an item carries a label (the GitHub issue's labels).</summary>
 public interface IItemLabels
 {
     /// <summary>The labels of the item, or null when it does not exist. A fault throws.</summary>
     Task<IReadOnlyList<string>?> LabelsOf(ItemId item, CancellationToken ct);
+}
+
+/// <summary>The DbUp scripts of a pull request against the base branch (<c>Get-MigrationCollision</c>): null when no script of the pull request has the number of a different script on the base branch. A fault throws.</summary>
+public interface IMergeMigrations
+{
+    Task<MigrationCollision?> CollisionOf(int pullRequest, CancellationToken ct);
 }
 
 /// <summary>How the merge verb waits for the saga: the pause between two looks at its state and how many looks (1 second apart by default, 20 at most).</summary>
@@ -24,7 +32,7 @@ public sealed record MergeVerbWait(TimeSpan Poll, int Looks)
 }
 
 public sealed class MergeVerbService(RepoId home, IWorkItemStore store, IItemLabels labels, Func<MergeRetryDue, Task<bool>> publish, MergeVerbSettings settings,
-    MergeVerbWait? wait = null, Func<TimeSpan, Task>? delay = null, Func<DateTimeOffset>? clock = null)
+    MergeVerbWait? wait = null, Func<TimeSpan, Task>? delay = null, Func<DateTimeOffset>? clock = null, IMergeMigrations? migrations = null, IItemRefusals? refusals = null)
 {
     readonly MergeVerbWait wait = wait ?? MergeVerbWait.Default;
     readonly Func<TimeSpan, Task> pause = delay ?? Task.Delay;
@@ -47,6 +55,10 @@ public sealed class MergeVerbService(RepoId home, IWorkItemStore store, IItemLab
         var itemLabels = await labels.LabelsOf(new ItemId(home, item), ct);
         if (itemLabels is null) return MergeVerbReplies.Reject("merge", 12, "item-not-found", $"issue #{item} not found");
         if (MergeVerbRules.MergeFromLabels(item, pr, state, itemLabels, settings) is { } held) return held;
+        // two pull requests that each add the same DbUp number race: the first merged takes it, the second is refused here (a session is told why; the saga's own merge is not asked)
+        if (migrations is not null && await migrations.CollisionOf(pr ?? state.PullRequest, ct) is { } mig)
+            return MergeVerbReplies.Reject("merge", 10, "migration-number-taken", MigrationNumbers.MergeReason(pr ?? state.PullRequest, mig, settings.DefaultBranch),
+                new JsonObject { ["prNumber"] = pr ?? state.PullRequest, ["script"] = mig.Script, ["taken_by"] = mig.TakenBy, ["next"] = mig.Next });
         return await MergeNow(item, state, ct);
     }
 
@@ -97,6 +109,17 @@ public sealed class MergeVerbService(RepoId home, IWorkItemStore store, IItemLab
     {
         var colon = reason.IndexOf(':');
         return (colon > 0 ? reason[..colon] : reason).Trim();
+    }
+
+    /// <summary>
+    /// The model ladder's input (<c>Add-Refusal</c>, factory.ps1): a refusal 10 of <c>merge</c> or <c>approve-pr</c> on an item is one data point, and repeated refusals on one item mean the session is looping. The script counts its own
+    /// refusals; this counts the ones v2 answers. A fault of the file is not the verb's.
+    /// </summary>
+    public async Task CountRefusal(JsonObject body, VerbAnswer answer, CancellationToken ct = default)
+    {
+        if (refusals is null || answer.Code != 10 || !MergeVerbReplies.ItemNumber("merge", body, out var item, out _)) return;
+        try { await refusals.Add(item, ct); }
+        catch (Exception e) when (e is not OperationCanceledException) { }
     }
 
     /// <summary><c>approve-pr</c>: the script's answer under merge policy auto; null where the inspector's review is the script's.</summary>

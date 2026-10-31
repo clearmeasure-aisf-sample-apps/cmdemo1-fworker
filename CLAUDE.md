@@ -70,6 +70,8 @@ Rules of the runners:
 - `run-all.ps1` without `-NoBuild` builds with `--no-restore`: on a fresh clone run the two `dotnet build` commands above first.
 - A new suite is appended at the END of `$SuiteDefs` in `tests/scenarios/run.ps1` (the position is its port slot) and added to a job of
   `.github/workflows/tests.yml` (the workflow fails when one is missing). A scenario tagged ` [full]` in its name is left out of the fast tier.
+  A suite's groups listen on `10000 + 1000 * slot + 100 * group` and up, and the jobs move the machine's ephemeral port range to 50000-60999 so that an
+  outgoing connection cannot hold such a port: the step "Ephemeral ports above the test ports" fails when the last slot reaches 50000 (slot 40).
 - The v2 engine has a second Tier 1, the matrix jobs `Tier 1 (v2 ...)` of `tests.yml`: they run the suites and scenarios named in `tests/scenarios/v2-claims.txt` again with
   `run-all.ps1 -Engine v2` (`run.ps1 -Engine v2 -V2Profile`; `FACTORY_ENVIRONMENT` v2ci, or the suite's own name where it sets one (tdd for copilot, promote, envscope),
   `engine.v2Environments` naming it, `FACTORY_DB_CONNECTION` a database of its own on the SQL Server of `FACTORY_TEST_SQL`; a machine without one exits 2). A claim names its profile:

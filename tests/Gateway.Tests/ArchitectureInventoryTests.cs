@@ -107,7 +107,7 @@ public class ArchitectureInventoryTests
         {
             if (!PlanRows.Contains(f.Owner)) problems.Add($"{f.Id}: owner '{f.Owner}' is not a row of the plan");
             if (!PlanRows.Contains(f.Leaves)) problems.Add($"{f.Id}: leaves '{f.Leaves}' is not a row of the plan");
-            if (f.Kind is not ("item-v1" or "merge-script" or "behavior-gap")) problems.Add($"{f.Id}: kind '{f.Kind}'");
+            if (f.Kind is not ("merge-script" or "behavior-gap")) problems.Add($"{f.Id}: kind '{f.Kind}'");
             if ((f.Kind == "behavior-gap") != (f.Marker is null)) problems.Add($"{f.Id}: a behavior-gap has no marker in the code, every other kind has one");
         }
         foreach (var e in Callers.Select(c => (c.Id, c.Exception)).Concat(Fallbacks.Select(f => (f.Id, f.Exception))).Where(x => x.Exception is not null))
@@ -147,16 +147,14 @@ public class ArchitectureInventoryTests
     // ---- the v1 fallbacks ----------------------------------------------------------------------------------------------------------------------
 
     [Fact]
-    public void EveryItemV1Fallback_IsInTheInventory_AndEveryMarkerIsStillInTheCode()
+    public void TheItemVerbsLeaveNothingToTheRuleScript_AndEveryFallbackMarkerIsStillInTheCode()
     {
         var problems = new List<string>();
-        // every place the item verbs hand a call to the script (ToV1) is an entry
-        var toV1 = new List<string>();
-        foreach (var (path, code) in Sources("src/Fworker.Workflows"))
-            foreach (Match m in Regex.Matches(code, @"\bToV1\(""([^""]*)"""))
-                toV1.Add(m.Groups[1].Value);
-        var itemV1 = Fallbacks.Where(f => f.Kind == "item-v1").ToList();
-        foreach (var reason in toV1) if (!itemV1.Any(f => f.Marker!.StartsWith("ToV1(\"", StringComparison.Ordinal) && reason.StartsWith(f.Marker["ToV1(\"".Length..], StringComparison.Ordinal))) problems.Add($"ToV1(\"{reason}\") is a fallback to the script that is not in the inventory (v1Fallbacks)");
+        // W9.10q closed the item verbs' fallbacks: nothing hands an item verb to the script (ToV1, IItemV1, ItemDelegated, ItemVerbsV1) any more, and no entry of the inventory is one
+        foreach (var (path, code) in Sources("src/Fworker.Workflows").Concat(Sources("gateway")))
+            foreach (Match m in Regex.Matches(code, @"\b(ToV1\(|IItemV1\b|ItemDelegated\b|ItemVerbsV1\b)"))
+                problems.Add($"{path}: {m.Value.TrimEnd('(')} hands an item verb to the rule script; the item verbs run no script (W9.10q)");
+        foreach (var f in Fallbacks.Where(f => f.Kind == "item-v1")) problems.Add($"{f.Id}: an item-v1 fallback is a call the item verbs leave to the script; there are none");
         // every entry's marker is in its file the number of times it says
         foreach (var f in Fallbacks.Where(f => f.Marker is not null))
         {
@@ -165,9 +163,6 @@ public class ArchitectureInventoryTests
             var n = Regex.Matches(ArchitectureTests.Code(File.ReadAllText(path)), Regex.Escape(f.Marker!)).Count;
             if (n != f.Sites) problems.Add($"{f.Id}: '{f.Marker}' is in {f.File} {n} time(s), the inventory says {f.Sites}" + (n == 0 ? " (the fallback is gone: delete the entry)" : ""));
         }
-        // and there is one implementation of the port that runs them
-        var impls = Sources("gateway").Where(s => Regex.IsMatch(s.Code, @"class\s+\w+[^{;]*:\s*[^{;]*\bIItemV1\b")).Select(s => s.Path).ToList();
-        if (impls.Count != 1 || impls[0] != "gateway/Ports/ItemVerbsPort.cs") problems.Add($"IItemV1 is implemented in: {string.Join(", ", impls)}; the one implementation is gateway/Ports/ItemVerbsPort.cs (ItemVerbsV1)");
         Assert.True(problems.Count == 0, "The v1 fallbacks differ from docs/design/verb-inventory.json:\n  " + string.Join("\n  ", problems));
     }
 

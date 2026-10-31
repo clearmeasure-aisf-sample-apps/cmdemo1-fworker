@@ -7,8 +7,8 @@ namespace Fworker.Workflows.WorkItem.Verbs;
 // board and the item's state comment, in the same order. Each handler is the port of its Verb_* function (Verbs.Item.ps1, Owner.ps1, Verbs.Pr.ps1); the comment above it names what it ports. The state comment stays in
 // v1's format (Get-State, Save-State), so v1 can take every item back (FACTORY_V2_OFF). What the saga learns of a verb is told by the gateway's feed (V2VerbFeed) from the answer, as for v1 (hybrid composition, W6.6).
 //
-// Where a verb leans on a rule that another group of W9 owns, the call is the script's still: the accept of a QC environment (W9.1), the completion of Development (the red-head ruling and the migration check of the CI rule,
-// W9.5), the pull requests of the Copilot owner task (W9.4), and the inline merge of a PASS (W9.3). IItemV1 runs the script for them; without a v1 the verb says so in a refusal (30, v1-unavailable).
+// W9.10q closed the calls that were the script's still: the completion of Development (the CI rule's red-head ruling and the migration check, ItemCiRule and MigrationNumbers, over the checks read model), open-pr for a copilot/* branch and
+// item-pr for an owner task (ItemOwnerPrs), and the accept of a QC environment (IItemQc, the QC gate's own). Nothing here runs the rule script any more. What stays declared is the inline merge of a PASS (W9.3, the saga's merge).
 
 /// <summary>The item verbs.</summary>
 public sealed partial class ItemVerbs
@@ -26,15 +26,21 @@ public sealed partial class ItemVerbs
     readonly IItemStateStore store;
     readonly IItemJournal journal;
     readonly IItemRefusals refusals;
-    readonly IItemV1? v1;
+    readonly IItemLock locks;
+    readonly IItemChecks checks;
+    readonly IItemQc? qc;
+    readonly ItemCiRule ciRule;
+    readonly ItemOwnerPrs ownerPrs;
     readonly IItemClock clock;
     readonly ItemVerbRunner runner;
     readonly Dictionary<string, Func<ItemCall, Task<JsonObject>>> handlers;
 
-    public ItemVerbs(ItemGitHub gh, ItemBoard board, ItemPulls pulls, IItemStateStore store, IItemJournal journal, IItemLock locks, IItemRefusals refusals, IItemV1? v1, IItemClock? clock = null)
+    public ItemVerbs(ItemGitHub gh, ItemBoard board, ItemPulls pulls, IItemStateStore store, IItemJournal journal, IItemLock locks, IItemRefusals refusals, IItemChecks checks, IItemQc? qc, IItemClock? clock = null)
     {
-        this.gh = gh; this.board = board; this.pulls = pulls; this.store = store; this.journal = journal; this.refusals = refusals; this.v1 = v1; this.clock = clock ?? new SystemItemClock();
-        runner = new ItemVerbRunner(locks, refusals, v1);
+        this.gh = gh; this.board = board; this.pulls = pulls; this.store = store; this.journal = journal; this.refusals = refusals; this.locks = locks; this.checks = checks; this.qc = qc; this.clock = clock ?? new SystemItemClock();
+        ciRule = new ItemCiRule(gh, checks, this.clock);
+        ownerPrs = new ItemOwnerPrs(gh, pulls, board, store, this.clock);
+        runner = new ItemVerbRunner(locks, refusals);
         handlers = new(StringComparer.Ordinal)
         {
             ["get-item"] = GetItem, ["append-body"] = AppendBody, ["comment"] = Comment, ["claim-item"] = ClaimItem, ["accept"] = Accept, ["release"] = Release, ["my-items"] = MyItems,
@@ -84,8 +90,4 @@ public sealed partial class ItemVerbs
         catch (OperationCanceledException) when (c.Ct.IsCancellationRequested) { throw; }
         catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); return false; }
     }
-
-    /// <summary>The call is one this port leaves to the rule script (see <see cref="ItemDelegated"/>): nothing may have been written when this is thrown.</summary>
-    static ItemDelegated ToV1(string reason) => new(reason);
-
 }

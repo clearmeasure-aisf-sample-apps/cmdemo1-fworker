@@ -169,6 +169,32 @@ public sealed partial class ItemVerbsFakeGitHubTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task TheCompletionOfDevelopment_ReadsTheChecksOfTheHeadOnTheWire_ARedGateIsRefused_AGreenHeadMovesTheCard()
+    {
+        // W9.10q: the CI rule's reads (check runs, workflow runs, the base branch) on the fake GitHub, through the checks read model of the gateway
+        await Control("reset");
+        var n = await Issue("Development", "x", "factory worker");
+        await Verb("accept", new { item = n, assignment = "a-1", holder = "alice" });
+        var rv = await Verb("record-review", new { item = n, column = "Development", role = "reviewer", text = "REVIEW: COMPLETE" });
+        var branch = $"factory-worker/{n}-development";
+        await Control("push-branch", new { branch, files = new[] { "src/App.cs" } });
+        var o = await Verb("open-pr", new { item = n, head = branch, title = "Trial", body = "change" });
+        var sha = o["pullRequest"]!["head_sha"]!.ToString();
+        var args = new { item = n, holder = "alice", comment = "REVIEW: COMPLETE", review_ref = rv["review_ref"]!.ToString() };
+        await Control("checks", new { sha, name = "Build result", status = "completed", conclusion = "success" });
+        await Control("checks", new { sha, name = "secret-scan", status = "completed", conclusion = "failure" });
+        var red = await Verb("complete", args, 10);
+        Assert.Equal("checks-not-green", red["code"]!.ToString()); Assert.Equal("secret-scan", red["checks"]!["failed_checks"]![0]!.ToString());
+        Assert.Contains("pull request checks are not green (", red["reason"]!.ToString());
+        var s = await StateOf(n);
+        Assert.Equal(1, (int)s["checks_red"]!["count"]!); Assert.Equal("secret-scan", s["pr"]!["failed_checks"]![0]!.ToString());
+        await Control("checks", new { sha, name = "secret-scan", status = "completed", conclusion = "success" });
+        var ok = await Verb("complete", args);
+        Assert.True((bool)ok["completed"]!); Assert.Equal("Functional Testing", ok["moved_to"]!.ToString()); Assert.Equal((int)o["pullRequest"]!["number"]!, (int)ok["prNumber"]!);
+        Assert.Equal(n, (int)(await Verb("item-pr", new { item = n }))["id"]!);
+    }
+
+    [Fact]
     public async Task AFailVerdictDemotesTheItem_AndTheBoardIsReadByMyItems()
     {
         await Control("reset");
