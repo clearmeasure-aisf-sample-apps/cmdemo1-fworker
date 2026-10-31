@@ -27,6 +27,13 @@ public static class JournalKeys
 {
     /// <summary>One command per (item, event, key): the ledger in the item's state comment holds the same key, so a replay after a restart does nothing twice.</summary>
     public static string For(int item, string ev, string key) => IdempotencyKeys.For("WriteJournalLine", item, ev, key);
+
+    /// <summary>
+    /// The one rule for a line without a key, the same in both writers (Add-Journal of plugin/scripts/lib/Journal.ps1, and the JournalLedger with the sink's command): an empty key is the ticks of now, so two different
+    /// events of one kind are never taken for one. The alternative, the key "event|" for every keyless line, would drop the second distinct event of that kind for good (the ledger keeps the key).
+    /// </summary>
+    public static string OrTicks(string? key, DateTime utcNow) =>
+        string.IsNullOrEmpty(key) ? utcNow.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) : key;
 }
 
 public sealed class WriteJournalLineHandler : IntegrationCommandHandler<WriteJournalLine>

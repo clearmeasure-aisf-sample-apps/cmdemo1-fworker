@@ -21,7 +21,9 @@ target `fworker-host` only; the gateway reads the capability tags together with 
 The machine name in Octopus (`FWORKER_HOST_NAME`, default the short host name) is the `host` the gateway's desired list is keyed by.
 
 Size: each worker container gets `Fworker.Cpus` (2) and `Fworker.Memory` (8g) by default; plan the host for the number of concurrent
-workers the gateway assigns to it. Images are pulled from private GHCR with `Fworker.GhcrUsername` / `Fworker.GhcrToken`.
+workers the gateway assigns to it. Host admission (W7.4) is the project variables `Fworker.PerHostCapacity` (2), `Fworker.PerHostBurst` (2),
+`Fworker.ReserveMb` (2048), `Fworker.MinDiskMb` (4096) and `Fworker.HostFullWaitSeconds` (30), set in `deploy/octopus/main.tf`: a start on a host that already runs
+two `fw-*` containers waits up to 30 s, then ends with `host-full` (exit 75), which the gateway treats as a wait. Images are pulled from private GHCR with `Fworker.GhcrUsername` / `Fworker.GhcrToken`.
 
 Security: membership of the `docker` group on a host equals root on it and access to the agents' API keys (`docker inspect` of a
 worker container shows its environment, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `CURSOR_API_KEY` included). Add no other user to

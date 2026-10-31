@@ -285,4 +285,23 @@ Check 'v2 differences: a - or + line outside a block is invalid' ((Get-VdErrors 
 Check 'v2 differences: a name that is not <suite>/<slug> is invalid' ((Get-VdErrors @('@ S1/a', "+ $vdX", $vdWhy)) -like '*is not <suite>/<slug>*')
 Check 'v2 differences: a scenario with two blocks is invalid' ((Get-VdErrors @('@ s1/a-1', "+ $vdX", $vdWhy, '', '@ s1/a-1', "+ $vdX", $vdWhy)) -like '*has a block already*')
 Remove-Item -Recurse -Force -Path $vd -ErrorAction SilentlyContinue
+# #477: a journal line without a key takes the ticks of now (the C# journal does the same, JournalKeys.OrTicks): two distinct events of one kind are two comments, never "released|" twice.
+# The GitHub, state and clock calls are stubbed inside this block only (a function defined in a script block is local to it).
+$jeResult = & {
+    $script:jePosts = 0; $script:jeTick = 639000000000000000L; $script:jeHolder = @{ state = @{}; id = 0 }
+    function Invoke-Gh { param([string]$Method, [string]$Path, $Body, $Allow) $script:jePosts++; return [pscustomobject]@{ id = 100 + $script:jePosts } }
+    function Get-UtcNow { $script:jeTick += 10; [DateTime]::new($script:jeTick, [DateTimeKind]::Utc) }
+    function Get-State([int]$Item) { return $script:jeHolder }
+    function Save-State([int]$Item, $St) { }
+    $fields = { @{ worker = 'w1'; reason = 'r' } }
+    $a1 = Add-Journal 5 $null 'released' (& $fields) ''
+    $a2 = Add-Journal 5 $null 'released' (& $fields) ''
+    $v1 = Verb_journal @{ item = 5; event = 'released'; fields = (& $fields); key = '' }
+    $v2 = Verb_journal @{ item = 5; event = 'released'; fields = (& $fields) }
+    $v3 = Verb_journal @{ item = 5; event = 'released'; fields = (& $fields); key = 'same' }
+    $v4 = Verb_journal @{ item = 5; event = 'released'; fields = (& $fields); key = 'same' }
+    @{ posts = $script:jePosts; keys = @($script:jeHolder.state.journal.keys); flags = @($a1, $a2, $v1.posted, $v2.posted, $v3.posted, $v4.posted) }
+}
+Check 'journal: an empty key is the ticks of now, so distinct events of one kind are all written (Add-Journal and the journal verb)' ($jeResult.posts -eq 5 -and (@($jeResult.flags) -join ',') -eq 'True,True,True,True,True,False' -and @($jeResult.keys | Where-Object { $_ -match '^released\|\d{10,}$' }).Count -eq 4 -and @($jeResult.keys | Select-Object -Unique).Count -eq 5)
+Check 'journal: a given key is still the dedup key, and no line is ever recorded as "event|"' (@($jeResult.keys) -contains 'released|same' -and @($jeResult.keys) -notcontains 'released|')
 if ($fail) { "FAILED: $fail"; exit 1 } else { 'all passed' }
