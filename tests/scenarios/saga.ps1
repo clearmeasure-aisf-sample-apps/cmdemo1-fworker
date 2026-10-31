@@ -193,6 +193,9 @@ $SagaScenarios['saga: sweep step: a PASS whose pull request was closed without m
     Saga-NumbersAbove 30
     $x = Saga-Play 'Saga closed pull request' "Change the code, as the criteria say.`n`n- criterion one" $false
     if (-not $x) { return }
+    # the saga reads the hold label at each card event (SagaIngress.Hold), and the move of the card to Functional Testing is one: a label added before the board poll has seen that move parks the item in Verify at once,
+    # and a verdict that comes after finds the item parked and is not taken (the Merge step is never reached), so the label waits until the poll has been through (the sweep's cadence is 4 s)
+    Start-Sleep -Seconds 8
     # a person holds the item (hold:owner) before the verdict: the PASS is recorded and the merge waits, so the pull request can be closed before the gateway merges it
     Gh-As 'fake-operator' "issues/$($x.n)/labels" @{ labels = @('hold:owner') } | Out-Null
     Saga-Pass $x | Out-Null
