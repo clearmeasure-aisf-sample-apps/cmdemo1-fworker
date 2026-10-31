@@ -176,7 +176,7 @@ static class JournalCommandWiring
         return factory.For(repo).GetAwaiter().GetResult();
     }
 
-    static JournalIdentity Identity(GatewayComposition c, Func<string, string?> env, HttpClient? http, GitHubTokenProvider tokens)
+    internal static JournalIdentity Identity(GatewayComposition c, Func<string, string?> env, HttpClient? http, GitHubTokenProvider tokens)
     {
         var root = c.Instance.Root;
         var name = root?["name"]?.ToString() ?? "";

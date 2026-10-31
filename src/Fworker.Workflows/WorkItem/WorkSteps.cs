@@ -90,8 +90,8 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
     }
 
     /// <summary>
-    /// The instance ends without the item being done: v1 takes the item up again (it is no longer owned, so its sweep reads it). Used when the item moves to a plan this engine does not carry; nothing about the board or
-    /// the state comment changes, because v1's verbs kept them in step all along.
+    /// The instance ends without the item being done: v1 takes the item up again (it is no longer owned, so its sweep reads it). Used when the item moves to a plan this engine does not carry; nothing about the board changes,
+    /// because v1's verbs kept it in step all along, and the state comment loses the saga's park only (W9.10i: the projection of the handed-back decision).
     /// </summary>
     public void HandBack(string reason)
     {
