@@ -725,10 +725,12 @@ jobs:
           set -euo pipefail
           dev_token="$(openssl rand -hex 24)"; webhook_secret="$(openssl rand -hex 24)"; token_secret="$(openssl rand -hex 24)"
           echo "::add-mask::$dev_token"; echo "::add-mask::$webhook_secret"; echo "::add-mask::$token_secret"
+          # FACTORY_ENVIRONMENT=uat: the gateway defaults to tdd, where v2 acts since W9.9c and needs the database (the kill switch FACTORY_V2_OFF=1 is the tdd case without one); uat and prod run v1 with none.
           # FACTORY_OWNER_MODE=1 and FACTORY_TOKEN_SECRET are what the deployed app is given (system.json): the image's configuration turns messaging and
           # the manager on, and the gateway refuses to start for either without owner mode (MessagingSettings.Load), and owner mode without a token secret
           docker run --detach --name fworker-start --publish 18080:8080 \
             -e FACTORY_DEV_TOKEN="$dev_token" -e FACTORY_WEBHOOK_SECRET="$webhook_secret" -e FACTORY_TOKEN_SECRET="$token_secret" -e FACTORY_OWNER_MODE=1 -e GH_TOKEN=unset \
+            -e FACTORY_ENVIRONMENT=uat \
             fworker-start-check:ci
           container_env="$(docker exec fworker-start env 2>/dev/null || true)"
           if grep -q '^FACTORY_DB_CONNECTION=' <<<"$container_env"; then echo "::error::the container has FACTORY_DB_CONNECTION set"; exit 1; fi
