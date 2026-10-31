@@ -10,6 +10,7 @@ using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Fworker.Workflows.Keeper;
+using Fworker.Workflows.Reconcilers;
 using Fworker.Workflows.WorkItem;
 
 // W9.6 (#358): the keeper and manager verbs on v2 (Fworker.Workflows.Keeper), in the gateway. The verbs are the port of Verbs.Keeper.ps1 and Verbs.Manager.ps1; this file is what they stand on, each part the C# of a helper of the rule
@@ -18,7 +19,7 @@ using Fworker.Workflows.WorkItem;
 // and the word to the saga when the verb ends a park or closes an item it owns. Registered by Routes/Keeper.cs, only where the engine acts and the gateway has a GitHub identity and a home repository.
 
 /// <summary>GitHub for the keeper and manager verbs: the rules of Invoke-Gh (Core.ps1), request by request.</summary>
-sealed class KeeperGitHub(HttpClient http, FactoryRules rules, int project, Action<JsonObject>? observe = null, Func<TimeSpan, Task>? delay = null) : IKeeperGitHub
+sealed class KeeperGitHub(HttpClient http, FactoryRules rules, int project, Action<JsonObject>? observe = null, Func<TimeSpan, Task>? delay = null) : IPlantGitHub
 {
     const string MoveCardMutation = BoardColumnProjection.MoveMutation;
     const string AddCardMutation = "mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p,contentId:$c}){ item{ id } } }";
@@ -251,6 +252,36 @@ sealed class KeeperGitHub(HttpClient http, FactoryRules rules, int project, Acti
     public async Task<int> RerunFailedJobs(long runId) => (await Send(HttpMethod.Post, $"{Repo}/actions/runs/{runId}/rerun-failed-jobs")).Status;
 
     public async Task RemoveClaimRef(int item) => await Call(HttpMethod.Delete, $"{Repo}/git/refs/factory/{rules.Name}/claims/{item}", null, 404, 422);
+
+    // ---- the plant steps (W9.10g) ----------------------------------------------------------------------------------------------------------------
+
+    /// <summary><c>Get-ClaimRefItems</c>: matching-refs may ignore the page parameter (as Get-RevokedRefs), so the pages end on an empty one or on one that brings nothing new.</summary>
+    public async Task<IReadOnlyList<int>> ClaimRefItems()
+    {
+        var prefix = $"refs/factory/{rules.Name}/claims/"; var seen = new HashSet<int>(); var found = new List<int>();
+        for (var page = 1; page <= 50; page++)
+        {
+            var rows = (await Call(HttpMethod.Get, $"{Repo}/git/matching-refs/factory/{rules.Name}/claims/?per_page=100&page={page}")) as JsonArray ?? [];
+            if (rows.Count == 0) break;
+            var fresh = 0;
+            foreach (var r in rows)
+            {
+                var name = Ps.Str(r?["ref"]);
+                if (name.StartsWith(prefix, StringComparison.Ordinal) && Regex.IsMatch(name[prefix.Length..], @"^\d{1,9}$") && int.TryParse(name[prefix.Length..], NumberStyles.None, CultureInfo.InvariantCulture, out var n) && seen.Add(n)) { found.Add(n); fresh++; }
+            }
+            if (fresh == 0) break;
+        }
+        return found;
+    }
+
+    public async Task<IReadOnlyList<JsonObject>> LabelledIssues(string state, int page) =>
+        ((await Call(HttpMethod.Get, $"{Repo}/issues?state={state}&labels={Uri.EscapeDataString(rules.Label)}&per_page=100&page={page}")) as JsonArray ?? []).OfType<JsonObject>().ToList();
+
+    public async Task<string> LastColumn()
+    {
+        var m = await Meta();
+        return m.Options.Keys.LastOrDefault() ?? "";
+    }
 }
 
 /// <summary>The state comment and the journal of an item: the W3.2 store and ledger, with their failures turned into the script's refusals.</summary>
@@ -332,11 +363,14 @@ sealed class KeeperFileLocks(IItemLock items, Func<string, string?>? env = null,
     }
 
     /// <summary>The item's lock as a handle: <see cref="IItemLock"/> takes a body, so the body here waits until the handle is disposed. A lock that stays busy for the wait is the refusal 'item-busy' (20).</summary>
-    public async Task<IAsyncDisposable> Item(int item)
+    public Task<IAsyncDisposable> Item(int item) => Item(item, wait);
+
+    /// <summary><c>Use-ItemLock $n {...} $seconds</c> (W9.10g: the claim-ref reap takes it without waiting, the board guard's journal line waits 3 seconds).</summary>
+    public async Task<IAsyncDisposable> Item(int item, TimeSpan waitFor)
     {
         var acquired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var held = items.Use(item, async () => { acquired.TrySetResult(); await release.Task; return 0; }, (int)Math.Ceiling(wait.TotalSeconds), CancellationToken.None);
+        var held = items.Use(item, async () => { acquired.TrySetResult(); await release.Task; return 0; }, (int)Math.Ceiling(waitFor.TotalSeconds), CancellationToken.None);
         if (await Task.WhenAny(acquired.Task, held) == held)
         {
             try { await held; }
@@ -350,12 +384,15 @@ sealed class KeeperFileLocks(IItemLock items, Func<string, string?>? env = null,
         public async ValueTask DisposeAsync() { release.TrySetResult(); await held; }
     }
 
-    public Task<IAsyncDisposable> Intake() => Take("board-intake.lock", () => VerbRejection.Retry(20, "intake-busy", "another work item is being put on the board", 5));
+    public Task<IAsyncDisposable> Intake() => Intake(wait);
 
-    async Task<IAsyncDisposable> Take(string file, Func<VerbRejection> busy)
+    /// <summary><c>Use-IntakeLock {...} $seconds</c> (W9.10g: the board guard takes it without waiting).</summary>
+    public Task<IAsyncDisposable> Intake(TimeSpan waitFor) => Take("board-intake.lock", () => VerbRejection.Retry(20, "intake-busy", "another work item is being put on the board", 5), waitFor);
+
+    async Task<IAsyncDisposable> Take(string file, Func<VerbRejection> busy, TimeSpan waitFor)
     {
         var path = Path.Combine(StateDir(), file);
-        var deadline = DateTime.UtcNow + wait;
+        var deadline = DateTime.UtcNow + waitFor;
         while (true)
         {
             try { return new Lock(new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)); }
@@ -392,15 +429,56 @@ sealed class KeeperSagaPort(V2Ownership? ownership, RepoId home, Func<object, Ta
     }
 }
 
+/// <summary>The first-seen times of the claim refs that have no live claim, in the file the rule script keeps (<c>claim-orphans.json</c>: item number to ISO time), so a restart does not start every wait again.</summary>
+sealed class FileClaimOrphans(Func<string> stateDir) : IClaimOrphanMemory
+{
+    string OrphanFile => Path.Combine(stateDir(), "claim-orphans.json");
+
+    public IReadOnlyDictionary<int, DateTime> Load()
+    {
+        var found = new Dictionary<int, DateTime>();
+        try
+        {
+            if (!File.Exists(OrphanFile) || JsonNode.Parse(File.ReadAllText(OrphanFile)) is not JsonObject o) return found;
+            foreach (var kv in o)
+                if (int.TryParse(kv.Key, NumberStyles.None, CultureInfo.InvariantCulture, out var n) && Ps.FromIso(kv.Value) is { } at) found[n] = at;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException or FormatException) { }   // a file that cannot be read starts the waits again, which only delays a removal
+        return found;
+    }
+
+    public void Save(IReadOnlyDictionary<int, DateTime> firstSeen)
+    {
+        var o = new JsonObject();
+        foreach (var kv in firstSeen.OrderBy(k => k.Key)) o[kv.Key.ToString(CultureInfo.InvariantCulture)] = Ps.Iso(kv.Value);
+        File.WriteAllText(OrphanFile, o.ToJsonString());
+    }
+}
+
 static class KeeperWiring
 {
     /// <summary>
     /// The verbs, made from the container: null (nothing is registered, v1 answers) without the instance configuration or its home repository, or without a GitHub identity (GH_TOKEN or the author App), which is what the rule
     /// scripts need as well.
     /// </summary>
-    public static KeeperVerbs? Make(IServiceProvider services, Func<string, string?>? env = null, HttpClient? http = null)
+    public static KeeperVerbs? Make(IServiceProvider services, Func<string, string?>? env = null, HttpClient? http = null) =>
+        Build(services, env ?? Environment.GetEnvironmentVariable, http) is { } p ? new KeeperVerbs(p.Cx) : null;
+
+    /// <summary>
+    /// W9.10g: the plant steps (claim-ref reap, board guard, replenishment, the keeper's count) over the same ports as the verbs, for the recurring jobs: null without the instance configuration, its home repository or a GitHub
+    /// identity. <paramref name="mayAct"/> is the lease: a step that finds it ended stops before its next write. The claim refs' first-seen memory is the file of the rule script (claim-orphans.json of the state directory).
+    /// </summary>
+    public static PlantSteps? MakePlantSteps(IServiceProvider services, Func<bool> mayAct, Func<string, string?>? env = null, HttpClient? http = null, IClaimOrphanMemory? orphans = null)
     {
         env ??= Environment.GetEnvironmentVariable;
+        if (Build(services, env, http) is not { } p) return null;
+        return new PlantSteps(p.Cx, p.GitHub, orphans ?? new FileClaimOrphans(p.Locks.StateDir), PlantStepSettings.From(p.Root, env), mayAct);
+    }
+
+    sealed record Parts(VerbContext Cx, KeeperGitHub GitHub, KeeperFileLocks Locks, JsonNode Root);
+
+    static Parts? Build(IServiceProvider services, Func<string, string?> env, HttpClient? http)
+    {
         if (services.GetService<InstanceConfig>() is not { Root: { } root, Home: { } home }) return null;
         var tokens = GitHubTokenProvider.FromEnvironment(env);
         if (tokens is null) return null;
@@ -425,7 +503,8 @@ static class KeeperWiring
         var host = services.GetService<WolverineHostService>();
         var ownership = services.GetService<WorkItemParts>()?.Ownership;
         IKeeperSaga saga = host is null || ownership is null ? new NoSaga() : new KeeperSagaPort(ownership, home, m => host.PublishAsync(m));
-        return new KeeperVerbs(new VerbContext(rules, github, new KeeperStateStore(store, ledger), new KeeperFileLocks(itemLocks, env), saga));
+        var locks = new KeeperFileLocks(itemLocks, env);
+        return new Parts(new VerbContext(rules, github, new KeeperStateStore(store, ledger), locks, saga), github, locks, root);
     }
 
     // the secrets catalogue and the waiting minutes of the journal, from the configuration the rule scripts read
