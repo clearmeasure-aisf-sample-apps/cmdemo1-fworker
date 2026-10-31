@@ -92,6 +92,9 @@ public sealed class DeliveryActingShadowHostTests
                 .ConfigureLogging(l => { l.SetMinimumLevel(LogLevel.Debug); l.AddProvider(new Capture(Log)); })
                 .UseWolverine(w =>
                 {
+                    // as the gateway's host (WolverineHostService): no handler is found by convention, Configure names the ones it needs. Without this the host scans the assembly Wolverine takes for the application, which depends on what
+                    // earlier tests in the process did, and finds the gateway's SignOffWaitHandler, whose recorder this host does not register: the chain of TrainDecided then fails to compile and the decision is moved to the error queue.
+                    w.Discovery.DisableConventionalDiscovery();
                     w.Services.AddSingleton(delivered);   // (the gateway's ItemMergedWiring.Attach registers it)
                     DeliveryActingWiring.Configure(w.Services, w, parts, new InMemoryTrainStore(), executor, durable: false);
                 })
