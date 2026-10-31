@@ -158,19 +158,36 @@ public sealed class OwnershipLookupTests
     // ---- the published value ------------------------------------------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task ALookupThatIsOlderThanAFullRead_DoesNotBringBackWhatThatReadLeftOut()
+    public async Task AFullReadThatBeganWhileTheLookupWaitedForTheTable_DoesNotMakeTheLookupAnswerNo()
     {
-        var rig = new Rig(); await rig.StartedAfterTheRead();
+        var rig = new Rig();
         var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        rig.Store.AfterLoad = () => held.Task;                              // (the lookup has read the open saga and is held back)
+        rig.Store.OnLoad = (_, _) => held.Task;                              // (the lookup has begun and waits for the table)
         var lookup = rig.Own.OwnsOrFindAsync(7);
         await Task.Delay(50);
-        var s = (await rig.Store.Inner.Load(Item.ToString(), default))!;
-        await rig.Store.Inner.Save(Item.ToString(), Completed(s.State), s.Revision, default);   // (the saga completed)
-        Assert.True(await rig.Own.RefreshAsync());                          // (a read that began after the lookup: the saga is not in it)
-        held.SetResult();
-        Assert.False(await lookup);
-        Assert.False(rig.Own.Owns(7)); Assert.Empty(rig.Own.Offers); Assert.Empty(rig.Own.States);
+        Assert.True(await rig.Own.RefreshAsync());                          // (a full read begins and ends meanwhile: the saga is not committed yet)
+        await rig.Svc.Handle(new StartWorkItem(Item, "intake", "docs"));    // (committed)
+        held.SetResult();                                                    // (the lookup reads the row)
+        Assert.True(await lookup);                                           // (it answered "no" for a saga it had found, when the number of its start was compared)
+        Assert.True(rig.Own.Owns(7));
+    }
+
+    [Fact]
+    public async Task AFoundSagaThatTheReadMissed_IsOwnedAndNothingMore_UntilTheNextFullRead()
+    {
+        var rig = new Rig();
+        for (var n = 1; n <= 2; n++) await rig.Svc.Handle(new StartWorkItem(new ItemId(Home, n), "intake", "docs"));
+        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Store.AfterRead = n => n == 1 ? first.Task : Task.CompletedTask;
+        var startup = rig.Own.RefreshAsync();                               // (it saw items 1 and 2)
+        await Task.Delay(50);
+        await rig.Svc.Handle(new StartWorkItem(Item, "intake", "docs"));    // (item 7 started after its read)
+        Assert.True(await rig.Own.OwnsOrFindAsync(7));
+        first.SetResult(); await startup;
+        Assert.Equal([1, 2, 7], rig.Own.Items.Order());
+        Assert.Equal([1, 2], rig.Own.Offers.Select(o => o.Item).Order());   // (7 is owned: v1 leaves it alone; the read after the script offers it)
+        Assert.True(await rig.Own.RefreshAsync());
+        Assert.Equal([1, 2, 7], rig.Own.Offers.Select(o => o.Item).Order());
     }
 
     [Fact]

@@ -128,9 +128,11 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
             var read = states.Where(st => ItemId.TryParse(st.Item, out var id) && id.Repository == home).ToList();
             var seen = read.Select(st => ItemId.TryParse(st.Item, out var rid) ? rid.Number : 0).ToHashSet();
             var found = new Dictionary<int, long>();
+            var next = Build(started, read, found);
+            // (a found saga that the read did not see is owned, and that is all it is until the next full read: its offers and slots are the read's word, so a saga that completed in the window is not offered)
             foreach (var (item, stamp) in cur.Found)
-                if (stamp > started && !seen.Contains(item) && cur.States.FirstOrDefault(st => ItemId.TryParse(st.Item, out var id) && id.Number == item) is { } kept) { read.Add(kept); found[item] = stamp; }
-            snapshot = Build(started, read, found);
+                if (stamp > started && !seen.Contains(item)) { next.Owned.Add(item); found[item] = stamp; }
+            snapshot = next;
             return true;
         }
     }
@@ -176,19 +178,20 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
 
     async Task<bool> FindAsync(int item)
     {
-        var started = Interlocked.Increment(ref reads);
         try
         {
             using var limit = new CancellationTokenSource(findWait);
             var record = await store.Load(new ItemId(home, item).ToString(), limit.Token).WaitAsync(findWait);
+            // (the number of the moment the row was read: a full read that began after it is the newer word; one that began before it, while this lookup was waiting for the table, may have read before the saga's commit)
+            var readAt = Interlocked.Increment(ref reads);
             lock (publishing)
             {
                 var cur = snapshot;
-                // a full read that began after this lookup is published: it is the newer word (the saga may have completed meanwhile), and this lookup adds nothing
-                if (cur.FullStarted > started) return cur.Owned.Contains(item);
+                // a full read that began after this lookup's read is published: it is the newer word (the saga may have completed meanwhile), and this lookup adds nothing
+                if (cur.FullStarted > readAt) return cur.Owned.Contains(item);
                 if (record?.State is not { } state || state.Status == WorkItemStatus.Completed) return cur.Owned.Contains(item);
                 if (cur.Owned.Contains(item)) return true;
-                var found = new Dictionary<int, long>(cur.Found) { [item] = Interlocked.Increment(ref reads) };
+                var found = new Dictionary<int, long>(cur.Found) { [item] = readAt };
                 var added = Build(cur.FullStarted, cur.States.Where(st => st.Item != state.Item).Append(state), found);
                 added.Owned.UnionWith(cur.Owned);   // (the items Set gave)
                 snapshot = added;
