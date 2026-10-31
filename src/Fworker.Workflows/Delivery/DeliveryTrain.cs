@@ -96,10 +96,10 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             TrainRun? run = null; DateTimeOffset? wake = null;
             if (gated)
             {
-                // if the end marker is lost, the train looks again when the hold runs out. That is one timer: the train's pending wake. An input that finds it pending sends nothing (a replay of hundreds of
-                // inputs used to leave one timer per input, all due at the same time)
+                // If the end marker is lost, the train looks again when the hold runs out. That timer is ONE: it is recorded as the pending one and goes out only when it changes. It used to go out with every
+                // input applied during the replay (about 120 per train on tdd, a restart's whole Octopus history), and each of those timers ran a full evaluation when the hold ran out.
                 var hold = state.ReplayingSince!.Value + ReplayLimit;
-                if (state.WakeDue != hold) { state.WakeDue = hold; wake = hold; }
+                if (state.WakeDue is not { } cur || cur <= now || hold < cur) { state.WakeDue = hold; wake = hold; }
             }
             if (!gated)
             {

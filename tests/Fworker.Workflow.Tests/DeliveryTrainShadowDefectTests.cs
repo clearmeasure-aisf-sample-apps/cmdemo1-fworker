@@ -158,14 +158,19 @@ public class DeliveryTrainShadowDefectTests
         Assert.NotNull((await f.Send(new TrainReplay(f.Key, true))).WakeAt);
         Assert.Null((await f.Merge(7, 'a')).WakeAt);
         Assert.Null((await f.Release("1.0.2", 'a')).WakeAt);
-        // a second replay begin (the watcher restarts it) moves the hold: one new timer, and the old one is stale
+        // a second replay begin (the watcher restarts it) holds longer than the pending timer: no second timer, the earlier one stands
         var first = f.State.WakeDue;
         f.Now += TimeSpan.FromMinutes(3);
         var second = await f.Send(new TrainReplay(f.Key, true));
-        Assert.Equal(f.Now + DeliveryTrainService.ReplayLimit, second.WakeAt);
-        Assert.NotEqual(first, f.State.WakeDue);
-        // the first timer fires: it is not the pending one, the pending one is to come, and the train does nothing
+        Assert.Null(second.WakeAt);
+        Assert.Equal(first, f.State.WakeDue);
+        // the first timer fires while the replay is still held: it is the pending one, and the hold's new end goes out as the one timer
         f.Now = first!.Value;
+        var fired = await f.Wake(first);
+        Assert.Equal(f.State.ReplayingSince!.Value + DeliveryTrainService.ReplayLimit, fired.WakeAt);
+        Assert.Equal(fired.WakeAt, f.State.WakeDue);
+        Assert.Empty(fired.Messages);
+        // a timer that is not the pending one (the first, delivered again) does nothing
         var stale = await f.Wake(first);
         Assert.Null(stale.WakeAt);
         Assert.Empty(stale.Messages);
@@ -444,5 +449,74 @@ public class DeliveryTrainShadowDefectTests
         Assert.StartsWith("the tdd app answered Unhealthy", f.LastDecision!.Reasons[0]);
         Assert.NotNull(unhealthy.WakeAt);
         Assert.True(unhealthy.WakeAt <= f.Now + DeliveryTrainService.SafetyWake);
+    }
+
+    // ---- tdd 2026-10-31: a restart's replay left one timer per input behind, and the burst of full evaluations 30 minutes later ended in the dead letters ------------
+
+    [Fact]
+    public async Task AReplayOfManyInputs_SchedulesOneTimerForItsHold_NotOnePerInput()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        var results = new List<TrainResult> { await f.Send(new TrainReplay(f.Key, true)) };
+        for (var i = 0; i < 40; i++)
+        {
+            f.Now += TimeSpan.FromSeconds(1);
+            results.Add(i % 2 == 0 ? await f.Release($"2.0.{i}", 'a') : await f.Deploy($"2.0.{i - 1}", "Tdd", "Started"));
+        }
+        var hold = f.State.ReplayingSince!.Value + DeliveryTrainService.ReplayLimit;
+        var timers = results.Where(r => r.WakeAt is not null).ToList();
+        Assert.Single(timers);
+        Assert.Equal(hold, timers[0].WakeAt);
+        Assert.Equal(hold, f.State.WakeDue);
+        // the end marker ends the hold; the hold's timer, when it comes, is the pending one: it looks again once and is cleared
+        await f.Send(new TrainReplay(f.Key, false));
+        f.Now = hold;
+        await f.Wake(hold);
+        Assert.NotEqual(hold, f.State.WakeDue);
+    }
+
+    [Fact]
+    public async Task AReplaysHold_KeepsAnEarlierPendingTimer_AndSchedulesItsOwnWhenThatOneFires()
+    {
+        var f = await OneRelease(HoldGap);   // waiting: the safety wake is pending
+        var pending = f.State.WakeDue!.Value;
+        Assert.True(pending < f.Now + DeliveryTrainService.ReplayLimit);
+        var r = await f.Send(new TrainReplay(f.Key, true));
+        Assert.Null(r.WakeAt);   // the pending timer stands; the hold needs none yet
+        Assert.Equal(pending, f.State.WakeDue);
+        f.Now = pending;
+        var fired = await f.Wake(pending);   // still held: the timer for the hold's end goes out now
+        Assert.Equal(f.State.ReplayingSince!.Value + DeliveryTrainService.ReplayLimit, fired.WakeAt);
+    }
+
+    [Fact]
+    public async Task TheTransientRetry_WhileTheSafetyWakeIsPending_StillEvaluates()
+    {
+        // The retry of a failure inside a release's judgement is recorded as the train's pending wake (it is earlier than the safety wake), so when it fires it is the pending one and looks: the retry chain does not end at its first link.
+        var f = await OneRelease(HoldGap);   // waiting: the safety wake is pending
+        var pending = f.State.WakeDue!.Value;
+        Assert.True(pending > f.Now + DeliveryTrainService.TransientRetry);
+        f.Reads.Fail = new HttpRequestException("the read budget is spent");
+        var failed = await f.Deploy("1.0.2", "Tdd", "Succeeded");   // the evaluation needs a read of the running version, and fails: it asks for the retry
+        Assert.Equal(f.Now + DeliveryTrainService.TransientRetry, failed.WakeAt);
+        Assert.Equal(failed.WakeAt, f.State.WakeDue);   // (recorded as the pending wake)
+        f.Reads.Fail = null;
+        var sequence = f.State.Sequence;
+        await f.Fire(failed);
+        Assert.True(f.State.Sequence > sequence, "the retry evaluated (a look saves the state; the early return did not)");
+        Assert.NotNull(f.State.WakeDue);   // (the safety wake carries the chain on)
+    }
+
+    [Fact]
+    public async Task AStaleTimer_WithNoPendingOne_StillLooks_SoTheChainIsNeverLost()
+    {
+        var f = await OneRelease(HoldGap);
+        var rec = (await f.Store.Load(f.Key, default))!;
+        rec.State.WakeDue = null;   // (the pending timer was lost between the save and the outbox)
+        Assert.True(await f.Store.Save(f.Key, rec.State, rec.Revision, default));
+        f.Now += TimeSpan.FromMinutes(1);
+        var r = await f.Wake(f.Now - TimeSpan.FromSeconds(30));
+        Assert.NotNull(r.WakeAt);
+        Assert.Equal(r.WakeAt, f.State.WakeDue);
     }
 }

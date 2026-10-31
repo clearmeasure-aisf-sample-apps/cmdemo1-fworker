@@ -22,7 +22,7 @@
 # run-all.ps1 -Engine v2 (FACTORY_ENVIRONMENT v2ci, or the suite's own name; engine.v2Environments naming it; FACTORY_DB_CONNECTION a SQL Server of its own; the saga profiles of run.ps1 -V2Profile start
 # sagas). Those scenarios also run, as before, in the shards. An entry of the v2 matrix names its suites after `claims:`, not `suites:`, so "Every scenario is in exactly one shard" does not read it
 # (it runs tests/ci/run-v2-claims.py, which proves that every claim of the file is in exactly one v2 entry), and the jobs upload v2-results-*, not suite-results-*, so "Tests result" does not count
-# their scenarios a second time. Until the first green run of Tests on master they are reported by "Tests result" and do not fail it (V2_BLOCKING there). The job "Image starts without a database"
+# their scenarios a second time. They are required: "Tests result" fails when one fails (V2_BLOCKING there, true since the first green run of Tests on master). The job "Image starts without a database"
 # builds the image and starts it with no FACTORY_DB_CONNECTION (the kill-switch case of W2.0): /ready must answer 200.
 name: Tests
 
@@ -922,15 +922,19 @@ jobs:
           SRC_RESULT: ${{ needs.src.result }}
           IMAGE_START_RESULT: ${{ needs.image-start.result }}
           V2_RESULT: ${{ needs.v2.result }}
-          # The job "Tier 1 (v2)" is reported here and does not fail this job until it has run green on master (issue 467): a flake of the new engine
-          # must not block other merges. Then set this to "true" (a pull request, protected area: workflows) and "Build result" needs it.
-          V2_BLOCKING: "false"
+          # The jobs "Tier 1 (v2 ...)" fail this job, and so "Build result", since the first green run of Tests on master (issue 467, W9.9c precondition):
+          # the cutover makes v2 the engine that acts in tdd. "false" puts them back to reported-only (a pull request, protected area: workflows).
+          V2_BLOCKING: "true"
         run: |
           echo "tier1: ${TIER1_RESULT}, coverage: ${COVERAGE_RESULT}, unit: ${UNIT_RESULT}, src: ${SRC_RESULT}, image-start: ${IMAGE_START_RESULT}, v2: ${V2_RESULT} (blocking: ${V2_BLOCKING})"
           if [ "${V2_RESULT}" != "success" ]; then
-            echo "::warning title=Tier 1 (v2)::the job Tier 1 (v2) ended ${V2_RESULT}; it is not required yet (V2_BLOCKING in tests.yml)"
-            echo "**Tier 1 (v2) ended ${V2_RESULT}.** It is reported and not required yet (\`V2_BLOCKING\` in tests.yml)." >> "$GITHUB_STEP_SUMMARY"
-            if [ "${V2_BLOCKING}" = "true" ]; then exit 1; fi
+            if [ "${V2_BLOCKING}" = "true" ]; then
+              echo "::error title=Tier 1 (v2)::the job Tier 1 (v2) ended ${V2_RESULT}; it is required (V2_BLOCKING true in tests.yml)"
+              echo "**Tier 1 (v2) ended ${V2_RESULT}.** It is required (\`V2_BLOCKING\` true in tests.yml)." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "::warning title=Tier 1 (v2)::the job Tier 1 (v2) ended ${V2_RESULT}; it is reported only (V2_BLOCKING false in tests.yml)"
+            echo "**Tier 1 (v2) ended ${V2_RESULT}.** It is reported only (\`V2_BLOCKING\` false in tests.yml)." >> "$GITHUB_STEP_SUMMARY"
           fi
           test "${TIER1_RESULT}" = "success"
           test "${COVERAGE_RESULT}" = "success"
