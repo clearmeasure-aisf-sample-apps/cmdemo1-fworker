@@ -74,6 +74,10 @@ public sealed class DeliveryActingShadowHostTests
                 .ConfigureLogging(l => l.SetMinimumLevel(LogLevel.Critical))
                 .UseWolverine(w =>
                 {
+                    // Wolverine pins the application assembly for the whole process to the first host that starts (GH-3521). When that host is the gateway's, conventional discovery here finds the gateway's
+                    // SignOffWaitHandler, which joins the handlers of TrainDecided and cannot be resolved in this host (no SignOffWaitRecorder): the decision then never reaches the shadow. Configure includes
+                    // every type this host needs, so nothing is found by convention.
+                    w.Discovery.DisableConventionalDiscovery();
                     w.Services.AddSingleton(delivered);   // (the gateway's ItemMergedWiring.Attach registers it)
                     DeliveryActingWiring.Configure(w.Services, w, parts, new InMemoryTrainStore(), executor, durable: false);
                 })
