@@ -1084,6 +1084,61 @@ with no slot is routed as before; the stop retry and the host gate exist only wi
   "Part of #562" and does not close it; the second pull request ("Closes #562") adds that scenario (the scheduler on, a fake runtime, more than half the day budget in sessions, the gateway restarted mid-run, the count checked after) and claims it in `v2-claims.txt` when it passes on v2. It is also a line of W9.9c's readiness checklist. Not claimed here.
 - *Not in this pull request.* The plant's assignments still live in the plant (W9.10k puts them in SQL); the offer of a saga item that the plant lost in a restart comes back with the next sweep.
 
+**W9.10m as built (#564): adoption as reconciliation, the mapping from v1's state to the saga's.** The pure part of adoption: `src/Fworker.Workflows/Adoption` maps what v1 knows of one item to the `WorkItemSaga` row it stands for, and states the rule of the upsert. Nothing here runs yet: W9.9b gathers the snapshots and applies the results at every start (where
+`Engine.V2Acts`; tdd stays in the shadow run, so v1's sweep, its verbs and the projection are untouched), W9.10n adds the fencing of a re-adoption. No schema change: the saga's row is a JSON document, so the revision the comment was read at is one optional field of it (`WorkItemState.CommentRev`, 0 in a row saved before it), and the
+ledger, train, QC and merged-items rows are the tables that exist; no script of the reserved range 250 to 259 is used. One new action, `adopted`, is published once per adoption or change (not among the decisions the state comment's projection writes: the comment is where it came from).
+- *The pieces.* `AdoptionMapper.Map(snapshot, settings, now)`: v1's state comment (claim, park, verdict, merge, counters, reviews, design, `awaiting_checks`, `qc`), the card's column, the issue, the pull request, the ledger's slot for the item and the delivery trains, to the row, the slot and the place in flight, the QC rows and the merged-items row, or a reason for
+  skipping the item. `AdoptionReconciler.Reconcile(existing, projectedSequence, mapping, now)`: the rule. `AdoptionLedger.Apply` (the scheduler's state with the adopted slot) and `AdoptionTrain.SignOffs` (the train's state with the Sign-offs it must answer) are the edits of the shared state beside the row. All are functions of their inputs and idempotent.
+- *The rule.* At every start, for every open item, an upsert in which the state comment wins when its revision is newer than `CommentRev`: no row, the mapped row is made (`Adopted`, one decision); a row the comment has not moved past stays (`Kept`); a newer comment is mapped and laid over the row (`Updated`, one decision whose reasons name the changed fields),
+  keeping what the saga alone knows (generation, sequence, keys applied, start, the arm while the plan, step, park and verdict head are the same, the slot it holds, the merge calls made on this verdict, the clock of a wait for master it is in); a newer comment that says what the row says moves only `CommentRev` (`Unchanged`: the saga's own projection
+  writes the comment, so its revision moves with every decision). Two guards: a row with decisions the projection has not written (`Sequence` above the projection version of target `comment`) stays, because the projection will write them and the comment is the older; a completed instance is not brought back (W9.10n). The unchanged result is what advances
+  `CommentRev` past the projection's own writes, so the projection needs no change.
+- *Skipped, with a reason (cases X1 to X9; the v2 status block lists them).* `issue-closed`; `no-state-comment` (the intake has not started it); `settled` (`merge.done_at`); `hold-column: X` and `card-done` (no merge record); `column-of-no-step: X` and `not-on-the-board`; `docs-merged` (the docs plan ends at the merge); `delivered-and-settled` (delivered to the final
+  environment and past its settle window); `plan-not-carried: X` (`intake.v2Plans` does not name it).
+
+The table (one `Fworker.Workflow.Tests` case per row, `AdoptionMappingTests` and `AdoptionReconcileTests`, the row's letter and number in the test name):
+
+| Row | v1 says | The saga's row (or the other state) |
+|---|---|---|
+| P1 to P6 | `design.docs_only` true / false / absent; a legacy body marker (`DocsOnly.ItemIsDocsOnly`); the pull request's files | docs plan / feature plan / feature plan; legacy marker docs plan; a docs-only design whose pull request changes anything but documentation is the feature plan (`DevelopStep`'s rule) |
+| S1 to S3 | card in the design, development, validation column | Design, Develop, Verify (the claim's column places an item that is off the board) |
+| S4, S5 | validation column with a FAIL / a PASS (`verdict.passed`) | Verify / Merge with `VerdictHead` = `verdict.head_sha` and `VerdictSummary` |
+| S6 | Development done, waiting for CI (`awaiting_checks`, park `development:awaiting-checks`) | Verify, `PullRequest` and `Head` from it, `ChecksState` pending on that head (code plans); the gateway's own wait is not a park |
+| S7 | `merge.sha` | Deliver, `MergeCommit`, `PullRequest` = `merge.pr`, no lease |
+| S9 | the state's revision, `flow[0]`, `design` | `CommentRev`, `StartedAt`, source "adopted from v1 (state revision N)", generation 1, arm `1.1`; `DesignMarker` false for an item past its design with no decision (the design step's exit) |
+| B1 | `reviews[<column of the step>]` {round, last, ref} | `ReviewRounds[step]`, `ReviewsComplete` |
+| B2 | `fix_forward_rounds`, `demotions` | `FixForwardRounds`, `Demotions` |
+| B3 | park `watchdog-relaunch-budget`, `session-relaunch-budget`, `validation-no-verdict` (`park.launches`) | parked with that reason, `Launches[step]` = `park.launches` (else the limit) |
+| B4 | park `worker-failure` | `Failures[step]` = `MaxFailuresPerPhase` |
+| B5, B6 | `claim.launches` in the step's column (the Merge step stands in the validation column) | `Launches[step]`; a claim of another column counts nothing; `claim.session_launches` is not carried (noted) |
+| K1, K2 | a live park (`until` after now) / an expired one | parked with the reason verbatim and `ParkUntil` = `park.until` (the sweep's expiry only where `Policy.Sweep` is set) / no park |
+| K3 | park `inspector-escalated` on a PASS | Merge, parked; `OwnerIdleDue` = `park.at` + `idleReleaseMinutes` (the saga's `Park`) |
+| K4 | park `pass-without-auto-merge` | Merge, parked, no idle release |
+| K6, K7, K8 | merged, `awaiting` master-broken / master-timeout, with its park or (expired) without | Deliver; `MasterState` broken (`MasterFailed` = `park.failed`) / timeout, parked master-broken / master-green-timeout; without a live park the wait is still watched, not parked |
+| L1 | a live owner claim (`lease_until` after now, `owner`) on a code plan | `LeaseDue` = `lease_until`; a slot in the ledger (`AdoptionSlot`, id `adopted|item|generation`, runtime from the ledger or `scheduler.runtime`, expiring with the lease, not an execution of the day); `EverGranted`, `SlotKnown` |
+| L2 | the same, and the ledger holds a slot for the item | the ledger's slot id, runtime and host; nothing adopted |
+| L3 | a live claim of a session that is no owner | the lease only |
+| L4, L5 | an expired claim / no claim, on a code plan, in a session step | no lease, `SlotAsked`, an `AskSlot` in the outbox (resume = the item was claimed before: rank 2) |
+| L6 | the docs plan (no slots) | `LeaseDue` = the claim's, else a new arm's lease |
+| L7 | parked | no lease, no slot |
+| L8 | the pull request's files | `Footprint`, from the pull request |
+| M1 | a PASS on the docs plan | Merge; `MergeRequest` attempt 1 on the verdict head, in the merge line (`TrainEntered`), the command published with the row |
+| M2 | a PASS on a code plan | Merge; `MergeAwaitingChecks` (the watcher says when the head is green) |
+| M3, M4 | a PASS on a code plan, unparked / parked | `SlotKnown` and an `AdoptionFlight` (the file-overlap rule keeps it among the items in flight until it is cleared) / neither |
+| D1, D2 | merged, `awaiting` master-green, with a re-run (`rerun_at`, `rerun_runs`) | Deliver; `MasterState` waiting from `merged_at` (from the re-run), due +`masterGreenTimeoutMinutes`, the re-run's runs |
+| D3 | `awaiting` release-candidate / late-rc / release-queue | `MasterState` green, `MasterGreenVia` = `green_via` |
+| D4 | a plan or policy that watches no master | no `MasterState` |
+| D5 to D8 | the delivery trains (`DeliveredItems` "item\|commit", `DeliveredBy`, `Current`, `Superseded`, the deployments) and `merge.release` | `Delivered[environment]` = the release that carries the merge (the train's record, else the current release, else the release v1 queued the item for or the one that superseded it, when it succeeded and was no rollback) |
+| D9, D10 | delivered to the final environment | settling from the deployment's finish, `SettleUntil` + the settle window, arm `1.2`, the timer; past the window: skipped |
+| Q1 | `qc` map {pr: record} | `AdoptionQcRow` (key `owner/repo!pr`) for `IQcEnvironmentStore.Save` (the store keeps the newer revision) |
+| G1, G2 | `merge` {sha, pr, merged_at, by}, labels, verdict | a `MergedItem` row (source "adopted", the gates of `ItemMergedDeriver.GatesOf`, the dependencies of the body), message id fixed by item and commit so that the webhook's or the reconciler's derivation finds it taken |
+| R1 to R12 | the rule above | adopted, unchanged, kept (comment not newer; projection behind), updated (new arm and the old session ended; same arm kept), completed instance skipped, the rows beside the state given in every case |
+| C1 to C5 | an `AdoptionSlot` and an `AdoptionFlight` | the ledger with the slot (the item out of the queue, in flight when past design, no execution counted); idempotent; a slot the ledger holds is kept; a copy |
+| T1 to T8 | `merge.promoted.<env>` {task, at, release, `signoff_wait_since`} and the Sign-offs Octopus shows | the train's `SignOffs` (`Since` = the earliest recorded wait, else Octopus's), `Requested`, `FirstRequested`, `RequestNumbers`, `RequestItems`; a Sign-off at somebody else's deployment, at another environment's, or already known is left |
+
+- *Not here.* The reads that fill a snapshot, the writes of the results, the backfill of `DeliveredTo` from Octopus's history and of `MergedItems` from the merged pull requests, the validation or reset of train rows built in shadow, and the result in the status block (W9.9b); the fence of a re-adoption after `FACTORY_V2_OFF` (W9.10n). The merge line
+  (`MergeTrainState`) has no state of v1 to adopt: v1's queue is in memory, so an adopted PASS asks to enter it (M1) and the train rebuilds it.
+
 **W9.10p as built (#555): the app's uat and prod stay with v1's `AutoPromoter`** (owner decision 2026-10-30, decision 2 of the audit). Where the engine acts the train promotes nothing in uat or prod, and the loop that calls the rule
 script `auto-promote` keeps promoting them; the train acts for tdd only, where it observes the release lifecycle's deployment and publishes `DeliveredTo(tdd)`. #545 (W9.4) stops the loop wherever `Engine.V2Acts`; this row narrows that stop
 to the day the train takes the environments over. It changes the shared gateway in one place, the composition's line that decides whether the loop starts (`AutoPromoter.Runs`); everything else is inert unless the engine acts.
