@@ -137,7 +137,7 @@ public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports,
     {
         report.Skipped++;
         var code = AdoptionReport.Code(reason);
-        report.SkippedBy[code] = report.SkippedBy.GetValueOrDefault(code) + 1;
+        lock (report.Gate) report.SkippedBy[code] = report.SkippedBy.GetValueOrDefault(code) + 1;   // (the status reads the report while the run writes it)
     }
 
     static void Tally(AdoptionReport report, AdoptionResult r, AdoptionMapping mapping)
