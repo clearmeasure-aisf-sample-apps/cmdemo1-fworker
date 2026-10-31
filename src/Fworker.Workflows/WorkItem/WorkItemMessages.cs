@@ -176,6 +176,9 @@ public static class WorkItemActions
     public const string HoldCleared = "hold-cleared";
     public const string OwnerReleased = "owner-released";
     public const string SettleRearmed = "settle-rearmed";
+    // adoption (W9.10m)
+    /// <summary>The saga took the item over from v1's state at a start (the state comment, the card, the pull request): the reasons say what was mapped or what changed.</summary>
+    public const string Adopted = "adopted";
     // the plant manager's actions (W9.10k)
     public const string OwnerReleaseAsked = "owner-release-asked";
     public const string Requeued = "requeued";
