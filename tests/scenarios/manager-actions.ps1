@@ -241,3 +241,189 @@ $ManagerActionScenarios['act: the plan offers a top item before a high one befor
         } finally { Msg-Close $sup; Msg-Close $alice }
     }
 }
+
+# ---- W9.10k (second pull request): the manager's actions on an item a saga owns, and a plant that comes back from SQL (v2 only) --------------------------------------------------------------------------------
+# Where the engine acts the work item's flow is a WorkItemSaga, and three of the manager's actions reach it (manager-action: unpark sends ResumeWorkItem, release-owner OwnerReleaseAsked, requeue RequeueWorkItem; docs/design/
+# fworker-wolverine-implementation.md "W9.10k as built"). The scenarios above run on items of v1's flow, where there is no saga: these start one. The gateway of the suite is restarted with the intake on (the docs plan of the engine, as the
+# profile saga-docs of run.ps1 has it), a Todo item is pulled by the intake, the owner session sg1 of the suite 'saga' is offered it, and the supervisor acts on it through the real client. What is checked is what the saga's history
+# (the dashboard's v2Items) and the item's state comment say afterwards. The last scenario keeps the plant in the database: the gateway is stopped as the platform stops it and started again, and the offer and the owner come back from SQL.
+# On v1 there is no saga (the sweep and the plant do this, and the scenarios above test that): the scenarios say so and pass.
+function Ma-V2Only { if ($script:GoldenEngine -eq 'v2') { return $true }; Check 'v2 only: on v1 the item has no saga, the scenarios above test the same actions (the plant''s flow)' $true; return $false }
+# Runs the body against the suite's gateway restarted with the intake on and, with -Snapshot, with the plant kept in the database (FACTORY_PLANT_SNAPSHOT is 0 in every suite so that the plant of one scenario never reaches the next one);
+# afterwards the owner session ends and the gateway comes back as the suite started it.
+$script:MaSagaItems = @()
+function Ma-OnSaga([scriptblock]$Body, [switch]$Snapshot) {
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $oldSnap = $env:FACTORY_PLANT_SNAPSHOT
+    try {
+        $cfg = $orig | ConvertFrom-Json -AsHashtable
+        $cfg.intake.enabled = $true; $cfg.intake.v2Plans = @('docs')
+        $cfg.wolverine.scheduledJobSeconds = 60; $cfg.wolverine.firstScheduledJobSeconds = 0
+        $cfg.scheduler.featureSlots = $false
+        $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+        if ($Snapshot) { Remove-Item Env:FACTORY_PLANT_SNAPSHOT -ErrorAction SilentlyContinue }
+        Restart-Gateway
+        Check 'the Wolverine host runs with the intake on' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+        & $Body
+    } finally {
+        # the items' sagas end with their issues (a saga left open would be offered to the next scenario's session and hold the intake back)        $left = @($script:MaSagaItems); $script:MaSagaItems = @()
+        $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
+        # (the webhook says it at once, as GitHub does; the poll of the board would take its minute)
+        foreach ($n in $left) {
+            try { [void](Invoke-RestMethod "$gh/issues/$n" -Method PATCH -Headers @{ Authorization = 'Bearer fake-operator' } -ContentType 'application/json' -Body (@{ state = 'closed' } | ConvertTo-Json)) } catch { }
+            try { [void](Qc-Hook 'issues' @{ action = 'closed'; repository = @{ full_name = 'clearmeasure-aisf-sample-apps/cmdemo1-workorders' }; sender = @{ login = 'a-person' }; issue = @{ number = $n; state = 'closed'; labels = @($OwnerLabels | ForEach-Object { @{ name = $_ } }) } }) } catch { }
+        }
+        foreach ($n in $left) { Check "the saga of #$n ends with its issue" (Wait-Until -Seconds 120 { 'completed' -in (Saga-Actions $n) }) "decisions: $((Saga-Actions $n) -join ', ')" }
+        if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner; $script:Workers.Remove($script:SagaOwner) }
+        Set-Content -Path $cfgPath -Value $orig -NoNewline
+        if ($null -ne $oldSnap) { $env:FACTORY_PLANT_SNAPSHOT = $oldSnap } else { Remove-Item Env:FACTORY_PLANT_SNAPSHOT -ErrorAction SilentlyContinue }
+        Restart-Gateway -Graceful:$Snapshot
+    }
+}
+# A docs item that the intake pulls from Todo into Technical Design and the saga offers to the owner session; returns the item and the (newest) offer, or $null after a failed check.
+function Ma-SagaOffer([int]$Above) {
+    Saga-NumbersAbove $Above
+    Saga-EnsureOwner
+    $n = New-Item-Fake 'Manager acts on a saga item' "Change the documentation.`n`n<!-- aisf:docs-only -->" $OwnerLabels 'Todo'
+    $script:MaSagaItems += $n
+    $pulled = Wait-Until -Seconds 200 { (Saga-Col $n) -eq 'Technical Design' }
+    Check "the intake pulls #$n from Todo into Technical Design" $pulled "column $(Saga-Col $n)"
+    if (-not $pulled) { return $null }
+    $offered = Wait-Until -Seconds 90 { (Get-Assigned $script:SagaOwner $n).Count -gt 0 }
+    Check "the saga's item #$n is offered to the owner session" $offered "column $(Saga-Col $n); decisions $((Saga-Actions $n) -join ', ')"
+    if (-not $offered) { return $null }
+    return @{ n = $n; ev = (Get-Assigned $script:SagaOwner $n)[-1] }
+}
+# the owner session takes the offer (the newest one: an offer that came after a slow answer replaces the one before)
+function Ma-SagaAccept($x) {
+    for ($try = 0; $try -lt 5; $try++) {
+        $ev = (Get-Assigned $script:SagaOwner $x.n)[-1]
+        $r = Fo $script:SagaOwner @('accept', '--item', $x.n, '--assignment', $ev.assignment)
+        if ($r.exit -ne 11) { break }
+        $seen = (Get-Assigned $script:SagaOwner $x.n).Count; [void](Wait-Until -Seconds 30 { (Get-Assigned $script:SagaOwner $x.n).Count -gt $seen })
+    }
+    CheckExit "the owner session accepts #$($x.n)" $r 0
+    return $r
+}
+function Ma-Plant { (Msg-Admin '/api/v1/status').plant }
+# who the plant names as the owner of the item, '' for none
+function Ma-OwnerOf([int]$n) { $o = (Ma-Plant).owners; if ($o.ContainsKey("$n")) { return "$($o["$n"])" }; return '' }
+function Ma-SagaView($n) { $v = Saga-View $n; if ($null -eq $v) { return '(no saga)' }; return ($v | ConvertTo-Json -Compress -Depth 4) }
+
+$ManagerActionScenarios['act: saga item: unpark ends the park of a saga item, the saga resumes it (decision resumed) and the owner session is offered it again'] = {
+    if (-not (Ma-V2Only)) { return }
+    Ma-OnSaga {
+        $x = Ma-SagaOffer 70; if (-not $x) { return }; $n = $x.n
+        [void](Ma-SagaAccept $x)
+        $sup = Start-ManagerClient 'act-sg-a'
+        try {
+            Check 'the supervisor registers' (Msg-WaitEvent $sup 'supervisor.registered') (Get-Content -Raw $sup.out)
+            # the owner reports that the criterion cannot be met: the item is parked (worker-failure), in the state comment and in the saga
+            $r = Fo $script:SagaOwner @('complete', '--item', $n, '--column', 'Technical Design', '--succeeded', 'false', '--comment', 'the criterion cannot be met as written')
+            CheckExit "the owner session reports a failure of #$n" $r 0
+            Check 'the item is parked in its state comment' (Wait-Until -Seconds 30 { (Ma-State $n).ContainsKey('park') }) ((Ma-State $n) | ConvertTo-Json -Compress -Depth 4)
+            Check 'and the saga has parked it' (Wait-Until -Seconds 60 { $v = Saga-View $n; $null -ne $v -and $v.parked }) (Ma-SagaView $n)
+            $offers = (Get-Assigned $script:SagaOwner $n).Count
+            $r = Ma-Act @('unpark', '--item', "$n", '--policy', 'park-resolved', '--reason', 'the owner reworded criterion 2')
+            CheckExit 'unpark' $r 0
+            Check 'the park is gone from the state comment and the item is handed off to its column' (-not (Ma-State $n).ContainsKey('park') -and (Ma-State $n).handoff.column -eq 'Technical Design' -and $r.reoffer -eq $true -and $r.park.reason -eq 'worker-failure') ($r | ConvertTo-Json -Compress -Depth 4)
+            Check 'the saga resumed the item: decision resumed, not parked, still in its design step' (Wait-Until -Seconds 60 { $v = Saga-View $n; $null -ne $v -and -not $v.parked -and 'resumed' -in (Saga-Actions $n) }) "$(Ma-SagaView $n); decisions $((Saga-Actions $n) -join ', ')"
+            Check 'the owner session is offered the item again' (Wait-Until -Seconds 90 { (Get-Assigned $script:SagaOwner $n).Count -gt $offers }) "offers before $offers, now $((Get-Assigned $script:SagaOwner $n).Count); $(Ma-SagaView $n)"
+            $j = @(Ma-Journal $n 'manager-action')
+            Check 'one journal line names the supervisor, the action and the policy code' ($j.Count -eq 1 -and $j[0].body -match 'released the park `worker-failure`' -and $j[0].body -match 'policy `park-resolved`') (($j | ForEach-Object { $_.body }) -join ' | ')
+        } finally { Mgr-Stop $sup }
+    }
+}
+
+$ManagerActionScenarios['act: saga item: release-owner ends the owner''s lease, the saga records the decision (owner-release-asked) and keeps its step, and the session that takes the new offer keeps its claim'] = {
+    if (-not (Ma-V2Only)) { return }
+    Ma-OnSaga {
+        $x = Ma-SagaOffer 80; if (-not $x) { return }; $n = $x.n
+        [void](Ma-SagaAccept $x)
+        $sup = Start-ManagerClient 'act-sg-b'
+        try {
+            Check 'the supervisor registers' (Msg-WaitEvent $sup 'supervisor.registered') (Get-Content -Raw $sup.out)
+            Check 'the plant names the owner session as the owner of the item' ((Ma-OwnerOf $n) -eq $script:SagaOwner) ((Ma-Plant).owners | ConvertTo-Json -Compress)
+            $step = "$((Saga-View $n).step)"
+            $offers = (Get-Assigned $script:SagaOwner $n).Count
+            $r = Ma-Act @('release-owner', '--item', "$n", '--policy', 'stalled-owner', '--reason', 'no verb for 50 minutes')
+            CheckExit 'release-owner' $r 0
+            $st = Ma-State $n
+            Check 'the claim stays in the item, its lease ended, marked taken_back' ("$($st.claim.taken_back)" -eq 'released-by-plant-manager' -and [DateTime]::Parse("$($st.claim.lease_until)").ToUniversalTime() -lt [DateTime]::UtcNow) ($st | ConvertTo-Json -Compress -Depth 4)
+            Check 'the saga recorded the decision (owner-release-asked) and says why' (Wait-Until -Seconds 60 { $v = Saga-View $n; $null -ne $v -and @($v.history | Where-Object { "$($_.action)" -eq 'owner-release-asked' -and "$(@($_.reasons) -join ' ')" -match 'no verb for 50 minutes' }).Count -eq 1 }) "$(Ma-SagaView $n)"
+            $v = Saga-View $n
+            Check 'the item keeps its step and is not parked: only the owner went' ($null -ne $v -and "$($v.step)" -eq $step -and -not $v.parked) (Ma-SagaView $n)
+            Check 'the owner session is told item.taken_back and the plant no longer names it' ((Wait-Until -Seconds 30 { @(Get-WorkerEvents $script:SagaOwner | Where-Object { $_.event -eq 'item.taken_back' -and $_.item -eq $n }).Count -ge 1 }) -and (Ma-OwnerOf $n) -eq '') ((Ma-Plant).owners | ConvertTo-Json -Compress)
+            Check 'the item is offered again' (Wait-Until -Seconds 90 { (Get-Assigned $script:SagaOwner $n).Count -gt $offers }) "offers before $offers, now $((Get-Assigned $script:SagaOwner $n).Count); $(Ma-SagaView $n)"
+            # the saga released nothing itself: the session that takes the new offer keeps its claim (a ReleaseOwner run late would end it)
+            [void](Ma-SagaAccept $x)
+            Start-Sleep -Seconds 8
+            $st = Ma-State $n
+            Check 'the claim is the session''s again and is not ended by the decision' ("$($st.claim.holder)" -eq $script:SagaOwner -and -not $st.claim.ContainsKey('taken_back') -and [DateTime]::Parse("$($st.claim.lease_until)").ToUniversalTime() -gt [DateTime]::UtcNow -and (Ma-OwnerOf $n) -eq $script:SagaOwner) (($st | ConvertTo-Json -Compress -Depth 4) + ' ' + ((Ma-Plant).owners | ConvertTo-Json -Compress))
+        } finally { Mgr-Stop $sup }
+    }
+}
+
+$ManagerActionScenarios['act: saga item: requeue puts a saga item that nobody holds back to be offered, the saga records the decision (requeued) and keeps its step'] = {
+    if (-not (Ma-V2Only)) { return }
+    Ma-OnSaga {
+        $x = Ma-SagaOffer 90; if (-not $x) { return }; $n = $x.n
+        $sup = Start-ManagerClient 'act-sg-c'
+        try {
+            Check 'the supervisor registers' (Msg-WaitEvent $sup 'supervisor.registered') (Get-Content -Raw $sup.out)
+            $step = "$((Saga-View $n).step)"
+            $offers = (Get-Assigned $script:SagaOwner $n).Count
+            $r = Ma-Act @('requeue', '--item', "$n", '--policy', 'stuck-offer', '--reason', 'the offer has waited for an hour')
+            CheckExit 'requeue of the offered item nobody holds' $r 0
+            Check 'the item is handed off to its column' ((Ma-State $n).handoff.column -eq 'Technical Design') ((Ma-State $n) | ConvertTo-Json -Compress -Depth 4)
+            Check 'the saga recorded the decision (requeued) and says why' (Wait-Until -Seconds 60 { $v = Saga-View $n; $null -ne $v -and @($v.history | Where-Object { "$($_.action)" -eq 'requeued' -and "$(@($_.reasons) -join ' ')" -match 'waited for an hour' }).Count -eq 1 }) "$(Ma-SagaView $n)"
+            $v = Saga-View $n
+            Check 'the item keeps its step and is not parked' ($null -ne $v -and "$($v.step)" -eq $step -and -not $v.parked) (Ma-SagaView $n)
+            Check 'the owner session is offered the item again' (Wait-Until -Seconds 90 { (Get-Assigned $script:SagaOwner $n).Count -gt $offers }) "offers before $offers, now $((Get-Assigned $script:SagaOwner $n).Count); $(Ma-SagaView $n)"
+            # an item with a live claim is the owner's: requeue points to release-owner, and the saga hears nothing
+            [void](Ma-SagaAccept $x)
+            $r = Ma-Act @('requeue', '--item', "$n", '--policy', 'stuck-offer')
+            CheckExit 'requeue of the owned item is refused' $r 10 'owned'
+            Check 'the saga recorded the first requeue only' (@((Saga-View $n).history | Where-Object { "$($_.action)" -eq 'requeued' }).Count -eq 1) (Ma-SagaView $n)
+        } finally { Mgr-Stop $sup }
+    }
+}
+
+# The restart: the plant of the suite is kept in the database for this scenario (FACTORY_PLANT_SNAPSHOT is switched on for its gateway), the gateway is stopped with SIGTERM as the platform stops a container, and started again.
+# The id of the offer is the one in the owner session's hands (its event, and the item token it gets by accepting), so an accept with the old id is the proof that the assignment came from the database and not from a new offer of the sweep.
+function Ma-Restore { $r = (Invoke-RestMethod "$(Get-GatewayBase)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 10).plantSnapshot.restore; return $r }
+function Ma-Assignment([int]$n) { , @((Get-Plant).plant.assignments | Where-Object { $_.item -eq $n -and $_.kind -eq 'own-item' }) }
+function Ma-RestartKeepingPlant {
+    Restart-Gateway -Graceful
+    Check 'the Wolverine host runs again' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
+    Check 'the owner session is connected again' (Wait-Until -Seconds 60 { try { @((Get-Plant).plant.workers | Where-Object { $_.name -eq $script:SagaOwner -and $_.connected }).Count -gt 0 } catch { $false } }) "client: $(@(Get-WorkerEvents $script:SagaOwner | Select-Object -Last 3 | ForEach-Object { $_.event }) -join ',')"
+}
+
+$ManagerActionScenarios['act: saga item: the plant is kept in SQL: the offer of a saga item and then its owner come back after the gateway is stopped and started, under the id the worker holds'] = {
+    if (-not (Ma-V2Only)) { return }
+    Ma-OnSaga -Snapshot {
+        $x = Ma-SagaOffer 100; if (-not $x) { return }; $n = $x.n
+        $id = "$($x.ev.assignment)"
+        $a = @(Ma-Assignment $n)
+        Check 'the plant holds the offer under the id of the session''s event, for the owner session, not accepted' ($a.Count -eq 1 -and "$($a[0].id)" -eq $id -and "$($a[0].worker)" -eq $script:SagaOwner -and -not $a[0].accepted) ($a | ConvertTo-Json -Compress)
+        Ma-RestartKeepingPlant
+        $rs = Ma-Restore
+        Check 'the plant was restored from the database, with the offer, and the correction found nothing to change' ("$($rs.how)" -eq 'sql' -and "$($rs.skipped)" -eq '' -and $rs.assignments -ge 1 -and $rs.corrected.open -ge 1 -and @($rs.corrected.forgotten).Count -eq 0 -and @($rs.corrected.unread).Count -eq 0) ($rs | ConvertTo-Json -Compress -Depth 5)
+        $a = @(Ma-Assignment $n)
+        Check 'the offer is there with the same id (the sweep has not made a new one)' ($a.Count -eq 1 -and "$($a[0].id)" -eq $id -and -not $a[0].accepted) ($a | ConvertTo-Json -Compress)
+        # the session answers the offer it was given before the restart
+        $r = Fo $script:SagaOwner @('accept', '--item', $n, '--assignment', $id)
+        CheckExit "accept #$n with the id from before the restart" $r 0
+        Check 'the plant names the owner session as the owner' ((Ma-OwnerOf $n) -eq $script:SagaOwner) ((Ma-Plant).owners | ConvertTo-Json -Compress)
+        $st = Ma-State $n
+        Check 'the claim is the owner session''s' ("$($st.claim.holder)" -eq $script:SagaOwner -and -not $st.claim.ContainsKey('taken_back')) ($st | ConvertTo-Json -Compress -Depth 4)
+        # a second restart, now with an owner: the claim says who owns the item, and the plant keeps the owner
+        Ma-RestartKeepingPlant
+        $rs = Ma-Restore
+        Check 'the plant was restored from the database again, the owner confirmed by the claim' ("$($rs.how)" -eq 'sql' -and "$($rs.skipped)" -eq '' -and $rs.owners -ge 1 -and $rs.corrected.open -ge 1 -and @($rs.corrected.owners.PSObject.Properties).Count -eq 0 -and @($rs.corrected.unread).Count -eq 0) ($rs | ConvertTo-Json -Compress -Depth 5)
+        Check 'the owner is the owner session still, with its accepted assignment under the same id' ((Ma-OwnerOf $n) -eq $script:SagaOwner -and @(Ma-Assignment $n | Where-Object { "$($_.id)" -eq $id -and $_.accepted }).Count -eq 1) (((Ma-Plant).owners | ConvertTo-Json -Compress) + ' ' + (@(Ma-Assignment $n) | ConvertTo-Json -Compress))
+        # and the saga is where it was: the item goes on from its owner
+        $v = Saga-View $n
+        Check 'the saga still has the item open in its design step' ($null -ne $v -and "$($v.step)" -eq 'Design' -and -not $v.parked) (Ma-SagaView $n)
+    }
+}

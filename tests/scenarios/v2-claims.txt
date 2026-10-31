@@ -76,6 +76,12 @@ qc-gate | ^qc: gate a non-auto-merge PASS stays on the approval path
 manager | ^act: (the supervisor unparks|unpark refuses|the supervisor drains|the plan offers)
 manager | ^keeper: (a worker-failure park|split-item)
 
+# W9.10k gate (#563, second pull request): the manager's actions on an item a saga owns, and the plant that comes back from SQL (manager-actions.ps1, v2 only: v1 has no saga and the scenarios say so). Each scenario restarts the suite's gateway with the
+# intake on (the docs plan of the engine), has the intake pull a Todo item and the owner session sg1 take it, and acts through the real supervisor client: unpark (the saga resumes it), release-owner (the saga records owner-release-asked and
+# the session that takes the new offer keeps its claim), requeue (the saga records requeued). The last one keeps the plant in the database (FACTORY_PLANT_SNAPSHOT on for its gateway), stops the gateway with SIGTERM and starts it again twice: the
+# offer comes back under the id the session holds (the accept with that id is the proof), then the owner, confirmed by the claim. The four run in one process, about 5 minutes in all.
+manager | ^act: saga item:
+
 # W9.2: the item verbs (claim-item, append-body, record-review, complete, validation-verdict, move-next ...) answer on v2 as the scripts do. Three scenarios of the suite 'auto' that use them (the completion
 # of Development stays the script's until W9.5, and these scenarios run it as such): the gates, the escalation of a repeated criterion with the timing comment, and the docs-only design reviews.
 auto | ^gates refuse what they should
