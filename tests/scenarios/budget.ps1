@@ -77,7 +77,8 @@ $BudgetScenarios['github budget: built from the rate-limit headers; below the re
         Check 'the refusals are counted' ((Bg-Status).github.verbRefusals -ge 1)
         # a new window: the budget is full again once a call reports it
         Fake 'rate' @{ resource = 'core'; remaining = 1000000; resetSeconds = 3700 } | Out-Null
-        [void](Bg-Verb 'my-items' @{ holder = 'nobody' })
+        # (on v1 my-items reads GitHub and reports the new window itself; on v2 it is answered from the plant and the next call that reaches GitHub, the sweep's, reports it: asked until it does)
+        [void](Wait-Until -Seconds 30 { [void](Bg-Verb 'my-items' @{ holder = 'nobody' }); (Bg-Status).github.low -eq $false })
         $r = Bg-Verb 'get-item' @{ item = $n }
         Check 'a new window ends the low budget' ((Bg-Status).github.low -eq $false -and $r.status -eq 200) ((Bg-Status).github | ConvertTo-Json -Compress -Depth 4)
         # how a refusal of GitHub is read (the rule script alone, so the gateway's own calls see none of it)

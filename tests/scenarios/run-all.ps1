@@ -54,6 +54,7 @@ function Read-V2Claims([string]$Path) {
     $out = @(); $n = 0
     foreach ($raw in [IO.File]::ReadAllLines($Path)) {
         $n++; $line = $raw.Trim(); if (-not $line -or $line.StartsWith('#')) { continue }
+        if ($line -match '^v1-only-scenarios\s+([a-z0-9-]+)\s*\|') { continue }   # (run.ps1 reads these: the scenarios of a claimed suite that stay on v1)
         if ($line -match '^v1-only\s+([a-z0-9-]+)\s*\|\s*(.+)$') { $out += @{ line = $n; kind = 'v1-only'; suite = $Matches[1]; only = ''; profile = 'plain'; reason = $Matches[2].Trim() }; continue }
         $f = @($line -split ' \| ' | ForEach-Object { $_.Trim() })
         if ($f[0] -notmatch '^[a-z0-9-]+$') { throw "${Path}:${n}: '$($f[0])' is not a suite name" }
@@ -126,7 +127,7 @@ $jobOf = @{}; foreach ($j in $todo) { $jobOf[$j.label] = $j }
 if ($Engine -eq 'v2') {
     $empty = @()
     foreach ($j in $todo) {
-        $la = @('-NoProfile', '-File', (Join-Path $here 'run.ps1'), '-ListScenarios', '-Suite', $j.suite, '-Tier', $Tier)
+        $la = @('-NoProfile', '-File', (Join-Path $here 'run.ps1'), '-ListScenarios', '-Suite', $j.suite, '-Tier', $Tier, '-Engine', 'v2')
         if ($j.only) { $la += @('-Only', $j.only) }; if ($j.groups -gt 1 -and $j.group -ge 0) { $la += @('-Groups', $j.groups, '-Group', $j.group) }
         $j.listed = @(& pwsh @la | Where-Object { $_ -match '^[^\t]+\t[^\t]+\t(fast|full)$' }).Count
         if ($j.listed -eq 0 -and -not ($j.groups -gt 1 -and $j.group -ge 0)) { $empty += "$($j.suite)$(if ($j.only) { " /$($j.only)/" })" }

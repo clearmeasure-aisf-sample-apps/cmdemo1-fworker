@@ -27,8 +27,16 @@ sealed class FileItemLock(string stateDir, Func<TimeSpan, CancellationToken, Tas
 {
     readonly Func<TimeSpan, CancellationToken, Task> sleep = pause ?? ((t, ct) => Task.Delay(t, ct));
 
+    // The items whose lock the current flow of work holds. A verb that holds an item's lock and calls another verb of the same item through the router (copilot-settle's takeover calls open-pr, an item verb) is one
+    // operation: the nested call runs under the lock the flow has, as the one script process did. Without this the nested call waited its 45 seconds on a lock its own caller held, was refused item-busy, and the
+    // takeover of a Copilot task's draft never happened (W9.9c prep: the suite copilot on v2). Another flow of work is a stranger, as before: the lock is the file's, exclusive.
+    static readonly AsyncLocal<IReadOnlyList<(string Dir, int Item)>?> held = new();
+
     public async Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct)
     {
+        var key = (stateDir, item);
+        var outer = held.Value;
+        if (outer is not null && outer.Contains(key)) return await body();
         Directory.CreateDirectory(stateDir);
         var path = Path.Combine(stateDir, $"item-{item}.lock");
         var until = DateTime.UtcNow.AddSeconds(waitSeconds);
@@ -42,7 +50,12 @@ sealed class FileItemLock(string stateDir, Func<TimeSpan, CancellationToken, Tas
                 await sleep(TimeSpan.FromMilliseconds(300), ct);
             }
         }
-        using (fs) return await body();
+        using (fs)
+        {
+            held.Value = [.. outer ?? [], key];
+            try { return await body(); }
+            finally { held.Value = outer; }
+        }
     }
 }
 

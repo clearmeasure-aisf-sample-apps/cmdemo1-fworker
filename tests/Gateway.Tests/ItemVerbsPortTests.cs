@@ -248,6 +248,28 @@ public sealed class ItemVerbsPortTests : IDisposable
     }
 
     [Fact]
+    public async Task ACallOfTheSameItemInsideAHeldLock_IsTheSameOperation_AndAStrangerStaysBusy()
+    {
+        var l = new FileItemLock(dir);
+        var inside = new TaskCompletionSource(); var release = new TaskCompletionSource();
+        var nested = 0;
+        var outer = l.Use(21, async () =>
+        {
+            // the verb's own nested call (copilot-settle -> open-pr): runs under the lock the flow holds, at once, and a second item is its own lock
+            nested = await l.Use(21, () => Task.FromResult(7), 1, default);
+            Assert.Equal(8, await l.Use(22, () => l.Use(22, () => Task.FromResult(8), 1, default), 1, default));
+            inside.SetResult(); await release.Task; return 1;
+        }, 5, default);
+        await inside.Task;
+        Assert.Equal(7, nested);
+        // a flow that does not hold it waits and is refused, as before
+        await Assert.ThrowsAsync<ItemBusyException>(() => l.Use(21, () => Task.FromResult(9), 1, default));
+        release.SetResult(); Assert.Equal(1, await outer);
+        // and what the flow held is let go: the next flow takes it, and its nested call is the same operation again
+        Assert.Equal(10, await l.Use(21, () => l.Use(21, () => Task.FromResult(10), 1, default), 1, default));
+    }
+
+    [Fact]
     public async Task TheRefusalsFile_IsTheOneOfTheModelLadder_ObjectOfCountsByItem()
     {
         var r = new ItemVerbsRefusals(dir);

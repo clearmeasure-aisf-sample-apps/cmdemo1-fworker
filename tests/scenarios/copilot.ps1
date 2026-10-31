@@ -182,7 +182,13 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'copilot-launch-failures' @{ count = 1 })
         $m = New-Item-Fake 'Copilot relaunch' 'x' $CopLabels
         Check 'after the failed create a new task is created' (Wait-Until -Seconds 40 { (Cop-Tasks $m).Count -ge 1 })
-        Check 'status: the failure was counted against the item' (Wait-Until -Seconds 20 { @((Cop-Status).failures | Where-Object { $_.item -eq $m -and $_.count -ge 1 }).Count -eq 1 }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
+        if ($script:GoldenEngine -eq 'v2') {
+            # the fake refuses the create with a 500: a transient answer, which the start command tries again (RuntimeCommandService.RetryPauses, 2 s) with the same worker, so nothing ended as start-failed and
+            # no failure is counted; a 4xx refusal is a failure at once (V1CommandPort: the suite 'cursor-deadline' has one)
+            Check 'status (v2): the refused create is tried again by the start command; it is no failure of the item and the retry is the item''s only task' (@((Cop-Status).failures | Where-Object { $_.item -eq $m }).Count -eq 0 -and (Cop-Tasks $m).Count -eq 1) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
+        } else {
+            Check 'status: the failure was counted against the item' (Wait-Until -Seconds 20 { @((Cop-Status).failures | Where-Object { $_.item -eq $m -and $_.count -ge 1 }).Count -eq 1 }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
+        }
     } finally { Cop-Cleanup @($n, $m) }
 }
 
@@ -358,7 +364,8 @@ $CopilotScenarios = [ordered]@{
         Check 'the held run of the item''s head is released after the retry' (Wait-Until -Seconds 120 { (Held $run.id).reruns -eq 1 }) ((Fake 'held-runs') | ConvertTo-Json -Compress -Depth 4)
         Check 'status counts the release and clears the owner action' (Wait-Until -Seconds 10 { $c = CiStatus; $c.released -ge 1 -and -not $c.permissionMissing }) ((CiStatus) | ConvertTo-Json -Compress)
         Check 'a 403 posts one neutral owner-action comment on the item' (Wait-Until -Seconds 30 { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "owner action: the gateway could not release workflow run $($run.id)" }).Count -eq 1 })
-        Check 'the successful release posts no issue comment' (@((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'GitHub held it|released workflow run' }).Count -eq 0) ((Get-FakeIssue $n).comments | ConvertTo-Json -Compress -Depth 3)
+        # (the state comment is machine-read and holds the release in journal.ciReleased as soon as it is recorded, which the engine v2 does in the call; it is no comment on the item for a person)
+        Check 'the successful release posts no issue comment' (@((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -notmatch '^<!-- factory-state:' -and "$($_.body)" -match 'GitHub held it|released workflow run' }).Count -eq 0) ((Get-FakeIssue $n).comments | ConvertTo-Json -Compress -Depth 3)
         Check 'the release is recorded in status (released, lastRelease)' ((CiStatus).released -ge 1 -and "$((CiStatus).lastRelease)" -ne '') ((CiStatus) | ConvertTo-Json -Compress)
         Start-Sleep -Seconds 25
         Check 'idempotent: the run, still listed held, is not re-run again' ((Held $run.id).reruns -eq 1) ((Held $run.id) | ConvertTo-Json -Compress)

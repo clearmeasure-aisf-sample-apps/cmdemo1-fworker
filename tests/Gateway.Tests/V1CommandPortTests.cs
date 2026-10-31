@@ -33,6 +33,15 @@ public class V1CommandPortTests
     [InlineData("no capacity", FailureKind.RateLimited)]
     [InlineData("quota", FailureKind.RateLimited)]
     [InlineData("start-error: x", FailureKind.Transient)]
+    [InlineData("launch-400: model not available for this account", FailureKind.Permanent)]
+    [InlineData("launch-422", FailureKind.Permanent)]
+    [InlineData("launch-408", FailureKind.Transient)]
+    [InlineData("launch-429: slow down", FailureKind.Transient)]
+    [InlineData("launch-500", FailureKind.Transient)]
+    [InlineData("launch-502: bad gateway", FailureKind.Transient)]
+    [InlineData("launch-HttpRequestException", FailureKind.Transient)]
+    [InlineData("launch-no-id", FailureKind.Transient)]
+    [InlineData("launch-4000", FailureKind.Transient)]
     public async Task StartFailureIsClassified(string error, FailureKind kind)
     {
         var rt = new FakeRuntime { Result = new ProvisionResult(false, "", error) };
