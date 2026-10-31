@@ -48,6 +48,9 @@ public static class WorkItemHandlers
     public static Task<OutgoingMessages> Handle(PullRequestClosed m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(ApprovalSeen m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(RearmSettle m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    // W9.10k: the plant manager's release-owner and requeue
+    public static Task<OutgoingMessages> Handle(OwnerReleaseAsked m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(RequeueWorkItem m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
 
     public static async Task<OutgoingMessages> Run(WorkItemInput input, WorkItemService svc, CancellationToken ct)
     {

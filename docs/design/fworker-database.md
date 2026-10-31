@@ -81,6 +81,7 @@ every added column under `IF COL_LENGTH(...) IS NULL`, every schema created only
 | 013 AddTranscripts | Transcripts (W9.0 for W9.8: runtime session transcripts) |
 | 100 AddIncidents | Incidents (W8.0 for W8.1: the incident saga of one application and environment; the timeline is in ItemHistory) |
 | 140 AddIdempotencyClaimsAndReservationMode | IdempotencyClaims (W9.10c: the pending claim of a command key) and the column Mode of CopilotReservations (launch, resume). Numbers 130 to 169 are reserved per work item of W9.10 (the plan), so the numbers are ascending, not contiguous |
+| 240 AddPlantState | PlantAssignments, PlantHolders, PlantDrains and PlantState (W9.10k: the plant's offers and assignments with the ids the workers' item tokens name, its owners, bot holders and drains, and the rest of its hand-over as one document with the epoch of the term that wrote it) |
 
 The DDL of 001 to 008 is what `dotnet ef migrations script <previous> <this>` printed, with the history inserts removed and guards added. Column types,
 lengths, nullability, identity, key names (`PK_<Table>`), index names, filters and the default are exactly EF's, so the tables EF built on tdd match.

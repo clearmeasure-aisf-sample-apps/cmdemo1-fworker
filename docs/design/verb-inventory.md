@@ -154,6 +154,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | plant-expire-claim | `gateway/PlantHooks.cs` | 1 | expire-claim | runner | W9.2 | W9.9a | Claim expiry of an assigned item. |
 | ticker-journal | `gateway/PlantTicker.cs` | 1 | journal | runner | W9.8 | W9.9a | The ticker's journal lines (#477). |
 | owner-release | `gateway/Ports/ItemStepsPort.cs` | 2 | get-item, release | router | W9.10f | - | OwnerRelease: the saga's ReleaseOwner (an owner that waited out a hold) reads the claim with get-item and gives it up with release, through the verb router (v2's item verbs where the engine acts); no script of its own. |
+| plant-restore-claim | `gateway/PlantRestoreCorrection.cs` | 1 | get-item | router | W9.10k | - | PlantRestoreCorrection: at start the plant restored from the database is corrected from the claim of each owned saga item, read with get-item through the verb router (v2's item verbs where the engine acts); no script of its own. |
 | item-verbs-v1 | `gateway/Ports/ItemVerbsPort.cs` | 1 | by argument | runner | W9.10q | W9.10q | ItemVerbsV1, the IItemV1 plumbing: it goes with the fallbacks. |
 | item-admin-feed | `gateway/Ports/ItemVerbsPort.cs` | 1 | by argument | router | W9.2 | - | ItemAdminFeed forwards to the router it wraps (no script). |
 | qc-calls | `gateway/Qc.cs` | 1 | by argument | runner | W9.1 | W9.9a | QcHub runs the qc-* verbs (QcService in W9.1). |

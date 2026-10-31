@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
+using Fworker.Workflows.PlantState;
 
 // The plant snapshot (PlantSnapshot.cs, enhancement 5; Leader.cs, issue 94): the restore before the first sweep, the write of every change, the final
 // write of a hand-over or a stop, and what /api/v1/status shows of it. Moved out of Program.cs unchanged (C4d): the same rule scripts, arguments,
@@ -36,6 +37,15 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     }
 
     public bool On { get; }
+    /// <summary>
+    /// W9.10k: where the engine acts the plant is kept in the database (factory.PlantAssignments and the rows beside it, script 240) instead of the snapshot ref: written on every change and at the stop, read first at start. Null in v1
+    /// and in the shadow run (tdd), which keep the ref. A database with nothing in it yet (the first start of this version) still reads the ref once.
+    /// </summary>
+    public IPlantStateStore? Sql { get; set; }
+    /// <summary>W9.10k: the correction of a restored plant at start (PlantRestoreCorrection); its result is part of the status's restore block.</summary>
+    public Func<Task<JsonObject>>? Correct { get; set; }
+    /// <summary>W9.10k: completes when the database's tables exist (the host's upgrade has verified the schema); the restore from the database waits for it, at most two minutes.</summary>
+    public Func<CancellationToken, Task>? SchemaReady { get; set; }
     public Task Restored => restored.Task;
     public long HeldEpoch => Interlocked.Read(ref heldEpoch);
     public JsonObject Status() { lock (state) return (JsonObject)state.DeepClone(); }
@@ -60,6 +70,7 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     {
         try
         {
+            if (Sql != null && await RestoreFromSqlAsync(null, "start")) return;
             var (code, output) = await run("plant-snapshot-load", "{}", TimeSpan.FromSeconds(45));
             var j = code == 0 ? JsonNode.Parse(output) : null;
             var found = j?["found"] is JsonValue fv && fv.TryGetValue<bool>(out var fb) && fb;
@@ -82,6 +93,13 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
         {
             if (!restored.Task.IsCompleted) { Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"gateway\":\"plant-snapshot\",\"skipped\":\"not-restored-yet\"}}"); return; }
             var snap = plant.Snapshot();
+            if (Sql != null)
+            {
+                using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                var saved = Sql.Save(snap, leader.ClaimEpoch, leader.Holder, limit.Token).GetAwaiter().GetResult();
+                Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["store"] = "sql", ["saved"] = saved, ["assignments"] = (snap["assignments"] as JsonArray)?.Count ?? 0, ["owners"] = (snap["owners"] as JsonObject)?.Count ?? 0 }.ToJsonString());
+                return;
+            }
             var (code, output) = run("plant-snapshot-save", new JsonObject { ["snapshot"] = snap }.ToJsonString(), TimeSpan.FromSeconds(20)).GetAwaiter().GetResult();
             Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-snapshot", ["exit"] = code, ["assignments"] = (snap["assignments"] as JsonArray)?.Count ?? 0, ["owners"] = (snap["owners"] as JsonObject)?.Count ?? 0 }.ToJsonString());
         }
@@ -101,12 +119,23 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
             var plain = plant.Snapshot(); var ep = leader.Epoch;
             var snap = (JsonObject)plain.DeepClone(); snap["epoch"] = ep; snap["holder"] = leader.Holder; snap["final"] = final;
             // every write is guarded: a snapshot of a later epoch (a process that took over) is never overwritten
-            var args = new JsonObject { ["snapshot"] = snap, ["guard_epoch"] = ep };
-            if (tree != "") args["tree"] = tree;
-            var (code, output) = await run("plant-snapshot-save", args.ToJsonString(), timeout);
+            int code; var output = "";
+            if (Sql != null)
+            {
+                // W9.10k: the rows of the database, in one transaction; a writer of an older epoch than the stored one is refused (it lost the lock)
+                using var limit = new CancellationTokenSource(timeout);
+                try { code = await Sql.Save(snap, leader.ClaimEpoch, leader.Holder, limit.Token) ? 0 : 1; }   // (ClaimEpoch: the SQL lock's term where there is one, so it counts in the database's own numbers)
+                catch (Exception e) { Console.Error.WriteLine($"plant state save: {(e is OperationCanceledException ? "timeout" : e.GetType().Name)}"); code = 1; }
+            }
+            else
+            {
+                var args = new JsonObject { ["snapshot"] = snap, ["guard_epoch"] = ep };
+                if (tree != "") args["tree"] = tree;
+                (code, output) = await run("plant-snapshot-save", args.ToJsonString(), timeout);
+            }
             if (code == 0)
             {
-                try { if (JsonNode.Parse(output)?["tree"]?.ToString() is { Length: > 0 } t) tree = t; } catch { }
+                if (Sql == null) { try { if (JsonNode.Parse(output)?["tree"]?.ToString() is { Length: > 0 } t) tree = t; } catch { } }
                 lastSave = DateTime.UtcNow; lastStructure = SnapStructure(plain); lastFull = SnapFull(plain); Interlocked.Exchange(ref heldEpoch, ep); saves++;
             }
             else failures++;
@@ -132,6 +161,7 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     {
         try
         {
+            if (Sql != null && On && await RestoreFromSqlAsync(pred, via)) return;
             var now = DateTime.UtcNow;
             var predEpoch = LongOf(pred?["epoch"], 0); var released = pred?["released"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb;
             var predUntil = IsoTime(pred?["until"]);
@@ -169,6 +199,54 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
         }
         catch (Exception e) { Console.Error.WriteLine($"plant restore: {e.Message}"); }
         finally { restored.TrySetResult(); }
+    }
+
+    // W9.10k: the restore from the database. The plant the previous term wrote is read at once (the SQL lock fences the terms: a holder that stepped down wrote its last state before it let the lock go, and a dead one wrote its last
+    // periodic one), restored whatever its age within a day, and corrected (Correct: the items whose saga completed, the owner the claim says). Returns false when the database holds no plant yet (the first start of this version),
+    // so that the ref is read once; true when it handled the restore, also when the database could not be read (the plant then starts empty, as a failed read of the ref leaves it). The gap, if the predecessor did not hand over
+    // (its stored state is not marked final), is the same as for the ref.
+    async Task<bool> RestoreFromSqlAsync(JsonObject? pred, string via)
+    {
+        var handled = false;
+        try
+        {
+            PlantStateRead? stored;
+            try
+            {
+                // (the tables are the schema's: the read waits for the host's upgrade of the database where that happens in this process)
+                if (SchemaReady != null) { using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(120)); await SchemaReady(cts.Token); }
+                stored = await Sql!.Load();
+            }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"plant state load: {e.GetType().Name}");
+                lock (state) state["restore"] = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["assignments"] = 0, ["owners"] = 0, ["skipped"] = "load-failed", ["how"] = "sql", ["via"] = via };
+                Interlocked.Exchange(ref heldEpoch, -1);
+                return handled = true;
+            }
+            if (stored == null) return false;
+            handled = true;
+            var (na, no, skipped) = plant.Restore(stored.Snapshot, 60 * 24);
+            Interlocked.Exchange(ref heldEpoch, skipped == "" ? stored.Epoch : -1);
+            var corrected = skipped == "" ? await CorrectAsync() : null;
+            var final = stored.Snapshot["final"] is JsonValue fv && fv.TryGetValue<bool>(out var fb) && fb;
+            var released = pred?["released"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb;
+            var gapSince = pred == null ? null : released ? IsoTime(pred["released_at"]) : final ? null : IsoTime(pred["renewed_at"]);
+            if (gapSince is { } gs && (DateTime.UtcNow - gs).TotalMinutes <= leader.Settings.GapRenewMaxMinutes) sweepGap.Set(gs);
+            lock (state) state["restore"] = new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["assignments"] = na, ["owners"] = no, ["skipped"] = skipped, ["how"] = "sql", ["via"] = via, ["snapshotAt"] = stored.Snapshot["at"]?.ToString(),
+                ["snapshotEpoch"] = stored.Epoch, ["predecessorEpoch"] = pred == null ? null : LongOf(pred["epoch"], 0), ["final"] = final, ["gapSince"] = gapSince?.ToString("o"), ["corrected"] = corrected };
+            Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["gateway"] = "plant-restore", ["how"] = "sql", ["assignments"] = na, ["owners"] = no, ["skipped"] = skipped, ["epoch"] = leader.Epoch, ["corrected"] = corrected?.DeepClone() }.ToJsonString());
+            return true;
+        }
+        catch (Exception e) { Console.Error.WriteLine($"plant restore (sql): {e.Message}"); handled = true; return true; }
+        finally { if (handled) restored.TrySetResult(); }
+    }
+
+    async Task<JsonObject?> CorrectAsync()
+    {
+        if (Correct == null) return null;
+        try { return await Correct().WaitAsync(TimeSpan.FromSeconds(90)); }
+        catch (Exception e) { Console.Error.WriteLine($"plant restore correction: {e.GetType().Name}"); return new JsonObject { ["error"] = e.GetType().Name }; }
     }
 
     // the snapshot of every change: a change of the hand-over at most every plantSnapshotDebounceSeconds (30), any other change at most every

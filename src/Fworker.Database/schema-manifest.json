@@ -1283,6 +1283,302 @@
         }
       }
     },
+    "factory.PlantAssignments": {
+      "columns": {
+        "Accepted": {
+          "type": "bit",
+          "maxLength": 1,
+          "precision": 1,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "AcceptedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": true,
+          "identity": false,
+          "default": null
+        },
+        "ArmId": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "BoardColumn": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "CreatedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Id": {
+          "type": "nvarchar",
+          "maxLength": 120,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Item": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Kind": {
+          "type": "nvarchar",
+          "maxLength": 40,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Mode": {
+          "type": "nvarchar",
+          "maxLength": 120,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Pin": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "PullRequest": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Reason": {
+          "type": "nvarchar",
+          "maxLength": 120,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Role": {
+          "type": "nvarchar",
+          "maxLength": 120,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "SlotId": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "SlotRuntime": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Worker": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_PlantAssignments": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Id"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.PlantDrains": {
+      "columns": {
+        "Kind": {
+          "type": "nvarchar",
+          "maxLength": 20,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Name": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_PlantDrains": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Name",
+            "Kind"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.PlantHolders": {
+      "columns": {
+        "Holder": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Item": {
+          "type": "int",
+          "maxLength": 4,
+          "precision": 10,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Kind": {
+          "type": "nvarchar",
+          "maxLength": 20,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_PlantHolders": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Item",
+            "Kind"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
+    "factory.PlantState": {
+      "columns": {
+        "Document": {
+          "type": "nvarchar",
+          "maxLength": -1,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Epoch": {
+          "type": "bigint",
+          "maxLength": 8,
+          "precision": 19,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Holder": {
+          "type": "nvarchar",
+          "maxLength": 200,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "Name": {
+          "type": "nvarchar",
+          "maxLength": 80,
+          "precision": 0,
+          "scale": 0,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        },
+        "SavedAt": {
+          "type": "datetimeoffset",
+          "maxLength": 10,
+          "precision": 34,
+          "scale": 7,
+          "nullable": false,
+          "identity": false,
+          "default": null
+        }
+      },
+      "indexes": {
+        "PK_PlantState": {
+          "unique": true,
+          "primary": true,
+          "keys": [
+            "Name"
+          ],
+          "included": [],
+          "filter": null
+        }
+      }
+    },
     "factory.ProjectionVersions": {
       "columns": {
         "AppliedAt": {

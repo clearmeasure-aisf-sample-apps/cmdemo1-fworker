@@ -176,4 +176,6 @@ public sealed class KeeperWorld : IKeeperGitHub, IItemStateStore, IVerbLocks, IK
     public bool Owns(int item) => SagaOwned.Contains(item);
     Task IKeeperSaga.Resumed(int item, string key) { SagaCalls.Add($"resumed {item}"); return Task.CompletedTask; }
     Task IKeeperSaga.Closed(int item, string reason, string key) { SagaCalls.Add($"closed {item} {reason}"); return Task.CompletedTask; }
+    Task IKeeperSaga.OwnerReleased(int item, string reason, string key) { SagaCalls.Add($"owner-released {item}"); return Task.CompletedTask; }
+    Task IKeeperSaga.Requeued(int item, string reason, string key) { SagaCalls.Add($"requeued {item}"); return Task.CompletedTask; }
 }

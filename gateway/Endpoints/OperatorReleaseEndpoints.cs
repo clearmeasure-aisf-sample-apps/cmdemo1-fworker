@@ -14,20 +14,22 @@ sealed class ReleasesLoadedFilter(IOperatorReleaseLoader loader) : IEndpointFilt
 // The operator session's two enforced checks (Operator.cs, docs/design/operator-session.md), for the active operator session and the operator. The
 // release records are refs in GitHub, written by the rule scripts and read once at start. Guards, in this order: the operator session enabled (then
 // owner mode and messaging), the admin or the active operator session, the records read.
-sealed class OperatorReleaseEndpoints(Plant plant, ServiceVerbCalls verbs, RevocationService revocations) : IEndpointModule
+sealed class OperatorReleaseEndpoints(Plant plant, ServiceVerbCalls verbs, RevocationService revocations, SagaPlantFeed? saga = null) : IEndpointModule
 {
     // its own gate (a flood of records must never delay a revoke)
     readonly SemaphoreSlim releaseGate = new(1, 1);
 
     public void Map(IEndpointRouteBuilder routes)
     {
-        routes.MapGet("/api/v1/operator/release-check", (HttpContext c) => Check()).WithOperatorGuards();
+        routes.MapGet("/api/v1/operator/release-check", async (HttpContext c) => { return await Check(c.RequestAborted); }).WithOperatorGuards();
         routes.MapPost("/api/v1/operator/record-release", async (HttpContext c) => { return await Record(c); }).WithOperatorGuards();
     }
 
     // GET /operator/release-check: 200 when the plant is quiet and the day's limit is not reached; otherwise 409 not-quiet (with every reason) or daily-limit.
-    IResult Check()
+    async Task<IResult> Check(CancellationToken ct)
     {
+        // W9.10k: where the engine acts, the saga's table is read now (a read that fails keeps the last answer), so that what it has in flight counts
+        if (saga is not null) { try { await saga.RefreshAsync(ct); } catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch (Exception e) { Console.Error.WriteLine($"release check: the saga could not be read ({e.GetType().Name})"); } }
         var r = plant.ReleaseCheck();
         return Results.Text(r.ToJsonString(), "application/json", Encoding.UTF8, r["ok"]!.GetValue<bool>() ? 200 : 409);
     }

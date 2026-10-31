@@ -31,7 +31,8 @@ sealed partial class Plant
                 ["assignments"] = new JsonArray(assignments.Values.Where(a => !IsQc(a)).OrderBy(a => a.Item).Select(a => (JsonNode)new JsonObject
                 {
                     ["id"] = a.Id, ["item"] = a.Item, ["kind"] = a.Kind, ["role"] = a.Role, ["column"] = a.Column, ["mode"] = a.Mode, ["reason"] = a.Reason, ["worker"] = a.Worker,
-                    ["pr"] = a.Pr, ["pin"] = a.Pin, ["accepted"] = a.Accepted, ["acceptedAt"] = Iso(a.AcceptedAt), ["createdAt"] = Iso(a.CreatedAt)
+                    ["pr"] = a.Pr, ["pin"] = a.Pin, ["accepted"] = a.Accepted, ["acceptedAt"] = Iso(a.AcceptedAt), ["createdAt"] = Iso(a.CreatedAt),
+                    ["slot"] = a.Slot, ["runtime"] = a.SlotRuntime, ["arm"] = a.Arm   // W9.10k: the scheduler's slot of a saga item (the session starts on it)
                 }).ToArray()),
                 ["owners"] = new JsonObject(ownerOf.OrderBy(kv => kv.Key).Select(kv => KeyValuePair.Create(kv.Key.ToString(), (JsonNode?)kv.Value))),
                 ["drained"] = new JsonArray(drainedNames.OrderBy(x => x, StringComparer.Ordinal).Select(x => (JsonNode)x).ToArray()),   // issue 80
@@ -75,8 +76,10 @@ sealed partial class Plant
                 var a = new Assignment
                 {
                     Id = id, Key = key, Item = item, Kind = kind, Role = role, Column = Gated(o["column"]?.ToString()), Mode = GatedCode(o["mode"]?.ToString()) is { Length: > 0 } md ? md : "first",
-                    Reason = GatedCode(o["reason"]?.ToString()), Pr = Num(o["pr"]), Pin = Name(o["pin"]), Worker = worker, CreatedAt = Time(o["createdAt"]) ?? now, MatchedNoted = true
+                    Reason = GatedCode(o["reason"]?.ToString()), Pr = Num(o["pr"]), Pin = Name(o["pin"]), Worker = worker, CreatedAt = Time(o["createdAt"]) ?? now, MatchedNoted = true,
+                    Slot = GatedCode(o["slot"]?.ToString()), SlotRuntime = GatedCode(o["runtime"]?.ToString()), Arm = GatedCode(o["arm"]?.ToString())   // W9.10k (absent in a snapshot written before it)
                 };
+                if (a.Slot.Length == 0) a.SlotRuntime = "";
                 if (accepted) { a.Accepted = true; a.AcceptedAt = Time(o["acceptedAt"]) ?? now; }
                 else if (worker != "") { a.AckBy = now.AddSeconds(ackSeconds); }
                 else { a.WaitingSince = now; a.WaitingCode = a.Pin != "" ? "pinned-unavailable" : "no-session"; }
