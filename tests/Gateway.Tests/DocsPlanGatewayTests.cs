@@ -490,6 +490,36 @@ public sealed class V2OfferTests
         Assert.True(own.Owns(7) && own.Owns(8) && own.Owns(11)); Assert.False(own.Owns(9) || own.Owns(10));
     }
 
+    [Fact]
+    public async Task AfterABreak_AnUnadoptedOpenRow_IsNotOffered_UntilTheAdoptionHasExaminedIt_OrTheGateIsReleased()
+    {
+        // W9.9b (review): the row is still generation 1 (Open, Design, a session to place) and v1 may have moved or merged the item since; the plant would start a session on it
+        var (store, svc) = await Store();
+        var a = new ItemId(Home, 7); var b = new ItemId(Home, 8);
+        await svc.Handle(new StartWorkItem(a, "intake", "docs")); await svc.Handle(new StartWorkItem(b, "intake", "docs"));
+        var gate = new Fworker.Workflows.Adoption.ReadoptionGate();
+        var own = new V2Ownership(store, Home, Column, gate);
+        await own.RefreshAsync();
+        Assert.Equal(2, own.OfferNodes(_ => false).Count);   // (no break: nothing is held)
+
+        gate.Hold("v1 ran with the kill switch", newTerm: true);
+        Assert.Empty(own.Offers); Assert.Empty(own.OfferNodes(_ => false)); Assert.Empty(own.OfferNodes(_ => false, [7]));
+        await own.RefreshAsync();   // (a refresh in between changes nothing)
+        Assert.Empty(own.OfferNodes(_ => false));
+        Assert.True(own.Owns(7) && own.Owns(8));   // (v1's sweep still leaves both alone)
+
+        gate.Adopted(a.ToString());   // the adoption examined item 7 only
+        Assert.Equal([7], own.OfferNodes(_ => false).Select(n => n["item"]!.GetValue<int>()));
+        Assert.Equal([(7, "Technical Design")], own.Offers);
+
+        gate.Release();   // the term's run is done
+        Assert.Equal(2, own.OfferNodes(_ => false).Count);
+
+        // a new start of the host is a new term: what the adoption examined before says nothing about this break
+        gate.Hold("v1 ran again", newTerm: true);
+        Assert.Empty(own.OfferNodes(_ => false));
+    }
+
     static async Task WalkTo(WorkItemService svc, ItemId item, StepKind until)
     {
         for (var i = 0; (await svc.Store.Load(item.ToString(), default))!.State.Step != until && i < 6; i++)

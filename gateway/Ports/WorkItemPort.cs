@@ -25,8 +25,9 @@ using Wolverine;
 /// The items of the home repository that have a saga which has not completed, as the numbers v1's sweep knows them by. Read from the saga's table before each sweep (a point query by status,
 /// bounded in time); a read that fails keeps the last answer, because a v2 item must not be taken by v1 for the length of an outage.
 /// </summary>
-sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, string?>? columnOf = null)
+sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, string?>? columnOf = null, Fworker.Workflows.Adoption.ReadoptionGate? readoption = null)
 {
+    volatile IReadOnlyDictionary<int, string> offerKeys = new Dictionary<int, string>();
     volatile HashSet<int> owned = [];
     volatile IReadOnlyList<(int Item, string Column)> offers = [];
     volatile IReadOnlyDictionary<int, SlotOffer> slots = new Dictionary<int, SlotOffer>();
@@ -57,7 +58,13 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     /// What the plant is offered for the saga's items (W6.6): an open, unparked item on a step that a session works, in that step's column. The sweep's own offers for these items are dropped (SweepV2Filter), so
     /// the saga is what says that an item waits for a session; the sessions and the plant that places them are v1's. Empty without the columns of the docs plan.
     /// </summary>
-    public IReadOnlyList<(int Item, string Column)> Offers => offers;
+    /// <summary>
+    /// W9.9b (review): after a break an item whose row is still the old generation and that the adoption has not examined is not offered (ReadoptionGate): v1 may have moved or merged it since, and the plant would start a
+    /// session on a stale Develop. The gate is asked at each read, so the offer is back as soon as the adoption has examined the item (Adopted) or the gate is released; the sweep's full pass repeats it.
+    /// </summary>
+    public IReadOnlyList<(int Item, string Column)> Offers => readoption is null ? offers : offers.Where(o => !Awaiting(o.Item)).ToList();
+
+    bool Awaiting(int item) => readoption is not null && offerKeys.TryGetValue(item, out var key) && readoption.Refuses(key);
 
     /// <summary>W9.10j: the slot of the scheduler that an offered item holds, by item: the runtime it is on and the saga's arm. An item of a plan that does not use the scheduler has none (the plant places its session).</summary>
     public IReadOnlyDictionary<int, SlotOffer> Slots => slots;
@@ -69,7 +76,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     public List<JsonObject> OfferNodes(Func<int, bool> hasOwner, IReadOnlyCollection<int>? only = null)
     {
         var nodes = new List<JsonObject>();
-        foreach (var (item, column) in offers)
+        foreach (var (item, column) in Offers)
             if (!hasOwner(item) && (only is null || only.Contains(item)))
             {
                 var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = "handoff", ["v2"] = true };
@@ -87,7 +94,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct); limit.CancelAfter(TimeSpan.FromSeconds(10));
             var states = await store.OwnedStates(limit.Token);
-            var set = new HashSet<int>(); var wanted = new List<(int, string)>(); var granted = new Dictionary<int, SlotOffer>(); var homeStates = new List<WorkItemState>();
+            var set = new HashSet<int>(); var wanted = new List<(int, string)>(); var keys = new Dictionary<int, string>(); var granted = new Dictionary<int, SlotOffer>(); var homeStates = new List<WorkItemState>();
             foreach (var state in states)
             {
                 if (!ItemId.TryParse(state.Item, out var id) || id.Repository != home) continue;
@@ -95,11 +102,11 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
                 // (an item that asked the scheduler for a slot (W7.3) is offered only once it holds one: a hold, a full runtime or a runtime that is off keeps the session from being offered)
                 if (state.Status == WorkItemStatus.Open && !state.Parked && !state.SlotAsked && state.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && columnOf?.Invoke(state.Step) is { Length: > 0 } column)
                 {
-                    wanted.Add((id.Number, column));
+                    wanted.Add((id.Number, column)); keys[id.Number] = state.Item;
                     if (state.SlotId.Length > 0 && state.SlotRuntime.Length > 0) granted[id.Number] = new SlotOffer(state.SlotId, state.SlotRuntime, state.ArmId);
                 }
             }
-            owned = set; offers = wanted; slots = granted; this.states = homeStates; loaded = true;
+            owned = set; offers = wanted; offerKeys = keys; slots = granted; this.states = homeStates; loaded = true;
             return true;
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -212,14 +219,14 @@ static class DocsOnlySettingsReader
 static class WorkItemWiring
 {
     /// <summary>The saga's parts on the database of the host. The docs-only test is D4's, with the settings of the configuration; the docs plan's rules are those of <see cref="DocsPlanSettingsReader"/>.</summary>
-    public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null, Func<BoardRef?>? boardRef = null, Func<string, string?>? env = null, HttpClient? http = null, Func<int, JsonObject, bool>? route = null, IItemLock? locks = null)
+    public static WorkItemParts Make(GatewayComposition c, string connectionString, IDocsOnlyPort? docs = null, Func<BoardRef?>? boardRef = null, Func<string, string?>? env = null, HttpClient? http = null, Func<int, JsonObject, bool>? route = null, IItemLock? locks = null, Fworker.Workflows.Adoption.ReadoptionGate? readoption = null)
     {
         Func<FactoryDbContext> open = () => Open(connectionString);
         var root = c.Instance.Root;
         var settings = DocsPlanSettingsReader.From(root);
         var store = new SqlWorkItemStore(open);
-        var service = new WorkItemService(store, new WorkItemSaga(docs ?? new DomainDocsOnlyPort(DocsOnlySettingsReader.From(root)), settings.Policy));
-        var ownership = c.Instance.Home is { } home ? new V2Ownership(store, home, settings.ColumnOf) : null;
+        var service = new WorkItemService(store, new WorkItemSaga(docs ?? new DomainDocsOnlyPort(DocsOnlySettingsReader.From(root)), settings.Policy), readoption: readoption);
+        var ownership = c.Instance.Home is { } home ? new V2Ownership(store, home, settings.ColumnOf, readoption) : null;
         var train = MergeTrainSettingsReader.From(root, w => Console.Error.WriteLine("merge train: " + w));
         var merge = new MergeTrainParts(new MergeTrainService(new SqlMergeTrainStore(open), train), new MergeTrainHistory(open), train);
         var queue = new MergeQueueCount(store);

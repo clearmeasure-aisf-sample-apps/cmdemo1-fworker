@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
 
 namespace Fworker.Contracts.Seams;
@@ -42,4 +43,27 @@ public interface IMergeFactsReader
 
     /// <summary>The item's facts, or null when the issue does not exist. The demo video is read only for an item that carries the video label.</summary>
     Task<ItemMergeFacts?> ReadItem(ItemId item, CancellationToken ct = default);
+}
+
+/// <summary>W9.9b: an item as v1 left it on GitHub: whether the issue is open, its labels, body and creation time, the state comment (null: the issue has none) and whether its demo video was published (read only for an item that carries the video label).</summary>
+public sealed record V1ItemRecord(bool IssueOpen, IReadOnlyList<string> Labels, string? Body, DateTimeOffset? CreatedAt, JsonObject? State, bool DemoVideoPublished);
+
+/// <summary>W9.9b: a pull request as the adoption reads it: its state ("open", "closed" or "merged"), its head commit (lower case) and the merge commit when merged.</summary>
+public sealed record PullRequestFacts(int Number, string State, string Head, string? MergeCommit);
+
+/// <summary>
+/// W9.9b: the reads of the adoption beside <see cref="IMergeFactsReader"/>: the state comment itself (the merge derivation reads three fields of it), a pull request's state and head, the pull requests merged into a branch and
+/// the commits a branch has past a commit. Implemented by Fworker.Integrations.GitHub.HttpMergeFactsReader. A 404 is "not there" (null); any other failure throws.
+/// </summary>
+public interface IAdoptionGitHub
+{
+    Task<V1ItemRecord?> ReadV1Record(ItemId item, CancellationToken ct = default);
+
+    Task<PullRequestFacts?> ReadPullRequestFacts(RepoId repository, int number, CancellationToken ct = default);
+
+    /// <summary>The newest pull requests merged into <paramref name="baseBranch"/> (at most <paramref name="take"/>), newest merge first.</summary>
+    Task<IReadOnlyList<MergedPullRequest>> ListMergedPulls(RepoId repository, string baseBranch, int take, CancellationToken ct = default);
+
+    /// <summary>The commits of <paramref name="branch"/> past <paramref name="baseCommit"/> (lower case, up to 250), or null when GitHub cannot compare them.</summary>
+    Task<IReadOnlySet<string>?> CommitsPast(RepoId repository, string baseCommit, string branch, CancellationToken ct = default);
 }

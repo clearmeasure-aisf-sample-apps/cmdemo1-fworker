@@ -12,7 +12,7 @@ namespace Fworker.Integrations.GitHub;
 /// merge) and, for an item that carries <paramref name="videoLabel"/>, the release demo-N with its asset demo-N.mp4. A 404 is "not there" (null); any other failure throws, and the
 /// inbox retries the message. The HttpClient's BaseAddress is the API root; the answer's rate-limit headers go to <paramref name="observe"/>.
 /// </summary>
-public sealed class HttpMergeFactsReader(HttpClient http, IGitHubCredentialSource credentials, string instanceName, string videoLabel, Action<string, string?, string?, string?>? observe = null) : IMergeFactsReader, IItemIssueReader
+public sealed class HttpMergeFactsReader(HttpClient http, IGitHubCredentialSource credentials, string instanceName, string videoLabel, Action<string, string?, string?, string?>? observe = null) : IMergeFactsReader, IItemIssueReader, IAdoptionGitHub
 {
     const string ClosedBy = """
         query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ issue(number:$n){ closedByPullRequestsReferences(first:10, includeClosedPrs:true){ nodes{
@@ -67,6 +67,59 @@ public sealed class HttpMergeFactsReader(HttpClient http, IGitHubCredentialSourc
         }
         return new ItemMergeFacts(item, state is not null, labels, issue["body"]?.ToString(),
             verdict?["passed"]?.GetValue<bool>() == true, Int(verdict?["pr"]), Int(merge?["pr"]), merge?["by"]?.ToString(), video);
+    }
+
+    public async Task<V1ItemRecord?> ReadV1Record(ItemId item, CancellationToken ct = default)
+    {
+        var path = $"repos/{item.Repository}/issues/{item.Number}";
+        var issue = await Get(item.Repository.Owner, path, ct);
+        if (issue is null || issue["pull_request"] is not null) return null;   // a pull request is no item
+        var labels = (issue["labels"] as JsonArray ?? []).Select(l => l?["name"]?.ToString() ?? "").Where(n => n != "").ToList();
+        var marker = ItemStateComment.Marker(instanceName);
+        JsonObject? state = null;
+        for (var page = 1; page <= 10 && state is null; page++)
+        {
+            var comments = await GetArray(item.Repository.Owner, $"{path}/comments?per_page=100&page={page}", ct);
+            foreach (var c in comments)
+                if (c?["body"]?.ToString() is { } b && b.StartsWith(marker, StringComparison.Ordinal)) { state = ItemStateComment.Parse(b); break; }
+            if (comments.Count < 100) break;
+        }
+        var video = false;
+        if (labels.Any(l => string.Equals(l, videoLabel, StringComparison.OrdinalIgnoreCase)))
+        {
+            var rel = await Get(item.Repository.Owner, $"repos/{item.Repository}/releases/tags/demo-{item.Number}", ct);
+            video = (rel?["assets"] as JsonArray ?? []).Any(a => a?["name"]?.ToString() == $"demo-{item.Number}.mp4");
+        }
+        return new V1ItemRecord(string.Equals(issue["state"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase), labels, issue["body"]?.ToString(), Time(issue["created_at"]), state, video);
+    }
+
+    public async Task<PullRequestFacts?> ReadPullRequestFacts(RepoId repository, int number, CancellationToken ct = default)
+    {
+        var p = await Get(repository.Owner, $"repos/{repository}/pulls/{number}", ct);
+        if (p is null) return null;
+        var state = p["merged"]?.GetValue<bool>() == true ? "merged" : string.Equals(p["state"]?.ToString(), "open", StringComparison.OrdinalIgnoreCase) ? "open" : "closed";
+        return new PullRequestFacts(number, state, Lower(p["head"]?["sha"]?.ToString()) ?? "", Lower(p["merge_commit_sha"]?.ToString()));
+    }
+
+    public async Task<IReadOnlyList<MergedPullRequest>> ListMergedPulls(RepoId repository, string baseBranch, int take, CancellationToken ct = default)
+    {
+        var found = new List<MergedPullRequest>();
+        for (var page = 1; page <= 3 && found.Count < take * 2; page++)
+        {
+            var pulls = await GetArray(repository.Owner, $"repos/{repository}/pulls?state=closed&base={Uri.EscapeDataString(baseBranch)}&sort=updated&direction=desc&per_page=50&page={page}", ct);
+            foreach (var p in pulls)
+                if (Time(p?["merged_at"]) is { } at && p?["number"]?.GetValue<int>() is { } n)
+                    found.Add(new MergedPullRequest(repository, n, true, p["base"]?["ref"]?.ToString(), p["head"]?["ref"]?.ToString(), p["title"]?.ToString(), p["body"]?.ToString(), Lower(p["merge_commit_sha"]?.ToString()), at));
+            if (pulls.Count < 50) break;
+        }
+        return found.OrderByDescending(f => f.MergedAt).Take(take).ToList();
+    }
+
+    public async Task<IReadOnlySet<string>?> CommitsPast(RepoId repository, string baseCommit, string branch, CancellationToken ct = default)
+    {
+        var compare = await Get(repository.Owner, $"repos/{repository}/compare/{baseCommit}...{Uri.EscapeDataString(branch)}", ct);
+        if (compare is null) return null;
+        return (compare["commits"] as JsonArray ?? []).Select(c => Lower(c?["sha"]?.ToString())).Where(s => s is not null).Select(s => s!).ToHashSet(StringComparer.Ordinal);
     }
 
     public async Task<ItemIssue?> ReadIssue(ItemId item, CancellationToken ct = default)

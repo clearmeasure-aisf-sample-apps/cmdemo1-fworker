@@ -242,6 +242,33 @@ public sealed class WorkItemRearmTests
     }
 
     [Fact]
+    public async Task AfterABreak_AnItemTheAdoptionHasNotExamined_GetsNoTimerAndNoCommand_UntilItHas()
+    {
+        // W9.9b (review): every row is silent after a break; without the gate the re-arm would send the old generation's commands (a session start, a merge call) for all of them
+        var fx = new SagaFixture(); fx.Store.Clock = () => fx.Now;
+        var sent = new List<object>();
+        var gate = new Fworker.Workflows.Adoption.ReadoptionGate();
+        var rearm = new WorkItemRearm(fx.Store, Policy, m => { sent.Add(m); return Task.FromResult(true); }, () => fx.Now, gate.Refuses);
+        await fx.Start(plan: "docs");
+        var rec = (await fx.Store.Load(fx.Key, default))!;
+        rec.State.MergeRequest = new MergeRequestState { Attempt = 1, PullRequest = 11, Head = "aaa1111" };
+        rec.State.MergeRequestEmitted = true;
+        Assert.True(await fx.Store.Save(fx.Key, rec.State, rec.Revision, default));
+        fx.Now = fx.State.LeaseDue!.Value.AddHours(1);   // the lease timer is lost and the item has been silent for long
+
+        gate.Hold("v1 ran", newTerm: true);
+        var held = await rearm.Run(default);
+        Assert.Empty(sent);
+        Assert.Equal((0, 0, 0, 1), (held.Timers, held.Commands, held.Failed, held.Held));
+
+        gate.Adopted(fx.Key);   // the adoption examined it
+        var released = await rearm.Run(default);
+        Assert.Contains(sent, m => m is PhaseLeaseExpired);
+        Assert.Contains(sent, m => m is MergeRequested);
+        Assert.Equal(0, released.Held);
+    }
+
+    [Fact]
     public async Task AHostThatIsNotUp_IsCountedAsFailed_AndTheNextRunTriesAgain()
     {
         var fx = new SagaFixture(); fx.Store.Clock = () => fx.Now;

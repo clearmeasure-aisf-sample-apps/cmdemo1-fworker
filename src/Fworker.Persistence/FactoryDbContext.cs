@@ -35,6 +35,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<PlantHolderRow> PlantHolders => Set<PlantHolderRow>();
     public DbSet<PlantDrainRow> PlantDrains => Set<PlantDrainRow>();
     public DbSet<PlantStateRow> PlantState => Set<PlantStateRow>();
+    public DbSet<EngineMarkerRow> EngineMarkers => Set<EngineMarkerRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -282,6 +283,15 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.Property(x => x.Name).HasMaxLength(40);
             e.Property(x => x.Holder).HasMaxLength(100).IsRequired();
             e.Property(x => x.Document).IsRequired();
+        });
+
+        b.Entity<EngineMarkerRow>(e =>
+        {
+            e.ToTable("EngineMarkers");
+            e.HasKey(x => x.Name);
+            e.Property(x => x.Name).HasMaxLength(40);
+            e.Property(x => x.Holder).HasMaxLength(100).IsRequired();
+            e.Property(x => x.Detail).HasMaxLength(200).IsRequired();
         });
 
         b.Entity<CatalogCopy>(e =>

@@ -82,7 +82,7 @@ public static class AdoptionTrain
     /// <summary>
     /// The train with the Sign-offs its deployments are waiting at now. A Sign-off is the train's to answer when the deployment it waits at was the gateway's own, which v1 recorded as <c>merge.promoted.&lt;environment&gt;.task</c> on
     /// the items of the release; the time it has waited is the recorded <c>signoff_wait_since</c> (so that the two-hour limit of signoffWaitHours survives the switch) else the time Octopus shows. The release counts as
-    /// requested by the train, with the items it carries. A Sign-off the train knows already is left as it is (it may have been answered); a deployment that is no longer waiting is not added. A copy.
+    /// requested by the train, with the items it carries. A Sign-off the train knows already is left as it is when it was answered, and otherwise only learns whose it is (W9.9b: the watcher's poll may have been first); a deployment that is no longer waiting is not added. A copy.
     /// </summary>
     public static TrainState SignOffs(TrainState train, IReadOnlyList<PendingSignOff> pending, IReadOnlyList<ItemPromotion> promotions)
     {
@@ -90,18 +90,34 @@ public static class AdoptionTrain
         var environment = train.Environment.ToLowerInvariant();
         foreach (var wait in pending)
         {
-            if (next.SignOffs.Any(s => s.InterruptionId == wait.InterruptionId)) continue;
             var own = promotions.Where(p => p.Environment == environment && p.TaskId == wait.TaskId).ToList();
             if (own.Count == 0) continue;   // (a deployment somebody else made: not the train's to answer)
+            // W9.9b: a Sign-off the train knows already (the watcher's poll was first) is not ours in its eyes until the release counts as requested ("the Sign-off belongs to a deployment the gateway did not create");
+            // one that was answered is left as it is, one that waits learns whose it is and how long it has waited
+            if (next.SignOffs.FirstOrDefault(s => s.InterruptionId == wait.InterruptionId) is { } known)
+            {
+                if (known.Answered) continue;
+                var knownSince = own.Where(p => p.SignOffWaitSince is not null).Select(p => p.SignOffWaitSince!.Value).DefaultIfEmpty(known.Since).Min();
+                if (knownSince < known.Since) known.Since = knownSince;
+                if (known.Version.Length == 0 && wait.Version.Length > 0) known.Version = wait.Version;
+                Request(next, known.Version.Length > 0 ? known.Version : own.Select(p => p.Release).FirstOrDefault(r => r.Length > 0) ?? "", own);
+                continue;
+            }
             var version = wait.Version.Length > 0 ? wait.Version : own.Select(p => p.Release).FirstOrDefault(r => r.Length > 0) ?? "";
             var since = own.Where(p => p.SignOffWaitSince is not null).Select(p => p.SignOffWaitSince!.Value).DefaultIfEmpty(wait.Since).Min();
             next.SignOffs.Add(new TrainSignOff { InterruptionId = wait.InterruptionId, DeploymentId = wait.DeploymentId, TaskId = wait.TaskId, Version = version, Since = since });
-            if (version.Length == 0) continue;
-            var at = own.Select(p => p.At).Min();
-            next.Requested.TryAdd(version, at); next.FirstRequested.TryAdd(version, at); next.RequestNumbers.TryAdd(version, 1);
-            var items = next.RequestItems.TryGetValue(version, out var known) ? known : [];
-            next.RequestItems[version] = [.. items.Union(own.Select(p => p.Item), StringComparer.OrdinalIgnoreCase).OrderBy(i => i, StringComparer.Ordinal)];
+            Request(next, version, own);
         }
         return next;
+    }
+
+    // the release counts as requested by the train, with the items it carries
+    static void Request(TrainState next, string version, IReadOnlyList<ItemPromotion> own)
+    {
+        if (version.Length == 0) return;
+        var at = own.Select(p => p.At).Min();
+        next.Requested.TryAdd(version, at); next.FirstRequested.TryAdd(version, at); next.RequestNumbers.TryAdd(version, 1);
+        var items = next.RequestItems.TryGetValue(version, out var carried) ? carried : [];
+        next.RequestItems[version] = [.. items.Union(own.Select(p => p.Item), StringComparer.OrdinalIgnoreCase).OrderBy(i => i, StringComparer.Ordinal)];
     }
 }
