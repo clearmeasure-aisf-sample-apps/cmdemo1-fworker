@@ -102,6 +102,11 @@ Made by the owner, 2026-10-10 to 2026-10-13.
   release waits in the Release Queue and each item is told why, once per reason. `delivery.autoPromote` (off in the source defaults, on for
   the tdd gateway in `config/deploy.overrides.json`); design `docs/design/auto-promote.md`. Needs the Octopus permissions listed there granted
   to the gateway's Octopus account (owner action). When it is live, cmdemo1-system's `ui-auto-promote.yml` stops promoting ui.
+- **When a v2 item is Done relative to uat and prod** (W9.10p, the cutover to `delivery.finalEnvironment` tdd): v2 delivers at tdd and the app's uat and prod promotions stay with v1's `AutoPromoter`, which
+  takes its items from the Release Queue (`merge.awaiting` release-queue, written by the state projection only while the saga is Settling). So the 24 hour settle window (`WorkItemPolicy.Settle`) does not complete
+  an item whose release is not in prod: at the end of the window the saga decides `settle-held` and keeps the item Settling, in the Release Queue, and the item is Done when the prod train publishes
+  `DeliveredTo(prod)` (v1's AutoPromoter deployed the release, or a later one that carries the commit, to prod), or at the safety cap (`WorkItemPolicy.SettleCap`, 14 days after the delivery to tdd; the decision
+  `completed` names the cap). `/api/v1/status` shows it as `v2Items.settleHeldForProd` (count) and `settleHeld`/`settleUntil` per item. A final environment of prod (the default) is unchanged: the window completes the item.
 - **One work item per worker session** (2026-10-14): when its item ends the session ends (the skill says so, and the worker connect prompt says an item is owned until its pull request is merged; changing that text changes a hash pinned by the operator suite, a protected path, so it needs the owner's review), and a launcher loop starts a new session from the
   connect prompt. The gateway offers a session that held an item no other (`plant.oneItemPerSession`); `docs/launcher.md`.
 - **Messaging and the supervisor are on for every registered worker** (`allowedWorkers` and `allowedAskers` are `*`), set in

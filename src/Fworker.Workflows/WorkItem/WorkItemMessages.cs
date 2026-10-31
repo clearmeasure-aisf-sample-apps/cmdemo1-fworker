@@ -150,6 +150,8 @@ public static class WorkItemActions
     public const string MovedBack = "moved-back";
     public const string Merged = "merged";
     public const string Settling = "settling";
+    /// <summary>The settle window ended with the release not in prod (final environment before prod): the item stays Settling, in the Release Queue, until prod or the cap.</summary>
+    public const string SettleHeld = "settle-held";
     public const string Undelivered = "undelivered";
     public const string Reopened = "reopened";
     public const string Completed = "completed";

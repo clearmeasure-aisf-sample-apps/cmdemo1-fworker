@@ -78,7 +78,7 @@ sealed partial class V2ItemViews
     static JsonObject Counts(IEnumerable<WorkItemView> items, DateTimeOffset at)
     {
         var l = items.ToList();
-        return new JsonObject { ["open"] = l.Count(i => i.Status == WorkItemStatus.Open), ["settling"] = l.Count(i => i.Status == WorkItemStatus.Settling), ["completed"] = l.Count(i => i.Status == WorkItemStatus.Completed),
+        return new JsonObject { ["open"] = l.Count(i => i.Status == WorkItemStatus.Open), ["settling"] = l.Count(i => i.Status == WorkItemStatus.Settling), ["settleHeldForProd"] = l.Count(i => i.Status == WorkItemStatus.Settling && i.SettleHeld), ["completed"] = l.Count(i => i.Status == WorkItemStatus.Completed),
             ["parked"] = l.Count(i => i.IsOpen && i.Parked), ["leaseOverdue"] = l.Count(LeaseOverdueAt(at)) };
     }
 
@@ -121,7 +121,7 @@ sealed partial class V2ItemViews
                     var delivered = new JsonObject();
                     foreach (var (env, release) in i.Delivered.OrderBy(kv => kv.Key, StringComparer.Ordinal)) delivered[env] = Clip(release);
                     items.Add(new JsonObject { ["item"] = i.Item, ["number"] = i.Number, ["generation"] = i.Generation, ["status"] = i.Status, ["plan"] = i.Plan, ["step"] = i.Step, ["parked"] = i.Parked,
-                        ["parkReason"] = i.Parked ? Clip(i.ParkReason) : "", ["leaseOverdue"] = LeaseOverdueAt(at)(i), ["leaseDue"] = i.LeaseDue?.ToString("o"), ["pullRequest"] = i.PullRequest, ["delivered"] = delivered,
+                        ["parkReason"] = i.Parked ? Clip(i.ParkReason) : "", ["leaseOverdue"] = LeaseOverdueAt(at)(i), ["leaseDue"] = i.LeaseDue?.ToString("o"), ["settleUntil"] = i.SettleUntil?.ToString("o"), ["settleHeld"] = i.SettleHeld, ["pullRequest"] = i.PullRequest, ["delivered"] = delivered,
                         ["startedAt"] = i.StartedAt.ToString("o"), ["completedAt"] = i.CompletedAt?.ToString("o"), ["updatedAt"] = i.UpdatedAt.ToString("o"), ["history"] = history });
                 }
                 var r = Counts(g, at); r["repository"] = g.Key; r["items"] = items;

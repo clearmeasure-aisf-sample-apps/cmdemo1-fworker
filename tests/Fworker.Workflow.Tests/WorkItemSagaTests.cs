@@ -292,6 +292,69 @@ public class WorkItemSagaTests
         Assert.Equal(WorkItemStatus.Completed, fx.State.Status);
     }
 
+    static WorkItemPolicy AtTdd => WorkItemPolicy.Default with { FinalEnvironment = "tdd" };
+
+    [Fact]
+    public async Task WhereV2DeliversAtTdd_ADeliveredItemWhoseReleaseIsNotInProdStaysSettlingPastTheWindow_AndReachingProdCompletesIt()
+    {
+        var fx = new SagaFixture(AtTdd);
+        await fx.Start(); await fx.Merged();
+        var delivered = await fx.Delivered("tdd");
+        Assert.Equal(WorkItemStatus.Settling, fx.State.Status);
+        var window = Assert.IsType<SettleWindowElapsed>(Assert.Single(delivered.Timers).Message);
+        // uat is not prod: nothing changes
+        await fx.Delivered("uat");
+        fx.Now = T0.AddHours(25);
+        var held = await fx.Send(window);
+        Assert.Equal([WorkItemActions.SettleHeld], held.Decisions.Select(d => d.Action));
+        Assert.Equal((WorkItemStatus.Settling, true), (fx.State.Status, fx.State.SettleHeld));
+        Assert.Equal(T0.AddDays(14), fx.State.SettleUntil);   // (the cap counts from the delivery)
+        var cap = Assert.IsType<SettleWindowElapsed>(Assert.Single(held.Timers).Message);
+        Assert.Equal(T0.AddDays(14), held.Timers[0].Due);
+        // prod: the release is delivered there by v1's AutoPromoter, the prod train says so, and the item is done
+        var prod = await fx.Delivered("prod", "1.0.5");
+        Assert.Equal([WorkItemActions.Completed], prod.Decisions.Select(d => d.Action));
+        Assert.Equal((WorkItemStatus.Completed, false), (fx.State.Status, fx.State.SettleHeld));
+        // the cap's timer is late then
+        Assert.Equal(WorkItemOutcome.NotFound, (await fx.Send(cap)).Decision.Outcome);
+    }
+
+    [Fact]
+    public async Task WhereV2DeliversAtTdd_AProdBeforeTheWindowEndsLetsTheWindowComplete()
+    {
+        var fx = new SagaFixture(AtTdd);
+        await fx.Start(); await fx.Merged();
+        var window = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Delivered("tdd")).Timers).Message);
+        var prod = await fx.Delivered("prod");
+        Assert.Empty(prod.Decisions);   // (inside the window: recorded, the window decides)
+        fx.Now = T0.AddHours(24);
+        Assert.Equal([WorkItemActions.Completed], (await fx.Send(window)).Decisions.Select(d => d.Action));
+    }
+
+    [Fact]
+    public async Task WhereV2DeliversAtTdd_TheCapEndsTheHoldWithoutProd()
+    {
+        var fx = new SagaFixture(AtTdd);
+        await fx.Start(); await fx.Merged();
+        var window = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Delivered("tdd")).Timers).Message);
+        var cap = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Send(window)).Timers).Message);
+        fx.Now = T0.AddDays(14);
+        var end = await fx.Send(cap);
+        Assert.Equal([WorkItemActions.Completed], end.Decisions.Select(d => d.Action));
+        Assert.Contains("cap", end.Decisions[0].Reasons[0]);
+    }
+
+    [Fact]
+    public async Task WhereV2DeliversAtTdd_AnUndeliveredFromTddWhileHeldReturnsTheItemAndClearsTheHold()
+    {
+        var fx = new SagaFixture(AtTdd);
+        await fx.Start(); await fx.Merged();
+        var window = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Delivered("tdd")).Timers).Message);
+        await fx.Send(window);
+        await fx.Lost("tdd");
+        Assert.Equal((WorkItemStatus.Open, StepKind.Deliver, false), (fx.State.Status, fx.State.Step, fx.State.SettleHeld));
+    }
+
     [Fact]
     public async Task AfterTheWindow_ALateMessageIsNotFound_AndAnUndeliveredStartsTheNextGenerationOnTheRedeliverPlan()
     {
