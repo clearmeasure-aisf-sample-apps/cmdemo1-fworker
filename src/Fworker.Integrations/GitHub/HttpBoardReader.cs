@@ -14,7 +14,7 @@ public sealed class BoardReadException(string message) : Exception(message);
 /// state and repository. No label filter: the scope of an environment is the consumer's. The answer's rate-limit headers go to <paramref name="observe"/> (resource, remaining, reset, limit), which the gateway hands to its budget.
 /// The HttpClient's BaseAddress is the API root (GITHUB_API_URL or api.github.com); at most <see cref="MaxPages"/> pages of 100 are read.
 /// </summary>
-public sealed class HttpBoardReader(HttpClient http, IGitHubCredentialSource credentials, Action<string, string?, string?, string?>? observe = null) : IMeteredBoardReader
+public sealed class HttpBoardReader(HttpClient http, IGitHubCredentialSource credentials, Action<string, string?, string?, string?>? observe = null, bool withLabels = false) : IMeteredBoardReader
 {
     public const int MaxPages = 20;
     long requests;
@@ -25,6 +25,12 @@ public sealed class HttpBoardReader(HttpClient http, IGitHubCredentialSource cre
           nodes{ id fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
             content{ ... on Issue{ number state title repository{ nameWithOwner } } } } } } } }
         """;
+    // W9.10k: with the labels of each issue, for the reader of the reconciler where the engine acts (the plant reads the pins, priorities and runtime labels of the saga's items from them); one more nested connection per card
+    const string QueryWithLabels = """
+        query($o:String!,$n:Int!,$after:String){ organization(login:$o){ projectV2(number:$n){ items(first:100, after:$after){ pageInfo{ hasNextPage endCursor }
+          nodes{ id fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } }
+            content{ ... on Issue{ number state title repository{ nameWithOwner } labels(first:30){ nodes{ name } } } } } } } } }
+        """;
 
     public async Task<IReadOnlyList<BoardCard>> Read(BoardRef board, CancellationToken ct = default)
     {
@@ -32,7 +38,7 @@ public sealed class HttpBoardReader(HttpClient http, IGitHubCredentialSource cre
         var cards = new List<BoardCard>(); string? after = null;
         for (var page = 0; page < MaxPages; page++)
         {
-            var body = new JsonObject { ["query"] = Query, ["variables"] = new JsonObject { ["o"] = board.Owner, ["n"] = board.Number, ["after"] = after } }.ToJsonString();
+            var body = new JsonObject { ["query"] = withLabels ? QueryWithLabels : Query, ["variables"] = new JsonObject { ["o"] = board.Owner, ["n"] = board.Number, ["after"] = after } }.ToJsonString();
             using var req = new HttpRequestMessage(HttpMethod.Post, "graphql") { Content = new StringContent(body, Encoding.UTF8, "application/json") };
             req.Headers.Authorization = new("Bearer", cred.Token);
             req.Headers.Accept.ParseAdd("application/vnd.github+json");
@@ -50,7 +56,8 @@ public sealed class HttpBoardReader(HttpClient http, IGitHubCredentialSource cre
                 var content = n?["content"];
                 if (content?["number"] is not JsonValue nv || !nv.TryGetValue<int>(out var number)) continue;   // a draft card, a pull request without number, a redacted card
                 if (!RepoId.TryParse(content["repository"]?["nameWithOwner"]?.ToString(), out var repo)) continue;
-                cards.Add(new BoardCard(repo, number, n?["fieldValueByName"]?["name"]?.ToString(), content["state"]?.ToString() == "OPEN", content["title"]?.ToString() ?? ""));
+                var labels = withLabels ? (content["labels"]?["nodes"] as JsonArray ?? []).Select(l => l?["name"]?.ToString() ?? "").Where(l => l.Length > 0).ToList() : null;
+                cards.Add(new BoardCard(repo, number, n?["fieldValueByName"]?["name"]?.ToString(), content["state"]?.ToString() == "OPEN", content["title"]?.ToString() ?? "", labels));
             }
             if (items["pageInfo"]?["hasNextPage"]?.GetValue<bool>() != true) return cards;
             after = items["pageInfo"]?["endCursor"]?.ToString();

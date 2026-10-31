@@ -163,6 +163,30 @@ static class SweepFlow
         return StepAnswer.Applied;
     }
 
+    // ---- the plant manager's actions (W9.10k) --------------------------------------------------------------------------------------------------------------------
+
+    /// <summary>The plant manager ended the lease of the item's owner (release-owner): the saga records it and asks the gateway to give the claim up, as it does for an owner that waited out a hold. No step and no park changes.</summary>
+    public static StepAnswer ReleaseAsked(StepContext c, OwnerReleaseAsked a)
+    {
+        var s = c.State;
+        if (s.Status != WorkItemStatus.Open) return StepAnswer.Refused("the item is delivered");
+        var reason = a.Reason.Length == 0 ? "the plant manager ended the owner's lease" : a.Reason;
+        c.Decide(WorkItemActions.OwnerReleaseAsked, reason);
+        c.Send(new ReleaseOwner($"release|{s.Item}|{s.Generation}|{a.Key}", reason));
+        return StepAnswer.Applied;
+    }
+
+    /// <summary>The plant manager put the item back to be offered at once (requeue). Only an item a session can take: open, not parked, on a step a session works. The offer itself comes from the state.</summary>
+    public static StepAnswer Requeue(StepContext c, RequeueWorkItem q)
+    {
+        var s = c.State;
+        if (s.Status != WorkItemStatus.Open) return StepAnswer.Refused("the item is delivered");
+        if (s.Parked) return StepAnswer.Refused("the item is parked: unpark it, which offers it again");
+        if (s.Step is not (StepKind.Design or StepKind.Develop or StepKind.Verify)) return StepAnswer.Refused($"no session works the {s.Step} step");
+        c.Decide(WorkItemActions.Requeued, q.Reason.Length == 0 ? "the plant manager put the item back to be offered" : q.Reason);
+        return StepAnswer.Applied;
+    }
+
     // ---- the PASS ----------------------------------------------------------------------------------------------------------------------------------------------
 
     /// <summary>The pull request of a PASS was closed without merging: the verdict is void, the item goes back to Development (a demotion; past the limit it is parked demotion-limit).</summary>

@@ -176,6 +176,9 @@ public static class WorkItemActions
     public const string HoldCleared = "hold-cleared";
     public const string OwnerReleased = "owner-released";
     public const string SettleRearmed = "settle-rearmed";
+    // the plant manager's actions (W9.10k)
+    public const string OwnerReleaseAsked = "owner-release-asked";
+    public const string Requeued = "requeued";
 }
 
 /// <summary>What the saga answered to one input.</summary>
