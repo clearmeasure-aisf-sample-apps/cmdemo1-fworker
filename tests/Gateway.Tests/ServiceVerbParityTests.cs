@@ -166,6 +166,11 @@ public sealed class ServiceVerbParityTests : IClassFixture<ServiceVerbParityTest
         if (faults != null) await faults();
         var v2 = await V2(verb, stdin, extraEnv);
         Assert.Equal(v1.Exit, v2.Exit);
+        // retryAfterSeconds counts down to resetAt from the clock of each process (the script and the gateway are two processes, so no clock can be shared):
+        // a clock second may tick between the two computations, so it may differ by one; everything else is compared exactly
+        var (r1, r2) = (v1.Json?["retryAfterSeconds"], v2.Json?["retryAfterSeconds"]);
+        Assert.Equal(r1 is null, r2 is null);
+        if (r1 is not null) { Assert.True(Math.Abs((double)r1 - (double)r2!) <= 1, $"retryAfterSeconds: the rule script {r1}, v2 {r2}"); mask = [.. mask, "retryAfterSeconds"]; }
         var (c1, c2) = (Canon(v1.Json, mask), Canon(v2.Json, mask));
         Assert.True(c1 == c2, Difference(c1, c2));
         Assert.Equal(v1.Calls, v2.Calls);
