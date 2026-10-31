@@ -207,27 +207,36 @@ sealed class QcHub : IEndpointModule
     void ClearRuntime(QcMem m) { lock (m) { m.Url = ""; m.Probe = ""; m.LeaseUntil = null; m.LastTouch = null; m.AppAlive = null; m.LocalHealth = ""; m.StopPending = false; m.StopDeadline = null; } }
 
     // ---- placing a job and persisting it -----------------------------------------------------------------------------------------------------
-    async Task<(bool Placed, string Why)> PlaceAndPersist(QcMem m, JsonObject rec, string mode, string only = "")
+    // where says who places: "request" (Start and Reset: the placement completes within the call, so its writes carry the call's cause) or "sweep" (Reconcile: a record
+    // the sweep read in requested or reset, placed in the background). The log lines say which of the two placed the job, and why a placement was deferred (#592).
+    async Task<(bool Placed, string Why)> PlaceAndPersist(QcMem m, JsonObject rec, string mode, string only = "", string where = "request")
     {
-        var (a, why) = plant.PlaceQc(Int(rec["item"]), Int(rec["pr"]), Str(rec["sha"]), Str(rec["env_id"]), Int(rec["attempt"]), mode, only: only);
-        if (a.Worker == "") return (false, why);
-        await Persist(a);
+        var item = Int(rec["item"]); var pr = Int(rec["pr"]);
+        var before = plant.QcAssignment(pr);
+        var (a, why) = plant.PlaceQc(item, pr, Str(rec["sha"]), Str(rec["env_id"]), Int(rec["attempt"]), mode, only: only);
+        if (a.Worker == "")
+        {
+            Console.Error.WriteLine($"qc place #{item} PR {pr} ({mode}, {where}): deferred, no worker yet: {why}");
+            return (false, why);
+        }
+        // the plant returns the assignment it already holds for the same head and attempt: the other path (the request or the sweep) placed it first
+        var how = before != null && before.Id == a.Id ? $"the plant already held {a.Id} (placed by the other path or an earlier call)" : $"placed {a.Id}";
+        var persisted = await Persist(a);
+        Console.Error.WriteLine($"qc place #{item} PR {pr} ({mode}, {where}): {how} on {a.Worker}; the record {(persisted ? "took it" : "did not take it")}");
         return (true, "");
     }
 
-    // Writes the worker and assignment into the record (a state transition: requested/reset to assigned).
-    async Task Persist(Assignment a)
+    // Writes the worker and assignment into the record (a state transition: requested/reset to assigned). False when the record would not take it.
+    async Task<bool> Persist(Assignment a)
     {
         var m = Mem(a.Pr);
         var (code, o) = await Ps("qc-transition", new JsonObject { ["item"] = a.Item, ["pr"] = a.Pr, ["to"] = "assigned", ["worker"] = a.Worker, ["assignment"] = a.Id, ["mode"] = a.Mode, ["sha"] = a.Sha });
-        if (code == 0) { Mirror(m, RecOf(o)); lock (m) { m.Item = a.Item; } }
-        else
-        {
-            // The record would not take this assignment (it moved on: torn down, failed, reset, or GitHub did not answer). A job that stays in the plant for a
-            // record that does not hold it keeps a worker's QC capacity for nothing; a record still waiting is placed again by the next sweep.
-            plant.DropQcIf(a.Pr, a.Id);
-            Console.Error.WriteLine($"qc persist #{a.Item} PR {a.Pr}: {Str(o["code"])} {Str(o["reason"])}");
-        }
+        if (code == 0) { Mirror(m, RecOf(o)); lock (m) { m.Item = a.Item; } return true; }
+        // The record would not take this assignment (it moved on: torn down, failed, reset, or GitHub did not answer). A job that stays in the plant for a
+        // record that does not hold it keeps a worker's QC capacity for nothing; a record still waiting is placed again by the next sweep.
+        plant.DropQcIf(a.Pr, a.Id);
+        Console.Error.WriteLine($"qc persist #{a.Item} PR {a.Pr}: {Str(o["code"])} {Str(o["reason"])}");
+        return false;
     }
 
     // ---- Start, Reset, Teardown (page and operator) ------------------------------------------------------------------------------------------------
@@ -589,7 +598,7 @@ sealed class QcHub : IEndpointModule
             if (plant.QcAssignment(pr) != null) continue;
             if (SnapshotIsStale(m, rec)) continue;
             var item = Int(rec["item"]); var sha = Str(rec["sha"]); var env = Str(rec["env_id"]); var attempt = Int(rec["attempt"]);
-            if (state is "requested" or "reset") { await PlaceAndPersist(m, rec, state == "reset" ? "reset" : "first"); continue; }
+            if (state is "requested" or "reset") { await PlaceAndPersist(m, rec, state == "reset" ? "reset" : "first", where: "sweep"); continue; }
             var worker = Str(rec["worker"]); var asg = Str(rec["assignment"]);
             if (worker == "" || asg == "") continue;
             var (placed, why) = plant.PlaceQc(item, pr, sha, env, attempt, Str(rec["mode"]) is { Length: > 0 } md ? md : "first", asg, worker, rec["accepted_at"] != null);

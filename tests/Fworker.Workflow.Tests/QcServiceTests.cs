@@ -331,6 +331,21 @@ public sealed class QcServiceTests
         var (c2, o2) = await h.Call("qc-transition", new { item = 5, pr = 9, to = "assigned", worker = "qw2", assignment = "a-2" });
         Assert.Equal(0, c2);
         Assert.Equal(("a-1", "a-2", "assigned", 3), (string.Join(",", ((JsonArray)Rec(o2)["old_assignments"]!).Select(x => x!.ToString())), QcJson.Str(Rec(o2), "assignment"), QcJson.Str(Rec(o2), "state"), QcJson.Int(Rec(o2), "rev")));
+        // the second placement edited nothing, and the log says which skip it took, for each of the two comments (#592)
+        Assert.Equal(2, h.Log.Count(l => l.Contains("already says it runs on a worker")));
+        Assert.DoesNotContain(h.Log, l => l.Contains("offer not found"));
+    }
+
+    [Fact]
+    public async Task PlacingAJobWithNoOfferCommentLogsThatTheOfferWasNotFound()
+    {
+        var h = Validated();
+        await h.Start();
+        var (code, _) = await h.Call("qc-transition", new { item = 5, pr = 9, to = "assigned", worker = "qw1", assignment = "a-1", mode = "first", sha = FakeQcWorld.Sha1 });
+        Assert.Equal(0, code);
+        Assert.Empty(h.World.Offers(9));
+        Assert.Equal(2, h.Log.Count(l => l.Contains("offer not found")));
+        Assert.DoesNotContain(h.Log, l => l.Contains("already says"));
     }
 
     [Fact]
