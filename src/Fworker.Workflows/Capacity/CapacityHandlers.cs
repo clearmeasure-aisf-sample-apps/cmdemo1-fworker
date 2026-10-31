@@ -18,6 +18,7 @@ public static class CapacityHandlers
     public static Task<OutgoingMessages> Handle(StartRefused m, CapacityService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(HostReported m, CapacityService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(FootprintChanged m, CapacityService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(ReapStale m, CapacityService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(CapacityWake m, CapacityService svc, CancellationToken ct) => Run(m, svc, ct);
 
     public static async Task<OutgoingMessages> Run(CapacityInput input, CapacityService svc, CancellationToken ct)

@@ -14,8 +14,11 @@ public abstract record IntegrationCommand(string IdempotencyKey)
     public abstract CommandTarget Target { get; }
 }
 
-/// <summary>Starts a worker on a runtime (RuntimeManager.Provision): the answer is a <see cref="CommandResult"/>; v2 turns it into SessionStarted or StartFailed.</summary>
-public sealed record StartRuntimeSession(string IdempotencyKey, string Runtime, string WorkerName, int Item, string Phase, string ModelProfile, string Nonce, string Role = "") : IntegrationCommand(IdempotencyKey)
+/// <summary>
+/// Starts a worker on a runtime (RuntimeManager.Provision): the answer is a <see cref="CommandResult"/>; v2 turns it into SessionStarted or StartFailed. W9.10j: a session the item's saga asked for after a grant of the
+/// scheduler carries the saga's <paramref name="ArmId"/> and the <paramref name="SlotId"/> of the grant (empty for a session the plant offered on its own).
+/// </summary>
+public sealed record StartRuntimeSession(string IdempotencyKey, string Runtime, string WorkerName, int Item, string Phase, string ModelProfile, string Nonce, string Role = "", string ArmId = "", string SlotId = "") : IntegrationCommand(IdempotencyKey)
 {
     public override string Name => "StartRuntimeSession";
     public override CommandTarget Target => CommandTarget.Runtime;

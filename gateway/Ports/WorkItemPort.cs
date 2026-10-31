@@ -29,6 +29,7 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
 {
     volatile HashSet<int> owned = [];
     volatile IReadOnlyList<(int Item, string Column)> offers = [];
+    volatile IReadOnlyDictionary<int, SlotOffer> slots = new Dictionary<int, SlotOffer>();
     volatile bool loaded;
     public int Count => owned.Count;
 
@@ -48,6 +49,9 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     /// </summary>
     public IReadOnlyList<(int Item, string Column)> Offers => offers;
 
+    /// <summary>W9.10j: the slot of the scheduler that an offered item holds, by item: the runtime it is on and the saga's arm. An item of a plan that does not use the scheduler has none (the plant places its session).</summary>
+    public IReadOnlyDictionary<int, SlotOffer> Slots => slots;
+
     /// <summary>
     /// The offers as the sweep prints them, for the items <paramref name="hasOwner"/> says no session holds: an item with an owner is not offered again (the plant would take the offer for a session that is gone and drop the
     /// owner), it goes on with its owner from column to column.
@@ -57,7 +61,12 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         var nodes = new List<JsonObject>();
         foreach (var (item, column) in offers)
             if (!hasOwner(item) && (only is null || only.Contains(item)))
-                nodes.Add(new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = "handoff", ["v2"] = true });
+            {
+                var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = "handoff", ["v2"] = true };
+                // W9.10j: the slot the scheduler granted: the plant starts the session on its runtime, under the saga's arm, and the manager keeps the execution apart from its own counts
+                if (slots.TryGetValue(item, out var slot)) { node["slot"] = slot.SlotId; node["runtime"] = slot.Runtime; node["arm"] = slot.ArmId; }
+                nodes.Add(node);
+            }
         return nodes;
     }
 
@@ -68,16 +77,19 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
         {
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct); limit.CancelAfter(TimeSpan.FromSeconds(10));
             var states = await store.OwnedStates(limit.Token);
-            var set = new HashSet<int>(); var wanted = new List<(int, string)>();
+            var set = new HashSet<int>(); var wanted = new List<(int, string)>(); var granted = new Dictionary<int, SlotOffer>();
             foreach (var state in states)
             {
                 if (!ItemId.TryParse(state.Item, out var id) || id.Repository != home) continue;
                 set.Add(id.Number);
                 // (an item that asked the scheduler for a slot (W7.3) is offered only once it holds one: a hold, a full runtime or a runtime that is off keeps the session from being offered)
                 if (state.Status == WorkItemStatus.Open && !state.Parked && !state.SlotAsked && state.Step is StepKind.Design or StepKind.Develop or StepKind.Verify && columnOf?.Invoke(state.Step) is { Length: > 0 } column)
+                {
                     wanted.Add((id.Number, column));
+                    if (state.SlotId.Length > 0 && state.SlotRuntime.Length > 0) granted[id.Number] = new SlotOffer(state.SlotId, state.SlotRuntime, state.ArmId);
+                }
             }
-            owned = set; offers = wanted; loaded = true;
+            owned = set; offers = wanted; slots = granted; loaded = true;
             return true;
         }
         catch (Exception e) when (!ct.IsCancellationRequested)
@@ -90,6 +102,9 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
     /// <summary>For a test or a host without a database: the owned items as given.</summary>
     public void Set(IEnumerable<int> items) { owned = items.ToHashSet(); loaded = true; }
 }
+
+/// <summary>The slot of the scheduler that the saga of an offered item holds (W9.10j).</summary>
+sealed record SlotOffer(string SlotId, string Runtime, string ArmId);
 
 static class SweepV2Filter
 {

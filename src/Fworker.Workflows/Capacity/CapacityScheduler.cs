@@ -135,6 +135,7 @@ public sealed class CapacityScheduler(CapacitySettings settings, Func<string, Ru
             case StartRefused s: return Refused(state, s, now);
             case HostReported h: return Report(state, h, now);
             case FootprintChanged f: return Footprints(state, f);
+            case ReapStale r: return Reap(state, r);
             case CapacityWake w:
                 if (w.Due == state.WakeDue) state.WakeDue = null;   // (a timer that is not the pending one only plans again)
                 return Answer.Applied;
@@ -243,6 +244,20 @@ public sealed class CapacityScheduler(CapacitySettings settings, Func<string, Ru
         h.Runtime = r.Runtime; h.Metrics = r.Metrics; h.ReportedAt = at;
         h.Outside = Math.Max(0, r.Running - state.SlotsOn(r.Host));
         return Answer.Applied;
+    }
+
+    /// <summary>
+    /// W9.10j: the entries of the ledger that no saga has in flight any more (see <see cref="ReapStale"/>). A slot is never reaped here: it ends with the session (SessionEnded), a refused start, or its time limit (Expire), and the
+    /// item's entries go with the pass after that. Plan runs after every input, so a waiting item the reaped holder was holding back is admitted in the same transition.
+    /// </summary>
+    static Answer Reap(CapacityState state, ReapStale r)
+    {
+        var live = r.Live.ToHashSet(StringComparer.Ordinal);
+        var cutoff = r.ReadAt - r.Grace;
+        var reaped = 0;
+        foreach (var key in state.InFlight.Where(kv => !live.Contains(kv.Key) && !state.Slots.ContainsKey(kv.Key) && kv.Value.Since <= cutoff).Select(kv => kv.Key).ToList()) { state.InFlight.Remove(key); state.Holds.Remove(key); reaped++; }
+        foreach (var key in state.Queue.Where(kv => !live.Contains(kv.Key) && !state.Slots.ContainsKey(kv.Key) && kv.Value.RequestedAt <= cutoff).Select(kv => kv.Key).ToList()) { state.Queue.Remove(key); state.Holds.Remove(key); reaped++; }
+        return reaped > 0 ? Answer.Applied : new Answer(CapacityOutcome.NotFound, "the ledger holds nothing that no saga has in flight");
     }
 
     static Answer Footprints(CapacityState state, FootprintChanged f)

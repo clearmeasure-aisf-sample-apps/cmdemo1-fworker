@@ -164,6 +164,13 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         Send(new AskSlot($"ask|{ItemKey}|{s.Generation}|{s.AskSeq}", s.ArmId, phase, s.EverGranted, depth, [.. s.Footprint], s.FootprintFromPullRequest, Now, Plan.TopRank));
     }
 
+    /// <summary>
+    /// W9.10j: the slot was granted and the session of the step is to start on its runtime: the saga sends the start with the arm id it granted the slot for, once per slot (the key names it). The gateway starts the session
+    /// where the slot is; a start it cannot make is told to the scheduler (StartRefused), which frees the slot and, for a wait, asks again.
+    /// </summary>
+    public void StartSession(string slotId, string runtime, string? host, string phase) =>
+        Send(new StartSession($"start|{ItemKey}|{slotId}", State.ArmId, slotId, runtime, host, phase));
+
     /// <summary>The item's session needs no slot any more: the scheduler frees it at once. Nothing when the item holds none.</summary>
     public void EndSession()
     {

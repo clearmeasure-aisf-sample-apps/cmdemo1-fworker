@@ -105,7 +105,8 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     // W6.6: a pass over items that all have a saga: nothing to read for v1, the plant takes the saga's offers for exactly those items (scope), as it takes the offers of an incremental pass
     void PlanV2Offers(List<int> mine)
     {
-        try { plant.Plan(new JsonArray(V2!.OfferNodes(plant.HasOwner, mine).ToArray()), null, null, null, mine, null, DateTime.UtcNow, mine, null, null); }
+        // (W9.10j: the same offers as the saga's own session start makes, from the saga's state; the labels of the items stay)
+        try { plant.PlanSagaOffers(new JsonArray(V2!.OfferNodes(plant.HasOwner, mine).ToArray()), mine); }
         catch (Exception e) { Console.Error.WriteLine($"v2 offers: {e.GetType().Name}"); }
     }
 

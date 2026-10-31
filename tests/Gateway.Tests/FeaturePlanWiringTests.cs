@@ -205,6 +205,7 @@ public sealed class FeaturePlanWiringTests
         Assert.True(jobs.Has(RecurringJobSlots.SagaRearm));   // W9.10o: the repair of a save whose timer or command was never sent
         Assert.True(jobs.Has(RecurringJobSlots.LedgerPurge));   // W9.10o: the successes of the idempotency ledger do not live for ever
         Assert.True(jobs.Has(RecurringJobSlots.ItemSteps));   // W9.10f: master's CI after a merge, a closed pull request, an approved hold
+        Assert.True(jobs.Has(RecurringJobSlots.CapacityReap));   // W9.10j: what the scheduler keeps of an item whose saga never cleared it
         Assert.NotNull(host.Services.GetService<V2Health>());
         // W9.10g: the plant-wide steps of the sweep, the retention and the faster reconciler are jobs of the engine, and the sweep knows it leaves the steps to them
         foreach (var slot in new[] { RecurringJobSlots.ClaimRefReap, RecurringJobSlots.BoardGuard, RecurringJobSlots.QcSync, RecurringJobSlots.Replenish, RecurringJobSlots.BacklogLow, RecurringJobSlots.RetentionPrune })

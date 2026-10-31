@@ -433,6 +433,51 @@ public class FeaturePlanTests
         Assert.Equal("s6", Assert.Single(late.Sent.OfType<SessionEnded>()).SlotId);
     }
 
+    // ---- W9.10j: the saga starts the session of its slot ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task AGrant_StartsTheSessionOfTheSlot_WithTheArmItWasGrantedFor_OnceForTheSlot()
+    {
+        var fx = new SagaFixture(Policy());
+        await fx.Start();
+        var armAtTheGrant = fx.State.ArmId;
+        var granted = await Grant(fx);
+        var start = Assert.Single(granted.Sent.OfType<SessionStartRequested>());
+        Assert.Equal(("s1", "octopus", "host-a", "design", armAtTheGrant, "start|acme/orders#7|s1"), (start.SlotId, start.Runtime, start.Host, start.Phase, start.ArmId, start.Key));
+        Assert.Equal(1, start.Generation);
+        // the same grant told twice (the same key) is published again with the same key, which the start's handler takes as one start; a newer word of the same slot (another key) is no new start
+        var again = await Grant(fx);
+        Assert.Equal(WorkItemOutcome.Duplicate, again.Decision.Outcome);
+        Assert.Equal(start.Key, Assert.Single(again.Sent.OfType<SessionStartRequested>()).Key);
+        var newer = await fx.Send(new SlotAssigned(Item, 1, "slot|s1|again", "s1", "octopus", "host-a", "design", At(fx), fx.Now.AddHours(4)));
+        Assert.Empty(newer.Sent.OfType<SessionStartRequested>());
+        // a later slot (the session was lost, the item asked again) is a start of its own
+        await fx.Send(new SessionLost(Item, 1, "expired|s1", "s1", "the slot ran out of time", At(fx)));
+        var next = await Grant(fx, "s2");
+        Assert.Equal("start|acme/orders#7|s2", Assert.Single(next.Sent.OfType<SessionStartRequested>()).Key);
+    }
+
+    [Fact]
+    public async Task AGrantTheItemCanNoLongerUse_StartsNoSession()
+    {
+        var fx = await At(StepKind.Merge, Policy());
+        var r = await fx.Send(new SlotAssigned(Item, 1, "slot|s5", "s5", "octopus", null, "verify", At(fx), fx.Now.AddHours(4)));
+        Assert.Empty(r.Sent.OfType<SessionStartRequested>());
+        var parked = new SagaFixture(Policy());
+        await parked.Start();
+        await parked.Send(new ParkWorkItem(Item, 0, "park-1", "person"));
+        Assert.Empty((await parked.Send(new SlotAssigned(Item, 1, "slot|s6", "s6", "octopus", null, "design", At(parked), parked.Now.AddHours(4)))).Sent.OfType<SessionStartRequested>());
+    }
+
+    [Fact]
+    public async Task APlanThatUsesNoScheduler_StartsNoSessionOfItsOwn()
+    {
+        var fx = new SagaFixture(Policy(scheduler: false));
+        await fx.Start();
+        Assert.Empty(fx.Commands.OfType<SessionStartRequested>());
+        Assert.Empty(fx.State.Outbox.OfType<StartSession>());
+    }
+
     [Fact]
     public async Task ALostSession_FreesTheSlot_AndTheItemAsksAgainAsAnOwnedItem_WithoutCountingAFailure()
     {

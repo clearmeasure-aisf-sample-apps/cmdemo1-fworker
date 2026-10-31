@@ -68,7 +68,9 @@ static class GatewayWolverineExtensions
                             throw new InvalidOperationException("the Wolverine host did not take the end of the session");
                     };
                 // W7.0, W7.1: the CapacityScheduler, the slot ledger of the sessions the v2 engine starts; it shares the runtimes' limits with the plant's manager (no flag: it exists where the engine acts)
-                CapacityWiring.Attach(host, CapacityWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), CapacityWiring.OutsideOf(sp.GetRequiredService<RuntimeRegistry>()), CapacityWiring.OnOf(sp.GetRequiredService<RuntimeRegistry>())));
+                var capacityParts = CapacityWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), CapacityWiring.OutsideOf(sp.GetRequiredService<RuntimeRegistry>()), CapacityWiring.OnOf(sp.GetRequiredService<RuntimeRegistry>()));
+                CapacityWiring.Attach(host, capacityParts);
+                CapacityWiring.ConnectLedger(sp.GetRequiredService<RuntimeRegistry>(), capacityParts.Service.Store, c.Instance.Home);   // W9.10j: the managers read the ledger's persisted day count and slots when they count the day again after a restart
                 CapacityWiring.ConnectHostReports(sp.GetRequiredService<RuntimeRegistry>().OctopusRuntime, host);   // W7.4: the host reports (metrics, running containers) are the scheduler's HostReported
                 if (c.Instance.Home is { } home)
                 {
@@ -108,6 +110,11 @@ static class GatewayWolverineExtensions
                     var stepReads = new Fworker.Workflows.Delivery.ItemStepReads(new DeliveryKitSource(() => kitHost.Value));
                     var itemSteps = new ItemStepsJob(workItems.Store, home, stepReads, stepReads, m => host.PublishAsync(m), () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low, masterWatch: workItems.Docs.Settings.CarriesFeature);
                     jobs.Add(RecurringJobSlots.ItemSteps, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["itemSteps"] = await itemSteps.Run(ct) }.ToJsonString()));
+                    // W9.10j: the saga starts the session of the slot the scheduler granted (the offer is made from the saga's state, on the slot's runtime), and the reaper tells the scheduler which items are in flight so that
+                    // what it keeps of an item whose saga never cleared it is dropped
+                    if (workItems.Ownership is { } sessionOwnership) SessionStartWiring.Attach(host, new SessionStartPort(sessionOwnership, () => sp.GetService<Plant>()));
+                    var reaper = new CapacityReaper(workItems.Store, m => host.PublishAsync(m), () => c.Leader.MayAct);
+                    jobs.Add(RecurringJobSlots.CapacityReap, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["capacityReap"] = await reaper.Run(ct) }.ToJsonString()));
                     ItemStepsWiring.Attach(host, new OwnerRelease(() => sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), (item, holder) => sp.GetService<Plant>()?.ManagerReleased(item, holder)));
                     // W9.10o: the repair of the window between a saga's save and its outbox (the timer or command that was never sent), and the purge of the old successes of the idempotency ledger
                     if (workItems.Store is IWorkItemAges ages)
