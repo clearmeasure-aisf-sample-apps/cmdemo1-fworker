@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Fworker.Workflows.Merge;
 
 namespace Fworker.Workflows.WorkItem.Verbs;
 
@@ -36,6 +37,19 @@ public sealed class ItemPulls(ItemGitHub gh, IItemStateStore store)
     public Task<List<JsonNode>> GetPrFiles(int number, CancellationToken ct) => gh.Pages($"{Cfg.RepoPath}/pulls/{number}/files", ct);
 
     public static IEnumerable<string> Names(IEnumerable<JsonNode> files) => files.Select(f => Ps.Text(f, "filename"));
+
+    /// <summary>
+    /// <c>Get-MigrationCollision</c> (W9.10q): the DbUp scripts of the pull request whose number is already the number of a different script on the base branch, read through GitHub's contents listing of that directory (a 404 is an empty
+    /// directory). Nothing is read from the base branch when the pull request adds no script. Null when there is no collision.
+    /// </summary>
+    public async Task<MigrationCollision?> MigrationCollisionOf(IEnumerable<JsonNode> files, CancellationToken ct)
+    {
+        var mine = files.Select(f => (File: Ps.Text(f, "filename"), Status: Ps.Text(f, "status"))).ToList();
+        if (!MigrationNumbers.Touches(mine)) return null;
+        var ls = await gh.Allow("GET", $"{Cfg.RepoPath}/contents/{MigrationNumbers.Directory}?ref={Uri.EscapeDataString(Cfg.DefaultBranch)}", [404], null, ct);
+        List<string> names = ls.Allowed ? [] : ls.Body switch { JsonArray a => a.Where(x => x is not null).Select(x => Ps.Text(x, "name")).ToList(), JsonObject o => [Ps.Text(o, "name")], _ => [] };
+        return MigrationNumbers.Find(mine, MigrationNumbers.ScriptsOnBase(names));
+    }
 
     /// <summary><c>Get-BuildOwed</c>: the private build is not owed only when the design recorded the item as docs-only AND every changed file is documentation.</summary>
     public async Task<BuildOwed> GetBuildOwed(ItemInfo info, int prNumber, JsonObject state, CancellationToken ct)

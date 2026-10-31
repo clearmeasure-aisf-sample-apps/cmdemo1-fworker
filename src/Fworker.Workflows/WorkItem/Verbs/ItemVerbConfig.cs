@@ -93,6 +93,17 @@ public sealed class ItemVerbConfig
     public double AwaitingChecksParkMinutes => Timing("awaitingChecksParkMinutes", 0);
     public int RedChecksGate => HasTiming("redChecksGate") ? (int)Timing("redChecksGate", 2) : 2;
     public double ReleaseCandidateTimeoutMinutes => Timing("releaseCandidateTimeoutMinutes", 0);
+    /// <summary><c>timing.masterDefectCheckMinutes</c>, 5 when the file has none (Get-RedHeadRuling).</summary>
+    public double MasterDefectCheckMinutes => Timing("masterDefectCheckMinutes", 5);
+
+    // ---- the CI rule (Prs.ps1) -----------------------------------------------------------------------------------------------------------------------
+
+    /// <summary><c>ciGates</c>: the checks the ruleset requires (empty entries left out).</summary>
+    public IReadOnlyList<string> CiGates => Ps.Strings(root["ciGates"]).Where(g => g.Length > 0).ToList();
+    /// <summary><c>ciAggregateGates</c>, else "Build result": gates that fail because a job they need failed.</summary>
+    public IReadOnlyList<string> CiAggregateGates => Ps.Has(root, "ciAggregateGates") ? Ps.Strings(root["ciAggregateGates"]).ToList() : ["Build result"];
+    /// <summary><c>masterFlakyChecks</c>: patterns of checks known to be flaky.</summary>
+    public IReadOnlyList<string> MasterFlakyChecks => Ps.Has(root, "masterFlakyChecks") ? Ps.Strings(root["masterFlakyChecks"]).ToList() : [];
 
     /// <summary><c>docsOnlyLegacyBefore</c>: when the items an older version designed end; null when unset.</summary>
     public DateTime? LegacyCutoff => Ps.Has(timing, "docsOnlyLegacyBefore") ? Ps.FromIso(timing["docsOnlyLegacyBefore"]) : null;

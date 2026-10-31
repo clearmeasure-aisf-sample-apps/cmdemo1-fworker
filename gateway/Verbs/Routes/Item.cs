@@ -1,8 +1,7 @@
 using Fworker.Contracts.Seams;
 
 // W9.2 (#354): the item verbs, owned by the WorkItemSaga (Fworker.Workflows.WorkItem.Verbs). Each answers exactly as its rule script does (same fields, same exit codes, same writes to GitHub, the board and the state comment, in
-// the state comment's v1 format), and the saga hears what happened (V2VerbFeed for the decision verbs, ItemAdminFeed for a park and an unpark). A few calls are the script's still, through the runner: the accept of a QC environment (W9.1),
-// the completion of Development with its CI rule and the pull request of the Copilot owner task (W9.4, W9.5). Registered to the v2 path only where the engine acts (V2VerbRoutes.Build); v1, the shadow run and FACTORY_V2_OFF are unchanged.
+// the state comment's v1 format), and the saga hears what happened (V2VerbFeed for the decision verbs, ItemAdminFeed for a park and an unpark). Since W9.10q no call is left to the script: the accept of a QC environment is the QC gate's, the completion of Development has its CI rule, and the pull requests of the Copilot owner task are the verbs' own. Registered to the v2 path only where the engine acts (V2VerbRoutes.Build); v1, the shadow run and FACTORY_V2_OFF are unchanged.
 // The wiring they read and write through is gateway/Ports/ItemVerbsPort.cs.
 static class ItemRoutes
 {

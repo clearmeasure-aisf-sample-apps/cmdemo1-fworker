@@ -236,6 +236,28 @@ public sealed class ChecksReadModel(ItemReads reads, IItemStateStore states, IIt
         return new BaseHistory { Available = true, Branch = branch, Commits = commits };
     }
 
+    /// <summary>
+    /// <c>Get-BaseFailures</c> (Prs.ps1, the CI rule for a red head, W9.10q): which of these checks fail on the base branch now: the newest finished conclusion of the check on the last 5 commits of the default branch failed (preexisting) or
+    /// passed (green). A base branch that cannot be read is "not available" (the ruling then waits), never an error.
+    /// </summary>
+    public async Task<BaseFailures> BaseFailures(IReadOnlyCollection<string> names, CancellationToken ct)
+    {
+        BaseHistory h;
+        try { h = await BaseHistory(gh.Settings.DefaultBranch, null, ct); }
+        catch (Exception e) when (e is not OperationCanceledException) { return new BaseFailures(false, [], []); }
+        if (!h.Available) return new BaseFailures(false, [], []);
+        var pre = new List<string>(); var green = new List<string>();
+        foreach (var name in names)
+        {
+            var b = CheckRules.Baseline(name, h);
+            if (!Ps.Bool(b["available"])) continue;
+            var conclusion = Ps.Text(b["conclusion"]).ToLowerInvariant();
+            if (conclusion is "failure" or "timed_out" or "action_required" or "startup_failure") pre.Add(name);
+            else if (conclusion is "success" or "neutral" or "skipped") green.Add(name);
+        }
+        return new BaseFailures(true, pre, green);
+    }
+
     /// <summary><c>Get-CheckAnnotations</c>: three pages of a hundred at most.</summary>
     async Task<(JsonObject Counts, JsonArray List)> Annotations(long id, Dictionary<string, HashSet<int>>? diff, DateTime? deadline, CancellationToken ct)
     {
