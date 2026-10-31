@@ -74,7 +74,6 @@ sealed class JournalCommandSink
         var now = utcNow();
         // a waiting line has no key of its own (the verb takes the ticks of the write) and is written once per timing.journalWaitingMinutes per item: the ledger decides
         // from the state, this only spares the outbox the repeats of every sweep within the window of the last one it sent
-        var keyless = ev == "waiting" || key.Length == 0;
         if (ev == "waiting")
         {
             lock (waitingSent)
@@ -83,7 +82,8 @@ sealed class JournalCommandSink
                 waitingSent[item] = now;
             }
         }
-        var k = keyless ? now.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture) : key;
+        // a line without a key takes the ticks of the decision: the rule of the ledger and of Add-Journal (JournalKeys.OrTicks); a waiting line always does
+        var k = JournalKeys.OrTicks(ev == "waiting" ? "" : key, now);
         var cmd = new WriteJournalLine(JournalKeys.For(item, ev, k), item, ev, (JsonObject)fields.DeepClone(), k);
         if (!await publish(cmd))
         {

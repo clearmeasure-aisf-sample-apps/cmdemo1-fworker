@@ -49,6 +49,19 @@ public sealed class JournalCommandSinkTests
     }
 
     [Fact]
+    public async Task TwoKeylessLinesOfOneKind_AreTwoCommands_NeverOne_AsAddJournalTakesTheTicksOfAnEmptyKey()
+    {
+        var (sink, sent, clock, set) = Make();
+        await sink.Send(3, "released", new JsonObject { ["worker"] = "w1" }, "");
+        set(clock().AddSeconds(1));
+        await sink.Send(3, "released", new JsonObject { ["worker"] = "w2" }, "");
+        Assert.Equal(2, sent.Count);
+        Assert.NotEqual(sent[0].Key, sent[1].Key);
+        Assert.NotEqual(sent[0].IdempotencyKey, sent[1].IdempotencyKey);
+        Assert.All(sent, c => Assert.Matches(@"^\d{10,}$", c.Key));   // never "" (the key "released|" of the script's old rule)
+    }
+
+    [Fact]
     public async Task Waiting_IsSentOncePerWindowPerItem_AndTheEarlierOneIsFreeAgainWhenThePublishFails()
     {
         var (sink, sent, _, set) = Make(waitingMinutes: 30);

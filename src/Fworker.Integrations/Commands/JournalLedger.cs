@@ -92,7 +92,8 @@ public sealed class JournalLedger
     {
         if (!JournalEvents.Writable.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
         ev = JournalEvents.Writable.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
-        if (string.IsNullOrEmpty(key) || ev == "waiting") key = utcNow().Ticks.ToString(CultureInfo.InvariantCulture);
+        // a line without a key takes the ticks (JournalKeys.OrTicks, the rule of Add-Journal too); a waiting line always does
+        key = JournalKeys.OrTicks(ev == "waiting" ? "" : key, utcNow());
         return (ev, key);
     }
 
@@ -186,6 +187,7 @@ public sealed class JournalLedger
         var own = false;
         if (st == null) { st = await store.Read(item, ct); own = true; }
         var j = Journal(st.State);
+        key = JournalKeys.OrTicks(key, utcNow());   // (AddTo and AddInHand come here without Prepare, as Add-Journal is called with whatever key the caller has)
         var k = $"{ev}|{key}";
         if (JournalJson.Strings(j, "keys").Contains(k, StringComparer.Ordinal)) return false;
         var f = With(fields, item);
