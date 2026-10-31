@@ -45,6 +45,7 @@ public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports,
             var trains = await LoadTrains(ct);
             var promotions = new Dictionary<string, IReadOnlyList<ItemPromotion>>(StringComparer.Ordinal);
             if (!await Items(report, trains, promotions, afterBreak, acting, ct)) { report.Outcome = "aborted"; return report; }
+            report.ItemsCompleted = true;
             var backfilled = false;
             var mergedOk = await Guarded(report, async () => backfilled = await BackfillMerged(report, trains, ct)) && backfilled;
             await Guarded(report, () => Trains(report, promotions, mergedOk, ct));

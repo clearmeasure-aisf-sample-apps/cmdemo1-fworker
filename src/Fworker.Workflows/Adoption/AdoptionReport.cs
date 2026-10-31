@@ -18,6 +18,8 @@ public sealed class AdoptionReport
 
     /// <summary>The open cards of the home repository on the board, and the items the run read (a card in a column of no step is not read).</summary>
     public int Cards { get; set; }
+    /// <summary>The pass over the items finished (the board and the saga's rows were read and every item was tried; an item whose read failed is an error, not the end of the pass). Not in the status JSON.</summary>
+    public bool ItemsCompleted { get; set; }
     public int Read { get; set; }
 
     public int Adopted { get; set; }

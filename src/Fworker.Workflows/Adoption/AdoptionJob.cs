@@ -13,7 +13,7 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
 {
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
     readonly object gate = new();
-    long? termEpoch, doneEpoch;
+    long? termEpoch, doneEpoch, clearedEpoch;
     (bool Break, string Why)? termBreak;
     int attempts;
     DateTimeOffset? retryAt;
@@ -80,6 +80,7 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         lock (gate)
         {
             state = report.Outcome;
+            if (report.Outcome == "done" || (report.Outcome == "partial" && !decided.Break && report.ItemsCompleted)) clearedEpoch = e;   // (the sweep may begin: a finished run of the term, no break whose fencing is outstanding)
             if (report.Outcome == "done" || (report.Outcome == "partial" && attempts >= maxAttempts && !decided.Break)) { doneEpoch = e; doneAt = now(); }
             else if (report.Outcome == "partial" && decided.Break && attempts >= maxAttempts) retryAt = now() + TimeSpan.FromTicks(Math.Min(RetryCap.Ticks, TimeSpan.FromMinutes(1).Ticks << Math.Min(attempts - maxAttempts, 10)));
         }
@@ -94,8 +95,8 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         catch (Exception ex) when (ex is not OperationCanceledException) { Console.Error.WriteLine($"adoption: the engine marker could not be written ({ex.GetType().Name})"); }
     }
 
-    /// <summary>Whether the adoption of the term with this epoch is over (a run was "done", or a partial one with no break was given up after MaxAttempts). The gateway's sweep waits for it (AdoptionGate): the first pass of a term does not begin beside the adoption.</summary>
-    public bool IsDone(long termEpochToAsk) { lock (gate) return doneEpoch == termEpochToAsk; }
+    /// <summary>Whether the sweep may begin in the term with this epoch: a run of the term finished "done", or finished "partial" where no break is outstanding (items it could not read stay v1's, as before; the job retries them), or a partial one was given up after MaxAttempts. After a break only a "done" run (the fencing) counts. The gateway's sweep waits for it (AdoptionGate): the first pass of a term does not begin beside the adoption.</summary>
+    public bool IsDone(long termEpochToAsk) { lock (gate) return doneEpoch == termEpochToAsk || clearedEpoch == termEpochToAsk; }
 
     /// <summary>The "adoption" block of the v2 status: where the term stands and the report of the latest run.</summary>
     public JsonObject Block()

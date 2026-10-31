@@ -64,6 +64,31 @@ public class AdoptionJobTests
         }
     }
 
+    // Cutover review: the gateway's sweep begins when IsDone says so. Not before a run of the term has finished; a board that could not be read is no run; an item that could not be read is (it stays v1's, the job retries it);
+    // after a break only a done run counts, because the fencing is what the break needs.
+    [Fact]
+    public async Task J0_TheSweepMayBeginAfterADoneRun_OrAPartialOneThatTriedEveryItem_NotAfterAFailedBoardRead_NorAPartialRunAfterABreak()
+    {
+        var r = new Rig();
+        Assert.False(r.Job.IsDone(1));
+        r.Reads.Fail = true;
+        Assert.Equal("partial", await r.Job.Tick(default));
+        Assert.False(r.Job.IsDone(1));                 // (the board could not be read: nothing was examined)
+        r.Reads.Fail = false; r.Reads.Two = true; r.Reads.FailEight = true;
+        Assert.Equal("partial", await r.Job.Tick(default));
+        Assert.True(r.Job.IsDone(1)); Assert.False(r.Job.IsDone(2));   // (item 8 could not be read; item 7 was adopted)
+
+        var broke = new Rig();
+        await broke.Markers.Mark(EngineMarkerNames.V1Ran, Now, "other", "FACTORY_V2_OFF", default);
+        broke.Reads.Two = true; broke.Reads.FailEight = true;
+        Assert.Equal("partial", await broke.Job.Tick(default));
+        Assert.True(broke.Job.Block()["breakPending"]!.GetValue<bool>());
+        Assert.False(broke.Job.IsDone(1));
+        broke.Reads.FailEight = false;
+        Assert.Equal("done", await broke.Job.Tick(default));
+        Assert.True(broke.Job.IsDone(1));
+    }
+
     [Fact]
     public async Task J1_ItWaitsForThePlantsRestore_AndRunsWhenItIsOver()
     {
