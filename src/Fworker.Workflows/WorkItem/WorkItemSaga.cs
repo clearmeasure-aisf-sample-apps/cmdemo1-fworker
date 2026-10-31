@@ -35,6 +35,9 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         PhaseLeaseExpired l => $"lease|{l.ArmId}|{l.Due.UtcTicks}",
         SettleWindowElapsed s => $"settle|{s.ArmId}",
         MergeRetryDue m => $"mergeretry|{m.ArmId}|{m.Due.UtcTicks}",
+        MasterWatchElapsed w => $"masterwatch|{w.Due.UtcTicks}",
+        ParkExpired p => $"parkexpired|{p.Due.UtcTicks}",
+        OwnerIdleElapsed i => $"owneridle|{i.Due.UtcTicks}",
         _ => "",
     };
 
@@ -85,18 +88,37 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
             case PhaseLeaseExpired l: return LeaseExpired(c, l);
             case ParkWorkItem p:
                 if (state.Parked) return StepAnswer.Refused("the item is parked");
-                c.Park(p.Reason.Length == 0 ? "parked" : p.Reason);
+                c.Park(p.Reason.Length == 0 ? "parked" : p.Reason, p.Minutes > 0 ? TimeSpan.FromMinutes(p.Minutes) : null);
                 return StepAnswer.Applied;
             case ResumeWorkItem:
-                if (!state.Parked) return StepAnswer.Refused("the item is not parked");
-                state.Failures.Remove(state.Step.ToString()); state.Launches.Remove(state.Step.ToString()); state.IdleFollowUps = 0;
-                c.Decide(WorkItemActions.Resumed, $"was parked: {state.ParkReason}");
-                // an item parked inside its settle window is delivered: it goes on with the window, it does not return to its step
-                if (state.Status == WorkItemStatus.Settling) { state.Parked = false; state.ParkReason = ""; return StepAnswer.Applied; }
-                c.Enter(state.Step, "resumed");
+                return Resume(c);
+            case ItemClosed:
+                // W9.10h: the merge decides for an item that is merged or merging (the merge closes its issue); a delivered item is in its settle window
+                if (state.Status == WorkItemStatus.Settling) return StepAnswer.Refused("the item is delivered");
+                if (state.MergeCommit.Length > 0) return StepAnswer.Refused("the item was merged");
+                if (state.Step >= StepKind.Merge && !state.Parked) return StepAnswer.Refused("the merge step decides: the merge closes the issue");
+                c.Complete("the issue was closed");
                 return StepAnswer.Applied;
+            case HoldObserved h:
+                if (h.Hold is { Length: > 0 } hold)
+                {
+                    if (state.Parked) return StepAnswer.Refused("the item is parked");
+                    if (state.Status != WorkItemStatus.Open || state.Step == StepKind.Deliver) return StepAnswer.Refused("the item is delivered or being delivered");
+                    c.Park($"{HoldParkPrefix}{hold}");
+                    return StepAnswer.Applied;
+                }
+                if (!state.Parked || !state.ParkReason.StartsWith(HoldParkPrefix, StringComparison.Ordinal)) return StepAnswer.Refused("the item is not held");
+                return Resume(c);
+            case CardMoved m: return Moved(c, m);
             case StartWorkItem or ReopenWorkItem:
                 return StepAnswer.Refused("the item is open");
+            case MasterObserved m: return SweepFlow.Master(c, m);
+            case MasterWatchElapsed w: return SweepFlow.MasterElapsed(c, w);
+            case ParkExpired e: return SweepFlow.Expired(c, e);
+            case OwnerIdleElapsed i: return SweepFlow.OwnerIdle(c, i);
+            case PullRequestClosed pc: return SweepFlow.Closed(c, pc);
+            case ApprovalSeen a: return SweepFlow.Approved(c, a);
+            case RearmSettle r: return SweepFlow.Rearm(c, r);
             case ChecksObserved o: return FeatureFlow.Checks(c, o);
             case SlotAssigned a: return FeatureFlow.Assigned(c, a);
             case SlotHeld h: return FeatureFlow.Held(c, h);
@@ -110,6 +132,37 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         // a message about the item's progress is not taken while it is parked, except the facts that happened outside (the merge, a delivery, the pull request)
         if (state.Parked && input is DesignRecorded) return StepAnswer.Refused("the item is parked");
         return c.StepOf(home.Value).Handle(c, input);
+    }
+
+    /// <summary>The park reason of a hold label (W9.10h): a removal of the label lifts exactly this park.</summary>
+    public const string HoldParkPrefix = "hold: ";
+
+    // the budgets of the phase start again and the step is armed anew
+    static StepAnswer Resume(StepContext c)
+    {
+        var state = c.State;
+        if (!state.Parked) return StepAnswer.Refused("the item is not parked");
+        state.Failures.Remove(state.Step.ToString()); state.Launches.Remove(state.Step.ToString()); state.IdleFollowUps = 0;
+        c.Decide(WorkItemActions.Resumed, $"was parked: {state.ParkReason}");
+        // an item parked inside its settle window is delivered: it goes on with the window, it does not return to its step
+        if (state.Status == WorkItemStatus.Settling) { state.Parked = false; state.ParkReason = ""; c.ClearParkTimers(); c.TimerChanged = true; return StepAnswer.Applied; }
+        c.Enter(state.Step, "resumed");
+        return StepAnswer.Applied;
+    }
+
+    // W9.10h: a person moved the card back to the column of an earlier step. The merge happens in the validation column, so an item on its Merge step stands in the Verify column.
+    static StepAnswer Moved(StepContext c, CardMoved m)
+    {
+        var state = c.State;
+        if (state.Status != WorkItemStatus.Open || state.Parked) return StepAnswer.Refused("the item is parked or delivered");
+        if (m.Step is not { } target) return StepAnswer.Refused($"'{m.Column}' is the column of no step");
+        if (state.MergeCommit.Length > 0 || state.Step > StepKind.Merge) return StepAnswer.Refused("the item was merged");
+        var standsIn = state.Step == StepKind.Merge ? StepKind.Verify : state.Step;
+        if (target >= standsIn) return StepAnswer.Refused("the card is in the column of the step or ahead of it");
+        if (!c.Plan.Has(target)) return StepAnswer.Refused($"the {c.Plan.Name} plan has no {target} step");
+        c.Decide(WorkItemActions.MovedBack, $"a person moved the card to {m.Column}");
+        c.Enter(target, $"a person moved the card back to {m.Column}");
+        return StepAnswer.Applied;
     }
 
     StepAnswer Budget(StepContext c, BudgetSpent b)
@@ -230,6 +283,10 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         if (state.Status == WorkItemStatus.Open && !state.Parked && state.LeaseDue is { } due) timers.Add(new WorkItemTimer(new PhaseLeaseExpired(item, state.Generation, state.ArmId, due), due));
         if (state.Status == WorkItemStatus.Open && !state.Parked && state.MergeRetryAt is { } retry) timers.Add(new WorkItemTimer(new MergeRetryDue(item, state.Generation, state.ArmId, retry), retry));
         if (state.Status == WorkItemStatus.Settling && state.SettleUntil is { } until) timers.Add(new WorkItemTimer(new SettleWindowElapsed(item, state.Generation, state.ArmId), until));
+        // W9.10f: the master-green wait runs out, the park ends, the owner of a held PASS loses patience
+        if (state.Status == WorkItemStatus.Open && !state.Parked && state.MasterState == "waiting" && state.MasterDue is { } masterDue) timers.Add(new WorkItemTimer(new MasterWatchElapsed(item, state.Generation, masterDue), masterDue));
+        if (state.Status != WorkItemStatus.Completed && state.Parked && state.ParkUntil is { } parkUntil) timers.Add(new WorkItemTimer(new ParkExpired(item, state.Generation, parkUntil), parkUntil));
+        if (state.Status == WorkItemStatus.Open && state.Parked && !state.OwnerReleased && state.OwnerIdleDue is { } idleDue) timers.Add(new WorkItemTimer(new OwnerIdleElapsed(item, state.Generation, idleDue), idleDue));
         return timers;
     }
 
@@ -247,6 +304,7 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 ClearSlot x => new Capacity.ClearItem(item, x.Key, x.Reason),
                 ChangeFootprint f => new Capacity.FootprintChanged(item, f.Key, f.Files),
                 LeaveTrain l => new Merge.MergeTrainLeft(item.Repository.ToString(), item, l.Reason),
+                ReleaseOwner r => new OwnerReleaseRequested(item, r.Key, r.Reason),
                 _ => throw new InvalidOperationException($"no message for the command {c.GetType().Name}"),
             });
         if (state.MergeRequestEmitted && state.MergeRequest is { } m && state.Status == WorkItemStatus.Open && !state.Parked)

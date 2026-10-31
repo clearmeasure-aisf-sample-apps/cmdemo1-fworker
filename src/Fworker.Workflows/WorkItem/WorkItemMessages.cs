@@ -93,13 +93,34 @@ public sealed record DeliverySeen(ItemId Item, string Key, string Environment, s
 [MessageIdentity("workitem.delivery-lost")]
 public sealed record DeliveryLost(ItemId Item, string Key, string Environment) : WorkItemInput(Item), IKeyedInput;
 
-/// <summary>A person or the operator parks the item (park-item): the saga stops its lease and takes no step message until <see cref="ResumeWorkItem"/>.</summary>
+/// <summary>A person or the operator parks the item (park-item): the saga stops its lease and takes no step message until <see cref="ResumeWorkItem"/> or, where the engine expires parks (W9.10f), until the park ends (<paramref name="Minutes"/>, else <c>timing.parkHours</c>).</summary>
 [MessageIdentity("workitem.park")]
-public sealed record ParkWorkItem(ItemId Item, int Generation, string Key, string Reason) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+public sealed record ParkWorkItem(ItemId Item, int Generation, string Key, string Reason, int Minutes = 0) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
 
 /// <summary>Takes the item out of its park (unpark-item): the budgets of the phase start again and the step is armed anew.</summary>
 [MessageIdentity("workitem.resume")]
 public sealed record ResumeWorkItem(ItemId Item, int Generation, string Key) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+
+/// <summary>
+/// W9.10h: the item's issue was closed (a person closed it, or the board shows the card closed). Honoured only while no merge has happened and the merge step does not decide: an issue closed by the merge itself
+/// ("Closes #N") reaches the saga as the merge, not as this. The instance then completes, so its slot, its place in the merge line and its card go.
+/// </summary>
+[MessageIdentity("workitem.item-closed")]
+public sealed record ItemClosed(ItemId Item, string Key, string Source) : WorkItemInput(Item), IKeyedInput;
+
+/// <summary>
+/// W9.10h: the hold label the item carries now (the first label that is a hold: <c>hold:*</c> or a configured one), or null when it carries none. A hold parks the item (the label's name in the reason) and the label's
+/// removal lifts that park, and only that one: a park for another reason stays a person's or the saga's.
+/// </summary>
+[MessageIdentity("workitem.hold-observed")]
+public sealed record HoldObserved(ItemId Item, int Generation, string Key, string? Hold) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+
+/// <summary>
+/// W9.10h: a person moved the item's card (the projection's own moves are echoes and never reach the saga). <paramref name="Step"/> is the step whose column that is, null for a column of no step (Todo, Done, a hold column).
+/// A move back to the column of an earlier step sends the item back to that step; a move to the step's own column or forward changes nothing (the saga follows the work, not the card).
+/// </summary>
+[MessageIdentity("workitem.card-moved")]
+public sealed record CardMoved(ItemId Item, int Generation, string Key, string Column, StepKind? Step) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
 
 /// <summary>
 /// The timer of a step's lease (a Wolverine scheduled message): <paramref name="Due"/> is the time it was scheduled for. It counts only when it names the current arm and the lease still ends at that time;
@@ -125,6 +146,8 @@ public static class WorkItemActions
     public const string LeaseExpired = "lease-expired";
     public const string Parked = "parked";
     public const string Resumed = "resumed";
+    /// <summary>A person moved the card back to the column of an earlier step (W9.10h): the item returns to that step.</summary>
+    public const string MovedBack = "moved-back";
     public const string Merged = "merged";
     public const string Settling = "settling";
     public const string Undelivered = "undelivered";
@@ -145,6 +168,14 @@ public static class WorkItemActions
     public const string SlotGranted = "slot-granted";
     public const string Held = "held";
     public const string SessionLost = "session-lost";
+    // the sweep's steps (W9.10f)
+    public const string MasterGreen = "master-green";
+    public const string MasterBroken = "master-broken";
+    public const string MasterTimeout = "master-timeout";
+    public const string ParkExpired = "park-expired";
+    public const string HoldCleared = "hold-cleared";
+    public const string OwnerReleased = "owner-released";
+    public const string SettleRearmed = "settle-rearmed";
 }
 
 /// <summary>What the saga answered to one input.</summary>

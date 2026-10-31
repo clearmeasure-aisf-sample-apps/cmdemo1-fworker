@@ -302,12 +302,19 @@ static class GatewayServiceCollectionExtensions
             rmx.Plant = rp;
             if (rmx.Kind is "octopus" or "cae-job") { rmx.SessionStarted = transcripts.Started; rmx.SessionEnded = transcripts.Ended; }
             // the gateway's own hands for the adapter: park an item runtime-failed, end the claim a lost execution left, revoke a failed execution's name
+            var saga = sp.GetService<SagaInputs>();   // W9.10h: where the engine acts, the saga hears of every park and of the runtime's budgets (null elsewhere)
             rmx.Park = async (item, phase) =>
             {
-                var (code, _) = await rr.RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "runtime-failed", ["phase"] = phase, ["by"] = "the runtime adapter" }.ToJsonString(), TimeSpan.FromSeconds(120));
+                var (code, output) = await rr.RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "runtime-failed", ["phase"] = phase, ["by"] = "the runtime adapter" }.ToJsonString(), TimeSpan.FromSeconds(120));
                 if (code != 0) throw new InvalidOperationException($"park-item answered exit {code}");
                 rp.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "runtime-failed" });
+                if (saga is not null) await saga.Parked(item, "runtime-failed", SagaKeys.ParkKey(output, "runtime-failed", phase));
             };
+            if (saga is not null)
+            {
+                rmx.OnBudget = (item, kind, key, reason) => _ = saga.Budget(item, kind, key, reason);
+                rmx.OnStartRefused = (item, key, outcome) => _ = saga.StartRefused(item, key, outcome);
+            }
             rmx.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
             return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct };
         });
@@ -338,11 +345,13 @@ static class GatewayServiceCollectionExtensions
             services.AddSingleton<IHostedService>(sp =>
             {
                 var plant = sp.GetRequiredService<Plant>(); var runner = sp.GetRequiredService<Runner>();
+                var saga = sp.GetService<SagaInputs>();   // W9.10h: where the engine acts, the saga hears of the park
                 copilotRuntime.OverBudget = async (item, phase, credits) =>
                 {
-                    var (code, _) = await runner.RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "credit-guard", ["phase"] = phase, ["by"] = $"the Copilot credit guard: one task reported {credits:0} ai_credits, over api.copilot.maxCreditsPerTask {copilotSettings.MaxCreditsPerTask:0}" }.ToJsonString(), TimeSpan.FromSeconds(120));
+                    var (code, output) = await runner.RunAsync("park-item", new JsonObject { ["item"] = item, ["code"] = "credit-guard", ["phase"] = phase, ["by"] = $"the Copilot credit guard: one task reported {credits:0} ai_credits, over api.copilot.maxCreditsPerTask {copilotSettings.MaxCreditsPerTask:0}" }.ToJsonString(), TimeSpan.FromSeconds(120));
                     if (code != 0) throw new InvalidOperationException($"park-item answered exit {code}");
                     plant.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "credit-guard" });
+                    if (saga is not null) await saga.Parked(item, "credit-guard", SagaKeys.ParkKey(output, "credit-guard", phase));
                 };
                 return new CloudOwnerWatch(copilotRuntime, copilotManager, sp.GetRequiredService<CopilotOwnerVerbs>(), sp.GetRequiredService<ILeadership>(),
                     sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, new CloudOwnerWatchOptions { IntervalSeconds = copilotSettings.CiReleaseSeconds, MasterFixer = copilotRuntime });

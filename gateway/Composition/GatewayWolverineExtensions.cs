@@ -78,6 +78,8 @@ static class GatewayWolverineExtensions
                     var map = new Fworker.Integrations.Correlation.GenerationStampingMap(new Fworker.Integrations.Correlation.SqlCorrelationMap(cs), new Fworker.Integrations.Correlation.SqlItemGenerations(cs));
                     var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
                     IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, home));
+                    // W9.10h: what a person does on GitHub (close, reopen, move the card, a hold label) reaches the saga from the same events; the card projection's echo is consulted first
+                    IngressInboxSagaWiring.Attach(host, new SagaIngress(workItems.Store, home, workItems.Docs.Settings, workItems.Docs.Versions!, workItems.Docs.Echo!, workItems.Docs.Issues, workItems.Docs.Facts));
                     // W5.0: ItemMerged, derived from the merge webhook and the board reconciler's poll (v1 emits nothing); needs GH_TOKEN or the author App to read the pull request and the item
                     var mergedDeriver = ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable);
                     if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)), acting: true);
@@ -100,6 +102,13 @@ static class GatewayWolverineExtensions
                         var watcher = new FeatureChecksJob(workItems.Store, home, new PullRequestChecks(async (verb, stdin, timeout) => await runner.RunAsync(verb, stdin, timeout)), m => host.PublishAsync(m), () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low);
                         jobs.Add(RecurringJobSlots.FeatureChecks, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["featureChecks"] = await watcher.Run(ct) }.ToJsonString()));
                     }
+                    // W9.10f: the sweep's item steps for the items the saga owns (every minute, on the leader): master's CI for merged code items (the settle's master-green wait and its parks), the settle's re-arm, a PASS whose pull request
+                    // was closed, an inspector's hold that a person approved. It reads GitHub with the delivery verbs' identity and kit; the owner that waited out a hold is released through the verb router
+                    var kitHost = new Lazy<DeliveryVerbHost>(() => DeliveryVerbHost.Make(sp), LazyThreadSafetyMode.PublicationOnly);
+                    var stepReads = new Fworker.Workflows.Delivery.ItemStepReads(new DeliveryKitSource(() => kitHost.Value));
+                    var itemSteps = new ItemStepsJob(workItems.Store, home, stepReads, stepReads, m => host.PublishAsync(m), () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low, masterWatch: workItems.Docs.Settings.CarriesFeature);
+                    jobs.Add(RecurringJobSlots.ItemSteps, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["itemSteps"] = await itemSteps.Run(ct) }.ToJsonString()));
+                    ItemStepsWiring.Attach(host, new OwnerRelease(() => sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), (item, holder) => sp.GetService<Plant>()?.ManagerReleased(item, holder)));
                     // W9.10o: the repair of the window between a saga's save and its outbox (the timer or command that was never sent), and the purge of the old successes of the idempotency ledger
                     if (workItems.Store is IWorkItemAges ages)
                     {
@@ -190,6 +199,13 @@ static class GatewayWolverineExtensions
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return plantSteps!; });
         // W6.6: the saga's parts, for the verbs' feed (S1) (resolving it builds the host first, which makes them)
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return workItemParts!; });
+        // W9.10h: the producers of the saga's inputs that are the gateway's own paths (the park and unpark of the runtime adapters, the credit guard and the admin endpoint; the runtime manager's budgets and refused starts)
+        if (c.Engine.V2Acts && c.Instance.Home is { } sagaHome)
+            services.AddSingleton(sp =>
+            {
+                var parts = sp.GetRequiredService<WorkItemParts>(); var host = sp.GetRequiredService<WolverineHostService>();
+                return new SagaInputs(parts.Ownership!, parts.Store, sagaHome, m => host.PublishAsync(m), m => host.PublishAsync(m));
+            });
         // W6.7: the views of the items the saga owns (status, dashboard, digest), read from the saga's table and the item history; no host is needed for a read, only the database. Nowhere else is it registered, so
         // every other environment answers exactly as before
         if (c.Engine.V2Acts && c.Database.ConnectionString is { } viewsConnection)

@@ -43,12 +43,12 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
         State.ArmSeq++;
         State.ArmId = $"{State.Generation}.{State.ArmSeq}";
         State.Status = WorkItemStatus.Open;
-        State.Parked = false; State.ParkReason = "";
+        State.Parked = false; State.ParkReason = ""; ClearParkTimers();
         State.SettleUntil = null;
         State.LeaseDue = StepOf(step).Lease(Policy) is { } lease ? Now + lease : null;
         State.MergeRequest = null; State.MergeRetryAt = null;   // (a merge asked of an earlier arm is no longer waited for)
         TimerChanged = true;
-        Decide(WorkItemActions.StepEntered, reason);
+        State.CardSeq = Decide(WorkItemActions.StepEntered, reason).Sequence;
         StepOf(step).OnEnter(this);   // (after the decision: what the step asks for, it asks for in the step it has entered)
         // a step that needs no session gives the slot of the scheduler back; the merge is the end of the item's time in flight there (the feature plan, W7.3)
         if (step is StepKind.Merge or StepKind.Deliver) EndSession();
@@ -66,9 +66,9 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
     public void Complete(string reason)
     {
         State.Status = WorkItemStatus.Completed;
-        State.LeaseDue = null; State.SettleUntil = null; State.Parked = false; State.ParkReason = "";
+        State.LeaseDue = null; State.SettleUntil = null; State.Parked = false; State.ParkReason = ""; ClearParkTimers();
         State.CompletedAt = Now;
-        State.MergeRequest = null; State.MergeRetryAt = null;
+        State.MergeRequest = null; State.MergeRetryAt = null; State.MasterDue = null;
         TimerChanged = true;
         Decide(WorkItemActions.Completed, reason);
         LeaveTrain("completed"); EndSession(); ClearSlot("completed");
@@ -96,22 +96,35 @@ public sealed class StepContext(WorkItemState state, WorkItemPolicy policy, IDoc
     public void HandBack(string reason)
     {
         State.Status = WorkItemStatus.Completed;
-        State.LeaseDue = null; State.SettleUntil = null; State.Parked = false; State.ParkReason = "";
-        State.MergeRequest = null; State.MergeRetryAt = null;
+        State.LeaseDue = null; State.SettleUntil = null; State.Parked = false; State.ParkReason = ""; ClearParkTimers();
+        State.MergeRequest = null; State.MergeRetryAt = null; State.MasterDue = null;
         State.CompletedAt = Now;
         TimerChanged = true;
         Decide(WorkItemActions.HandedBack, reason);
         LeaveTrain("handed back"); EndSession(); ClearSlot("handed back");
     }
 
-    public void Park(string reason)
+    /// <summary>
+    /// Parks the item. Where the engine takes the sweep's steps (W9.10f) the park ends by itself after <paramref name="span"/> (else <c>timing.parkHours</c>; <see cref="ParkExpired"/>), and a PASS that waits for its merge
+    /// is given up by its owner after <c>idleReleaseMinutes</c> (<see cref="OwnerIdleElapsed"/>).
+    /// </summary>
+    public void Park(string reason, TimeSpan? span = null)
     {
         State.Parked = true; State.ParkReason = reason;
         State.LeaseDue = null; State.MergeRequest = null; State.MergeRetryAt = null; State.MergeAwaitingChecks = false;
+        ClearParkTimers();
+        if (Policy.Sweep is { } sweep)
+        {
+            State.ParkUntil = Now + (span is { } s && s > TimeSpan.Zero ? s : sweep.ParkTime);
+            if (State.Step == StepKind.Merge && State.VerdictHead.Length > 0 && State.MergeCommit.Length == 0 && SweepParks.CodeOf(reason) != SweepParks.PassWithoutAutoMerge) State.OwnerIdleDue = Now + sweep.IdleReleaseAfter;
+        }
         TimerChanged = true;
         Decide(WorkItemActions.Parked, reason);
         LeaveTrain("parked"); EndSession(); ClearSlot("parked");
     }
+
+    /// <summary>The park is over (or never was): its expiry and the owner's patience are not waited for any more.</summary>
+    public void ClearParkTimers() { State.ParkUntil = null; State.OwnerIdleDue = null; State.OwnerReleased = false; }
 
     /// <summary>The settle window starts under a new arm, so its timer is checked like a lease.</summary>
     public void Settle(string reason)
@@ -263,6 +276,9 @@ public sealed class DeliverStep : WorkStep
 {
     public override StepKind Kind => StepKind.Deliver;
 
+    // W9.10f: a merged code item waits for master's CI before anything is delivered (the settle's master-green wait); a no-op without the sweep's rules, for an item that was watched already, and for a plan with no merge
+    public override void OnEnter(StepContext c) => SweepFlow.ArmMaster(c);
+
     public override StepAnswer Handle(StepContext c, WorkItemInput input)
     {
         switch (input)
@@ -283,6 +299,7 @@ public sealed class DeliverStep : WorkStep
         var env = d.Environment.ToLowerInvariant();
         var already = c.State.Delivered.TryGetValue(env, out var release) && release == d.Release;
         c.State.Delivered[env] = d.Release;
+        SweepFlow.DeliveredSoMasterWasGreen(c);
         if (!c.Plan.Has(StepKind.Deliver)) return StepAnswer.Refused($"the {c.Plan.Name} plan has nothing to deliver");
         if (env != c.Policy.FinalEnvironment.ToLowerInvariant() || c.State.Status == WorkItemStatus.Settling) return already ? StepAnswer.Refused("the delivery was recorded") : StepAnswer.Applied;
         if (c.State.Step != StepKind.Deliver)

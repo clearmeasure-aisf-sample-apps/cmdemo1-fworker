@@ -69,7 +69,7 @@ static class DocsVerbs
                 if (state.Step != StepKind.Verify || !Bool(answer, "recorded")) return [];
                 var passed = Bool(answer, "passed"); var pull = Int(body, "pr");
                 var verdictHead = Text(body, "head_sha") is { Length: > 0 } given ? given : head;
-                // a PASS the script parked (no Auto Merge label) is not a PASS the saga merges: it parks too, and a person's unpark resumes both
+                // a PASS the script parked (no Auto Merge label) is not a PASS the saga merges: it parks too. The operator's unpark resumes both: the admin endpoint and the unpark-item verb each tell the saga (ResumeWorkItem; W9.10h, SagaInputs and ItemAdminFeed)
                 if (passed && Text(answer, "next") == "parked") return [new ParkWorkItem(item, gen, $"park|{arm}|pass-without-auto-merge", "pass-without-auto-merge")];
                 return [new VerdictRecorded(item, gen, arm, $"verdict|{arm}|{pull}|{verdictHead}|{passed}", passed, pull, verdictHead, Text(body, "summary"))];
         }

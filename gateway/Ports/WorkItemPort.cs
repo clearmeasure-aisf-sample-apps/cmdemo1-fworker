@@ -153,11 +153,12 @@ static class MergeTrainSettingsReader
 }
 
 /// <summary>What the docs plan needs of GitHub (W6.6). Every reader is null without a credential (GH_TOKEN or the author App): the merge then answers "merge-unavailable" (a wait), the card stays where it is, nothing is read for the intake.</summary>
-sealed record DocsPlanParts(DocsPlanSettings Settings, DocsMergePort Merge, DocsProjection Projection, IMergeFactsReader? Facts, IBoardReader? Boards, PullRequestHeads? Heads, Func<BoardRef?> Board)
+sealed record DocsPlanParts(DocsPlanSettings Settings, DocsMergePort Merge, DocsProjection Projection, IMergeFactsReader? Facts, IBoardReader? Boards, PullRequestHeads? Heads, Func<BoardRef?> Board,
+    IProjectionVersions? Versions = null, ProjectionEcho? Echo = null, IItemIssueReader? Issues = null)
 {
     /// <summary>The intake job; null when it cannot read the board and the items. The caller brings the plant's facts (free slots, whether a design waits) and the lease.</summary>
     public DocsIntakeJob? IntakeJob(WorkItemIntake intake, RepoId home, IReadOnlyList<string> aiColumns, Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow) =>
-        Boards is null || Facts is null ? null : new DocsIntakeJob(Boards, Facts, intake, Board, home, Settings, aiColumns, freeSlots, designWaiting, mayAct, budgetLow);
+        Boards is null || Facts is null ? null : new DocsIntakeJob(Boards, Facts, intake, Board, home, Settings, aiColumns, freeSlots, designWaiting, mayAct, budgetLow, Issues);
 }
 
 /// <summary>The settings of D4's docs-only test (Fworker.Domain.DocsOnly), read from the configuration the rule scripts read: docsOnlyPaths, docsOnlyMarker, timing.docsOnlyLegacyBefore, requiredBodySection, videoLabel, masterCodeChecks.</summary>
@@ -206,7 +207,9 @@ static class WorkItemWiring
     static DocsPlanParts MakeDocsPlan(GatewayComposition c, DocsPlanSettings settings, Func<FactoryDbContext> open, string connectionString, Func<BoardRef?> boardRef, Func<string, string?> env, HttpClient? http, MergeQueueCount queue)
     {
         var tokens = GitHubTokenProvider.FromEnvironment(env);   // GH_TOKEN, else the author App's installation token (the token of the rule scripts)
-        if (tokens is null) return new DocsPlanParts(settings, new DocsMergePort(null, null, settings), new DocsProjection(() => null, settings), null, null, null, boardRef);
+        // (the projection versions and the echo of the card projection are the ingress inbox's too: it asks the echo before a card event reaches the saga)
+        var versions = new SqlProjectionVersions(open); var echo = new ProjectionEcho(versions);
+        if (tokens is null) return new DocsPlanParts(settings, new DocsMergePort(null, null, settings), new DocsProjection(() => null, settings), null, null, null, boardRef, versions, echo);
         var root = c.Instance.Root;
         string Str(string name, string fallback) => root?[name]?.ToString() is { Length: > 0 } s ? s : fallback;
         var api = env("GITHUB_API_URL");
@@ -218,10 +221,9 @@ static class WorkItemWiring
         var claimNode = Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node;
         var merge = new MergePullRequestHandler(new SqlCommandStores(connectionString, owner: () => new Fworker.Integrations.Commands.ClaimOwner(claimNode, c.Leader?.ClaimEpoch ?? 0)).Ledger, new MergeDirect(clients));
         var facts = new HttpMergeFactsReader(http, creds, Str("name", "factory-worker"), Str("videoLabel", "video"), observe);
-        var versions = new SqlProjectionVersions(open); var echo = new ProjectionEcho(versions);
         BoardColumnProjection? card = null;
         BoardColumnProjection? Card() => card ??= boardRef() is { } board ? new BoardColumnProjection(http, creds, board, versions, echo) : null;
-        return new DocsPlanParts(settings, new DocsMergePort(merge, facts, settings, () => budget.Low().Low, queue.Busy), new DocsProjection(Card, settings), facts, new HttpBoardReader(http, creds, observe), new PullRequestHeads(clients), boardRef);
+        return new DocsPlanParts(settings, new DocsMergePort(merge, facts, settings, () => budget.Low().Low, queue.Busy), new DocsProjection(Card, settings), facts, new HttpBoardReader(http, creds, observe), new PullRequestHeads(clients), boardRef, versions, echo, facts);
     }
 
     public static FactoryDbContext Open(string connectionString) => new(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer(connectionString).Options);
@@ -246,6 +248,9 @@ static class WorkItemWiring
             // W7.2: the merge goes through the train of its repository (the request enters it, the turn is granted to the merge port above, the answer comes back through it)
             services.AddSingleton(parts.Merge.Service);
             services.AddSingleton(parts.Merge.History);
+            // W9.10h: a merged feature item on its Deliver step is told what its merge commit's checks and its pull request's files say (MergeFactsRead), so a docs-only merge is settled as docs
+            services.AddSingleton(new MergeFactsPort(parts.Store, parts.Docs.Issues));
+            w.Discovery.IncludeType(typeof(MergeFactsHandler));
             w.Discovery.IncludeType(typeof(WorkItemHandlers));
             w.Discovery.IncludeType(typeof(WorkItemRouting));
             w.Discovery.IncludeType(typeof(WorkItemHistoryHandler));

@@ -26,7 +26,7 @@ sealed record RecurringJobIntervals(TimeSpan BoardReconciler, TimeSpan PlantStep
 
 sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
 {
-    public const string BoardReconciler = "board-reconciler", CatalogReread = "catalog-reread", IngressDedupPurge = "ingress-dedup-purge", DocsIntake = "docs-intake", FeatureChecks = "feature-checks", SagaRearm = "saga-rearm", LedgerPurge = "ledger-purge", IncidentHealth = "incident-health";
+    public const string BoardReconciler = "board-reconciler", CatalogReread = "catalog-reread", IngressDedupPurge = "ingress-dedup-purge", DocsIntake = "docs-intake", FeatureChecks = "feature-checks", SagaRearm = "saga-rearm", LedgerPurge = "ledger-purge", IncidentHealth = "incident-health", ItemSteps = "item-steps";
     // W9.10g: the plant-wide steps of the sweep, the retention prune
     public const string ClaimRefReap = "claim-ref-reap", BoardGuard = "board-guard", QcSync = "qc-sync", Replenish = "replenish", BacklogLow = "backlog-low", RetentionPrune = "retention-prune";
     public IReadOnlyList<RecurringJobSlot> Slots { get; } = slots;
@@ -36,7 +36,7 @@ sealed class RecurringJobSlots(IReadOnlyList<RecurringJobSlot> slots)
     {
         var i = intervals ?? RecurringJobIntervals.Default;
         TimeSpan Soon(TimeSpan every) => TimeSpan.FromSeconds(Math.Min(every.TotalSeconds, 15));   // the first run of a plant-wide step: as soon as the leader may act (the job itself waits for the restore)
-        return new([new(BoardReconciler, i.BoardReconciler), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1)), new(FeatureChecks, TimeSpan.FromMinutes(1)), new(SagaRearm, TimeSpan.FromMinutes(5)), new(LedgerPurge, TimeSpan.FromHours(6)), new(IncidentHealth, TimeSpan.FromMinutes(1)),
+        return new([new(BoardReconciler, i.BoardReconciler), new(CatalogReread, TimeSpan.FromMinutes(15)), new(IngressDedupPurge, TimeSpan.FromHours(6)), new(DocsIntake, TimeSpan.FromMinutes(1)), new(FeatureChecks, TimeSpan.FromMinutes(1)), new(SagaRearm, TimeSpan.FromMinutes(5)), new(LedgerPurge, TimeSpan.FromHours(6)), new(IncidentHealth, TimeSpan.FromMinutes(1)), new(ItemSteps, TimeSpan.FromMinutes(1)),
             new(ClaimRefReap, i.PlantSteps, Soon(i.PlantSteps)), new(BoardGuard, i.PlantSteps, Soon(i.PlantSteps)), new(QcSync, i.QcSync, Soon(i.QcSync)), new(Replenish, i.PlantSteps, Soon(i.PlantSteps)), new(BacklogLow, i.PlantSteps, Soon(i.PlantSteps)),
             new(RetentionPrune, i.Retention, TimeSpan.FromMinutes(10))]);
     }

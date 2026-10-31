@@ -113,6 +113,21 @@ static class IngressInboxWiring
     }
 }
 
+static class IngressInboxSagaWiring
+{
+    /// <summary>W9.10h: where the engine acts, the events of the inbox are also the saga's inputs (SagaIngress: close, reopen, card moves, hold labels). Attach after <see cref="IngressInboxWiring.Attach"/>, which routes the message to the queue.</summary>
+    public static void Attach(WolverineHostService host, SagaIngress ingress)
+    {
+        var previous = host.RuntimeCommands;
+        host.RuntimeCommands = (services, w) =>
+        {
+            previous?.Invoke(services, w);
+            services.AddSingleton(ingress);
+            w.Discovery.IncludeType(typeof(SagaIngressHandler));
+        };
+    }
+}
+
 /// <summary>
 /// The correlation-map writers of the verbs and the runtimes (W4.1). Off the caller's thread: a database that does not answer never fails the verb. A failed write is tried again with growing
 /// pauses (#485), each mapping on its own, until it is stored or the attempts are spent (the log says so); a pull request mapping that stays unwritten is written again when the inbox takes in the

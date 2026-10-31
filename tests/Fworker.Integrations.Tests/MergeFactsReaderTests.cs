@@ -53,6 +53,25 @@ public class MergeFactsReaderTests
     }
 
     [Fact]
+    public async Task TheMergedPullRequestOfAClosedIssue_IsTheOneThatMergedLast_AndCarriesWhenItMerged()
+    {
+        // the list is not in merge order: the latest mergedAt wins, and a pull request without a time keeps the list's order
+        var stub = new Stub((_, body) =>
+        {
+            Assert.Contains("mergedAt", body);
+            return (HttpStatusCode.OK, """
+                {"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[
+                  {"number":9,"merged":true,"mergedAt":"2026-10-29T10:00:00Z","baseRefName":"master","headRefName":"a","title":"newer","body":"","mergeCommit":{"oid":"2222222222222222222222222222222222222222"}},
+                  {"number":4,"merged":true,"mergedAt":"2026-10-01T10:00:00Z","baseRefName":"master","headRefName":"b","title":"older","body":"","mergeCommit":{"oid":"1111111111111111111111111111111111111111"}}]}}}}}
+                """);
+        });
+        var pr = await Reader(stub).FindMergedPullRequest(new ItemId(Repo, 7));
+        Assert.Equal((9, new DateTimeOffset(2026, 10, 29, 10, 0, 0, TimeSpan.Zero)), (pr!.Number, pr.MergedAt));
+        var pulls = new Stub((_, _) => (HttpStatusCode.OK, """{"merged":true,"merged_at":"2026-10-29T10:00:00Z","base":{"ref":"master"},"head":{"ref":"x"},"title":"T","body":"","merge_commit_sha":"abc"}"""));
+        Assert.Equal(new DateTimeOffset(2026, 10, 29, 10, 0, 0, TimeSpan.Zero), (await Reader(pulls).ReadPullRequest(Repo, 9))!.MergedAt);
+    }
+
+    [Fact]
     public async Task TheItem_CarriesLabelsBody_AndTheVerdictAndMergeOfItsStateComment_AndTheDemoVideoWhenLabelled()
     {
         var state = new JsonObject { ["verdict"] = new JsonObject { ["passed"] = true, ["pr"] = 9 }, ["merge"] = new JsonObject { ["pr"] = 9, ["by"] = "gateway" } };
@@ -88,6 +107,55 @@ public class MergeFactsReaderTests
         Assert.Null(await reader.ReadItem(new ItemId(Repo, 9)));
         Assert.Null(await reader.ReadItem(new ItemId(Repo, 10)));
         Assert.DoesNotContain(stub.Paths, p => p.Contains("releases"));   // no video label, no release read
+    }
+
+    // ---- W9.10h: the reads of the saga's producers (IItemIssueReader) ----------------------------------------------------------------------------
+
+    [Fact]
+    public async Task TheIssue_CarriesItsStateAndLabels_WithoutReadingComments_AndAPullRequestOrAMissingIssueIsNull()
+    {
+        var stub = new Stub((r, _) =>
+        {
+            var p = r.RequestUri!.AbsolutePath;
+            if (p.EndsWith("/issues/8")) return (HttpStatusCode.OK, """{"state":"closed","labels":[{"name":"factory worker"},{"name":"hold:owner"}]}""");
+            if (p.EndsWith("/issues/9")) return (HttpStatusCode.OK, """{"state":"open","labels":[]}""");
+            if (p.EndsWith("/issues/10")) return (HttpStatusCode.OK, """{"state":"open","labels":[],"pull_request":{}}""");
+            return (HttpStatusCode.NotFound, "{}");
+        });
+        var reader = Reader(stub);
+        var closed = await reader.ReadIssue(new ItemId(Repo, 8));
+        Assert.True(closed!.Closed); Assert.Equal(["factory worker", "hold:owner"], closed.Labels);
+        Assert.False((await reader.ReadIssue(new ItemId(Repo, 9)))!.Closed);
+        Assert.Null(await reader.ReadIssue(new ItemId(Repo, 10)));
+        Assert.Null(await reader.ReadIssue(new ItemId(Repo, 11)));
+        Assert.DoesNotContain(stub.Paths, p => p.Contains("comments"));
+    }
+
+    [Fact]
+    public async Task TheCheckRunsOfACommit_AreReadWithTheirStatusAndConclusion_AndAnUnknownCommitIsNull()
+    {
+        var stub = new Stub((r, _) => r.RequestUri!.AbsolutePath.EndsWith("/commits/abc/check-runs")
+            ? (HttpStatusCode.OK, """{"total_count":2,"check_runs":[{"name":"Build result","status":"completed","conclusion":"success"},{"name":"Integration Build (SQL container)","status":"completed","conclusion":"skipped"},{"name":"Pending","status":"in_progress","conclusion":null}]}""")
+            : (HttpStatusCode.NotFound, "{}"));
+        var reader = Reader(stub);
+        var checks = await reader.ReadCheckRuns(Repo, "abc");
+        Assert.Equal([("Build result", "completed", "success"), ("Integration Build (SQL container)", "completed", "skipped"), ("Pending", "in_progress", null)], checks!.Select(c => (c.Name, c.Status, c.Conclusion)));
+        Assert.Null(await reader.ReadCheckRuns(Repo, "def"));
+    }
+
+    [Fact]
+    public async Task TheFilesOfAPullRequest_AreReadPageByPage_AndAMissingPullRequestIsNull()
+    {
+        var stub = new Stub((r, _) =>
+        {
+            var q = r.RequestUri!.Query;
+            if (!r.RequestUri.AbsolutePath.EndsWith("/pulls/9/files")) return (HttpStatusCode.NotFound, "{}");
+            return q.Contains("&page=1") ? (HttpStatusCode.OK, "[" + string.Join(",", Enumerable.Range(0, 100).Select(i => $"{{\"filename\":\"docs/f{i}.md\"}}")) + "]") : (HttpStatusCode.OK, """[{"filename":"src/last.cs"}]""");
+        });
+        var reader = Reader(stub);
+        var files = await reader.ReadPullRequestFiles(Repo, 9);
+        Assert.Equal((101, "docs/f0.md", "src/last.cs"), (files!.Count, files[0], files[^1]));
+        Assert.Null(await reader.ReadPullRequestFiles(Repo, 10));
     }
 
     [Fact]
