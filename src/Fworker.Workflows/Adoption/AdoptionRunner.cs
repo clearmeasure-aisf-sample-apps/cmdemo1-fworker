@@ -97,7 +97,7 @@ public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports,
             ct.ThrowIfCancellationRequested();
             try { await One(report, new ItemId(options.Home, number), card, trains, promotions, afterBreak, ct); }
             catch (OperationCanceledException) { throw; }
-            catch (Exception e) { report.Error(e); }
+            catch (Exception e) { report.Error(e); report.FailedItems.Add(number); }
         }
         return acting();
     }
@@ -118,7 +118,7 @@ public sealed class AdoptionRunner(AdoptionOptions options, AdoptionPorts ports,
             var (comment, cardSeq) = await ports.Projected.Of(key, ct);
             var ledger = (await ports.Capacity.Load(CapacityKeys.Factory, ct))?.State;
             var at = now();
-            var mapping = AdoptionMapper.Map(snapshot with { HeldSlot = ledger?.Slots.GetValueOrDefault(key) }, options.Mapping, at, AdoptionFence.GenerationFor(rec?.State, afterBreak));
+            var mapping = AdoptionMapper.Map(snapshot with { HeldSlot = ledger?.Slots.GetValueOrDefault(key) }, options.Mapping, at, AdoptionFence.GenerationFor(rec?.State, afterBreak), options.Gap?.Invoke());
             var result = AdoptionReconciler.Reconcile(rec?.State, comment, cardSeq, mapping, at, afterBreak);
             if (await Apply(report, key, result, rec?.Revision ?? 0, ct)) { Tally(report, result, mapping); return; }
             report.Conflicts++;

@@ -110,12 +110,17 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     /// W9.10e: what the script is told where the engine acts. `skip_items`: the items that have a saga are not v1's, so the script reads and acts on none of them (settle, merge pickup, the PASS merge, park, demote,
     /// auto-unpark, claim-ref reap). `intake.v2Plans` (only in a pass that has an intake block): the plans whose Todo items the engine's intake takes, which v1's intake leaves in the column. Nothing is added without V2.
     /// </summary>
-    internal static void AddV2Arguments(JsonObject args, V2Ownership? v2, IReadOnlyList<string> v2Plans)
+    internal static void AddV2Arguments(JsonObject args, V2Ownership? v2, IReadOnlyList<string> v2Plans, IReadOnlyCollection<int>? left = null)
     {
         if (v2 is null) return;
-        if (v2.Count > 0) args["skip_items"] = new JsonArray(v2.Items.OrderBy(i => i).Select(i => (JsonNode)i).ToArray());
+        // (left: after a break the items the adoption could not fence; the script leaves them alone like the saga's)
+        var skip = v2.Items.Concat(left ?? []).Distinct().OrderBy(i => i).ToList();
+        if (skip.Count > 0) args["skip_items"] = new JsonArray(skip.Select(i => (JsonNode)i).ToArray());
         if (v2Plans.Count > 0 && args["intake"] is JsonObject intake) intake["v2Plans"] = new JsonArray(v2Plans.Select(p => (JsonNode)p).ToArray());
     }
+
+    // cutover review: after a break, the items the adoption of the term could not fence (AdoptionJob.Excluded): v1 leaves them alone until a run fences them
+    IReadOnlyCollection<int> Left() => Adoption is null ? [] : Adoption.Excluded();
 
     DateTime ownershipWarned = DateTime.MinValue;
     async Task<bool> OwnershipRead(CancellationToken ct)
@@ -148,8 +153,9 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             await V2.RefreshAsync(ct);
             if (items != null)
             {
+                var left = Left();
                 var mine = items.Where(V2.Owns).ToList();
-                items = items.Where(i => !V2.Owns(i)).ToList();
+                items = items.Where(i => !V2.Owns(i) && !left.Contains(i)).ToList();
                 // W6.6: the pass named only the saga's items. v1 has nothing to read for them, but the plant still takes the saga's offers for them (an item whose step just began waits for a session)
                 if (items.Count == 0) { if (ownerMode && mine.Count > 0) PlanV2Offers(mine); return unconfirmedOut; }
             }
@@ -162,7 +168,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         if (ownerMode) args["free_workers"] = plant.FreeOwnerSessions();
         // work intake (issue 104): a full sweep may pull a Todo item onto the board when an owner session has a free slot
         if (ownerMode && items == null && !IntakeOff) args["intake"] = new JsonObject { ["freeSlots"] = plant.IntakeSlots() };
-        AddV2Arguments(args, V2, V2Plans);
+        AddV2Arguments(args, V2, V2Plans, Left());
         if (PlantJobs) args["skip_steps"] = new JsonArray(PlantStepJobs.SweepSkips.Select(x => (JsonNode)x).ToArray());
         // replenish backpressure (delivery-speed.md 6): the waiting items of the last plan; absent before the first plan has run (Replenish.ps1 then holds back)
         if (ownerMode && items == null && plant.LastPlanWaiting() is { } lastWaiting) args["replenish_waiting"] = lastWaiting;
@@ -196,9 +202,10 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
             // card the script saw there has a row by now, and the set is read again before the filter drops v1's word about it. Read once at the start only, the sweep offered an item that has a saga to the plant
             // (a v1 offer with no slot, and the capacity of the scheduler counted twice) in the seconds between the saga's start and the next sweep. A read that fails leaves the set as it was.
             if (V2 != null) await V2.RefreshAsync(ct);
-            if (V2 != null && V2.Count > 0)
+            if (V2 != null && (V2.Count > 0 || Left().Count > 0))
             {
-                SweepV2Filter.Apply(j, V2.Owns);
+                var left = Left();
+                SweepV2Filter.Apply(j, i => V2.Owns(i) || left.Contains(i));
                 // W9.10k: what the sweep would have said of those items, from the saga's state and the cards' labels (a full pass: an incremental pass names none of them)
                 if (items == null && Feed != null)
                 {

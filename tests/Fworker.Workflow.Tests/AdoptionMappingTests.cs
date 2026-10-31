@@ -255,6 +255,24 @@ public class AdoptionMappingTests
 
     // ---- L: the claim, the lease and the slot -----------------------------------------------------------------------------------------------------------------
 
+    // Cutover review: the adoption comes before the first sweep's gap renewal (Invoke-GapRenew, issue 94), so an owner's claim that ran out while no gateway was up is live for it, with a fresh lease, as the renewal makes it
+    [Fact]
+    public void L0_AnOwnersClaimThatRanOutInTheGap_IsAdoptedWithItsSession_AClaimThatRanOutBeforeItIsNot()
+    {
+        var gap = (Now - TimeSpan.FromMinutes(12), Now);
+        var lapsed = AdoptionMapper.Map(Snapshot(Develop, State(extra: Claim(Develop, true, TimeSpan.FromMinutes(-5)))), Settings(), Now, gap: gap);
+        var s = lapsed.State!;
+        Assert.True(s.SlotKnown); Assert.True(s.EverGranted); Assert.False(s.SlotAsked);
+        Assert.NotNull(lapsed.Slot);
+        Assert.True(s.LeaseDue > Now);                 // (renewed, not the lease that ran out)
+        Assert.Empty(s.Outbox);                        // (no request for another session)
+
+        var before = AdoptionMapper.Map(Snapshot(Develop, State(extra: Claim(Develop, true, TimeSpan.FromMinutes(-40)))), Settings(), Now, gap: gap);
+        Assert.True(before.State!.SlotAsked);          // (it lapsed before the gap: dead as ever, the item asks for a session)
+        var none = AdoptionMapper.Map(Snapshot(Develop, State(extra: Claim(Develop, true, TimeSpan.FromMinutes(-5)))), Settings(), Now);
+        Assert.True(none.State!.SlotAsked);            // (no gap noted: nothing renewed)
+    }
+
     [Fact]
     public void L1_ALiveOwnersClaimIsTheStepsLease_AndASlotInTheLedger()
     {

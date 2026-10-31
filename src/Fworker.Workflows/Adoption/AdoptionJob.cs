@@ -14,6 +14,7 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
     readonly object gate = new();
     long? termEpoch, doneEpoch, clearedEpoch;
+    IReadOnlySet<int> excluded = new HashSet<int>();
     (bool Break, string Why)? termBreak;
     int attempts;
     DateTimeOffset? retryAt;
@@ -57,7 +58,7 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         (bool Break, string Why) decided;
         lock (gate)
         {
-            if (termEpoch != e) { termEpoch = e; termBreak = null; attempts = 0; retryAt = null; }
+            if (termEpoch != e) { termEpoch = e; termBreak = null; attempts = 0; retryAt = null; excluded = new HashSet<int>(); }
         }
         try
         {
@@ -80,7 +81,8 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         lock (gate)
         {
             state = report.Outcome;
-            if (report.Outcome == "done" || (report.Outcome == "partial" && !decided.Break && report.ItemsCompleted)) clearedEpoch = e;   // (the sweep may begin: a finished run of the term, no break whose fencing is outstanding)
+            if (report.ItemsCompleted) excluded = decided.Break ? report.FailedItems.ToHashSet() : [];   // (after a break the items that could not be fenced stay out of v1's sweep; without one they are v1's as ever)
+            if (report.Outcome == "done" || (report.Outcome == "partial" && report.ItemsCompleted)) clearedEpoch = e;   // (the sweep may begin: a finished run of the term, no break whose fencing is outstanding)
             if (report.Outcome == "done" || (report.Outcome == "partial" && attempts >= maxAttempts && !decided.Break)) { doneEpoch = e; doneAt = now(); }
             else if (report.Outcome == "partial" && decided.Break && attempts >= maxAttempts) retryAt = now() + TimeSpan.FromTicks(Math.Min(RetryCap.Ticks, TimeSpan.FromMinutes(1).Ticks << Math.Min(attempts - maxAttempts, 10)));
         }
@@ -95,7 +97,10 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         catch (Exception ex) when (ex is not OperationCanceledException) { Console.Error.WriteLine($"adoption: the engine marker could not be written ({ex.GetType().Name})"); }
     }
 
-    /// <summary>Whether the sweep may begin in the term with this epoch: a run of the term finished "done", or finished "partial" where no break is outstanding (items it could not read stay v1's, as before; the job retries them), or a partial one was given up after MaxAttempts. After a break only a "done" run (the fencing) counts. The gateway's sweep waits for it (AdoptionGate): the first pass of a term does not begin beside the adoption.</summary>
+    /// <summary>Cutover review: after a break, the items the latest finished run of the term could not fence (their read or write failed). The sweep leaves them alone, as it leaves the saga's items, until a run fences them.</summary>
+    public IReadOnlySet<int> Excluded { get { lock (gate) return excluded; } }
+
+    /// <summary>Whether the sweep may begin in the term with this epoch: a run of the term got through the items (the board and the rows were read and every item was tried), whatever the trains, the backfill or one item did; the items that could not be fenced after a break are <see cref="Excluded"/> from the sweep. The gateway's sweep waits for it (AdoptionGate): the first pass of a term does not begin beside the adoption.</summary>
     public bool IsDone(long termEpochToAsk) { lock (gate) return doneEpoch == termEpochToAsk || clearedEpoch == termEpochToAsk; }
 
     /// <summary>The "adoption" block of the v2 status: where the term stands and the report of the latest run.</summary>

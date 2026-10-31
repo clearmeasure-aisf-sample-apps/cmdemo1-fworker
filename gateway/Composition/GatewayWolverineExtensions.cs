@@ -35,8 +35,22 @@ static class GatewayWolverineExtensions
         // cutover review: the sweep waits for the adoption of its term (AdoptionGate); registered below where the engine acts, set up here because the status block and the host's wiring close over `adoption`
         WolverineHostService? hostForPoke = null;
         // (the sweep asks for the term's first look of the adoption itself once the host runs: the recurring job's first look comes later, and the sweep waits for it)
+        // (at most one look every 15 s, so that a plant that is not restored yet or markers that cannot be read, a database in trouble, are not asked every 2 s; a line only when the answer changes)
+        var lastPoke = DateTime.MinValue; string? lastPoked = null;
         var adoptionGate = new AdoptionGate(() => adoption is not null, e => adoption!.Job.IsDone(e), () => c.Leader.MayAct, () => c.Leader.ClaimEpoch,
-            poke: async ct => { if (adoption is { } a && hostForPoke is { State: WolverineHostService.Phase.Running }) { var did = await a.Job.TickIfFirst(ct); if (did is not (null or "heartbeat" or "not-leader")) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["adoption"] = did, ["report"] = a.Runner.Last?.ToJson() }.ToJsonString()); } });
+            excluded: () => adoption?.Job.Excluded ?? new HashSet<int>(),
+            poke: async ct =>
+            {
+                if (adoption is not { } a || hostForPoke is not { State: WolverineHostService.Phase.Running } || DateTime.UtcNow - lastPoke < TimeSpan.FromSeconds(15)) return;
+                var did = await a.Job.TickIfFirst(ct);
+                if (did is null) return;
+                lastPoke = DateTime.UtcNow;
+                if (did is not ("heartbeat" or "not-leader") && did != lastPoked)
+                {
+                    lastPoked = did;
+                    Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["adoption"] = did, ["report"] = a.Runner.Last?.ToJson() }.ToJsonString());
+                }
+            });
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return adoptionGate; });
         services.AddSingleton(sp =>
         {
@@ -146,7 +160,7 @@ static class GatewayWolverineExtensions
                     Fworker.Workflows.Reconcilers.PlantSteps? stepsMade = null;   // (made at the first run: the instance configuration and the GitHub identity are in the container by then; null where there is no identity, the jobs then say no-github)
                     Func<bool> plantRestored = () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60));   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)
                     var steps = plantSteps = new PlantStepJobs(() => stepsMade ??= KeeperWiring.MakePlantSteps(sp, () => c.Leader.MayAct), () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, workItems.Ownership, () => c.Leader.MayAct,
-                        plantRestored, c.Gateway.OwnerMode);
+                        () => plantRestored() && adoptionGate.Settled() is not null, c.Gateway.OwnerMode);   // (the plant-wide steps wait for the adoption of the term as the sweep does)
                     jobs.Add(RecurringJobSlots.ClaimRefReap, ct => steps.ClaimRefReap(ct));
                     jobs.Add(RecurringJobSlots.BoardGuard, ct => steps.BoardGuard(ct));
                     jobs.Add(RecurringJobSlots.QcSync, ct => steps.QcSync(ct));

@@ -92,7 +92,11 @@ static class AdoptionWiring
         var branch = Str("defaultBranch", "master");
         // the trains of the home repository's deployables: every environment of the chain (the train of an environment that has no state yet is just not there)
         Func<IReadOnlyList<string>> trainKeys = () => catalog()?.Current.Deployables.Where(d => d.Repository == home).SelectMany(d => DeliveryPolicy.Chain.Select(e => TrainKey.Of(d.Name, e))).ToList() ?? [];
-        var options = new AdoptionOptions(home, mapping, trainKeys, MergeQueueDepth: settings.MergeQueueDepth);
+        var options = new AdoptionOptions(home, mapping, trainKeys, MergeQueueDepth: settings.MergeQueueDepth)
+        {
+            // cutover review: the gap the restore noted, not taken (the first full sweep takes it, after this adoption): an owner's claim that ran out in it is live (AdoptionMapper)
+            Gap = () => c.SweepGap.Peek() is { } since ? (new DateTimeOffset(DateTime.SpecifyKind(since, DateTimeKind.Utc)), DateTimeOffset.UtcNow) : null,
+        };
         var octopus = PendingReader(root, env, http);
         var names = (root?["octopus"]?["environments"] as JsonObject)?.ToDictionary(kv => kv.Key, kv => kv.Value?.ToString() ?? "", StringComparer.OrdinalIgnoreCase) ?? [];
         // the Octopus name of an environment to its key (tdd, uat, prod); a name that is none of the chain's is not a train's Sign-off
@@ -150,8 +154,11 @@ sealed class KillSwitchMarkerService(IEngineMarkers markers, string holder, Func
 /// first time the adoption has been over in this process, /ready answers 503 "adoption". A process that never adopts is an outage for the operator to decide (FACTORY_V2_OFF=1 hands the factory back to v1, whose marker the next adoption fences);
 /// a v1 pass on items the adoption has not examined is the unfenced case this exists to prevent. Where this process has no adoption (no GitHub identity: nothing could be read) there is nothing to wait for.
 /// </summary>
-sealed class AdoptionGate(Func<bool> hasAdoption, Func<long, bool> isDone, Func<bool> mayAct, Func<long> epoch, Func<DateTimeOffset>? clock = null, TimeSpan? limit = null, Func<CancellationToken, Task>? poke = null)
+sealed class AdoptionGate(Func<bool> hasAdoption, Func<long, bool> isDone, Func<bool> mayAct, Func<long> epoch, Func<DateTimeOffset>? clock = null, TimeSpan? limit = null, Func<CancellationToken, Task>? poke = null, Func<IReadOnlySet<int>>? excluded = null)
 {
+    /// <summary>After a break, the items the adoption could not fence: the sweep leaves them alone (the rest of the board is swept, with the saga's offers).</summary>
+    public IReadOnlySet<int> Excluded() => excluded?.Invoke() ?? new HashSet<int>();
+
     /// <summary>Asks for the term's first look of the adoption now instead of at the recurring job's next tick (the wiring: only while the Wolverine host runs). The sweep calls it while it waits.</summary>
     public Task PokeAsync(CancellationToken ct) => poke?.Invoke(ct) ?? Task.CompletedTask;
 

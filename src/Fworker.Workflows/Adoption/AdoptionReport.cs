@@ -20,6 +20,8 @@ public sealed class AdoptionReport
     public int Cards { get; set; }
     /// <summary>The pass over the items finished (the board and the saga's rows were read and every item was tried; an item whose read failed is an error, not the end of the pass). Not in the status JSON.</summary>
     public bool ItemsCompleted { get; set; }
+    /// <summary>The items whose adoption failed in this run (a read, a conflict, a write): after a break these are the items that are not fenced. Not in the status JSON (the count of errors is).</summary>
+    public SortedSet<int> FailedItems { get; } = [];
     public int Read { get; set; }
 
     public int Adopted { get; set; }

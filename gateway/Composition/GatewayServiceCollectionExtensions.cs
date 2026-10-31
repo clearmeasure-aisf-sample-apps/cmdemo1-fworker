@@ -264,7 +264,7 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, gw.PublicUrl, gw.TokenSecret));
         // master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs); only the acting gateway
         var leader = c.Leader;
-        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode) { MayAct = () => leader.MayAct });
+        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase });
         // the operator session's recorded releases (gateway/Operator/OperatorReleaseLoader.cs): read once at start, after the revocations' read has started
         var skipRevocations = c.Revocation.SkipRevocations;
         services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, skipRevocations, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));
@@ -339,9 +339,9 @@ static class GatewayServiceCollectionExtensions
                 rmx.OnStartRefused = (item, key, outcome) => _ = saga.StartRefused(item, key, outcome);
             }
             rmx.ReleaseClaim = async (item, holder) => await rr.RunAsync("claim-item", new JsonObject { ["item"] = item, ["release"] = true, ["force"] = true, ["holder"] = holder }.ToJsonString(), TimeSpan.FromSeconds(120));
-            return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct };
+            return new RuntimeLoop(rmx) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase };
         });
-        services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct });
+        services.AddHostedService(sp => new PlantTicker(sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sp.GetRequiredService<Messenger>(), sp.GetRequiredService<Runner>()) { MayAct = () => leader.MayAct && !c.Engine.NoDatabase });
         c.SweepMinSeconds = sweepMinSeconds;
         // C5c: the loops Program.cs started after Build(), in that order: the Copilot CI release, the Copilot owner watch, the Cursor owner watch
         services.AddGatewayCloudOwners(c);
@@ -353,6 +353,10 @@ static class GatewayServiceCollectionExtensions
         return services;
     }
 
+    // Cutover review: the lease as the loops that act on items see it. Where v2 is configured and there is no database (EngineOptions.NoDatabase) nothing may act: the lease is held (status, hand-over) but MayAct is false.
+    internal static ILeadership ActingLeadership(GatewayComposition c, IServiceProvider sp) =>
+        c.Engine.NoDatabase ? new InertLeadership(sp.GetRequiredService<ILeadership>()) : sp.GetRequiredService<ILeadership>();
+
     // The CI release and the owner watches of the cloud runtimes (gateway/Runtimes/Owner*.cs, task C5c), where Program.cs started them: the CI release
     // where the Copilot runtime is on and api.copilot.ciRelease; one CloudOwnerWatch per cloud runtime that is on. The Copilot watch's registration
     // also sets the Copilot credit guard (OverBudget), which parks through the plant; the host makes every hosted service before it starts any.
@@ -362,7 +366,7 @@ static class GatewayServiceCollectionExtensions
         var copilotRuntime = rts.CopilotRuntime; var copilotManager = rts.Copilot; var cursorRuntime = rts.CursorRuntime; var cursorManager = rts.Cursor;
         if (copilotManager != null && copilotSettings.CiRelease)
             services.AddHostedService(sp => new CopilotCiReleaseService(rts.CopilotCiRelease, copilotManager, copilotRuntime, sp.GetRequiredService<Plant>(), sp.GetRequiredService<Runner>(),
-                sp.GetRequiredService<ILeadership>(), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds)));
+                ActingLeadership(c, sp), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds)));
         // two registrations of one implementation type: AddSingleton<IHostedService> adds each (AddHostedService would keep only the first, as with RuntimeLoop)
         if (copilotRuntime != null && copilotManager != null)
             services.AddSingleton<IHostedService>(sp =>
@@ -376,11 +380,11 @@ static class GatewayServiceCollectionExtensions
                     plant.Route(item, new JsonObject { ["provider"] = "gateway", ["event"] = "item.parked", ["item"] = item, ["reason"] = "credit-guard" });
                     if (saga is not null) await saga.Parked(item, "credit-guard", SagaKeys.ParkKey(output, "credit-guard", phase));
                 };
-                return new CloudOwnerWatch(copilotRuntime, copilotManager, sp.GetRequiredService<CopilotOwnerVerbs>(), sp.GetRequiredService<ILeadership>(),
+                return new CloudOwnerWatch(copilotRuntime, copilotManager, sp.GetRequiredService<CopilotOwnerVerbs>(), ActingLeadership(c, sp),
                     sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, new CloudOwnerWatchOptions { IntervalSeconds = copilotSettings.CiReleaseSeconds, MasterFixer = copilotRuntime });
             });
         if (cursorRuntime != null && cursorManager != null)
-            services.AddSingleton<IHostedService>(sp => new CloudOwnerWatch(cursorRuntime, cursorManager, sp.GetRequiredService<CopilotOwnerVerbs>(), sp.GetRequiredService<ILeadership>(),
+            services.AddSingleton<IHostedService>(sp => new CloudOwnerWatch(cursorRuntime, cursorManager, sp.GetRequiredService<CopilotOwnerVerbs>(), ActingLeadership(c, sp),
                 sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, new CloudOwnerWatchOptions { IntervalSeconds = cursorSettings.OwnerWatchSeconds }));
     }
 
@@ -416,7 +420,7 @@ static class GatewayServiceCollectionExtensions
             Console.WriteLine(new JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["manager"] = "copilot-config", ["enabled"] = mgrCopSettings.Enabled, ["maxPerDay"] = mgrCopSettings.MaxPerDay, ["cooldownMinutes"] = mgrCopSettings.CooldownMinutes, ["maxMinutes"] = mgrCopSettings.MaxMinutes }.ToJsonString());
             return manager;
         });
-        services.AddSingleton(sp => new ManagerCopilotService(sp.GetRequiredService<ManagerCopilot>(), sp.GetRequiredService<ILeadership>(),
+        services.AddSingleton(sp => new ManagerCopilotService(sp.GetRequiredService<ManagerCopilot>(), ActingLeadership(c, sp),
             sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, ManagerCopilotService.IntervalFor(sp.GetRequiredService<CopilotCloudSettings>().ListSeconds)));
         services.AddHostedService(sp => sp.GetRequiredService<ManagerCopilotService>());
     }

@@ -24,3 +24,28 @@ static class VerbRouterFactory
         _ => new V1VerbRouter(runner),
     };
 }
+
+// Cutover review: the router of a gateway whose environment is configured for v2 and has no database (EngineOptions.NoDatabase). v2 cannot act and v1 must not take its place (no "v1-ran" marker can be written), so every verb that
+// changes anything is refused with code "database" and exit 20 (the caller retries later, as for a budget); the verbs that only read pass through. Nothing a session could do on a saga item reaches v1's scripts.
+sealed class InertVerbRouter(IVerbRouter below) : IVerbRouter
+{
+    /// <summary>The verbs that read and write nothing (kebab-case, as on the wire).</summary>
+    public static readonly IReadOnlySet<string> ReadOnly = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get-item", "my-items", "inspect-facts", "pr-checks", "wait-for-checks", "metrics", "qc-view", "qc-list", "get-delivery", "backlog", "item-pr", "revocations", "operator-releases", "transcript-load", "plant-snapshot-load",
+    };
+
+    public Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout) =>
+        ReadOnly.Contains(verb) ? below.RunAsync(verb, stdin, timeout)
+        : Task.FromResult(BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one, or FACTORY_V2_OFF=1", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 }));
+}
+
+// The leader lease as the loops of a gateway with no database see it: it is held (status, hand-over), but nothing may act.
+sealed class InertLeadership(ILeadership inner) : ILeadership
+{
+    public bool On => inner.On;
+    public bool MayAct => false;
+    public bool Replaced => inner.Replaced;
+    public long Epoch => inner.Epoch;
+    public System.Text.Json.Nodes.JsonObject Status() => inner.Status();
+}

@@ -146,6 +146,20 @@ public sealed class CutoverSafetyTests
         var sweeper = services.OfType<Sweeper>().Single();
         Assert.True(sweeper.V2!.Unavailable); Assert.False(sweeper.V2.Loaded);
         Assert.Contains(services, s => s is AutoPromoter);
+        // nothing that acts on items acts (the lease is off in this test, so MayAct of the leader is true: only the inert rule says no), and a verb that changes anything is refused
+        Assert.False(services.OfType<PlantTicker>().Single().MayAct!());
+        Assert.False(services.OfType<BaseWatch>().Single().MayAct!());
+        Assert.True(services.OfType<AutoPromoter>().Single().MayAct!());
+        Assert.True(host.Services.GetRequiredService<ILeadership>().MayAct); Assert.False(new InertLeadership(host.Services.GetRequiredService<ILeadership>()).MayAct);
+        var router = host.Services.GetRequiredService<IVerbRouter>();
+        Assert.IsType<InertVerbRouter>(router);
+        foreach (var verb in new[] { "claim-item", "merge", "move-next", "complete", "park-item", "qc-request", "sync-board" })
+        {
+            var refused = await router.RunAsync(verb, "{\"item\":7}", TimeSpan.FromSeconds(5));
+            Assert.Equal(20, refused.Code);
+            Assert.Equal("database", JsonNode.Parse(refused.Output)!["code"]!.ToString());
+        }
+        Assert.Empty(SyncBoardCalls(env));
         Assert.DoesNotContain(host.Captured!, d => d.ServiceType == typeof(WolverineHostService));
 
         Assert.Equal(200, (await host.SendAsync("GET", "/health", GatewayEnvironment.ApiPort)).Status);
@@ -163,6 +177,41 @@ public sealed class CutoverSafetyTests
 
         await Task.Delay(TimeSpan.FromSeconds(8));   // (the sweep interval is 1 s: a v1 that took over would have swept by now)
         Assert.Empty(SyncBoardCalls(env));
+    }
+
+    [Fact]
+    public void TheItemsTheAdoptionCouldNotFence_AreLeftOutOfTheSweepLikeTheSagasItems()
+    {
+        var own = new V2Ownership(new InMemoryWorkItemStore(), Home);
+        own.Set([3]);
+        var args = new JsonObject();
+        Sweeper.AddV2Arguments(args, own, [], [8, 3]);
+        Assert.Equal([3, 8], args["skip_items"]!.AsArray().Select(x => x!.GetValue<int>()).ToArray());
+        var onlyLeft = new JsonObject();
+        Sweeper.AddV2Arguments(onlyLeft, new V2Ownership(new InMemoryWorkItemStore(), Home), [], [8]);
+        Assert.Equal([8], onlyLeft["skip_items"]!.AsArray().Select(x => x!.GetValue<int>()).ToArray());
+        var gate = new AdoptionGate(() => true, _ => true, () => true, () => 1, excluded: () => new HashSet<int> { 8 });
+        Assert.Equal([8], gate.Excluded().ToArray());
+    }
+
+    sealed class Below : IVerbRouter
+    {
+        public readonly List<string> Calls = [];
+        public Task<VerbAnswer> RunAsync(string verb, string stdin, TimeSpan timeout) { Calls.Add(verb); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true}")); }
+    }
+
+    [Fact]
+    public async Task TheInertRouter_RefusesEveryVerbThatChangesAnything_AndLetsTheReadingOnesThrough()
+    {
+        var below = new Below(); var router = new InertVerbRouter(below);
+        foreach (var verb in InertVerbRouter.ReadOnly) Assert.Equal(0, (await router.RunAsync(verb, "{}", TimeSpan.FromSeconds(1))).Code);
+        Assert.Equal(InertVerbRouter.ReadOnly.Count, below.Calls.Count);
+        foreach (var verb in new[] { "claim-item", "merge", "complete", "move-next", "approve-pr", "qc-request", "create-item", "park-item", "accept", "release" })
+        {
+            var a = await router.RunAsync(verb, "{}", TimeSpan.FromSeconds(1));
+            Assert.Equal(20, a.Code); Assert.Equal("database", JsonNode.Parse(a.Output)!["code"]!.ToString());
+        }
+        Assert.Equal(InertVerbRouter.ReadOnly.Count, below.Calls.Count);   // (none of the refused reached v1)
     }
 
     [Fact]

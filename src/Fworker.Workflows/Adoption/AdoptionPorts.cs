@@ -79,6 +79,9 @@ public sealed class InMemoryDeliveredBackfill : IDeliveredBackfill
 /// <summary>What the run needs of the configuration: the home repository, the mapping's settings, the delivery trains of the home deployables ("deployable/environment"), the environment the acting train delivers to, and the merge queue depth.</summary>
 public sealed record AdoptionOptions(RepoId Home, AdoptionSettings Mapping, Func<IReadOnlyList<string>> TrainKeysOf, string TrainEnvironment = "tdd", int MergeQueueDepth = 0)
 {
+    /// <summary>Cutover review: the gap a restore noted (no gateway was up between Since and Until). An owner's claim whose lease ran out inside it is live, as the sweep's renewal (Invoke-GapRenew, issue 94) would make it, which the adoption now comes before.</summary>
+    public Func<(DateTimeOffset Since, DateTimeOffset Until)?>? Gap { get; init; }
+
     /// <summary>The trains' keys, "deployable/environment", as the catalog names the home repository's deployables now.</summary>
     public IReadOnlyList<string> TrainKeys => TrainKeysOf();
 
