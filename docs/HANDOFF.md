@@ -835,8 +835,13 @@ The tdd gateway runs the v2 engine from the pull request "W9.9c: the tdd cutover
 for the measured batch (#437 option A; their day budgets are counted in memory): switch them back on in the same file afterwards. That also stops the
 Copilot on-demand manager of tdd, which needs the Copilot runtime.
 
-- **Kill switch.** `FACTORY_V2_OFF=1` in cmdemo1-system `system.json` (tdd fworker settings) makes tdd run v1 again without a release of this repository.
+- **Kill switch.** `FACTORY_V2_OFF=1` in cmdemo1-system `system.json` (tdd fworker settings) makes tdd run v1 again without a release of this repository. Once the
+  safety pull request (`cm-ai-ops-bot/cutover-safety`) has landed, v1's intake stays off under it as well; until then, check that before relying on it.
 - **Rollback.** `FACTORY_V2_OFF=1` as above, or a revert of the cutover pull request (about 4 minutes to tdd).
+- **Before the deploy.** Confirm that no item is owned by a running Copilot task or Cursor agent (those runtimes are switched off by this change). Deploy with the
+  plant quiet: no running sessions and no PASS waiting to merge.
+- **After the deploy.** Check the start-up line `runtime: octopus, enabled`, `/ready` 200 and `/_build` as in the release rule of CLAUDE.md.
+- **Done.** When a v2 item reaches Done relative to uat and prod is changed by a separate pull request (`cm-ai-ops-bot/settle-until-prod`); read that one for the rule.
 - The drills and the measured batch are recorded later, on #268.
 
 ## 7. History in one paragraph
