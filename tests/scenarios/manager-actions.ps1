@@ -266,7 +266,8 @@ function Ma-OnSaga([scriptblock]$Body, [switch]$Snapshot) {
         Check 'the Wolverine host runs with the intake on' (Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' }) ((Get-V2State) | ConvertTo-Json -Compress)
         & $Body
     } finally {
-        # the items' sagas end with their issues (a saga left open would be offered to the next scenario's session and hold the intake back)        $left = @($script:MaSagaItems); $script:MaSagaItems = @()
+        # the items' sagas end with their issues (a saga left open would be offered to the next scenario's session and hold the intake back)
+        $left = @($script:MaSagaItems); $script:MaSagaItems = @()
         $gh = "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders"
         # (the webhook says it at once, as GitHub does; the poll of the board would take its minute)
         foreach ($n in $left) {
