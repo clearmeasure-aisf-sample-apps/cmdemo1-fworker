@@ -349,16 +349,17 @@ $PromoteScenarios = [ordered]@{
     [void](Fake 'octo-release' @{ version = '3.41.1'; sha = $it[0].sha; tdd = 'Failed' })
     [void](Fake 'octo-release' @{ version = '3.41.2'; sha = $it[4].sha; tdd = 'Success' })
     [void](Fake 'octo-release' @{ version = '3.41.3'; sha = $it[8].sha; tdd = 'Success' })
-    # a promotion pass that takes its time (5 s per release) runs on the side
+    # a promotion pass that takes its time (15 s per release, 45 s in all) runs on the side. The sweep's answer is timed against it: the sweep of a loaded CI runner (the engine v2 job: 12 to 13 s in two runs) took
+    # as long as the 5 s per release of an earlier version made the whole pass (15 s), and 'a few seconds' (12 s) failed on it. A sweep that waited for the promotion would take the 45 s.
     $env:FACTORY_HOLDER = 'w1'
     $slowOut = Join-Path $script:Work 'slow-promotion.json'
-    $slow = Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-File', (Join-Path $script:Root 'plugin/scripts/factory.ps1'), 'auto-promote', '--budget_seconds', '60', '--test_promotion_delay_ms', '5000') -PassThru -RedirectStandardOutput $slowOut
+    $slow = Start-Process -FilePath 'pwsh' -ArgumentList @('-NoProfile', '-File', (Join-Path $script:Root 'plugin/scripts/factory.ps1'), 'auto-promote', '--budget_seconds', '120', '--test_promotion_delay_ms', '15000') -PassThru -RedirectStandardOutput $slowOut
     Start-Sleep -Seconds 2
     $t0 = Get-Date
     $sw = F 'w1' @('sync-board'); $took = ((Get-Date) - $t0).TotalSeconds; $swj = $sw | ConvertTo-Json -Depth 8 -Compress
     $stillRunning = -not $slow.HasExited
     Check 'the board sweep answers while the slow promotion pass is still running' (((Pv $sw 'ok') -eq $true) -and $stillRunning) "ok=$(Pv $sw 'ok') slow pass running=$stillRunning after $took s"
-    Check 'and in a few seconds, not after the promotion' ($took -lt 12) "$took s"
+    Check 'and in a few seconds, not after the promotion' ($took -lt 30) "$took s"
     Check 'its answer has no promotion action and no promotion step' (($swj -notmatch 'promotion-') -and $null -eq (Pv (Pv $sw 'steps') 'auto-promote')) $swj
     Check 'the whole queue is still listed in the sweep answer' (@(Pv $sw 'release_queue').Count -eq 9) $swj
     [void]$slow.WaitForExit(120000)

@@ -74,6 +74,11 @@ public sealed class DeliveryActingShadowHostTests
                 .ConfigureLogging(l => l.SetMinimumLevel(LogLevel.Critical))
                 .UseWolverine(w =>
                 {
+                    // Only the handlers Configure names, as the gateway's own host does (WolverineHostService.BuildHost). Without this Wolverine adds conventional discovery of the "application
+                    // assembly", a process-wide value pinned by whichever host started first in the test process (GH-3521): after a test that started the gateway's host (the SQL-backed ones of the same
+                    // shard) that is FactoryWorker.Gateway, and its SignOffWaitHandler, which needs a SignOffWaitRecorder this host does not register, is combined into the chain of TrainDecided and
+                    // fails it, so the shadow never saw a decision. Run alone, the test passed.
+                    w.Discovery.DisableConventionalDiscovery();
                     w.Services.AddSingleton(delivered);   // (the gateway's ItemMergedWiring.Attach registers it)
                     DeliveryActingWiring.Configure(w.Services, w, parts, new InMemoryTrainStore(), executor, durable: false);
                 })
@@ -122,7 +127,7 @@ public sealed class DeliveryActingShadowHostTests
         await rig.ReleaseGoesThroughTdd();
         Assert.True(await Until(() => rig.Recorded >= 1), "the train did not decide to promote, or its ShadowCommand was not handled");
         // (the decision and the command are separate messages: the command can be recorded before the shadow has the decision, so the tick below waits for both)
-        Assert.True(await Until(() => rig.Decisions >= 1), "the train's decision did not reach the shadow");
+        Assert.True(await Until(() => rig.Decisions >= 1), "the train's decision did not reach the shadow: " + rig.Shadow.Status().ToJsonString());
         // the AutoPromoter's pass says the same (what AddGatewayBackground's OnActions gives the holder's shadow)
         rig.Shadow.ObserveV1(new JsonArray(JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(new { item = 7, action = "promoted", release = "1.0.2", environment = "Uat", task = "ServerTasks-9", items = new[] { 7 } }))));
         await rig.Shadow.Tick(default);
