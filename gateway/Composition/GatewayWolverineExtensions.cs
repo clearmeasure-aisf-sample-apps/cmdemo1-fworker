@@ -16,7 +16,7 @@ static class GatewayWolverineExtensions
     public static IServiceCollection AddGatewayWolverine(this IServiceCollection services, GatewayComposition c)
     {
         // always registered, so that /ready and /api/v1/status can take it; Tracked is false where there is no Wolverine host, and Required (the gate of /ready) only where v2 acts (W9.10o)
-        var schemaStatus = new FactorySchemaStatus(required: c.WolverineHost && c.Engine.V2Acts, tracked: c.WolverineHost);
+        var schemaStatus = new FactorySchemaStatus(required: c.WolverineHost && c.Engine.V2Acts, tracked: c.WolverineHost, noDatabase: c.Engine.NoDatabase, malformed: c.Database.Malformed);
         services.AddSingleton(schemaStatus);
         if (c.Database.Malformed) services.AddSingleton(c.Database);   // (only so that /api/v1/status can say the variable is set and malformed; every other case registers it with the host)
         if (!c.WolverineHost) return services;
@@ -32,6 +32,9 @@ static class GatewayWolverineExtensions
         var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
         var readoption = new Fworker.Workflows.Adoption.ReadoptionGate();   // W9.9b (review): the hold on old-generation inputs between the host's start and the adoption of a term after a break
         AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
+        // cutover review: the sweep waits for the adoption of its term (AdoptionGate); registered below where the engine acts, set up here because the status block and the host's wiring close over `adoption`
+        var adoptionGate = new AdoptionGate(() => adoption is not null, e => adoption!.Job.IsDone(e), () => c.Leader.MayAct, () => c.Leader.ClaimEpoch);
+        if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return adoptionGate; });
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
@@ -242,7 +245,7 @@ static class GatewayWolverineExtensions
             {
                 _ = sp.GetRequiredService<WolverineHostService>();
                 var cs = WolverineHostService.WithConnectTimeout(healthConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => adoption?.Job.Block());
+                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => { var b = adoption?.Job.Block(); if (b is not null && c.Engine.V2Acts) b["sweep"] = adoptionGate.Block(); return b; });   // (sweep: whether v1's sweep still waits for this term's adoption, since when, and whether the wait is past its limit)
             });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)

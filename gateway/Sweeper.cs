@@ -23,6 +23,12 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     public bool PlantJobs { get; init; }
     // W9.10k: the plant's input for the items that have a saga (owners' leases, parks, pins, priorities, runtime labels, the release queue), built from the saga's state and the cards' labels. Set only where the engine acts, with V2.
     public SagaPlantFeed? Feed { get; init; }
+    // cutover review: where the engine acts the sweep also waits for the adoption of this process's term (AdoptionGate), and reads the saga's table again before the term's first pass. Set only with V2.
+    public AdoptionGate? Adoption { get; init; }
+    long? adoptedTerm;
+    // cutover review: v1's intake is off. Set where intake.v2Plans names plans and the engine does not act on them (the kill switch, uat and prod, a v2 environment without a database): v1's intake takes only what the plans leave it where the
+    // engine acts, and everywhere else it would take everything, which the configuration of the cutover never meant (intake.enabled is true for the image so that the engine's intake runs). The script has no intake without the block.
+    public bool IntakeOff { get; init; }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -37,6 +43,17 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         while (!ct.IsCancellationRequested)
         {
             if (MayAct?.Invoke() == false) { try { await Task.Delay(1000, ct); } catch (OperationCanceledException) { } continue; }
+            // cutover review: nor until the adoption of this term is over (v1's pass and the adoption have no per-item lock between them), and then the saga's table is read again, because the adoption wrote to it. A failed adoption is tried again by its job; this keeps waiting.
+            if (V2 != null && Adoption != null)
+            {
+                var term = Adoption.Settled();
+                if (term is null) { WarnWaiting("the adoption of this term has not finished; v1 acts on no item until it has"); try { await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } continue; }
+                if (adoptedTerm != term)
+                {
+                    if (!await OwnershipRead(ct)) { try { await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } continue; }
+                    adoptedTerm = term;
+                }
+            }
             // W9.10e: where the engine acts, nothing is swept until the saga's table has been read once: an empty set that only means "not read yet" would let v1 act on an item that has a saga. Items asked for meanwhile stay queued.
             if (V2 is { Loaded: false } && !await OwnershipRead(ct)) { try { await Task.Delay(TimeSpan.FromSeconds(2), ct); } catch (OperationCanceledException) { } continue; }
             try
@@ -100,8 +117,13 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     async Task<bool> OwnershipRead(CancellationToken ct)
     {
         try { if (await V2!.RefreshAsync(ct) && V2.Loaded) return true; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return false; }
-        if (DateTime.UtcNow - ownershipWarned > TimeSpan.FromMinutes(1)) { ownershipWarned = DateTime.UtcNow; Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"waiting\",\"reason\":\"the saga table has not been read yet; v1 acts on no item until it has\"}}"); }
+        WarnWaiting(V2!.Unavailable ? "v2 is configured for this environment and there is no database; v1 acts on no item" : "the saga table has not been read yet; v1 acts on no item until it has");
         return false;
+    }
+
+    void WarnWaiting(string reason)
+    {
+        if (DateTime.UtcNow - ownershipWarned > TimeSpan.FromMinutes(1)) { ownershipWarned = DateTime.UtcNow; Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"waiting\",\"reason\":{JsonSerializer.Serialize(reason)}}}"); }
     }
 
     // W6.6: a pass over items that all have a saga: nothing to read for v1, the plant takes the saga's offers for exactly those items (scope), as it takes the offers of an incremental pass
@@ -135,7 +157,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
         // free_workers: the auto-unpark of a park caused by session trouble needs a session that could take the item (Verbs.Sweep.ps1)
         if (ownerMode) args["free_workers"] = plant.FreeOwnerSessions();
         // work intake (issue 104): a full sweep may pull a Todo item onto the board when an owner session has a free slot
-        if (ownerMode && items == null) args["intake"] = new JsonObject { ["freeSlots"] = plant.IntakeSlots() };
+        if (ownerMode && items == null && !IntakeOff) args["intake"] = new JsonObject { ["freeSlots"] = plant.IntakeSlots() };
         AddV2Arguments(args, V2, V2Plans);
         if (PlantJobs) args["skip_steps"] = new JsonArray(PlantStepJobs.SweepSkips.Select(x => (JsonNode)x).ToArray());
         // replenish backpressure (delivery-speed.md 6): the waiting items of the last plan; absent before the first plan has run (Replenish.ps1 then holds back)

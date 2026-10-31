@@ -75,6 +75,9 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         catch (Exception ex) when (ex is not OperationCanceledException) { Console.Error.WriteLine($"adoption: the engine marker could not be written ({ex.GetType().Name})"); }
     }
 
+    /// <summary>Whether the adoption of the term with this epoch is over (a run was "done", or a partial one with no break was given up after MaxAttempts). The gateway's sweep waits for it (AdoptionGate): the first pass of a term does not begin beside the adoption.</summary>
+    public bool IsDone(long termEpochToAsk) { lock (gate) return doneEpoch == termEpochToAsk; }
+
     /// <summary>The "adoption" block of the v2 status: where the term stands and the report of the latest run.</summary>
     public JsonObject Block()
     {

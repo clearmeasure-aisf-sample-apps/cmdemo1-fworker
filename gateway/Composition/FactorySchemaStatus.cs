@@ -10,8 +10,13 @@ using Microsoft.Data.SqlClient;
 // - Where it is required, /ready answers 503 "waitingFor":"schema" until the first good verification of this process. After that /ready no longer depends on the database: a later outage shows in
 //   /api/v1/status (the schema and wolverine blocks) and does not flip /ready.
 // - Nothing here is a secret: a failure is a type, a SQL error number and a script name, never a message.
-sealed class FactorySchemaStatus(bool required, bool? tracked = null)
+// - NoDatabase (cutover review) is true where the file names v2 for the environment, the kill switch is off and FACTORY_DB_CONNECTION is missing or malformed (EngineOptions.NoDatabase): v2 cannot act and v1 does not take its place,
+//   so /ready answers 503 {"ready":false,"waitingFor":"database"} for as long as the process lives (a new revision with the variable, or FACTORY_V2_OFF=1, is the way out); /health stays 200.
+sealed class FactorySchemaStatus(bool required, bool? tracked = null, bool noDatabase = false, bool malformed = false)
 {
+    /// <summary>v2 is configured here and no usable database is: nothing acts, and /ready waits for "database".</summary>
+    public bool NoDatabase => noDatabase;
+
     readonly bool tracked = tracked ?? required;
 
     public const int MaxDifferences = 20;
@@ -70,6 +75,7 @@ sealed class FactorySchemaStatus(bool required, bool? tracked = null)
     /// <summary>The 503 body of /ready while the schema is not good; null when /ready does not wait for it.</summary>
     public object? Waiting()
     {
+        if (noDatabase) return new { ready = false, waitingFor = "database", reason = malformed ? "v2 is configured for this environment and FACTORY_DB_CONNECTION is not a connection string" : "v2 is configured for this environment and FACTORY_DB_CONNECTION is not set" };
         if (!required) return null;
         lock (gate)
         {

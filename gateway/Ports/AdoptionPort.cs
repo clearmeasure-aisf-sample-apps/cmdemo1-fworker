@@ -141,3 +141,52 @@ sealed class KillSwitchMarkerService(IEngineMarkers markers, string holder, Func
         }
     }
 }
+
+/// <summary>
+/// Cutover review: v1's sweep (the PASS merge, settling, the card moves) and the adoption of the term (W9.9b) must not run beside each other: there is no per-item lock between them, and an item that v1's pass merges while the adoption
+/// is still deciding whose it is would be adopted on stale facts. So where the engine acts the sweep waits until the adoption of this process's term in the lease is over (<see cref="AdoptionJob.IsDone"/>), then reads the saga's table
+/// again before its first pass (the adoption wrote rows meanwhile: Sweeper). A run that fails is the job's business: it tries again every minute (with growing pauses after a break) and the sweep keeps waiting, it never sweeps on unadopted items.
+/// The wait is bounded in what it SHOWS, not in what it permits: past <see cref="Limit"/> (10 minutes of this term's wait, counted while this process may act) <see cref="Overdue"/> is true, /api/v1/status v2.adoption.sweep says so and, until the
+/// first time the adoption has been over in this process, /ready answers 503 "adoption". A process that never adopts is an outage for the operator to decide (FACTORY_V2_OFF=1 hands the factory back to v1, whose marker the next adoption fences);
+/// a v1 pass on items the adoption has not examined is the unfenced case this exists to prevent. Where this process has no adoption (no GitHub identity: nothing could be read) there is nothing to wait for.
+/// </summary>
+sealed class AdoptionGate(Func<bool> hasAdoption, Func<long, bool> isDone, Func<bool> mayAct, Func<long> epoch, Func<DateTimeOffset>? clock = null, TimeSpan? limit = null)
+{
+    public static readonly TimeSpan Limit = TimeSpan.FromMinutes(10);
+    readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
+    readonly TimeSpan bound = limit ?? Limit;
+    readonly object gate = new();
+    long? waitingEpoch; DateTimeOffset? since; bool everSettled;
+
+    /// <summary>The epoch of the term whose adoption is over, so the sweep may begin; null while it waits (also when this process may not act: the caller asks that first).</summary>
+    public long? Settled()
+    {
+        lock (gate)
+        {
+            if (!hasAdoption()) { everSettled = true; return 0; }
+            if (!mayAct()) { waitingEpoch = null; since = null; return null; }   // (a process that does not hold the lease is not waiting: the wait counts from when it may act)
+            var e = epoch();
+            if (isDone(e)) { everSettled = true; waitingEpoch = null; since = null; return e; }
+            if (waitingEpoch != e) { waitingEpoch = e; since = now(); }
+            return null;
+        }
+    }
+
+    /// <summary>The wait of this term has lasted past the limit.</summary>
+    public bool Overdue { get { Settled(); lock (gate) return since is { } s && now() - s > bound; } }
+
+    /// <summary>The 503 body of /ready: the process has not seen an adoption over yet and the wait of its term is past the limit. Null otherwise (and for ever after the first adoption).</summary>
+    public object? ReadyWaiting()
+    {
+        if (!Overdue) return null;
+        lock (gate) return everSettled ? null : new { ready = false, waitingFor = "adoption", since = since!.Value.ToString("o"), minutes = (int)(now() - since.Value).TotalMinutes, reason = "the sweep waits for the adoption of this term, which has not finished" };
+    }
+
+    /// <summary>The "sweep" block of v2.adoption in /api/v1/status.</summary>
+    public JsonObject Block()
+    {
+        var done = Settled() is not null;
+        lock (gate)
+            return new JsonObject { ["waiting"] = !done && mayAct(), ["done"] = done, ["since"] = since?.ToString("o"), ["overdue"] = since is { } s && now() - s > bound, ["limitMinutes"] = (int)bound.TotalMinutes };
+    }
+}
