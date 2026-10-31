@@ -68,6 +68,20 @@ function Saga-Pass($x) {
 }
 function Saga-MergeComments([int]$n, [int]$pr) { @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match "squash-merged PR #$pr " }).Count }
 
+# The merge record of the item's state comment as v1 reads it: the commit and the pull request, what is awaited, whether it is done, and whether the PASS verdict is processed
+function Saga-V1Merge([int]$n) {
+    $st = Pm-State $n
+    $m = $(if ($st.ContainsKey('merge')) { $st['merge'] } else { @{} })
+    $vd = $(if ($st.ContainsKey('verdict')) { $st['verdict'] } else { @{} })
+    return @{
+        sha = $(if ($m.ContainsKey('sha') -and $m['sha']) { "$($m['sha'])" } else { '' })
+        pr = $(if ($m.ContainsKey('pr') -and $m['pr']) { [int]$m['pr'] } else { 0 })
+        awaiting = $(if ($m.ContainsKey('awaiting') -and $m['awaiting']) { "$($m['awaiting'])" } else { '' })
+        done = [bool]($m.ContainsKey('done_at') -and $m['done_at'])
+        processed = [bool]($vd.ContainsKey('processed') -and $vd['processed'])
+    }
+}
+
 # What the two engines do once the PASS is recorded, checked on the same item: one merge write by either, and the differences W6.6 and W7.3 declare (golden/v2-differences.txt)
 function Saga-CheckMerged($x, [string]$Plan) {
     Check "the pull request of #$($x.n) is merged by the gateway" (Wait-Until -Seconds 150 { (Get-FakePr $x.pr).merged }) "merged $((Get-FakePr $x.pr).merged), column $(Saga-Col $x.n)"
@@ -83,9 +97,17 @@ function Saga-CheckMerged($x, [string]$Plan) {
             Check 'v2: no card move after the PASS is the rule script''s (the projection moves the card)' ($ruleMoves.Count -eq 0) "rule card moves outside a verb call: $($ruleMoves.Count)"
         }
         Check 'v2: no comment on the item says that the gateway merged it (the saga''s history is the record)' ((Saga-MergeComments $x.n $x.pr) -eq 0) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
-        $st = Pm-State $x.n; $mr = $(if ($st.ContainsKey('merge')) { $st['merge'] } else { $null })   # (the sweep's record may not be there yet: strict mode refuses a key that is not)
-        # (W9.10e: the rule script's sweep leaves the saga's item alone, so it takes the saga's merge for no person's and writes no wait record of its own)
-        Check 'v2: the state comment holds no wait record of the rule script''s merge (awaiting master CI, done_at)' ($null -eq $mr -or (-not $mr.ContainsKey('awaiting') -and -not $mr.ContainsKey('done_at'))) ($mr | ConvertTo-Json -Compress -Depth 4)
+        # W9.10i: the state comment follows the saga in the format v1 reads (the rollback path of FACTORY_V2_OFF). The rule script's sweep writes no wait record of its own (it leaves the saga's item alone, W9.10e); the record that is
+        # there is the gateway's projection of the saga's merge: the commit and the pull request, the PASS processed, and the docs plan (which ends at the merge) done at once, the feature plan awaiting master's CI as v1 leaves it after a merge
+        $recorded = Wait-Until -Seconds 60 { $r = Saga-V1Merge $x.n; $r.sha -ne '' -and $r.processed }
+        $r = Saga-V1Merge $x.n
+        Check 'v2: the state comment holds the merge record of the saga''s merge (commit, pull request) and the PASS is processed' ($recorded -and $r.pr -eq $x.pr) ($r | ConvertTo-Json -Compress)
+        if ($Plan -eq 'docs') {
+            $done = Wait-Until -Seconds 30 { (Saga-V1Merge $x.n).done }
+            Check 'v2: the docs item is done in the state comment (done_at, nothing awaited)' ($done -and (Saga-V1Merge $x.n).awaiting -eq '') ((Saga-V1Merge $x.n) | ConvertTo-Json -Compress)
+        } else {
+            Check 'v2: the feature item awaits master CI in the state comment, as v1 leaves it after a merge (or has gone on)' ($r.awaiting -ne '' -or $r.done) ($r | ConvertTo-Json -Compress)
+        }
     } else {
         Check 'v1: the merge is recorded on the item once (the rule script''s comment and merge record)' ((Wait-Until -Seconds 30 { (Saga-MergeComments $x.n $x.pr) -eq 1 })) "merge comments: $(Saga-MergeComments $x.n $x.pr)"
         Check 'v1: the state comment holds the merge record' ((Pm-State $x.n).ContainsKey('merge')) ((Pm-State $x.n) | ConvertTo-Json -Compress -Depth 4)

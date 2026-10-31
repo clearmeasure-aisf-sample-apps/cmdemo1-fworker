@@ -51,7 +51,7 @@ static class GatewayWolverineExtensions
                 // W6.6: the docs plan's steps run in it; the board it moves cards on is the catalog's, read when the first card moves
                 // W7.3: a fix-forward round of the feature plan reaches the owner session as the trigger v1's sweep sends (the plant is resolved when the trigger is sent, not here: building the plant needs the host)
                 var workItems = WorkItemWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), boardRef: () => sp.GetService<ISystemCatalog>()?.Current.Board,
-                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; });
+                    route: (item, trigger) => { if (sp.GetService<Plant>() is not { } plant) return false; plant.Route(item, trigger); return true; }, locks: sp.GetRequiredService<IItemLock>());
                 WorkItemWiring.Attach(host, workItems);
                 workItemParts = workItems;
                 v2Ownership = workItems.Ownership;
@@ -83,7 +83,7 @@ static class GatewayWolverineExtensions
                     var mergedDeriver = ItemMergedWiring.Make(c, home, cs, Environment.GetEnvironmentVariable);
                     if (mergedDeriver is { } merged) ItemMergedWiring.Attach(host, merged, new Fworker.Workflows.Delivery.DeliveredToTable(() => ItemMergedWiring.Open(cs)));
                     // W9.4: the delivery train acts: it promotes (PromoteRelease, AnswerSignOff are executed against Octopus) and the watcher's events reach it. W9.10p: for tdd only; v1's auto-promote loop keeps uat and prod (AddGatewayBackground, AutoPromoter.Runs) and the train's shadow of them is the holder's
-                    if (mergedDeriver is not null) octopusPort = DeliveryActingWiring.Attach(host, c, () => sp.GetService<ISystemCatalog>(), cs, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger, shadowHolder);
+                    if (mergedDeriver is not null) octopusPort = DeliveryActingWiring.Attach(host, c, () => sp.GetService<ISystemCatalog>(), cs, Environment.GetEnvironmentVariable, () => c.Leader.MayAct, stores.Ledger, shadowHolder, workItems.Docs.Promotions);
                     // W6.6: the intake of docs items (off unless intake is enabled and names the docs plan in intake.v2Plans); the plant's facts are read when the job runs
                     if (workItems.Intake is { Enabled: true } && workItems.Intake.V2Plans.Count > 0)
                     {

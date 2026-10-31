@@ -114,6 +114,8 @@ public sealed class TrainState
     /// <summary>The number of the request for each release (W9.10o): the first request of a version is 1, and a request made again after the earlier one was dropped (Octopus never showed it) is the next. It is in the key of
     /// the PromoteRelease command, so the ledger answers the retries of one request and never a later request for the same version.</summary>
     public Dictionary<string, int> RequestNumbers { get; set; } = [];
+    /// <summary>The work items each requested release carries (W9.10i), by version, "owner/repo#N": the PromoteRelease command names them so the executor can record the deployment on their state comments. Absent in a state saved before it.</summary>
+    public Dictionary<string, List<string>> RequestItems { get; set; } = [];
     /// <summary>"item|commit" of the items already delivered here: a redelivered ItemMerged does not make them candidates again.</summary>
     public List<string> DeliveredItems { get; set; } = [];
     /// <summary>The releases that reached the environment by version and the release that carried it: "delivered in release X, superseding Y".</summary>

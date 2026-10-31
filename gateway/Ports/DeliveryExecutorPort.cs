@@ -3,6 +3,7 @@ using Fworker.Contracts.Commands;
 using Fworker.Contracts.Messaging;
 using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
+using Fworker.Integrations.GitHub;
 using Fworker.Integrations.Octopus;
 using Fworker.Workflows.Delivery;
 using Wolverine;
@@ -18,7 +19,7 @@ using Wolverine.ErrorHandling;
 public sealed record DeliveryCommandFinished(string IdempotencyKey, string Name, bool Ok, string Error);
 
 /// <summary>The runs of the delivery commands: the handler of the command, the retry of a transient failure, the messages of the outcome.</summary>
-public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, AnswerSignOffHandler answer)
+public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, AnswerSignOffHandler answer, PromotionStateWriter? recorder = null)
 {
     static RuntimeOutcome Settle<T>(T c, CommandResult r) where T : IntegrationCommand
     {
@@ -33,8 +34,15 @@ public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, Answe
         return new(r, new DeliveryCommandFinished(c.IdempotencyKey, c.Name, false, r.Error), IntegrationFailed.From(c, r));
     }
 
-    internal Task<IReadOnlyList<object>> PromoteMessages(PromoteRelease c, int attempts, CancellationToken ct) =>
-        RuntimeCommandService.Outcome(c, async () => Settle(c, await promote.Handle(c, ct)), e => Exhausted(c, e), attempts);
+    internal async Task<IReadOnlyList<object>> PromoteMessages(PromoteRelease c, int attempts, CancellationToken ct)
+    {
+        CommandResult? result = null;
+        var messages = await RuntimeCommandService.Outcome(c, async () => Settle(c, result = await promote.Handle(c, ct)), e => Exhausted(c, e), attempts);
+        // W9.10i: the deployment (made now, or found: either way the train's own request) is recorded on the state comments of the release's items, where v1's promotion reads that it is the gateway's. A fault here
+        // is thrown, so the handler runs again: the ledger answers the command from its record and only the write is tried again, which is idempotent
+        if (recorder is not null && result is { Ok: true, Execution.Length: > 0 }) await recorder.Promoted(c, result.Execution, DateTimeOffset.UtcNow, ct);
+        return messages;
+    }
 
     internal Task<IReadOnlyList<object>> AnswerMessages(AnswerSignOff c, int attempts, CancellationToken ct) =>
         RuntimeCommandService.Outcome(c, async () => Settle(c, await answer.Handle(c, ct)), e => Exhausted(c, e), attempts);
@@ -64,13 +72,33 @@ public static class DeliveryExecutorHandlers
     }
 }
 
+/// <summary>
+/// W9.10i: the Sign-off a deployment of the train waits at, recorded on the release's first item (<c>merge.promoted.&lt;environment&gt;.signoff_wait_since</c>), so that after FACTORY_V2_OFF v1 counts the wait from when it began
+/// and not from its own first look. The train publishes "signoff-waiting" once per change; the sign-off's task and since are read from the train's state. Public because Wolverine's generated code refers to it.
+/// </summary>
+public sealed class SignOffWaitRecorder(ITrainStore trains, PromotionStateWriter writer)
+{
+    public async Task Record(TrainDecided m, CancellationToken ct)
+    {
+        if (m.Action != "signoff-waiting" || m.Items.Count == 0) return;
+        if ((await trains.Load(m.Key, ct))?.State.SignOffs.FirstOrDefault(x => x.Version == m.Release && !x.Answered) is not { } signOff) return;
+        await writer.SignOffWaiting(m.Items, TrainKey.Split(m.Key).Environment, signOff.TaskId, signOff.Since, ct);
+    }
+}
+
+/// <summary>The handler of the train's decisions for the Sign-off wait. Public because Wolverine's generated code refers to it.</summary>
+public static class SignOffWaitHandler
+{
+    public static Task Handle(TrainDecided m, SignOffWaitRecorder recorder, CancellationToken ct) => recorder.Record(m, ct);
+}
+
 static class DeliveryActingWiring
 {
     /// <summary>
     /// The acting train for an engine that acts: the same parts the shadow run is made of (policies, the reads, the delivered-to table), the executor of its commands and the port for the watcher's events.
     /// The returned port is the one the ingress publishes the Octopus events to; it is disabled when the train cannot be built (no GH_TOKEN or catalog).
     /// </summary>
-    public static ShadowOctopusPort Attach(WolverineHostService host, GatewayComposition c, Func<Fworker.Contracts.Catalog.ISystemCatalog?> catalog, string connectionString, Func<string, string?> env, Func<bool> mayAct, IIdempotencyLedger ledger, DeliveryShadowHolder? shadowHolder = null)
+    public static ShadowOctopusPort Attach(WolverineHostService host, GatewayComposition c, Func<Fworker.Contracts.Catalog.ISystemCatalog?> catalog, string connectionString, Func<string, string?> env, Func<bool> mayAct, IIdempotencyLedger ledger, DeliveryShadowHolder? shadowHolder = null, PromotionStateWriter? promotions = null)
     {
         var parts = catalog() is { } cat ? DeliveryShadowWiring.Make(c, cat, connectionString, env) : null;
         if (parts is null) return new ShadowOctopusPort(_ => Task.FromResult(false), false);
@@ -81,7 +109,7 @@ static class DeliveryActingWiring
         // the key that may create deployments and answer interruptions: the runbook service account's, else the reader key
         var settings = new OctopusPromoteSettings(octopus["space"]?.ToString() ?? "", names, () => env("OCTOPUS_RUNBOOK_API_KEY") is { Length: > 0 } k ? k : env("OCTOPUS_API_KEY"), mayAct);
         var promoter = new OctopusPromoter(http, settings);
-        var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter));
+        var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter), promotions);
         // W9.10p: the shadow of the environments v1's AutoPromoter still promotes (uat and prod until delivery.autoPromote.trainActs): the AutoPromoter's passes (AddGatewayBackground) and the status endpoints find it through the holder
         if (shadowHolder is not null) shadowHolder.Shadow = parts.Shadow;
         RollbackWiring.Attach(host, c, env, mayAct, ledger);   // W8.3: the executor of the train's incident rollback (RollbackRelease) and the migration probe it takes; the executor refuses every environment but tdd
@@ -89,7 +117,7 @@ static class DeliveryActingWiring
         host.RuntimeCommands = (services, w) =>
         {
             previous?.Invoke(services, w);
-            Configure(services, w, parts, new SqlTrainStore(() => ItemMergedWiring.Open(parts.ConnectionString)), service);
+            Configure(services, w, parts, new SqlTrainStore(() => ItemMergedWiring.Open(parts.ConnectionString)), service, promotions: promotions);
         };
         return new ShadowOctopusPort(ev => DeliveryShadowWiring.Publish(host, ev), true);
     }
@@ -98,7 +126,7 @@ static class DeliveryActingWiring
     /// What the acting train adds to the Wolverine host: its services, its handlers, the executor of its commands and the recording of the train's shadow (<see cref="DeliveryActingShadowHandlers"/>: the decisions and
     /// the ShadowCommands of an environment v1 still promotes, which nothing executes). Apart from <see cref="Attach"/> so that a host test builds the same registration with a store of its own.
     /// </summary>
-    internal static void Configure(IServiceCollection services, WolverineOptions w, DeliveryShadowParts parts, ITrainStore store, DeliveryExecutorService service, bool durable = true)
+    internal static void Configure(IServiceCollection services, WolverineOptions w, DeliveryShadowParts parts, ITrainStore store, DeliveryExecutorService service, bool durable = true, PromotionStateWriter? promotions = null)
     {
         services.AddSingleton(parts.Policies);
         services.AddSingleton(parts.Reads);
@@ -108,6 +136,8 @@ static class DeliveryActingWiring
         services.AddSingleton<DeliveryTrainService>();
         services.AddSingleton<DeliveryTrainRouter>();
         services.AddSingleton(service);
+        // W9.10i: where there is a state comment to write, a Sign-off the train waits at is recorded for v1 (the deployments themselves are recorded by the executor)
+        if (promotions is not null) { services.AddSingleton(new SignOffWaitRecorder(store, promotions)); w.Discovery.IncludeType(typeof(SignOffWaitHandler)); }
         w.Discovery.IncludeType(typeof(DeliveryTrainHandlers));
         w.Discovery.IncludeType(typeof(DeliveryTrainRouting));
         w.Discovery.IncludeType(typeof(DeliveryExecutorHandlers));

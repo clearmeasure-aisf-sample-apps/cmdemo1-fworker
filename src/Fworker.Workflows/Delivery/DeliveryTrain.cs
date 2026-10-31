@@ -542,6 +542,7 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
         var release = s.Releases[pick.Version];
         s.Requested[pick.Version] = now; s.FirstRequested[pick.Version] = now;
         s.RequestNumbers[pick.Version] = s.RequestNumbers.GetValueOrDefault(pick.Version) + 1;   // a new request: a new key (the retries of this one keep it)
+        if (!p.Shadow) s.RequestItems[pick.Version] = [.. winner.Items];   // (W9.10i: the retries of the request name the same items; a shadow train promotes nothing and records nothing)
         Out.Add(Send(PromoteOf(release), release.Version));
         wakes.Add(now.Add(DeliveryTrainService.CommandRetry));
         Decide("promote", pick.Version, winner.Items, []);
@@ -561,7 +562,8 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
     object Send(IntegrationCommand command, string release) => p.Shadow ? new ShadowCommand(s.Key, command.Name, command.IdempotencyKey, release) : command;
 
     // the key names the request (W9.10o): deployable, version, environment and the number of the request, so a promotion asked for again after the first was dropped, or after a rollback, is not answered from the ledger
-    PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}|{Math.Max(1, s.RequestNumbers.GetValueOrDefault(r.Version))}", p.Deployable, p.Project, r.Version, env);
+    PromoteRelease PromoteOf(TrainRelease r) => new($"PromoteRelease|{p.Deployable}|{r.Version}|{env}|{Math.Max(1, s.RequestNumbers.GetValueOrDefault(r.Version))}", p.Deployable, p.Project, r.Version, env,
+        s.RequestItems.TryGetValue(r.Version, out var items) ? [.. items] : null);
 
     // ---- decisions -----------------------------------------------------------------------------------------------------------------------------------------
 

@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
 using Fworker.Contracts.Seams;
+using Fworker.Integrations.Commands;
 using Fworker.Workflows.WorkItem;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
@@ -69,17 +70,33 @@ public sealed class DocsPlanWiringTests
                 var body = await new StreamReader(ctx.Request.InputStream).ReadToEndAsync();
                 var path = ctx.Request.Url!.AbsolutePath;
                 lock (Requests) { Requests.Add($"{ctx.Request.HttpMethod} {path}"); Bodies.Add(body); }
-                var (code, json) = Answer(ctx.Request.HttpMethod, path);
+                var (code, json) = Answer(ctx.Request.HttpMethod, path, body);
                 var bytes = Encoding.UTF8.GetBytes(json);
                 ctx.Response.StatusCode = code; ctx.Response.ContentType = "application/json"; ctx.Response.ContentLength64 = bytes.Length;
                 await ctx.Response.OutputStream.WriteAsync(bytes); ctx.Response.Close();
             }
         }
 
-        (int, string) Answer(string method, string path)
+        // W9.10i: the comments of the item (the state comment the projection writes: read, created, rewritten) and the login of the gateway's token
+        readonly List<(long Id, string Body)> comments = [];
+        public IReadOnlyList<string> Comments { get { lock (comments) return comments.Select(c => c.Body).ToList(); } }
+
+        static string CommentJson((long Id, string Body) c) => new JsonObject { ["id"] = c.Id, ["user"] = new JsonObject { ["login"] = "factory-bot" }, ["body"] = c.Body }.ToJsonString();
+
+        (int, string) Answer(string method, string path, string body)
         {
+            if (method == "GET" && path == "/user") return (200, """{"login":"factory-bot"}""");
+            lock (comments)
+            {
+                if (method == "GET" && path == $"/repos/{repoPath}/issues/701/comments") return (200, "[" + string.Join(",", comments.Select(CommentJson)) + "]");
+                if (method == "POST" && path == $"/repos/{repoPath}/issues/701/comments") { var c = (1000L + comments.Count, JsonNode.Parse(body)!["body"]!.ToString()); comments.Add(c); return (201, CommentJson(c)); }
+                if (path.StartsWith($"/repos/{repoPath}/issues/comments/") && long.TryParse(path[(path.LastIndexOf('/') + 1)..], out var id) && comments.FindIndex(c => c.Id == id) is >= 0 and var at)
+                {
+                    if (method == "PATCH") comments[at] = (id, JsonNode.Parse(body)!["body"]!.ToString());
+                    return (200, CommentJson(comments[at]));
+                }
+            }
             if (method == "GET" && path == $"/repos/{repoPath}/issues/701") return (200, new JsonObject { ["number"] = 701, ["body"] = "docs", ["labels"] = new JsonArray(Labels.Select(n => (JsonNode)new JsonObject { ["name"] = n }).ToArray()) }.ToJsonString());
-            if (method == "GET" && path == $"/repos/{repoPath}/issues/701/comments") return (200, "[]");
             if (method == "GET" && path == $"/repos/{repoPath}/pulls/11")
                 return (200, $$$"""{"state":"open","draft":false,"merged":false,"merge_commit_sha":null,"mergeable":true,"mergeable_state":"clean","base":{"ref":"master"},"head":{"sha":"{{{Head}}}","ref":"bot/701-x"}}""");
             if (method == "PUT" && path == $"/repos/{repoPath}/pulls/11/merge")
@@ -156,6 +173,13 @@ public sealed class DocsPlanWiringTests
             Assert.Empty(train.Line);
             Assert.Equal([(item.ToString(), MergeSha)], train.Merged.Select(m => (m.Item, m.Commit)));
             Assert.True(await Until(async () => (await Rows(cs, "SELECT COUNT(*) FROM factory.ItemHistory WHERE Type = 'merge.train.decided' AND Detail LIKE '%\"Action\":\"merged\"%'"))[0] == "1", 30), "the train's merge did not reach the history");
+            // W9.10i: the state comment follows the saga in the format v1 reads (the rollback path): the merge record of the gateway's merge, done at once (the docs plan ends at the merge), the stages entered, and nothing parked
+            JsonObject? v1 = null;
+            Assert.True(await Until(() => { v1 = api.Comments.Select(ItemStateComment.Parse).FirstOrDefault(s => s?["merge"]?["done_at"] is not null); return Task.FromResult(v1 is not null); }, 30), "the state comment holds no merge record: " + string.Join(" / ", api.Comments));
+            Assert.Equal(MergeSha, v1!["merge"]!["sha"]!.ToString());
+            Assert.Equal(11, (int)v1["merge"]!["pr"]!);
+            Assert.Null(v1["park"]);
+            Assert.Equal(["Technical Design", "Development", "Functional Testing"], v1["flow"]!.AsArray().Select(f => f!["c"]!.ToString()));
             Assert.Equal("0", (await Rows(cs, "SELECT COUNT(*) FROM wolverine.wolverine_dead_letters"))[0]);
         }
         finally
