@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Fworker.Database;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Xunit;
@@ -24,6 +25,20 @@ internal static class SqlLeadershipSupport
         var sw = Stopwatch.StartNew();
         while (!c() && sw.Elapsed < TimeSpan.FromSeconds(seconds)) await Task.Delay(10);
         Assert.True(c());
+    }
+
+    /// <summary>The one process that acts, once exactly one has acted for 1.5 s without a change.</summary>
+    public static async Task<FakeProcess> SettledActor(FakeProcess a, FakeProcess b, int seconds = 30)
+    {
+        var sw = Stopwatch.StartNew(); FakeProcess? current = null; var since = sw.Elapsed;
+        while (sw.Elapsed < TimeSpan.FromSeconds(seconds))
+        {
+            var now = a.Acts && !b.Acts ? a : b.Acts && !a.Acts ? b : null;
+            if (now != current) { current = now; since = sw.Elapsed; }
+            if (current != null && sw.Elapsed - since > TimeSpan.FromSeconds(1.5)) return current;
+            await Task.Delay(20);
+        }
+        throw new Xunit.Sdk.XunitException("the two processes did not settle on one actor");
     }
 
     /// <summary>Ends the loops a test started (declared after the source, so it is disposed first).</summary>
@@ -74,7 +89,8 @@ internal sealed class FakeRefServer
     public IRuleScriptCalls Calls_(Func<Task>? beforeAcquire = null) => new Calls(Run(beforeAcquire));
 
     readonly object gate = new();
-    long epoch; string? holder; DateTime until; bool released;
+    long epoch; string? holder; DateTime until; bool released; long? plantEpoch;
+    public long Epoch { get { lock (gate) return epoch; } }
 
     public Func<string, string, TimeSpan, Task<(int Code, string Output)>> Run(Func<Task>? beforeAcquire = null) => async (verb, stdin, timeout) =>
     {
@@ -84,19 +100,19 @@ internal sealed class FakeRefServer
         if (action == "acquire" && beforeAcquire != null) await beforeAcquire();
         lock (gate)
         {
-            System.Text.Json.Nodes.JsonObject Current() => new() { ["holder"] = holder, ["epoch"] = epoch, ["until"] = until.ToString("o"), ["released"] = released };
+            System.Text.Json.Nodes.JsonObject Current() => new() { ["holder"] = holder, ["epoch"] = epoch, ["until"] = until.ToString("o"), ["released"] = released, ["plant_epoch"] = released ? plantEpoch : null };
             switch (action)
             {
                 case "acquire":
                 {
                     var pred = holder == null ? null : Current();
-                    epoch++; holder = who; until = DateTime.UtcNow.AddSeconds(ttl); released = false;
+                    epoch++; holder = who; until = DateTime.UtcNow.AddSeconds(ttl); released = false; plantEpoch = null;
                     return (0, new System.Text.Json.Nodes.JsonObject { ["ok"] = true, ["epoch"] = epoch, ["leader"] = true, ["sha"] = "s" + epoch, ["until"] = until.ToString("o"), ["predecessor"] = pred }.ToJsonString());
                 }
                 case "release":
                 {
                     var mine = (long?)input["epoch"] == epoch && who == holder;
-                    if (mine) released = true;
+                    if (mine) { released = true; plantEpoch = (long?)input["plant_epoch"]; }
                     return (0, new System.Text.Json.Nodes.JsonObject { ["ok"] = true, ["released"] = mine, ["leader"] = mine }.ToJsonString());
                 }
                 default:   // check, renew
@@ -375,9 +391,29 @@ public sealed class SqlLeadershipRulesTests
             n1.Start();
             await SqlLeadershipSupport.Until(() => n1.Lease.Held);
             n2.Start();
-            await SqlLeadershipSupport.Until(() => n1.Acts ^ n2.Acts, 30);
-            await Task.Delay(1500);   // and it stays one: nobody flips, nobody is left without
-            Assert.True(n1.Acts ^ n2.Acts);
+            // the late write of the older process may displace the newer one that already acts (the newer one hands over, the older one takes both again): that churn is allowed, the end of it is
+            // one actor that then stays the one
+            var actor = await SqlLeadershipSupport.SettledActor(n1, n2);
+            await Task.Delay(1500);
+            Assert.True(actor.Acts); Assert.False((actor == n1 ? n2 : n1).Acts);
+            Assert.Equal(1, nodes.MaxRunning);
+            Assert.Equal(1, new[] { n1, n2 }.Count(p => p.Leader.MayAct));
+        }
+        finally { n1.Stop(); n2.Stop(); await n1.Service.StopAsync(CancellationToken.None); await n2.Service.StopAsync(CancellationToken.None); }
+    }
+
+    [Fact]
+    public async Task TwoNearSimultaneousStarts_TheOtherOrdering_TheSecondIsTheSlowOne_ConvergeToExactlyOneActor_AndNeverTwoNodes()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); var nodes = new SqlLeadershipSupport.Nodes();
+        // N1 takes the lock and the ref at once, N2 starts at the same time and is slow to write the ref: N2 asks, takes the lock (N1 makes room, acting or not) and its write lands late, over whatever N1 did
+        var n1 = new FakeProcess("N1", locks, refs, nodes); var n2 = new FakeProcess("N2", locks, refs, nodes, beforeRefWrite: () => Task.Delay(500));
+        try
+        {
+            n1.Start(); n2.Start();
+            var actor = await SqlLeadershipSupport.SettledActor(n1, n2);
+            await Task.Delay(1500);
+            Assert.True(actor.Acts); Assert.False((actor == n1 ? n2 : n1).Acts);
             Assert.Equal(1, nodes.MaxRunning);
             Assert.Equal(1, new[] { n1, n2 }.Count(p => p.Leader.MayAct));
         }
@@ -432,6 +468,68 @@ public sealed class SqlLeadershipRulesTests
         Assert.Equal("OLD", pred!["holder"]!.ToString());                 // ... and the restore still waits for the final snapshot of the real predecessor
         Assert.True(lease.Held);
         Assert.Equal(3, leader.Epoch);                                    // the seeded record was epoch 1, the two writes 2 and 3
+        Assert.Equal("OLD", leader.Predecessor!["holder"]!.ToString());   // and the status shows the one the restore uses, not the process's own record
+        Assert.Equal("OLD", leader.Status()["predecessor"]!["holder"]!.ToString());
+    }
+
+    [Fact]
+    public async Task TheLockIsLostAfterTheFirstWriteFoundNoRef_ThereIsNoPredecessor_NotTheProcessesOwnRecord()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        var lease = locks.NewLease(); var writes = 0;
+        var leader = FakeLeader(refs, lease, async () => { if (Interlocked.Increment(ref writes) == 1) { await Task.Delay(200); lease.Lose(); } });
+        var pred = await leader.AcquireAllAsync(cts.Token);
+        Assert.Equal(2, writes);
+        Assert.Null(pred);                                                // nothing to restore from: waiting for the snapshot of its own first write would cost leaderHandoverSeconds
+        Assert.Null(leader.Predecessor);
+    }
+
+    [Fact]
+    public async Task AProcessThatStoodAsideForANewerOne_WhichActedAndStoppedMeanwhile_RestoresFromThatOne_NotFromTheOneBeforeIt()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        await SeedRef(refs, "O", release: false);
+        var leaseA = locks.NewLease(); var leaseB = locks.NewLease(); var nodes = new SqlLeadershipSupport.Nodes();
+        var b = FakeLeader(refs, leaseB, () => SqlLeadershipSupport.Until(() => refs.Epoch >= 2));   // B writes the ref after A did
+        SqlLeadershipSupport.HandOver(b, nodes, "B");
+        Task<System.Text.Json.Nodes.JsonObject?>? bStart = null; var writes = 0;
+        var a = FakeLeader(refs, leaseA, async () =>
+        {
+            if (Interlocked.Increment(ref writes) != 1) return;
+            // A has the lock and is about to write the ref; the lock goes (a newer process asked) and B, the newer one, takes it
+            await Task.Delay(200); leaseA.Lose();
+            await b.AcquireSqlAsync(cts.Token);
+            bStart = Task.Run(async () => { var p = await b.AcquireAllAsync(cts.Token); if (await b.ConfirmAsync()) b.StartActing(); return p; });
+        });
+        var aStart = Task.Run(() => a.AcquireAllAsync(cts.Token));
+        var predB = await Task.Run(async () => { await SqlLeadershipSupport.Until(() => bStart != null); return await bStart!; });
+        Assert.Equal(3, b.Epoch);                                         // O wrote 1, A 2 and B 3
+        await SqlLeadershipSupport.Until(() => a.State == GatewayLeader.Role.Superseded);   // A waits for B's lock as a process that lost the start race
+        await SqlLeadershipSupport.Until(() => b.State == GatewayLeader.Role.Acting);
+        Assert.Equal(a.Holder, predB!["holder"]!.ToString());
+        // B loses its connection: it steps down with a final snapshot of its own epoch (the hand-over), and A, which has been waiting, takes the lock and the ref
+        leaseB.Lose();
+        var predA = await aStart.WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.Equal(b.Holder, predA!["holder"]!.ToString());             // the restore names B, whose final snapshot exists, not O
+        Assert.Equal(3L, (long)predA["epoch"]!);
+        Assert.Equal(b.Holder, a.Predecessor!["holder"]!.ToString());
+        await SqlLeadershipSupport.Until(() => nodes.Snapshot().Contains("B:snapshot"));   // (the dropped connection freed the lock at once; B's hand-over follows when it looks)
+    }
+
+    [Fact]
+    public async Task AProcessThatGivesUpTheLockBeforeItActed_ReleasesItsRefNamingTheSnapshotItWouldHaveRestored_SoTheNewcomerDoesNotWaitForOne()
+    {
+        var locks = new FakeLockServer(); var refs = new FakeRefServer(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        await SeedRef(refs, "O", release: false);
+        var a = FakeLeader(refs, locks.NewLease()); var b = FakeLeader(refs, locks.NewLease());
+        var predA = await a.AcquireAllAsync(cts.Token);                   // A holds the lock and wrote the ref (epoch 2); it restores, it has not acted
+        Assert.Equal("O", predA!["holder"]!.ToString());
+        Assert.Equal(GatewayLeader.Role.Starting, a.State);
+        var predB = await b.AcquireAllAsync(cts.Token).WaitAsync(TimeSpan.FromSeconds(20));   // B starts: it asks, A (which never acted, so writes no snapshot) makes room
+        Assert.Equal(a.Holder, predB!["holder"]!.ToString());
+        Assert.True((bool)predB["released"]!);                            // A's record says so ...
+        Assert.Equal(1L, (long)predB["plant_epoch"]!);                    // ... and names O's snapshot, the one A would have restored from: B restores from that, and does not wait for A's
+        Assert.Equal(3, b.Epoch);
     }
 
     [Fact]
@@ -487,19 +585,40 @@ public sealed class SqlLeadershipRulesTests
     }
 
     [Fact]
-    public async Task ALockCheckThatRunsLongerThanTwiceItsTimeout_ClearsHeld_WhateverTheCommandIsDoing()
+    public async Task ALockCheckThatRunsLongerThanTwiceItsTimeout_IsAbandoned_HeldIsClearedAndTheAnswerIsLost_WhileItsCommandIsStillRunning()
     {
-        var lease = new SqlLease("Server=unused;Database=unused", _ => Task.CompletedTask, 20) { CheckWatchdog = TimeSpan.FromMilliseconds(200) };
-        var stuck = new TaskCompletionSource(); lease.InCheck = _ => stuck.Task;   // a command on a dead socket: it neither finishes nor times out
+        var lease = new SqlLease("Server=unused;Database=unused", _ => Task.CompletedTask, 20) { CheckWatchdog = TimeSpan.FromMilliseconds(300) };
+        var stuck = new TaskCompletionSource<SqlLeaseCheck?>(); lease.InCheck = _ => stuck.Task;   // a command on a dead socket: it neither finishes nor times out
         lease.MarkHeldForTest(1);
         Assert.True(lease.Held);
-        var check = lease.CheckAsync("H", CancellationToken.None);
-        await SqlLeadershipSupport.Until(() => !lease.Held, 10);
-        Assert.False(check.IsCompleted);                                  // the look is still stuck, and the process already acts no more
-        stuck.SetResult();
-        var result = await check;
-        Assert.Equal(SqlLeaseState.Lost, result.State);                   // a look that overran never answers "held"
+        var result = await lease.CheckAsync("H", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));   // the look does not wait for the command
+        Assert.Equal(SqlLeaseState.Lost, result.State); Assert.Contains("too long", result.Failure);
+        Assert.False(lease.Held);                                         // the process acts no more ...
+        Assert.False(stuck.Task.IsCompleted);                             // ... though the command is still stuck
+        await lease.ReleaseAsync().WaitAsync(TimeSpan.FromSeconds(10));   // and the release of the step-down does not wait for it either
+        stuck.SetResult(new SqlLeaseCheck(SqlLeaseState.Held));           // a late answer of the abandoned look changes nothing
+        await Task.Delay(100);
         Assert.False(lease.Held);
+    }
+
+    [Fact]
+    public async Task AStuckLockCheck_LetsTheStepDownRun_TheNodeLeaves_AndThePlantIsSaved()
+    {
+        var nodes = new SqlLeadershipSupport.Nodes(); using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)); using var stop = new SqlLeadershipSupport.CancelOnDispose(cts);
+        var lease = new SqlLease("Server=unused;Database=unused", _ => Task.CompletedTask, 20) { CheckWatchdog = TimeSpan.FromMilliseconds(300) };
+        var stuckNow = false; var stuck = new TaskCompletionSource<SqlLeaseCheck?>();
+        lease.InCheck = _ => stuckNow ? stuck.Task : Task.FromResult<SqlLeaseCheck?>(new SqlLeaseCheck(SqlLeaseState.Held));
+        var a = SqlLeadershipSupport.NewLeader(lease, fences: true);
+        var svc = SqlLeadershipSupport.Service(a, nodes, "A"); SqlLeadershipSupport.HandOver(a, nodes, "A");
+        await svc.StartAsync(CancellationToken.None);
+        lease.MarkHeldForTest(1); a.StartActing();
+        _ = Task.Run(() => a.SqlLoopAsync(cts.Token));
+        await SqlLeadershipSupport.Until(() => svc.State == WolverineHostService.Phase.Running);
+        stuckNow = true;                                                  // the socket dies: the look never ends
+        await SqlLeadershipSupport.Until(() => nodes.Snapshot().Contains("A:stop"), 10);   // the running node is stopped by the step-down, not left running behind a stuck check
+        Assert.Contains("A:snapshot", nodes.Snapshot());
+        Assert.False(a.MayAct); Assert.Equal(GatewayLeader.Role.Superseded, a.State);
+        await svc.StopAsync(CancellationToken.None);
     }
 
     [Fact]
@@ -661,6 +780,31 @@ public sealed class SqlLeaseDatabaseTests
             await b.ReleaseAsync();                                                       // B stops: its request goes with it
             Assert.Equal(0L, await db.Count("SELECT COUNT(*) FROM factory.Leadership WHERE TakeoverBy IS NOT NULL"));
             await a.ReleaseAsync();                                                       // A's step-down ends: now the lock is free
+            Assert.True((await b.TryAcquireAsync("B", false, default)).Acquired);
+        }
+        finally { await a.ReleaseAsync(); await b.ReleaseAsync(); }
+    }
+
+    [Fact]
+    public async Task ALookBlockedPastTheWatchdog_IsAbandoned_AndTheReleaseFreesTheLock()
+    {
+        if (!TestDatabase.Available) return;
+        await using var db = await TestDatabase.CreateAsync("fw_lease8_");
+        var a = NewLease(db); a.CheckWatchdog = TimeSpan.FromSeconds(1); var b = NewLease(db);
+        await using var blocker = new SqlConnection(db.ConnectionString);
+        try
+        {
+            Assert.True((await a.TryAcquireAsync("A", true, default)).Acquired);
+            await blocker.OpenAsync();
+            await using var tx = (SqlTransaction)await blocker.BeginTransactionAsync();
+            await using (var hold = new SqlCommand("UPDATE factory.Leadership SET Holder = Holder WHERE Id = 1", blocker, tx)) await hold.ExecuteNonQueryAsync();   // the row stays locked: the holder's look cannot read it
+            var sw = Stopwatch.StartNew();
+            var lost = await a.CheckAsync("A", default);
+            Assert.Equal(SqlLeaseState.Lost, lost.State); Assert.False(a.Held);
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(8), "the look was given up at the watchdog, not at its command timeout");
+            await a.ReleaseAsync();                                       // ends the connection, and with it the stuck command and the session lock
+            await tx.RollbackAsync();
+            Assert.True((await b.PeekAsync(default)).LockFree);
             Assert.True((await b.TryAcquireAsync("B", false, default)).Acquired);
         }
         finally { await a.ReleaseAsync(); await b.ReleaseAsync(); }

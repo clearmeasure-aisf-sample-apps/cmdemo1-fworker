@@ -40,7 +40,7 @@ sealed class SqlLease : ISqlLease
     readonly SemaphoreSlim io = new(1, 1);
     readonly object gate = new();
     SqlConnection? conn;
-    bool prepared, requested, conceded, held;
+    bool prepared, requested, conceded, held, abandoned;   // abandoned: a look was given up while its command was still running on the connection
     long epoch;
     string? me;   // the holder name this lease acts for (set by the first try), so that a stop can withdraw its own takeover request
 
@@ -58,7 +58,7 @@ sealed class SqlLease : ISqlLease
     /// <summary>How long a look may run before the lock counts as gone whatever the command is doing: a dead socket can hold a command past its timeout (the driver's timeout needs the socket to answer).</summary>
     internal TimeSpan CheckWatchdog { get; set; } = TimeSpan.FromSeconds(2 * CheckTimeoutSeconds);
     /// <summary>For a test: runs inside the look, where the query would run (it can stand for a command stuck on a dead socket).</summary>
-    internal Func<CancellationToken, Task>? InCheck { get; set; }
+    internal Func<CancellationToken, Task<SqlLeaseCheck?>>? InCheck { get; set; }
     /// <summary>For a test: the lock counts as held without a database behind it.</summary>
     internal void MarkHeldForTest(long term) => SetHeld(true, term);
 
@@ -68,7 +68,7 @@ sealed class SqlLease : ISqlLease
 
     async Task<SqlConnection> ConnectionAsync(CancellationToken ct)
     {
-        if (conn is { State: ConnectionState.Open }) return conn;
+        if (conn is { State: ConnectionState.Open } && !abandoned) return conn;
         Drop();
         var c = new SqlConnection(connectionString);
         try { await c.OpenAsync(ct); } catch { c.Dispose(); throw; }
@@ -77,7 +77,7 @@ sealed class SqlLease : ISqlLease
     }
 
     // the connection ends, and with it the session lock; pooling is off, so the server sees the session end at once
-    void Drop() { var c = conn; conn = null; if (c != null) { try { c.Dispose(); } catch { } } }
+    void Drop() { var c = conn; conn = null; lock (gate) abandoned = false; if (c != null) { try { c.Dispose(); } catch { } } }
 
     SqlCommand Command(SqlConnection c, string text, int timeoutSeconds = 15)
     {
@@ -182,48 +182,66 @@ sealed class SqlLease : ISqlLease
         await io.WaitAsync(ct);
         try
         {
-            if (!Held) return new SqlLeaseCheck(SqlLeaseState.Lost);
-            // the watchdog: a look that is still running after twice its command timeout (the socket is dead and the driver has not noticed) must not leave Held true, which is what lets this process act (MayAct);
-            // the connection is not touched (the lock stays the server's until the step-down releases it), only the claim to act goes
-            var overran = 0;
-            using var watchdog = new Timer(_ => { Interlocked.Exchange(ref overran, 1); SetHeld(false); }, null, CheckWatchdog, Timeout.InfiniteTimeSpan);
-            try
+            if (!Held) return LostCheck("not held");
+            // The look runs as a task of its own and is waited for at most CheckWatchdog (twice its command timeout): a command on a dead socket can run past its timeout (the driver's timeout needs the socket
+            // to answer), and a look that cannot end would keep Held true (which is what lets this process act) and keep the step-down from running. Past the deadline the look is abandoned: the lock counts
+            // as gone, the caller steps down (the node leaves, the plant is saved) and its release ends the connection, which ends the stuck command. The connection is not touched before that: the lock stays
+            // the server's until the release, so that no other process takes it while this node still runs.
+            var look = LookAsync(holder, ct);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var first = await Task.WhenAny(look, Task.Delay(CheckWatchdog, deadline.Token));
+            if (first != look)
             {
-                if (InCheck is { } hook) await hook(ct);
-                var c = conn ?? throw new InvalidOperationException("no connection");
-                // the session's own view of the lock (a reconnected session has none), and the row: the term must still be ours
-                // (a lock that does not show is asked for once more before it counts as gone)
-                for (var look = 1; ; look++)
-                {
-                    await using var cmd = Command(c, """
-                        SELECT APPLOCK_MODE(N'public', @r, N'Session'), l.Epoch, l.Holder, l.TakeoverBy, CASE WHEN l.TakeoverAt >= DATEADD(SECOND, -@fresh, SYSDATETIMEOFFSET()) THEN 1 ELSE 0 END
-                        FROM (SELECT 1 AS One) d LEFT JOIN factory.Leadership l ON l.Id = 1;
-                        """, CheckTimeoutSeconds);
-                    await using var r = await cmd.ExecuteReaderAsync(ct);
-                    if (!await r.ReadAsync(ct)) return Lost("no answer");
-                    var mode = r.GetString(0);
-                    var rowEpoch = r.IsDBNull(1) ? -1 : r.GetInt64(1);
-                    var rowHolder = r.IsDBNull(2) ? null : r.GetString(2);
-                    if (mode != "Exclusive" || rowHolder != holder || rowEpoch != Epoch)
-                    {
-                        if (look == 1) continue;
-                        return Lost(mode != "Exclusive" ? "the lock is gone" : "the term is another's");
-                    }
-                    var by = r.IsDBNull(3) ? null : r.GetString(3);
-                    if (Volatile.Read(ref overran) == 1) return Lost("the look took too long");
-                    if (by != null && by != holder && r.GetInt32(4) == 1) return new SqlLeaseCheck(SqlLeaseState.TakeoverRequested, by);
-                    return new SqlLeaseCheck(SqlLeaseState.Held);
-                }
+                _ = look.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);   // whatever the abandoned look ends with is not looked at
+                ct.ThrowIfCancellationRequested();
+                lock (gate) abandoned = true;
+                SetHeld(false);
+                return LostCheck("the look took too long");
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception e) { return Lost(e is SqlException se ? $"SqlException {se.Number}" : e.GetType().Name); }
+            deadline.Cancel();
+            var result = await look;
+            if (result.State == SqlLeaseState.Lost) SetHeld(false);
+            return result;
         }
         finally { io.Release(); }
     }
 
-    // The holder has lost the lock: it acts no more. The connection is NOT ended here: a lock the server still holds (a failed look, a timeout) stays held until ReleaseAsync, which the step-down calls
-    // after the node has left and the plant is saved, so that no other process can take it while this node still runs.
-    SqlLeaseCheck Lost(string why) { SetHeld(false); return new SqlLeaseCheck(SqlLeaseState.Lost, Failure: why); }
+    async Task<SqlLeaseCheck> LookAsync(string holder, CancellationToken ct)
+    {
+        try
+        {
+            if (InCheck is { } hook && await hook(ct) is { } answer) return answer;
+            var c = conn ?? throw new InvalidOperationException("no connection");
+            // the session's own view of the lock (a reconnected session has none), and the row: the term must still be ours
+            // (a lock that does not show is asked for once more before it counts as gone)
+            for (var look = 1; ; look++)
+            {
+                await using var cmd = Command(c, """
+                    SELECT APPLOCK_MODE(N'public', @r, N'Session'), l.Epoch, l.Holder, l.TakeoverBy, CASE WHEN l.TakeoverAt >= DATEADD(SECOND, -@fresh, SYSDATETIMEOFFSET()) THEN 1 ELSE 0 END
+                    FROM (SELECT 1 AS One) d LEFT JOIN factory.Leadership l ON l.Id = 1;
+                    """, CheckTimeoutSeconds);
+                await using var r = await cmd.ExecuteReaderAsync(ct);
+                if (!await r.ReadAsync(ct)) return LostCheck("no answer");
+                var mode = r.GetString(0);
+                var rowEpoch = r.IsDBNull(1) ? -1 : r.GetInt64(1);
+                var rowHolder = r.IsDBNull(2) ? null : r.GetString(2);
+                if (mode != "Exclusive" || rowHolder != holder || rowEpoch != Epoch)
+                {
+                    if (look == 1) continue;
+                    return LostCheck(mode != "Exclusive" ? "the lock is gone" : "the term is another's");
+                }
+                var by = r.IsDBNull(3) ? null : r.GetString(3);
+                if (by != null && by != holder && r.GetInt32(4) == 1) return new SqlLeaseCheck(SqlLeaseState.TakeoverRequested, by);
+                return new SqlLeaseCheck(SqlLeaseState.Held);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception e) { return LostCheck(e is SqlException se ? $"SqlException {se.Number}" : e.GetType().Name); }
+    }
+
+    // The holder has lost the lock: it acts no more (CheckAsync clears Held; a look that was abandoned changes nothing). The connection is NOT ended here: a lock the server still holds (a failed look, a timeout) stays
+    // held until ReleaseAsync, which the step-down calls after the node has left and the plant is saved, so that no other process can take it while this node still runs.
+    static SqlLeaseCheck LostCheck(string why) => new(SqlLeaseState.Lost, Failure: why);
 
     public async Task<SqlLeasePeek> PeekAsync(CancellationToken ct)
     {
@@ -252,7 +270,8 @@ sealed class SqlLease : ISqlLease
         try
         {
             var c = conn;
-            if (c is { State: ConnectionState.Open })
+            bool stuck; lock (gate) stuck = abandoned;   // a command of an abandoned look is still running on the connection: nothing more is asked of it, ending it ends the session lock too
+            if (c is { State: ConnectionState.Open } && !stuck)
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 // a stopping newcomer withdraws its own request (it is not honoured when stale, but the holder need not step down for it meanwhile)
