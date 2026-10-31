@@ -13,6 +13,10 @@
 # variables after the apply, then set the values there; the scripts treat an empty or missing value as unset. A state from before this
 # change holds octopusdeploy_variable.sensitive: `terraform state rm octopusdeploy_variable.sensitive` first, or the apply deletes them.
 # The scripts are deploy/octopus/scripts/*.sh (tested by tests/octopus/runbooks.test.sh).
+#
+# Host admission (W7.4): local.settings carries Fworker.PerHostCapacity, PerHostBurst, ReserveMb, MinDiskMb and HostFullWaitSeconds. With
+# PerHostCapacity set, start-worker.sh counts the running fw-* containers itself and ends a start the host cannot take with "host-full" and
+# exit code 75, which the gateway reads as a wait, not a failure. They reach the project only by this apply (terraform apply by hand).
 
 terraform {
   required_version = ">= 1.6"
@@ -145,6 +149,15 @@ locals {
     "Fworker.Cpus"                = "2"
     "Fworker.Memory"              = "8g"
     "Fworker.StartTimeoutSeconds" = "180"
+    # host admission (W7.4), read by start-worker.sh; they equal runtimes.octopus of config/instance.json (perHostCapacity 2, perHostBurst 0,
+    # reserveMb 2048, minDiskMb 4096, hostFullSeconds 30; the tdd override repeats perHostCapacity 2) so the host and the gateway agree.
+    # PerHostBurst 2 is not the gateway's 0: the script's limit is max(burst, capacity), so 2 is the same limit (no burst).
+    # Fworker.FootprintMb is deliberately not set: a start above the capacity is refused ("host-full", exit 75) until a burst is wanted.
+    "Fworker.PerHostCapacity"     = "2"
+    "Fworker.PerHostBurst"        = "2"
+    "Fworker.ReserveMb"           = "2048"
+    "Fworker.MinDiskMb"           = "4096"
+    "Fworker.HostFullWaitSeconds" = "30"
   }
 
   # Sensitive variables of the project, added outside Terraform (see the top): the name and what the value is
