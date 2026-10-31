@@ -12,8 +12,8 @@
 # A line that starts with # and a blank line are comments. A claim must name a suite of `run.ps1 -ListSuites` and match at least one scenario of it: the run fails on a claim that lists none, so a renamed
 # suite or scenario cannot leave a claim empty. tests/ci/run-v2-claims.py checks this file and the matrix of tests.yml (every claimed suite in exactly one v2 job; the coverage job runs it).
 #
-# The precondition of W9.9c is that the claim list equals `run.ps1 -ListSuites` less the declared v1-only suites, every suite claimed whole: `run-v2-claims.py ... --require-complete`. The suites listed
-# under "not claimed yet" below fail on v2 or have not been run there; each says why. A suite claimed by scenarios is a start, not a claim of the suite.
+# The precondition of W9.9c is that the claim list equals `run.ps1 -ListSuites` less the declared v1-only suites, every suite claimed whole: `run-v2-claims.py ... --require-complete`, which the job
+# "Every scenario is in exactly one shard" runs, so the list stays complete: a suite appended to run.ps1 is claimed whole or declared v1-only in the same pull request. A suite claimed by scenarios is not claimed whole.
 
 # ---- the sagas: the Todo items of the suite 'saga' start WorkItemSagas (W9.10d; golden/v2-differences.txt has the blocks of W6.6 and W7.3) -------------------------------------------------------------------
 # W6 gate (#265): the docs plan on v2: the engine's intake pulls the item, the owner session designs, builds and verifies it, the saga merges it once, the card goes to Done by the projection.
@@ -61,71 +61,36 @@ promote
 # qc-worker: 330 checks green on v2 in one process (494 s); four shards in the matrix, as in the v1 job
 qc-worker
 
-# ---- by scenarios: the suites that are too long for one job or not yet green as a whole ---------------------------------------------------------------------------------------------------------------
-# W3 gate: the journal as a v2 command (Add-Journal's ledger: dedup keys, the 30-line cap, folds by comment id). The journal-fold
-# scenarios are part of the owner suite; this runs them alone, on the owner suite's gateway settings.
-owner | ^journal fold:
-
-# W9.1 gate: the QC verbs on v2 (QcService, #353): the merge gate that reads the record of the run (a PASS that needs a QC run, then a person, then merges: Start, the worker's report, the person's approval, qc-gate) and the lost worker
-# that is relaunched (qc-gate-lease). The state comment is still where v1 reads the record, so the sweep's own QC step and the merge script see what the verbs wrote. This job has 22 minutes for its claims and the other gates take
-# about 17 of them, so the rest of the QC suites (qc-gate: the new head, the reset, the approval by webhook and sweep, the busy lock, the switched-off requirements; qc-gate-race; qc and qc-worker, the same verbs through the click
-# pages and the worker's session) stay with the shards, which run them on the engine each shard has.
-qc-gate | ^qc: gate a non-auto-merge PASS stays on the approval path
-# (qc-gate-lease is claimed whole above, with the other one-scenario QC suites)
-
-# W9.6 gate: the keeper's and the manager's verbs (gateway/Verbs/Routes/Keeper.cs, Fworker.Workflows.Keeper) answer on v2 as the rule scripts did: the scenarios that call manager-action, amend-criteria,
-# split-item, create-item, set-priority and link-dependency, with their golden writes. (The replenish scenarios of keeper.ps1 are Replenish.ps1's, not a verb of this group.)
-manager | ^act: (the supervisor unparks|unpark refuses|the supervisor drains|the plan offers)
-manager | ^keeper: (a worker-failure park|split-item)
-
-# W9.10k gate (#563, second pull request): the manager's actions on an item a saga owns, and the plant that comes back from SQL (manager-actions.ps1, v2 only: v1 has no saga and the scenarios say so). Each scenario restarts the suite's gateway with the
-# intake on (the docs plan of the engine), has the intake pull a Todo item and the owner session sg1 take it, and acts through the real supervisor client: unpark (the saga resumes it), release-owner (the saga records owner-release-asked and
-# the session that takes the new offer keeps its claim), requeue (the saga records requeued). The last one keeps the plant in the database (FACTORY_PLANT_SNAPSHOT on for its gateway), stops the gateway with SIGTERM and starts it again twice: the
-# offer comes back under the id the session holds (the accept with that id is the proof), then the owner, confirmed by the claim. The four run in one process, about 5 minutes in all.
-manager | ^act: saga item:
-
-# W9.2: the item verbs (claim-item, append-body, record-review, complete, validation-verdict, move-next ...) answer on v2 as the scripts do. Three scenarios of the suite 'auto' that use them (the completion
-# of Development stays the script's until W9.5, and these scenarios run it as such): the gates, the escalation of a repeated criterion with the timing comment, and the docs-only design reviews.
-auto | ^gates refuse what they should
-auto | ^escalate earlier:
-auto | ^docs-only fast path: one design review round
-
-# W9.5 gate: the read models (pr-checks, wait-for-checks, model-tier) on v2: the detail of a failed check, the baseline, the pages of a log and the artifacts, the item's own pull request, the count of red heads and the one
-# rerun, and the model ladder with the refusals the v1 wrapper counts in the state directory (the files the rule scripts and v2 share). The verbs answer from v2 where the engine acts; the rest of each scenario still runs on v1.
-auto | ^(push gate|pr-checks|model ladder|testing profile):
-owner | ^owner: pr-checks with an item token
-manager | ^mgr: pr-checks gives the supervisor
-
-# W9.10g gate (#559): the sweep's plant-wide steps as recurring jobs of the C# port (src/Fworker.Workflows/Reconcilers/PlantSteps.cs, the jobs of gateway/Ports/PlantStepJobs.cs) where the engine acts: the claim-ref reap (the first two: an
-# accept takes an orphan ref over, a closed item's ref is removed and a young one kept; a busy item lock does not stall the sweep), the board guard (an issue a verb is still putting on the board is left to it, then placed and journalled
-# once; the owner suite's guard: placed, a stranded card repaired, the closed and the rival's issue left alone, journalled once, offered) and the replenishment (one docs-only item per Done item, never above targetOpen or maxPerDay, its counts
-# in /status). The keeper's design_waiting count (the backlog-low job) is proved by `manager | ^keeper: (a worker-failure park|split-item)` above, which now runs on the C# count. The plan's section "W9.10g, second pull request as built" lists them.
-auto | ^orphan claim refs:
-auto | ^board guard: an issue a verb is still putting
-owner | ^owner: board guard:
-manager | ^keeper: replenish creates one docs-only
+# ---- whole suites that were claimed by scenarios, then completed (W9.9c prep, #361) ------------------------------------------------------------------------------------------------------------------
+# The scenarios that earlier gates claimed one by one are part of the suites below, which run whole on v2 in shards as the v1 jobs do (tests.yml, the matrix of the job v2). What each gate proved stays proved:
+#   W3  the journal as a v2 command (Add-Journal's ledger): owner, the journal fold scenarios
+#   W9.1 the QC verbs (QcService, #353): qc and qc-worker (the click pages and the worker's session), qc-gate-lease (the lost worker that is relaunched)
+#   W9.2 the item verbs (claim-item, append-body, record-review, complete, validation-verdict, move-next ...): auto, the gates, the escalation of a repeated criterion, the docs-only design reviews
+#   W9.4 the delivery verbs a session calls through the verb route (private-build, publish-demo): auto 'push gate' and 'video label', owner 'the owner publishes the demo video' (the demo upload endpoint,
+#        POST /api/v1/demo/N, reaches publish-demo through the bridge, not the verb route). settle, copilot-settle, copilot-owner and ci-release have no scenario of their own here: the sweep's settle is the
+#        script's (sync-board, W9.8) and the copilot suite, which runs as tdd, covers its CI release, owner and settle scenarios. The unit tests (DeliveryVerbs*Tests, DeliveryVerbHostTests) pin them against the scripts.
+#   W9.5 the read models (pr-checks, wait-for-checks, model-tier): auto, owner and manager scenarios that call them
+#   W9.6 the keeper's and the manager's verbs (manager-action, amend-criteria, split-item, create-item, set-priority, link-dependency): manager, 'act:', 'keeper:' and 'mgr:' scenarios
+#   W9.10g the plant-wide steps as recurring jobs (the claim-ref reap, the board guard, the replenishment): auto, owner and manager scenarios
+#   W9.10k the manager's actions on an item a saga owns and the plant that comes back from SQL (manager-actions.ps1, v2 only: v1 has no saga and the scenarios say so): manager, 'act: saga item:'
+# auto and owner: gatewayMerge is off for auto (the session's own merge verb is tested there) and owner sessions are on for owner; both are the suites' own settings, as on v1.
+auto
+owner
+manager
+# qc and messaging: the rule-script pool and the client host of the suite, four groups in one job (v1's job does the same)
+qc
+messaging
+# copilot, cursor, cursor-deadline, runtime and author: the runtimes and the author identity; their differences from v1, if any, are blocks of golden/v2-differences.txt
+copilot
+cursor
+cursor-deadline
+runtime
+author
 
 # ---- v1 only -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # The merge policy peer-approved is dropped (the owner's decision 4 of 2026-10-30): its suites go with v1 (W9.11), and so does the merge gate of the QC environment that rests on it.
 v1-only peer-approved | the dropped merge policy peer-approved (decision 4 of 2026-10-30): the suite tests the approval path that v2 does not port
-# What qc-gate covers of the QC environment, checked against the suite qc: the record of a reset keeping the head of the run (ran_sha) and the teardown of a live environment when the Auto Merge label is added
-# (label-changed) are the QC record's own, not the gate's: they moved to the suite qc (qc.ps1 runs $QcGateAutoScenarios, policy auto). The other eight scenarios test the gate itself: a merge needs a QC run and a person's approval.
-# The rest of qc-gate (its eight scenarios) tests the merge gate itself, which rests on the dropped policy: it is not claimed beyond the one scenario of W9.1 above, and goes with v1 at W9.11a unless the owner keeps the gate.
-# (It is not declared v1-only while the QC verbs are being ported: W9.1 claims one of its scenarios on v2.)
-
-# ---- not claimed yet (W9.9c's precondition): each suite, why, and what runs of it now ------------------------------------------------------------------------------------------------------------------------
-# auto, owner, manager     claimed above by scenarios; the suites are 100 to 1,800 s of scenarios on a CI runner, and a whole-suite claim needs shards in the v2 matrix and a green run of each
-# messaging, qc            not run on v2 yet (a run of 12 to 40 minutes on one core; the claim and its shards follow with the first green master run of the matrix above)
-# copilot                  1 of 394 checks fails on v2: 'copilot: a task that ends by itself ...': status 'the failure was counted against the item' (the same runtime-status difference as cursor); the rest is green (986 s in one process)
-# author                   1 of 39 checks fails on v2: 'author app: state written by an earlier identity is adopted, then continued in the App's own comment': the App's own state comment is not written next to the old one (v2's item verbs keep
-#                          writing the state comment that exists)
-# cursor, cursor-deadline  3 checks of each fail on v2: the runtime status after a failed launch ('the failure was counted against the item', 'the failure shows the launch's HTTP status and Cursor's answer', the ended execution in last[])
-# runtime                  13 checks fail on v2: the runtime status has no 'cae-job' entry in the status block the scenarios read
-
-# W9.4 gate: the delivery verbs that a session or a scenario calls through the verb route. private-build (the push gate's attestation) and publish-demo (the demo
-# video's release and asset) are answered by v2's own code (gateway/Ports/DeliveryVerbHost.cs) and write what the rule scripts write; no difference is declared.
-# settle, copilot-settle, copilot-owner and ci-release have no scenario that can be claimed here: the sweep's settle is the script's own (sync-board, W9.8), and the
-# copilot suite needs the environment name tdd (run with V2EnvName 'tdd' in run.ps1 by hand, its CI release, owner and settle scenarios pass on v2 with the golden writes unchanged). The unit tests (DeliveryVerbs*Tests) and the gateway tests (DeliveryVerbHostTests) pin them against the scripts.
-auto | ^(push gate|video label):
-# the demo upload endpoint (POST /api/v1/demo/N) reaches publish-demo through the bridge, not the verb route
-owner | ^owner:.the.owner.publishes.the.demo.video
+# qc-gate runs under mergePolicy peer-approved (run.ps1: Policy 'peer-approved'): its eight scenarios test the merge gate that needs a QC run and then a person's approval, which is the dropped policy's path
+# (decision 4 of 2026-10-30 names "qc-gate, which runs under that policy"; W9.11a removes it). What of it is the QC environment's own moved to the suite qc under the auto policy (a reset carries ran_sha over,
+# an Auto Merge label added to an item with a live environment tears it down: qc.ps1 runs $QcGateAutoScenarios), and the QC verbs W9.1 ported are claimed by qc, qc-worker and qc-gate-lease.
+v1-only qc-gate | the merge gate of the dropped policy peer-approved (decision 4 of 2026-10-30 names qc-gate: it runs under that policy, and W9.11a removes it); the QC record's own scenarios moved to the suite qc

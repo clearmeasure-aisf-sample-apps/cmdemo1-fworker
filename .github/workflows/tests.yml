@@ -455,9 +455,110 @@ jobs:
           - name: saga
             claims: saga
             parallel: 2
-          # the claims of auto, owner and manager by scenarios (10 claims, a job each)
-          - name: partial
-            claims: auto,owner,manager
+          # auto, owner, manager, copilot: whole suites in the groups of the v1 shards above (W9.9c prep, #361); the engine runs the same scenarios and goldens
+          - name: auto-0
+            claims: auto@0/8
+            parallel: 1
+          - name: auto-1
+            claims: auto@1/8
+            parallel: 1
+          - name: auto-2
+            claims: auto@2/8
+            parallel: 1
+          - name: auto-3
+            claims: auto@3/8
+            parallel: 1
+          - name: auto-4
+            claims: auto@4/8
+            parallel: 1
+          - name: auto-5
+            claims: auto@5/8
+            parallel: 1
+          - name: auto-6
+            claims: auto@6/8
+            parallel: 1
+          - name: auto-7
+            claims: auto@7/8
+            parallel: 1
+          - name: owner-0
+            claims: owner@0/10
+            parallel: 1
+          - name: owner-1
+            claims: owner@1/10
+            parallel: 1
+          - name: owner-2
+            claims: owner@2/10
+            parallel: 1
+          - name: owner-3
+            claims: owner@3/10
+            parallel: 1
+          - name: owner-4
+            claims: owner@4/10
+            parallel: 1
+          - name: owner-5
+            claims: owner@5/10
+            parallel: 1
+          - name: owner-6
+            claims: owner@6/10
+            parallel: 1
+          - name: owner-7
+            claims: owner@7/10
+            parallel: 1
+          - name: owner-8
+            claims: owner@8/10
+            parallel: 1
+          - name: owner-9
+            claims: owner@9/10
+            parallel: 1
+          - name: manager-0
+            claims: manager@0/8
+            parallel: 1
+          - name: manager-1
+            claims: manager@1/8
+            parallel: 1
+          - name: manager-2
+            claims: manager@2/8
+            parallel: 1
+          - name: manager-3
+            claims: manager@3/8
+            parallel: 1
+          - name: manager-4
+            claims: manager@4/8
+            parallel: 1
+          - name: manager-5
+            claims: manager@5/8
+            parallel: 1
+          - name: manager-6
+            claims: manager@6/8
+            parallel: 1
+          - name: manager-7
+            claims: manager@7/8
+            parallel: 1
+          - name: copilot-0
+            claims: copilot@0/4
+            parallel: 1
+          - name: copilot-1
+            claims: copilot@1/4
+            parallel: 1
+          - name: copilot-2
+            claims: copilot@2/4
+            parallel: 1
+          - name: copilot-3
+            claims: copilot@3/4
+            parallel: 1
+          # qc and messaging: their 4 groups in one job each, as in tier1 (the rule-script pool and the client host)
+          - name: qc
+            claims: qc@all/4
+            parallel: 1
+          - name: messaging
+            claims: messaging@all/4
+            parallel: 1
+          # runtime alone (the settled-background-line goldens failed beside other suites on v1); the runtime suites after it
+          - name: runtime
+            claims: runtime
+            parallel: 1
+          - name: cursor
+            claims: cursor,cursor-deadline,author
             parallel: 2
           - name: octopus
             claims: octopus,copilot-manager
@@ -487,7 +588,7 @@ jobs:
             parallel: 1
           # the QC environment suites (policy auto)
           - name: qc-gates-a
-            claims: qc-gate,qc-gate-race,qc-gate-grace,qc-gate-lease
+            claims: qc-gate-race,qc-gate-grace,qc-gate-lease
             parallel: 2
           - name: qc-gates-b
             claims: qc-gate-idle,qc-gate-lifetime,qc-gate-waiting,qc-rate,qc-proxy
@@ -715,7 +816,7 @@ jobs:
 
       # The claims of the v2 engine (W9.10d): the file parses, every claim names a suite of run.ps1 -ListSuites and lists a scenario, and every claimed suite is in exactly one entry (`claims:`) of the v2 matrix
       - name: Every v2 claim is in exactly one v2 job
-        run: python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml
+        run: python3 tests/ci/run-v2-claims.py tests/scenarios/v2-claims.txt --workflow .github/workflows/tests.yml --require-complete
 
       - name: Keep the list of scenarios
         uses: actions/upload-artifact@v7
