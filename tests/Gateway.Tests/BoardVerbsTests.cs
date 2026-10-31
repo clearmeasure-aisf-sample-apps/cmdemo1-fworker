@@ -39,8 +39,9 @@ public sealed class BoardVerbsTests
     sealed class MemoryJournal : IJournalStore
     {
         public readonly Dictionary<int, JsonObject> States = new(); public readonly List<(int Item, string Body)> Posts = new();
-        public bool Down; long id = 100;
-        public Task<ItemState> Read(int item, CancellationToken ct) { if (Down) throw new HttpRequestException("GitHub is down"); return Task.FromResult(new ItemState { State = (JsonObject)(States.GetValueOrDefault(item)?.DeepClone() ?? new JsonObject()), Rev = 0 }); }
+        public bool Down, ShowPosts; long id = 100;
+        // ShowPosts: the issue's comments are the posts, as GitHub's are (the ledger finds a comment an earlier try posted by its marker)
+        public Task<ItemState> Read(int item, CancellationToken ct) { if (Down) throw new HttpRequestException("GitHub is down"); return Task.FromResult(new ItemState { State = (JsonObject)(States.GetValueOrDefault(item)?.DeepClone() ?? new JsonObject()), Rev = 0, Comments = ShowPosts ? Posts.Where(p => p.Item == item).Select((p, i) => new IssueComment(i + 1, "bot", p.Body)).ToList() : [] }); }
         public Task Save(int item, ItemState holder, CancellationToken ct) { States[item] = (JsonObject)holder.State.DeepClone(); return Task.CompletedTask; }
         public Task<long?> Post(int item, string body, CancellationToken ct) { Posts.Add((item, body)); return Task.FromResult<long?>(++id); }
         public Task<PatchOutcome> Patch(long commentId, string body, CancellationToken ct) => Task.FromResult(PatchOutcome.Ok);
@@ -55,13 +56,14 @@ public sealed class BoardVerbsTests
         public readonly List<string> Sweeps = [];
         public (int Code, string Output) SweepAnswer = (0, """{"ok":true,"steps":{},"offers":[],"actions":[],"errors":[],"incremental":false,"exit":0}""");
         public BoardReconciler? Reconciler;
+        public IItemLock? Locks;
         public readonly List<string> Published = [];
         public TranscriptSeal Seal = new("board-verbs-tests-secret");
         public BoardVerbs Verbs() => new(new BoardVerbParts
         {
             Transcripts = Transcripts, Seal = Seal, Home = Home, Ready = () => Ready,
             Translator = new WebhookEventTranslator(new WebhookTranslatorConfig("acme", "orders", "factory-worker", "master", "factory worker", ""), Lookups, () => T0),
-            Ledger = () => new JournalLedger(Journal, new JournalSettings(30), () => T0.UtcDateTime, _ => { }),
+            Ledger = () => new JournalLedger(Journal, new JournalSettings(30), () => T0.UtcDateTime, _ => { }, Locks),
             Reconciler = () => Reconciler, Now = () => T0,
             RuleScript = (verb, stdin, _) => { Sweeps.Add(stdin); return Task.FromResult(SweepAnswer); },
         });
@@ -162,6 +164,30 @@ public sealed class BoardVerbsTests
         Assert.Equal(exit, a.Code);
         var o = Parse(a);
         Assert.Equal((false, "usage", reason), ((bool)o["ok"]!, o["code"]!.ToString(), o["reason"]!.ToString()));
+    }
+
+    sealed class BusyLock : IItemLock
+    {
+        public Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct) => throw new ItemBusyException(item);
+    }
+
+    [Fact]
+    public async Task Journal_AnItemLockThatStaysBusy_IsTheScriptsItemBusy_AndTheRetryPostsNothingTwice()
+    {
+        var rig = new Rig { Locks = new BusyLock() }; rig.Journal.ShowPosts = true;
+        const string body = """{"item":7,"event":"question-escalated","key":"q|m-1","fields":{"worker":"alice","minutes":10,"supervisor":"absent"}}""";
+        // the lock is held around the save only, so the comment is posted and the save is refused: the answer is the script's Reject 20 item-busy, which the callers retry on (not posted:false, which ends their retries)
+        var busy = await rig.Verbs().Journal(body, Time);
+        Assert.Equal(20, busy.Code);
+        var o = Parse(busy);
+        Assert.Equal((false, "journal", "item-busy", 5, 20), ((bool)o["ok"]!, o["verb"]!.ToString(), o["code"]!.ToString(), (int)o["retryAfterSeconds"]!, (int)o["exit"]!));
+        Assert.Single(rig.Journal.Posts);
+        // the lock is free at the retry: the comment of the first try is found by its marker, the state is saved with the key, and the answer is posted:true
+        rig.Locks = null;
+        var again = Parse(await rig.Verbs().Journal(body, Time));
+        Assert.Equal((true, 0), ((bool)again["posted"]!, (int)again["exit"]!));
+        Assert.Single(rig.Journal.Posts);
+        Assert.Contains("question-escalated|q|m-1", rig.Journal.States[7].ToJsonString());
     }
 
     [Fact]

@@ -46,6 +46,16 @@ sealed class SnapshotCoordinator : ISnapshotCoordinator
     public Func<Task<JsonObject>>? Correct { get; set; }
     /// <summary>W9.10k: completes when the database's tables exist (the host's upgrade has verified the schema); the restore from the database waits for it, at most two minutes.</summary>
     public Func<CancellationToken, Task>? SchemaReady { get; set; }
+    /// <summary>
+    /// When the restore from the database may read: the host's upgrade has verified the schema, or this process holds the SQL lock, which it takes only after it applied the scripts (SqlLease.TryAcquireAsync). Where the lease is on the
+    /// Wolverine host (whose start applies and verifies the schema) begins only after the restore (GatewayLeader.OnActing), so waiting for the host alone would wait out the whole two minutes of the restore and then restore nothing:
+    /// a newer process would start with an empty plant, no snapshot, no owner, and a sweep two minutes late.
+    /// </summary>
+    internal static async Task WaitForTablesAsync(FactorySchemaStatus schema, GatewayLeader leader, CancellationToken ct)
+    {
+        while (!schema.IsGood && !leader.SqlHeld) await Task.Delay(100, ct);
+    }
+
     public Task Restored => restored.Task;
     public long HeldEpoch => Interlocked.Read(ref heldEpoch);
     public JsonObject Status() { lock (state) return (JsonObject)state.DeepClone(); }
