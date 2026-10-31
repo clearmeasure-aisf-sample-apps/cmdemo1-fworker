@@ -159,6 +159,9 @@ public sealed class QcPortTests
         public readonly StubRouter Router = new((verb, _) => new VerbAnswer(0, "{\"ok\":true,\"verb\":\"inspect-facts\",\"mandatory\":[{\"code\":\"secret-like\"},{\"code\":\"other\"}],\"exit\":0}"));
         public readonly QcService Qc;
         public readonly QcConfig Cfg;
+        public readonly GitHubTokenProvider Tokens;
+        public readonly HttpClient Http;
+        public readonly Func<string, string?> Env;
         public DateTime Now = new(2026, 10, 29, 9, 0, 0, DateTimeKind.Utc);
 
         public Rig(Func<string, string?>? envOverride = null)
@@ -167,6 +170,7 @@ public sealed class QcPortTests
             Cfg = QcConfig.From(JsonNode.Parse(Config), env);
             var tokens = GitHubTokenProvider.FromEnvironment(env)!;
             var http = new HttpClient(new GitHubAuthHandler(tokens, new QcRequestHandler(Api))) { BaseAddress = new Uri("https://api.test/") };
+            Tokens = tokens; Http = http; Env = env;
             Qc = QcWiring.Build(Cfg, new RepoId("o", "r"), tokens, http, env, null, [], () => Router, Table, Index, () => Now);
             // an item in Functional Testing with a PASS verdict for its pull request, and the state comment that says so
             Api.Issues[5] = (true, "Item 5", ["factory worker"], "Functional Testing");
@@ -421,5 +425,67 @@ public sealed class QcPortTests
         Assert.False(r.Api.Pulls[9]["draft"]!.GetValue<bool>());
         Assert.Equal("qc-offer", ((JsonArray)o["actions"]!)[0]!["action"]!.ToString());
         Assert.Contains(r.Api.Requests, q => q.Method == "POST" && q.Path == "/graphql" && q.Body.Contains("markPullRequestReadyForReview") && q.Body.Contains("PR_9"));
+    }
+
+    // W9.10g (CI run 41142195332, v2 qc-worker shards): the plant's "offered" journal line is written by the journal ledger while the gateway assigns the QC record. Both save the state comment; the store's save reads the
+    // revision and then writes, so two savers that both pass the read overwrite one another. The ledger saves under the item's lock; the QC save did not, and the ledger's write (the record as it was read: requested) landed 3 ms
+    // after the assignment's and undid it: the worker's accept answered 11 and every later verb of the environment 40 'claim-held'. Now the QC save takes the same lock, so the later saver finds the revision moved and reads again.
+    [Fact]
+    public async Task ASaveOfTheJournalThatRacesTheAssignmentOfTheRecord_DoesNotUndoTheAssignment()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "qc-save-race-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var r = new Rig(n => n == "FACTORY_STATE_DIR" ? dir : null);
+            await r.Call("qc-request", new { item = 5, pr = 9, @operator = true, confirm = true });
+            var commentId = r.Api.Of(5).Single(c => c.Body.StartsWith("<!-- factory-state:")).Id;
+            var clients = new GitHubClientFactory(r.Http, new ProviderCredentialSource(r.Tokens), new Fworker.Integrations.GitHub.GitHubBudget());
+            var store = new GitHubJournalStore(await clients.For(new RepoId("o", "r")), new JournalIdentity("factory-worker", _ => Task.FromResult(Login), []), () => r.Now);
+            var locks = new FileItemLock(dir);
+
+            // the journal handler has read the state (record: requested) and is about to write it back; its write waits until the assignment's write has landed, or 1.5 seconds
+            var holder = await store.Read(5, default);
+            holder.State["journal_handler"] = "was here";
+            var armed = false; var atWrite = new ManualResetEventSlim(); var assigned = new ManualResetEventSlim();
+            r.Api.Intercept = req =>
+            {
+                if (req.Method != HttpMethod.Patch || req.RequestUri!.AbsolutePath != $"/repos/o/r/issues/comments/{commentId}") return null;
+                if (armed) { armed = false; atWrite.Set(); assigned.Wait(TimeSpan.FromMilliseconds(1500)); return null; }
+                assigned.Set();
+                return null;
+            };
+            armed = true;
+            var journal = Task.Run(() => locks.Use(5, async () => { await store.Save(5, holder, default); return 0; }, default));
+            Assert.True(atWrite.Wait(TimeSpan.FromSeconds(10)));
+            var (code, _) = await r.Call("qc-transition", new { item = 5, pr = 9, to = "assigned", worker = "qw1", assignment = "a-1", mode = "first", sha = Sha1 });
+            await journal;
+
+            Assert.Equal(0, code);
+            var state = r.State(5);
+            Assert.Equal(("assigned", "a-1"), (state["qc"]!["9"]!["state"]!.ToString(), state["qc"]!["9"]!["assignment"]!.ToString()));
+            Assert.Equal("was here", state["journal_handler"]!.ToString());
+            Assert.True((await r.Qc.Accept(5, "a-1", "qw1"))["accepted"]!.GetValue<bool>());   // (the worker's accept: 11 stale-assignment when the assignment was undone)
+        }
+        finally { try { Directory.Delete(dir, true); } catch (IOException) { } }
+    }
+
+    [Fact]
+    public async Task ASaveOfTheRecordWaitsForTheItemsLock_AndAnItemThatStaysBusyIsTheRefusal20ItemBusy()
+    {
+        var r = new Rig();
+        var clients = new GitHubClientFactory(r.Http, new ProviderCredentialSource(r.Tokens), new Fworker.Integrations.GitHub.GitHubBudget());
+        var store = new GitHubJournalStore(await clients.For(new RepoId("o", "r")), new JournalIdentity("factory-worker", _ => Task.FromResult(Login), []), () => r.Now);
+        var held = new List<int>();
+        var adapter = new QcItemsAdapter(new QcGitHubClient(r.Http, r.Tokens, r.Cfg, r.Env), store, new JournalLedger(store), new BusyLock(held));
+        var st = await adapter.ReadState(5, default);
+        var e = await Assert.ThrowsAsync<QcReject>(() => adapter.SaveState(5, st, default));
+        Assert.Equal((20, "item-busy"), (e.Exit, e.Code));
+        Assert.Equal([5], held);
+        Assert.DoesNotContain(r.Api.Requests, q => q.Method == "PATCH");   // nothing was written
+    }
+
+    sealed class BusyLock(List<int> asked) : IItemLock
+    {
+        public Task<T> Use<T>(int item, Func<Task<T>> body, int waitSeconds, CancellationToken ct) { asked.Add(item); throw new ItemBusyException(item); }
     }
 }

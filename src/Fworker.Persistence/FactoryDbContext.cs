@@ -30,6 +30,7 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
     public DbSet<TranscriptRow> Transcripts => Set<TranscriptRow>();
     public DbSet<IncidentRow> Incidents => Set<IncidentRow>();
     public DbSet<LeadershipRow> Leadership => Set<LeadershipRow>();
+    public DbSet<BoardSeenRow> BoardSeen => Set<BoardSeenRow>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -227,6 +228,14 @@ public class FactoryDbContext(DbContextOptions<FactoryDbContext> options) : DbCo
             e.Property(x => x.Id).ValueGeneratedNever();
             e.Property(x => x.Holder).HasMaxLength(100).IsRequired();
             e.Property(x => x.TakeoverBy).HasMaxLength(100);
+        });
+
+        b.Entity<BoardSeenRow>(e =>
+        {
+            e.ToTable("BoardSeen");
+            e.HasKey(x => new { x.Repository, x.Number });
+            e.Property(x => x.Repository).HasMaxLength(200);
+            e.Property(x => x.StatusColumn).HasMaxLength(200);
         });
 
         b.Entity<CatalogCopy>(e =>

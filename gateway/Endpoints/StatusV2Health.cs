@@ -37,7 +37,7 @@ interface IV2HealthSource
     Task<V2Facts> Read(CancellationToken ct);
 }
 
-sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, EngineOptions engine, Func<RecurringJobRegistry?> jobs, Func<WorkItemRearm?> rearm, Func<DateTimeOffset>? now = null)
+sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, EngineOptions engine, Func<RecurringJobRegistry?> jobs, Func<WorkItemRearm?> rearm, Func<DateTimeOffset>? now = null, Func<JsonObject?>? reconciler = null)
 {
     public static readonly TimeSpan Fresh = TimeSpan.FromSeconds(10), AttemptLimit = TimeSpan.FromSeconds(8);
     /// <summary>Envelopes remembered per kind: past this many ids a backlog is "at least" this old, not counted one by one.</summary>
@@ -54,6 +54,7 @@ sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, Engine
     public async Task<JsonObject> Block(CancellationToken ct)
     {
         var o = new JsonObject { ["acts"] = engine.V2Acts, ["schema"] = schema.IsGood ? "good" : "not-good" };
+        if (engine.V2Acts && reconciler?.Invoke() is { } reconcilerBlock) o["reconciler"] = reconcilerBlock;   // W9.10g: what the board reconciler costs GitHub (passes and GraphQL requests of the last hour)
         if (!schema.IsGood) { o["available"] = false; return o; }
         string? error = null; bool stale = false; Read? read;
         if (last is { } fresh && now() - fresh.At < Fresh) read = fresh;

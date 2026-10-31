@@ -22,14 +22,23 @@ using Wolverine.Runtime.Handlers;
 public static class ItemMergedDerivationHandler
 {
     /// <summary>
+    /// W9.10g: whether the last step is a retry every hour for ever (where the engine acts) or the dead letters after the hour (the shadow run, as before). Set by <see cref="ItemMergedWiring.Attach"/> before the host builds its handler chains.
+    /// </summary>
+    public static volatile bool RetryIndefinitely;
+
+    /// <summary>
     /// A GitHub that does not answer (a network fault, a 5xx or a rate limit, which the reader throws as <see cref="MergeFactsException"/>) is tried again with growing pauses and then every few minutes, for
     /// this handler only: the merge is derived from the message or from nothing (the poll publishes a closed card once), so a transient fault must not end in the dead letters after three quick attempts
-    /// (#494). A permanent one (an app that is not installed) is not in the list, and the last step is the dead letters, where it can be seen.
+    /// (#494). W9.10g, where the engine acts: the last step is a retry every hour, for ever, instead of the dead letters: a GitHub that stays away for a day must not lose a merge (the poll publishes a closed card once and the webhook once), and a
+    /// derivation that keeps failing shows in /api/v1/status (scheduled envelopes, oldest overdue age), not in a pile of dead letters nobody replays. A permanent failure (an app that is not installed) is not in the list: it is not retried
+    /// at all and goes to the dead letters at once, where it can be seen.
     /// </summary>
     public static void Configure(HandlerChain chain)
     {
-        chain.OnException<HttpRequestException>().Or<MergeFactsException>().Or<TaskCanceledException>().Or<TimeoutException>()
-            .RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5)).Then.ScheduleRetry(TimeSpan.FromMinutes(15)).Then.ScheduleRetry(TimeSpan.FromHours(1)).Then.MoveToErrorQueue();
+        var rule = chain.OnException<HttpRequestException>().Or<MergeFactsException>().Or<TaskCanceledException>().Or<TimeoutException>()
+            .RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5)).Then.ScheduleRetry(TimeSpan.FromMinutes(15));
+        if (RetryIndefinitely) rule.Then.ScheduleRetryIndefinitely(TimeSpan.FromHours(1));
+        else rule.Then.ScheduleRetry(TimeSpan.FromHours(1)).Then.MoveToErrorQueue();
     }
 
     public static async Task<OutgoingMessages> Handle(IngressInboxMessage message, ItemMergedDeriver deriver, Envelope envelope, CancellationToken ct)
@@ -81,8 +90,9 @@ static class ItemMergedWiring
 
     public static FactoryDbContext Open(string connectionString) => new(new DbContextOptionsBuilder<FactoryDbContext>().UseSqlServer(connectionString).Options);
 
-    public static void Attach(WolverineHostService host, ItemMergedDeriver deriver, DeliveredToTable table)
+    public static void Attach(WolverineHostService host, ItemMergedDeriver deriver, DeliveredToTable table, bool acting = false)
     {
+        if (acting) ItemMergedDerivationHandler.RetryIndefinitely = true;   // (W9.10g: read when the host builds the handler chains, which is after this)
         var previous = host.RuntimeCommands;
         host.RuntimeCommands = (services, w) =>
         {

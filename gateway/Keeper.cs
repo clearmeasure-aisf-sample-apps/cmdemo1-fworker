@@ -122,8 +122,8 @@ sealed partial class Plant
         KeeperJob("backlog-low", 0, Keeper.Column, $"waiting-{Math.Max(0, waiting)}-of-{Keeper.MinTechnicalDesign}");
     }
 
-    // A keeper that registers is told the open backlog-low at once from the last full sweep's count: full sweeps are throttled (issue 92), so the
-    // next one may be an interval away.
+    // A keeper that registers is told the open backlog-low at once from the last count: the full sweep's (issue 92: full sweeps are throttled, so the next one may be an interval away) or, where the engine acts (W9.10g), the
+    // backlog-low job's, which counts the keeper's column on its own pass (PlantStepJobs.BacklogLow) and calls KeeperBacklog, so the count does not wait for the sweep.
     int? kpDesignWaiting;
     public void KeeperRaiseOpen() { int? w; lock (gate) w = kpDesignWaiting; if (w is { } wv) KeeperBacklog(wv); }
 

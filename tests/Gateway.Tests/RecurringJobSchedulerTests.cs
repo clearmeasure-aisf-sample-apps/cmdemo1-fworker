@@ -12,9 +12,9 @@ public class RecurringJobSchedulerTests
         var s = new RecurringJobScheduler(RecurringJobSlots.Default(), reg, r => { sent.Add(r.Name); return Task.FromResult(true); }, () => may, time, TimeSpan.FromSeconds(10));
         await s.Tick(); Assert.Empty(sent);
         time.Now += TimeSpan.FromSeconds(11); await s.Tick(); Assert.Equal([RecurringJobSlots.BoardReconciler], sent);
-        time.Now += TimeSpan.FromMinutes(4); await s.Tick(); Assert.Single(sent);
+        time.Now += TimeSpan.FromMinutes(1); await s.Tick(); Assert.Single(sent);   // W9.10g: every 2 minutes, not 5
         may = false; time.Now += TimeSpan.FromMinutes(2); await s.Tick(); Assert.Single(sent);   // due, but not the leader: skipped, not queued
-        may = true; time.Now += TimeSpan.FromMinutes(5); await s.Tick(); Assert.Equal(2, sent.Count);
+        may = true; time.Now += TimeSpan.FromMinutes(3); await s.Tick(); Assert.Equal(2, sent.Count);
     }
 
     [Fact]
