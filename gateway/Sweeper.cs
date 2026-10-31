@@ -50,7 +50,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 if (full)
                 {
                     hub.FullSweepTaken(); confirmItems.Clear(); confirmAt = null; lastFull = now;
-                    var unconfirmed = await SweepOnce(null);
+                    var unconfirmed = await SweepOnce(null, ct);
                     if (unconfirmed.Count > 0) { confirmItems.UnionWith(unconfirmed); confirmAt = DateTime.UtcNow.AddSeconds(Math.Min(seconds, confirmSeconds)); }
                 }
                 else if (ownerMode && (queued > 0 || confirmDue))
@@ -60,7 +60,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                     items = items.Distinct().OrderBy(i => i).ToList();
                     // at most 50 in one pass; the rest stay queued for the next one
                     if (items.Count > 50) { foreach (var i in items.Skip(50)) hub.RequestSweep(i); items = items.Take(50).ToList(); }
-                    var unconfirmed = await SweepOnce(items);
+                    var unconfirmed = await SweepOnce(items, ct);
                     if (unconfirmed.Count > 0) { confirmItems.UnionWith(unconfirmed); confirmAt ??= DateTime.UtcNow.AddSeconds(Math.Min(seconds, confirmSeconds)); }
                 }
             }
@@ -99,7 +99,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
     DateTime ownershipWarned = DateTime.MinValue;
     async Task<bool> OwnershipRead(CancellationToken ct)
     {
-        try { if (await V2!.RefreshAsync(ct)) return true; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return false; }
+        try { if (await V2!.RefreshAsync(ct) && V2.Loaded) return true; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { return false; }
         if (DateTime.UtcNow - ownershipWarned > TimeSpan.FromMinutes(1)) { ownershipWarned = DateTime.UtcNow; Console.WriteLine($"{{\"at\":\"{DateTime.UtcNow:o}\",\"sweep\":\"waiting\",\"reason\":\"the saga table has not been read yet; v1 acts on no item until it has\"}}"); }
         return false;
     }
@@ -114,7 +114,7 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
 
     // One pass of sync-board: the whole board (items null) or the given items. Returns the items it saw for the first time in their column (unconfirmed).
     readonly HashSet<int> ownerHolds = new(); bool holdsComplete;
-    async Task<List<int>> SweepOnce(List<int>? items)
+    async Task<List<int>> SweepOnce(List<int>? items, CancellationToken ct = default)
     {
         var unconfirmedOut = new List<int>();
         if (V2 != null)
@@ -166,6 +166,10 @@ sealed class Sweeper(Runner runner, EventHub hub, Plant plant, QcHub qc, int sec
                 if (items != null) foreach (var i in items) hub.RequestSweep(i);
                 return unconfirmedOut;
             }
+            // The set was read before the script ran, and the script read the board after: a saga's card reaches a working column only after its row is committed (the projection follows the saga's decisions), so a
+            // card the script saw there has a row by now, and the set is read again before the filter drops v1's word about it. Read once at the start only, the sweep offered an item that has a saga to the plant
+            // (a v1 offer with no slot, and the capacity of the scheduler counted twice) in the seconds between the saga's start and the next sweep. A read that fails leaves the set as it was.
+            if (V2 != null) await V2.RefreshAsync(ct);
             if (V2 != null && V2.Count > 0)
             {
                 SweepV2Filter.Apply(j, V2.Owns);

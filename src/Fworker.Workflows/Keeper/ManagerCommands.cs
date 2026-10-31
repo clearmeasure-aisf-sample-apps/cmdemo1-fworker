@@ -192,7 +192,7 @@ public sealed class ManagerCommands(VerbContext cx)
             $"{action}|{now.Ticks}");
         await cx.State.Save(n, st);
         // an item the saga owns hears of what changes its flow (W9.10k: the release of its owner and its requeue as well as the unpark), so that its state and its history say what the manager did
-        if (cx.Saga.Owns(n))
+        if (await cx.Saga.Owns(n))
         {
             if (unparked) await cx.Saga.Resumed(n, $"manager-unpark|{now.Ticks}");
             else if (action.Equals("release-owner", StringComparison.OrdinalIgnoreCase)) await cx.Saga.OwnerReleased(n, reason, $"manager-release|{now.Ticks}");

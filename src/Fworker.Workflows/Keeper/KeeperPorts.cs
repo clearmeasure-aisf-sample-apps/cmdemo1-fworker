@@ -109,7 +109,7 @@ public interface IVerbLocks
 public interface IKeeperSaga
 {
     /// <summary>The item is owned by a saga (an item of the docs or the feature plan that v2 decides).</summary>
-    bool Owns(int item);
+    Task<bool> Owns(int item);
 
     /// <summary>The park of the item was released (manager-action unpark, amend-criteria --unpark): the saga takes up its step again.</summary>
     Task Resumed(int item, string key);
@@ -127,7 +127,7 @@ public interface IKeeperSaga
 /// <summary>No saga owns anything.</summary>
 public sealed class NoSaga : IKeeperSaga
 {
-    public bool Owns(int item) => false;
+    public Task<bool> Owns(int item) => Task.FromResult(false);
     public Task Resumed(int item, string key) => Task.CompletedTask;
     public Task Closed(int item, string reason, string key) => Task.CompletedTask;
     public Task OwnerReleased(int item, string reason, string key) => Task.CompletedTask;

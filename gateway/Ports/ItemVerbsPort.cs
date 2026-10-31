@@ -158,7 +158,7 @@ sealed class ItemAdminFeed(IVerbRouter inner, V2Ownership ownership, RepoId home
         {
             try
             {
-                if (JsonNode.Parse(stdin) is JsonObject body && JsonNode.Parse(answer.Output) is JsonObject a && int.TryParse(body["item"]?.ToString(), out var n) && n > 0 && ownership.Owns(n))
+                if (JsonNode.Parse(stdin) is JsonObject body && JsonNode.Parse(answer.Output) is JsonObject a && int.TryParse(body["item"]?.ToString(), out var n) && n > 0 && await ownership.OwnsOrFindAsync(n))
                 {
                     var id = new ItemId(home, n);
                     WorkItemInput? input = verb == "park-item" && a["already"] is null
