@@ -44,7 +44,7 @@ public class ArchitectureInventoryTests
         n["owner"]!.ToString(), n["leaves"]!.ToString(), Exc(n["exception"]))).ToList();
 
     /// <summary>The exceptions that may exist; a new one is a decision, so it is a visible edit of this list.</summary>
-    static readonly string[] DeclaredExceptions = ["auto-promote", "leader-lease", "plant-snapshot", "merge-peer-approved", "merge-hybrid-script"];
+    static readonly string[] DeclaredExceptions = ["auto-promote", "leader-lease", "plant-snapshot", "transcripts", "merge-peer-approved", "merge-hybrid-script"];
 
     static readonly string[] Kinds = ["runner", "router"];
 
@@ -54,7 +54,8 @@ public class ArchitectureInventoryTests
 
     // ---- the calls of the gateway itself ----------------------------------------------------------------------------------------------------------
 
-    /// <summary>Every <c>.RunAsync</c> of gateway/ outside gateway/Verbs, per file: the literal verbs (<c>RunAsync("verb"</c>) and the count of sites (a method group or a variable verb counts as a site with no literal).</summary>
+    /// <summary>Every <c>.RunAsync</c> and <c>.RunScriptAsync</c> of gateway/ outside gateway/Verbs, per file: the literal verbs (<c>RunAsync("verb"</c>) and the count of sites (a method group or a variable verb counts as a site with no literal).
+    /// <c>RunScriptAsync</c> is the rule script whatever v2 answers, so a gateway call of it is a script call on every engine; it is counted outside the route side (gateway/Ports and gateway/Identity), where it is a route's own fallback.</summary>
     static Dictionary<string, (int Sites, List<string> Verbs)> FoundCalls()
     {
         var found = new Dictionary<string, (int, List<string>)>();
@@ -62,7 +63,8 @@ public class ArchitectureInventoryTests
         {
             if (path.StartsWith("gateway/Verbs/", StringComparison.Ordinal)) continue;   // the router's own files: the issue lists what is outside it
             var verbs = new List<string>(); var sites = 0;
-            foreach (Match m in Regex.Matches(code, @"\.RunAsync\b"))
+            var routeSide = path.StartsWith("gateway/Ports/", StringComparison.Ordinal) || path.StartsWith("gateway/Identity/", StringComparison.Ordinal);
+            foreach (Match m in Regex.Matches(code, routeSide ? @"\.RunAsync\b" : @"\.Run(?:Script)?Async\b"))
             {
                 sites++;
                 if (Regex.Match(code[(m.Index + m.Length)..], @"^\(\s*""([a-z0-9-]+)""") is { Success: true } lit) verbs.Add(lit.Groups[1].Value);

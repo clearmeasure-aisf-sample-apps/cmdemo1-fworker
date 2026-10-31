@@ -73,11 +73,28 @@ sealed class Runner(string entry) : IRuleScriptCalls
     {
         if (Routes is { } routes && routes.TryGet(verb, out var handler))
         {
-            var answer = await handler(stdin, timeout);
-            return (answer.Code, answer.Output);
+            // the fence of the script path (FencedVerbs, RunScriptAsync) holds for the route too: a process that no longer holds the leader lease refuses a verb that writes to the board
+            // (the script would answer lease-lost at its write; a route has no such check of its own, except those that made one), and the call is counted so that DrainFencedAsync waits for it
+            var fenced = FencedVerbs.Contains(verb);
+            if (fenced && MayAct?.Invoke() == false)
+            {
+                var lost = (20, JsonSerializer.Serialize(new { ok = false, verb, code = "lease-lost", reason = $"this gateway no longer holds the leader lease; the step was not performed: {verb}", exit = 20 }));
+                NoteFenced(verb, lost.Item1, lost.Item2);
+                return lost;
+            }
+            if (fenced) Interlocked.Increment(ref fencedInFlight);
+            try
+            {
+                var answer = await handler(stdin, timeout);
+                return (answer.Code, answer.Output);
+            }
+            finally { if (fenced) Interlocked.Decrement(ref fencedInFlight); }
         }
         return await RunScriptAsync(verb, stdin, timeout);
     }
+
+    /// <summary>Whether this process may act now (the leader lease, and the SQL lock where the engine acts: <c>GatewayLeader.MayAct</c>); null (the default) is always. Set with <see cref="Lease"/>; only a routed fenced verb asks it here, the script path has the lease in its input.</summary>
+    public Func<bool>? MayAct { get; set; }
 
     /// <summary>The rule script, whatever v2 answers: what a v2 route that cannot answer (no ledger, no translator, a merge for an item the saga does not own) falls back to. A route must call this and never <see cref="RunAsync"/>, which would ask the route again.</summary>
     public async Task<(int Code, string Output)> RunScriptAsync(string verb, string stdin, TimeSpan timeout)

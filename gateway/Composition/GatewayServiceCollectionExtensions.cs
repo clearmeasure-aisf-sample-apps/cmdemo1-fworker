@@ -49,7 +49,9 @@ static class GatewayServiceCollectionExtensions
         var runner = new Runner(gw.Entry) { Budget = githubBudget };
         // session transcripts of runtime workers (Transcripts.cs): stored encrypted beside the plant snapshot; FACTORY_TRANSCRIPTS=0 keeps them in memory only
         var transcriptsDurable = gw.OwnerMode && gw.TokenSecret.Length > 0 && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPTS") != "0";
-        var transcripts = new TranscriptStore(transcriptsDurable ? runner.RunAsync : null, gw.TokenSecret);
+        // RunScriptAsync, not RunAsync: where the engine acts the board routes answer transcript-load and transcript-prune from factory.Transcripts, so through RunAsync the legacy fallback of DatabaseTranscriptBackend would
+        // read the database a second time and never reach the ref store (the sessions written before the move, and the old refs that the prune ages out)
+        var transcripts = new TranscriptStore(transcriptsDurable ? runner.RunScriptAsync : null, gw.TokenSecret);
         if (int.TryParse(Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPT_SAVE_SECONDS"), out var tss) && tss >= 0) transcripts.SaveSeconds = tss;
         services.AddSingleton(transcripts);
         services.AddSingleton<TranscriptService>();
@@ -87,6 +89,7 @@ static class GatewayServiceCollectionExtensions
         }
         // fencing (W0.1): the rule scripts that act on the board run under this process's lease epoch and refuse their writes once it is lost (Runner.InjectLease)
         c.Runner.Lease = () => leader.FenceLease;
+        c.Runner.MayAct = () => leader.MayAct;   // the routes of a fenced verb (Runner.RunAsync) refuse the same way once the lease is lost
         // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
         var sweepGap = new SweepGap();
         // the plant snapshot and the lease's start, hand-over and stop (gateway/Leadership/): the restore before the first sweep, the write of every change

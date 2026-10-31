@@ -1,3 +1,4 @@
+using Fworker.Contracts.Seams;
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Ids;
 using Fworker.Workflows.Transcripts;
@@ -224,5 +225,49 @@ public sealed class TranscriptBackendTests
         var other = new TranscriptSeal("another").Seal(Doc());
         var b = new RuleScriptTranscriptBackend((verb, _, _) => Task.FromResult((0, new JsonObject { ["found"] = true, ["data"] = other }.ToJsonString())), new TranscriptSeal("mine"));
         Assert.Null(await b.Load("w1"));
+    }
+
+    // ---- W9.9a: the fallback of the database backend reaches the ref store, not the board routes ----
+
+    [Fact]
+    public async Task TheFallbackOfTheDatabaseBackend_WithRoutesSet_ReachesTheScript_AndNotTheRoute()
+    {
+        if (!StubPwsh.Supported) return;
+        using var env = new GatewayEnvironment();
+        env.Apply();
+        var log = Path.Combine(env.Dir, "transcripts.log");
+        File.WriteAllText(Path.Combine(env.Dir, "bin", "pwsh"), "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' \"$6\" >> \"$FWTEST_DIR/transcripts.log\"\necho '{\"ok\":true,\"found\":false}'\nexit 0\n");
+        var routed = new List<string>();
+        var routes = new V2VerbRoutes();
+        foreach (var verb in BoardRoutes.Verbs.Where(v => v.StartsWith("transcript-", StringComparison.Ordinal)))
+            routes.Add(BoardRoutes.Verbs, verb, (_, _) => { routed.Add(verb); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true,\"found\":false}")); });
+        var runner = new Runner(Path.Combine(env.Dir, "no-such-dir", "factory.ps1")) { Routes = routes };
+        // what the composition does: the store made on the Runner's script path, its backend handed to the database backend as the legacy one
+        var store = new TranscriptStore(runner.RunScriptAsync, "backend-tests-secret");
+        Assert.NotNull(store.Backend);
+        var database = new DatabaseTranscriptBackend(new MemoryRepository(), Home, () => true, store.Backend);
+        Assert.Null(await database.Load("old-session"));   // a miss in the database, a miss in the ref store: the script was asked
+        await database.Prune(14);
+        Assert.Empty(routed);
+        Assert.Equal(["transcript-load", "transcript-prune"], File.ReadAllLines(log));
+        // the same call through RunAsync is the route's (the mistake this pins): it never reaches the refs
+        await runner.RunAsync("transcript-load", "{}", Time);
+        Assert.Equal(["transcript-load"], routed);
+        Assert.Equal(2, File.ReadAllLines(log).Length);
+    }
+
+    [Fact]
+    public void TheComposition_BuildsTheRuleScriptBackendOnTheScriptPath_NotOnTheRoutedOne()
+    {
+        var text = File.ReadAllText(Path.Combine(RepoRoot(), "gateway", "Composition", "GatewayServiceCollectionExtensions.cs"));
+        Assert.Contains("new TranscriptStore(transcriptsDurable ? runner.RunScriptAsync : null", text);
+        Assert.DoesNotContain("new TranscriptStore(transcriptsDurable ? runner.RunAsync", text);
+    }
+
+    static string RepoRoot()
+    {
+        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent)
+            if (File.Exists(Path.Combine(d.FullName, "gateway", "Program.cs"))) return d.FullName;
+        throw new InvalidOperationException("the repository root was not found above " + AppContext.BaseDirectory);
     }
 }
