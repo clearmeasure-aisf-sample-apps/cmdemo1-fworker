@@ -342,4 +342,72 @@ public class DeliveryTrainShadowDefectTests
         Assert.NotNull(unhealthy.WakeAt);
         Assert.True(unhealthy.WakeAt <= f.Now + DeliveryTrainService.SafetyWake);
     }
+
+    // ---- tdd 2026-10-31: a restart's replay left one timer per input behind, and the burst of full evaluations 30 minutes later ended in the dead letters ------------
+
+    [Fact]
+    public async Task AReplayOfManyInputs_SchedulesOneTimerForItsHold_NotOnePerInput()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        var results = new List<TrainResult> { await f.Send(new TrainReplay(f.Key, true)) };
+        for (var i = 0; i < 40; i++)
+        {
+            f.Now += TimeSpan.FromSeconds(1);
+            results.Add(i % 2 == 0 ? await f.Release($"2.0.{i}", 'a') : await f.Deploy($"2.0.{i - 1}", "Tdd", "Started"));
+        }
+        var hold = f.State.ReplayingSince!.Value + DeliveryTrainService.ReplayLimit;
+        var timers = results.Where(r => r.WakeAt is not null).ToList();
+        Assert.Single(timers);
+        Assert.Equal(hold, timers[0].WakeAt);
+        Assert.Equal(hold, f.State.WakeDue);
+        // the end marker ends the hold; the hold's timer, when it comes, is the pending one: it looks again once and is cleared
+        await f.Send(new TrainReplay(f.Key, false));
+        f.Now = hold;
+        await f.Wake(hold);
+        Assert.NotEqual(hold, f.State.WakeDue);
+    }
+
+    [Fact]
+    public async Task AReplaysHold_KeepsAnEarlierPendingTimer_AndSchedulesItsOwnWhenThatOneFires()
+    {
+        var f = await OneRelease(HoldGap);   // waiting: the safety wake is pending
+        var pending = f.State.WakeDue!.Value;
+        Assert.True(pending < f.Now + DeliveryTrainService.ReplayLimit);
+        var r = await f.Send(new TrainReplay(f.Key, true));
+        Assert.Null(r.WakeAt);   // the pending timer stands; the hold needs none yet
+        Assert.Equal(pending, f.State.WakeDue);
+        f.Now = pending;
+        var fired = await f.Wake(pending);   // still held: the timer for the hold's end goes out now
+        Assert.Equal(f.State.ReplayingSince!.Value + DeliveryTrainService.ReplayLimit, fired.WakeAt);
+    }
+
+    [Fact]
+    public async Task StaleTimers_WhileThePendingOneLiesAhead_EvaluateNothingAndScheduleNothing()
+    {
+        var f = await OneRelease(HoldGap);   // waiting: the safety wake is pending
+        var pending = f.State.WakeDue!.Value;
+        Assert.True(pending > f.Now);
+        var before = f.Reads.Probes + f.Reads.Compares; var sequence = f.State.Sequence;
+        for (var i = 1; i <= 120; i++)
+        {
+            var r = await f.Wake(f.Now - TimeSpan.FromSeconds(i));   // a timer that is not the pending one
+            Assert.Empty(r.Messages); Assert.Null(r.WakeAt);
+        }
+        Assert.Equal(before, f.Reads.Probes + f.Reads.Compares);
+        Assert.Equal(sequence, f.State.Sequence);
+        Assert.Equal(pending, f.State.WakeDue);
+    }
+
+    [Fact]
+    public async Task AStaleTimer_WithNoPendingOne_StillLooks_SoTheChainIsNeverLost()
+    {
+        var f = await OneRelease(HoldGap);
+        var rec = (await f.Store.Load(f.Key, default))!;
+        rec.State.WakeDue = null;   // (the pending timer was lost between the save and the outbox)
+        Assert.True(await f.Store.Save(f.Key, rec.State, rec.Revision, default));
+        f.Now += TimeSpan.FromMinutes(1);
+        var r = await f.Wake(f.Now - TimeSpan.FromSeconds(30));
+        Assert.NotNull(r.WakeAt);
+        Assert.Equal(r.WakeAt, f.State.WakeDue);
+    }
 }

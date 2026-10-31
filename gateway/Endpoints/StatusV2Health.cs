@@ -27,7 +27,9 @@ sealed record V2Facts(
 sealed record DeadLetterGroup(string MessageType, string ExceptionType, int Count, DateTimeOffset? OldestFailedAt);
 /// <summary>Incoming (not yet handled) or outgoing (not yet sent) envelopes: how many, the most attempts one took, and their ids (to see how long this process has seen each).</summary>
 sealed record EnvelopeFacts(int Count, int MaxAttempts, IReadOnlyList<Guid> Ids);
-sealed record ScheduledFacts(int Count, int Overdue, DateTimeOffset? OldestDue, DateTimeOffset? NextDue);
+sealed record ScheduledFacts(int Count, int Overdue, DateTimeOffset? OldestDue, DateTimeOffset? NextDue, IReadOnlyList<ScheduledGroup>? ByType = null);
+/// <summary>The scheduled envelopes of one message type: how many, how many are due, the oldest due time among those, the next due time among the rest.</summary>
+sealed record ScheduledGroup(string MessageType, int Count, int Overdue, DateTimeOffset? OldestDue, DateTimeOffset? NextDue);
 sealed record LedgerFacts(int Entries, int Failures, DateTimeOffset? Oldest);
 sealed record SagaGroup(string Plan, string Step, string Status, int Count, DateTimeOffset Oldest);
 sealed record CapacityLedgerFacts(CapacityState State, DateTimeOffset UpdatedAt);
@@ -120,6 +122,12 @@ sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, Engine
         {
             ["count"] = f.Scheduled.Count, ["overdue"] = f.Scheduled.Overdue, ["oldestOverdueSeconds"] = f.Scheduled.OldestDue is { } due && due < at ? (long)(at - due).TotalSeconds : null,
             ["nextDue"] = f.Scheduled.NextDue?.ToString("o"),
+            // by message type (the biggest 20 groups): a backlog of timers shows what it is made of (a wake storm is TrainWake, a stuck job is its own type)
+            ["byType"] = new JsonArray((f.Scheduled.ByType ?? []).OrderByDescending(g => g.Count).ThenBy(g => g.MessageType, StringComparer.Ordinal).Take(20).Select(g => (JsonNode?)new JsonObject
+            {
+                ["messageType"] = g.MessageType, ["count"] = g.Count, ["overdue"] = g.Overdue,
+                ["oldestOverdueSeconds"] = g.OldestDue is { } d && d < at ? (long)(at - d).TotalSeconds : null, ["nextDue"] = g.NextDue?.ToString("o"),
+            }).ToArray()),
         };
         o["outgoing"] = Envelopes(f.Outgoing, seenOutgoing, at);
         o["jobs"] = Jobs();
@@ -220,6 +228,15 @@ sealed class SqlV2HealthSource(Func<SqlConnection> open, Func<DateTimeOffset>? n
             await r.ReadAsync(ct);
             scheduled = new ScheduledFacts(r.GetInt32(0), r.IsDBNull(1) ? 0 : r.GetInt32(1), r.IsDBNull(2) ? null : r.GetDateTimeOffset(2), r.IsDBNull(3) ? null : r.GetDateTimeOffset(3));
         }
+        var scheduledTypes = new List<ScheduledGroup>();
+        await using (var cmd = new SqlCommand("SELECT TOP (50) message_type, COUNT(*), SUM(CASE WHEN execution_time <= @now THEN 1 ELSE 0 END), MIN(CASE WHEN execution_time <= @now THEN execution_time END), MIN(CASE WHEN execution_time > @now THEN execution_time END) FROM wolverine.wolverine_incoming_envelopes WHERE status = 'Scheduled' GROUP BY message_type ORDER BY COUNT(*) DESC", c))
+        {
+            cmd.Parameters.Add("@now", SqlDbType.DateTimeOffset).Value = at;
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                scheduledTypes.Add(new ScheduledGroup(r.GetString(0), r.GetInt32(1), r.IsDBNull(2) ? 0 : r.GetInt32(2), r.IsDBNull(3) ? null : r.GetDateTimeOffset(3), r.IsDBNull(4) ? null : r.GetDateTimeOffset(4)));
+        }
+        scheduled = scheduled with { ByType = scheduledTypes };
 
         CapacityLedgerFacts? capacity = null;
         await foreach (var r in Rows(c, "SELECT StateJson, UpdatedAt FROM factory.CapacityLedgers WHERE [Key] = 'factory'", ct))

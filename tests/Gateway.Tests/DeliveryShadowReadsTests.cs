@@ -115,16 +115,17 @@ public sealed class DeliveryShadowReadsTests
         {
             evaluations++;
             now += TimeSpan.FromSeconds(15);
-            Assert.True(now - start < TimeSpan.FromMinutes(8), $"not finished after {now - start} and {evaluations} evaluations");
+            Assert.True(now - start < TimeSpan.FromMinutes(20), $"not finished after {now - start} and {evaluations} evaluations");
         }
-        // 1 compare + 100 settled commits + 50 commits waiting for state, one comment page each, 40 a minute: about four minutes of 15 s retries
-        Assert.True(now - start <= TimeSpan.FromMinutes(5), $"took {now - start}");
+        // 1 compare + 100 settled commits and 50 commits waiting for state (a pull request read and one comment page each) + 50 pull requests not merged (one read), 40 a minute: about nine minutes of 15 s retries, a few more for the pull requests that expire in between
+        // (the pull request reads are calls of the minute's cap since 2026-10-31; before, only the compare and the comment pages were, and the pull request reads went out beside the cap)
+        Assert.True(now - start <= TimeSpan.FromMinutes(14), $"took {now - start}");
         Assert.Equal(1, gh.Count("/compare/"));
         for (var i = 0; i < 300; i++)
             switch (KindOf(i))
             {
-                case Kind.Settled: Assert.Equal(1, gh.Count($"/issues/{ItemOf(i)}/comments")); Assert.Equal(1, facts.Pulls[PullOf(i)]); break;
-                case Kind.NotMerged: Assert.Equal(1, facts.Pulls[PullOf(i)]); Assert.Equal(0, gh.Count($"/issues/{ItemOf(i)}/comments")); break;
+                case Kind.Settled: Assert.Equal(1, gh.Count($"/issues/{ItemOf(i)}/comments")); Assert.InRange(facts.Pulls[PullOf(i)], 1, 2); break;   // (twice when the cap held back its state read for longer than the pull request is kept: CompareKeep)
+                case Kind.NotMerged: Assert.InRange(facts.Pulls[PullOf(i)], 1, 2); Assert.Equal(0, gh.Count($"/issues/{ItemOf(i)}/comments")); break;
                 case Kind.Direct: Assert.False(facts.Pulls.ContainsKey(PullOf(i))); break;
             }
         Assert.All(gh.Seen, s => Assert.Equal(HttpMethod.Get, s.Method));
@@ -240,14 +241,94 @@ public sealed class DeliveryShadowReadsTests
         var now = DateTimeOffset.UtcNow;
         var (reads, gh, _) = Reads(() => now);
         Assert.Equal(40, HttpTrainReads.MaxCallsPerMinute);
-        // 41 commits that each need a state read: the 41st is refused until a minute has passed, and nothing was sent for it
-        var waiting = Enumerable.Range(0, 300).Where(i => KindOf(i) == Kind.WaitsForState).Take(41).ToList();
-        for (var k = 0; k < 40; k++) await reads.LookupCommit(Home, new RangeCommit(ShaOf(waiting[k]), [Deployed], $"x (#{PullOf(waiting[k])})"), default);
-        var last = new RangeCommit(ShaOf(waiting[40]), [Deployed], $"x (#{PullOf(waiting[40])})");
+        // commits that each need a pull request read (the merge-facts reader) and a state read, both calls of the minute's cap: 20 of them are 40 reads, the 21st is refused until a minute has passed, and nothing was sent for it
+        var waiting = Enumerable.Range(0, 300).Where(i => KindOf(i) == Kind.WaitsForState).Take(21).ToList();
+        for (var k = 0; k < 20; k++) await reads.LookupCommit(Home, new RangeCommit(ShaOf(waiting[k]), [Deployed], $"x (#{PullOf(waiting[k])})"), default);
+        var last = new RangeCommit(ShaOf(waiting[20]), [Deployed], $"x (#{PullOf(waiting[20])})");
         await Assert.ThrowsAsync<HttpRequestException>(() => reads.LookupCommit(Home, last, default));
-        Assert.Equal(40, gh.Total);
+        Assert.Equal(20, gh.Total);   // (the 20 state reads; the pull request reads went to the reader)
         now += TimeSpan.FromSeconds(61);
         await reads.LookupCommit(Home, last, default);
-        Assert.Equal(41, gh.Total);
+        Assert.Equal(21, gh.Total);
+    }
+
+    // ---- tdd 2026-10-31: the reads through the merge-facts reader obey the limits, and a refusal of GitHub there is a failed read, not an exception the train does not know ----
+
+    sealed class RefusingFacts(Exception refusal) : IMergeFactsReader
+    {
+        public int Calls;
+        public Task<MergedPullRequest?> ReadPullRequest(RepoId repository, int number, CancellationToken ct = default) { Calls++; throw refusal; }
+        public Task<MergedPullRequest?> FindMergedPullRequest(ItemId item, CancellationToken ct = default) { Calls++; throw refusal; }
+        public Task<ItemMergeFacts?> ReadItem(ItemId item, CancellationToken ct = default) { Calls++; throw refusal; }
+    }
+
+    static (HttpTrainReads Reads, RefusingFacts Facts) Refused(Exception refusal, Func<bool>? low = null)
+    {
+        var snapshot = new CatalogSnapshot(CatalogSource.SystemJson, DateTimeOffset.UtcNow, "acme", Home, null, [new RepositoryEntry(Home, [new DeployableEntry("ui", Home, null, null, null, null, false)])], []);
+        var facts = new RefusingFacts(refusal);
+        var reads = new HttpTrainReads(new HttpClient(new Handler()) { BaseAddress = new Uri("https://api.example/") }, new HttpClient(new Handler()), "factory-worker", facts, new ItemGateConfig("Auto Merge", "video"),
+            new CatalogDeliveryPolicies(() => snapshot, _ => null), null, null, low);
+        return (reads, facts);
+    }
+
+    static RangeCommit Named(int i) => new(ShaOf(i), [Deployed], $"Thing {i} (#{PullOf(i)})");
+
+    [Theory]
+    [InlineData(502)]
+    [InlineData(429)]
+    [InlineData(403)]
+    public async Task AGitHubRefusalOfThePullRequestRead_IsAFailedRead_NotAMergeFactsException(int status)
+    {
+        var (reads, facts) = Refused(new Fworker.Integrations.GitHub.MergeFactsException($"GitHub answered {status} to a read of repos/acme/work/pulls/1"));
+        var e = await Assert.ThrowsAsync<HttpRequestException>(() => reads.LookupCommit(Home, Named(1), default));
+        Assert.Contains(status.ToString(), e.Message);
+        Assert.Equal(1, facts.Calls);
+    }
+
+    [Fact]
+    public async Task NoInstallationForTheOwner_IsAFailedReadToo()
+    {
+        var (reads, _) = Refused(new Fworker.Integrations.GitHub.NoInstallationException("acme"));
+        await Assert.ThrowsAsync<HttpRequestException>(() => reads.LookupCommit(Home, Named(1), default));
+    }
+
+    [Fact]
+    public async Task TheItemRead_IsAFailedReadToo()
+    {
+        var (reads, _) = Refused(new Fworker.Integrations.GitHub.MergeFactsException("GitHub answered 502 to the pull request read of acme/work#7"));
+        await Assert.ThrowsAsync<HttpRequestException>(() => reads.ReadGates(new ItemId(Home, 7), default));
+    }
+
+    [Fact]
+    public async Task AFault_ThatIsNotGitHubs_StaysItself()
+    {
+        var (reads, _) = Refused(new InvalidOperationException("a defect"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => reads.LookupCommit(Home, Named(1), default));
+    }
+
+    [Fact]
+    public async Task WhenTheBudgetIsLow_NoPullRequestOrItemIsReadAtAll()
+    {
+        var (reads, facts) = Refused(new Fworker.Integrations.GitHub.MergeFactsException("never reached"), () => true);
+        await Assert.ThrowsAsync<HttpRequestException>(() => reads.LookupCommit(Home, Named(1), default));
+        await Assert.ThrowsAsync<HttpRequestException>(() => reads.ReadGates(new ItemId(Home, 7), default));
+        Assert.Equal(0, facts.Calls);
+    }
+
+    [Fact]
+    public async Task ThePullRequestAndItemReads_CountAgainstTheMinutesCap()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var (reads, _, facts) = Reads(() => now);
+        // commits whose pull request is not merged cost one pull request read each and nothing else: the cap stops the 41st before the reader is called
+        var unmerged = Enumerable.Range(0, 300).Where(i => KindOf(i) == Kind.NotMerged).Take(41).ToList();
+        for (var k = 0; k < 40; k++) await reads.LookupCommit(Home, Named(unmerged[k]), default);
+        Assert.Equal(40, facts.Pulls.Values.Sum());
+        await Assert.ThrowsAsync<HttpRequestException>(() => reads.LookupCommit(Home, Named(unmerged[40]), default));
+        Assert.Equal(40, facts.Pulls.Values.Sum());
+        await Assert.ThrowsAsync<HttpRequestException>(() => reads.ReadGates(new ItemId(Home, 7), default));
+        now += TimeSpan.FromSeconds(61);
+        await reads.LookupCommit(Home, Named(unmerged[40]), default);
+        Assert.Equal(41, facts.Pulls.Values.Sum());
     }
 }
