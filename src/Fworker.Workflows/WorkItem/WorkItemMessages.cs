@@ -102,6 +102,27 @@ public sealed record ParkWorkItem(ItemId Item, int Generation, string Key, strin
 public sealed record ResumeWorkItem(ItemId Item, int Generation, string Key) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
 
 /// <summary>
+/// W9.10h: the item's issue was closed (a person closed it, or the board shows the card closed). Honoured only while no merge has happened and the merge step does not decide: an issue closed by the merge itself
+/// ("Closes #N") reaches the saga as the merge, not as this. The instance then completes, so its slot, its place in the merge line and its card go.
+/// </summary>
+[MessageIdentity("workitem.item-closed")]
+public sealed record ItemClosed(ItemId Item, string Key, string Source) : WorkItemInput(Item), IKeyedInput;
+
+/// <summary>
+/// W9.10h: the hold label the item carries now (the first label that is a hold: <c>hold:*</c> or a configured one), or null when it carries none. A hold parks the item (the label's name in the reason) and the label's
+/// removal lifts that park, and only that one: a park for another reason stays a person's or the saga's.
+/// </summary>
+[MessageIdentity("workitem.hold-observed")]
+public sealed record HoldObserved(ItemId Item, int Generation, string Key, string? Hold) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+
+/// <summary>
+/// W9.10h: a person moved the item's card (the projection's own moves are echoes and never reach the saga). <paramref name="Step"/> is the step whose column that is, null for a column of no step (Todo, Done, a hold column).
+/// A move back to the column of an earlier step sends the item back to that step; a move to the step's own column or forward changes nothing (the saga follows the work, not the card).
+/// </summary>
+[MessageIdentity("workitem.card-moved")]
+public sealed record CardMoved(ItemId Item, int Generation, string Key, string Column, StepKind? Step) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+
+/// <summary>
 /// The timer of a step's lease (a Wolverine scheduled message): <paramref name="Due"/> is the time it was scheduled for. It counts only when it names the current arm and the lease still ends at that time;
 /// a renewed lease has a timer of its own.
 /// </summary>
@@ -125,6 +146,8 @@ public static class WorkItemActions
     public const string LeaseExpired = "lease-expired";
     public const string Parked = "parked";
     public const string Resumed = "resumed";
+    /// <summary>A person moved the card back to the column of an earlier step (W9.10h): the item returns to that step.</summary>
+    public const string MovedBack = "moved-back";
     public const string Merged = "merged";
     public const string Settling = "settling";
     public const string Undelivered = "undelivered";

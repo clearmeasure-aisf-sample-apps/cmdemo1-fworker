@@ -46,6 +46,11 @@ public sealed class WorkItemState
     public Dictionary<string, string> Delivered { get; set; } = [];
     public DateTimeOffset StartedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
+    /// <summary>
+    /// The sequence of the decision that put the item on its current step (W9.10h): the version the card projection carries for that step. A card event counts as a person's move only once the projection has applied
+    /// this version (ProjectionVersions of the card); before that the card is not yet where the saga wants it and an event about it is the old column, not news. 0 in a state saved before it.
+    /// </summary>
+    public long CardSeq { get; set; }
     /// <summary>How the instance began: the source of the start, or "reopened: ...".</summary>
     public string Source { get; set; } = "";
     /// <summary>The business keys applied, the newest last; the oldest are dropped past <see cref="WorkItemPolicy.KeepKeys"/>.</summary>

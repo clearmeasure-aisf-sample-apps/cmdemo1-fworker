@@ -137,12 +137,12 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | copilot-settle-client | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.4 | W9.9a | CopilotSettleClient: copilot-settle. |
 | plant-journal | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | journal | runner | W9.8 | W9.9a | The plant's journal lines (#477). |
 | operator-release-calls | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | bridge | W9.7 | W9.9a | OperatorReleaseLoader through ServiceVerbCalls (operator-releases). |
-| runtime-failed-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | runner | W9.10h | W9.10h | The runtime adapters' park after a failed launch; the saga's ParkWorkItem replaces it. |
+| runtime-failed-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | runner | W9.10h | W9.9a | The runtime adapters' park after a failed launch. The script's park-item stays the park (v2's route answers it from W9.9a); W9.10h tells the saga as well (ParkWorkItem). |
 | runtime-release-claim | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | claim-item | runner | W9.10j | W9.10j | The runtime adapters' ReleaseClaim; the saga's step lease and the scheduler's slot replace it. |
-| credit-guard-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | runner | W9.10h | W9.10h | The Copilot credit guard's park. |
+| credit-guard-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | runner | W9.10h | W9.9a | The Copilot credit guard's park. As the runtime adapters' park: the script's park-item until W9.9a, and W9.10h tells the saga (ParkWorkItem). |
 | feature-checks | `gateway/Composition/GatewayWolverineExtensions.cs` | 1 | by argument | runner | W9.5 | W9.9a | FeatureChecksJob reads pr-checks through PullRequestChecks. |
 | publish-demo | `gateway/Endpoints/DemoEndpoints.cs` | 2 | publish-demo, publish-demo | runner | W9.4 | W9.9a | The demo endpoint (the Runner and the delivery bridge: v2 where the engine acts). |
-| unpark-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | unpark-item | runner | W9.2 | W9.9a | The unpark endpoint (W9.10h adds the saga's ResumeWorkItem). |
+| unpark-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | unpark-item | runner | W9.2 | W9.9a | The unpark endpoint. W9.10h: it tells the saga (ResumeWorkItem), so the item is offered again. |
 | resettle-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | resettle-item | runner | W9.2 | W9.9a | The resettle endpoint. |
 | metrics-calls | `gateway/Endpoints/MetricsEndpoints.cs` | 1 | metrics | bridge | W9.7 | W9.9a | Through ServiceVerbCalls. |
 | operator-release-endpoint | `gateway/Endpoints/OperatorReleaseEndpoints.cs` | 1 | operator-release | bridge | W9.7 | W9.9a | Through ServiceVerbCalls. |

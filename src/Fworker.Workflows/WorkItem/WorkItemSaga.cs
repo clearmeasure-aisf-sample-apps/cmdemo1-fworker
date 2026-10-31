@@ -91,13 +91,25 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
                 c.Park(p.Reason.Length == 0 ? "parked" : p.Reason, p.Minutes > 0 ? TimeSpan.FromMinutes(p.Minutes) : null);
                 return StepAnswer.Applied;
             case ResumeWorkItem:
-                if (!state.Parked) return StepAnswer.Refused("the item is not parked");
-                state.Failures.Remove(state.Step.ToString()); state.Launches.Remove(state.Step.ToString()); state.IdleFollowUps = 0;
-                c.Decide(WorkItemActions.Resumed, $"was parked: {state.ParkReason}");
-                // an item parked inside its settle window is delivered: it goes on with the window, it does not return to its step
-                if (state.Status == WorkItemStatus.Settling) { state.Parked = false; state.ParkReason = ""; c.ClearParkTimers(); c.TimerChanged = true; return StepAnswer.Applied; }
-                c.Enter(state.Step, "resumed");
+                return Resume(c);
+            case ItemClosed:
+                // W9.10h: the merge decides for an item that is merged or merging (the merge closes its issue); a delivered item is in its settle window
+                if (state.Status == WorkItemStatus.Settling) return StepAnswer.Refused("the item is delivered");
+                if (state.MergeCommit.Length > 0) return StepAnswer.Refused("the item was merged");
+                if (state.Step >= StepKind.Merge && !state.Parked) return StepAnswer.Refused("the merge step decides: the merge closes the issue");
+                c.Complete("the issue was closed");
                 return StepAnswer.Applied;
+            case HoldObserved h:
+                if (h.Hold is { Length: > 0 } hold)
+                {
+                    if (state.Parked) return StepAnswer.Refused("the item is parked");
+                    if (state.Status != WorkItemStatus.Open || state.Step == StepKind.Deliver) return StepAnswer.Refused("the item is delivered or being delivered");
+                    c.Park($"{HoldParkPrefix}{hold}");
+                    return StepAnswer.Applied;
+                }
+                if (!state.Parked || !state.ParkReason.StartsWith(HoldParkPrefix, StringComparison.Ordinal)) return StepAnswer.Refused("the item is not held");
+                return Resume(c);
+            case CardMoved m: return Moved(c, m);
             case StartWorkItem or ReopenWorkItem:
                 return StepAnswer.Refused("the item is open");
             case MasterObserved m: return SweepFlow.Master(c, m);
@@ -120,6 +132,37 @@ public sealed class WorkItemSaga(IDocsOnlyPort docs, WorkItemPolicy? policy = nu
         // a message about the item's progress is not taken while it is parked, except the facts that happened outside (the merge, a delivery, the pull request)
         if (state.Parked && input is DesignRecorded) return StepAnswer.Refused("the item is parked");
         return c.StepOf(home.Value).Handle(c, input);
+    }
+
+    /// <summary>The park reason of a hold label (W9.10h): a removal of the label lifts exactly this park.</summary>
+    public const string HoldParkPrefix = "hold: ";
+
+    // the budgets of the phase start again and the step is armed anew
+    static StepAnswer Resume(StepContext c)
+    {
+        var state = c.State;
+        if (!state.Parked) return StepAnswer.Refused("the item is not parked");
+        state.Failures.Remove(state.Step.ToString()); state.Launches.Remove(state.Step.ToString()); state.IdleFollowUps = 0;
+        c.Decide(WorkItemActions.Resumed, $"was parked: {state.ParkReason}");
+        // an item parked inside its settle window is delivered: it goes on with the window, it does not return to its step
+        if (state.Status == WorkItemStatus.Settling) { state.Parked = false; state.ParkReason = ""; c.ClearParkTimers(); c.TimerChanged = true; return StepAnswer.Applied; }
+        c.Enter(state.Step, "resumed");
+        return StepAnswer.Applied;
+    }
+
+    // W9.10h: a person moved the card back to the column of an earlier step. The merge happens in the validation column, so an item on its Merge step stands in the Verify column.
+    static StepAnswer Moved(StepContext c, CardMoved m)
+    {
+        var state = c.State;
+        if (state.Status != WorkItemStatus.Open || state.Parked) return StepAnswer.Refused("the item is parked or delivered");
+        if (m.Step is not { } target) return StepAnswer.Refused($"'{m.Column}' is the column of no step");
+        if (state.MergeCommit.Length > 0 || state.Step > StepKind.Merge) return StepAnswer.Refused("the item was merged");
+        var standsIn = state.Step == StepKind.Merge ? StepKind.Verify : state.Step;
+        if (target >= standsIn) return StepAnswer.Refused("the card is in the column of the step or ahead of it");
+        if (!c.Plan.Has(target)) return StepAnswer.Refused($"the {c.Plan.Name} plan has no {target} step");
+        c.Decide(WorkItemActions.MovedBack, $"a person moved the card to {m.Column}");
+        c.Enter(target, $"a person moved the card back to {m.Column}");
+        return StepAnswer.Applied;
     }
 
     StepAnswer Budget(StepContext c, BudgetSpent b)

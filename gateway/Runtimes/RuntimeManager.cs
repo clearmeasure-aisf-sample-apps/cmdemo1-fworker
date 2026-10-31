@@ -118,6 +118,13 @@ sealed class RuntimeManager : IRuntimeManager
     public Func<int, string, Task>? Park { get; set; }
     public Func<int, string, Task>? ReleaseClaim { get; set; }
     public Func<string, Task>? Revoke { get; set; }
+    // W9.10h (only where the engine acts): what the item's saga and the scheduler are told of this runtime's sessions. The budget of the item's step (a launch, a failure, an idle follow-up, a session that
+    // connected or pushed: item, kind, business key, reason) and a start that was refused (item, business key, outcome: "host-full" is a wait, anything else frees the slot and drops the request). Both are
+    // fire and forget: a fault in them never reaches the plant or the start.
+    public Action<int, Fworker.Workflows.WorkItem.BudgetKind, string, string>? OnBudget { get; set; }
+    public Action<int, string, string>? OnStartRefused { get; set; }
+    void Spend(int item, Fworker.Workflows.WorkItem.BudgetKind kind, string key, string reason) { try { OnBudget?.Invoke(item, kind, key, reason); } catch (Exception x) { Log("budget-feed-failed", "", item, x.GetType().Name); } }
+    void Refused(int item, string key, string outcome) { try { OnStartRefused?.Invoke(item, key, outcome); } catch (Exception x) { Log("start-refused-feed-failed", "", item, x.GetType().Name); } }
     // before the plant takes back what an ended execution held: the gateway settles what the execution left (the Copilot runtime: a Development
     // task's pull request waits for its checks in the gateway, rule verb copilot-settle). Not for an execution that never started.
     public Func<Exec, Task<bool>>? Ending { get; set; }   // true: the item was settled (the end is no failure of the phase)
@@ -213,7 +220,12 @@ sealed class RuntimeManager : IRuntimeManager
         return new Ticket(name, item, phase, profile, nonce, role);
     }
 
-    public void Registered(string name) { lock (gate) { if (execs.TryGetValue(name, out var e) && e.RegisteredAt == null) { e.RegisteredAt = DateTime.UtcNow; startFailuresInRow = 0; idleFollowUps.Remove(e.Item); } } }
+    public void Registered(string name)
+    {
+        int item = 0;
+        lock (gate) { if (execs.TryGetValue(name, out var e) && e.RegisteredAt == null) { e.RegisteredAt = DateTime.UtcNow; startFailuresInRow = 0; idleFollowUps.Remove(e.Item); item = e.Item; } }
+        if (item > 0) Spend(item, Fworker.Workflows.WorkItem.BudgetKind.Registered, $"registered|{name}", "the session connected");
+    }
 
     // a session started outside the plant (the Copilot owner's fix-forward of a red master) counts against the daily cap
     public void CountExternal() { lock (gate) { Roll(); today++; } }
@@ -328,6 +340,8 @@ sealed class RuntimeManager : IRuntimeManager
             bool late; lock (gate) { late = !execs.TryGetValue(t.Name, out var e) || e.Ended || e.StopReason != ""; if (execs.TryGetValue(t.Name, out var e2)) { e2.Execution = r.Execution; e2.Url = r.Url; e2.Status = "Running"; } }
             span?.SetTag("fworker.execution", r.Execution);
             if (!late) { try { SessionStarted?.Invoke(t.Name, t.Item, t.Phase, cae.Kind); } catch (Exception x) { Log("transcript-failed", t.Name, t.Item, x.Message); } }
+            // the launch counts against the step's launches in a row once the execution exists (a refused or failed start is not one: it is a refusal or a failure below)
+            if (!late) Spend(t.Item, Fworker.Workflows.WorkItem.BudgetKind.Launch, $"launch|{t.Name}", cae.Kind);
             // the item's journal names the execution and its page (a Copilot task: "Copilot session: <url>"); a runtime without a page adds no line
             if (!late && r.Url != "") { try { Plant?.RuntimeLaunched(t.Name, t.Item, t.Phase, cae.Kind, r.Execution, r.Url); } catch (Exception x) { Log("journal-failed", t.Name, t.Item, x.Message); } }
             // ended or stopped while the start call ran (a revoke, a lapse): stop it now, or it would run unattended
@@ -347,6 +361,7 @@ sealed class RuntimeManager : IRuntimeManager
         if (r.Error == "no capacity")
         {
             lock (gate) { today = Math.Max(0, today - 1); if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            Refused(t.Item, $"refused|{t.Name}", "host-full");   // (the scheduler's slot goes back and the request waits again: no host had room)
             await End(t.Name, "no-capacity", failed: false, startFailure: false);
             return;
         }
@@ -355,17 +370,20 @@ sealed class RuntimeManager : IRuntimeManager
         if (r.Error == "reserved")
         {
             lock (gate) { if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            Refused(t.Item, $"refused|{t.Name}", "reserved");
             await End(t.Name, "reserved", failed: false, startFailure: false);
             return;
         }
         if (r.Error == "quota")
         {
             lock (gate) { if (launches.TryGetValue((t.Item, t.Phase), out var lc)) { if (lc <= 1) launches.Remove((t.Item, t.Phase)); else launches[(t.Item, t.Phase)] = lc - 1; } }
+            Refused(t.Item, $"refused|{t.Name}", "quota");
             await End(t.Name, "quota-blocked", failed: false, startFailure: false);
             return;
         }
         span?.SetStatus(ActivityStatusCode.Error, r.Error);
         lock (gate) failureErrors[(t.Item, t.Phase)] = r.Error;
+        Refused(t.Item, $"refused|{t.Name}", "start-failed");   // (the slot is free and the request dropped; the failure is counted by End, and the saga's budget with it)
         await End(t.Name, "start-failed", failed: true, startFailure: true);
     }
 
@@ -395,6 +413,12 @@ sealed class RuntimeManager : IRuntimeManager
             if (!execs.TryGetValue(name, out e) || e.Ended) return;
             e.Ended = true; e.EndedAt = DateTime.UtcNow; e.Outcome = outcome;
             try { SessionEnded?.Invoke(name); } catch { }
+            // W9.10h: the host had no room (the start refused with exit 75): a wait like "no capacity", not a failure. The execution and its launch are given back, nothing counts against the item or the runtime's health
+            if (outcome == "host-full")
+            {
+                today = Math.Max(0, today - 1);
+                if (launches.TryGetValue((e.Item, e.Phase), out var lc)) { if (lc <= 1) launches.Remove((e.Item, e.Phase)); else launches[(e.Item, e.Phase)] = lc - 1; }
+            }
             // a failure is counted before the plant takes the item back (RuntimeEnded): a plan in between would otherwise see the phase not yet
             // exhausted and start one execution more than maxFailuresPerPhase
             if (failed) { var n0 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n0 == lim.MaxFailuresPerPhase; if (outcome != "start-failed") failureErrors[(e.Item, e.Phase)] = outcome; }
@@ -408,6 +432,9 @@ sealed class RuntimeManager : IRuntimeManager
             foreach (var k in execs.Where(kv => kv.Value.Ended && kv.Value.EndedAt < DateTime.UtcNow.AddHours(-1)).Select(kv => kv.Key).ToList()) execs.Remove(k);
         }
         if (unhealthyNow) Log("unhealthy", name, e.Item, unhealthyWhy);
+        // the saga's budget of the step follows the runtime's (a failure here is a failure there), and a start the host refused for room frees the scheduler's slot
+        if (failed) Spend(e.Item, Fworker.Workflows.WorkItem.BudgetKind.Failure, $"failure|{name}", outcome);
+        if (outcome == "host-full") Refused(e.Item, $"refused|{name}", "host-full");
         // a follow-up session is judged by its end and the work it pushed, not only by its registration: one that succeeded and pushed to the
         // item's pull request without connecting did its step (Development: settled below, its pull request waits for its checks); one that
         // neither connected nor pushed did nothing, and such sessions in a row park the item (Exhausted) instead of resuming it again
@@ -422,8 +449,10 @@ sealed class RuntimeManager : IRuntimeManager
             Log(pushed ? "followup-pushed" : idle ? "followup-idle" : "followup-unknown", name, e.Item, e.Phase);
         }
         lock (gate) { if (idle) idleFollowUps[e.Item] = idleFollowUps.GetValueOrDefault(e.Item) + 1; else if (pushed) idleFollowUps.Remove(e.Item); }
+        if (idle) Spend(e.Item, Fworker.Workflows.WorkItem.BudgetKind.IdleFollowUp, $"idle|{name}", "the follow-up ended without connecting or pushing");
+        else if (pushed) Spend(e.Item, Fworker.Workflows.WorkItem.BudgetKind.Registered, $"pushed|{name}", "the follow-up pushed");
         var settled = false;
-        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked" or "no-capacity" or "fenced")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
+        if (Ending != null && outcome is not ("settled" or "start-failed" or "quota-blocked" or "no-capacity" or "host-full" or "fenced")) { try { settled = await Ending(e); } catch (Exception x) { Log("ending-failed", name, e.Item, x.Message); } }
         // the phase is done pending checks: the next Development task (a fix-forward round) is counted afresh; fixForwardMaxRounds caps those
         if (settled) lock (gate) launches.Remove((e.Item, e.Phase));
         var tookBack = false; try { tookBack = Plant?.RuntimeEnded(name, e.Item, outcome, e.Url) ?? false; } catch (Exception x) { Log("take-back-failed", name, e.Item, x.Message); }
@@ -432,6 +461,7 @@ sealed class RuntimeManager : IRuntimeManager
         {
             failed = true; outcome = "ended-with-item";
             lock (gate) { e.Outcome = outcome; var n1 = failures[(e.Item, e.Phase)] = failures.GetValueOrDefault((e.Item, e.Phase)) + 1; park = n1 == lim.MaxFailuresPerPhase; failureErrors[(e.Item, e.Phase)] = outcome; }
+            Spend(e.Item, Fworker.Workflows.WorkItem.BudgetKind.Failure, $"failure|{name}", outcome);
         }
         Executions.Add(1, new KeyValuePair<string, object?>("runtime", cae.Kind), new KeyValuePair<string, object?>("outcome", outcome));
         if (tookBack && outcome != "fenced" && ReleaseClaim != null) { try { await ReleaseClaim(e.Item, name); } catch (Exception x) { Log("release-claim-failed", name, e.Item, x.Message); } }
@@ -505,6 +535,8 @@ sealed class RuntimeManager : IRuntimeManager
                 else if (i.Status is "Failed" or "Degraded") ends.Add((e.Name, "failed", true));
                 // the runtime refused the session for a reason of its own account (quota): no failure of the item, no launch counted
                 else if (i.Status == "Blocked") { ends.Add((e.Name, "blocked", false)); launches.Remove((e.Item, e.Phase)); }
+                // the host refused the start for room (the Octopus runtime, exit 75): no failure, the execution is refunded (End)
+                else if (i.Status == "HostFull") ends.Add((e.Name, "host-full", false));
                 else if (i.Status == "Stopped") ends.Add((e.Name, e.StopReason != "" ? "stopped:" + e.StopReason : "stopped", e.StopReason == ""));
             }
         }
