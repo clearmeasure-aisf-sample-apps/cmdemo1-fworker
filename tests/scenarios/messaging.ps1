@@ -2455,7 +2455,11 @@ $ManagerScenarios['mgr: the escalation comment waits out a busy item lock and is
             [void](Msg-Post '/api/v1/_test/roles' @{ item = $n; owner = 'alice' })
             $q = Mgr-Ask 'alice' $n
             Start-Sleep -Seconds 58
-            Check 'while the lock is held nothing is posted, and the first attempt has given up' ((& $esc).Count -eq 0)
+            # v1's journal verb takes the lock before it does anything, so nothing is posted while it is held. On v2 the ledger holds the lock around the save of the state comment only and posts before it (W9.10l: a post that
+            # takes seconds must not hold a verb of the same item behind it), so the comment can already be there while the lock is held: the attempt gives up at the save, answers item-busy, and the later attempt finds
+            # the comment by its marker and only saves. What holds on both: the comment is never there twice, and the question shows no journal failure while the retries go on.
+            $v2 = [bool]$env:FACTORY_DB_CONNECTION
+            Check 'while the lock is held nothing is posted (v2: at most the one comment, posted before the save), and the first attempt has given up' ($(if ($v2) { (& $esc).Count -le 1 } else { (& $esc).Count -eq 0 }) -and @((Mgr-Questions).questions | Where-Object { $_.id -eq $q.id -and $_.ContainsKey('journalFailed') }).Count -eq 0)
         } finally { $lock.Dispose() }
         Check 'once the lock is free the comment is posted by a later attempt' (Wait-Until -Seconds 70 { (& $esc).Count -eq 1 })
         Start-Sleep -Seconds 4

@@ -690,7 +690,7 @@ public sealed class SqlLeadershipRulesTests
         await SqlLeadershipSupport.Until(() => svc.State == WolverineHostService.Phase.Running);
         stuckNow = true;                                                  // the socket dies: the look never ends
         await SqlLeadershipSupport.Until(() => nodes.Snapshot().Contains("A:stop"), 10);   // the running node is stopped by the step-down, not left running behind a stuck check
-        Assert.Contains("A:snapshot", nodes.Snapshot());
+        await SqlLeadershipSupport.Until(() => nodes.Snapshot().Contains("A:snapshot"), 10);   // (the plant is saved right after the node left: the step-down is a sequence, not one event)
         Assert.False(a.MayAct); Assert.Equal(GatewayLeader.Role.Superseded, a.State);
         await svc.StopAsync(CancellationToken.None);
     }
@@ -734,6 +734,29 @@ public sealed class SqlLeadershipRulesTests
         Assert.Equal(0, leader.SqlEpoch);
         Assert.Null(leader.Status()["sql"]);
         Assert.Equal(leader.Epoch, leader.ClaimEpoch);
+    }
+
+    // The restore from the database reads the plant before the Wolverine host starts (the node begins only once the plant is restored), and the host's start is what verifies the schema: waiting for the host alone waited out the
+    // two minutes of the restore and restored nothing (owner-8 of run 41211065949: a newer process started with no plant and no sweep for two minutes). The lock is taken only after the scripts ran, so a held lock is enough.
+    [Fact]
+    public async Task TheRestoreFromTheDatabase_WaitsForTheTables_ButNotForTheHost_WhenTheSqlLockIsHeld()
+    {
+        var lease = new SqlLease("Server=unused;Database=unused", _ => Task.CompletedTask, 20);
+        var leader = SqlLeadershipSupport.NewLeader(lease, fences: true);
+        var schema = new FactorySchemaStatus(required: true);
+        var wait = SnapshotCoordinator.WaitForTablesAsync(schema, leader, CancellationToken.None);
+        await Task.Delay(400);
+        Assert.False(wait.IsCompleted);                                  // neither the host's verification nor the lock yet
+        lease.MarkHeldForTest(1);
+        await wait.WaitAsync(TimeSpan.FromSeconds(5));                   // the lock is held: the scripts have run
+        Assert.True(leader.SqlHeld); Assert.False(schema.IsGood);
+
+        var other = SqlLeadershipSupport.NewLeader(new SqlLease("Server=unused;Database=unused", _ => Task.CompletedTask, 20), fences: true);
+        var second = SnapshotCoordinator.WaitForTablesAsync(schema, other, CancellationToken.None);
+        await Task.Delay(300);
+        Assert.False(second.IsCompleted);
+        schema.Good(new SchemaReport { Verified = true });               // the host verified the schema (the lease off, or a later restore)
+        await second.WaitAsync(TimeSpan.FromSeconds(5));
     }
 }
 

@@ -133,6 +133,13 @@ sealed class BoardVerbs(BoardVerbParts p)
         if (key.Length == 0) key = p.Now().UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture);
         JournalOutcome outcome;
         try { outcome = await ledger.Append(item, ev, fields, key); }
+        // The state could not be saved because the item's lock stayed busy for 45 s (an owner's merge holds it): the script's answer in that case is Reject 20 item-busy, and its callers retry on exactly that code (PlantTicker's
+        // escalation comment, 3.8). The ledger posts the comment before it saves (the lock is held around the save only), so the retry finds the comment by its marker and posts nothing twice; answering posted:false here would
+        // end the retries and mark the question's journal as failed although the comment is there.
+        catch (TimeoutException e) when (e.InnerException is ItemBusyException busy)
+        {
+            return BoardVerbAnswer.Rejected(verb, 20, "item-busy", busy.Message, new JsonObject { ["retryAfterSeconds"] = 5 });
+        }
         // best-effort, as Add-Journal is: a failed comment never blocks the caller; the script's answer is posted:false and its stderr says why
         catch (Exception e) when (e is not OperationCanceledException)
         {

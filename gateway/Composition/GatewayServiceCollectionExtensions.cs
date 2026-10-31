@@ -106,7 +106,7 @@ static class GatewayServiceCollectionExtensions
                 snapshots.Sql = new Fworker.Workflows.PlantState.SqlPlantStateStore(() => WorkItemWiring.Open(cs));
                 var correction = new PlantRestoreCorrection(plant, new Fworker.Workflows.WorkItem.SqlWorkItemStore(() => WorkItemWiring.Open(cs)), home, (item, ct) => PlantRestoreCorrection.HolderOf(sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), item, ct));
                 snapshots.Correct = () => correction.Run();
-                snapshots.SchemaReady = async ct => { var schema = sp.GetRequiredService<FactorySchemaStatus>(); while (!schema.IsGood) await Task.Delay(500, ct); };
+                snapshots.SchemaReady = ct => SnapshotCoordinator.WaitForTablesAsync(sp.GetRequiredService<FactorySchemaStatus>(), leader, ct);
             }
             return snapshots;
         });

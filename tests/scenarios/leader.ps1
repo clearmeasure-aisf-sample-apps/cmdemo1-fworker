@@ -130,6 +130,8 @@ $LeaderScenarios['leader: two gateways overlap: the newer takes the lease, the o
         $ia = New-Item-Fake 'Leader owned' 'x' ($OwnerLabels + 'worker:lena'); $ib = New-Item-Fake 'Leader offered' 'x' ($OwnerLabels + 'worker:lena')
         [void](Wait-Until -Seconds 40 { (Get-Assigned 'lena' $ia).Count -gt 0 -and (Get-Assigned 'lena' $ib).Count -gt 0 })
         $ea = (Get-Assigned 'lena' $ia)[-1]; $eb = (Get-Assigned 'lena' $ib)[-1]
+        # (where the engine acts, v2, the plant is a row in SQL and the term of the SQL lock is the epoch it carries: leader.sql.epoch; v1 has no such block)
+        $sqlEpochA = Ld-Get (Ld-Status $gwA) 'leader.sql.epoch'
         $logA0 = Ld-SuiteLog; $beforeAccept = [DateTime]::UtcNow
         $r = Fo 'lena' @('accept', '--item', $ia, '--assignment', $ea.assignment); CheckExit 'lena accepts the first item' $r 0
         # When the gateway applied the acceptance: its own log line (verb accept, item), not the clock after the client process has exited. That process takes
@@ -147,7 +149,8 @@ $LeaderScenarios['leader: two gateways overlap: the newer takes the lease, the o
         $supAt = [DateTime]::UtcNow
         $logA = Ld-SuiteLog
         Check 'it writes its final snapshot and ends its streams' (Wait-Until -Seconds 20 { @(Ld-Log $logA | Where-Object { $_ -match '"gateway":"handed-over"' -and $_ -match '"finalSnapshot":true' }).Count -ge 1 }) ((Ld-Log $logA | Where-Object { $_ -match 'handed-over|plant-snapshot' }) -join "`n")
-        Check 'the newer process restores that snapshot: the hand-over, epoch 1, the owner and both assignments' (Wait-Until -Seconds 40 { $rs = Ld-Restore $b.base; $rs -and $rs.how -eq 'handover' -and $rs.snapshotEpoch -eq 1 -and $rs.assignments -ge 2 -and $rs.owners -ge 1 }) ((Ld-Status $b.base).plantSnapshot | ConvertTo-Json -Compress -Depth 4)
+        # v1 waits for the predecessor's final snapshot in the ref (how handover, the ref's epoch 1); v2 reads the plant the predecessor saved in SQL before it let the lock go (how sql, the epoch of its SQL term)
+        Check 'the newer process restores that snapshot: the hand-over, epoch 1, the owner and both assignments' (Wait-Until -Seconds 40 { $rs = Ld-Restore $b.base; $rs -and $rs.assignments -ge 2 -and $rs.owners -ge 1 -and (($rs.how -eq 'handover' -and $rs.snapshotEpoch -eq 1) -or ($rs.how -eq 'sql' -and $rs.skipped -eq '' -and $null -ne $sqlEpochA -and $rs.snapshotEpoch -eq $sqlEpochA)) }) ((Ld-Status $b.base).plantSnapshot | ConvertTo-Json -Compress -Depth 4)
         $sb = Ld-Status $b.base
         Check 'the owner and the accepted assignment keep their ids on the new process' (@($sb.plant.owners.PSObject.Properties | Where-Object { $_.Name -eq "$ia" -and $_.Value -eq 'lena' }).Count -eq 1 -and @($sb.plant.assignments | Where-Object { $_.item -eq $ia -and $_.id -eq $ea.assignment -and $_.accepted }).Count -eq 1) ($sb.plant | ConvertTo-Json -Compress -Depth 4)
         Check 'the session''s client is told of the hand-over and connects to the new process by itself' (Wait-Until -Seconds 40 { @(Get-WorkerEvents 'lena' | Where-Object { $_.event -eq 'stream.handover' }).Count -ge 1 -and @((Ld-Status $b.base).plant.workers | Where-Object { $_.name -eq 'lena' -and $_.connected }).Count -eq 1 }) (@(Get-WorkerEvents 'lena' | Select-Object -Last 6) | ConvertTo-Json -Compress -Depth 3)
@@ -189,8 +192,10 @@ $LeaderScenarios['leader: a graceful stop releases the lease; the next start res
         $t0 = [DateTime]::UtcNow
         [void](Ld-StartSuiteGateway)
         $gw = Get-GatewayBase
-        Check 'the next start restores at once: the predecessor released the lease' (Wait-Until -Seconds 30 { $rs = Ld-Restore $gw; $rs -and $rs.how -eq 'released' -and $rs.owners -ge 1 -and $rs.gapSince }) ((Ld-Status $gw).plantSnapshot | ConvertTo-Json -Compress -Depth 4)
-        $rsAt = Ld-Time (Ld-Restore $gw).at
+        # (v1: how released, the ref's snapshot of the releaser; v2: how sql, the plant the stopped process saved in SQL; the lease it released is the ref's, which still arbitrates, so the gap is known on both)
+        Check 'the next start restores at once: the predecessor released the lease' (Wait-Until -Seconds 30 { $rs = Ld-Restore $gw; $rs -and ($rs.how -in 'released', 'sql') -and $rs.owners -ge 1 -and $rs.gapSince }) ((Ld-Status $gw).plantSnapshot | ConvertTo-Json -Compress -Depth 4)
+        $rsNow = Ld-Restore $gw
+        $rsAt = if ($rsNow) { Ld-Time $rsNow.at } else { [DateTime]::MaxValue }
         Check 'without waiting for a hand-over' (($rsAt - $t0).TotalSeconds -lt 25) "$(($rsAt - $t0).TotalSeconds) s"
         Check 'its first sweep renews the claim that ran out in the gap' (Wait-Until -Seconds 40 { $st = Pm-State $n; $st.ContainsKey('claim') -and $st.claim.ContainsKey('gap_renewed') -and [DateTime]::Parse("$($st.claim.lease_until)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) -gt [DateTime]::UtcNow }) ((Pm-State $n).claim | ConvertTo-Json -Compress)
         $j = Get-Journal $n; $gapLines = @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'plant event=gap-renewed' })
