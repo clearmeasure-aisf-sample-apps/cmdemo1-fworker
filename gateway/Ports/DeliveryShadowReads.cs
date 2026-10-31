@@ -6,6 +6,7 @@ using Fworker.Contracts.Messaging;
 using Fworker.Contracts.Seams;
 using Fworker.Domain;
 using Fworker.Integrations.Commands;
+using Fworker.Integrations.GitHub;
 using Fworker.Workflows.Delivery;
 
 // W5.2: the reads of the delivery train (ITrainReads) over HTTP, for the shadow run. READ ONLY, and a test pins it: every request this class sends is a GET (the pull request read of
@@ -109,7 +110,7 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
         lock (gate) if (pulls.TryGetValue(pullKey, out var kept) && now() - kept.At < CompareKeep) pull = kept.Pull;
         if (pull is null)
         {
-            pull = await facts.ReadPullRequest(repository, number, ct);
+            pull = await Facts(() => facts.ReadPullRequest(repository, number, ct));
             if (pull is { Merged: true } && string.Equals(pull.MergeCommit, commit.Sha, StringComparison.OrdinalIgnoreCase)) lock (gate) { Trim(pulls); pulls[pullKey] = (now(), pull); }
         }
         if (pull is null) return (new CommitItemLookup(0, ""), Finality.No);   // a 404 may be a permission or a lag, not a fact about the commit
@@ -152,7 +153,7 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
     {
         var key = item.ToString();
         lock (gate) if (gateReads.TryGetValue(key, out var kept) && now() - kept.At < GatesKeep) return kept.Gates;
-        var read = await facts.ReadItem(item, ct);
+        var read = await Facts(() => facts.ReadItem(item, ct));
         var g = read is null ? null : ItemMergedDeriver.GatesOf(read, item.Number, gates);
         lock (gate) { Trim(gateReads); gateReads[key] = (now(), g); }
         return g;
@@ -193,6 +194,18 @@ sealed class HttpTrainReads(HttpClient github, HttpClient app, string instanceNa
             if (callTimes.Count >= MaxCallsPerMinute) throw new HttpRequestException("the shadow run's reads of this minute are spent");
             callTimes.Enqueue(t);
         }
+    }
+
+    /// <summary>
+    /// A read through the merge-facts reader (the pull request and the item). It is a GitHub call of v1's token like any other, so it obeys the same limits (<see cref="Admit"/>), and its refusal (a 5xx, a rate limit, no installation:
+    /// <see cref="MergeFactsException"/>, <see cref="NoInstallationException"/>) is a failed read like the ones of <see cref="Get"/>: an <see cref="HttpRequestException"/>, which the train answers by looking again later. Left as it was, the
+    /// exception was one the train does not know, and it ended a wake in the dead letters (tdd, 2026-10-30, 121 of them), and the reads were outside the cap and the low-budget check.
+    /// </summary>
+    async Task<T> Facts<T>(Func<Task<T>> read)
+    {
+        Admit();
+        try { return await read(); }
+        catch (Exception e) when (e is MergeFactsException or NoInstallationException) { throw new HttpRequestException(e.Message, e); }
     }
 
     async Task<JsonNode?> Get(string path, CancellationToken ct, HttpStatusCode[] allow)

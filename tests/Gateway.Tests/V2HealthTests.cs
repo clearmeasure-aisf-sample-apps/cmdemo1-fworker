@@ -145,12 +145,21 @@ public sealed class V2HealthTests
         source.Facts = () => Empty() with
         {
             Incoming = new EnvelopeFacts(2, 3, [a, b]), Outgoing = new EnvelopeFacts(1, 1, [Guid.Parse("00000000-0000-0000-0000-000000000009")]),
-            Scheduled = new ScheduledFacts(4, 2, T0.AddMinutes(-9), T0.AddHours(1)),
+            Scheduled = new ScheduledFacts(4, 2, T0.AddMinutes(-9), T0.AddHours(1),
+            [
+                new ScheduledGroup("Fworker.Workflows.Delivery.TrainWake", 3, 2, T0.AddMinutes(-9), T0.AddHours(1)),
+                new ScheduledGroup("Fworker.Workflows.Merge.SomethingElse", 1, 0, null, T0.AddHours(2)),
+            ]),
         };
         var first = await health.Block(default);
         Assert.Equal((2, 3, 0L), ((int)first["incoming"]!["count"]!, (int)first["incoming"]!["maxAttempts"]!, (long)first["incoming"]!["oldestSeenSeconds"]!));
         Assert.Equal((4, 2, 540L), ((int)first["scheduled"]!["count"]!, (int)first["scheduled"]!["overdue"]!, (long)first["scheduled"]!["oldestOverdueSeconds"]!));
         Assert.Equal(T0.AddHours(1).ToString("o"), (string)first["scheduled"]!["nextDue"]!);
+        // by message type, the biggest first: what a backlog of timers is made of
+        var types = (JsonArray)first["scheduled"]!["byType"]!;
+        Assert.Equal(2, types.Count);
+        Assert.Equal(("Fworker.Workflows.Delivery.TrainWake", 3, 2, 540L), ((string)types[0]!["messageType"]!, (int)types[0]!["count"]!, (int)types[0]!["overdue"]!, (long)types[0]!["oldestOverdueSeconds"]!));
+        Assert.Null(types[1]!["oldestOverdueSeconds"]);
         // 3 minutes later (past the 10 second cache): the same envelopes are still there, so they are 3 minutes old as far as this process can say
         clock.Now = T0.AddMinutes(3);
         var later = await health.Block(default);
