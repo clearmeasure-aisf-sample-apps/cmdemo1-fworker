@@ -14,7 +14,7 @@ using System.Text.Json.Nodes;
 // while the saga table has not been read once (the steps leave the saga's items alone), or while the GitHub budget is below its reserve (the steps are the ones the sweep skipped on a low budget). A pass the lease ended is dropped.
 
 /// <summary>The plant-wide steps of the sweep as jobs. One instance for the gateway; each method is one job and answers how the run ended.</summary>
-sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, GitHubBudget budget, V2Ownership? ownership, Func<bool> mayAct, Func<bool> restored, bool ownerMode)
+sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, GitHubBudget budget, V2Ownership? ownership, Func<bool> mayAct, Func<bool> restored, bool ownerMode, TimeSpan? readyWait = null)
 {
     /// <summary>The steps the sweep leaves to the jobs (sync-board skip_steps). The keeper's count is not a step of an ordinary pass: the gateway simply does not apply it.</summary>
     public static readonly string[] SweepSkips = ["claim-ref-reap", "board-guard", "qc-sync", "replenish"];
@@ -25,6 +25,21 @@ sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, G
     public Dictionary<string, int> Outcomes { get; } = new(StringComparer.Ordinal);
 
     void Note(string job, string outcome) { lock (Outcomes) Outcomes[$"{job}:{outcome}"] = Outcomes.GetValueOrDefault($"{job}:{outcome}") + 1; }
+
+    // The first run of a job comes a few seconds after the leader may act, often before the plant is restored or the saga's items are read once. The sweep waited for both and then ran at once; a job that gave up would lose a whole
+    // interval (180 s, an hour on a gateway that sweeps rarely) and the keeper would not hear the backlog before it. So a job waits for them, at most this long, and then does nothing as before.
+    readonly TimeSpan readyWait = readyWait ?? TimeSpan.FromSeconds(30);
+
+    async Task<string?> NotNowAsync(bool needsBudget, CancellationToken ct)
+    {
+        var until = DateTime.UtcNow + readyWait;
+        while (true)
+        {
+            var why = NotNow(needsBudget);
+            if (why is not ("waiting-for-restore" or "waiting-for-ownership") || DateTime.UtcNow >= until) return why;
+            try { await Task.Delay(500, ct); } catch (OperationCanceledException) { return why; }
+        }
+    }
 
     /// <summary>Why a job does not run now, or null: not the leader, not restored, the saga's items not known yet, or the budget low.</summary>
     string? NotNow(bool needsBudget = true)
@@ -64,7 +79,7 @@ sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, G
 
     public async Task<string> QcSync(CancellationToken ct)
     {
-        if (NotNow() is { } why) { Note("qc-sync", why); return why; }
+        if (await NotNowAsync(true, ct) is { } why) { Note("qc-sync", why); return why; }
         if (qc() is not { } hub) { Note("qc-sync", "no-qc"); return "no-qc"; }
         var outcome = await hub.Sync(mayAct, ct);
         Note("qc-sync", outcome);
@@ -73,7 +88,7 @@ sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, G
 
     async Task<string> Pass(string job, string[] steps, CancellationToken ct, JsonObject? extra = null, bool budgetGated = false, Action<JsonNode, Plant?>? apply = null)
     {
-        if (NotNow(budgetGated) is { } why) { Note(job, why); return why; }
+        if (await NotNowAsync(budgetGated, ct) is { } why) { Note(job, why); return why; }
         var args = new JsonObject { ["plant_steps"] = new JsonArray(steps.Select(s => (JsonNode)s).ToArray()) };
         if (extra is not null) foreach (var kv in extra) args[kv.Key] = kv.Value?.DeepClone();
         if (ownership is not null) { try { await ownership.RefreshAsync(ct); } catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch { } }

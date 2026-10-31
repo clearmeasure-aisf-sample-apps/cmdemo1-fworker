@@ -18,10 +18,10 @@ public class PlantStepJobsTests
         public readonly Runner Runner = new("/nonexistent/factory.ps1");
         public PlantStepJobs Jobs;
 
-        public Rig(bool ownerMode = true)
+        public Rig(bool ownerMode = true, TimeSpan? readyWait = null)
         {
             Runner.V2Own = (verb, stdin, _) => { Calls.Add((verb, (JsonObject)JsonNode.Parse(stdin)!)); return Task.FromResult<(int, string)?>((Code, Output ?? Answer.ToJsonString())); };
-            Jobs = new PlantStepJobs(Runner, () => Plant, () => null, Budget, null, () => May, () => Restored, ownerMode);
+            Jobs = new PlantStepJobs(Runner, () => Plant, () => null, Budget, null, () => May, () => Restored, ownerMode, readyWait ?? TimeSpan.Zero);
         }
     }
 
@@ -101,6 +101,22 @@ public class PlantStepJobsTests
     }
 
     [Fact]
+    public async Task AJobThatComesBeforeTheRestore_WaitsForItALittle_AndDoesNotLoseItsInterval()
+    {
+        var r = new Rig(readyWait: TimeSpan.FromSeconds(10)) { Restored = false };
+        r.Plant.Keeper = new KeeperSettings { Enabled = true, MinTechnicalDesign = 3, Names = ["backlog-keeper"] };
+        r.Answer["design_waiting"] = 0;
+        var run = r.Jobs.BacklogLow(default);
+        await Task.Delay(700);
+        Assert.False(run.IsCompleted);
+        r.Restored = true;
+        Assert.Equal("ok", await run);
+        Assert.Equal(1, (int)r.Plant.KeeperStatus()["jobsBuffered"]!);
+        var late = new Rig(readyWait: TimeSpan.FromMilliseconds(600)) { Restored = false };
+        Assert.Equal("waiting-for-restore", await late.Jobs.BoardGuard(default));   // never restored: gives up after the wait, as before
+    }
+
+    [Fact]
     public async Task APassTheLeaseEnded_IsDropped_AndOnePlantWithoutOwnerModeAppliesNothing()
     {
         var r = new Rig();
@@ -141,7 +157,7 @@ public class PlantStepJobsTests
         var fast = RecurringJobSlots.Default(RecurringJobIntervals.From(null, 2)).Slots;
         Assert.Equal(TimeSpan.FromSeconds(5), fast.Single(s => s.Name == RecurringJobSlots.QcSync).Every);
         Assert.Equal(TimeSpan.FromSeconds(5), fast.Single(s => s.Name == RecurringJobSlots.Replenish).Every);
-        Assert.Equal(TimeSpan.FromSeconds(5), fast.Single(s => s.Name == RecurringJobSlots.ClaimRefReap).First);   // the first run as soon as the leader may act
+        Assert.Equal(TimeSpan.FromSeconds(3), fast.Single(s => s.Name == RecurringJobSlots.ClaimRefReap).First);   // the first run as soon as the leader may act
     }
 
     [Fact]
