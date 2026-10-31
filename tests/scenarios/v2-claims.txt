@@ -94,6 +94,15 @@ auto | ^(push gate|pr-checks|model ladder|testing profile):
 owner | ^owner: pr-checks with an item token
 manager | ^mgr: pr-checks gives the supervisor
 
+# W9.10g gate (#559): the sweep's plant-wide steps as recurring jobs of the C# port (src/Fworker.Workflows/Reconcilers/PlantSteps.cs, the jobs of gateway/Ports/PlantStepJobs.cs) where the engine acts: the claim-ref reap (the first two: an
+# accept takes an orphan ref over, a closed item's ref is removed and a young one kept; a busy item lock does not stall the sweep), the board guard (an issue a verb is still putting on the board is left to it, then placed and journalled
+# once; the owner suite's guard: placed, a stranded card repaired, the closed and the rival's issue left alone, journalled once, offered) and the replenishment (one docs-only item per Done item, never above targetOpen or maxPerDay, its counts
+# in /status). The keeper's design_waiting count (the backlog-low job) is proved by `manager | ^keeper: (a worker-failure park|split-item)` above, which now runs on the C# count. The plan's section "W9.10g, second pull request as built" lists them.
+auto | ^orphan claim refs:
+auto | ^board guard: an issue a verb is still putting
+owner | ^owner: board guard:
+manager | ^keeper: replenish creates one docs-only
+
 # ---- v1 only -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 # The merge policy peer-approved is dropped (the owner's decision 4 of 2026-10-30): its suites go with v1 (W9.11), and so does the merge gate of the QC environment that rests on it.
 v1-only peer-approved | the dropped merge policy peer-approved (decision 4 of 2026-10-30): the suite tests the approval path that v2 does not port

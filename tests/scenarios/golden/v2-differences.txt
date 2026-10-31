@@ -43,6 +43,11 @@
 - ~ rule POST /repos/{repo}/git/refs 201 {"ref":"refs/factory/factory-worker/transcripts/{n}/oct-{session}","sha":"{sha}"}
 # why: the transcript is a row of factory.Transcripts where v2 acts, not a sealed commit and a ref in the work-orders repository; W9.8 (#360), docs/design/fworker-wolverine-implementation.md "W9.8 as built"; issue: #360
 
+@ owner/owner-board-guard-a-labelled-issue-missing-from-the-board-is-added-in-technical-c8ab9c21
+- ~ rule POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **guard1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|guard1 -->"}
++ ~ gateway POST /repos/{repo}/issues/{#1}/comments 201 {"body":"\uD83C\uDFED Plant manager: offered to **guard1** (persistent-local); waiting up to {dur} for it to accept.\n\n<!-- plant event=offered key=off|a-{id}|guard1 -->"}
+# why: where v2 acts the plant journals the offered line through the Wolverine sink (source gateway), not through the sweep's rule script, as in the saga scenarios (W9.10g, #559); the board guard's own writes (board-added line, card, state) are the C# step's and are unchanged
+
 @ saga/saga-a-docs-item-pulled-from-todo-is-designed-built-and-verified-by-its-owner-se-3231c803
 # why: the docs plan on v2 (W6.6): the engine's intake pulls the card and the saga's projection moves it (source gateway), the plant journals through the Wolverine sink (source gateway), the merge is the saga's own call after the PASS (source gateway, no merge comment, no claim-ref delete in the verdict call, the card to Done by the projection, no delivery comments of the rule script's settle); v1's sweep leaves the saga's item alone (W9.10e), so it writes no merge record or comment of its own (the merge record of the state comment is the saga's projection in v1's format, W9.10i: a state write of the gateway, a background line); issue: #335, #557
 - = rule PUT /repos/{repo}/pulls/{#2}/merge 200 {"merge_method":"squash","sha":"{sha}"}

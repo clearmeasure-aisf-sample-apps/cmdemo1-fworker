@@ -16,7 +16,10 @@ namespace Fworker.Integrations.Commands;
 // the repeat finds a comment that was posted before the conflict by its marker instead of posting it twice; a GitHub failure that is worth a retry is
 // thrown, for the command base to classify, where the script logs it and drops the line.
 
-/// <summary>The events the journal verb accepts (Verb_journal).</summary>
+/// <summary>
+/// The events the journal verb accepts (Verb_journal, <see cref="Supported"/>) and the lines the ledger writes (<see cref="Writable"/>): Add-Journal takes any event the text knows, so the plant's own steps (the board guard's
+/// board-added, the replenishment's replenish) write lines that no caller of the verb may send.
+/// </summary>
 public static class JournalEvents
 {
     public static readonly IReadOnlySet<string> Supported = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -25,6 +28,9 @@ public static class JournalEvents
         "qc-ready", "qc-failed", "qc-reset", "qc-torn-down", "qc-waiting", "question-escalated", "base-updated", "branch-updated", "keeper-action", "manager-action",
         "pin-fallback", "ci-released", "ci-release-refused",
     };
+
+    /// <summary>What the ledger writes: the verb's events and the lines of the plant's steps (Invoke-BoardGuard, Invoke-Replenish: W9.10g).</summary>
+    public static readonly IReadOnlySet<string> Writable = new HashSet<string>(Supported.Concat(["board-added", "replenish"]), StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>What one journal line did: <see cref="Posted"/> (a comment was written, or an open fold edited), the <see cref="Reason"/> when not, and <see cref="Recorded"/> for a ci-released line.</summary>
@@ -84,8 +90,8 @@ public sealed class JournalLedger
 
     (string Event, string Key) Prepare(string ev, string key)
     {
-        if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
-        ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
+        if (!JournalEvents.Writable.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
+        ev = JournalEvents.Writable.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
         if (string.IsNullOrEmpty(key) || ev == "waiting") key = utcNow().Ticks.ToString(CultureInfo.InvariantCulture);
         return (ev, key);
     }
@@ -115,7 +121,7 @@ public sealed class JournalLedger
     public async Task<bool> Recorded(int item, string ev, string key, CancellationToken ct = default)
     {
         if (string.Equals(ev, "waiting", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(key)) return false;
-        var supported = JournalEvents.Supported.FirstOrDefault(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
+        var supported = JournalEvents.Writable.FirstOrDefault(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
         if (supported == null) return false;
         var st = await store.Read(item, ct);
         return JournalJson.Strings(Journal(st.State), "keys").Contains($"{supported}|{key}", StringComparer.Ordinal);
@@ -128,8 +134,8 @@ public sealed class JournalLedger
     /// </summary>
     public Task<bool> AddTo(int item, ItemState holder, string ev, IReadOnlyDictionary<string, object?> fields, string key, CancellationToken ct = default)
     {
-        if (!JournalEvents.Supported.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
-        ev = JournalEvents.Supported.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
+        if (!JournalEvents.Writable.Contains(ev)) throw new JournalRefusedException($"unsupported journal event '{ev}'");
+        ev = JournalEvents.Writable.First(e => string.Equals(e, ev, StringComparison.OrdinalIgnoreCase));
         return AddJournal(item, holder, ev, fields, key, save: false, held: true, ct);
     }
 
