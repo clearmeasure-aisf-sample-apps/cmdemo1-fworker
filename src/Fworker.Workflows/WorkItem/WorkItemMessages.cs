@@ -93,9 +93,9 @@ public sealed record DeliverySeen(ItemId Item, string Key, string Environment, s
 [MessageIdentity("workitem.delivery-lost")]
 public sealed record DeliveryLost(ItemId Item, string Key, string Environment) : WorkItemInput(Item), IKeyedInput;
 
-/// <summary>A person or the operator parks the item (park-item): the saga stops its lease and takes no step message until <see cref="ResumeWorkItem"/>.</summary>
+/// <summary>A person or the operator parks the item (park-item): the saga stops its lease and takes no step message until <see cref="ResumeWorkItem"/> or, where the engine expires parks (W9.10f), until the park ends (<paramref name="Minutes"/>, else <c>timing.parkHours</c>).</summary>
 [MessageIdentity("workitem.park")]
-public sealed record ParkWorkItem(ItemId Item, int Generation, string Key, string Reason) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
+public sealed record ParkWorkItem(ItemId Item, int Generation, string Key, string Reason, int Minutes = 0) : WorkItemInput(Item), IGenerationInput, IKeyedInput;
 
 /// <summary>Takes the item out of its park (unpark-item): the budgets of the phase start again and the step is armed anew.</summary>
 [MessageIdentity("workitem.resume")]
@@ -168,6 +168,14 @@ public static class WorkItemActions
     public const string SlotGranted = "slot-granted";
     public const string Held = "held";
     public const string SessionLost = "session-lost";
+    // the sweep's steps (W9.10f)
+    public const string MasterGreen = "master-green";
+    public const string MasterBroken = "master-broken";
+    public const string MasterTimeout = "master-timeout";
+    public const string ParkExpired = "park-expired";
+    public const string HoldCleared = "hold-cleared";
+    public const string OwnerReleased = "owner-released";
+    public const string SettleRearmed = "settle-rearmed";
 }
 
 /// <summary>What the saga answered to one input.</summary>

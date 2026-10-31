@@ -125,6 +125,32 @@ public sealed class WorkItemState
     /// <summary>The commands the last applied input asked for besides the merge call; kept so a redelivery of the input publishes them again, and emptied by the next input.</summary>
     public List<StateCommand> Outbox { get; set; } = [];
 
+    // ---- the sweep's steps (W9.10f, Plans/SweepSteps.cs): optional fields, absent in a state saved before them ---------------------------------------------------------------
+    /// <summary>When the current park ends (null: it does not, or the engine expires none). The park's timer is checked against it like a lease.</summary>
+    public DateTimeOffset? ParkUntil { get; set; }
+    /// <summary>
+    /// The wait for master's CI after the merge (the settle's master-green, D5): "" before the merge or where nothing watches, "waiting" while the merge commit is not judged, "broken" (a gate failed, parked master-broken),
+    /// "timeout" (parked master-green-timeout) and "green". A broken or timed-out wait goes on being watched: it ends when master is green for the merge, the park or not.
+    /// </summary>
+    public string MasterState { get; set; } = "";
+    /// <summary>When the wait began, and when the failed jobs were last re-run (the timeout counts again from there; issue 79).</summary>
+    public DateTimeOffset? MasterSince { get; set; }
+    public DateTimeOffset? MasterRerunAt { get; set; }
+    /// <summary>The runs whose failed jobs were re-run and the attempt that was: the verdict waits for a newer, completed attempt of each.</summary>
+    public List<RerunRun> MasterRerunRuns { get; set; } = [];
+    /// <summary>When the master-green wait times out (waiting only); the timer is checked against it.</summary>
+    public DateTimeOffset? MasterDue { get; set; }
+    public List<string> MasterFailed { get; set; } = [];
+    /// <summary>The commit that made master green for the merge: the merge commit or a later one that contains it.</summary>
+    public string MasterGreenVia { get; set; } = "";
+    /// <summary>The lifts of parks by the saga itself, by park code (timing.autoUnparkMax per code).</summary>
+    public Dictionary<string, int> AutoUnparks { get; set; } = [];
+    /// <summary>When a held PASS's owner gives the item up, and whether it did (one release per park).</summary>
+    public DateTimeOffset? OwnerIdleDue { get; set; }
+    public bool OwnerReleased { get; set; }
+    /// <summary>Who approved the pull request that cleared the inspector's hold.</summary>
+    public string ApprovedBy { get; set; } = "";
+
     static readonly JsonSerializerOptions Json = new() { WriteIndented = false, Converters = { new JsonStringEnumConverter() } };
 
     public string ToJson() => JsonSerializer.Serialize(this, Json);

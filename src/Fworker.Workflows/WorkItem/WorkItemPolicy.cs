@@ -16,7 +16,8 @@ public sealed record WorkItemPolicy(
     int KeepKeys = 100,
     DocsPlanRules? Docs = null,
     IReadOnlyList<string>? CarriedPlans = null,
-    FeaturePlanRules? FeatureRules = null)
+    FeaturePlanRules? FeatureRules = null,
+    SweepRules? Sweep = null)
 {
     public static readonly WorkItemPolicy Default = new(new Dictionary<StepKind, TimeSpan?>
     {
@@ -43,6 +44,12 @@ public sealed record WorkItemPolicy(
 
     /// <summary>Whether the steps of a plan ask the scheduler for a slot when they need a session: the code plans (feature, and the hotfix plan of an incident, which asks at the top rank), where the engine carries the feature plan.</summary>
     public bool Schedules(string plan) => FeatureRules is { UseScheduler: true } && WorkPlans.IsCode(plan);
+
+    /// <summary>Whether the saga takes the sweep's steps for its items (W9.10f): parks that expire, the watch of master's CI after a merge, the owner that waits out a hold. Unset, none of them exist.</summary>
+    public bool TakesSweepSteps => Sweep is not null;
+
+    /// <summary>Whether the saga watches master's CI for the merge commit of an item on that plan (a code item; a documentation change ends at the merge).</summary>
+    public bool WatchesMaster(string plan) => Sweep is { MasterWatch: true } && WorkPlans.IsCode(plan);
 
     public TimeSpan Settle => SettleWindow ?? TimeSpan.FromHours(24);
 

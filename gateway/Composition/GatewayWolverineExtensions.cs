@@ -101,6 +101,13 @@ static class GatewayWolverineExtensions
                         var watcher = new FeatureChecksJob(workItems.Store, home, new PullRequestChecks(async (verb, stdin, timeout) => await runner.RunAsync(verb, stdin, timeout)), m => host.PublishAsync(m), () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low);
                         jobs.Add(RecurringJobSlots.FeatureChecks, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["featureChecks"] = await watcher.Run(ct) }.ToJsonString()));
                     }
+                    // W9.10f: the sweep's item steps for the items the saga owns (every minute, on the leader): master's CI for merged code items (the settle's master-green wait and its parks), the settle's re-arm, a PASS whose pull request
+                    // was closed, an inspector's hold that a person approved. It reads GitHub with the delivery verbs' identity and kit; the owner that waited out a hold is released through the verb router
+                    var kitHost = new Lazy<DeliveryVerbHost>(() => DeliveryVerbHost.Make(sp), LazyThreadSafetyMode.PublicationOnly);
+                    var stepReads = new Fworker.Workflows.Delivery.ItemStepReads(new DeliveryKitSource(() => kitHost.Value));
+                    var itemSteps = new ItemStepsJob(workItems.Store, home, stepReads, stepReads, m => host.PublishAsync(m), () => c.Leader.MayAct, () => c.GitHubBudget.Low().Low, masterWatch: workItems.Docs.Settings.CarriesFeature);
+                    jobs.Add(RecurringJobSlots.ItemSteps, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["itemSteps"] = await itemSteps.Run(ct) }.ToJsonString()));
+                    ItemStepsWiring.Attach(host, new OwnerRelease(() => sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), (item, holder) => sp.GetService<Plant>()?.ManagerReleased(item, holder)));
                     // W9.10o: the repair of the window between a saga's save and its outbox (the timer or command that was never sent), and the purge of the old successes of the idempotency ledger
                     if (workItems.Store is IWorkItemAges ages)
                     {

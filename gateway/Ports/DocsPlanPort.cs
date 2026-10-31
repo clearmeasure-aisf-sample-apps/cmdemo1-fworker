@@ -25,7 +25,7 @@ using Microsoft.EntityFrameworkCore;
 public sealed record DocsPlanSettings(
     string AutoMergeLabel, IReadOnlyList<string> HoldLabels, int MergeQueueDepth, bool UpdateBranchWhenBehind, int MaxUpdates,
     IReadOnlyDictionary<StepKind, string> Columns, string DoneColumn, string DocsMarker, string DesignSection, DocsPlanRules Rules, IReadOnlyList<string> CarriedPlans,
-    string ReleaseColumn = "", string FinalEnvironment = "prod", bool FeatureSlots = true, string SlotRuntime = "", IReadOnlyList<string>? HoldColumnNames = null)
+    string ReleaseColumn = "", string FinalEnvironment = "prod", bool FeatureSlots = true, string SlotRuntime = "", IReadOnlyList<string>? HoldColumnNames = null, SweepRules? Sweep = null)
 {
     /// <summary>The card of an item on that step; null when the step has none of its own (the merge happens in the validation column).</summary>
     public string? ColumnOf(StepKind step) => Columns.TryGetValue(step, out var c) ? c : null;
@@ -43,6 +43,7 @@ public sealed record DocsPlanSettings(
     {
         Docs = Rules, CarriedPlans = CarriedPlans.Count == 0 ? null : CarriedPlans, FinalEnvironment = FinalEnvironment,
         FeatureRules = CarriedPlans.Contains(WorkPlans.Feature, StringComparer.OrdinalIgnoreCase) ? new FeaturePlanRules(FeatureSlots) : null,
+        Sweep = Sweep is { } sweep ? sweep with { MasterWatch = CarriesFeature } : null,
     };
 
     /// <summary>Whether the engine carries the feature plan: its steps run, its items are pulled by the intake and its checks are watched.</summary>
@@ -74,8 +75,19 @@ public static class DocsPlanSettingsReader
         return new DocsPlanSettings(Text(root, "autoMergeLabel") ?? "Auto Merge", Strings(root, "holdLabels"), Int(root, "mergeQueueDepth") ?? 0, policyAuto && autoUpdate,
             Int(timing, "outOfDateMergeAttempts") ?? 4, columns, Text(root?["columns"], "done") ?? "Done", Text(root, "docsOnlyMarker") ?? "<!-- aisf:docs-only -->", section ?? "", rules,
             Strings(intake, "v2Plans").Select(p => p.ToLowerInvariant()).ToList(),
-            Strings(Node(root, "columns"), "hold").FirstOrDefault() ?? "", Text(Node(root, "delivery"), "finalEnvironment") ?? "prod", featureSlots, Text(scheduler, "runtime") ?? "", Strings(Node(root, "columns"), "hold"));
+            Strings(Node(root, "columns"), "hold").FirstOrDefault() ?? "", Text(Node(root, "delivery"), "finalEnvironment") ?? "prod", featureSlots, Text(scheduler, "runtime") ?? "", Strings(Node(root, "columns"), "hold"), Sweep(root, timing));
     }
+
+    /// <summary>W9.10f: <c>timing.parkHours</c> (24), <c>timing.masterGreenTimeoutMinutes</c> (30), <c>timing.autoUnparkMax</c> (3) and <c>idleReleaseMinutes</c> (60), as the sweep reads them.</summary>
+    static SweepRules Sweep(JsonNode? root, JsonNode? timing)
+    {
+        var d = SweepRules.Default;
+        var park = Number(timing, "parkHours"); var master = Number(timing, "masterGreenTimeoutMinutes"); var idle = Number(root, "idleReleaseMinutes");
+        return new SweepRules(park is > 0 ? TimeSpan.FromHours(park.Value) : d.ParkTime, master is > 0 ? TimeSpan.FromMinutes(master.Value) : d.MasterTimeout,
+            Int(timing, "autoUnparkMax") ?? d.AutoUnparkMax, idle is > 0 ? TimeSpan.FromMinutes(idle.Value) : d.IdleReleaseAfter);
+    }
+
+    static double? Number(JsonNode? n, string name) { try { return n?[name] is JsonValue v && double.TryParse(v.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x) && x >= 0 ? x : null; } catch { return null; } }
 
     static JsonNode? Node(JsonNode? n, string name) { try { return n?[name]; } catch { return null; } }
     static string? Text(JsonNode? n, string name) { try { return n?[name] is JsonValue v && v.TryGetValue<string>(out var s) && s.Length > 0 ? s : null; } catch { return null; } }

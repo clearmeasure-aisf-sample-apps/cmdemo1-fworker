@@ -151,6 +151,17 @@ sealed class DeliveryVerbHost
         return new DeliveryVerbHost(instance.Root as JsonObject ?? new JsonObject(), Environment.GetEnvironmentVariable, () => leadership?.MayAct ?? true, budget.Observe, call, sp.GetService<V2ActivityTap>(), itemLock: ItemLocks.From(sp, Environment.GetEnvironmentVariable));
     }
 
+    /// <summary>
+    /// W9.10f: a kit for the gateway's own reads of GitHub (master's CI for a merge commit, a pull request, its reviews): the same transport as a verb call, the lease checked before the one write it may make (the re-run of
+    /// the failed jobs), and no state comment (the kit's state store is never used by those reads).
+    /// </summary>
+    public async Task<T> WithKit<T>(Func<RuleKit, Task<T>> body, CancellationToken ct)
+    {
+        if (tokens is null) throw new Fworker.Workflows.Delivery.Verbs.VerbReject(30, "secret-missing", "GH_TOKEN is not set on the gateway");
+        var transport = new HttpGhTransport(github, uploads, octopus, config, env, mayAct, observeRate, delay);
+        return await body(new RuleKit(transport, new UnusedStateStore(), config, board, env));
+    }
+
     // ---- one call --------------------------------------------------------------------------------------------------------------------------------------
 
     public async Task<VerbAnswer> Run(string verb, string stdin, TimeSpan timeout)
@@ -188,6 +199,13 @@ sealed class DeliveryVerbHost
         SettleVerb.Verb => SettleVerb.Run(kit, a, ct),
         _ => throw new Fworker.Workflows.Delivery.Verbs.VerbReject(2, "unknown-verb", $"unknown verb '{verb}'"),
     };
+}
+
+/// <summary>The kit of a read that has no item state to read or write (<see cref="DeliveryVerbHost.WithKit"/>): asking it for one is a bug.</summary>
+sealed class UnusedStateStore : IItemStateStore
+{
+    public Task<StateHolder> Read(int item, CancellationToken ct) => throw new InvalidOperationException("this kit has no state comment");
+    public Task Save(int item, StateHolder holder, CancellationToken ct) => throw new InvalidOperationException("this kit has no state comment");
 }
 
 /// <summary>The state comment of an item over <see cref="GitHubJournalStore"/> (Get-State, Save-State), with the lease checked before a write of a fenced verb.</summary>

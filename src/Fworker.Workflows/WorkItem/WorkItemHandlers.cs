@@ -40,6 +40,14 @@ public static class WorkItemHandlers
     public static Task<OutgoingMessages> Handle(SlotAssigned m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(SlotHeld m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
     public static Task<OutgoingMessages> Handle(SessionLost m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    // W9.10f: the sweep's steps
+    public static Task<OutgoingMessages> Handle(MasterObserved m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(MasterWatchElapsed m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(ParkExpired m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(OwnerIdleElapsed m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(PullRequestClosed m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(ApprovalSeen m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
+    public static Task<OutgoingMessages> Handle(RearmSettle m, WorkItemService svc, CancellationToken ct) => Run(m, svc, ct);
 
     public static async Task<OutgoingMessages> Run(WorkItemInput input, WorkItemService svc, CancellationToken ct)
     {
