@@ -282,6 +282,31 @@ public sealed class SessionLedgerTests
     }
 
     [Fact]
+    public async Task AfterABreak_TheSagasOffer_IsNotMadeForAnItemTheAdoptionHasNotExamined_UntilItIs()
+    {
+        // W9.9b (review): the row is still the old generation and v1 may have moved or merged the item; the plant must not start a session on it
+        var store = new InMemoryWorkItemStore();
+        var svc = new WorkItemService(store, new WorkItemSaga(new DocsPort(), WorkItemPolicy.Default with { FeatureRules = new FeaturePlanRules(true) }));
+        var item = new ItemId(Home, 7);
+        await svc.Handle(new StartWorkItem(item, "intake"));
+        var arm = (await store.Load(item.ToString(), default))!.State.ArmId;
+        await svc.Handle(new SlotAssigned(item, 1, "slot|s1", "s1", "octopus", "host-a", "design", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddHours(4)));
+        var gate = new Fworker.Workflows.Adoption.ReadoptionGate();
+        gate.Hold("v1 ran", newTerm: true);
+        var own = new V2Ownership(store, Home, Column, gate);
+        var planned = new List<(JsonArray Nodes, IReadOnlyCollection<int> Items)>();
+        var port = new SessionStartPort(own.RefreshAsync, only => own.OfferNodes(_ => false, only), (nodes, items) => planned.Add((nodes, items)));
+        var request = new SessionStartRequested(item, 1, arm, "start|x|s1", "s1", "octopus", "host-a", "design");
+
+        Assert.Equal("no-offer", await port.Run(request, default));
+        Assert.Empty(planned);
+        Assert.True(own.Owns(7));   // (v1's sweep still leaves the item alone)
+        gate.Adopted(item.ToString());
+        Assert.Equal("offered", await port.Run(request, default));
+        Assert.Single(planned);
+    }
+
+    [Fact]
     public async Task ASagaTableThatCannotBeRead_IsAnError_TheHostTriesTheRequestAgain()
     {
         var port = new SessionStartPort(_ => Task.FromResult(false), _ => [], (_, _) => { });

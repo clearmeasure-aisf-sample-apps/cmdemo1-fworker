@@ -156,7 +156,7 @@ sealed class V2Health(IV2HealthSource source, FactorySchemaStatus schema, Engine
             steps.Add(new JsonObject { ["plan"] = g.Plan, ["step"] = g.Step, ["status"] = g.Status, ["count"] = g.Count, ["oldestAgeSeconds"] = Age(g.Oldest, at) });
         var o = new JsonObject { ["open"] = groups.Where(g => g.Status == WorkItemStatus.Open).Sum(g => g.Count), ["settling"] = groups.Where(g => g.Status == WorkItemStatus.Settling).Sum(g => g.Count), ["byStep"] = steps };
         if (rearm() is { Last: { } r })
-            o["rearm"] = new JsonObject { ["at"] = r.At.ToString("o"), ["open"] = r.Open, ["timersSent"] = r.Timers, ["commandsSent"] = r.Commands, ["stepsWithoutLease"] = r.NoLease, ["failed"] = r.Failed };
+            o["rearm"] = new JsonObject { ["at"] = r.At.ToString("o"), ["open"] = r.Open, ["timersSent"] = r.Timers, ["commandsSent"] = r.Commands, ["stepsWithoutLease"] = r.NoLease, ["failed"] = r.Failed, ["awaitingReadoption"] = r.Held };
         return o;
     }
 

@@ -120,7 +120,7 @@ static class GatewayWolverineExtensions
                     // W9.10o: the repair of the window between a saga's save and its outbox (the timer or command that was never sent), and the purge of the old successes of the idempotency ledger
                     if (workItems.Store is IWorkItemAges ages)
                     {
-                        var repair = rearm = new WorkItemRearm(ages, workItems.Docs.Settings.Policy, m => host.PublishAsync(m));
+                        var repair = rearm = new WorkItemRearm(ages, workItems.Docs.Settings.Policy, m => host.PublishAsync(m), awaitsReadoption: readoption.Refuses);
                         jobs.Add(RecurringJobSlots.SagaRearm, async ct =>
                         {
                             var report = await repair.Run(ct);

@@ -22,9 +22,9 @@ public interface IWorkItemAges
 }
 
 /// <summary>What one run of the re-arm looked at and sent.</summary>
-public sealed record RearmReport(DateTimeOffset At, int Open, int Timers, int Commands, int NoLease, int Failed);
+public sealed record RearmReport(DateTimeOffset At, int Open, int Timers, int Commands, int NoLease, int Failed, int Held = 0);
 
-public sealed class WorkItemRearm(IWorkItemAges ages, WorkItemPolicy policy, Func<object, Task<bool>> publish, Func<DateTimeOffset>? clock = null)
+public sealed class WorkItemRearm(IWorkItemAges ages, WorkItemPolicy policy, Func<object, Task<bool>> publish, Func<DateTimeOffset>? clock = null, Func<string, bool>? awaitsReadoption = null)
 {
     /// <summary>A timer this much past its time is taken as lost.</summary>
     public static readonly TimeSpan OverdueGrace = TimeSpan.FromMinutes(2);
@@ -40,12 +40,16 @@ public sealed class WorkItemRearm(IWorkItemAges ages, WorkItemPolicy policy, Fun
     public async Task<RearmReport> Run(CancellationToken ct)
     {
         var now = clock();
-        int open = 0, timers = 0, commands = 0, noLease = 0, failed = 0;
+        int open = 0, timers = 0, commands = 0, noLease = 0, failed = 0, held = 0;
         foreach (var item in await ages.OpenItems(ct))
         {
             ct.ThrowIfCancellationRequested();
             var s = item.State;
             if (s.Status == WorkItemStatus.Completed) continue;
+            // W9.9b (review): after a break an item the adoption has not examined yet (ReadoptionGate) gets no timer and no command: its row is still the old generation, v1 may have moved or merged it since, and a
+            // SessionStartRequested or MergeRequested of that generation would act on the old state. Every row is silent after a break, so without this the re-arm would send them all. The adoption releases the item (its row
+            // is then the new generation, or was found to stand) and the next run repairs what is still missing.
+            if (awaitsReadoption is not null && awaitsReadoption(s.Item)) { held++; continue; }
             if (s.Parked)
             {
                 // W9.10f: a parked item has the timers of its park (its end, the owner's patience): a lost one would leave it parked for ever
@@ -62,7 +66,7 @@ public sealed class WorkItemRearm(IWorkItemAges ages, WorkItemPolicy policy, Fun
                 foreach (var command in WorkItemSaga.CommandsOf(s))
                     if (await Send(command)) commands++; else failed++;
         }
-        return last = new RearmReport(now, open, timers, commands, noLease, failed);
+        return last = new RearmReport(now, open, timers, commands, noLease, failed, held);
     }
 
     // a host that is not up takes nothing (false); the next run tries again
