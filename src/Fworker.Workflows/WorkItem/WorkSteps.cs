@@ -310,7 +310,15 @@ public sealed class DeliverStep : WorkStep
     static StepAnswer SettleEnded(StepContext c)
     {
         if (!c.Policy.HoldsForProd || c.State.Delivered.ContainsKey(Prod)) { c.Complete(c.Policy.HoldsForProd ? "the settle window ended and the release is in prod" : "the settle window ended"); return StepAnswer.Applied; }
-        if (c.State.SettleHeld) { c.Complete($"the settle cap of {c.Policy.SettleCap.TotalDays:0.##} days ended with the release not in prod"); return StepAnswer.Applied; }
+        if (c.State.SettleHeld)
+        {
+            // the end is not silent: a decision of its own (the history, the status and the digest show it; the gateway logs a warning), then the completion
+            var why = $"the settle cap of {c.Policy.SettleCap.TotalDays:0.##} days ended with the release not in prod";
+            c.State.Delivered.TryGetValue(c.Policy.FinalEnvironment.ToLowerInvariant(), out var release);
+            c.Decide(WorkItemActions.SettleCapExpired, why, release ?? "");
+            c.Complete(why);
+            return StepAnswer.Applied;
+        }
         c.State.SettleHeld = true;
         c.State.ArmSeq++; c.State.ArmId = $"{c.State.Generation}.{c.State.ArmSeq}";   // (a new arm: the cap's timer is not a redelivery of the window's)
         c.State.SettleUntil = (c.State.SettleUntil ?? c.Now) + (c.Policy.SettleCap > c.Policy.Settle ? c.Policy.SettleCap - c.Policy.Settle : TimeSpan.Zero);

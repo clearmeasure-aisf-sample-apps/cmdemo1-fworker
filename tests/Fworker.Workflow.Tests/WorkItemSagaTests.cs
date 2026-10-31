@@ -292,7 +292,7 @@ public class WorkItemSagaTests
         Assert.Equal(WorkItemStatus.Completed, fx.State.Status);
     }
 
-    static WorkItemPolicy AtTdd => WorkItemPolicy.Default with { FinalEnvironment = "tdd" };
+    static WorkItemPolicy AtTdd => WorkItemPolicy.Default with { FinalEnvironment = "tdd", V1PromotesProd = true };
 
     [Fact]
     public async Task WhereV2DeliversAtTdd_ADeliveredItemWhoseReleaseIsNotInProdStaysSettlingPastTheWindow_AndReachingProdCompletesIt()
@@ -320,6 +320,15 @@ public class WorkItemSagaTests
     }
 
     [Fact]
+    public async Task WhereNothingPromotesProd_TheWindowCompletesTheItemAtTdd()
+    {
+        var fx = new SagaFixture(WorkItemPolicy.Default with { FinalEnvironment = "tdd" });
+        await fx.Start(); await fx.Merged();
+        var window = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Delivered("tdd")).Timers).Message);
+        Assert.Equal([WorkItemActions.Completed], (await fx.Send(window)).Decisions.Select(d => d.Action));
+    }
+
+    [Fact]
     public async Task WhereV2DeliversAtTdd_AProdBeforeTheWindowEndsLetsTheWindowComplete()
     {
         var fx = new SagaFixture(AtTdd);
@@ -340,8 +349,9 @@ public class WorkItemSagaTests
         var cap = Assert.IsType<SettleWindowElapsed>(Assert.Single((await fx.Send(window)).Timers).Message);
         fx.Now = T0.AddDays(14);
         var end = await fx.Send(cap);
-        Assert.Equal([WorkItemActions.Completed], end.Decisions.Select(d => d.Action));
+        Assert.Equal([WorkItemActions.SettleCapExpired, WorkItemActions.Completed], end.Decisions.Select(d => d.Action));
         Assert.Contains("cap", end.Decisions[0].Reasons[0]);
+        Assert.Equal("1.0.5", end.Decisions[0].Reasons[1]);   // (the release that stayed behind)
     }
 
     [Fact]

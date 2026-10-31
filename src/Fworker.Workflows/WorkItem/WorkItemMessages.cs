@@ -152,6 +152,8 @@ public static class WorkItemActions
     public const string Settling = "settling";
     /// <summary>The settle window ended with the release not in prod (final environment before prod): the item stays Settling, in the Release Queue, until prod or the cap.</summary>
     public const string SettleHeld = "settle-held";
+    /// <summary>The cap on the hold for prod ended with the release still not in prod; the reasons are the text and the release (in the final environment) that stayed behind.</summary>
+    public const string SettleCapExpired = "settle-cap-expired";
     public const string Undelivered = "undelivered";
     public const string Reopened = "reopened";
     public const string Completed = "completed";

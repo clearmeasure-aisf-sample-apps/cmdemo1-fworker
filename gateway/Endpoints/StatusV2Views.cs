@@ -79,7 +79,17 @@ sealed partial class V2ItemViews
     {
         var l = items.ToList();
         return new JsonObject { ["open"] = l.Count(i => i.Status == WorkItemStatus.Open), ["settling"] = l.Count(i => i.Status == WorkItemStatus.Settling), ["settleHeldForProd"] = l.Count(i => i.Status == WorkItemStatus.Settling && i.SettleHeld), ["completed"] = l.Count(i => i.Status == WorkItemStatus.Completed),
-            ["parked"] = l.Count(i => i.IsOpen && i.Parked), ["leaseOverdue"] = l.Count(LeaseOverdueAt(at)) };
+            ["parked"] = l.Count(i => i.IsOpen && i.Parked), ["leaseOverdue"] = l.Count(LeaseOverdueAt(at)), ["settleCapExpired"] = CapExpired(l) };
+    }
+
+    /// <summary>The items the settle cap completed with the release not in prod (their newest decisions show it): item, release and when.</summary>
+    static JsonArray CapExpired(IEnumerable<WorkItemView> items)
+    {
+        var a = new JsonArray();
+        foreach (var i in items.OrderBy(i => i.Number))
+            if (i.History.FirstOrDefault(h => h.Action == WorkItemActions.SettleCapExpired) is { } h)
+                a.Add(new JsonObject { ["item"] = i.Number, ["release"] = Code(h.Reasons.Count > 1 ? h.Reasons[1] : ""), ["at"] = h.At.ToString("o") });
+        return a;
     }
 
     static Func<WorkItemView, bool> LeaseOverdueAt(DateTimeOffset at) => i => i.IsOpen && !i.Parked && i.LeaseDue is { } due && due <= at;
@@ -148,7 +158,7 @@ sealed partial class V2ItemViews
                     attention.Add(new JsonObject { ["item"] = i.Number, ["kind"] = i.Parked ? "parked" : "lease-overdue", ["plan"] = Code(i.Plan), ["step"] = Code(i.Step), ["generation"] = i.Generation,
                         ["lastAction"] = last == null ? null : Code(last.Action), ["lastAt"] = last?.At.ToString("o"), ["sinceMinutes"] = (int)Math.Max(0, (at - i.UpdatedAt).TotalMinutes) });
                 }
-                var r = new JsonObject { ["repository"] = g.Key, ["open"] = g.Count(i => i.Status == WorkItemStatus.Open), ["settling"] = g.Count(i => i.Status == WorkItemStatus.Settling), ["attention"] = attention };
+                var r = new JsonObject { ["repository"] = g.Key, ["open"] = g.Count(i => i.Status == WorkItemStatus.Open), ["settling"] = g.Count(i => i.Status == WorkItemStatus.Settling), ["settleCapExpired"] = CapExpired(g), ["attention"] = attention };
                 repos.Add(r);
             }
         o["repositories"] = repos;

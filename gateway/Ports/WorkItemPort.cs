@@ -316,7 +316,7 @@ static class WorkItemWiring
     {
         Func<FactoryDbContext> open = () => Open(connectionString);
         var root = c.Instance.Root;
-        var settings = DocsPlanSettingsReader.From(root);
+        var settings = DocsPlanSettingsReader.From(root, env);
         var store = new SqlWorkItemStore(open);
         var service = new WorkItemService(store, new WorkItemSaga(docs ?? new DomainDocsOnlyPort(DocsOnlySettingsReader.From(root)), settings.Policy), readoption: readoption);
         var ownership = c.Instance.Home is { } home ? new V2Ownership(store, home, settings.ColumnOf, readoption) : null;
