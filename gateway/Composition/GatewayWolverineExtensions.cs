@@ -16,7 +16,7 @@ static class GatewayWolverineExtensions
     public static IServiceCollection AddGatewayWolverine(this IServiceCollection services, GatewayComposition c)
     {
         // always registered, so that /ready and /api/v1/status can take it; Tracked is false where there is no Wolverine host, and Required (the gate of /ready) only where v2 acts (W9.10o)
-        var schemaStatus = new FactorySchemaStatus(required: c.WolverineHost && c.Engine.V2Acts, tracked: c.WolverineHost);
+        var schemaStatus = new FactorySchemaStatus(required: c.WolverineHost && c.Engine.V2Acts, tracked: c.WolverineHost, noDatabase: c.Engine.NoDatabase, malformed: c.Database.Malformed);
         services.AddSingleton(schemaStatus);
         if (c.Database.Malformed) services.AddSingleton(c.Database);   // (only so that /api/v1/status can say the variable is set and malformed; every other case registers it with the host)
         if (!c.WolverineHost) return services;
@@ -32,10 +32,31 @@ static class GatewayWolverineExtensions
         var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
         var readoption = new Fworker.Workflows.Adoption.ReadoptionGate();   // W9.9b (review): the hold on old-generation inputs between the host's start and the adoption of a term after a break
         AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
+        // cutover review: the sweep waits for the adoption of its term (AdoptionGate); registered below where the engine acts, set up here because the status block and the host's wiring close over `adoption`
+        WolverineHostService? hostForPoke = null;
+        // (the sweep asks for the term's first look of the adoption itself once the host runs: the recurring job's first look comes later, and the sweep waits for it)
+        // (at most one look every 15 s, so that a plant that is not restored yet or markers that cannot be read, a database in trouble, are not asked every 2 s; a line only when the answer changes)
+        var lastPoke = DateTime.MinValue; string? lastPoked = null;
+        var adoptionGate = new AdoptionGate(() => adoption is not null, e => adoption!.Job.IsDone(e), () => c.Leader.MayAct, () => c.Leader.ClaimEpoch,
+            excluded: () => adoption?.Job.Excluded ?? new HashSet<int>(),
+            poke: async ct =>
+            {
+                if (adoption is not { } a || hostForPoke is not { State: WolverineHostService.Phase.Running } || DateTime.UtcNow - lastPoke < TimeSpan.FromSeconds(15)) return;
+                var did = await a.Job.TickIfFirst(ct);
+                if (did is null) return;
+                lastPoke = DateTime.UtcNow;
+                if (did is not ("heartbeat" or "not-leader") && did != lastPoked)
+                {
+                    lastPoked = did;
+                    Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["adoption"] = did, ["report"] = a.Runner.Last?.ToJson() }.ToJsonString());
+                }
+            });
+        if (c.Engine.V2Acts && c.Instance.Home != null) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return adoptionGate; });
         services.AddSingleton(sp =>
         {
             _ = sp.GetRequiredService<LeadershipService>();
             var host = new WolverineHostService(sp.GetRequiredService<DatabaseOptions>(), sp.GetRequiredService<WolverineHostOptions>(), sp.GetRequiredService<GatewayLeader>(), sp.GetRequiredService<FactorySchemaStatus>());
+            hostForPoke = host;
             if (c.Engine.V2Acts)
             {
                 // W3.3: the Copilot launch runs under a reservation, settled by CopilotReconcileService (a hosted service of AddGatewayBackground)
@@ -139,7 +160,7 @@ static class GatewayWolverineExtensions
                     Fworker.Workflows.Reconcilers.PlantSteps? stepsMade = null;   // (made at the first run: the instance configuration and the GitHub identity are in the container by then; null where there is no identity, the jobs then say no-github)
                     Func<bool> plantRestored = () => sp.GetService<ISnapshotCoordinator>()?.Restored is not { } restored || restored.IsCompleted || (!c.LeaderOn && DateTime.UtcNow - restoredSince > TimeSpan.FromSeconds(60));   // (as the sweep: without the lease a restore that hangs holds it back 60 s at most)
                     var steps = plantSteps = new PlantStepJobs(() => stepsMade ??= KeeperWiring.MakePlantSteps(sp, () => c.Leader.MayAct), () => sp.GetService<Plant>(), () => sp.GetService<QcHub>(), c.GitHubBudget, workItems.Ownership, () => c.Leader.MayAct,
-                        plantRestored, c.Gateway.OwnerMode);
+                        () => plantRestored() && adoptionGate.Settled() is not null, c.Gateway.OwnerMode, excluded: () => adoptionGate.Excluded());   // (the plant-wide steps wait for the adoption of the term as the sweep does, and leave out what it could not fence)
                     jobs.Add(RecurringJobSlots.ClaimRefReap, ct => steps.ClaimRefReap(ct));
                     jobs.Add(RecurringJobSlots.BoardGuard, ct => steps.BoardGuard(ct));
                     jobs.Add(RecurringJobSlots.QcSync, ct => steps.QcSync(ct));
@@ -242,7 +263,7 @@ static class GatewayWolverineExtensions
             {
                 _ = sp.GetRequiredService<WolverineHostService>();
                 var cs = WolverineHostService.WithConnectTimeout(healthConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => adoption?.Job.Block());
+                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => { var b = adoption?.Job.Block(); if (b is not null && c.Engine.V2Acts) b["sweep"] = adoptionGate.Block(); return b; });   // (sweep: whether v1's sweep still waits for this term's adoption, since when, and whether the wait is past its limit)
             });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)

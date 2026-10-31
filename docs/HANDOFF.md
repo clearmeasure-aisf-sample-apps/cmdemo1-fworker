@@ -834,6 +834,21 @@ owner sets (`docs/design/operator-session.md` section 5):
 - no push access for that account to the work-orders repository (`cmdemo1-workorders`): the session improves the factory, it never
   works on the application.
 
+## 6c. Cutover safety (review of the tdd cutover)
+
+Three rules the gateway keeps around the switch to v2 (tests: `tests/Gateway.Tests/CutoverSafetyTests.cs`, job "Image starts without a database"):
+
+- **v1's intake is off wherever the engine does not act on `intake.v2Plans`.** The image has `intake.enabled` true for the engine's intake; v1's intake leaves a Todo item alone only because the sweep hands it the plans of the engine
+  (`Sweeper.AddV2Arguments`). So where `intake.v2Plans` names plans and v2 does not act (the kill switch `FACTORY_V2_OFF`, uat and prod, a v2 environment with no database) the sweep sends no `intake` block at all
+  (`Sweeper.IntakeOff`): v1 takes no item, as before the cutover. `FACTORY_INTAKE=1` cannot bring it back, the script has no block to act on. With `v2Plans` empty (the source defaults, the Tier 1 suites) nothing changes.
+- **v2 configured and no usable database (`FACTORY_DB_CONNECTION` missing or malformed): inert, not crashed, not v1.** `EngineOptions.NoDatabase`: `V2Acts` is false, no v2 service is registered, the sweeper holds an ownership that
+  is never loaded (`V2Ownership.NeverLoaded`) and sweeps nothing, `/ready` answers 503 `{"waitingFor":"database"}`, `/health` stays 200, `/api/v1/status` `engine` says `inert`. The AutoPromoter (uat and prod), the dashboard and
+  the status keep running. v1 is not the fallback on purpose: with no database no `v1-ran` marker can be written, and a later adoption would not know that v1 had acted. The way out is the variable, or `FACTORY_V2_OFF=1`.
+- **No v1 sweep pass before the term's adoption.** Where v2 acts the sweep waits until the adoption of this process's term in the lease is over (`AdoptionJob.IsDone`, `AdoptionGate`), then reads the saga's table again before its
+  first pass. The sweep begins once a run of the term has finished: done, or partial with no break outstanding (items the run could not read stay v1's, as before); after a break only a done run counts (the fencing). A run that cannot finish is retried by its job and the sweep keeps waiting, so v1's steps (the PASS merge, settling, card moves) do not run beside an adoption or on items a break left unfenced. The wait is shown, not cut short: after 10 minutes
+  `/api/v1/status` `v2.adoption.sweep` says `overdue: true` and, until the first adoption of the process has finished, `/ready` answers 503 `{"waitingFor":"adoption"}` (a release is then an outage: find the cause in
+  `v2.adoption`, or set `FACTORY_V2_OFF=1`). A later term (lease lost and taken again) waits again and shows the wait, but `/ready` does not flip back.
+
 ## 7. History in one paragraph
 
 2026-10-10: plugin, rule scripts and a local gateway; ten trial items. 2026-10-11: owner sessions, plant manager, dashboard, PR QC

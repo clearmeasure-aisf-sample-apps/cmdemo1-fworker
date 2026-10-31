@@ -133,7 +133,7 @@ Wolverine builds and diffs none of its tables (`AutoCreate.None`); script 011 ho
    **A release is done only when both are true**: `curl -s <tdd url>/_build` shows the new version (`1.0.<Build run number>`,
    `pluginHash`) AND `curl -s -o /dev/null -w '%{http_code}' <tdd url>/ready` answers 200 (it also means the database schema is good; `/api/v1/status` `schema` lists the scripts this start applied and `differences` is empty). `/health` 200 is not enough: on 2026-10-13 a
    release was live and never ready for 49 minutes. A 503 of `/ready` says what the start waits for
-   (`{"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."}`); if it has not turned 200 a few minutes after the
+   (`{"ready":false,"waitingFor":"revocations","attempts":N,"since":"..."}`; `"database"` for a v2 environment with no usable `FACTORY_DB_CONNECTION`, for good; `"adoption"` only after 10 minutes of the sweep waiting for the first adoption of the term: before that the start is simply not done yet, `/api/v1/status` `v2.adoption` says where it is); if it has not turned 200 a few minutes after the
    deployment, treat it as an outage: find the cause or roll back.
 7. uat and prod are manual promotions by the operator (Octopus sign-off, the demo-environment kit). A session does not promote to them.
 

@@ -43,7 +43,7 @@ function Get-Delivery([string]$Sha) {
     $deps = @((Invoke-Octo "api/$sp/deployments?projects=$($proj.Id)&take=30").Items | Where-Object { $_.ReleaseId -eq $cand.Id } | Sort-Object { [DateTime]$_.Created } -Descending)
     foreach ($d in $deps) {
         $name = $envs[$d.EnvironmentId]; if (-not $name -or $res.deployments.ContainsKey($name)) { continue }
-        $task = Invoke-Octo "api/$sp/tasks/$($d.TaskId)"
+        $task = Invoke-Octo "api/$sp/tasks/$($d.TaskId)"; if (-not $task) { continue }   # (gone since the list was read, as in Get-ProdContaining: StrictMode throws on .State of $null)
         $res.deployments[$name] = @{ state = "$($task.State)"; completed = [bool]$task.IsCompleted; at = $d.Created; deployment = $d.Id }
     }
     $prodName = $o.environments.prod

@@ -13,7 +13,8 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
 {
     readonly Func<DateTimeOffset> now = clock ?? (() => DateTimeOffset.UtcNow);
     readonly object gate = new();
-    long? termEpoch, doneEpoch;
+    long? termEpoch, doneEpoch, clearedEpoch;
+    IReadOnlySet<int> excluded = new HashSet<int>();
     (bool Break, string Why)? termBreak;
     int attempts;
     DateTimeOffset? retryAt;
@@ -24,6 +25,25 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
 
     /// <summary>One look: waits, runs the adoption of the term, or writes the heartbeat. Returns what it did ("not-leader", "waiting: ...", "heartbeat", or the run's outcome).</summary>
     public async Task<string> Tick(CancellationToken ct)
+    {
+        await oneTick.WaitAsync(ct);
+        try { return await TickCore(ct); } finally { oneTick.Release(); }
+    }
+
+    readonly SemaphoreSlim oneTick = new(1, 1);
+
+    /// <summary>
+    /// Cutover review: the sweep waits for the adoption of the term, and the recurring job's first look can be late (the scheduler starts with the host). So the sweep asks for the term's FIRST look itself: it runs only when no look has begun
+    /// in this term and none is running; later looks (the retries, with their pauses and attempt counts) stay with the recurring job. Returns null when it did nothing.
+    /// </summary>
+    public async Task<string?> TickIfFirst(CancellationToken ct)
+    {
+        bool Begun() { lock (gate) return termEpoch == epoch() && attempts > 0; }
+        if (Begun() || !await oneTick.WaitAsync(0, ct)) return null;
+        try { return Begun() ? null : await TickCore(ct); } finally { oneTick.Release(); }
+    }
+
+    async Task<string> TickCore(CancellationToken ct)
     {
         if (!mayAct()) { lock (gate) { state = "not-leader"; } return "not-leader"; }
         var e = epoch();
@@ -38,7 +58,7 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         (bool Break, string Why) decided;
         lock (gate)
         {
-            if (termEpoch != e) { termEpoch = e; termBreak = null; attempts = 0; retryAt = null; }
+            if (termEpoch != e) { termEpoch = e; termBreak = null; attempts = 0; retryAt = null; excluded = new HashSet<int>(); }
         }
         try
         {
@@ -61,6 +81,8 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         lock (gate)
         {
             state = report.Outcome;
+            if (report.ItemsCompleted) excluded = decided.Break ? report.FailedItems.ToHashSet() : [];   // (after a break the items that could not be fenced stay out of v1's sweep; without one they are v1's as ever)
+            if (report.Outcome == "done" || (report.Outcome == "partial" && report.ItemsCompleted)) clearedEpoch = e;   // (the sweep may begin: a finished run of the term, no break whose fencing is outstanding)
             if (report.Outcome == "done" || (report.Outcome == "partial" && attempts >= maxAttempts && !decided.Break)) { doneEpoch = e; doneAt = now(); }
             else if (report.Outcome == "partial" && decided.Break && attempts >= maxAttempts) retryAt = now() + TimeSpan.FromTicks(Math.Min(RetryCap.Ticks, TimeSpan.FromMinutes(1).Ticks << Math.Min(attempts - maxAttempts, 10)));
         }
@@ -74,6 +96,12 @@ public sealed class AdoptionJob(AdoptionRunner runner, IEngineMarkers markers, F
         try { await markers.Mark(EngineMarkerNames.Acted, now(), holder, $"epoch {e}", ct); }
         catch (Exception ex) when (ex is not OperationCanceledException) { Console.Error.WriteLine($"adoption: the engine marker could not be written ({ex.GetType().Name})"); }
     }
+
+    /// <summary>Cutover review: after a break, the items the latest finished run of the term could not fence (their read or write failed). The sweep leaves them alone, as it leaves the saga's items, until a run fences them.</summary>
+    public IReadOnlySet<int> Excluded { get { lock (gate) return excluded; } }
+
+    /// <summary>Whether the sweep may begin in the term with this epoch: a run of the term got through the items (the board and the rows were read and every item was tried), whatever the trains, the backfill or one item did; the items that could not be fenced after a break are <see cref="Excluded"/> from the sweep. The gateway's sweep waits for it (AdoptionGate): the first pass of a term does not begin beside the adoption.</summary>
+    public bool IsDone(long termEpochToAsk) { lock (gate) return doneEpoch == termEpochToAsk || clearedEpoch == termEpochToAsk; }
 
     /// <summary>The "adoption" block of the v2 status: where the term stands and the report of the latest run.</summary>
     public JsonObject Block()

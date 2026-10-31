@@ -23,7 +23,7 @@ public class AdoptionJobTests
     sealed class Reads : IAdoptionReads
     {
         public int Runs;
-        public bool Fail, Two, FailEight, Moved;   // (Moved: v1 moved item 7 to Verify while the engine was away)
+        public bool Fail, Two, FailEight, Moved, PullsFail, OctopusFails;   // (Moved: v1 moved item 7 to Verify while the engine was away)
         public Task<IReadOnlyList<BoardCard>> Cards(CancellationToken ct)
         {
             Runs++;
@@ -32,8 +32,8 @@ public class AdoptionJobTests
         }
         public Task<V1ItemRecord?> ReadItem(ItemId item, CancellationToken ct) => FailEight && item.Number == 8 ? throw new HttpRequestException("GitHub answered 502") : Task.FromResult<V1ItemRecord?>(new V1ItemRecord(true, ["factory worker"], "The body.", Now.AddDays(-2), Moved ? State(rev: 9, extra: Claim(Verify, true, TimeSpan.FromMinutes(25))) : State(extra: Claim(Develop, true, TimeSpan.FromMinutes(25))), false));
         public Task<AdoptionPullRequest?> ReadPullRequest(RepoId repository, int number, CancellationToken ct) => Task.FromResult<AdoptionPullRequest?>(null);
-        public Task<IReadOnlyList<OctopusSignOff>> PendingSignOffs(CancellationToken ct) => Task.FromResult<IReadOnlyList<OctopusSignOff>>([]);
-        public Task<IReadOnlyList<MergedPullRequest>> RecentMergedPulls(int take, string? afterCommit, CancellationToken ct) => Task.FromResult<IReadOnlyList<MergedPullRequest>>([]);
+        public Task<IReadOnlyList<OctopusSignOff>> PendingSignOffs(CancellationToken ct) => OctopusFails ? throw new HttpRequestException("Octopus answered 502") : Task.FromResult<IReadOnlyList<OctopusSignOff>>([]);
+        public Task<IReadOnlyList<MergedPullRequest>> RecentMergedPulls(int take, string? afterCommit, CancellationToken ct) => PullsFail ? throw new HttpRequestException("GitHub answered 502") : Task.FromResult<IReadOnlyList<MergedPullRequest>>([]);
     }
 
     sealed class Projections : IProjectedSequences
@@ -62,6 +62,49 @@ public class AdoptionJobTests
             Runner = new AdoptionRunner(new AdoptionOptions(Home, Settings(), () => ["cmdemo1-ui/tdd"]), ports, () => Clock, Gate);
             Job = new AdoptionJob(Runner, Markers, () => MayAct, () => Epoch, () => Ready, "node-a", () => Clock, maxAttempts, readoption: Gate);
         }
+    }
+
+    // Cutover review: the gateway's sweep begins when IsDone says so: when a run of the term got through the items. A board that could not be read is no run. After a break the items that could not be fenced are Excluded from the sweep
+    // (it goes on without them); a part beside the items (the merged backfill, the trains, an Octopus read) that keeps failing holds nothing back.
+    [Fact]
+    public async Task J0_TheSweepMayBeginAfterARunThatTriedEveryItem_NotAfterAFailedBoardRead()
+    {
+        var r = new Rig();
+        Assert.False(r.Job.IsDone(1));
+        r.Reads.Fail = true;
+        Assert.Equal("partial", await r.Job.Tick(default));
+        Assert.False(r.Job.IsDone(1));                 // (the board could not be read: nothing was examined)
+        r.Reads.Fail = false; r.Reads.Two = true; r.Reads.FailEight = true;
+        Assert.Equal("partial", await r.Job.Tick(default));
+        Assert.True(r.Job.IsDone(1)); Assert.False(r.Job.IsDone(2));
+        Assert.Empty(r.Job.Excluded);                  // (no break: item 8 stays v1's, as before the engine)
+    }
+
+    [Fact]
+    public async Task J0b_AfterABreak_AnItemWhoseReadKeepsFailing_IsExcludedFromTheSweep_TheRestOfTheBoardIsSwept()
+    {
+        var r = new Rig();
+        await r.Markers.Mark(EngineMarkerNames.V1Ran, Now, "other", "FACTORY_V2_OFF", default);
+        r.Reads.Two = true; r.Reads.FailEight = true;
+        for (var i = 0; i < 3; i++) Assert.Equal("partial", await r.Job.Tick(default));
+        Assert.True(r.Job.Block()["breakPending"]!.GetValue<bool>());
+        Assert.True(r.Job.IsDone(1));                  // (the sweep is not held for the term)
+        Assert.Equal([8], r.Job.Excluded.ToArray());   // (it leaves item 8 alone: v1 may have moved it and no fence was written)
+        r.Reads.FailEight = false;
+        Assert.Equal("done", await r.Job.Tick(default));
+        Assert.Empty(r.Job.Excluded);
+        Assert.True(r.Job.IsDone(1));
+    }
+
+    [Fact]
+    public async Task J0c_AfterABreak_APartThatKeepsFailing_BesideTheItems_HoldsTheSweepBackNever()
+    {
+        var r = new Rig();
+        await r.Markers.Mark(EngineMarkerNames.V1Ran, Now, "other", "FACTORY_V2_OFF", default);
+        r.Reads.OctopusFails = true;                   // (the Sign-off read of the trains, and with it the run, fails every time)
+        Assert.Equal("partial", await r.Job.Tick(default));
+        Assert.True(r.Job.Block()["breakPending"]!.GetValue<bool>());
+        Assert.True(r.Job.IsDone(1)); Assert.Empty(r.Job.Excluded);
     }
 
     [Fact]
