@@ -39,6 +39,30 @@ static class CapacityWiring
     };
 
     /// <summary>
+    /// W9.10j: what each runtime's manager reads of the scheduler's persisted ledger (<see cref="RuntimeManager.ReadLedger"/>): the day's count of grants of that runtime and the slots it holds, by item number. The manager reads it
+    /// when it counts the day again (after a restart, at midnight) and adopts the executions it finds, so the grants made before a restart are subtracted from what it reports as outside the ledger once, not counted twice.
+    /// Only the items of <paramref name="home"/> (the work-orders repository the plant's items belong to) are matched by number.
+    /// </summary>
+    public static void ConnectLedger(RuntimeRegistry registry, ICapacityStore store, Fworker.Contracts.Ids.RepoId? home)
+    {
+        foreach (var manager in registry.Managers)
+        {
+            var kind = manager.Kind;
+            manager.ReadLedger = async ct => LedgerDayOf(await store.Load(CapacityKeys.Factory, ct), kind, home);
+        }
+    }
+
+    /// <summary>The manager's view of the ledger for one runtime; null when the ledger has no row yet (it has counted nothing).</summary>
+    internal static RuntimeManager.LedgerDay? LedgerDayOf(CapacityRecord? record, string kind, Fworker.Contracts.Ids.RepoId? home)
+    {
+        if (record?.State is not { } state) return null;
+        var slots = new List<RuntimeManager.LedgerSlotRef>();
+        foreach (var slot in state.Slots.Values.Where(s => s.Runtime == kind).OrderBy(s => s.SlotId, StringComparer.Ordinal))
+            if (Fworker.Contracts.Ids.ItemId.TryParse(slot.Item, out var id) && (home is null || id.Repository == home)) slots.Add(new RuntimeManager.LedgerSlotRef(id.Number, slot.SlotId));
+        return new RuntimeManager.LedgerDay(state.Day, state.ExecutionsToday.GetValueOrDefault(kind), slots);
+    }
+
+    /// <summary>
     /// W7.4: every host report of the Octopus runtime becomes the scheduler's <see cref="HostReported"/> input (the containers running on the host and its metrics). Called only where the engine acts, so v1 and the
     /// shadow run of tdd never send one. A report is not sent while the Wolverine host is down (PublishAsync answers false): the host reports again within five minutes, and a report holds the whole state.
     /// </summary>

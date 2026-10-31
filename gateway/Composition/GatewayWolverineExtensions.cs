@@ -68,7 +68,9 @@ static class GatewayWolverineExtensions
                             throw new InvalidOperationException("the Wolverine host did not take the end of the session");
                     };
                 // W7.0, W7.1: the CapacityScheduler, the slot ledger of the sessions the v2 engine starts; it shares the runtimes' limits with the plant's manager (no flag: it exists where the engine acts)
-                CapacityWiring.Attach(host, CapacityWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), CapacityWiring.OutsideOf(sp.GetRequiredService<RuntimeRegistry>()), CapacityWiring.OnOf(sp.GetRequiredService<RuntimeRegistry>())));
+                var capacityParts = CapacityWiring.Make(c, WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds), CapacityWiring.OutsideOf(sp.GetRequiredService<RuntimeRegistry>()), CapacityWiring.OnOf(sp.GetRequiredService<RuntimeRegistry>()));
+                CapacityWiring.Attach(host, capacityParts);
+                CapacityWiring.ConnectLedger(sp.GetRequiredService<RuntimeRegistry>(), capacityParts.Service.Store, c.Instance.Home);   // W9.10j: the managers read the ledger's persisted day count and slots when they count the day again after a restart
                 CapacityWiring.ConnectHostReports(sp.GetRequiredService<RuntimeRegistry>().OctopusRuntime, host);   // W7.4: the host reports (metrics, running containers) are the scheduler's HostReported
                 if (c.Instance.Home is { } home)
                 {

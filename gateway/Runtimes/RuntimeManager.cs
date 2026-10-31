@@ -111,13 +111,21 @@ sealed class RuntimeManager : IRuntimeManager
     readonly List<JsonObject> last = new();
     DateTime day = DateTime.UtcNow.Date; int today;
     // W9.10j: the executions begun today for a slot of the scheduler's ledger. The ledger counts its grants itself (what runs and the day's), so what this manager tells the scheduler it runs outside the ledger (Load) is its
-    // own count less these; the manager's own limits (CanStart) still count every execution, as the plant sees all of them. Counted since this process started: after a restart the day's earlier grants are in both counts again.
+    // own count less these; the manager's own limits (CanStart) still count every execution, as the plant sees all of them. Counted since this process started, and seeded from the ledger's persisted count when the day's
+    // count is read back from the runtime (SeedLedger): after a restart the day's earlier grants are in `today` (the history) and in the ledger's own count, and are subtracted once.
     int ledgerToday;
     int startFailuresInRow; bool healthy = true; string unhealthyWhy = "";
     bool relisted;
     // W0.2: the UTC day for which `today` was last counted from the runtime's task history (IRunHistory); `today` is a cache of that count plus the
     // launches since. A runtime without a history never sets it and counts in memory only.
     DateTime countedDay = DateTime.MinValue;
+
+    /// <summary>What the scheduler's persisted ledger says of this runtime (W9.10j): the UTC day (yyyy-MM-dd) its count is for, the executions it counted that day, and the slots it holds with the item each is for.</summary>
+    public sealed record LedgerDay(string Day, int ExecutionsToday, IReadOnlyList<LedgerSlotRef> Slots);
+    public sealed record LedgerSlotRef(int Item, string SlotId);
+    // Set where the engine acts. Read when the day's count is taken back from the runtime (the first reading after a start, every UTC midnight) and when an execution is adopted, so that an execution the ledger holds a slot
+    // for is not counted outside the ledger (concurrency) and the day's grants made before a restart are not counted twice (budget). A read that fails holds that reading back, as a history that cannot be read does.
+    public Func<CancellationToken, Task<LedgerDay?>>? ReadLedger { get; set; }
 
     public Plant? Plant { get; set; }
     // the leader lease (W0.1): a start is not made, and an end it caused is not settled, claimed or revoked, once this says false; defaults to the plant's
@@ -260,6 +268,21 @@ sealed class RuntimeManager : IRuntimeManager
     {
         today = Math.Max(0, today - 1);
         if (execs.TryGetValue(name, out var e) && e.Slot != "") ledgerToday = Math.Max(0, ledgerToday - 1);
+    }
+
+    // Under the lock (W9.10j): the slot of the ledger an execution found by the runtime (restart, a host report) belongs to: the one the ledger holds for its item that no other execution carries. "" when it holds none, and the
+    // execution is then outside the ledger, as a session the plant offered on its own.
+    string LedgerSlotOf(LedgerDay? ledger, int item)
+        => item > 0 && ledger?.Slots.FirstOrDefault(s => s.Item == item && !execs.Values.Any(x => x.Slot == s.SlotId)) is { } slot ? slot.SlotId : "";
+
+    // Under the lock (W9.10j): `today` was just counted from the runtime (the history, or the executions read at start), which includes the sessions the ledger granted earlier that day; the ledger counted them itself and
+    // keeps its count in SQL. What the ledger counted that has begun (a slot it holds that no execution carries has not) is its share of `today`, and Load leaves it out. A ledger of another day counted nothing for this one.
+    void SeedLedger(LedgerDay ledger)
+    {
+        if (ledger.Day != day.ToString("yyyy-MM-dd")) return;
+        var notBegun = ledger.Slots.Count(s => !execs.Values.Any(x => x.Slot == s.SlotId));
+        ledgerToday = Math.Max(ledgerToday, Math.Clamp(ledger.ExecutionsToday - notBegun, 0, today));
+        Log("ledger-counted", "", 0, $"{ledgerToday} of today's {today} are the ledger's ({ledger.ExecutionsToday} granted, {notBegun} slots not begun)");
     }
 
     // ---- outside the plant's lock -----------------------------------------------------------------------------------------------------------
@@ -556,6 +579,17 @@ sealed class RuntimeManager : IRuntimeManager
             try { fromHistory = await history.LaunchesSince(historyDay, ct); }
             catch (Exception e) { Log("history-failed", "", 0, e.Message); if (!relisted) return; }   // the first reading waits for the history: retried at the next poll
         }
+        // W9.10j: the scheduler's ledger, read (outside the lock) when the day is counted again or an execution is to be adopted; a read that fails holds the reading back, so a day is never counted without it
+        LedgerDay? ledger = null; var seedLedger = false; var ledgerFailed = false;
+        if (ReadLedger != null)
+        {
+            bool adopting; lock (gate) adopting = list.Any(i => (!relisted || i.Adopted) && i.Status is "Running" or "Processing" && !execs.ContainsKey(i.WorkerName));
+            if (fromHistory != null || !relisted || adopting)
+            {
+                try { ledger = await ReadLedger(ct); }
+                catch (Exception e) { Log("ledger-failed", "", 0, e.Message); if (!relisted) return; fromHistory = null; ledgerFailed = true; }
+            }
+        }
         lock (gate)
         {
             if (fromHistory is int counted)
@@ -563,24 +597,25 @@ sealed class RuntimeManager : IRuntimeManager
                 // Roll first: a midnight that passed while the history was read leaves the count for the next poll; otherwise the count replaces what the
                 // process had (nothing before the first reading; after a midnight, the launches since it, which the history includes)
                 Roll();
-                if (day == historyDay) { today = Math.Max(today, counted); countedDay = historyDay; Log("budget-counted", "", 0, $"{counted} since {historyDay:yyyy-MM-dd} 00:00 UTC"); }
+                if (day == historyDay) { today = Math.Max(today, counted); countedDay = historyDay; Log("budget-counted", "", 0, $"{counted} since {historyDay:yyyy-MM-dd} 00:00 UTC"); seedLedger = true; }
             }
             if (!relisted)
             {
                 foreach (var i in list.Where(i => i.Status is "Running" or "Processing" && !execs.ContainsKey(i.WorkerName)))
                 {
-                    execs[i.WorkerName] = new Exec { Name = i.WorkerName, Item = i.Item, Phase = i.Phase, Execution = i.Execution, Status = i.Status, StartedAt = now };   // its window starts at adoption: the worker reconnects after the restart
+                    execs[i.WorkerName] = new Exec { Name = i.WorkerName, Item = i.Item, Phase = i.Phase, Execution = i.Execution, Status = i.Status, StartedAt = now, Slot = LedgerSlotOf(ledger, i.Item) };   // its window starts at adoption: the worker reconnects after the restart
                     if (cae is not IRunHistory && i.Started is { } st && st.Date == day) today++;   // a runtime with a history counts the whole day from it
                     Log("relisted", i.WorkerName, i.Item, i.Execution);
                 }
-                relisted = true;
+                relisted = true; seedLedger = true;
             }
             else
-                foreach (var i in list.Where(i => i.Adopted && i.Status is "Running" or "Processing" && !execs.ContainsKey(i.WorkerName)))
+                foreach (var i in list.Where(i => i.Adopted && i.Status is "Running" or "Processing" && !execs.ContainsKey(i.WorkerName) && !ledgerFailed))
                 {
-                    execs[i.WorkerName] = new Exec { Name = i.WorkerName, Item = i.Item, Phase = i.Phase, Execution = i.Execution, Status = i.Status, StartedAt = now };
+                    execs[i.WorkerName] = new Exec { Name = i.WorkerName, Item = i.Item, Phase = i.Phase, Execution = i.Execution, Status = i.Status, StartedAt = now, Slot = LedgerSlotOf(ledger, i.Item) };
                     Log("adopted", i.WorkerName, i.Item, i.Execution);
                 }
+            if (seedLedger && ledger != null) SeedLedger(ledger);
             foreach (var e in execs.Values.Where(e => !e.Ended && e.Execution != ""))
             {
                 var i = list.FirstOrDefault(x => x.Execution == e.Execution);
