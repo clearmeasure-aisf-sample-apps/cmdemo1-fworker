@@ -8,6 +8,8 @@ using Fworker.Integrations.GitHub;
 using Fworker.Integrations.Octopus;
 using Fworker.Workflows.Delivery;
 using Fworker.Workflows.WorkItem;
+using Microsoft.Extensions.DependencyInjection;
+using Wolverine;
 using Xunit;
 
 namespace Gateway.Tests;
@@ -368,13 +370,13 @@ public sealed class StateProjectionTests
         var saga = Saga("feature", StepKind.Merge, s => { s.Parked = true; s.ParkReason = "merge-blocked: x"; s.ParkUntil = T0.AddHours(24); s.Sequence = 6; });
         await r.Put(saga);
         var parked = Decided(WorkItemActions.Parked, saga, 6);
-        Assert.True(await r.Projection.Project(parked, default));
+        await r.Projection.Project(parked, default);
         Assert.Equal((1, "merge-blocked"), (r.Journal.Saves, r.Journal.State["park"]!["reason"]!.ToString()));
         Assert.Equal(6, await r.Versions.Applied(Item.ToString(), ProjectionTargets.Comment));
         // handled again (a redelivery) and an older decision handled late: nothing is read or written
         r.Journal.Reads = 0;
-        Assert.True(await r.Projection.Project(parked, default));
-        Assert.True(await r.Projection.Project(Decided(WorkItemActions.Resumed, saga, 5), default));
+        await r.Projection.Project(parked, default);
+        await r.Projection.Project(Decided(WorkItemActions.Resumed, saga, 5), default);
         Assert.Equal((1, 0), (r.Journal.Saves, r.Journal.Reads));
     }
 
@@ -384,7 +386,7 @@ public sealed class StateProjectionTests
         var r = new Rig();
         var saga = Saga("feature", StepKind.Verify, s => { s.Sequence = 3; s.ArmId = "1.3"; });
         await r.Put(saga);
-        Assert.True(await r.Projection.Project(Decided(WorkItemActions.StepEntered, saga, 3), default));   // Functional Testing is stamped and the claim is there already
+        await r.Projection.Project(Decided(WorkItemActions.StepEntered, saga, 3), default);   // Functional Testing is stamped and the claim is there already
         Assert.Equal(0, r.Journal.Saves);
         Assert.Equal(3, ItemStateComment.RevOf(r.Journal.State));
     }
@@ -395,7 +397,7 @@ public sealed class StateProjectionTests
         var r = new Rig();
         var saga = Saga("feature", StepKind.Verify, s => s.Sequence = 3);
         await r.Put(saga);
-        Assert.True(await r.Projection.Project(Decided(WorkItemActions.Verdict, saga, 3), default));
+        await r.Projection.Project(Decided(WorkItemActions.Verdict, saga, 3), default);
         Assert.Equal((0, 0), (r.Journal.Reads, r.Journal.Saves));
     }
 
@@ -403,11 +405,11 @@ public sealed class StateProjectionTests
     public async Task ADecisionOfAnEarlierGeneration_OrOfAnItemWithNoSaga_IsLeftToItsOwnDecisions()
     {
         var r = new Rig();
-        Assert.True(await r.Projection.Project(Decided(WorkItemActions.Parked, Saga("feature", StepKind.Merge)), default));   // no saga
+        await r.Projection.Project(Decided(WorkItemActions.Parked, Saga("feature", StepKind.Merge)), default);   // no saga
         var reopened = Saga("feature", StepKind.Design, s => { s.Generation = 2; s.Sequence = 9; });
         await r.Put(reopened);
         var old = new WorkItemDecided(Item, 1, 4, WorkItemActions.Parked, "feature", "Merge", null, ["merge-blocked"], T0);
-        Assert.True(await r.Projection.Project(old, default));
+        await r.Projection.Project(old, default);
         Assert.Equal(0, r.Journal.Saves);
     }
 
@@ -417,32 +419,96 @@ public sealed class StateProjectionTests
         var r = new Rig(hasComment: false);
         var saga = Saga("feature", StepKind.Merge, s => s.Sequence = 1);
         await r.Put(saga);
-        Assert.True(await r.Projection.Project(Decided(WorkItemActions.Resumed, saga, 1), default));   // nothing parked, nothing to say: no comment is made for it
+        await r.Projection.Project(Decided(WorkItemActions.Resumed, saga, 1), default);   // nothing parked, nothing to say: no comment is made for it
         Assert.Equal(0, r.Journal.Saves);
         saga.Parked = true; saga.ParkReason = "merge-blocked: x"; saga.Sequence = 2;
         await r.Put(saga);
-        Assert.True(await r.Projection.Project(Decided(WorkItemActions.Parked, saga, 2), default));
+        await r.Projection.Project(Decided(WorkItemActions.Parked, saga, 2), default);
         Assert.Equal(1, r.Journal.Saves);
         Assert.Equal("merge-blocked", r.Journal.State["park"]!["reason"]!.ToString());
     }
 
     [Fact]
-    public async Task AFaultIsTriedAgainAndThenGivenUp_AndNothingIsRecordedAsApplied()
+    public async Task AFaultIsTriedAgain_AndOneThatOutlastsTheTriesIsThrown_AndNothingIsRecordedAsApplied()
     {
         var r = new Rig();
         var saga = Saga("feature", StepKind.Merge, s => { s.Parked = true; s.ParkReason = "merge-blocked: x"; s.Sequence = 2; });
         await r.Put(saga);
         var faults = 2;
         r.Journal.Fault = () => faults-- > 0 ? new HttpRequestException("503") : null;
-        Assert.True(await r.Projection.Project(Decided(WorkItemActions.Parked, saga, 2), default));   // the third try goes through
+        await r.Projection.Project(Decided(WorkItemActions.Parked, saga, 2), default);   // the third try goes through
         Assert.Equal(2, r.Pauses.Count);
         Assert.Equal(1, r.Journal.Saves);
         var down = new Rig();
         await down.Put(saga);
         down.Journal.Fault = () => new HttpRequestException("503");
-        Assert.False(await down.Projection.Project(Decided(WorkItemActions.Parked, saga, 2), default));   // given up: the next decision projects again
+        var thrown = await Assert.ThrowsAsync<StateProjectionRetryException>(() => down.Projection.Project(Decided(WorkItemActions.Parked, saga, 2), default));   // not given up: the handler's policy schedules it again
+        Assert.IsType<HttpRequestException>(thrown.InnerException);
         Assert.Equal(3, down.Pauses.Count);
         Assert.Equal(0, await down.Versions.Applied(Item.ToString(), ProjectionTargets.Comment));
+    }
+
+    [Fact]
+    public async Task AFaultThatOutlastsTheTries_IsProjectedLater_WithNoNewDecision()
+    {
+        // a docs item the gateway merged: its last decision is the merge; GitHub answers 5xx for longer than the tries and then recovers. No other decision comes.
+        var r = new Rig();
+        var saga = Saga("docs", StepKind.Merge, s => { s.Status = WorkItemStatus.Completed; s.MergeCommit = "abc123"; s.CompletedAt = T0.AddSeconds(2); s.Sequence = 4; });
+        await r.Put(saga);
+        var merged = Decided(WorkItemActions.Merged, saga, 4);
+        var down = true;
+        r.Journal.Fault = () => down ? new HttpRequestException("503") : null;
+        await Assert.ThrowsAsync<StateProjectionRetryException>(() => r.Projection.Project(merged, default));
+        Assert.Null(r.Journal.State["merge"]);   // v1, handed the item back now, would pick the merge up as a person's from this comment
+        down = false;
+        await r.Projection.Project(merged, default);   // the scheduled message: the same decision
+        Assert.Equal("abc123", r.Journal.State["merge"]!["sha"]!.ToString());
+        Assert.NotNull(r.Journal.State["merge"]!["done_at"]);
+        Assert.True((bool)r.Journal.State["verdict"]!["processed"]!);
+        var saves = r.Journal.Saves;
+        await r.Projection.Project(merged, default);   // and a delivery twice writes nothing
+        Assert.Equal(saves, r.Journal.Saves);
+    }
+
+    [Fact]
+    public async Task ALateRun_NeverUndoesANewerDecision()
+    {
+        // the park's message failed and is scheduled; the resume was projected meanwhile; the late park finds the saga unparked and the version ahead
+        var r = new Rig();
+        var parked = Saga("feature", StepKind.Merge, s => { s.Parked = true; s.ParkReason = "merge-blocked: x"; s.Sequence = 2; });
+        await r.Put(parked);
+        var parkDecision = Decided(WorkItemActions.Parked, parked, 2);
+        var down = true;
+        r.Journal.Fault = () => down ? new HttpRequestException("503") : null;
+        await Assert.ThrowsAsync<StateProjectionRetryException>(() => r.Projection.Project(parkDecision, default));
+        down = false;
+        var resumed = Saga("feature", StepKind.Merge, s => { s.Sequence = 3; });
+        await r.Put(resumed);
+        await r.Projection.Project(Decided(WorkItemActions.Resumed, resumed, 3), default);
+        await r.Projection.Project(parkDecision, default);   // the scheduled retry of the older message
+        Assert.Null(r.Journal.State["park"]);
+    }
+
+    [Fact]
+    public async Task TheMessageIsScheduledAgain_After1_5_15And60Minutes_ThenEveryHour_NeverTheDeadLetters()
+    {
+        using var host = Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder().UseWolverine(o =>
+        {
+            o.Discovery.DisableConventionalDiscovery().IncludeType(typeof(SagaStateProjectionHandler));
+            o.Durability.Mode = DurabilityMode.MediatorOnly;
+        }).Build();
+        await host.StartAsync();
+        var graph = host.Services.GetRequiredService<Wolverine.Runtime.Handlers.HandlerGraph>();
+        var chain = graph.Chains.Single(c => c.MessageType == typeof(ProjectStateComment));
+        // (Wolverine applies Configure while it compiles a chain, which a host that has handled nothing has not done: it is called here, on the chain it would be called on)
+        Assert.Empty(chain.Failures);
+        SagaStateProjectionHandler.Configure(chain);
+        var failure = new StateProjectionRetryException(Decided(WorkItemActions.Parked, Saga("feature", StepKind.Merge), 2), new HttpRequestException());
+        var text = chain.Failures.Single(r => r.Match.Matches(failure)).ToString();
+        Assert.Contains("attempt 1: Schedule Retry in 60 seconds; attempt 2: Schedule Retry in 300 seconds; attempt 3: Schedule Retry in 900 seconds; attempt 4: Schedule Retry in 3600 seconds", text);
+        Assert.Contains("repeat: Schedule Retry in 3600 seconds", text);
+        Assert.DoesNotContain("error queue", text);
+        Assert.DoesNotContain(chain.Failures, r => r.Match.Matches(new InvalidOperationException("a bug")));   // anything else is not this policy's
     }
 
     [Fact]
@@ -452,7 +518,7 @@ public sealed class StateProjectionTests
         var saga = Saga("feature", StepKind.Merge, s => { s.Parked = true; s.ParkReason = "merge-blocked: x"; s.Sequence = 2; });
         await r.Put(saga);
         r.Journal.Fault = () => new JournalRefusedException("state-too-large");
-        Assert.True(await r.Projection.Project(Decided(WorkItemActions.Parked, saga, 2), default));
+        await r.Projection.Project(Decided(WorkItemActions.Parked, saga, 2), default);
         Assert.Empty(r.Pauses);
     }
 
@@ -461,7 +527,7 @@ public sealed class StateProjectionTests
     {
         var store = new InMemoryWorkItemStore();
         var projection = new SagaStateProjection(() => null, store, Plan, Settings);
-        Assert.True(await projection.Project(Decided(WorkItemActions.Parked, Saga("feature", StepKind.Merge)), default));
+        await projection.Project(Decided(WorkItemActions.Parked, Saga("feature", StepKind.Merge)), default);
     }
 
     // ---- the rollback path: an item mid-flow, handed back to V1 ---------------------------------------------------------------------------------------
@@ -488,7 +554,7 @@ public sealed class StateProjectionTests
             edit(saga); saga.Sequence++;
             decisions.Add(Decided(action, saga, saga.Sequence, T0.AddMinutes(decisions.Count)));
             await r.Put(saga);
-            Assert.True(await r.Projection.Project(decisions[^1], default));
+            await r.Projection.Project(decisions[^1], default);
         }
         var s = r.Journal.State;
         Assert.Null(s["park"]);                                                 // v1 does not offer a parked item, and this one is not parked
@@ -497,7 +563,7 @@ public sealed class StateProjectionTests
         Assert.True(s["merge"]!["awaiting"] is null);
         // v1's sweep reads the comment: another pass over the same decisions (the handler runs again after a restart) writes nothing
         var saves = r.Journal.Saves; var rev = ItemStateComment.RevOf(s);
-        foreach (var d in decisions) Assert.True(await r.Projection.Project(d, default));
+        foreach (var d in decisions) await r.Projection.Project(d, default);
         Assert.Equal((saves, rev), (r.Journal.Saves, ItemStateComment.RevOf(r.Journal.State)));
     }
 }

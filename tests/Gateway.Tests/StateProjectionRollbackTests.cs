@@ -43,7 +43,7 @@ public sealed class StateProjectionRollbackTests : IDisposable
         await store.Save(saga.Item, saga, 0, default);
         var projection = new SagaStateProjection(() => comment, store, StateProjectionTests.Plan, StateProjectionTests.Settings);
         var decision = new WorkItemDecided(new ItemId(Home, item), saga.Generation, saga.Sequence, action, saga.Plan, saga.Status == WorkItemStatus.Completed ? null : saga.Step.ToString(), null, [saga.ParkReason], at);
-        Assert.True(await projection.Project(decision, default));
+        await projection.Project(decision, default);
     }
 
     async Task<List<string>> Log() => JsonNode.Parse(await rig!.Http.GetStringAsync("_fake/log"))!.AsArray().Select(x => x!.ToString()).ToList();

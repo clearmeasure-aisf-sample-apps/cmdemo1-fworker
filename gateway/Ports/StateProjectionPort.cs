@@ -4,6 +4,8 @@ using Fworker.Integrations.Commands;
 using Fworker.Integrations.GitHub;
 using Fworker.Workflows.WorkItem;
 using Wolverine;
+using Wolverine.ErrorHandling;
+using Wolverine.Runtime.Handlers;
 
 // W9.10i (docs/design/fworker-wolverine-implementation.md, W9.10i): the state comment projection, wired where the engine acts. It is the rollback path: `FACTORY_V2_OFF` or a revert hands every open item back to v1, which resumes
 // from the item's state comment and the board. In the hybrid composition v1's verbs write the comment for what a session does (the design, the pull request, the verdict, the claim), and the saga's own transitions had no writer:
@@ -13,7 +15,7 @@ using Wolverine;
 // What the projection is: for every decision of the saga that changes something v1 reads (Wants), the item's state comment is brought to what the saga's state says (V1StateFormat.Apply), in the format v1's Get-State reads, by
 // StateCommentProjection.Apply with the decision's sequence number as the version. The edit is a function of the saga's state as it is when the decision is handled (never older than the decision), so decisions handled late or
 // twice give the same comment, and a comment that already says it is not written. It never overwrites what v1's verbs wrote: a park that names the same cause is left as it is, a merge record of the same commit is
-// completed, not replaced. A fault is tried again a few times and then left (nothing is advanced, the next decision projects the whole of it again), as the card projection does.
+// completed, not replaced. A fault is tried again a few times and then thrown, and the handler's policy schedules the message again with a backoff (1, 5, 15, 60 minutes, then every hour).
 // The delivery train's deployments are recorded by the executor (Integrations/GitHub/ProjectionPromotion.cs, DeliveryExecutorPort.cs).
 // Not here: the claim ref and the claim of the owner (the plant's: ReleaseOwner), the `handoff` v1's verbs set, the journal lines of the settle (the saga's history is its journal), the labels.
 
@@ -207,8 +209,9 @@ public static class V1StateFormat
 
 /// <summary>
 /// The state comment follows the saga: a decision that changes what v1 reads brings the item's comment to what the saga's state says. The decision's sequence number is the version of the write, so a late decision never undoes
-/// a newer one. A refusal for good (the state does not fit its budget) is logged and left; a fault is tried again a few times and then left, nothing remembered as failed: the next decision projects the whole state again, and the
-/// card projection (DocsProjection) leaves an item behind the same way.
+/// a newer one. A refusal for good (the state does not fit its budget) is logged and left; a fault is tried again a few times here and then thrown as <see cref="StateProjectionRetryException"/>, which the handler's policy
+/// schedules again (1, 5, 15 and 60 minutes, then every hour): the edit is a function of the saga's state when the message is handled and guarded by the sequence version, so a late run writes what the newest decision says
+/// or nothing. It is not left to the next decision: the last decision of an item (a merge, a park) has none, and v1, handed the item back, would do it again as a person's.
 /// </summary>
 public sealed class SagaStateProjection(Func<StateCommentProjection?> commentOf, IWorkItemStore store, DocsPlanSettings plan, V1StateSettings settings, Func<TimeSpan, CancellationToken, Task>? delay = null)
 {
@@ -217,30 +220,41 @@ public sealed class SagaStateProjection(Func<StateCommentProjection?> commentOf,
 
     public static bool Wants(WorkItemDecided d) => V1StateFormat.Wants(d.Action);
 
-    /// <summary>Projects the decision. False when it gave up after the tries (the next decision projects again); true when the comment says what the saga says, or the decision is not this projection's.</summary>
-    public async Task<bool> Project(WorkItemDecided d, CancellationToken ct)
+    /// <summary>
+    /// Projects the decision. Returns when the comment says what the saga says, the decision is not this projection's, or a refusal for good was logged. A fault that outlasts the tries here throws
+    /// <see cref="StateProjectionRetryException"/>: the handler's policy schedules the message again with a backoff. It is not given up: the last decision of an item (a merge, a park) may have no later one to project it.
+    /// </summary>
+    public async Task Project(WorkItemDecided d, CancellationToken ct)
     {
-        if (!Wants(d) || commentOf() is not { } comment) return true;
+        if (!Wants(d) || commentOf() is not { } comment) return;
         for (var attempt = 0; ; attempt++)
         {
             try
             {
                 // the state as it is now, which is never older than the decision; a later generation (the item was reopened) projects by its own decisions
-                if ((await store.Load(d.Item.ToString(), ct))?.State is not { } saga || saga.Generation != d.Generation) return true;
+                if ((await store.Load(d.Item.ToString(), ct))?.State is not { } saga || saga.Generation != d.Generation) return;
                 await comment.Apply(d.Item, d.Sequence, s => V1StateFormat.Apply(s, d, saga, plan, settings), ct);
-                return true;
+                return;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (JournalRefusedException e) { Console.Error.WriteLine($"state comment of {d.Item} after '{d.Action}' refused: {e.Message}"); return true; }   // for good: a retry says the same
+            catch (JournalRefusedException e) { Console.Error.WriteLine($"state comment of {d.Item} after '{d.Action}' refused: {e.Message}"); return; }   // for good: a retry says the same
             catch (Exception e) when (attempt < Pauses.Length)
             {
                 Console.Error.WriteLine($"state comment of {d.Item} after '{d.Action}': {e.GetType().Name}; trying again");
                 await wait(Pauses[attempt], ct);
             }
-            catch (Exception e) { Console.Error.WriteLine($"state comment of {d.Item} after '{d.Action}' gave up: {e.GetType().Name}"); return false; }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine($"state comment of {d.Item} after '{d.Action}': {e.GetType().Name}; the message is scheduled again");
+                throw new StateProjectionRetryException(d, e);
+            }
         }
     }
 }
+
+/// <summary>The state comment could not be written after the tries of the projection (GitHub down or limited, the item's lock busy): the message is tried again later, with a backoff, by the handler's policy.</summary>
+public sealed class StateProjectionRetryException(WorkItemDecided decision, Exception inner)
+    : Exception($"the state comment of {decision.Item} after '{decision.Action}' (sequence {decision.Sequence}) was not written: {inner.GetType().Name}", inner);
 
 /// <summary>A decision of the saga for the state comment's projection, on a queue of its own: GitHub being slow or down holds up this queue and nothing else (the history of the decision, the card, the merge facts).</summary>
 [Fworker.Contracts.Messaging.MessageIdentity("workitem.state-projection")]
@@ -257,6 +271,18 @@ public static class SagaStateProjectionHandler
         var o = new OutgoingMessages();
         if (SagaStateProjection.Wants(m)) o.Add(new ProjectStateComment(m));
         return o;
+    }
+
+    public static readonly TimeSpan[] RetryPauses = [TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(15), TimeSpan.FromMinutes(60)];
+
+    /// <summary>
+    /// A projection that threw (<see cref="StateProjectionRetryException"/>) is scheduled again, not held on the queue (which runs one message at a time): after 1, 5, 15 and 60 minutes, then every hour for ever. Never the dead
+    /// letters: nothing replays them and the comment would stay behind. Wolverine applies this while it compiles the chain of the message.
+    /// </summary>
+    public static void Configure(HandlerChain chain)
+    {
+        if (chain.MessageType != typeof(ProjectStateComment)) return;
+        chain.OnException<StateProjectionRetryException>().ScheduleRetry(RetryPauses).Then.ScheduleRetryIndefinitely(TimeSpan.FromHours(1));
     }
 
     public static Task Handle(ProjectStateComment m, SagaStateProjection projection, CancellationToken ct) => projection.Project(m.Decision, ct);
