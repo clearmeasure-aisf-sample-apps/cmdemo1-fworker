@@ -10,6 +10,9 @@ function Ld-SetEnv([hashtable]$Env) { $old = @{}; foreach ($k in $Env.Keys) { $o
 function Ld-Status([string]$Base) { Invoke-RestMethod "$Base/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 10 }
 # a field of the status by its path (a.b.c), or $null while it is not there yet (strict mode refuses a missing property)
 function Ld-Get($Obj, [string]$Path) { $o = $Obj; foreach ($p in $Path.Split('.')) { if ($null -eq $o) { return $null }; $pp = $o.PSObject.Properties[$p]; if (-not $pp) { return $null }; $o = $pp.Value }; return $o }
+# A time of the status as a UTC DateTime with its fraction. Invoke-RestMethod has already made a DateTime of the ISO text; formatting that with "$x" keeps whole
+# seconds only, so a save 0.6 s after an event of the same second read as older than the event (the owner-8 failure of build 41195566959).
+function Ld-Time($V) { if ($V -is [DateTime]) { return $V.ToUniversalTime() }; [DateTime]::Parse("$V", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) }
 function Ld-Restore([string]$Base) { Ld-Get (Ld-Status $Base) 'plantSnapshot.restore' }
 function Ld-Log($P) { if (Test-Path $P) { @(Get-Content $P) } else { @() } }
 # A gateway process of this suite on another port (same fake GitHub, configuration and secrets), with a state directory of its own, as a second replica
@@ -127,9 +130,15 @@ $LeaderScenarios['leader: two gateways overlap: the newer takes the lease, the o
         $ia = New-Item-Fake 'Leader owned' 'x' ($OwnerLabels + 'worker:lena'); $ib = New-Item-Fake 'Leader offered' 'x' ($OwnerLabels + 'worker:lena')
         [void](Wait-Until -Seconds 40 { (Get-Assigned 'lena' $ia).Count -gt 0 -and (Get-Assigned 'lena' $ib).Count -gt 0 })
         $ea = (Get-Assigned 'lena' $ia)[-1]; $eb = (Get-Assigned 'lena' $ib)[-1]
+        $logA0 = Ld-SuiteLog; $beforeAccept = [DateTime]::UtcNow
         $r = Fo 'lena' @('accept', '--item', $ia, '--assignment', $ea.assignment); CheckExit 'lena accepts the first item' $r 0
-        $acceptedAt = [DateTime]::UtcNow
-        Check 'the holder writes a snapshot of the change without being stopped' (Wait-Until -Seconds 20 { $ps = (Ld-Status $gwA).plantSnapshot; (Ld-Get $ps 'saves') -ge 1 -and (Ld-Get $ps 'heldEpoch') -eq 1 -and [DateTime]::Parse("$(Ld-Get $ps 'lastSave')", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) -gt $acceptedAt }) ((Ld-Status $gwA).plantSnapshot | ConvertTo-Json -Compress -Depth 4)
+        # When the gateway applied the acceptance: its own log line (verb accept, item), not the clock after the client process has exited. That process takes
+        # a second or more to end, and with the snapshot debounce at 1 s the snapshot of the change can be written in that time (owner-8 of build 41195566959,
+        # 2026-10-31: accept 11:12:18.17, snapshot 11:12:18.82, the check began after 11:12:18.9 and never saw a later one: nothing else changed).
+        $acceptedAt = $beforeAccept
+        $m = [regex]::Match((@(Ld-Log $logA0 | Where-Object { $_ -match '"verb":"accept"' -and $_ -match "`"item`":`"$ia`"" }) | Select-Object -Last 1), '"at":"([^"]+)"')
+        if ($m.Success) { $acceptedAt = [DateTime]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) }
+        Check 'the holder writes a snapshot of the change without being stopped' (Wait-Until -Seconds 20 { $ps = (Ld-Status $gwA).plantSnapshot; (Ld-Get $ps 'saves') -ge 1 -and (Ld-Get $ps 'heldEpoch') -eq 1 -and (Ld-Time (Ld-Get $ps 'lastSave')) -gt $acceptedAt }) ("accepted at $($acceptedAt.ToString('o')): " + ((Ld-Status $gwA).plantSnapshot | ConvertTo-Json -Compress -Depth 4))
         # a new revision starts while the old one runs; the ingress sends new connections to it
         $b = Ld-StartGateway 12 'ldb'
         Fake 'proxy' @{ port = $b.port } | Out-Null
@@ -181,7 +190,7 @@ $LeaderScenarios['leader: a graceful stop releases the lease; the next start res
         [void](Ld-StartSuiteGateway)
         $gw = Get-GatewayBase
         Check 'the next start restores at once: the predecessor released the lease' (Wait-Until -Seconds 30 { $rs = Ld-Restore $gw; $rs -and $rs.how -eq 'released' -and $rs.owners -ge 1 -and $rs.gapSince }) ((Ld-Status $gw).plantSnapshot | ConvertTo-Json -Compress -Depth 4)
-        $rsAt = [DateTime]::Parse("$((Ld-Restore $gw).at)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal)
+        $rsAt = Ld-Time (Ld-Restore $gw).at
         Check 'without waiting for a hand-over' (($rsAt - $t0).TotalSeconds -lt 25) "$(($rsAt - $t0).TotalSeconds) s"
         Check 'its first sweep renews the claim that ran out in the gap' (Wait-Until -Seconds 40 { $st = Pm-State $n; $st.ContainsKey('claim') -and $st.claim.ContainsKey('gap_renewed') -and [DateTime]::Parse("$($st.claim.lease_until)", [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AdjustToUniversal) -gt [DateTime]::UtcNow }) ((Pm-State $n).claim | ConvertTo-Json -Compress)
         $j = Get-Journal $n; $gapLines = @((Get-FakeIssue $n).comments | Where-Object { "$($_.body)" -match 'plant event=gap-renewed' })
