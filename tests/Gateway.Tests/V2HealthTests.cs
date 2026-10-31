@@ -145,12 +145,18 @@ public sealed class V2HealthTests
         source.Facts = () => Empty() with
         {
             Incoming = new EnvelopeFacts(2, 3, [a, b]), Outgoing = new EnvelopeFacts(1, 1, [Guid.Parse("00000000-0000-0000-0000-000000000009")]),
-            Scheduled = new ScheduledFacts(4, 2, T0.AddMinutes(-9), T0.AddHours(1)),
+            Scheduled = new ScheduledFacts(4, 2, T0.AddMinutes(-9), T0.AddHours(1), [new ScheduledGroup("delivery.train-wake", 3, 2, T0.AddMinutes(-9), T0.AddMinutes(20)), new ScheduledGroup("workitem.timer", 1, 0, T0.AddHours(1), T0.AddHours(1))], 1, 2),
         };
         var first = await health.Block(default);
         Assert.Equal((2, 3, 0L), ((int)first["incoming"]!["count"]!, (int)first["incoming"]!["maxAttempts"]!, (long)first["incoming"]!["oldestSeenSeconds"]!));
         Assert.Equal((4, 2, 540L), ((int)first["scheduled"]!["count"]!, (int)first["scheduled"]!["overdue"]!, (long)first["scheduled"]!["oldestOverdueSeconds"]!));
         Assert.Equal(T0.AddHours(1).ToString("o"), (string)first["scheduled"]!["nextDue"]!);
+        // a batch of timers hides behind a single nextDue: the per-type groups and the due-soon counts show it
+        Assert.Equal((1, 2), ((int)first["scheduled"]!["dueIn5Minutes"]!, (int)first["scheduled"]!["dueIn30Minutes"]!));
+        var wakes = (JsonObject)first["scheduled"]!["byType"]![0]!;
+        Assert.Equal(("delivery.train-wake", 3, 2), ((string)wakes["messageType"]!, (int)wakes["count"]!, (int)wakes["overdue"]!));
+        Assert.Equal(T0.AddMinutes(20).ToString("o"), (string)wakes["latest"]!);
+        Assert.Equal("workitem.timer", (string)first["scheduled"]!["byType"]![1]!["messageType"]!);
         // 3 minutes later (past the 10 second cache): the same envelopes are still there, so they are 3 minutes old as far as this process can say
         clock.Now = T0.AddMinutes(3);
         var later = await health.Block(default);
@@ -323,7 +329,7 @@ public sealed class SqlV2HealthSourceTests
                 await Exec(cs, "INSERT wolverine.wolverine_dead_letters (id, body, message_type, received_at, exception_type, failed_at, archived_at) VALUES (NEWID(), 0x00, @t, 'local://x', @e, @f, @a)",
                     ("@t", type), ("@e", exception), ("@f", now.AddMinutes(-30)), ("@a", archived ? now : DBNull.Value));
             await Exec(cs, "INSERT wolverine.wolverine_incoming_envelopes (id, status, owner_id, body, message_type, received_at, attempts) VALUES (NEWID(), 'Incoming', 0, 0x00, 'x', 'local://x', 4)");
-            await Exec(cs, "INSERT wolverine.wolverine_incoming_envelopes (id, status, owner_id, execution_time, body, message_type, received_at) VALUES (NEWID(), 'Scheduled', 0, @t, 0x00, 'x', 'local://x'), (NEWID(), 'Scheduled', 0, @u, 0x00, 'x', 'local://x'), (NEWID(), 'Handled', 0, NULL, 0x00, 'x', 'local://x')",
+            await Exec(cs, "INSERT wolverine.wolverine_incoming_envelopes (id, status, owner_id, execution_time, body, message_type, received_at) VALUES (NEWID(), 'Scheduled', 0, @t, 0x00, 'x', 'local://x'), (NEWID(), 'Scheduled', 0, @u, 0x00, 'y', 'local://x'), (NEWID(), 'Scheduled', 0, @u, 0x00, 'y', 'local://x'), (NEWID(), 'Handled', 0, NULL, 0x00, 'x', 'local://x')",
                 ("@t", now.AddMinutes(-10)), ("@u", now.AddMinutes(10)));
             await Exec(cs, "INSERT wolverine.wolverine_outgoing_envelopes (id, owner_id, destination, body, message_type) VALUES (NEWID(), 0, 'local://y', 0x00, 'x'), (NEWID(), 0, 'local://y', 0x00, 'x')");
             await Exec(cs, "INSERT factory.IdempotencyLedger ([Key], Ok, Failure, Error, Execution, Url, RecordedAt) VALUES ('a', 1, 0, '', '', '', SYSUTCDATETIME()), ('b', 0, 2, 'no', '', '', DATEADD(day, -2, SYSUTCDATETIME()))");
@@ -341,7 +347,9 @@ public sealed class SqlV2HealthSourceTests
             Assert.Equal(("workitem.start", "WorkItemConflictException"), (facts.DeadLetters[0].MessageType, facts.DeadLetters[0].ExceptionType));
             Assert.Equal((1, 4), (facts.Incoming.Count, facts.Incoming.MaxAttempts));
             Assert.Equal(1, facts.Incoming.Ids.Count);
-            Assert.Equal((2, 1), (facts.Scheduled.Count, facts.Scheduled.Overdue));
+            Assert.Equal((3, 1), (facts.Scheduled.Count, facts.Scheduled.Overdue));
+            Assert.Equal((0, 2), (facts.Scheduled.DueIn5Minutes, facts.Scheduled.DueIn30Minutes));
+            Assert.Equal([("y", 2, 0), ("x", 1, 1)], facts.Scheduled.ByType!.Select(g => (g.MessageType, g.Count, g.Overdue)));
             Assert.True(facts.Scheduled.OldestDue < now);
             Assert.True(facts.Scheduled.NextDue > now);
             Assert.Equal(2, facts.Outgoing.Count);
@@ -359,6 +367,7 @@ public sealed class SqlV2HealthSourceTests
             Assert.True((bool)block["available"]!);
             Assert.Equal(3, (int)block["deadLetters"]!["total"]!);
             Assert.Equal(1, (int)block["sagas"]!["open"]!);
+            Assert.Equal("y", (string)block["scheduled"]!["byType"]![0]!["messageType"]!);
         }
         finally
         {

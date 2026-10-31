@@ -87,10 +87,19 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             var now = clock();
             var stale = false;
             if (input is TrainWake { Due: { } due }) { if (due == state.WakeDue) state.WakeDue = null; else stale = true; }   // (a timer that is not the pending one only looks again)
+            // A timer that is not the pending one, while the pending one is still to come, has nothing to add: the pending one looks at everything. It costs no read of GitHub or of the app (a restart's replay
+            // leaves hundreds of these) and keeps nothing. A stale timer with no pending one still looks, which heals a lost timer.
+            if (stale && state.WakeDue is { } pending && pending > now) return TrainResult.None;
             var gated = state.ReplayingSince is { } since && now - since < ReplayLimit;
             if (!gated && state.ReplayingSince is not null) { state.ReplayingSince = null; state.RepublishPending = true; }   // the end marker was lost: the hold ran out, which is the end of the replay too
             TrainRun? run = null; DateTimeOffset? wake = null;
-            if (gated) wake = state.ReplayingSince + DeliveryTrainService.ReplayLimit;   // if the end marker is lost, the train looks again when the hold runs out
+            if (gated)
+            {
+                // if the end marker is lost, the train looks again when the hold runs out. That is one timer: the train's pending wake. An input that finds it pending sends nothing (a replay of hundreds of
+                // inputs used to leave one timer per input, all due at the same time)
+                var hold = state.ReplayingSince!.Value + ReplayLimit;
+                if (state.WakeDue != hold) { state.WakeDue = hold; wake = hold; }
+            }
             if (!gated)
             {
                 var republish = state.RepublishPending;

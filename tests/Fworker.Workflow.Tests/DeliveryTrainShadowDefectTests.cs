@@ -122,6 +122,79 @@ public class DeliveryTrainShadowDefectTests
         Assert.NotEmpty(f.Of<TrainDecided>());
     }
 
+    // ---- the scheduled-envelope backlog (tdd 1.0.1069, 1.0.1071): every input of a restart's replay scheduled a timer of its own ---------------------------------------------
+
+    [Fact]
+    public async Task AReplayOfManyInputs_SchedulesExactlyOneTimer_ForTheHoldOfTheTrain()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        var timers = new List<DateTimeOffset>();
+        async Task Count(Task<TrainResult> send) { if ((await send).WakeAt is { } w) timers.Add(w); }
+        await Count(f.Send(new TrainReplay(f.Key, true)));
+        // 40 releases with a deployment to each of the three environments and two events each: about what the watcher's windows replay
+        for (var i = 0; i < 40; i++)
+        {
+            f.Now += TimeSpan.FromSeconds(1);
+            var v = $"1.0.{10 + i}";
+            await Count(f.Release(v, 'a')); await Count(f.Release(v, 'a'));
+            foreach (var e in new[] { "Tdd", "Uat", "Prod" }) { await Count(f.Deploy(v, e, "Started")); await Count(f.Deploy(v, e, "Succeeded")); }
+        }
+        // the one timer is the hold: it is the train's pending wake, due when the hold runs out
+        var hold = Assert.Single(timers);
+        Assert.Equal(f.State.ReplayingSince + DeliveryTrainService.ReplayLimit, hold);
+        Assert.Equal(hold, f.State.WakeDue);
+        Assert.Empty(f.Of<TrainDecided>());
+        Assert.Equal(0, f.Reads.Probes + f.Reads.Compares);
+        // the end of the replay: the train judges once and its wake moves to the earlier time of what it waits for (never a second timer for the same time)
+        await Count(f.Send(new TrainReplay(f.Key, false)));
+        Assert.All(timers, t => Assert.True(t <= hold));
+        Assert.True(timers.Count <= 2, $"{timers.Count} timers for one replay");   // (the hold, and at most the one wake of the judgment at the end)
+    }
+
+    [Fact]
+    public async Task AnInputWhileTheHoldIsPending_SendsNoTimer_AndTheFiredHoldIsReplacedOnlyIfTheReplayIsStillHeld()
+    {
+        var f = new TrainFixture(); await f.Baseline();
+        Assert.NotNull((await f.Send(new TrainReplay(f.Key, true))).WakeAt);
+        Assert.Null((await f.Merge(7, 'a')).WakeAt);
+        Assert.Null((await f.Release("1.0.2", 'a')).WakeAt);
+        // a second replay begin (the watcher restarts it) moves the hold: one new timer, and the old one is stale
+        var first = f.State.WakeDue;
+        f.Now += TimeSpan.FromMinutes(3);
+        var second = await f.Send(new TrainReplay(f.Key, true));
+        Assert.Equal(f.Now + DeliveryTrainService.ReplayLimit, second.WakeAt);
+        Assert.NotEqual(first, f.State.WakeDue);
+        // the first timer fires: it is not the pending one, the pending one is to come, and the train does nothing
+        f.Now = first!.Value;
+        var stale = await f.Wake(first);
+        Assert.Null(stale.WakeAt);
+        Assert.Empty(stale.Messages);
+    }
+
+    [Fact]
+    public async Task AStaleTimer_WhileAnotherIsPending_ReadsNothing_ButOneWithNoPendingTimerStillLooks()
+    {
+        var f = await OneRelease();
+        var pending = f.State.WakeDue;
+        Assert.NotNull(pending);
+        var reads = f.Reads.Probes + f.Reads.Compares;
+        // (a train that waits has a pending timer; a timer of another time than that one is stale)
+        var stale = await f.Wake(pending!.Value.AddSeconds(-30));
+        Assert.Equal(TrainResult.None, stale);
+        Assert.Equal(reads, f.Reads.Probes + f.Reads.Compares);
+        Assert.Equal(pending, f.State.WakeDue);
+        // the pending timer itself looks, as it always did
+        f.Now = pending.Value;
+        await f.Wake(pending);
+        Assert.True(f.Reads.Probes + f.Reads.Compares > reads, "the pending timer must evaluate");
+        // a stale timer with no pending one (the pending one fired and the evaluation scheduled none, or it was lost) still evaluates
+        var rec = (await f.Store.Load(f.Key, default))!; rec.State.WakeDue = null;
+        Assert.True(await f.Store.Save(f.Key, rec.State, rec.Revision, default));
+        reads = f.Reads.Probes + f.Reads.Compares;
+        await f.Wake(f.Now.AddSeconds(-30));
+        Assert.True(f.Reads.Probes + f.Reads.Compares > reads, "with no pending timer a stale one looks (it heals a lost timer)");
+    }
+
     // ---- defect 5 (tdd 1.0.838 and 1.0.839): after a restart the train decided nothing, because nothing had changed ------------------------------------------------
 
     /// <summary>Two open releases with a decision each, published and saved: 1.0.2 waits for its item's gate, 1.0.3 has no deployment to Tdd.</summary>

@@ -47,7 +47,8 @@ public sealed class DeliveryShadowReadsTests
     sealed class Facts(Func<int, MergedPullRequest?> pull) : IMergeFactsReader
     {
         public readonly Dictionary<int, int> Pulls = [];
-        public Task<MergedPullRequest?> ReadPullRequest(RepoId repository, int number, CancellationToken ct = default) { lock (Pulls) Pulls[number] = Pulls.GetValueOrDefault(number) + 1; return Task.FromResult(pull(number)); }
+        public Exception? Throw;
+        public Task<MergedPullRequest?> ReadPullRequest(RepoId repository, int number, CancellationToken ct = default) { if (Throw is not null) throw Throw; lock (Pulls) Pulls[number] = Pulls.GetValueOrDefault(number) + 1; return Task.FromResult(pull(number)); }
         public Task<MergedPullRequest?> FindMergedPullRequest(ItemId item, CancellationToken ct = default) => Task.FromResult<MergedPullRequest?>(null);
         public Task<ItemMergeFacts?> ReadItem(ItemId item, CancellationToken ct = default) => Task.FromResult<ItemMergeFacts?>(null);
     }
@@ -232,6 +233,17 @@ public sealed class DeliveryShadowReadsTests
         now += TimeSpan.FromSeconds(15);
         await reads.LookupCommit(Home, commit, default);
         Assert.Equal(2, gh.Total);
+    }
+
+    [Fact]
+    public async Task AReadOfTheMergeFactsThatGitHubRefuses_IsAnHttpRequestException_ForTheTrain()
+    {
+        // MergeFactsException is the reader's own; the train (which cannot name it) treats an HttpRequestException as a fault a later look gets past, so a refusal (a rate limit) is looked at again and never dead-lettered
+        var (reads, _, facts) = Reads(() => DateTimeOffset.UtcNow);
+        facts.Throw = new Fworker.Integrations.GitHub.MergeFactsException("GitHub answered 403 to the pull request read");
+        var commit = new RangeCommit(ShaOf(2), [ShaOf(1)], "Thing 2 (#1002)");
+        var e = await Assert.ThrowsAsync<HttpRequestException>(() => reads.LookupCommit(Home, commit, default));
+        Assert.IsType<Fworker.Integrations.GitHub.MergeFactsException>(e.InnerException);
     }
 
     [Fact]

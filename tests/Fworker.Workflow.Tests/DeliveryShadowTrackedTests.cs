@@ -126,6 +126,32 @@ public class DeliveryShadowTrackedTests
 
     static long Recorded(DeliveryShadow s) => (long)s.Status()["v2"]!["commandsRecorded"]!;
 
+    /// <summary>tdd 1.0.1069 and 1.0.1071: each start replayed about 120 Octopus events to every train and left one durable TrainWake per input (about 360), all due when the hold ran out. Now: one per train.</summary>
+    [SqlFact]
+    public async Task AReplayOfManyEvents_LeavesOneScheduledTrainWakePerTrain_NotOnePerInput()
+    {
+        if (!TrackedSessionHost.Available) return;
+        var fx = Fixture();
+        await using var h = await TrackedSessionHost.StartAsync(Wire(fx, _ => { }));
+        await h.TrackSend(new OctopusReplayBegan());
+        for (var i = 0; i < 30; i++)
+        {
+            var v = $"1.0.{10 + i}"; var at = Ago(1).AddMinutes(i);
+            await h.TrackSend(new OctopusReleaseCreated($"R-{i}", v, Sha('a'), at));
+            await h.TrackSend(new ReleaseCommitResolved($"R-{i}", v, Sha('a')));
+            foreach (var env in new[] { "Tdd", "Uat" })
+            {
+                await h.TrackSend(new OctopusDeploymentChanged($"D-{i}-{env}", $"T-{i}-{env}", $"R-{i}", v, env, OctopusDeploymentPhase.Started, Sha('a'), at));
+                await h.TrackSend(new OctopusDeploymentChanged($"D-{i}-{env}", $"T-{i}-{env}", $"R-{i}", v, env, OctopusDeploymentPhase.Succeeded, Sha('a'), at));
+            }
+        }
+        var trains = await h.Count("SELECT COUNT(*) FROM factory.DeliveryTrains");
+        Assert.True(trains >= 1);
+        Assert.Equal(trains, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_incoming_envelopes WHERE status = 'Scheduled' AND message_type LIKE '%wake%'"));
+        Assert.Equal(trains, await h.Count("SELECT COUNT(*) FROM wolverine.wolverine_incoming_envelopes WHERE status = 'Scheduled'"));
+        await NoDeadLetters(h);
+    }
+
     [SqlFact]
     public async Task TheTrainsPromotion_IsRecordedNotExecuted_ComparedWithV1_AndStored()
     {

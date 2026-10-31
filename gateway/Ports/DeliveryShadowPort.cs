@@ -192,7 +192,7 @@ static class DeliveryShadowWiring
             // The same for a database that does not answer (a connection that cannot be opened, a timeout): the input is applied again from the state as it is then, which the train's redelivery rule makes harmless. A train that
             // kept changing under the handler (TrainConflictException) and a transient SQL fault are the host's FaultPolicy, which comes first. The retry is BOUNDED (W9.10o, #500: it used to repeat every 5 minutes for ever, so a permanent
             // fault never reached the dead letters): three tries, then 5 minutes, 15 minutes, 1 hour and 6 hours, then the dead letters, which /api/v1/status counts and shows by type.
-            w.Policies.OnException<HttpRequestException>().Or<TaskCanceledException>().Or<TimeoutException>().Or<System.Data.Common.DbException>()
+            w.Policies.OnException<HttpRequestException>().Or<Fworker.Integrations.GitHub.MergeFactsException>().Or<TaskCanceledException>().Or<TimeoutException>().Or<System.Data.Common.DbException>()
                 .RetryWithCooldown(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)).Then.ScheduleRetry(TimeSpan.FromMinutes(5)).Then.ScheduleRetry(TimeSpan.FromMinutes(15)).Then.ScheduleRetry(TimeSpan.FromHours(1)).Then.ScheduleRetry(TimeSpan.FromHours(6)).Then.MoveToErrorQueue();
         };
     }
