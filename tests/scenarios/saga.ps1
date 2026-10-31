@@ -50,12 +50,14 @@ function Saga-Play([string]$Title, [string]$Body, [bool]$DocsOnly, [string[]]$La
     $r = Fo $w @('record-review', '--item', $n, '--column', 'Technical Design', '--role', 'reviewer', '--text-file', (TmpFile "sgrv-td$n.md" "Section present and complete.`nREVIEW: COMPLETE")); CheckExit "design #$n review" $r 0
     $c = Fo $w @('complete', '--item', $n, '--column', 'Technical Design', '--review-ref', $r.review_ref, '--comment', 'REVIEW: COMPLETE - design done'); CheckExit "design #$n complete" $c 0
     Check "#$n continues into Development" ((Wait-Until -Seconds 40 { (Saga-Col $n) -eq 'Development' })) "column $(Saga-Col $n)"
+    Saga-WaitStep $n @('Design') 'the design step is over'
     Fake 'push-branch' @{ branch = "factory-worker/$n-development"; files = @($file); profile = 'green' } | Out-Null
     $r = Fo $w @('open-pr', '--item', $n, '--head', "factory-worker/$n-development", '--title', 'Saga trial','--body-file', (TmpFile "sgpr$n.md" 'change')); CheckExit "open-pr #$n" $r 0
     $pr = [int]$r.pullRequest.number
     $rv = Fo $w @('record-review', '--item', $n, '--column', 'Development', '--role', 'reviewer', '--text-file', (TmpFile "sgrv-dev$n.md" "Diff matches the plan.`nREVIEW: COMPLETE")); CheckExit "development #$n review" $rv 0
     $c = Fo $w @('complete', '--item', $n, '--column', 'Development', '--review-ref', $rv.review_ref, '--comment', 'PR open, CI green. REVIEW: COMPLETE'); CheckExit "development #$n complete" $c 0
     Check "#$n is in Functional Testing" ((Wait-Until -Seconds 40 { (Saga-Col $n) -eq 'Functional Testing' })) "column $(Saga-Col $n); decisions $((Saga-Actions $n) -join ', '); view $((Saga-View $n) | ConvertTo-Json -Compress -Depth 4)"
+    Saga-WaitStep $n @('Design', 'Develop') 'the development step is over'
     return @{ n = $n; pr = $pr }
 }
 # The PASS of Functional Testing by the owner session
@@ -143,6 +145,13 @@ function Saga-View([int]$n) {
     } catch { }
     return $null
 }
+# v2 only: the verb moves the card at once, the saga takes the completion from its queue (the first use of a handler generates its code, seconds on a loaded runner). A verb of the next step sent before the saga has left the
+# step is recorded in the step it left (a review of Development read as one of Design) and the completion is lost; the owner session of a real run is far slower than that, so the scenario waits for the saga as a session would.
+function Saga-WaitStep([int]$n, [string[]]$Left, [string]$What) {
+    if ($script:GoldenEngine -ne 'v2') { return }
+    $over = Wait-Until -Seconds 60 { $v = Saga-View $n; $null -ne $v -and "$($v.step)" -notin $Left }
+    Check "the saga of #$n has taken the completion ($What)" $over "view $((Saga-View $n) | ConvertTo-Json -Compress -Depth 4)"
+}
 function Saga-Actions([int]$n) { $v = Saga-View $n; if ($null -eq $v) { return @() }; return @($v.history | ForEach-Object { "$($_.action)" }) }
 # the fake numbers its issues from 1 in every scenario, while the saga's database keeps what the scenarios before started (an item that is open is not started again): a scenario of this group takes numbers above those
 function Saga-NumbersAbove([int]$Count) { foreach ($i in 1..$Count) { Fake 'issue' @{ title = "filler $i"; body = 'x'; labels = @(); column = 'Done' } | Out-Null } }
@@ -184,6 +193,9 @@ $SagaScenarios['saga: sweep step: a PASS whose pull request was closed without m
     Saga-NumbersAbove 30
     $x = Saga-Play 'Saga closed pull request' "Change the code, as the criteria say.`n`n- criterion one" $false
     if (-not $x) { return }
+    # the saga reads the hold label at each card event (SagaIngress.Hold), and the move of the card to Functional Testing is one: a label added before the board poll has seen that move parks the item in Verify at once,
+    # and a verdict that comes after finds the item parked and is not taken (the Merge step is never reached), so the label waits until the poll has been through (the sweep's cadence is 4 s)
+    Start-Sleep -Seconds 8
     # a person holds the item (hold:owner) before the verdict: the PASS is recorded and the merge waits, so the pull request can be closed before the gateway merges it
     Gh-As 'fake-operator' "issues/$($x.n)/labels" @{ labels = @('hold:owner') } | Out-Null
     Saga-Pass $x | Out-Null

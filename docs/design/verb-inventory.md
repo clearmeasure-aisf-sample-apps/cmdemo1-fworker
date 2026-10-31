@@ -119,7 +119,7 @@ has a v2 owner still falls back to the script. Each entry names the plan row tha
 `docs/design/verb-inventory.json` (the same data) and fails when a call or a fallback is in the code and not here, when an entry is no longer in the code (delete it in the pull request that removes the call), when a row
 is not a row of the plan, and, once the server rule scripts are gone, when any entry without an exception is left. A new call needs a row first.
 
-Kinds: `runner` calls `Runner.RunAsync` (a rule script); `bridge` calls through a per-pull-request bridge (`ServiceVerbCalls`) that W9.9a removes; `router` forwards inside the v2 router chain and runs no script (listed so that the count of call sites is exact).
+Kinds: `runner` calls `Runner.RunAsync` for a verb that has no route, or `Runner.RunScriptAsync` (the rule script whatever v2 answers), so it is a rule script on every engine (only the declared exceptions are left); `router` asks the route table, either by forwarding inside the v2 router chain or through `Runner.RunAsync`, which since W9.9a asks `V2VerbRoutes` first for every verb that has a route where the engine acts (the script runs only where it does not, and for a verb with no route); it is listed so that the count of call sites is exact. The per-pull-request bridges (`DeliveryVerbBridge`, `ServiceVerbCalls`, `Runner.V2Own`, the route tables of `BaseWatch` and `QcHub`) are gone.
 Exceptions are the declared reasons an entry may outlive the rows before W9.11; the test pins their ids, so a new one is a visible edit.
 
 ### The gateway's own calls
@@ -127,42 +127,39 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 | Entry | File | Sites | Verbs | Kind | Owner | Leaves | What it is |
 |---|---|---|---|---|---|---|---|
 | auto-promote | `gateway/AutoPromoter.cs` | 1 | auto-promote | runner | W9.10p | W9.12 | The automatic promotion of the app to uat and prod. It has no v2 route by decision. **exception until W9.12.** |
-| base-watch-verbs | `gateway/BaseUpdate.cs` | 1 | by argument | runner | W9.3 | W9.9a | BaseWatch runs base-watch and base-update-branch (routed since #542). |
-| base-journal | `gateway/BaseUpdate.cs` | 1 | journal | runner | W9.8 | W9.9a | The journal line of a base update (#477). |
-| transcripts | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.8 | W9.9a | TranscriptStore: transcript-save, transcript-load and transcript-prune. |
+| base-watch-verbs | `gateway/BaseUpdate.cs` | 1 | by argument | router | W9.3 | - | BaseWatch runs base-watch and base-update-branch through the Runner (routed since #542; its own table is gone). |
+| base-journal | `gateway/BaseUpdate.cs` | 1 | journal | router | W9.8 | - | The journal line of a base update (#477). |
+| transcripts | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.8 | W9.11b | TranscriptStore: transcript-save, transcript-load and transcript-prune, the rule scripts of the ref store (RunScriptAsync). **exception until W9.11b.** |
 | plant-snapshot | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.10k | W9.11b | SnapshotCoordinator: plant-snapshot-save, -load, -clear and -await. **exception until W9.11b.** |
-| revocation-calls | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | bridge | W9.7 | W9.9a | RevocationService through ServiceVerbCalls (revocations, revoke-worker). |
-| copilot-owner-verbs | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.4 | W9.9a | CopilotOwnerVerbs: copilot-owner. |
-| delivery-bridge | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | bridge | W9.4 | W9.9a | DeliveryVerbBridge: the delivery verbs go to v2's DeliveryVerbHost where the engine acts, and to the Runner everywhere else. |
-| copilot-settle-client | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | runner | W9.4 | W9.9a | CopilotSettleClient: copilot-settle. |
-| plant-journal | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | journal | runner | W9.8 | W9.9a | The plant's journal lines (#477). |
-| operator-release-calls | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | bridge | W9.7 | W9.9a | OperatorReleaseLoader through ServiceVerbCalls (operator-releases). |
-| runtime-failed-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | runner | W9.10h | W9.9a | The runtime adapters' park after a failed launch. The script's park-item stays the park (v2's route answers it from W9.9a); W9.10h tells the saga as well (ParkWorkItem). |
-| runtime-release-claim | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | claim-item | runner | W9.10j | W9.10j | The runtime adapters' ReleaseClaim; the saga's step lease and the scheduler's slot replace it. |
-| credit-guard-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | runner | W9.10h | W9.9a | The Copilot credit guard's park. As the runtime adapters' park: the script's park-item until W9.9a, and W9.10h tells the saga (ParkWorkItem). |
-| feature-checks | `gateway/Composition/GatewayWolverineExtensions.cs` | 1 | by argument | runner | W9.5 | W9.9a | FeatureChecksJob reads pr-checks through PullRequestChecks. |
-| publish-demo | `gateway/Endpoints/DemoEndpoints.cs` | 2 | publish-demo, publish-demo | runner | W9.4 | W9.9a | The demo endpoint (the Runner and the delivery bridge: v2 where the engine acts). |
-| unpark-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | unpark-item | runner | W9.2 | W9.9a | The unpark endpoint. W9.10h: it tells the saga (ResumeWorkItem), so the item is offered again. |
-| resettle-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | resettle-item | runner | W9.2 | W9.9a | The resettle endpoint. |
-| metrics-calls | `gateway/Endpoints/MetricsEndpoints.cs` | 1 | metrics | bridge | W9.7 | W9.9a | Through ServiceVerbCalls. |
-| operator-release-endpoint | `gateway/Endpoints/OperatorReleaseEndpoints.cs` | 1 | operator-release | bridge | W9.7 | W9.9a | Through ServiceVerbCalls. |
-| ingest-event | `gateway/Endpoints/WebhookEndpoints.cs` | 1 | ingest-event | runner | W9.8 | W9.9a | The webhook endpoint hands the event to the script. |
-| service-calls-runner | `gateway/Identity/ServiceVerbs.cs` | 1 | by argument | bridge | W9.7 | W9.9a | ServiceVerbCalls: the Runner while the engine does not act. The bridge itself is removed by W9.9a. |
-| service-calls-v2 | `gateway/Identity/ServiceVerbs.cs` | 1 | by argument | router | W9.7 | - | ServiceVerbCalls: v2's own answer (no script). |
+| revocation-calls | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | router | W9.7 | - | RevocationService calls the Runner (revocations, revoke-worker): v2's route where the engine acts. |
+| copilot-owner-verbs | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | router | W9.4 | - | CopilotOwnerVerbs: copilot-owner. |
+| copilot-settle-client | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | router | W9.4 | - | CopilotSettleClient: copilot-settle. |
+| plant-journal | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | journal | router | W9.8 | - | The plant's journal lines (#477). |
+| operator-release-calls | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | by argument | router | W9.7 | - | OperatorReleaseLoader calls the Runner (operator-releases): v2's route where the engine acts. |
+| runtime-failed-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | router | W9.10h | - | The runtime adapters' park after a failed launch: the Runner asks the park-item route where the engine acts; W9.10h tells the saga as well (ParkWorkItem). |
+| runtime-release-claim | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | claim-item | router | W9.10j | - | The runtime adapters' ReleaseClaim: the Runner asks the claim-item route where the engine acts; the saga's step lease and the scheduler's slot replace it (W9.10j). |
+| credit-guard-park | `gateway/Composition/GatewayServiceCollectionExtensions.cs` | 1 | park-item | router | W9.10h | - | The Copilot credit guard's park: as the runtime adapters' park, through the Runner; W9.10h tells the saga (ParkWorkItem). |
+| feature-checks | `gateway/Composition/GatewayWolverineExtensions.cs` | 1 | by argument | router | W9.5 | - | FeatureChecksJob reads pr-checks through PullRequestChecks. |
+| publish-demo | `gateway/Endpoints/DemoEndpoints.cs` | 1 | publish-demo | router | W9.4 | - | The demo endpoint calls the Runner: v2's route where the engine acts. |
+| unpark-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | unpark-item | router | W9.2 | - | The unpark endpoint: the Runner asks the unpark-item route where the engine acts. W9.10h: it tells the saga (ResumeWorkItem), so the item is offered again. |
+| resettle-item | `gateway/Endpoints/ItemAdminEndpoints.cs` | 1 | resettle-item | router | W9.2 | - | The resettle endpoint. |
+| metrics-calls | `gateway/Endpoints/MetricsEndpoints.cs` | 1 | metrics | router | W9.7 | - | The metrics endpoint calls the Runner: v2's route where the engine acts. |
+| operator-release-endpoint | `gateway/Endpoints/OperatorReleaseEndpoints.cs` | 1 | operator-release | router | W9.7 | - | The record-release endpoint calls the Runner: v2's route where the engine acts. |
+| ingest-event | `gateway/Endpoints/WebhookEndpoints.cs` | 1 | ingest-event | router | W9.8 | - | The webhook endpoint hands the event to the script. |
 | leader-lease | `gateway/Leader.cs` | 5 | leader-lease | runner | W9.10b | W9.11b | The leader lease on the GitHub ref. **exception until W9.11b.** |
-| plant-claim-renew | `gateway/PlantHooks.cs` | 1 | claim-item | runner | W9.2 | W9.9a | Claim renewal of an assigned item. |
-| plant-expire-claim | `gateway/PlantHooks.cs` | 1 | expire-claim | runner | W9.2 | W9.9a | Claim expiry of an assigned item. |
-| ticker-journal | `gateway/PlantTicker.cs` | 1 | journal | runner | W9.8 | W9.9a | The ticker's journal lines (#477). |
+| plant-claim-renew | `gateway/PlantHooks.cs` | 1 | claim-item | router | W9.2 | - | Claim renewal of an assigned item. |
+| plant-expire-claim | `gateway/PlantHooks.cs` | 1 | expire-claim | router | W9.2 | - | Claim expiry of an assigned item. |
+| ticker-journal | `gateway/PlantTicker.cs` | 1 | journal | router | W9.8 | - | The ticker's journal lines (#477). |
 | owner-release | `gateway/Ports/ItemStepsPort.cs` | 2 | get-item, release | router | W9.10f | - | OwnerRelease: the saga's ReleaseOwner (an owner that waited out a hold) reads the claim with get-item and gives it up with release, through the verb router (v2's item verbs where the engine acts); no script of its own. |
 | plant-restore-claim | `gateway/PlantRestoreCorrection.cs` | 1 | get-item | router | W9.10k | - | PlantRestoreCorrection: at start the plant restored from the database is corrected from the claim of each owned saga item, read with get-item through the verb router (v2's item verbs where the engine acts); no script of its own. |
 | item-admin-feed | `gateway/Ports/ItemVerbsPort.cs` | 1 | by argument | router | W9.2 | - | ItemAdminFeed forwards to the router it wraps (no script). |
-| qc-calls | `gateway/Qc.cs` | 1 | by argument | runner | W9.1 | W9.9a | QcHub runs the qc-* verbs (QcService in W9.1). |
+| qc-calls | `gateway/Qc.cs` | 1 | by argument | router | W9.1 | - | QcHub calls the Runner for the qc-* verbs: QcService's route where the engine acts (its own table is gone). |
 | qc-facts | `gateway/Ports/QcPort.cs` | 1 | inspect-facts | router | W9.5 | - | QcFactsAdapter asks the router for the inspector's facts; the router answers on v2 or runs the script. |
 | delivery-open-pr | `gateway/Ports/DeliveryVerbHost.cs` | 1 | by argument | router | W9.4 | - | copilot-settle opens the item's pull request through the verb router (open-pr); no script of its own. |
-| item-pr-lookup | `gateway/Runtimes/ItemPrLookup.cs` | 1 | item-pr | runner | W9.2 | W9.9a | The pull request of an item for the runtime adapters (the owner-task case is a fallback below). |
-| owner-ci-release | `gateway/Runtimes/OwnerCiReleaseService.cs` | 2 | by argument | runner | W9.4 | W9.9a | OwnerCiReleaseService runs ci-release. |
-| owner-ci-journal | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | journal | runner | W9.8 | W9.9a | Its journal lines. |
-| sweep-board | `gateway/Sweeper.cs` | 1 | sync-board | runner | W9.8 | W9.10g | The sweep: sync-board (the reconciler of W9.8, the item and plant-wide steps of W9.10e to W9.10g). |
+| item-pr-lookup | `gateway/Runtimes/ItemPrLookup.cs` | 1 | item-pr | router | W9.2 | - | The pull request of an item for the runtime adapters (the owner-task case is a fallback below). |
+| owner-ci-release | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | by argument | router | W9.4 | - | OwnerCiReleaseService runs ci-release. |
+| owner-ci-journal | `gateway/Runtimes/OwnerCiReleaseService.cs` | 1 | journal | router | W9.8 | - | Its journal lines. |
+| sweep-board | `gateway/Sweeper.cs` | 1 | sync-board | router | W9.8 | - | The sweep: sync-board through the Runner; where the engine acts the route is the script's pass plus one pass of the board reconciler (the sweep stays v1's until W9.11). |
 
 ### The fallbacks of verbs that have a v2 owner
 
@@ -175,6 +172,7 @@ Exceptions are the declared reasons an entry may outlive the rows before W9.11; 
 
 - **auto-promote** (until W9.12): Decision 2 of 2026-10-30: the app's uat and prod promotions stay with v1's AutoPromoter until the delivery train has a recorded clean live window (the W5 gate). W9.11b must keep Verbs.Promote.ps1 and the Runner path for this one verb.
 - **plant-snapshot** (until W9.11b): The snapshot is the hand-over between gateway processes and the rollback to v1 until W9.11b removes v1; the plant is in SQL from W9.10k.
+- **transcripts** (until W9.11b): The ref store of the sessions written before the move to the database. Where the engine acts the `DatabaseTranscriptBackend` reads it as the fallback of a load and prunes it with the database; both go through the rule script (`Runner.RunScriptAsync`), because the board routes answer `transcript-load` and `transcript-prune` from `factory.Transcripts` and would never reach the refs. It goes with v1 at W9.11b, after the 14 days the refs are kept.
 - **leader-lease** (until W9.11b): The GitHub-ref lease stays as the arbitration with a process that has no database (v1, the kill switch, uat and prod) until W9.11b; where a database is configured W9.10b's SQL application lock replaces these calls.
 - **merge-peer-approved** (until W9.11b): The peer-approved merge policy is dropped (decision 4 of 2026-10-30), not ported; its suites go with v1 (W9.11a). Every environment runs mergePolicy auto.
 - **merge-hybrid-script** (until W9.11b): The adoption (W9.9b) gives the saga every open item, and W9.11b deletes the branch with the router of v1.

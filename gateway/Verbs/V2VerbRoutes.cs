@@ -53,6 +53,8 @@ sealed class V2VerbRoutes
         ServiceRoutes.Register(routes, services);
         BoardRoutes.Register(routes, services);
         QcRoutes.Register(routes, services);   // W9.1: the qc-* verbs, in no group above (registered with QC itself)
+        // W9.9a: the gateway's own calls ask the same table (Runner.RunAsync), so no per-pull-request bridge is needed any more
+        if (services.GetService(typeof(Runner)) is Runner runner) runner.Routes = routes;
         return routes;
     }
 }

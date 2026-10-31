@@ -1,3 +1,4 @@
+using Fworker.Contracts.Seams;
 using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Xunit;
@@ -228,6 +229,79 @@ public sealed class FencingTests
         Assert.Equal(7L, (long?)JsonNode.Parse(on.InjectLease("merge", forged))!["_lease"]?["epoch"]);   // a fenced verb: the gateway's, not the client's
         Assert.Null(JsonNode.Parse(NewRunner(null).InjectLease("merge", forged))!["_lease"]);   // the lease is off
         Assert.Equal(3, (int?)JsonNode.Parse(on.InjectLease("comment", forged))!["item"]);
+    }
+
+    // ---- W9.9a: the routes of a fenced verb are fenced like the script ----
+
+    static (Runner Runner, V2VerbRoutes Routes, List<string> Writes) RoutedRunner(Func<bool>? mayAct)
+    {
+        var writes = new List<string>();
+        var routes = new V2VerbRoutes();
+        routes.Add(ItemRoutes.Verbs, "resettle-item", (stdin, _) => { writes.Add("resettle-item " + stdin); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true}")); });
+        routes.Add(ItemRoutes.Verbs, "claim-item", (stdin, _) => { writes.Add("claim-item " + stdin); return Task.FromResult(new VerbAnswer(0, "{\"ok\":true}")); });
+        var runner = NewRunner(() => (7, "gw"));
+        runner.Routes = routes; runner.MayAct = mayAct;
+        return (runner, routes, writes);
+    }
+
+    [Fact]
+    public async Task ARoutedResettleItem_AfterTheLeaseIsLost_AnswersLeaseLost20_AndWritesNothing()
+    {
+        var held = true;
+        var (r, _, writes) = RoutedRunner(() => held);
+        Assert.Contains("resettle-item", Runner.FencedVerbs);
+        Assert.Equal(0, (await r.RunAsync("resettle-item", """{"item":4,"reason":"x"}""", TimeSpan.FromSeconds(5))).Code);   // the lease is held: the route answers
+        Assert.Single(writes);
+        held = false;   // a newer process took the lease
+        var (code, output) = await r.RunAsync("resettle-item", """{"item":4,"reason":"x"}""", TimeSpan.FromSeconds(5));
+        Assert.Equal(20, code);
+        var o = JsonNode.Parse(output)!.AsObject();
+        Assert.Equal("lease-lost", (string?)o["code"]);
+        Assert.Equal(false, (bool?)o["ok"]);
+        Assert.Equal(20, (int?)o["exit"]);
+        Assert.Single(writes);   // the route was not asked the second time
+        Assert.Equal(0, r.FencedInFlight);
+    }
+
+    [Fact]
+    public async Task AVerbThatIsNotFenced_IsStillAnsweredByItsRoute_WhenTheLeaseIsLost()
+    {
+        var (r, _, writes) = RoutedRunner(() => false);
+        Assert.DoesNotContain("claim-item", Runner.FencedVerbs);
+        Assert.Equal(0, (await r.RunAsync("claim-item", "{}", TimeSpan.FromSeconds(5))).Code);   // like the script path: only the fenced verbs stop
+        Assert.Single(writes);
+    }
+
+    [Fact]
+    public async Task ARoutedFencedVerb_IsCountedWhileItRuns_SoTheHandOverWaitsForIt()
+    {
+        var gate = new TaskCompletionSource();
+        var routes = new V2VerbRoutes();
+        routes.Add(ItemRoutes.Verbs, "resettle-item", async (_, _) => { await gate.Task; return new VerbAnswer(0, "{\"ok\":true}"); });
+        var r = NewRunner(() => (7, "gw"));
+        r.Routes = routes; r.MayAct = () => true;
+        var call = r.RunAsync("resettle-item", "{}", TimeSpan.FromSeconds(30));
+        Assert.Equal(1, r.FencedInFlight);
+        var (_, killed) = await r.DrainFencedAsync(TimeSpan.FromMilliseconds(300));   // nothing to end for a route: it is waited for, then the count is still 1
+        Assert.Equal(0, killed);
+        Assert.Equal(1, r.FencedInFlight);
+        gate.SetResult();
+        Assert.Equal(0, (await call.WaitAsync(TimeSpan.FromSeconds(5))).Code);
+        Assert.Equal(0, r.FencedInFlight);
+    }
+
+    [Fact]
+    public async Task WhereTheEngineDoesNotAct_ThereAreNoRoutes_AndNothingIsAskedOfTheLeaseHere()
+    {
+        var asked = 0;
+        var r = NewRunner(() => (7, "gw"));
+        r.MayAct = () => { asked++; return false; };
+        Assert.Null(r.Routes);
+        if (!StubPwsh.Supported) return;
+        using var env = new GatewayEnvironment();
+        env.Apply();   // the ordinary stub answers {"ok":true}: the script path is v1's, fenced by the lease in its input
+        Assert.Equal(0, (await r.RunAsync("resettle-item", "{}", TimeSpan.FromSeconds(30))).Code);
+        Assert.Equal(0, asked);
     }
 
     [Fact]

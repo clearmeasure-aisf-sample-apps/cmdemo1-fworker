@@ -724,14 +724,17 @@ public sealed class ServiceVerbsTests : IDisposable
     }
 
     // ---- the services that call the verbs, on v2 ----
-    (ServiceVerbCalls Calls, Net Net, EngineOptions Engine) CallsOf(bool v2, Dictionary<string, string?>? env = null)
+    (Runner Calls, Net Net, EngineOptions Engine) CallsOf(bool v2, Dictionary<string, string?>? env = null)
     {
         var (verbs, net) = Make(env);
         var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".json");
         File.WriteAllText(path, EngineOptionsTests.BlockFor(v2 ? "\"prod\"" : "", ""));
         Func<string, string?> none = _ => null;
         var engine = EngineOptions.From(InstanceConfig.Load(path, none), "prod", none);
-        return (new ServiceVerbCalls(new Runner("/nonexistent/factory.ps1"), verbs, engine), net, engine);
+        // the gateway's own calls are the Runner's (W9.9a): where the engine acts the table of routes is set on it when it is built, and the service verbs are answered there
+        var runner = new Runner("/nonexistent/factory.ps1");
+        V2VerbRoutes.Build(engine, new ServiceCollection().AddSingleton(verbs).AddSingleton(runner).BuildServiceProvider());
+        return (runner, net, engine);
     }
 
     [Theory]
@@ -747,7 +750,7 @@ public sealed class ServiceVerbsTests : IDisposable
     [InlineData(false, "metrics", false)]
     [InlineData(false, "git-credential", false)]
     public void TheCallsOfTheGateway_GoToV2_OnlyWhereTheEngineActs_AndOnlyForTheseSixVerbs(bool v2, string verb, bool onV2) =>
-        Assert.Equal(onV2, CallsOf(v2).Calls.OnV2(verb));
+        Assert.Equal(onV2, CallsOf(v2).Calls.Routes is { } routes && routes.TryGet(verb, out _) && ServiceVerbs.Handles(verb));
 
     [Fact]
     public async Task OnV2_ACallOfTheGateway_IsAnsweredWithoutARuleScript()
@@ -884,14 +887,16 @@ public sealed class ServiceVerbsTests : IDisposable
     public void TheVerbsWithAnEndpoint_AreRefusedToEveryCallerOfTheVerbRoute_OnV2AsOnV1(string verb, string reason) => Assert.Equal(reason, VerbPolicy.UseEndpointReason(verb));
 
     [Fact]
-    public void TheCallsOfTheGatewayItself_AllGoThroughServiceVerbCalls()
+    public void TheCallsOfTheGatewayItself_AllGoThroughTheRunner_WhichAsksTheRoutesFirst()
     {
-        Assert.Contains("sp.GetRequiredService<ServiceVerbCalls>().RunAsync, runtimeNonces", Source("gateway/Composition/GatewayServiceCollectionExtensions.cs"));
-        Assert.Contains("sp.GetRequiredService<ServiceVerbCalls>().RunAsync, sp.GetRequiredService<Plant>().AddRelease", Source("gateway/Composition/GatewayServiceCollectionExtensions.cs"));
+        // W9.9a: no bridge of their own (ServiceVerbCalls is gone)
+        Assert.Contains("sp.GetRequiredService<Runner>().RunAsync, runtimeNonces", Source("gateway/Composition/GatewayServiceCollectionExtensions.cs"));
+        Assert.Contains("sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>().AddRelease", Source("gateway/Composition/GatewayServiceCollectionExtensions.cs"));
+        Assert.DoesNotContain("ServiceVerbCalls", Source("gateway/Composition/GatewayServiceCollectionExtensions.cs"));
         foreach (var file in new[] { "gateway/Endpoints/OperatorReleaseEndpoints.cs", "gateway/Endpoints/MetricsEndpoints.cs" })
         {
             var text = Source(file);
-            Assert.Contains("ServiceVerbCalls verbs", text); Assert.DoesNotContain("Runner runner", text); Assert.DoesNotContain("runner.RunAsync", text);
+            Assert.Contains("Runner verbs", text); Assert.DoesNotContain("ServiceVerbCalls", text); Assert.DoesNotContain("runner.RunAsync", text);
         }
     }
 }

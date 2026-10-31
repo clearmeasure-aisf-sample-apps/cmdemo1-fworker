@@ -49,7 +49,9 @@ static class GatewayServiceCollectionExtensions
         var runner = new Runner(gw.Entry) { Budget = githubBudget };
         // session transcripts of runtime workers (Transcripts.cs): stored encrypted beside the plant snapshot; FACTORY_TRANSCRIPTS=0 keeps them in memory only
         var transcriptsDurable = gw.OwnerMode && gw.TokenSecret.Length > 0 && Environment.GetEnvironmentVariable("FACTORY_TEST_SKIP_REVOCATIONS") != "1" && Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPTS") != "0";
-        var transcripts = new TranscriptStore(transcriptsDurable ? runner.RunAsync : null, gw.TokenSecret);
+        // RunScriptAsync, not RunAsync: where the engine acts the board routes answer transcript-load and transcript-prune from factory.Transcripts, so through RunAsync the legacy fallback of DatabaseTranscriptBackend would
+        // read the database a second time and never reach the ref store (the sessions written before the move, and the old refs that the prune ages out)
+        var transcripts = new TranscriptStore(transcriptsDurable ? runner.RunScriptAsync : null, gw.TokenSecret);
         if (int.TryParse(Environment.GetEnvironmentVariable("FACTORY_TRANSCRIPT_SAVE_SECONDS"), out var tss) && tss >= 0) transcripts.SaveSeconds = tss;
         services.AddSingleton(transcripts);
         services.AddSingleton<TranscriptService>();
@@ -87,6 +89,7 @@ static class GatewayServiceCollectionExtensions
         }
         // fencing (W0.1): the rule scripts that act on the board run under this process's lease epoch and refuse their writes once it is lost (Runner.InjectLease)
         c.Runner.Lease = () => leader.FenceLease;
+        c.Runner.MayAct = () => leader.MayAct;   // the routes of a fenced verb (Runner.RunAsync) refuse the same way once the lease is lost
         // claims whose lease ran out while no gateway was up: the first full sweep after the restore renews them (Verbs.Sweep.ps1)
         var sweepGap = new SweepGap();
         // the plant snapshot and the lease's start, hand-over and stop (gateway/Leadership/): the restore before the first sweep, the write of every change
@@ -120,10 +123,10 @@ static class GatewayServiceCollectionExtensions
         var runtimeNonces = new RuntimeNonces();   // the one-time nonces of runtime workers (Auth.cs, cloud-worker-runtimes.md 2.6)
         // the revoked credentials (gateway/Identity/RevocationService.cs): the read at start and the revocation; its read starts with the host, before the other hosted services
         var revocationsNeeded = c.Instance.OwnerSessions || messaging.On || messaging.OperatorEnabled;
-        // W9.7: the rule scripts revocations and revoke-worker run through ServiceVerbCalls, which is the Runner unless the engine acts (then v2's own answer, gateway/Identity/RevocationVerbs.cs)
+        // W9.7, W9.9a: revocations and revoke-worker go through the Runner, which asks v2's route first where the engine acts (gateway/Identity/RevocationVerbs.cs) and runs the rule script elsewhere
         services.AddGatewayServiceVerbs(c);
         services.AddSingleton(sp => new RevocationService(revocationOptions, gw.OwnerMode, gw.TokenSecret, messaging.TestHooks, revocationsNeeded,
-            revocations, sp.GetRequiredService<ServiceVerbCalls>().RunAsync, runtimeNonces, sp.GetRequiredService<Plant>().Revoke));
+            revocations, sp.GetRequiredService<Runner>().RunAsync, runtimeNonces, sp.GetRequiredService<Plant>().Revoke));
         services.AddSingleton<IRevocationService>(sp => sp.GetRequiredService<RevocationService>());
         // the generations themselves, for the authentication middleware (gateway/Http/GatewayAuthMiddleware.cs, C6); the same instance the service raises
         services.AddSingleton(revocations);
@@ -153,12 +156,10 @@ static class GatewayServiceCollectionExtensions
         var cursorPrompts = new CursorPromptBuilder(prompts);
         // the owner record of the task that owns an item (rule verb copilot-owner) and the settle (rule verb copilot-settle), shared by both cloud
         // runtimes as constructor parameters (C5c, gateway/Runtimes/Owner*.cs)
-        // W9.4: where the engine acts, a v2 route answers these verbs (and publish-demo and ci-release); the bridge sends the gateway's own calls there, and to the runner everywhere else
-        var deliveryBridge = new DeliveryVerbBridge(c.Runner.RunAsync);
-        services.AddSingleton(deliveryBridge);
+        // W9.4, W9.9a: where the engine acts, a v2 route answers these verbs (and publish-demo and ci-release); the Runner asks the routes first, so the gateway's own calls go there too and to the rule script everywhere else
         services.AddSingleton<V2ActivityTap>();
-        var ownerVerbs = new CopilotOwnerVerbs(deliveryBridge.RunAsync);
-        var settleClient = new CopilotSettleClient(deliveryBridge.RunAsync);
+        var ownerVerbs = new CopilotOwnerVerbs(c.Runner.RunAsync);
+        var settleClient = new CopilotSettleClient(c.Runner.RunAsync);
         var cursorRuntime = ownerMode && tokenSecret.Length > 0 && cursorSettings.On ? new CursorCloudRuntime(cursorSettings, cursorPrompts, owners: ownerVerbs, settle: settleClient) : null;
         var cursorManager = cursorRuntime != null
             ? new RuntimeManager(runtimeSettings, cursorRuntime, runtimeNonces,
@@ -259,13 +260,13 @@ static class GatewayServiceCollectionExtensions
                 SweepRequest = sp.GetRequiredService<EventHub>().RequestSweep, SessionPage = (kind, name) => kind is "octopus" or "cae-job" && linkBase() is { Length: > 0 } lb ? $"{lb}/sessions/{Uri.EscapeDataString(name)}" : "" };
         });
         services.AddSingleton(sp => new Messenger(messaging, sp.GetRequiredService<Plant>()));
-        services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, gw.PublicUrl, gw.TokenSecret, () => sp.GetService<V2VerbRoutes>()));
+        services.AddSingleton(sp => new QcHub(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<EventHub>(), qcSettings, gw.PublicUrl, gw.TokenSecret));
         // master moved: base.updated to the owners of open branches, and GitHub's update branch where it is clean (BaseUpdate.cs); only the acting gateway
         var leader = c.Leader;
-        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode, sp.GetRequiredService<V2VerbRoutes>()) { MayAct = () => leader.MayAct });
+        services.AddSingleton(sp => new BaseWatch(sp.GetRequiredService<Runner>(), sp.GetRequiredService<Plant>(), baseUpdateSettings, gw.OwnerMode) { MayAct = () => leader.MayAct });
         // the operator session's recorded releases (gateway/Operator/OperatorReleaseLoader.cs): read once at start, after the revocations' read has started
         var skipRevocations = c.Revocation.SkipRevocations;
-        services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, skipRevocations, sp.GetRequiredService<ServiceVerbCalls>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));
+        services.AddSingleton(sp => new OperatorReleaseLoader(messaging.OperatorEnabled, skipRevocations, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>().AddRelease));
         services.AddSingleton<IOperatorReleaseLoader>(sp => sp.GetRequiredService<OperatorReleaseLoader>());
         return services;
     }
@@ -354,7 +355,7 @@ static class GatewayServiceCollectionExtensions
         var copilotRuntime = rts.CopilotRuntime; var copilotManager = rts.Copilot; var cursorRuntime = rts.CursorRuntime; var cursorManager = rts.Cursor;
         if (copilotManager != null && copilotSettings.CiRelease)
             services.AddHostedService(sp => new CopilotCiReleaseService(rts.CopilotCiRelease, copilotManager, copilotRuntime, sp.GetRequiredService<Plant>(), sp.GetRequiredService<Runner>(),
-                sp.GetRequiredService<ILeadership>(), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds), sp.GetRequiredService<DeliveryVerbBridge>()));
+                sp.GetRequiredService<ILeadership>(), sp.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping, TimeSpan.FromSeconds(copilotSettings.CiReleaseSeconds)));
         // two registrations of one implementation type: AddSingleton<IHostedService> adds each (AddHostedService would keep only the first, as with RuntimeLoop)
         if (copilotRuntime != null && copilotManager != null)
             services.AddSingleton<IHostedService>(sp =>

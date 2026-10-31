@@ -6,8 +6,7 @@ using Xunit;
 namespace Gateway.Tests;
 
 /// <summary>
-/// W9.8 (gateway/Verbs/Routes/Board.cs, gateway/Ports/BoardPort.cs): the board group registers its six verbs where the engine acts and its parts are there, takes the gateway's own calls of journal and ingest-event for the v2 path
-/// (Runner.V2Own), and leaves sync-board's sweep, and every other verb, to the rule scripts.
+/// W9.8 (gateway/Verbs/Routes/Board.cs, gateway/Ports/BoardPort.cs): the board group registers its six verbs where the engine acts and its parts are there, the Runner asks them for the gateway's own calls (W9.9a; the plant snapshot and the leader lease have no route and stay the rule scripts'), and sync-board's route is the script's sweep with one pass of the reconciler.
 /// </summary>
 public sealed class BoardRoutesTests : IDisposable
 {
@@ -49,7 +48,6 @@ public sealed class BoardRoutesTests : IDisposable
     {
         var runner = new Runner("/nonexistent/factory.ps1");
         Assert.DoesNotContain(V2VerbRoutes.Build(Engine("\"prod\""), Services(runner, null)).Verbs, BoardRoutes.Verbs.Contains);
-        Assert.Null(runner.V2Own);
     }
 
     [Fact]
@@ -58,23 +56,23 @@ public sealed class BoardRoutesTests : IDisposable
         var runner = new Runner("/nonexistent/factory.ps1");
         Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("\"tdd\""), Services(runner, Parts())));          // another environment: v1
         Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("\"prod\"", off: "1"), Services(runner, Parts())));   // the kill switch
-        Assert.Null(runner.V2Own);
+        Assert.Null(runner.Routes);   // (W9.9a: every call of the gateway itself is then the rule script)
     }
 
     [Fact]
-    public async Task TheGatewaysOwnCallsOfJournalAndIngestEvent_AreAnsweredByV2_TheOthersAreNot()
+    public async Task TheGatewaysOwnCalls_AreAnsweredByTheRoutes_WhereTheEngineActs_AVerbWithNoRouteIsTheScripts()
     {
         var runner = new Runner("/nonexistent/factory.ps1");
-        V2VerbRoutes.Build(Engine("\"prod\""), Services(runner, Parts()));
-        Assert.NotNull(runner.V2Own);
+        var routes = V2VerbRoutes.Build(Engine("\"prod\""), Services(runner, Parts()));
+        Assert.Same(routes, runner.Routes);
         // ingest-event without an event: v2's refusal (a usage error) and no rule script
-        var mine = await runner.V2Own!("ingest-event", "{}", TimeSpan.FromSeconds(5));
-        Assert.Equal(2, mine!.Value.Code);
-        Assert.Equal("usage", JsonNode.Parse(mine.Value.Output)!["code"]!.ToString());
-        Assert.Equal(2, (await runner.V2Own("journal", "{}", TimeSpan.FromSeconds(5)))!.Value.Code);
-        // the sweep, the plant's other verbs and the snapshot are the rule scripts' still
-        foreach (var verb in new[] { "sync-board", "transcript-save", "merge", "claim-item", "plant-snapshot-save" })
-            Assert.Null(await runner.V2Own(verb, "{}", TimeSpan.FromSeconds(5)));
+        var mine = await runner.RunAsync("ingest-event", "{}", TimeSpan.FromSeconds(5));
+        Assert.Equal(2, mine.Code);
+        Assert.Equal("usage", JsonNode.Parse(mine.Output)!["code"]!.ToString());
+        Assert.Equal(2, (await runner.RunAsync("journal", "{}", TimeSpan.FromSeconds(5))).Code);
+        // a verb with no route (the plant snapshot) is the rule script's still; the Runner of this test points at no script, so the script's run is a failure and not v2's answer
+        Assert.False(routes.TryGet("plant-snapshot-save", out _));
+        Assert.NotEqual(0, (await runner.RunAsync("plant-snapshot-save", "{}", TimeSpan.FromSeconds(5))).Code);
     }
 
     [Fact]

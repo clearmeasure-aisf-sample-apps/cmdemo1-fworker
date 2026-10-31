@@ -8,9 +8,6 @@ using Fworker.Workflows.Transcripts;
 // verb are answered without the rule scripts, and the parts the verbs read are registered once. Nothing here exists in v1, in the shadow run or under the kill switch.
 static class BoardWiring
 {
-    /// <summary>The verbs of the gateway's own calls that v2 answers in place of the rule script (the plant's journal lines of PlantTicker and BaseUpdate, the webhook's translation).</summary>
-    public static readonly IReadOnlySet<string> OwnCalls = new HashSet<string>(StringComparer.Ordinal) { "journal", "ingest-event" };
-
     public static void Register(IServiceCollection services, GatewayComposition c, FactorySchemaStatus schema)
     {
         if (!c.Engine.V2Acts) return;
@@ -31,7 +28,7 @@ static class BoardWiring
             Ledger = () => c.JournalLedger,
             History = connection is null || home is null ? null : new JournalHistory(() => WorkItemWiring.Open(connection)),
             Reconciler = () => c.BoardReconciler,
-            RuleScript = sp.GetRequiredService<Runner>().RunScriptAsync,   // not RunAsync: the gateway's own calls of journal and ingest-event come back here (Runner.V2Own)
+            RuleScript = sp.GetRequiredService<Runner>().RunScriptAsync,   // not RunAsync: that asks the routes first and the gateway's own calls of the verbs come back here (W9.9a)
         });
     }
 
