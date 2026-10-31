@@ -92,7 +92,21 @@ static class GatewayServiceCollectionExtensions
         // the plant snapshot and the lease's start, hand-over and stop (gateway/Leadership/): the restore before the first sweep, the write of every change
         services.AddSingleton(leader);
         var maxAge = c.Timing.PlantSnapshotMaxAgeMinutes;
-        services.AddSingleton(sp => new SnapshotCoordinator(snapshotOn, maxAge, leader, sp.GetRequiredService<Runner>().RunAsync, sp.GetRequiredService<Plant>(), sweepGap));
+        services.AddSingleton(sp =>
+        {
+            var plant = sp.GetRequiredService<Plant>();
+            var snapshots = new SnapshotCoordinator(snapshotOn, maxAge, leader, sp.GetRequiredService<Runner>().RunAsync, plant, sweepGap);
+            // W9.10k: where the engine acts (and there is a database and a home repository) the plant is kept in the database, not in the snapshot ref, and a restored plant is corrected from WorkItems and the claims
+            if (c.Engine.V2Acts && c.WolverineHost && c.Database.ConnectionString is { } connection && c.Instance.Home is { } home)
+            {
+                var cs = WolverineHostService.WithConnectTimeout(connection, WolverineHostOptions.From(c.Instance).ConnectTimeoutSeconds);
+                snapshots.Sql = new Fworker.Workflows.PlantState.SqlPlantStateStore(() => WorkItemWiring.Open(cs));
+                var correction = new PlantRestoreCorrection(plant, new Fworker.Workflows.WorkItem.SqlWorkItemStore(() => WorkItemWiring.Open(cs)), home, (item, ct) => PlantRestoreCorrection.HolderOf(sp.GetService<Fworker.Contracts.Seams.IVerbRouter>(), item, ct));
+                snapshots.Correct = () => correction.Run();
+                snapshots.SchemaReady = async ct => { var schema = sp.GetRequiredService<FactorySchemaStatus>(); while (!schema.IsGood) await Task.Delay(500, ct); };
+            }
+            return snapshots;
+        });
         services.AddSingleton<ISnapshotCoordinator>(sp => sp.GetRequiredService<SnapshotCoordinator>());
         services.AddSingleton<LeadershipService>();
         c.SnapshotOn = snapshotOn; c.LeaderOn = leaderOn; c.Leader = leader; c.SweepGap = sweepGap;
@@ -288,7 +302,8 @@ static class GatewayServiceCollectionExtensions
         var sweepMinSeconds = (int)Math.Min(sweepSeconds, int.TryParse(Environment.GetEnvironmentVariable("FACTORY_SWEEP_MIN_SECONDS"), out var smin) && smin >= 0 ? smin : c.Timing.SweepMinSeconds);
         var githubBudget = c.GitHubBudget; var leaderOn = c.LeaderOn; var sweepGap = c.SweepGap;
         var v2Sweep = c.Engine.V2Acts && c.Instance.Home != null;   // W6.1: v1's sweep leaves the items that have a saga alone
-        services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : null, V2Plans = v2Sweep ? sp.GetService<WorkItemParts>()?.Intake.V2Plans ?? [] : [], PlantJobs = v2Sweep && sp.GetService<PlantStepJobs>() is not null });   // (W9.10e: v1's intake leaves the Todo items of these plans to the engine's)
+        if (v2Sweep) services.AddSingleton(sp => SagaPlantWiring.Make(c, sp));   // W9.10k: the plant's input for the saga's items, and the sources of the patrol's parks and the release check's in-flight work
+        services.AddHostedService(sp => new Sweeper(sp.GetRequiredService<Runner>(), sp.GetRequiredService<EventHub>(), sp.GetRequiredService<Plant>(), sp.GetRequiredService<QcHub>(), sweepSeconds, gw.OwnerMode, sp.GetRequiredService<BaseWatch>(), sp.GetRequiredService<ISnapshotCoordinator>().Restored) { MinSeconds = sweepMinSeconds, Budget = githubBudget, MayAct = () => leader.MayAct, LeaderOn = leaderOn, Gap = sweepGap, V2 = v2Sweep ? sp.GetRequiredService<V2Ownership>() : null, V2Plans = v2Sweep ? sp.GetService<WorkItemParts>()?.Intake.V2Plans ?? [] : [], PlantJobs = v2Sweep && sp.GetService<PlantStepJobs>() is not null, Feed = v2Sweep ? sp.GetRequiredService<SagaPlantFeed>() : null });   // (W9.10e: v1's intake leaves the Todo items of these plans to the engine's)
         // The automatic promotion: a loop of its own after the sweep, its own call (verb auto-promote), timeout and leader gate; it never runs inside the sweep
         // W9.4 stopped this loop wherever the engine acts; W9.10p (owner decision 2026-10-30): the app's uat and prod stay with it until the train takes them over (delivery.autoPromote.trainActs, W9.12)
         var promoteOn = AutoPromoter.Runs(c.Instance, c.Engine.V2Acts); var promoteInterval = TimeSpan.FromSeconds(c.Timing.PromoteSeconds);
