@@ -49,7 +49,9 @@ public sealed partial class QcService
             foreach (var t in lists)
             {
                 var f = QcRules.FindOffer(t.List, prNum, login);
-                if (f is null || f.Body.Contains("was requested and runs on", StringComparison.Ordinal)) continue;
+                // which skip was taken is a log line (#592): a missing edit in a run shows whether the offer was not found or already said it
+                if (f is null) { log($"qc: offer comment of #{t.Number} not edited for PR {prNum}: offer not found"); continue; }
+                if (f.Body.Contains("was requested and runs on", StringComparison.Ordinal)) { log($"qc: offer comment {f.Id} of #{t.Number} not edited for PR {prNum}: it already says it runs on a worker"); continue; }
                 // keep the link line so a person can still click it
                 var link = Regex.Match(f.Body, "\\]\\(([^)]+)\\)").Groups[1].Value;
                 var exp = Regex.Match(f.Body, "exp=(\\d+)").Groups[1].Value;
