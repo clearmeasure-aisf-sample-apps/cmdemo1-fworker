@@ -90,6 +90,17 @@ public class PlantStepJobsTests
     }
 
     [Fact]
+    public async Task TheKeeperIsToldTheBacklogIsLow_AlsoWhereOwnerSessionsAreOff()
+    {
+        // the sweep applied the keeper's count whatever the owner mode (the Tier 1 keeper suite runs a gateway without owner sessions)
+        var r = new Rig(ownerMode: false);
+        r.Plant.Keeper = new KeeperSettings { Enabled = true, MinTechnicalDesign = 3, Names = ["backlog-keeper"] };
+        r.Answer["design_waiting"] = 1;
+        Assert.Equal("ok", await r.Jobs.BacklogLow(default));
+        Assert.Equal(1, (int)r.Plant.KeeperStatus()["jobsBuffered"]!);
+    }
+
+    [Fact]
     public async Task APassTheLeaseEnded_IsDropped_AndOnePlantWithoutOwnerModeAppliesNothing()
     {
         var r = new Rig();

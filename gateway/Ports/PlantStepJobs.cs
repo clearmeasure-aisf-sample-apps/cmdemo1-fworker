@@ -58,7 +58,8 @@ sealed class PlantStepJobs(Runner runner, Func<Plant?> plant, Func<QcHub?> qc, G
 
     public Task<string> BacklogLow(CancellationToken ct) => Pass("backlog-low", ["design-waiting"], ct, budgetGated: false, apply: (j, p) =>
     {
-        if (ownerMode && p is not null && j["design_waiting"] is JsonValue dw && dw.TryGetValue<int>(out var waiting)) p.KeeperBacklog(waiting);
+        // (the keeper's count is the plant's whether or not owner sessions are on, as the sweep applied it: the keeper's job needs no owner)
+        if (p is not null && j["design_waiting"] is JsonValue dw && dw.TryGetValue<int>(out var waiting)) p.KeeperBacklog(waiting);
     });
 
     public async Task<string> QcSync(CancellationToken ct)
