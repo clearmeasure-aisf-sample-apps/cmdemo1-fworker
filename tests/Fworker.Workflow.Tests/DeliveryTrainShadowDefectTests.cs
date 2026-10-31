@@ -382,19 +382,25 @@ public class DeliveryTrainShadowDefectTests
     }
 
     [Fact]
-    public async Task StaleTimers_WhileThePendingOneLiesAhead_EvaluateNothingAndScheduleNothing()
+    public async Task TheTransientRetry_WhileTheSafetyWakeIsPending_StillEvaluates()
     {
+        // The retry is a timer that is not the pending one (the pending one is the safety wake, ahead): it must still look, or the retry chain ends at its first link.
         var f = await OneRelease(HoldGap);   // waiting: the safety wake is pending
         var pending = f.State.WakeDue!.Value;
-        Assert.True(pending > f.Now);
-        var before = f.Reads.Probes + f.Reads.Compares; var sequence = f.State.Sequence;
-        for (var i = 1; i <= 120; i++)
-        {
-            var r = await f.Wake(f.Now - TimeSpan.FromSeconds(i));   // a timer that is not the pending one
-            Assert.Empty(r.Messages); Assert.Null(r.WakeAt);
-        }
-        Assert.Equal(before, f.Reads.Probes + f.Reads.Compares);
-        Assert.Equal(sequence, f.State.Sequence);
+        Assert.True(pending > f.Now + DeliveryTrainService.TransientRetry);
+        f.Reads.Fail = new HttpRequestException("the read budget is spent");
+        var failed = await f.Deploy("1.0.2", "Tdd", "Succeeded");   // the evaluation needs a read of the running version, and fails outside any release's judgement: it asks for the retry
+        Assert.Equal(f.Now + DeliveryTrainService.TransientRetry, failed.WakeAt);
+        // (a failure outside a release's judgement returns the retry without recording it as the pending timer; one inside the judgement records it, so the pending timer is put back: the retry is the stale one)
+        var rec = (await f.Store.Load(f.Key, default))!;
+        rec.State.WakeDue = pending;
+        Assert.True(await f.Store.Save(f.Key, rec.State, rec.Revision, default));
+        f.Reads.Fail = null;
+        f.Now += DeliveryTrainService.TransientRetry;
+        var sequence = f.State.Sequence;
+        var retry = await f.Wake(f.Now);   // the retry: not the pending timer, and the pending one lies ahead
+        Assert.True(f.State.Sequence > sequence, "the retry evaluated (a look saves the state; the early return did not)");
+        Assert.Null(retry.WakeAt);   // (the pending safety wake carries the chain on; the retry starts no second one)
         Assert.Equal(pending, f.State.WakeDue);
     }
 

@@ -87,9 +87,6 @@ public sealed class DeliveryTrainService(ITrainStore store, IDeliveryPolicies po
             var now = clock();
             var stale = false;
             if (input is TrainWake { Due: { } due }) { if (due == state.WakeDue) state.WakeDue = null; else stale = true; }   // (a timer that is not the pending one only looks again)
-            // A stale timer while the pending one still lies ahead has nothing to add: the pending one looks again. Without this, the timers a replay's inputs left behind (one per input, see below, on tdd about 120 per
-            // train, all due at the same moment) each ran a full evaluation of GitHub reads within minutes: the burst that GitHub refused and that ended in the dead letters (MergeFactsException).
-            if (stale && state.WakeDue is { } pending && pending > now) return TrainResult.None;
             var gated = state.ReplayingSince is { } since && now - since < ReplayLimit;
             if (!gated && state.ReplayingSince is not null) { state.ReplayingSince = null; state.RepublishPending = true; }   // the end marker was lost: the hold ran out, which is the end of the replay too
             TrainRun? run = null; DateTimeOffset? wake = null;
