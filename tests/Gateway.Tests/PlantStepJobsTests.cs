@@ -1,31 +1,48 @@
 using System.Text.Json.Nodes;
+using Fworker.Workflows.Reconcilers;
 using Xunit;
 
 /// <summary>
-/// W9.10g: the plant-wide steps of the sweep as recurring jobs (gateway/Ports/PlantStepJobs.cs), the intervals of the slots (RecurringJobIntervals), and the sweep leaving the steps out where the jobs exist. The rule script is a
-/// fake that answers sync-board and qc-sync as the real ones do; what is checked is what the gateway asks for and what it does with the answer.
+/// W9.10g: the plant-wide steps of the sweep as recurring jobs (gateway/Ports/PlantStepJobs.cs), the intervals of the slots (RecurringJobIntervals), and the sweep leaving the steps out where the jobs exist. The steps themselves
+/// (PlantSteps, the C# port of the rule scripts' claim-ref reap, board guard, replenishment and count) are tested in Fworker.Workflow.Tests (PlantStepsTests); here they are a stand-in, and what is checked is what the job asks of
+/// them, when it does not, and what it does with the answer.
 /// </summary>
 public class PlantStepJobsTests
 {
+    sealed class FakeSteps : IPlantSteps
+    {
+        public readonly List<string> Calls = [];
+        public IReadOnlySet<int>? Skip;
+        public int? Waiting; public int Free = -1;
+        public PlantStepResult Result = new();
+        public Exception? Fails;
+        public Action? Inside;
+
+        Task<PlantStepResult> Run(string step)
+        {
+            Calls.Add(step); Inside?.Invoke();
+            return Fails is { } f ? Task.FromException<PlantStepResult>(f) : Task.FromResult(Result);
+        }
+
+        public Task<PlantStepResult> ClaimRefReap(IReadOnlySet<int> skip) { Skip = skip; return Run("claim-ref-reap"); }
+        public Task<PlantStepResult> BoardGuard() => Run("board-guard");
+        public Task<PlantStepResult> Replenish(int? waiting, int freeWorkers) { Waiting = waiting; Free = freeWorkers; return Run("replenish"); }
+        public Task<PlantStepResult> DesignWaiting() => Run("design-waiting");
+    }
+
     sealed class Rig
     {
-        public readonly List<(string Verb, JsonObject Args)> Calls = [];
+        public readonly FakeSteps Steps = new();
         public readonly GitHubBudget Budget = new(300);
         public readonly Plant Plant = new("secret", (_, _, _, _) => Task.CompletedTask, 30);
-        public bool May = true, Restored = true;
-        public int Code; public string? Output;
-        public JsonObject Answer = new() { ["ok"] = true, ["actions"] = new JsonArray(), ["errors"] = new JsonArray(), ["elapsed_ms"] = 5 };
-        public readonly Runner Runner = new("/nonexistent/factory.ps1");
+        public bool May = true, Restored = true, HasSteps = true;
         public PlantStepJobs Jobs;
 
         public Rig(bool ownerMode = true, TimeSpan? readyWait = null)
         {
-            Runner.V2Own = (verb, stdin, _) => { Calls.Add((verb, (JsonObject)JsonNode.Parse(stdin)!)); return Task.FromResult<(int, string)?>((Code, Output ?? Answer.ToJsonString())); };
-            Jobs = new PlantStepJobs(Runner, () => Plant, () => null, Budget, null, () => May, () => Restored, ownerMode, readyWait ?? TimeSpan.Zero);
+            Jobs = new PlantStepJobs(() => HasSteps ? Steps : null, () => Plant, () => null, Budget, null, () => May, () => Restored, ownerMode, readyWait ?? TimeSpan.Zero);
         }
     }
-
-    static string Steps(JsonObject args) => string.Join(",", ((JsonArray)args["plant_steps"]!).Select(x => x!.ToString()));
 
     [Fact]
     public async Task EachJobAsksForItsOwnStep_AndNothingElse()
@@ -35,19 +52,21 @@ public class PlantStepJobsTests
         Assert.Equal("ok", await r.Jobs.BoardGuard(default));
         Assert.Equal("ok", await r.Jobs.Replenish(default));
         Assert.Equal("ok", await r.Jobs.BacklogLow(default));
-        Assert.Equal(["claim-ref-reap", "board-guard", "replenish", "design-waiting"], r.Calls.Select(c => Steps(c.Args)).ToArray());
-        Assert.All(r.Calls, c => Assert.Equal("sync-board", c.Verb));
-        Assert.All(r.Calls, c => Assert.False(c.Args.ContainsKey("items")));   // a plant pass is never an incremental one
+        Assert.Equal(["claim-ref-reap", "board-guard", "replenish", "design-waiting"], r.Steps.Calls);
+        Assert.Empty(r.Steps.Skip!);   // no saga owns an item here
     }
 
     [Fact]
-    public async Task NothingRunsWhileThisProcessMayNotAct_OrBeforeTheRestore()
+    public async Task NothingRunsWhileThisProcessMayNotAct_OrBeforeTheRestore_OrWithoutAGitHubIdentity()
     {
         var r = new Rig { May = false };
         Assert.Equal("not-leader", await r.Jobs.ClaimRefReap(default));
         r.May = true; r.Restored = false;
         Assert.Equal("waiting-for-restore", await r.Jobs.Replenish(default));
-        Assert.Empty(r.Calls);
+        Assert.Empty(r.Steps.Calls);
+        r.Restored = true; r.HasSteps = false;   // the instance has no GitHub identity: the steps cannot be made (v1 could not act either)
+        Assert.Equal("no-github", await r.Jobs.BoardGuard(default));
+        Assert.Equal(1, r.Jobs.Outcomes["board-guard:no-github"]);
     }
 
     [Fact]
@@ -60,18 +79,17 @@ public class PlantStepJobsTests
         Assert.Equal("budget-low", await r.Jobs.BoardGuard(default));
         Assert.Equal("ok", await r.Jobs.Replenish(default));
         Assert.Equal("ok", await r.Jobs.BacklogLow(default));
-        Assert.Equal(["replenish", "design-waiting"], r.Calls.Select(c => Steps(c.Args)).ToArray());
+        Assert.Equal(["replenish", "design-waiting"], r.Steps.Calls);
     }
 
     [Fact]
     public async Task ThePlantsFreeSessionsAndWaitingCountGoToTheReplenishment_AndItsAnswerIsKept()
     {
         var r = new Rig();
-        r.Answer["replenish"] = new JsonObject { ["enabled"] = true, ["open"] = 2, ["targetOpen"] = 5, ["createdToday"] = 1, ["maxPerDay"] = 4, ["skipped"] = "", ["created"] = new JsonArray(41, 42) };
+        r.Steps.Result.Replenish = new JsonObject { ["enabled"] = true, ["open"] = 2, ["targetOpen"] = 5, ["createdToday"] = 1, ["maxPerDay"] = 4, ["skipped"] = "", ["created"] = new JsonArray(41, 42) };
         Assert.Equal("ok", await r.Jobs.Replenish(default));
-        var args = r.Calls.Single().Args;
-        Assert.Equal(0, (int)args["free_workers"]!);      // the fake plant has no session
-        Assert.False(args.ContainsKey("replenish_waiting"));   // no plan has run yet: the script holds back or not as it did for a first sweep
+        Assert.Equal(0, r.Steps.Free);   // the fake plant has no session
+        Assert.Null(r.Steps.Waiting);    // no plan has run yet: the step holds back or not as it did for a first sweep
         var status = r.Plant.ReplenishStatus();
         Assert.NotNull(status); Assert.Equal(2, (int)status!["createdSinceStart"]!); Assert.Equal(42, (int)status["lastItem"]!);
     }
@@ -81,10 +99,10 @@ public class PlantStepJobsTests
     {
         var r = new Rig();
         r.Plant.Keeper = new KeeperSettings { Enabled = true, MinTechnicalDesign = 3, Names = ["backlog-keeper"] };
-        r.Answer["design_waiting"] = 1;
+        r.Steps.Result.DesignWaiting = 1;
         Assert.Equal("ok", await r.Jobs.BacklogLow(default));
         Assert.Equal(1, (int)r.Plant.KeeperStatus()["jobsBuffered"]!);
-        r.Answer["design_waiting"] = 5;
+        r.Steps.Result.DesignWaiting = 5;
         Assert.Equal("ok", await r.Jobs.BacklogLow(default));   // enough waiting: no new job
         Assert.Equal(1, (int)r.Plant.KeeperStatus()["jobsBuffered"]!);
     }
@@ -95,7 +113,7 @@ public class PlantStepJobsTests
         // the sweep applied the keeper's count whatever the owner mode (the Tier 1 keeper suite runs a gateway without owner sessions)
         var r = new Rig(ownerMode: false);
         r.Plant.Keeper = new KeeperSettings { Enabled = true, MinTechnicalDesign = 3, Names = ["backlog-keeper"] };
-        r.Answer["design_waiting"] = 1;
+        r.Steps.Result.DesignWaiting = 1;
         Assert.Equal("ok", await r.Jobs.BacklogLow(default));
         Assert.Equal(1, (int)r.Plant.KeeperStatus()["jobsBuffered"]!);
     }
@@ -105,7 +123,7 @@ public class PlantStepJobsTests
     {
         var r = new Rig(readyWait: TimeSpan.FromSeconds(10)) { Restored = false };
         r.Plant.Keeper = new KeeperSettings { Enabled = true, MinTechnicalDesign = 3, Names = ["backlog-keeper"] };
-        r.Answer["design_waiting"] = 0;
+        r.Steps.Result.DesignWaiting = 0;
         var run = r.Jobs.BacklogLow(default);
         await Task.Delay(700);
         Assert.False(run.IsCompleted);
@@ -120,26 +138,29 @@ public class PlantStepJobsTests
     public async Task APassTheLeaseEnded_IsDropped_AndOnePlantWithoutOwnerModeAppliesNothing()
     {
         var r = new Rig();
-        r.Answer["replenish"] = new JsonObject { ["enabled"] = true, ["created"] = new JsonArray(7) };
-        r.Runner.V2Own = (verb, stdin, _) => { r.May = false; r.Calls.Add((verb, (JsonObject)JsonNode.Parse(stdin)!)); return Task.FromResult<(int, string)?>((0, r.Answer.ToJsonString())); };   // the lease is lost while the script runs
+        r.Steps.Result.Replenish = new JsonObject { ["enabled"] = true, ["created"] = new JsonArray(7) };
+        r.Steps.Inside = () => r.May = false;   // the lease is lost while the step runs
         Assert.Equal("fenced", await r.Jobs.Replenish(default));
         Assert.Null(r.Plant.ReplenishStatus());   // what the pass read was not applied
 
+        var stopped = new Rig();
+        stopped.Steps.Fails = new PlantStepFenced();   // the step itself found the lease gone before a write
+        Assert.Equal("fenced", await stopped.Jobs.BoardGuard(default));
+
         var plain = new Rig(ownerMode: false);
-        plain.Answer["replenish"] = new JsonObject { ["enabled"] = true, ["created"] = new JsonArray(7) };
+        plain.Steps.Result.Replenish = new JsonObject { ["enabled"] = true, ["created"] = new JsonArray(7) };
         Assert.Equal("ok", await plain.Jobs.Replenish(default));
-        Assert.False(plain.Calls.Single().Args.ContainsKey("free_workers"));   // as the sweep: no owner mode, no input from the plant
+        Assert.Equal(0, plain.Steps.Free); Assert.Null(plain.Steps.Waiting);   // as the sweep: no owner mode, no input from the plant
         Assert.Null(plain.Plant.ReplenishStatus());
     }
 
     [Fact]
-    public async Task AScriptThatFails_IsReportedAsFailed_AndNeverThrows()
+    public async Task AStepThatThrows_IsReportedAsFailed_AndNeverThrows()
     {
-        var r = new Rig { Code = 20, Output = "not json" };
+        var r = new Rig { Steps = { Fails = new InvalidOperationException("boom") } };
         Assert.Equal("failed", await r.Jobs.BoardGuard(default));
-        r.Code = 0;
-        Assert.Equal("failed", await r.Jobs.BoardGuard(default));   // exit 0 with no JSON object
-        Assert.Equal(2, r.Jobs.Outcomes["board-guard:failed"]);
+        Assert.Equal("failed", await r.Jobs.ClaimRefReap(default));
+        Assert.Equal(1, r.Jobs.Outcomes["board-guard:failed"]);
     }
 
     // ---- the intervals --------------------------------------------------------------------------------------------------------------------------------------

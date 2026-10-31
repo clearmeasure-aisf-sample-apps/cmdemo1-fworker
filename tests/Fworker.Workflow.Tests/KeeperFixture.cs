@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Seams;
 using Fworker.Workflows.Keeper;
+using Fworker.Workflows.Reconcilers;
 using Xunit;
 
 namespace Fworker.Workflow.Tests;
@@ -9,11 +10,12 @@ namespace Fworker.Workflow.Tests;
 /// W9.6: the world the keeper and manager verbs run in, in memory: a repository with issues, a board, pull requests and workflow runs; the state comments and the journal; the locks; the saga. It does what GitHub does for the calls the
 /// verbs make (an issue created has the next number, a label added is on the issue), keeps every write in order for the tests to read, and refuses the way the ports refuse.
 /// </summary>
-public sealed class KeeperWorld : IKeeperGitHub, IItemStateStore, IVerbLocks, IKeeperSaga
+public sealed class KeeperWorld : IPlantGitHub, IItemStateStore, IVerbLocks, IKeeperSaga
 {
     public sealed class Issue
     {
         public int Number; public string Title = ""; public string Body = ""; public bool Open = true; public List<string> Labels = []; public string? Card; public string? Column;
+        public DateTime Created = new(2026, 10, 29, 11, 0, 0, DateTimeKind.Utc); public bool IsPull;
         public string NodeId => "I_" + Number;
     }
 
@@ -26,13 +28,21 @@ public sealed class KeeperWorld : IKeeperGitHub, IItemStateStore, IVerbLocks, IK
     public readonly List<string> Journal = [];
     public readonly List<JsonObject> Pulls = [];
     public readonly List<JsonObject> Runs = [];
-    public readonly HashSet<string> Columns = new(StringComparer.OrdinalIgnoreCase) { "Technical Design", "Todo", "Development" };
+    public readonly HashSet<string> Columns = new(StringComparer.OrdinalIgnoreCase) { "Technical Design", "Todo", "Development", "Done" };
     public readonly List<int> LocksTaken = [];
     public int IntakeLocks;
     public readonly List<string> SagaCalls = [];
     public readonly HashSet<int> SagaOwned = [];
     public readonly Dictionary<long, int> RerunStatus = [];
     public int NextNumber = 100;
+    // W9.10g: the plant steps' reads and the locks they take without waiting
+    public readonly HashSet<int> ClaimRefs = [];
+    public readonly HashSet<int> BusyItems = [];
+    public bool IntakeBusy;
+    public string Last = "Done";
+    public readonly List<string> IssuePages = [];
+    public Exception? ListBoardFails;
+    public Func<ItemInfo, Exception?>? MoveFails;
 
     public FactoryRules Rules = FactoryRules.From(JsonNode.Parse("""
         { "name": "factory-worker", "owner": "acme", "repo": "work", "project": 1, "label": "factory", "autoMergeLabel": "Auto Merge", "testLabel": "test", "videoLabel": "video",
@@ -81,10 +91,35 @@ public sealed class KeeperWorld : IKeeperGitHub, IItemStateStore, IVerbLocks, IK
 
     ItemInfo Info(Issue i) => new(i.Number, i.NodeId, i.Open, i.Title, i.Body, i.Labels.ToList(), i.Card, i.Column);
 
-    public Task<ItemInfo> GetItemInfo(int item) => Issues.TryGetValue(item, out var i) ? Task.FromResult(Info(i)) : throw new VerbRejection(12, "item-not-found", $"issue #{item} not found");
+    public Task<ItemInfo> GetItemInfo(int item) =>
+        !Issues.TryGetValue(item, out var i) ? throw new VerbRejection(12, "item-not-found", $"issue #{item} not found")
+        : !Rules.InScope(i.Labels) ? throw new VerbRejection(10, "out-of-scope", $"issue #{item} is outside this gateway's scope")   // (a world whose rules have no envScope has no scope)
+        : Task.FromResult(Info(i));
 
     public Task<IReadOnlyList<BoardEntry>> ListBoard() =>
-        Task.FromResult<IReadOnlyList<BoardEntry>>(Issues.Values.Where(i => i.Card != null).OrderBy(i => i.Number).Select(i => new BoardEntry(i.Number, i.Open, i.Title, i.Column, i.Labels.ToList())).ToList());
+        ListBoardFails is { } fail ? Task.FromException<IReadOnlyList<BoardEntry>>(fail)
+        : Task.FromResult<IReadOnlyList<BoardEntry>>(Issues.Values.Where(i => i.Card != null && !i.IsPull && Rules.InScope(i.Labels)).OrderBy(i => i.Number).Select(i => new BoardEntry(i.Number, i.Open, i.Title, i.Column, i.Labels.ToList())).ToList());
+
+    public Task<IReadOnlyList<int>> ClaimRefItems() => Task.FromResult<IReadOnlyList<int>>(ClaimRefs.OrderBy(n => n).ToList());
+
+    public Task<IReadOnlyList<JsonObject>> LabelledIssues(string state, int page)
+    {
+        IssuePages.Add($"{state}/{page}");
+        var rows = Issues.Values.Where(i => i.Labels.Any(l => l.Equals(Rules.Label, StringComparison.OrdinalIgnoreCase)) && (state == "all" || (state == "open") == i.Open)).OrderByDescending(i => i.Number)
+            .Skip((page - 1) * 100).Take(100).Select(i =>
+            {
+                var o = new JsonObject
+                {
+                    ["number"] = i.Number, ["title"] = i.Title, ["body"] = i.Body, ["state"] = i.Open ? "open" : "closed", ["created_at"] = Ps.Iso(i.Created),
+                    ["labels"] = new JsonArray(i.Labels.Select(l => (JsonNode)new JsonObject { ["name"] = l }).ToArray()),
+                };
+                if (i.IsPull) o["pull_request"] = new JsonObject();
+                return o;
+            }).ToList();
+        return Task.FromResult<IReadOnlyList<JsonObject>>(rows);
+    }
+
+    public Task<string> LastColumn() => Task.FromResult(Last);
 
     public Task<JsonNode> GetIssue(int item) => Issues.TryGetValue(item, out var i) ? Task.FromResult<JsonNode>(new JsonObject { ["number"] = i.Number, ["state"] = i.Open ? "open" : "closed" }) : throw NotFound($"issues/{item}");
 
@@ -110,6 +145,7 @@ public sealed class KeeperWorld : IKeeperGitHub, IItemStateStore, IVerbLocks, IK
     {
         if (!Columns.Contains(column)) throw new VerbRejection(10, "unknown-column", $"board has no column '{column}'");
         if (info.CardId == null) throw new VerbRejection(10, "not-on-board", $"issue #{info.Number} is not on the board");
+        if (MoveFails?.Invoke(info) is { } fail) throw fail;
         Issues[info.Number].Column = column;
         Writes.Add($"moveCard {info.Number} {column}");
         return Task.CompletedTask;
@@ -133,7 +169,7 @@ public sealed class KeeperWorld : IKeeperGitHub, IItemStateStore, IVerbLocks, IK
 
     public Task<int> RerunFailedJobs(long runId) { Writes.Add($"POST actions/runs/{runId}/rerun-failed-jobs"); return Task.FromResult(RerunStatus.GetValueOrDefault(runId, 201)); }
 
-    public Task RemoveClaimRef(int item) { Writes.Add($"DELETE claims/{item}"); return Task.CompletedTask; }
+    public Task RemoveClaimRef(int item) { ClaimRefs.Remove(item); Writes.Add($"DELETE claims/{item}"); return Task.CompletedTask; }
 
     public static JsonObject Pull(int number, string branch, string sha, string state = "open") =>
         new() { ["number"] = number, ["state"] = state, ["title"] = "pr", ["head"] = new JsonObject { ["ref"] = branch, ["sha"] = sha } };
@@ -170,6 +206,19 @@ public sealed class KeeperWorld : IKeeperGitHub, IItemStateStore, IVerbLocks, IK
     public Task<IAsyncDisposable> Item(int item) { LocksTaken.Add(item); return Task.FromResult<IAsyncDisposable>(new Nothing()); }
 
     public Task<IAsyncDisposable> Intake() { IntakeLocks++; return Task.FromResult<IAsyncDisposable>(new Nothing()); }
+
+    // (W9.10g: a lock taken with a wait of its own; the busy ones are refused at once, as a wait that runs out is)
+    public Task<IAsyncDisposable> Item(int item, TimeSpan wait)
+    {
+        if (BusyItems.Contains(item)) throw VerbRejection.Retry(20, "item-busy", $"another operation on item {item} is running", 5);
+        return Item(item);
+    }
+
+    public Task<IAsyncDisposable> Intake(TimeSpan wait)
+    {
+        if (IntakeBusy) throw VerbRejection.Retry(20, "intake-busy", "another work item is being put on the board", 5);
+        return Intake();
+    }
 
     // ---- IKeeperSaga ------------------------------------------------------------------------------------------------------------------------
 

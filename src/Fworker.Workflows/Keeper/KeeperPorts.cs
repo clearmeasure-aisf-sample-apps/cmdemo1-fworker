@@ -97,6 +97,12 @@ public interface IVerbLocks
 {
     Task<IAsyncDisposable> Item(int item);
     Task<IAsyncDisposable> Intake();
+
+    /// <summary>W9.10g: <c>Use-ItemLock $n {...} $seconds</c> with a wait of its own (the claim-ref reap takes it without waiting, the guard's journal line waits 3 seconds). A port that knows no other wait uses its own.</summary>
+    Task<IAsyncDisposable> Item(int item, TimeSpan wait) => Item(item);
+
+    /// <summary>W9.10g: <c>Use-IntakeLock {...} $seconds</c> (the board guard takes it without waiting).</summary>
+    Task<IAsyncDisposable> Intake(TimeSpan wait) => Intake();
 }
 
 /// <summary>What the WorkItemSaga must be told when a keeper or manager verb changes an item it owns. Nothing is said about an item no saga owns.</summary>
