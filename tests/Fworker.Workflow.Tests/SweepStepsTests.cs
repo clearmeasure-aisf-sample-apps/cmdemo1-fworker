@@ -503,14 +503,14 @@ public class SweepStepsTests
     // ---- the plant manager's release-owner and requeue (W9.10k) -------------------------------------------------------------------------------------------------
 
     [Fact]
-    public async Task TheManagersReleaseOfAnOwner_IsRecordedAndAsksTheGatewayToGiveTheClaimUp_OncePerCall()
+    public async Task TheManagersReleaseOfAnOwner_IsRecordedOnly_AndSendsNoReleaseCommand_OncePerCall()
     {
         var fx = await At(StepKind.Develop);
         var step = fx.State.Step; var arm = fx.State.ArmId; var lease = fx.State.LeaseDue;
         var r = await fx.Send(new OwnerReleaseAsked(Item, 0, "manager-release|1", "stalled owner"));
         Assert.Equal(WorkItemOutcome.Applied, r.Decision.Outcome);
-        var release = Assert.IsType<OwnerReleaseRequested>(Assert.Single(r.Sent));
-        Assert.Equal(Item, release.Item); Assert.Equal("stalled owner", release.Reason);
+        // the verb ended the lease itself; a command without a holder would release whoever holds the claim when it runs (a session that accepted the re-offered item)
+        Assert.Empty(r.Sent);
         Assert.Contains(WorkItemActions.OwnerReleaseAsked, fx.Actions);
         // nothing else about the item changes: the step, the arm and the lease are what they were
         Assert.Equal((step, arm, lease), (fx.State.Step, fx.State.ArmId, fx.State.LeaseDue));

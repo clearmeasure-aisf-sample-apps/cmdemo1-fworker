@@ -165,14 +165,14 @@ static class SweepFlow
 
     // ---- the plant manager's actions (W9.10k) --------------------------------------------------------------------------------------------------------------------
 
-    /// <summary>The plant manager ended the lease of the item's owner (release-owner): the saga records it and asks the gateway to give the claim up, as it does for an owner that waited out a hold. No step and no park changes.</summary>
+    /// <summary>The plant manager ended the lease of the item's owner (release-owner): the saga records the decision only. The verb has taken the lease back itself (lease_until in the past, taken_back) and the plant offers the item again, as in v1;
+    /// a ReleaseOwner command would carry no holder and, run late (a retry, a redelivery, the overlap of two nodes), would release the claim of the session that accepted the new offer. No step and no park changes.</summary>
     public static StepAnswer ReleaseAsked(StepContext c, OwnerReleaseAsked a)
     {
         var s = c.State;
         if (s.Status != WorkItemStatus.Open) return StepAnswer.Refused("the item is delivered");
         var reason = a.Reason.Length == 0 ? "the plant manager ended the owner's lease" : a.Reason;
         c.Decide(WorkItemActions.OwnerReleaseAsked, reason);
-        c.Send(new ReleaseOwner($"release|{s.Item}|{s.Generation}|{a.Key}", reason));
         return StepAnswer.Applied;
     }
 
