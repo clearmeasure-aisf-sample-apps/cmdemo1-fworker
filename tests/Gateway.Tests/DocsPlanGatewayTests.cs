@@ -612,6 +612,39 @@ public sealed class V2VerbFeedTests
         Assert.Empty(rig.Inputs);
     }
 
+    // The sweep reads the set of the saga's items before the board; the intake can start a saga between the two, the card then moves, the sweep offers the item, and a session that is quick sends its design before the next read.
+    // The feed used to skip every call while it knew no saga (Count 0) or not that item, and the saga never heard the design: its completion was refused, and the review of the next column was taken for the design's.
+    [Fact]
+    public async Task ASagaThatStartedAfterTheOwnershipWasRead_StillHearsTheDesignAndTheCompletion()
+    {
+        var rig = new Rig();
+        await rig.Svc.Handle(new StartWorkItem(Item, "intake", "docs"));   // (no Own.RefreshAsync: the set is the one read before the start)
+        Assert.False(rig.Own.Owns(7));
+        var feed = rig.Feed(new Inner(0, """{"ok":true,"appended":true}"""));
+        await feed.RunAsync("append-body", Body("append-body", new { content = Section + "\n<!-- aisf:docs-only -->" }), TimeSpan.FromSeconds(1));
+        Assert.IsType<DesignRecorded>(Assert.Single(rig.Inputs));
+        Assert.True(rig.Own.Owns(7));
+        rig.Published.Clear();
+        await rig.Feed(new Inner(0, """{"ok":true,"completed":true,"moved_to":"Development"}""")).RunAsync("complete", Body("complete"), TimeSpan.FromSeconds(1));
+        Assert.IsType<StepCompleted>(Assert.Single(rig.Inputs));
+    }
+
+    [Fact]
+    public async Task AnItemWithoutASaga_IsLookedForInTheTableAtMostEveryQuarterSecond_AndTheSagaHearsNothingOfIt()
+    {
+        var store = new CountingStore(new InMemoryWorkItemStore());
+        var own = new V2Ownership(store, Home);
+        var now = new DateTimeOffset(2026, 10, 28, 10, 0, 0, TimeSpan.Zero);
+        var published = new List<WorkItemInput>();
+        var feed = new V2VerbFeed(new Inner(0, """{"ok":true,"appended":true}"""), own, store, Home, Settings(), m => { published.Add(m); return Task.FromResult(true); }, null, _ => Task.CompletedTask, () => now);
+        for (var i = 0; i < 5; i++) await feed.RunAsync("append-body", Body("append-body", new { content = Section }), TimeSpan.FromSeconds(1));
+        Assert.Empty(published);
+        Assert.Equal(1, store.Reads);
+        now = now.Add(V2VerbFeed.MissReadEvery);
+        await feed.RunAsync("append-body", Body("append-body", new { content = Section }), TimeSpan.FromSeconds(1));
+        Assert.Equal(2, store.Reads);
+    }
+
     [Fact]
     public async Task AReviewAndTheCompletionsOfTheColumns_GoToTheSaga_InTheOrderTheyHappened()
     {
@@ -710,11 +743,11 @@ public sealed class V2VerbFeedTests
 
     sealed class CountingStore(IWorkItemStore inner) : IWorkItemStore
     {
-        public int Loads;
+        public int Loads, Reads;
         public Task<WorkItemRecord?> Load(string itemKey, CancellationToken ct) { Loads++; return inner.Load(itemKey, ct); }
         public Task<bool> Save(string itemKey, WorkItemState state, int expectedRevision, CancellationToken ct) => inner.Save(itemKey, state, expectedRevision, ct);
         public Task<IReadOnlyList<string>> OwnedItems(CancellationToken ct) => inner.OwnedItems(ct);
-        public Task<IReadOnlyList<WorkItemState>> OwnedStates(CancellationToken ct) => inner.OwnedStates(ct);
+        public Task<IReadOnlyList<WorkItemState>> OwnedStates(CancellationToken ct) { Reads++; return inner.OwnedStates(ct); }
         public Task<IReadOnlyDictionary<string, int>> InFlightByRepository(CancellationToken ct) => inner.InFlightByRepository(ct);
     }
 

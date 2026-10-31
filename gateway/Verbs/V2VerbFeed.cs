@@ -113,7 +113,7 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
         stdin = await AskForFunctionalTestingAlongside(verb, stdin);
         var answer = await inner.RunAsync(verb, stdin, timeout);
         // the script's answer is the caller's, whatever the feed does after it
-        if (answer.Code == 0 && ownership.Count > 0 && (DocsVerbs.Handled.Contains(verb) || DocsVerbs.Activity.Contains(verb)))
+        if (answer.Code == 0 && (DocsVerbs.Handled.Contains(verb) || DocsVerbs.Activity.Contains(verb)))
         {
             try { await Feed(verb, stdin, answer.Output); }
             catch (Exception e) { Console.Error.WriteLine($"v2 feed {verb}: {e.GetType().Name}"); }
@@ -124,7 +124,29 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
     /// <summary>W9.4: a verb answered by a v2 route (not by the script under this router) is a sign of life of the session as well: it renews the step's lease as the calls of the script do.</summary>
     public async Task Observe(string verb, string stdin, string output)
     {
-        if (ownership.Count > 0 && DocsVerbs.Activity.Contains(verb)) await Feed(verb, stdin, output);
+        if (DocsVerbs.Activity.Contains(verb)) await Feed(verb, stdin, output);
+    }
+
+    /// <summary>The least time between two reads of the saga's table that this feed asks for, because an item it was told of is not in the set it has.</summary>
+    public static readonly TimeSpan MissReadEvery = TimeSpan.FromMilliseconds(250);
+    static readonly TimeSpan MissReadLimit = TimeSpan.FromSeconds(3);
+    DateTimeOffset lastMissRead;
+
+    /// <summary>
+    /// Whether the saga owns the item. The set the ownership holds is read before each sweep, and a saga can start after that read (the intake starts it on its own clock, the sweep reads the set first and the board after): a session
+    /// that was offered the item in that gap, and is fast, would send its design, its review and its completion to a feed that does not know the item, and the saga would never hear them (its completion is refused for want of a design,
+    /// and the next step's review is recorded in the step it left). So an item that is not in the set is looked for in the table once, at most four times a second for all items; a v1 item costs that read, bounded, and nothing else.
+    /// </summary>
+    async Task<bool> Owns(int number)
+    {
+        if (ownership.Owns(number)) return true;
+        var t = now();
+        if (t - lastMissRead < MissReadEvery) return false;
+        lastMissRead = t;
+        // a table that does not answer must not hold up the call of an item that is v1's (the read has a limit of 10 s of its own; this one is shorter), and a failure is the old answer: not owned
+        try { await ownership.RefreshAsync().WaitAsync(MissReadLimit); }
+        catch (Exception e) when (e is TimeoutException or InvalidOperationException or System.Data.Common.DbException) { Console.Error.WriteLine($"v2 feed: the saga table was not read for #{number}: {e.GetType().Name}"); return false; }
+        return ownership.Owns(number);
     }
 
     /// <summary>
@@ -142,7 +164,7 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
             // the flags are the gateway's to give: one a caller sent is taken out, whatever the item
             var sent = TakeOutFlag(body);
             var give = false; var sagaMerges = false;
-            if (ownership.Count > 0 && int.TryParse(body["item"]?.ToString(), out var number) && number > 0 && ownership.Owns(number))
+            if (int.TryParse(body["item"]?.ToString(), out var number) && number > 0 && await Owns(number))
             {
                 if (verb == "validation-verdict") sagaMerges = true;
                 else if ((await store.Load(new ItemId(home, number).ToString(), CancellationToken.None))?.State is { } state)
@@ -159,7 +181,7 @@ sealed class V2VerbFeed(IVerbRouter inner, V2Ownership ownership, IWorkItemStore
     async Task Feed(string verb, string stdin, string output)
     {
         if (JsonNode.Parse(stdin) is not JsonObject body || JsonNode.Parse(output) is not JsonObject answer) return;
-        if (!int.TryParse(body["item"]?.ToString(), out var number) || number <= 0 || !ownership.Owns(number)) return;
+        if (!int.TryParse(body["item"]?.ToString(), out var number) || number <= 0 || !await Owns(number)) return;
         var id = new ItemId(home, number);
         if ((await store.Load(id.ToString(), CancellationToken.None))?.State is not { } state) return;
         // the call is the session's sign of life: the lease of the step is renewed (before the inputs that may end the step, so it carries the arm they end)
