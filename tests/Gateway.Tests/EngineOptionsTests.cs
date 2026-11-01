@@ -51,17 +51,37 @@ public sealed class EngineOptionsTests : IDisposable
     }
 
     [Fact]
-    public void DeployOverrides_PutTddInShadowAndNothingInV2()
+    public void DeployOverrides_PutTddInV2AndNothingInShadow()
     {
-        // W2 "tdd joins shadow mode": the deployed image merges engine.shadowEnvironments = [tdd] over the empty default; v2Environments stays empty
-        // until W9.9, so v1 still acts everywhere. Changing this pin is a protected-area change (deploy.overrides.json) and needs its own pull request.
+        // W9.9c "the tdd cutover": the deployed image merges engine.v2Environments = [tdd] over the empty default and the shadow list is empty; uat and
+        // prod stay v1. Changing this pin is a protected-area change (deploy.overrides.json) and needs its own pull request.
         var merged = ApplyOverrides.Merge(File.ReadAllText(Path.Combine(RepoRoot(), "config", "instance.json")), File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")));
-        Assert.Equal(new[] { "tdd" }, merged["engine"]!["shadowEnvironments"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
-        Assert.Empty(merged["engine"]!["v2Environments"]!.AsArray());
+        Assert.Equal(new[] { "tdd" }, merged["engine"]!["v2Environments"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray());
+        Assert.Empty(merged["engine"]!["shadowEnvironments"]!.AsArray());
         var cfg = Config(merged["engine"]!.ToJsonString() is var j ? "{\"engine\":" + j + "}" : "");
-        Assert.Equal(EngineMode.Shadow, EngineOptions.From(cfg, "tdd", Env()).Mode);
+        Assert.Equal(EngineMode.V2, EngineOptions.From(cfg, "tdd", Env()).Mode);
         Assert.Equal(EngineMode.V1, EngineOptions.From(cfg, "uat", Env()).Mode);
         Assert.Equal(EngineMode.V1, EngineOptions.From(cfg, "prod", Env()).Mode);
+    }
+
+    [Fact]
+    public void DeployOverrides_HoldTheRestOfTheW99cChecklistForTdd()
+    {
+        // W9.9c settings checklist on the merged configuration (the overrides over config/instance.json); a change of one of these is a change of the cutover and needs its own pull request.
+        var merged = ApplyOverrides.Merge(File.ReadAllText(Path.Combine(RepoRoot(), "config", "instance.json")), File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")));
+        string[] Strings(System.Text.Json.Nodes.JsonNode? n) => n!.AsArray().Select(x => x!.GetValue<string>()).ToArray();
+        Assert.True(merged["intake"]!["enabled"]!.GetValue<bool>());
+        Assert.Equal(new[] { "docs", "feature" }, Strings(merged["intake"]!["v2Plans"]));
+        Assert.Equal("tdd", merged["delivery"]!["finalEnvironment"]!.GetValue<string>());
+        Assert.Equal("octopus", merged["scheduler"]!["runtime"]!.GetValue<string>());
+        // #437 option A: the Copilot and Cursor runtimes are off for the measured batch
+        Assert.False(merged["api"]!["cursor"]!["enabled"]!.GetValue<bool>());
+        Assert.False(merged["api"]!["copilot"]!["environments"]!["tdd"]!["enabled"]!.GetValue<bool>());
+        // uat and prod stay with v1's promoter; the merge strategy is the default's
+        var overrides = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(RepoRoot(), "config", "deploy.overrides.json")))!;
+        Assert.Null(overrides["delivery"]?["autoPromote"]?["trainActs"]);
+        Assert.NotEqual(true, merged["delivery"]!["autoPromote"]!["trainActs"]?.GetValue<bool>());
+        Assert.Null(overrides["mergeStrategy"]);
     }
 
     [Theory]

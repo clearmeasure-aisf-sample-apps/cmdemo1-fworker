@@ -834,6 +834,24 @@ owner sets (`docs/design/operator-session.md` section 5):
 - no push access for that account to the work-orders repository (`cmdemo1-workorders`): the session improves the factory, it never
   works on the application.
 
+## 6b. v2 cutover (W9.9c)
+
+The tdd gateway runs the v2 engine from the pull request "W9.9c: the tdd cutover (v2 acts on tdd)" (`config/deploy.overrides.json`):
+`engine.v2Environments` is `["tdd"]` and `engine.shadowEnvironments` is empty; `intake.enabled` true with `intake.v2Plans` `["docs","feature"]`;
+`scheduler.runtime` `octopus`; `delivery.finalEnvironment` `tdd` (uat and prod keep the v1 `AutoPromoter`). The Copilot and Cursor runtimes are off on tdd
+for the measured batch (#437 option A; their day budgets are counted in memory): switch them back on in the same file afterwards. That also stops the
+Copilot on-demand manager of tdd, which needs the Copilot runtime.
+
+- **Kill switch.** `FACTORY_V2_OFF=1` in cmdemo1-system `system.json` (tdd fworker settings) makes tdd run v1 again without a release of this repository. Under it v1's intake
+  stays off (the sweep sends no `intake` block, section 6c), so v1 takes no item: the gateway then only settles and promotes what already exists.
+- **Rollback.** `FACTORY_V2_OFF=1` as above, or a revert of the cutover pull request (about 4 minutes to tdd).
+- **Before the deploy.** Confirm that no item is owned by a running Copilot task or Cursor agent (those runtimes are switched off by this change). Deploy with the
+  plant quiet: no running sessions and no PASS waiting to merge.
+- **After the deploy.** Check the start-up line `runtime: octopus, enabled`, `/ready` 200 and `/_build` as in the release rule of CLAUDE.md.
+- **Done.** A v2 item is Done relative to uat and prod as the paragraph "When a v2 item is Done relative to uat and prod" above says (#611): with `delivery.finalEnvironment` tdd the settle window does not complete an item whose release is not in prod; the item stays Settling in the Release Queue until the prod train publishes it or the safety cap ends the hold.
+- The drills and the measured batch are recorded later, on #268.
+- Cutover safety (v1 intake off where the engine does not act, no database: inert and `/ready` 503, no v1 sweep before the term's adoption): section 6c below.
+
 ## 6c. Cutover safety (review of the tdd cutover)
 
 Three rules the gateway keeps around the switch to v2 (tests: `tests/Gateway.Tests/CutoverSafetyTests.cs`, job "Image starts without a database"):
