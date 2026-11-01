@@ -34,7 +34,7 @@ public sealed class WolverineHostSqlServerTests
         var cs = With(sql, db);
         using var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", cs);
-        WolverineHostTestSupport.Shadow(env);
+        WolverineHostTestSupport.V2(env);
         env.Apply();
         if (mode != null)
         {
@@ -75,15 +75,9 @@ public sealed class WolverineHostSqlServerTests
     // W9.10o: in shadow /ready does not wait for the schema (only where v2 acts); the schema block of the status says when it is good, and /ready is 200 throughout
     static async Task WaitReady(GatewayHost host, int seconds = 90)
     {
+        // where v2 acts /ready is 503 "schema" until the scripts ran and the catalog was checked, then 200
         var sw = Stopwatch.StartNew(); var last = await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
-        while (sw.Elapsed < TimeSpan.FromSeconds(seconds))
-        {
-            Assert.Equal(200, last.Status);
-            var schema = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json?["schema"];
-            if ((string?)schema?["state"] == "good") break;
-            await Task.Delay(100);
-            last = await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
-        }
+        while (last.Status != 200 && sw.Elapsed < TimeSpan.FromSeconds(seconds)) { await Task.Delay(100); last = await host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort); }
         Assert.Equal(200, last.Status);
     }
 
@@ -105,9 +99,9 @@ public sealed class WolverineHostSqlServerTests
             Assert.Empty(schema?["pending"]?.AsArray() ?? []);
             Assert.Empty(schema?["differences"]?.AsArray() ?? []);
             Assert.Null(schema?["lastFailure"]);
-            // W9.10o: the health block of the status is there in shadow too (tdd), and reads the host's dead letters and envelopes: nothing dead, nothing waiting
+            // W9.10o: the health block of the status reads the host's dead letters and envelopes: nothing dead, nothing waiting
             var v2 = (await host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json?["v2"];
-            Assert.Equal((false, true, "good"), ((bool?)v2?["acts"] ?? true, (bool?)v2?["available"] ?? false, (string?)v2?["schema"]));
+            Assert.Equal((true, true, "good"), ((bool?)v2?["acts"] ?? false, (bool?)v2?["available"] ?? false, (string?)v2?["schema"]));
             Assert.Equal(0, (int?)v2?["deadLetters"]?["total"]);
             Assert.Equal(0, (int?)v2?["sagas"]?["open"]);
             Assert.Equal(0, (int?)v2?["scheduled"]?["overdue"]);
@@ -120,12 +114,6 @@ public sealed class WolverineHostSqlServerTests
                 Assert.Equal(1, await Count(cs, $"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='factory' AND TABLE_NAME='{t}'"));
             foreach (var t in new[] { "wolverine_incoming_envelopes", "wolverine_outgoing_envelopes", "wolverine_dead_letters", "wolverine_nodes" })
                 Assert.Equal(1, await Count(cs, $"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='wolverine' AND TABLE_NAME='{t}'"));
-            // inert, and cheap: no leader, no application lock, nothing polling in the first seconds
-            await Task.Delay(8000);
-            Assert.Equal(0, await Count(cs, "SELECT COUNT(*) FROM sys.dm_tran_locks WHERE resource_type='APPLICATION'"));
-            Assert.Equal(0, await Count(cs, "SELECT COUNT(*) FROM wolverine.wolverine_node_assignments"));
-            Assert.Equal(0, await Count(cs, "SELECT COUNT(*) FROM wolverine.wolverine_incoming_envelopes"));
-            Assert.Equal(0, await Count(cs, "SELECT COUNT(*) FROM wolverine.wolverine_outgoing_envelopes"));
         });
     }
 

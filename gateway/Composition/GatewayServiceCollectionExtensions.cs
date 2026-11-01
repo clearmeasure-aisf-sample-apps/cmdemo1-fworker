@@ -240,7 +240,6 @@ static class GatewayServiceCollectionExtensions
         services.AddSingleton(sp =>
         {
             var runner = sp.GetRequiredService<Runner>();
-            var shadow = sp.GetService<IShadowHistory>();   // W2.3: only in a shadow environment, with the Wolverine host
             // W3.2: only where v2 acts, with the Wolverine host. Resolved at the first journal line, not here: building the host resolves the leadership, which resolves the plant, so resolving the host while
             // the plant is built is a circle (the gateway of an environment in v2Environments never finished starting)
             var journalSink = new Lazy<JournalCommandSink?>(() => c.Engine.V2Acts ? sp.GetService<JournalCommandSink>() : null);
@@ -248,10 +247,8 @@ static class GatewayServiceCollectionExtensions
             {
                 // v2 acting: the line is a command in the outbox, written by the C# ledger (no `journal` verb); the chain of the plant only publishes
                 if (journalSink.Value is { } sink) { await sink.Send(item, ev, fields, key); return; }
-                var posted = false;
-                try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); posted = true; }
+                try { await runner.RunAsync("journal", new JsonObject { ["item"] = item, ["event"] = ev, ["fields"] = fields, ["key"] = key }.ToJsonString(), TimeSpan.FromSeconds(60)); }
                 catch (Exception e) { Console.Error.WriteLine($"journal {ev} for #{item} failed: {e.Message}"); }
-                shadow?.Journal(item, ev, fields, key, posted);   // after v1's call, best-effort, never throws
             }, timing.AckSeconds, gw.OwnerMode ? sp.GetRequiredService<IPlantHooks>() : null)
             { JournalCoded = (item, ev, code, key) => journalSink.Value is { } sink ? sink.Coded(item, ev, code, key) : Task.CompletedTask,   // W7.3: the code the plant takes off a journal line (session-gone)
                 Home = c.Credentials.HomeClaim, HomeBranch = instance.DefaultBranch, QcCfg = qcSettings, Msg = messaging, Rev = revocations, OneItemPerSession = instance.OneItemPerSession,
@@ -287,20 +284,16 @@ static class GatewayServiceCollectionExtensions
         services.AddHostedService(sp => sp.GetRequiredService<LeadershipService>());
         // W2.2: the Wolverine host, only with a connection string; its node leaves with the lease, so it starts after LeadershipService and stops before it
         if (c.WolverineHost) services.AddHostedService(sp => sp.GetRequiredService<WolverineHostService>());
-        // W9.9b: a process that the kill switch turned back to v1 in an environment the configuration names for v2 leaves the marker the engine's next adoption reads (nothing is made or written in any other case)
-        if (c.Engine.KillSwitch && c.Engine.Configured == EngineMode.V2 && c.Database.Configured && c.Instance.Home != null)
-            services.AddHostedService(sp => new KillSwitchMarkerService(new Fworker.Workflows.Adoption.SqlEngineMarkers(() => ItemMergedWiring.Open(c.Database.ConnectionString!)), Fworker.Integrations.Commands.ClaimOwner.ThisProcess().Node));
         if (c.Engine.V2Acts) services.AddHostedService(sp => sp.GetRequiredService<CopilotReconcileService>());   // W3.3
-        // W4.2: the Octopus watcher, read only; v1 promotes with the rule scripts. W5.2: it also runs in the shadow run of the delivery train (slower, a smaller call budget)
-        var shadowTrain = c.Engine.ShadowRuns && c.WolverineHost && c.Instance.Home != null;
-        if (c.Engine.V2Acts || shadowTrain)
+        // W4.2: the Octopus watcher, read only
+        if (c.Engine.V2Acts)
         {
-            services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct, shadow: shadowTrain));
+            services.AddSingleton(sp => OctopusWatchService.From(c.Instance, sp.GetRequiredService<Fworker.Contracts.Seams.IEventIngress>(), Environment.GetEnvironmentVariable, () => c.Leader.MayAct));
             services.AddHostedService(sp => sp.GetRequiredService<OctopusWatchService>());
         }
         // W9.10p: the same tick where the engine acts and v1's AutoPromoter still promotes uat and prod: it compares the train's shadow decisions with the AutoPromoter's and stores the comparison
         var actingShadow = c.Engine.V2Acts && c.WolverineHost && c.Instance.Home != null && AutoPromoter.Runs(c.Instance, true);
-        if (shadowTrain || actingShadow) services.AddHostedService(sp => new DeliveryShadowService(sp.GetRequiredService<DeliveryShadowHolder>(), DeliveryShadowService.DefaultInterval));   // W5.2: compares and stores
+        if (actingShadow) services.AddHostedService(sp => new DeliveryShadowService(sp.GetRequiredService<DeliveryShadowHolder>(), DeliveryShadowService.DefaultInterval));   // W5.2: compares and stores
         if (c.Engine.V2Acts && c.Instance.Home != null) services.AddHostedService(sp => sp.GetRequiredService<RecurringJobScheduler>());   // W4.3
         services.AddHostedService(sp => sp.GetRequiredService<BaseWatch>());
         // a full sweep at most every timing.sweepMinSeconds (60, never more than the interval); triggers between them queue their item for an incremental pass (issue 92)

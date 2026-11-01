@@ -13,11 +13,11 @@ public sealed class BoardRoutesTests : IDisposable
     readonly string dir = Directory.CreateTempSubdirectory("board-routes-").FullName;
     public void Dispose() { try { Directory.Delete(dir, true); } catch { } }
 
-    EngineOptions Engine(string v2, string? off = null)
+    EngineOptions Engine(string v2)
     {
         var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".json");
-        File.WriteAllText(path, EngineOptionsTests.BlockFor(v2, ""));
-        Func<string, string?> env = n => n == "FACTORY_V2_OFF" ? off : null;
+        File.WriteAllText(path, EngineOptionsTests.BlockFor(v2));
+        Func<string, string?> env = _ => null;
         return EngineOptions.From(InstanceConfig.Load(path, env), "prod", env);
     }
 
@@ -55,7 +55,6 @@ public sealed class BoardRoutesTests : IDisposable
     {
         var runner = new Runner("/nonexistent/factory.ps1");
         Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("\"tdd\""), Services(runner, Parts())));          // another environment: v1
-        Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine("\"prod\"", off: "1"), Services(runner, Parts())));   // the kill switch
         Assert.Null(runner.Routes);   // (W9.9a: every call of the gateway itself is then the rule script)
     }
 

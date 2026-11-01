@@ -122,7 +122,7 @@ public sealed class DocsPlanWiringTests
         try
         {
             using var env = new GatewayEnvironment();
-            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             env.Set("FACTORY_DB_CONNECTION", cs);
             env.Set("FACTORY_SWEEP_SECONDS", "3600");
             env.Apply();
@@ -201,7 +201,7 @@ public sealed class DocsPlanWiringTests
         try
         {
             using var env = new GatewayEnvironment();
-            env.EditConfig = c => c["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            env.EditConfig = c => c["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             env.Set("FACTORY_DB_CONNECTION", cs); env.Set("FACTORY_SWEEP_SECONDS", "3600");
             env.Apply();
             var cfg = JsonNode.Parse(File.ReadAllText(Path.Combine(env.Dir, "instance.test.json")))!;
@@ -238,35 +238,18 @@ public sealed class DocsPlanWiringTests
     }
 }
 
-/// <summary>The docs plan exists only where the engine acts: the kill switch (FACTORY_V2_OFF) puts the environment back on v1 whatever the engine lists say, and v1's verb router, sweep and ingress are what they were.</summary>
+/// <summary>The docs plan exists only where the engine acts: an environment outside engine.v2Environments keeps v1's verb router, sweep and ingress.</summary>
 public sealed class DocsPlanInertTests
 {
     static readonly string Token = "ghp_" + new string('A', 36);   // (composed at run time)
 
     [Fact]
-    public void TheKillSwitch_LeavesNoSaga_NoFeed_AndNoOwnership_SoV1ReadsEveryItem()
-    {
-        if (!StubPwsh.Supported) return;
-        using var env = new GatewayEnvironment();
-        env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
-        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
-        env.Set("FACTORY_V2_OFF", "1");
-        env.Apply();
-        using var host = new GatewayHost();
-        _ = host.Server;
-        foreach (var t in new[] { typeof(V2Ownership), typeof(WorkItemService), typeof(WorkItemHistory), typeof(WorkItemParts), typeof(WolverineHostService) })
-            Assert.DoesNotContain(host.Captured!, d => d.ServiceType == t);
-        Assert.IsType<V1VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
-        Assert.Null(host.Services.GetServices<Microsoft.Extensions.Hosting.IHostedService>().OfType<Sweeper>().Single().V2);
-    }
-
-    [Fact]
-    public void TheShadowRunAndV1_RouteVerbsToV1Alone()
+    public void AnEnvironmentOutsideV2_RoutesVerbsToV1Alone()
     {
         if (!StubPwsh.Supported) return;
         using (var env = new GatewayEnvironment())
         {
-            env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); env.Apply();
+            env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Apply();
             using var host = new GatewayHost();
             _ = host.Server;
             Assert.IsType<V1VerbRouter>(host.Services.GetRequiredService<IVerbRouter>());
@@ -286,7 +269,7 @@ public sealed class DocsPlanInertTests
         if (!StubPwsh.Supported) return;
         using var env = new GatewayEnvironment();
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
-        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+        env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
         env.Apply();
         using var host = new GatewayHost();
         var started = Task.Run(() => host.Server);
@@ -309,7 +292,7 @@ public sealed class DocsPlanInertTests
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.Set("GH_TOKEN", Token);
         env.EditConfig = cfg =>
         {
-            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             cfg["intake"] = new JsonObject { ["enabled"] = true, ["wipLimit"] = 6, ["fromColumn"] = "Todo", ["v2Plans"] = new JsonArray("docs") };
         };
         env.Apply();

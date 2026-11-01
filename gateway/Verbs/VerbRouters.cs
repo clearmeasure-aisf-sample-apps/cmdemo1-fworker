@@ -12,7 +12,7 @@ sealed class V1VerbRouter(Runner runner) : IVerbRouter
     }
 }
 
-// The engine branch: composed once at start from EngineOptions (config/instance.json engine lists, FACTORY_ENVIRONMENT, FACTORY_V2_OFF). v2 does not exist
+// The engine branch: composed once at start from EngineOptions (config/instance.json engine lists, FACTORY_ENVIRONMENT). v2 does not exist
 // yet, so every mode resolves to v1: a v2 or shadow environment still runs v1 alone, and nothing routes to v2. The v2 router joins the switch with the
 // wave that builds it; the branch is here so that it is chosen per environment and not in the pipeline.
 static class VerbRouterFactory
@@ -20,7 +20,6 @@ static class VerbRouterFactory
     public static IVerbRouter For(EngineOptions engine, Runner runner) => engine.Mode switch
     {
         EngineMode.V2 => new V1VerbRouter(runner),      // v2 is not built: v1 acts
-        EngineMode.Shadow => new V1VerbRouter(runner),  // v1 acts; the shadow side joins with the event ingress (W1.6)
         _ => new V1VerbRouter(runner),
     };
 }
@@ -45,7 +44,7 @@ static class InertVerbs
     public static bool RunnerMayRun(string verb) => ReadOnly.Contains(verb) || Housekeeping.Contains(verb);
 
     public static VerbAnswer Refusal(string verb) =>
-        BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one, or FACTORY_V2_OFF=1", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 });
+        BoardVerbAnswer.Rejected(verb, 20, "database", "v2 is configured for this environment and there is no database (FACTORY_DB_CONNECTION): nothing acts until there is one", new System.Text.Json.Nodes.JsonObject { ["retryAfterSeconds"] = 60 });
 }
 
 // The router in front of the verb endpoint of such a gateway: the verbs that only read pass through, every other is refused.

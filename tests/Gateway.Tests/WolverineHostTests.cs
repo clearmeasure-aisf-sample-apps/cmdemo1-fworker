@@ -22,8 +22,8 @@ internal static class WolverineHostTestSupport
     /// <summary>The service types that exist only with a connection string.</summary>
     public static readonly Type[] HostTypes = { typeof(DatabaseOptions), typeof(WolverineHostOptions), typeof(WolverineHostService) };
 
-    /// <summary>The environment of the test gateways is tdd: lists it in engine.shadowEnvironments, which (with a connection string) registers the host (W2.3).</summary>
-    public static void Shadow(GatewayEnvironment env) => env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray(), ["shadowEnvironments"] = new JsonArray("tdd") };
+    /// <summary>The environment of the test gateways is tdd: lists it in engine.v2Environments, which (with a connection string) registers the host and makes the engine act.</summary>
+    public static void V2(GatewayEnvironment env) => env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
 
     public static WolverineHostOptions Fast() => new() { RetryFirst = TimeSpan.FromMilliseconds(50), RetryMax = TimeSpan.FromMilliseconds(200), StopTimeout = TimeSpan.FromSeconds(2) };
 }
@@ -71,18 +71,11 @@ public sealed class WolverineHostOffTests(TwoPortGateway gw) : IClassFixture<Two
     }
 }
 
-/// <summary>With a connection string and a database that cannot be reached: the gateway starts and works as v1; /ready does not wait for the schema in shadow (W9.10o; the schema shows in the status) and the host keeps trying in the background.</summary>
-public sealed class WolverineHostUnreachableFixture : GatewayFixture
-{
-    protected override string UpPath => "/health";
-    protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); }
-}
-
 /// <summary>Where v2 acts (W9.10o): /ready is the one place the schema gates, so a database that does not answer keeps it at 503 with the reason.</summary>
 public sealed class WolverineHostV2UnreachableFixture : GatewayFixture
 {
     protected override string UpPath => "/health";
-    protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() }; }
+    protected override void Configure(GatewayEnvironment env) { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); env.EditConfig = cfg => cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") }; }
 }
 
 public sealed class WolverineHostV2UnreachableDatabaseTests(WolverineHostV2UnreachableFixture gw) : IClassFixture<WolverineHostV2UnreachableFixture>
@@ -105,61 +98,6 @@ public sealed class WolverineHostV2UnreachableDatabaseTests(WolverineHostV2Unrea
         Assert.Equal(false, (bool?)st.Json?["v2"]?["available"]);
         Assert.Equal(true, (bool?)st.Json?["v2"]?["acts"]);
     }
-}
-
-public sealed class WolverineHostUnreachableDatabaseTests(WolverineHostUnreachableFixture gw) : IClassFixture<WolverineHostUnreachableFixture>
-{
-    [Fact]
-    public void Registered_AsSingletons_AndHostedRightAfterTheLease()
-    {
-        if (!StubPwsh.Supported) return;
-        foreach (var t in WolverineHostTestSupport.HostTypes)
-        {
-            var ds = gw.Host.Captured!.Where(d => d.ServiceType == t).ToList();
-            Assert.Single(ds);
-            Assert.Equal(ServiceLifetime.Singleton, ds[0].Lifetime);
-        }
-        CompositionGraph.AssertSingletons(gw.Host.Services, gw.Host.Captured!);
-        var order = CompositionGraph.GatewayHostedOrder(gw.Host.Services);
-        Assert.Equal(new[] { "RevocationService", "OperatorReleaseLoader", "TranscriptService", "LeadershipService", "WolverineHostService", "OctopusWatchService", "DeliveryShadowService", "BaseWatch", "Sweeper", "AutoPromoter", "PlantTicker", "McpSessionSweeper" }, order);   // W5.2: the shadow run adds the Octopus watcher and the comparison tick
-        Assert.Same(gw.Host.Services.GetRequiredService<WolverineHostService>(), gw.Host.Services.GetServices<IHostedService>().OfType<WolverineHostService>().Single());
-    }
-
-    [Fact]
-    public async Task TheGatewayRuns_ReadyWaitsForTheSchema_AndTheStatusSaysTheHostIsStillTrying_WithoutTheConnectionString()
-    {
-        if (!StubPwsh.Supported) return;
-        Assert.NotNull(gw.ReadyAfter);   // up: /health answers, the start was not held by the database
-        // W9.10o: in shadow v1 acts and needs no table: /ready does not wait for the schema (a database that is down must not make a v1 release look failed). The schema is in the status, and no connection string is
-        var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
-        Assert.Equal(200, ready.Status);
-        var st = await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken);
-        Assert.Equal("upgrading", (string?)st.Json?["schema"]?["state"]);
-        Assert.Equal((false, false), ((bool?)st.Json?["v2"]?["acts"], (bool?)st.Json?["v2"]?["available"]));   // the v2 health block is there in shadow too, and says it cannot read (the schema is not good)
-        Assert.DoesNotContain("Password", st.Json!.ToJsonString());
-        Assert.DoesNotContain("127.0.0.1", st.Json.ToJsonString());
-        // the first attempt waits for a database that does not answer for the whole connect timeout (90 s): the start is "starting", not failed, and nothing else waits
-        JsonNode? w = null;
-        var sw = Stopwatch.StartNew();
-        while (sw.Elapsed < TimeSpan.FromSeconds(10))
-        {
-            w = (await gw.Host.SendAsync("GET", "/api/v1/status", GatewayEnvironment.ApiPort, GatewayEnvironment.AdminToken)).Json?["wolverine"];
-            if ((int?)w?["attempts"] >= 1) break;
-            await Task.Delay(100);
-        }
-        Assert.Equal("starting", (string?)w?["state"]);
-        Assert.Equal("solo", (string?)w?["mode"]);
-        Assert.Equal(1, (int?)w?["attempts"]);
-        Assert.DoesNotContain("Password", w!.ToJsonString());
-        Assert.DoesNotContain("127.0.0.1", w.ToJsonString());
-    }
-}
-
-/// <summary>The stop with the lease on and the Wolverine host registered (its database does not answer): hand-over, then the transcripts' flush, within the grace.</summary>
-public sealed class WolverineHostStopOrderTests
-{
-    [Fact]
-    public Task StopOrder_HandOverBeforeTranscriptFlush_WithTheHostRegistered_Within30Seconds() => StopOrderTests.Run(env => { env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable); WolverineHostTestSupport.Shadow(env); });
 }
 
 /// <summary>The service itself, without a database: retries, never waits for it, leaves with the lease, comes back, stops at shutdown.</summary>

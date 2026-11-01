@@ -100,7 +100,7 @@ public sealed class DeliveryActingGatewayTests
         env.Set("OCTOPUS_API_KEY", "API-" + new string('R', 20));
         env.EditConfig = cfg =>
         {
-            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd"), ["shadowEnvironments"] = new JsonArray() };
+            cfg["engine"] = new JsonObject { ["v2Environments"] = new JsonArray("tdd") };
             var oct = (JsonObject)cfg["octopus"]!;
             oct["url"] = stub.Base + "/octopus";
             cfg["delivery"] = new JsonObject { ["autoPromote"] = new JsonObject { ["enabled"] = true, ["environments"] = new JsonArray("uat", "prod"), ["gatewayEnvironment"] = "tdd" } };

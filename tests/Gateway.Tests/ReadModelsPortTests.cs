@@ -348,11 +348,11 @@ public sealed class ReadModelsPortTests : IDisposable
 
     // ---- the registration ------------------------------------------------------------------------------------------------------------------------
 
-    static EngineOptions Engine(string dir, string environment, string v2, string? off = null)
+    static EngineOptions Engine(string dir, string environment, string v2)
     {
         var path = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".json");
-        File.WriteAllText(path, EngineOptionsTests.BlockFor(v2, ""));
-        Func<string, string?> env = n => n == "FACTORY_V2_OFF" ? off : null;
+        File.WriteAllText(path, EngineOptionsTests.BlockFor(v2));
+        Func<string, string?> env = _ => null;
         return EngineOptions.From(InstanceConfig.Load(path, env), environment, env);
     }
 
@@ -393,7 +393,6 @@ public sealed class ReadModelsPortTests : IDisposable
     public void WhereTheEngineDoesNotAct_NothingIsRegistered_AndATableWithoutTheConfigurationRegistersNothing()
     {
         Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine(dir, "tdd", "\"prod\""), Gateway()));          // v1 acts
-        Assert.Same(V2VerbRoutes.None, V2VerbRoutes.Build(Engine(dir, "prod", "\"prod\"", "1"), Gateway()));    // the kill switch
         var bare = V2VerbRoutes.Build(Engine(dir, "prod", "\"prod\""), new ServiceCollection().BuildServiceProvider());
         Assert.All(ReadModelRoutes.Verbs, v => Assert.False(bare.TryGet(v, out _), v));   // (the merge verbs of W9.3 register anyway and find their parts at the first call)
     }

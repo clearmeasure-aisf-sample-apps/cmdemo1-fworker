@@ -209,27 +209,6 @@ static class GatewayWolverineExtensions
                 if (c.Catalog.Enabled) jobs.Add(RecurringJobSlots.CatalogReread, async ct => { await sp.GetRequiredService<ISystemCatalog>().RefreshAsync(ct); });   // W4.3 (the loader keeps the last good snapshot on a failed read)
                 recurring = RecurringJobSlots.Attach(host, jobs, intervals);   // W4.0 slots, filled by W4.3 and W9.10g
             }
-            else if (c.Engine.ShadowRuns && c.Instance.Home is { } shadowHome)
-            {
-                // W5.2: the delivery train in the shadow run. It sees the merge webhook (the inbox, W4.1; ItemMerged, W5.0) and the Octopus watcher's events (W4.2); its commands are only recorded.
-                // The board reconciler stays out (v1 reads the board itself); a merge the webhook missed is found by the train's own reads.
-                var cs = WolverineHostService.WithConnectTimeout(c.Database.ConnectionString!, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                var map = new Fworker.Integrations.Correlation.SqlCorrelationMap(cs);
-                var dedup = new Fworker.Integrations.Correlation.SqlIngressDedup(cs);
-                IngressInboxWiring.Attach(host, new Fworker.Integrations.Correlation.IngressInboxProcessor(dedup, map, shadowHome));
-                inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
-                var schemaStatus = sp.GetRequiredService<FactorySchemaStatus>();
-                shadowHolder.Housekeeping = () => { if (schemaStatus.IsGood) dedup.Purge(IngressDedupRetention); };   // (the table is the scripts': not before the schema is good; no recurring jobs in the shadow run: the shadow's tick calls this once an hour)
-                var parts = sp.GetService<Fworker.Contracts.Catalog.ISystemCatalog>() is { } catalog ? DeliveryShadowWiring.Make(c, catalog, cs, Environment.GetEnvironmentVariable) : null;
-                var merged = parts is null ? null : ItemMergedWiring.Make(c, shadowHome, cs, Environment.GetEnvironmentVariable);
-                if (parts is not null && merged is not null)
-                {
-                    ItemMergedWiring.Attach(host, merged, parts.Delivered);
-                    DeliveryShadowWiring.Attach(host, parts);
-                    shadowHolder.Shadow = parts.Shadow;
-                }
-                octopusPort = new ShadowOctopusPort(ev => { if (ev is OctopusReplayBegan) shadowHolder.Shadow?.ReplayBegan(); return DeliveryShadowWiring.Publish(host, ev); }, shadowHolder.Shadow is not null);
-            }
             return host;
         });
         if (c.Engine.V2Acts) services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return new CopilotReconcileService(copilotReconciler!, sp.GetRequiredService<FactorySchemaStatus>()); });
@@ -280,16 +259,6 @@ static class GatewayWolverineExtensions
         // W9.10p: where the engine acts and v1's AutoPromoter still promotes the app's uat and prod, the train's shadow of them is found through the same holder (the AutoPromoter's passes, the status endpoints)
         if (c.Engine.V2Acts && c.WolverineHost && c.Instance.Home != null && AutoPromoter.Runs(c.Instance, true))
             services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return shadowHolder; });
-        // W5.2: the shadow run of the delivery train (resolving these builds the host first, which makes them)
-        if (c.Engine.ShadowRuns && c.Instance.Home != null)
-        {
-            services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return shadowHolder; });
-            services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return octopusPort!; });
-            services.AddSingleton(sp => { _ = sp.GetRequiredService<WolverineHostService>(); return inboxPort!; });
-        }
-        // W2.3: shadow history, only where the environment is a shadow environment (v2 acting records its own history, later)
-        if (c.Engine.ShadowRuns)
-            services.AddSingleton<IShadowHistory>(sp => new ShadowHistory(r => sp.GetRequiredService<WolverineHostService>().PublishAsync(r), c.Instance.Home));
         return services;
     }
 }

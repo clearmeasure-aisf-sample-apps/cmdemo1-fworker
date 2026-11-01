@@ -966,29 +966,3 @@ public sealed class SqlLeaseDatabaseTests
         }
     }
 }
-
-/// <summary>The whole gateway with the lease on and a database (FACTORY_TEST_SQL): it takes the SQL lock, says so in the status, starts its node, and keeps a second holder out.</summary>
-public sealed class SqlLeadershipGatewayTests
-{
-    [Fact]
-    public async Task AGatewayWithADatabaseAndTheLeaseOn_HoldsTheSqlLock_StartsItsNode_AndAnotherProcessCannotTakeIt()
-    {
-        if (!StubPwsh.Supported || !TestDatabase.Available) return;
-        await using var db = await TestDatabase.CreateAsync("fw_gwlease_");
-        using var env = LeadershipGatewayTests.Environment(e => { e.Set("FACTORY_DB_CONNECTION", db.ConnectionString); WolverineHostTestSupport.Shadow(e); e.Set("FACTORY_TIMING_leaderSqlCheckSeconds", "1"); });
-        await using var host = new GatewayHost();
-        _ = host.Server;
-        var s = await LeadershipGatewayTests.StatusUntil(host, x => LeadershipGatewayTests.Role(x) == "acting" && (bool?)x?["leader"]?["sql"]?["held"] == true && (string?)x?["wolverine"]?["state"] == "running", 60);
-        Assert.Equal("acting", LeadershipGatewayTests.Role(s));
-        Assert.Equal(true, (bool?)s?["leader"]?["sql"]?["held"]);
-        Assert.Equal(false, (bool?)s?["leader"]?["sql"]?["fencesActing"]);   // the shadow run: v1 acts, the lock gates the node only
-        Assert.Equal(1L, (long?)s?["leader"]?["sql"]?["epoch"]);
-        Assert.Equal("running", (string?)s?["wolverine"]?["state"]);
-        Assert.DoesNotContain("Password", s!.ToJsonString());
-        Assert.Equal(1L, await db.Count("SELECT Epoch FROM factory.Leadership WHERE Id = 1"));
-        // another process on the same database does not get the lock while this one holds it
-        var other = new SqlLease(db.ConnectionString, _ => Task.CompletedTask, 20);
-        try { Assert.False((await other.TryAcquireAsync("another-process", false, default)).Acquired); }
-        finally { await other.ReleaseAsync(); }
-    }
-}

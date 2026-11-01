@@ -143,7 +143,7 @@ public sealed class DeliveryUatProdV1Tests
         env.Set("FACTORY_DB_CONNECTION", WolverineHostTestSupport.Unreachable);
         env.EditConfig = cfg =>
         {
-            cfg["engine"] = new JsonObject { ["v2Environments"] = v2 ? new JsonArray("tdd") : new JsonArray(), ["shadowEnvironments"] = new JsonArray() };
+            cfg["engine"] = new JsonObject { ["v2Environments"] = v2 ? new JsonArray("tdd") : new JsonArray() };
             var ap = new JsonObject { ["enabled"] = true, ["environments"] = new JsonArray("uat", "prod"), ["gatewayEnvironment"] = "tdd" };
             if (trainActs) ap["trainActs"] = true;
             cfg["delivery"] = new JsonObject { ["autoPromote"] = ap };
