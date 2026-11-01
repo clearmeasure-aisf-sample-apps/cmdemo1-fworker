@@ -4,7 +4,7 @@ What the factory's alert ingress (`POST /webhooks/azure-monitor`, `gateway/Endpo
 tell the owner when the factory itself is down. The rules are infrastructure of `clearmeasure-aisf-sample-apps/cmdemo1-system` (the infra
 bicep, applied by the cmdemo1 session); this repository holds the gateway side and this specification. tdd only: no rule is created for uat or
 prod (the gateway answers an alert of another environment with 202 and ignores it). The route exists only where the v2 engine acts
-(`Engine.V2Acts`): in v1, in the shadow run (tdd, until the owner moves it to `v2Environments`) and under `FACTORY_V2_OFF` it answers 404. So create the
+(`Engine.V2Acts`): in v1 (an environment outside `v2Environments`) it answers 404. So create the
 action group and the rules when tdd runs v2; before that Azure would get a 404 for every alert.
 
 ## 1. The two kinds of alert

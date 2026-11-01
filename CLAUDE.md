@@ -154,7 +154,7 @@ Wolverine builds and diffs none of its tables (`AutoCreate.None`); script 011 ho
 A gateway restart drops the in-memory state (below) except the plant: the process that holds the leader lease (`gateway/Leader.cs`) snapshots it
 to GitHub on every change and at its stop, and hands it over to the next process (which waits for that snapshot before its first sweep, and
 renews the owners' claims that ran out while no gateway was up). Deploy to tdd only when the plant is quiet, say so beforehand, and check
-afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting, `plantSnapshot.restore.how`). Roll back by reverting the pull request.
+afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting, `plantSnapshot.restore.how`). Roll back by redeploying the previous fworker release (there is no switch back to v1: `FACTORY_V2_OFF` and the shadow run are gone since V3.2), or by reverting the pull request.
 
 ## Rules
 
@@ -178,7 +178,7 @@ afterwards that the workers reconnected (`/api/v1/status`: `leader.role` acting,
   gateway: it would take the plant over from tdd (`FACTORY_LEADER_LEASE=0` turns the lease off for a local gateway, and then two would sweep).
   Where a database is configured (tdd, the v2 CI gateways) the process must also hold the SQL application lock `fworker:leader`
   (`gateway/Leadership/SqlLease.cs`, row `factory.Leadership`, status `leader.sql`): the Wolverine node runs only on its holder, and where
-  the engine acts so does everything else. A process without a database (v1 under the kill switch, uat, prod) is arbitrated by the ref alone.
+  the engine acts so does everything else. A process without a database (uat, prod, on their last release before V3.2 of the v2-only plan) is arbitrated by the ref alone. The ref lease and the ref snapshot go with the rest of V3.2.
 - **Protected areas need the owner**: credentials and tokens, authorization, revoke, the deploy pipeline (`.github/workflows/`,
   `Dockerfile`, `config/deploy.overrides.json`), uat and prod. `build.yml`, `release.yml`, `secret-scan.yml` and `architecture.yml` come
   from the demo-environment kit: the only local addition is the `tests` job of `build.yml`.
