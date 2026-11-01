@@ -156,7 +156,7 @@ public sealed class DocsMergePort(MergePullRequestHandler? merge, IMergeFactsRea
         var docsOnly = string.Equals(m.Plan, WorkPlans.Docs, StringComparison.OrdinalIgnoreCase);
         // a hotfix of an incident (W8.1) is not held back by the queue either: it ranks first and passes every quality gate, and what waits for a release candidate is what it is meant to overtake
         var busy = !docsOnly && !string.Equals(m.Plan, WorkPlans.Hotfix, StringComparison.OrdinalIgnoreCase) && settings.MergeQueueDepth > 0 && queueBusy is not null ? await queueBusy(m, ct) : 0;
-        var cmd = new MergePullRequest(MergePullRequest.KeyFor(m.Item.Repository, m.PullRequest, m.Head, m.UpdatesSoFar), m.Item.Repository, m.PullRequest, m.Head,
+        var cmd = new MergePullRequest(MergePullRequest.KeyFor(m.Item.Repository, m.PullRequest, m.Head, m.UpdatesSoFar, m.ArmId), m.Item.Repository, m.PullRequest, m.Head,
             MergeQueueDepth: settings.MergeQueueDepth, QueueBusy: busy, DocsOnly: docsOnly,
             UpdateWhenBehind: settings.UpdateBranchWhenBehind && firstTurn && m.UpdatedFrom.Length == 0, UpdatedFrom: m.UpdatedFrom, UpdatesSoFar: m.UpdatesSoFar, MaxUpdates: settings.MaxUpdates,
             Item: m.Item.Number, RecordedPullRequest: m.PullRequest);

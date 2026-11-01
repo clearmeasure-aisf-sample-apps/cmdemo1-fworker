@@ -39,9 +39,11 @@ public sealed record MergePullRequest(
     public override string Name => "MergePullRequest";
     public override CommandTarget Target => CommandTarget.GitHub;
 
-    /// <summary>The key of one merge attempt: the same pull request, PASS head and update count is the same side effect, so a replay merges once.</summary>
-    public static string KeyFor(RepoId repository, int pullRequest, string passHeadSha, int updatesSoFar = 0) =>
-        IdempotencyKeys.For("MergePullRequest", repository, pullRequest, passHeadSha, updatesSoFar);
+    /// <summary>The key of one merge attempt: the same pull request, PASS head, update count and arm is the same side effect, so a replay merges once. The arm (the saga's ArmId) changes whenever the item enters a step
+    /// anew, which a resume of a parked item does, so what the ledger stored before an operator acted can never answer the resumed merge. An empty arm keeps the key of the callers that have none.</summary>
+    public static string KeyFor(RepoId repository, int pullRequest, string passHeadSha, int updatesSoFar = 0, string armId = "") =>
+        armId.Length == 0 ? IdempotencyKeys.For("MergePullRequest", repository, pullRequest, passHeadSha, updatesSoFar)
+                          : IdempotencyKeys.For("MergePullRequest", repository, pullRequest, passHeadSha, updatesSoFar, armId);
 }
 
 /// <summary>How a merge call ended.</summary>
