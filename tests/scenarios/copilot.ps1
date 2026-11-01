@@ -82,8 +82,7 @@ $CopilotScenarios = [ordered]@{
         $code = Cop-Code $t
         Check 'the prompt carries a one-time code and no credential' ($code -ne '' -and -not ("$($b.prompt)" -match 'r1\.|b1\.|i1\.|w1\.|w2\.|fake-copilot'))
         Check 'neither the token nor the code is in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch 'fake-copilot').Count -eq 0 -and @(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch $code).Count -eq 0)
-        # v1 sets the execution id in the start call; v2 settles it when the start's result message is handled, which can trail the task's creation at the fake by seconds on a loaded runner
-        [void](Wait-Until -Seconds 30 { @((Cop-Status).executions | Where-Object { $_.item -eq $n -and $_.execution -eq $t.id }).Count -eq 1 })
+        [void](Wait-RuntimeExecution { Cop-Status } -Item $n -Execution "$($t.id)")   # (v2 settles the execution when the start's result message is handled; see lib.ps1)
         $st = Cop-Status
         Check 'status: the task runs under the copilot-cloud runtime' ($st.running -eq 1 -and @($st.executions | Where-Object { $_.item -eq $n -and $_.execution -eq $t.id }).Count -eq 1) ($st | ConvertTo-Json -Compress -Depth 5)
         $link = "https://github.com/clearmeasure-aisf-sample-apps/cmdemo1-workorders/tasks/$($t.id)"

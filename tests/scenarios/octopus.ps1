@@ -119,6 +119,7 @@ $OctopusScenarios = [ordered]@{
         Check 'on one machine: the first healthy host by name (host-a), never the unhealthy, other-environment or untagged ones' (@($ra.machines).Count -eq 1 -and $ra.machines[0] -eq 'Machines-1') ($ra | ConvertTo-Json -Compress -Depth 5)
         Check 'the prompted variables: item, phase, agent, mode detached, model profile and a nonce' ("$($ra.values.Item)" -eq "$a" -and $ra.values.Phase -eq 'Technical Design' -and $ra.values.Agent -eq 'codex' -and $ra.values.Mode -eq 'detached' -and "$($ra.values.Nonce)" -like 'n1.*' -and $null -ne $ra.values.ModelProfile) ($ra.values | ConvertTo-Json -Compress)
         Check 'neither the nonce nor the runbook key is in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "$($ra.values.Nonce)", "$env:OCTOPUS_RUNBOOK_API_KEY").Count -eq 0)
+        [void](Wait-RuntimeExecution { Oct-Status } -Worker $na -Execution "$($ra.task)")
         $st = Oct-Status
         Check 'status: the execution is the server task, with its machine' ($st.enabled -eq $true -and @($st.executions | Where-Object { $_.worker -eq $na -and $_.execution -eq $ra.task -and $_.detail.machine -eq 'Machines-1' }).Count -eq 1) ($st | ConvertTo-Json -Compress -Depth 6)
         Check 'status: no credential in the runtime block' (-not (($st | ConvertTo-Json -Compress -Depth 8) -match 'n1\.|API-'))

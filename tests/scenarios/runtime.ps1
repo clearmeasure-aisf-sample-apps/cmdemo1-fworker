@@ -161,6 +161,7 @@ $RuntimeScenarios['runtime: an item labelled runtime:cae-job starts one executio
         Check 'the configured agent picks the job (jobs.codex) and is passed as FWRUNNER_AGENT' ($e.job -eq 'caj-test' -and @($e.env | Where-Object { $_.name -eq 'FWRUNNER_AGENT' -and $_.value -eq 'codex' }).Count -eq 1) ($e | ConvertTo-Json -Compress -Depth 5)
         Check 'the environment holds a nonce, no credential' ("$($e.nonce)" -like 'n1.*' -and -not (($e.env | ConvertTo-Json -Compress) -match '"w[12]\.|"i1\.'))
         Check 'the nonce is not in the gateway log' (@(Get-ChildItem $script:Work -Filter 'gateway*.out' | Select-String -SimpleMatch "$($e.nonce)").Count -eq 0)
+        [void](Wait-RuntimeExecution { Rt-Status } -Item $n -Worker $name)
         $st = Rt-Status
         Check 'status: the execution runs and counts against today' ($st.running -ge 1 -and $st.today -ge 1 -and @($st.executions | Where-Object { $_.worker -eq $name -and $_.item -eq $n }).Count -eq 1) ($st | ConvertTo-Json -Compress -Depth 5)
         $r = Rt-Launch $e

@@ -148,6 +148,19 @@ function Wait-Until([scriptblock]$Cond, [int]$Seconds = 30, [string]$Message = '
     return $false
 }
 
+# Waits until a runtime's execution is settled: the row of the status for the item (and worker, when given) carries its execution id (the given one, when
+# given) and is no longer provisioning. v1 sets both in the start call; v2 settles them when the start's result message is handled, which can trail the
+# creation of the task, agent or run at the fake by seconds on a loaded runner, so a status read right after a start can show execution "" and
+# provisioning. $Status is the scenario's status reader (Cop-Status, Cur-Status, Oct-Status, Rt-Status). Returns the settled row, or $null at the timeout
+# (the check that follows then reports what the status showed).
+function Wait-RuntimeExecution([scriptblock]$Status, [int]$Item = 0, [string]$Worker = '', [string]$Execution = '', [int]$Seconds = 30) {
+    $script:RtExecRow = $null
+    [void](Wait-Until -Seconds $Seconds {
+        $script:RtExecRow = ((& $Status).executions | Where-Object { $_ -and ($Item -le 0 -or "$($_.item)" -eq "$Item") -and ($Worker -eq '' -or "$($_.worker)" -eq $Worker) -and ($Execution -eq '' -or "$($_.execution)" -eq $Execution) -and "$($_.execution)" -ne '' -and "$($_.status)" -ne 'provisioning' } | Select-Object -First 1)
+        $null -ne $script:RtExecRow
+    })
+    return $script:RtExecRow
+}
 function Fake([string]$What, $Body = $null) {
     $u = "http://127.0.0.1:$($script:FakePort)/_fake/$What"
     if ($null -eq $Body) { Invoke-RestMethod $u } else { Invoke-RestMethod $u -Method POST -Body ($Body | ConvertTo-Json -Depth 8) -ContentType 'application/json' }
