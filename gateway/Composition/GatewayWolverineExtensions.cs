@@ -148,7 +148,9 @@ static class GatewayWolverineExtensions
                             if (report.Timers + report.Commands + report.Failed > 0) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["sagaRearm"] = new System.Text.Json.Nodes.JsonObject { ["open"] = report.Open, ["timers"] = report.Timers, ["commands"] = report.Commands, ["failed"] = report.Failed } }.ToJsonString());
                         });
                     }
-                    if (purgeable is { } ledgerToPurge) jobs.Add(RecurringJobSlots.LedgerPurge, ct => Task.Run(() => { var n = ledgerToPurge.PurgeSuccesses(LedgerRetention, DateTimeOffset.UtcNow); if (n > 0) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["ledgerPurge"] = n }.ToJsonString()); }, ct));
+                    if (purgeable is { } ledgerToPurge) jobs.Add(RecurringJobSlots.LedgerPurge, ct => Task.Run(() => { var n = ledgerToPurge.PurgeSuccesses(LedgerRetention, DateTimeOffset.UtcNow); if (n > 0) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["ledgerPurge"] = n }.ToJsonString());
+                        // the permanent failures an outage of the credential left (a 403 under every key): the handler no longer records them, so every one still here is stale and would answer a resumed command from the ledger
+                        if (ledgerToPurge is IAuthFaultPurgeable stale && stale.PurgeAuthFaults() is var f and > 0) Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["ledgerAuthFaultPurge"] = f }.ToJsonString()); }, ct));
                     correlations = new IngressCorrelations(map, home);
                     inboxPort = new IngressInboxPort(m => host.PublishAsync(m));
                     // W4.1 follow-up (#485): the claims of the deduplication do not live for ever

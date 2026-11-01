@@ -38,7 +38,7 @@ public sealed class SqlCommandSchema(string connectionString)
     }
 }
 
-public sealed class SqlIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger
+public sealed class SqlIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger, IAuthFaultPurgeable
 {
     readonly SqlCommandSchema schema; readonly Func<ClaimOwner> owner; readonly TimeSpan ttl;
 
@@ -62,6 +62,30 @@ public sealed class SqlIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger
             total += n;
             if (n < 1000) return total;
         }
+    }
+
+    /// <summary>Drops the permanent failures that are credential or permission faults (<see cref="AuthFaults"/>), left by an outage before the handler stopped recording them. A row is only dropped when it is still
+    /// that failure (Ok 0, Permanent) at the delete; successes and every other failure stay.</summary>
+    public int PurgeAuthFaults()
+    {
+        var keys = new List<string>();
+        using (var c = schema.Open())
+        {
+            using var cmd = new SqlCommand("SELECT [Key], Ok, Failure, Error, Execution, Url FROM factory.IdempotencyLedger WHERE Ok = 0 AND Failure = @f", c);
+            cmd.Parameters.Add("@f", SqlDbType.Int).Value = (int)FailureKind.Permanent;
+            using var r = cmd.ExecuteReader();
+            while (r.Read()) if (AuthFaults.Is(new CommandResult(r.GetBoolean(1), (FailureKind)r.GetInt32(2), r.GetString(3), r.GetString(4), r.GetString(5)))) keys.Add(r.GetString(0));
+        }
+        var total = 0;
+        foreach (var key in keys)
+        {
+            using var c = schema.Open();
+            using var del = new SqlCommand("DELETE FROM factory.IdempotencyLedger WHERE [Key] = @k AND Ok = 0 AND Failure = @f", c);
+            del.Parameters.Add("@k", SqlDbType.NVarChar, 400).Value = key;
+            del.Parameters.Add("@f", SqlDbType.Int).Value = (int)FailureKind.Permanent;
+            total += del.ExecuteNonQuery();
+        }
+        return total;
     }
 
     public CommandResult? TryGet(string key)

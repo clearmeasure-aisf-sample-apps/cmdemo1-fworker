@@ -157,6 +157,24 @@ public sealed class LedgerRetentionTests
     }
 
     [Fact]
+    public async Task TheSqlLedger_PurgeAuthFaults_DropsOnlyTheRowsOfAnOutageOfTheCredential()
+    {
+        if (!TestDatabase.Available) return;
+        await using var db = await TestDatabase.CreateAsync("fw_ledger_");
+        var ledger = new SqlIdempotencyLedger(new SqlCommandSchema(db.ConnectionString));
+        ledger.Record("merge-403", new Fworker.Integrations.GitHub.MergeOutcome(Fworker.Integrations.GitHub.MergeStatus.Failed, "github-forbidden", "403", Kind: FailureKind.Permanent).ToResult());
+        ledger.Record("journal-403", CommandResult.Failed(FailureKind.Permanent, "WriteJournalLine: GitHub 403 on POST repos/a/b/issues/1/comments"));
+        ledger.Record("merge-final", new Fworker.Integrations.GitHub.MergeOutcome(Fworker.Integrations.GitHub.MergeStatus.Failed, "not-mergeable", "false", Kind: FailureKind.Permanent).ToResult());
+        ledger.Record("journal-404", CommandResult.Failed(FailureKind.Permanent, "WriteJournalLine: GitHub 404 on GET repos/a/b"));
+        ledger.Record("ok", CommandResult.Success("posted"));
+        Assert.Equal(2, ledger.PurgeAuthFaults());
+        Assert.Null(ledger.TryGet("merge-403")); Assert.Null(ledger.TryGet("journal-403"));
+        Assert.NotNull(ledger.TryGet("merge-final")); Assert.NotNull(ledger.TryGet("journal-404")); Assert.NotNull(ledger.TryGet("ok"));
+        Assert.Equal(0, ledger.PurgeAuthFaults());
+        Assert.Equal(ClaimState.Claimed, ledger.Claim("merge-403").State);   // the key runs again
+    }
+
+    [Fact]
     public async Task TheSqlLedger_PurgesOnlySuccessesPastTheRetention()
     {
         if (!TestDatabase.Available) return;

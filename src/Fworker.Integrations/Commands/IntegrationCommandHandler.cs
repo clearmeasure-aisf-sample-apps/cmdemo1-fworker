@@ -67,8 +67,10 @@ public abstract class IntegrationCommandHandler<TCommand> where TCommand : Integ
             // a transport failure may have reached the other side: the next handling looks for the effect first
             if (result.Failure == FailureKind.Transient) { _ledger.ExpireClaim(key); return result; }
         }
-        // only a settled outcome is remembered (and ends the claim): a retryable failure must run again
-        if (result.Ok || result.Failure is FailureKind.Permanent or FailureKind.NotSupported) _ledger.Record(key, result);
+        // only a settled outcome is remembered (and ends the claim): a retryable failure must run again. A refusal of the credential (401, a 403 that is no rate limit) is a fault of the
+        // environment that a fix clears, not an outcome of the request: it is answered to the caller as Permanent but never remembered, so the next handling after the fix calls the service again
+        if (result.Failure == FailureKind.Permanent && AuthFaults.Is(result)) _ledger.ReleaseClaim(key);
+        else if (result.Ok || result.Failure is FailureKind.Permanent or FailureKind.NotSupported) _ledger.Record(key, result);
         else _ledger.ReleaseClaim(key);
         return result;
     }
@@ -83,6 +85,28 @@ public abstract class IntegrationCommandHandler<TCommand> where TCommand : Integ
     /// <summary>The message for the saga when the result is a failure that will not be retried here; null when it is a success or will be retried.</summary>
     public static IntegrationFailed? FailureMessage(TCommand command, CommandResult result) =>
         result.Ok || result.Failure is FailureKind.Transient or FailureKind.RateLimited ? null : IntegrationFailed.From(command, result);
+}
+
+/// <summary>
+/// Which permanent failures are faults of the credential or its permission (a 401 after a token refresh, a 403 that is no rate limit) and not outcomes of the request. They clear when the credential or the
+/// permission is fixed, so the ledger must not freeze them (the outage of the missing User-Agent stored a 403 under every merge and journal key, and a resume after the fix was answered from the ledger).
+/// Only what is provably that class matches: the merge outcome's reason code, and the text of a GitHub 401 or 403 the journal store throws. A 404 or 422 is never one.
+/// </summary>
+public static class AuthFaults
+{
+    static readonly System.Text.RegularExpressions.Regex Text = new(@"^[A-Za-z]+: GitHub (401|403) on |^[A-Za-z]+: 401 after a token refresh", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    public static bool Is(CommandResult r)
+    {
+        if (r.Ok || r.Failure != FailureKind.Permanent) return false;
+        var e = r.Error ?? "";
+        if (e.StartsWith("merge/", StringComparison.Ordinal))
+        {
+            try { return System.Text.Json.Nodes.JsonNode.Parse(e["merge/".Length..])?["Reason"]?.GetValue<string>() == "github-forbidden"; }
+            catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException) { return false; }
+        }
+        return Text.IsMatch(e);
+    }
 }
 
 public enum EffectKind { Absent, Found, Unknown }
@@ -142,7 +166,14 @@ public interface IPurgeableLedger
     int PurgeSuccesses(TimeSpan retention, DateTimeOffset now);
 }
 
-public sealed class InMemoryIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger
+/// <summary>The cleanup of the rows an outage left (run by the hourly ledger purge; a no-op once they are gone): permanent failures that are <see cref="AuthFaults"/>. Since the handler no longer records them, every such row is from before that change.</summary>
+public interface IAuthFaultPurgeable
+{
+    /// <summary>Forgets the recorded failures that are credential or permission faults; the number forgotten.</summary>
+    int PurgeAuthFaults();
+}
+
+public sealed class InMemoryIdempotencyLedger : IIdempotencyLedger, IPurgeableLedger, IAuthFaultPurgeable
 {
     /// <summary>How long a claim holds the key when its handling neither records nor releases it (a process that died): longer than any single call of a command (the HTTP clients stop at 60 s), shorter than the caller's retries (RuntimeCommandService.RetryPauses add up to 102 s), so a command whose process was killed finds the claim expired at its last retry.</summary>
     public static readonly TimeSpan DefaultClaimTtl = TimeSpan.FromSeconds(90);
@@ -170,6 +201,16 @@ public sealed class InMemoryIdempotencyLedger : IIdempotencyLedger, IPurgeableLe
         {
             var n = 0;
             foreach (var kv in _done.Where(kv => kv.Value.Result.Ok && kv.Value.At < now - retention).ToList()) if (_done.TryRemove(kv.Key, out _)) n++;
+            return n;
+        }
+    }
+
+    public int PurgeAuthFaults()
+    {
+        lock (_claims)
+        {
+            var n = 0;
+            foreach (var kv in _done.Where(kv => AuthFaults.Is(kv.Value.Result)).ToList()) if (_done.TryRemove(kv.Key, out _)) n++;
             return n;
         }
     }

@@ -347,6 +347,70 @@ public class MergeTests
     }
 
     [Fact]
+    public async Task Merge_ABlanket403_IsNotRemembered_SoTheAttemptAfterTheFixCallsGitHubAgain()
+    {
+        var fake = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr())
+            .On(Merge, HttpStatusCode.Forbidden, """{"message":"Request forbidden by administrative rules. Please make sure your request has a User-Agent header"}""")
+            .On(Merge, HttpStatusCode.OK, OkMerge);
+        var ledger = new InMemoryIdempotencyLedger();
+        var h = new MergePullRequestHandler(ledger, Direct(fake).Item1);
+        var first = await h.Process(Cmd());
+        Assert.Equal((MergeStatus.Failed, "github-forbidden", FailureKind.Permanent), (first.Status, first.Reason, first.Kind));   // the caller still hears a permanent failure
+        Assert.Null(ledger.TryGet(Cmd().IdempotencyKey));
+        Assert.True((await h.Process(Cmd())).Merged);   // the same key, after the fix
+        Assert.Equal(2, fake.To("PUT", "/merge").Count());
+    }
+
+    [Fact]
+    public async Task Merge_ARealFinalRefusal_IsStillAnsweredFromTheLedger()
+    {
+        var fake = new Fake().On("GET " + PrPath, HttpStatusCode.OK, Pr(mergeable: "false")).On(Merge, HttpStatusCode.OK, OkMerge);
+        var ledger = new InMemoryIdempotencyLedger();
+        var h = new MergePullRequestHandler(ledger, Direct(fake).Item1);
+        Assert.Equal("not-mergeable", (await h.Process(Cmd())).Reason);
+        Assert.NotNull(ledger.TryGet(Cmd().IdempotencyKey));
+        var gets = fake.To("GET", "/pulls/9").Count();
+        Assert.Equal("not-mergeable", (await h.Process(Cmd())).Reason);   // answered without a call
+        Assert.Equal(gets, fake.To("GET", "/pulls/9").Count());
+    }
+
+    [Fact]
+    public void TheMergeKey_CarriesTheArm_SoAResumedStepNeverMeetsTheLedgerAnswerOfTheParkedOne()
+    {
+        var parked = MergePullRequest.KeyFor(Repo, 9, Pass, 0, "1.4");
+        var resumed = MergePullRequest.KeyFor(Repo, 9, Pass, 0, "1.5");   // a resume enters the step anew: the saga's ArmId moves on
+        Assert.NotEqual(parked, resumed);
+        Assert.Equal(parked, MergePullRequest.KeyFor(Repo, 9, Pass, 0, "1.4"));   // a redelivery of the same arm is the same effect
+        Assert.NotEqual(MergePullRequest.KeyFor(Repo, 9, Pass), parked);
+    }
+
+    [Fact]
+    public void AuthFaults_AreOnlyTheCredentialClass()
+    {
+        Assert.True(AuthFaults.Is(new MergeOutcome(MergeStatus.Failed, "github-forbidden", "x", Kind: FailureKind.Permanent).ToResult()));
+        Assert.True(AuthFaults.Is(CommandResult.Failed(FailureKind.Permanent, "WriteJournalLine: GitHub 403 on POST repos/a/b/issues/1/comments")));
+        Assert.True(AuthFaults.Is(CommandResult.Failed(FailureKind.Permanent, "WriteJournalLine: GitHub 401 on GET repos/a/b")));
+        Assert.False(AuthFaults.Is(new MergeOutcome(MergeStatus.Failed, "not-mergeable", "x", Kind: FailureKind.Permanent).ToResult()));
+        Assert.False(AuthFaults.Is(new MergeOutcome(MergeStatus.Failed, "merge-refused", "HTTP 422: nope", Kind: FailureKind.Permanent).ToResult()));
+        Assert.False(AuthFaults.Is(CommandResult.Failed(FailureKind.Permanent, "WriteJournalLine: GitHub 404 on GET repos/a/b")));
+        Assert.False(AuthFaults.Is(CommandResult.Failed(FailureKind.Transient, "WriteJournalLine: GitHub 403 on POST x")));
+        Assert.False(AuthFaults.Is(CommandResult.Success()));
+    }
+
+    [Fact]
+    public void TheCleanup_DropsOnlyTheAuthFaultRows_InMemory()
+    {
+        var ledger = new InMemoryIdempotencyLedger();
+        ledger.Record("a", new MergeOutcome(MergeStatus.Failed, "github-forbidden", "x", Kind: FailureKind.Permanent).ToResult());
+        ledger.Record("b", CommandResult.Failed(FailureKind.Permanent, "WriteJournalLine: GitHub 403 on POST x"));
+        ledger.Record("c", new MergeOutcome(MergeStatus.Failed, "not-mergeable", "x", Kind: FailureKind.Permanent).ToResult());
+        ledger.Record("d", CommandResult.Success("posted"));
+        Assert.Equal(2, ledger.PurgeAuthFaults());
+        Assert.Null(ledger.TryGet("a")); Assert.Null(ledger.TryGet("b"));
+        Assert.NotNull(ledger.TryGet("c")); Assert.NotNull(ledger.TryGet("d"));
+    }
+
+    [Fact]
     public async Task Merge_UpdateBranchTransportOrServerError_IsTransient_NotACachedUpdateRefused()
     {
         MergePullRequest Behind() => Cmd(with: c => c with { UpdateWhenBehind = true });
