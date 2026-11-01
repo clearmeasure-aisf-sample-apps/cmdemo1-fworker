@@ -39,6 +39,7 @@
     "boardReconcilerSeconds": 120
   },
   "wolverine": {
+    "preGeneratedCode": true,
     "scheduledJobSeconds": 60,
     "firstScheduledJobSeconds": 5
   },

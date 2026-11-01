@@ -110,6 +110,8 @@ sealed class WolverineHostService : IHostedService
                     host = h; phase = Phase.Running; readyAt = DateTime.UtcNow; lastFailure = "";
                 }
                 Log("started", null);
+                if (!options.PreGeneratedCode) Log("codegen", "handlers are compiled at their first use (wolverine.preGeneratedCode is off)");
+                else try { Log("codegen", WolverineCodegen.Report(h, typeof(WolverineHostService).Assembly)); } catch (Exception e) { Log("codegen", "not checked: " + e.GetType().Name); }
                 return;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -243,10 +245,18 @@ sealed class WolverineHostService : IHostedService
     /// <summary>Where Wolverine writes the code it generates: the image's /app is not writable for the gateway's user, so the default (Internal/Generated under the content root) logs "Unable to write code file".</summary>
     internal static string CodegenDirectory => Path.Combine(Path.GetTempPath(), "fworker-wolverine-codegen");
 
-    /// <summary>Auto (not Dynamic, which compiles everything on every start): pre-generated code is loaded when there is some, compiled otherwise, and written to a writable directory.</summary>
-    internal static void ConfigureCodeGeneration(WolverineOptions w)
+    /// <summary>
+    /// Where <paramref name="preGenerated"/> (wolverine.preGeneratedCode, on in the deployed image): Auto, the static mode with a dynamic fallback. The pre-generated code in this assembly
+    /// (gateway/Internal/Generated, WolverineCodegen) is loaded, and a handler that has none is compiled at its first use and written to a writable directory. Chosen over Static because
+    /// Static throws for a missing type at the first message, which for a durable queue is a stuck message; the start logs how many files are not in the assembly, and
+    /// WolverineCodegenDriftTests keeps that at none for the deployed configuration.
+    /// Otherwise Dynamic: nothing is loaded from the assembly. The code was generated for the deployed settings, and another configuration (a test gateway, the v2 CI gateways, a test host that
+    /// builds the same handlers with other options) generates other code for the same handler names, which loading would silently replace.
+    /// </summary>
+    internal static void ConfigureCodeGeneration(WolverineOptions w, bool preGenerated = true)
     {
-        w.CodeGeneration.TypeLoadMode = TypeLoadMode.Auto;
+        w.CodeGeneration.TypeLoadMode = preGenerated ? TypeLoadMode.Auto : TypeLoadMode.Dynamic;
+        w.ApplicationAssembly = typeof(WolverineHostService).Assembly;   // where the pre-generated code is looked for (gateway/Internal/Generated); the entry assembly of a test host is not the gateway
         var dir = CodegenDirectory;
         try { Directory.CreateDirectory(dir); } catch (Exception) { /* generation still works without a written copy; Wolverine logs it */ }
         w.CodeGeneration.GeneratedCodeOutputPath = dir;
@@ -277,7 +287,7 @@ sealed class WolverineHostService : IHostedService
                 // W2.3: the one handler is shadow history's (ShadowHistoryHandler), whose code Wolverine generates at its first use: Auto loads pre-generated code when there is
                 // some and compiles otherwise (the WolverineFx.RuntimeCompilation package, added with W2.3)
                 w.Discovery.IncludeType(typeof(ShadowHistoryHandler));
-                ConfigureCodeGeneration(w);
+                ConfigureCodeGeneration(w, o.PreGeneratedCode);
                 // The scripts of Fworker.Database build Wolverine's tables (011); Wolverine neither builds nor diffs them. None skips the Weasel diff at start (it took about 80 s on the
                 // S0 database of tdd) and keeps four cheap existence probes. OverrideAutoCreateResources stops the on-demand paths (IMessageStoreAdmin.MigrateAsync, storage clear-handled).
                 // Never call IHost.SetupResources() or ResetResourceState(): they always migrate with CreateOrUpdate.
