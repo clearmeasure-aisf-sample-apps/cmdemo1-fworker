@@ -33,6 +33,10 @@ saga | ^saga: sweep step: a merge by a person | profile=saga-feature
 # W9.10j (#562): the scheduler on (the scenario turns scheduler.featureSlots back on and the Octopus runtime of the fake on, with a day budget of 3), three sessions started across a gateway restart, the fourth item held by the budget.
 # The profile only turns the intake on; the scenario sets the rest in the configuration of its gateway (one gateway of its own, like the other claims of the suite).
 saga | ^saga: slots: | profile=saga-feature
+# V1.2 and V1.3 (v2-only plan, #622): the intake pulls a Todo item on the Octopus runtime's free capacity with no owner session connected and never past maxConcurrent; a runtime: label routes the slot request (a runtime that
+# is off holds it as runtime-off); a person's hotfix label starts the hotfix plan (one scenario, one gateway); a worker: pin is honoured on the saga's offer (a gateway of its own: the sagas of a scenario stay in the database of the process).
+saga | ^saga: intake: a Todo item | profile=saga-feature
+saga | ^saga: intake: a worker: pin | profile=saga-feature
 # W9.9b (#361): the adoption at a start with v1 items in flight (two items with v1's state comments, adopted at the start; the next start adopts nothing again; the report in the v2 status). Passed on v2 on 2026-10-31.
 saga | ^saga: adoption: a start | profile=saga-feature
 # V1.1: the admission. Replenish starts the saga of the item it creates; a card a person moves into a step column gets a saga that begins at that step (started by the admission, or adopted when v1 wrote a state comment first).

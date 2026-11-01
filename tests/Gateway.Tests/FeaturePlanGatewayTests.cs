@@ -253,6 +253,59 @@ public sealed class SlotRequestPortTests
         Assert.Equal("high", high.Rank.Priority);
     }
 
+    // V1.3: the runtime of the request is the runtime: label's, else the routing rule of the step's column, else scheduler.runtime
+    const string Routed = """
+        {"runtimes":{"environments":{"tdd":{"octopus":{"enabled":true,"maxConcurrent":4},"routing":[{"phase":"Functional Testing","runtime":"cursor-cloud"},{"phase":"Development","runtime":"local"},{"phase":"Technical Design","runtime":"copilot-cloud"}]},
+        "uat":{"routing":[{"runtime":"cae-job"}]}}},"api":{"cursor":{"enabled":true,"maxConcurrent":1,"maxExecutionsPerDay":9},"copilot":{"enabled":true,"maxConcurrent":1,"maxExecutionsPerDay":9,"environments":{"tdd":{"enabled":true}}}}}
+        """;
+
+    static SlotRequestSettings RoutedSettings(string environment = "tdd")
+    {
+        var root = JsonNode.Parse(Routed);
+        return SlotRequestSettings.From(root, CapacitySettings.From(root, environment), "", environment,
+            phase => phase switch { "design" => "Technical Design", "develop" => "Development", "verify" => "Functional Testing", _ => null });
+    }
+
+    [Theory]
+    [InlineData("develop", "factory worker", "octopus")]                              // a rule that says local is passed over: the default
+    [InlineData("verify", "factory worker", "cursor-cloud")]                          // the rule of the column
+    [InlineData("design", "factory worker", "copilot-cloud")]
+    [InlineData("verify", "runtime:copilot-cloud", "copilot-cloud")]                  // the label wins over the routing
+    [InlineData("develop", "Runtime:Cursor-Cloud", "cursor-cloud")]
+    [InlineData("develop", "runtime:nothing-we-know", "octopus")]                     // a kind the scheduler does not know is passed over
+    [InlineData("develop", "runtime:local", "octopus")]
+    public async Task TheRuntimeOfTheRequest_IsTheLabelsThenTheRoutingOfTheColumnThenTheDefault(string phase, string label, string expected)
+    {
+        var port = new SlotRequestPort(new Reader(_ => ["factory worker", label]), RoutedSettings());
+        Assert.Equal(expected, (await port.Run(Wanted(phase), default)).Runtime);
+    }
+
+    [Fact]
+    public async Task AnEnvironmentWithoutAnEntry_HasNoRoutingAndTheDefaultRuntime_AndAnEnvironmentOfItsOwnUsesItsRules()
+    {
+        var prod = RoutedSettings("prod");   // (tdd routes the design step to copilot-cloud; prod has no entry, so no rule: the default runtime)
+        Assert.Equal(prod.Runtime, (await new SlotRequestPort(new Reader(_ => []), prod).Run(Wanted("design"), default)).Runtime);
+        Assert.Equal("cae-job", (await new SlotRequestPort(new Reader(_ => []), RoutedSettings("uat")).Run(Wanted("verify"), default)).Runtime);
+        // without environments the block applies as it is
+        var flat = JsonNode.Parse("""{"runtimes":{"routing":[{"phase":"*","runtime":"cursor-cloud"}]},"api":{"cursor":{"enabled":true,"maxConcurrent":1}}}""");
+        var settings = SlotRequestSettings.From(flat, CapacitySettings.From(flat, "tdd"), "", "tdd");
+        Assert.Equal("cursor-cloud", (await new SlotRequestPort(new Reader(_ => []), settings).Run(Wanted("develop"), default)).Runtime);
+        // no reader, no labels: the routing and the default still decide
+        Assert.Equal("copilot-cloud", (await new SlotRequestPort(null, RoutedSettings()).Run(Wanted("design"), default)).Runtime);
+    }
+
+    [Fact]
+    public async Task ALabelForARuntimeThatIsOff_StillAsksForIt_SoTheSchedulerHoldsTheSlotAsRuntimeOff()
+    {
+        // (cae-job has no job in this configuration: the scheduler has no such runtime and holds the request with runtime-off)
+        var port = new SlotRequestPort(new Reader(_ => ["runtime:cae-job"]), RoutedSettings());
+        var request = await port.Run(Wanted("develop"), default);
+        Assert.Equal("cae-job", request.Runtime);
+        var fx = new Fworker.Workflows.Capacity.CapacityScheduler(CapacitySettings.From(JsonNode.Parse(Routed), "tdd"));
+        var t = fx.Apply(null, request, At);
+        Assert.Contains(t.Result.Messages, m => m is Held { Code: "runtime-off" });
+    }
+
     [Fact]
     public async Task ALabelReadThatFails_IsReadAgain_ThenTheRequestGoesWithoutIt_AndNeverFailsTheRequest()
     {
@@ -980,7 +1033,7 @@ public sealed class FeatureIntakeTests
         var intake = new WorkItemIntake(store, settings, (m, _) => { started.Add(m); return Task.CompletedTask; });
         var docsSettings = DocsPlanSettingsReader.From(JsonNode.Parse($$$"""{"intake":{"v2Plans":[{{{string.Join(",", plans.Select(p => $"\"{p}\""))}}}]}}"""));
         var job = new DocsIntakeJob(new Boards(todo.Select(n => new BoardCard(Home, n, "Todo", true, "item " + n)).ToArray()), new Items(bodies), intake, () => new BoardRef("acme", 3), Home, docsSettings,
-            ["Technical Design", "Development", "Functional Testing"], () => 1, () => false, () => true, () => false);
+            ["Technical Design", "Development", "Functional Testing"], () => 1, () => false, () => true, () => false, null, (_, _, _) => Task.FromResult(1));   // (the runtime has room: a code item needs it)
         return (await job.Run(default), started);
     }
 
