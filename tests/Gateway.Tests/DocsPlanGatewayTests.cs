@@ -932,7 +932,9 @@ public sealed class DocsIntakeJobTests
     public async Task TheSlotsOfTheIntake_AreTheSchedulersCapacityForCodeItems_AndTheOwnerSessionsOrTheCapacityForDocs(bool docs, int owners, int capacity, bool pulled)
     {
         var rig = new Rig(new Boards(Card(5, "Todo")), new Items(One(docs ? Marker : "a feature")), AllPlans(), capacity: (_, _, _) => Task.FromResult(capacity), source: HotfixSource) { Slots = owners };
-        Assert.Equal(pulled ? "started acme/orders#5" : "no-free-slot", await rig.Job.Run(default));
+        var result = await rig.Job.Run(default);
+        if (pulled) Assert.Equal("started acme/orders#5", result);
+        else Assert.StartsWith("no-free-slot (#5 wait for capacity", result);   // (the outcome names the item that waits)
     }
 
     [Fact]
@@ -951,7 +953,7 @@ public sealed class DocsIntakeJobTests
     public async Task ALedgerThatCannotBeRead_CountsNoCapacity_AndLeavesTheOwnerSessionsSlotsOfADocsItem()
     {
         var down = new Rig(new Boards(Card(5, "Todo")), new Items(One(Marker)), AllPlans(), capacity: (_, _, _) => throw new TimeoutException("the database does not answer"), source: HotfixSource) { Slots = 0 };
-        Assert.Equal("no-free-slot", await down.Job.Run(default));
+        Assert.StartsWith("no-free-slot", await down.Job.Run(default));
         var owner = new Rig(new Boards(Card(5, "Todo")), new Items(One(Marker)), AllPlans(), capacity: (_, _, _) => throw new TimeoutException("the database does not answer"), source: HotfixSource) { Slots = 1 };
         Assert.Equal("started acme/orders#5", await owner.Job.Run(default));
     }

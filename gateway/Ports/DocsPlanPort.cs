@@ -348,9 +348,12 @@ public sealed class DocsIntakeJob(IBoardReader boards, IMergeFactsReader items, 
         // V1.2: a candidate is pulled only where a slot is free for it (see Slots); the others stay in the column
         var owners = Math.Max(0, freeSlots());
         var pullable = new List<IntakeCandidate>();
-        foreach (var c in candidates) if (await Slots(c, owners, ct) > 0) pullable.Add(c);
+        var noRoom = new List<int>();
+        foreach (var c in candidates) if (await Slots(c, owners, ct) > 0) pullable.Add(c); else noRoom.Add(c.Item.Number);
         var d = await intake.Run(pullable, pullable.Count > 0 ? 1 : candidates.Count == 0 ? owners : 0, designWaiting(), inFlight, ct);   // (no candidate at all: the reason is the rule's own)
-        return d.Pull is { Engine: IntakeEngine.V2 } pull ? $"started {pull.Item}" : d.Reason;
+        // (the item that waits for want of capacity stays in Todo; the outcome of the job, in the status of the recurring jobs, says so)
+        var waiting = capacitySlots is not null && noRoom.Count > 0 ? $" ({string.Join(", ", noRoom.Select(n => "#" + n))} wait for capacity: no free slot of the runtime, its day budget or its hosts)" : "";
+        return d.Pull is { Engine: IntakeEngine.V2 } pull ? $"started {pull.Item}" : d.Reason + waiting;
     }
 
     /// <summary>

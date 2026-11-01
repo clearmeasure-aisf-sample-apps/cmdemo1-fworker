@@ -31,7 +31,7 @@ static class GatewayWolverineExtensions
         var jobs = new RecurringJobRegistry(); RecurringJobSlots? recurring = null; PlantStepJobs? plantSteps = null;
         var intervals = RecurringJobIntervals.From(c.Instance.Root, c.Gateway.SweepSeconds);   // W9.10g: the reconciler at 2 minutes, the plant-wide steps at the sweep's interval
         var readoption = new Fworker.Workflows.Adoption.ReadoptionGate();   // W9.9b (review): the hold on old-generation inputs between the host's start and the adoption of a term after a break
-        AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null;
+        AdoptionParts? adoption = null; V2Ownership? v2Ownership = null; WorkItemParts? workItemParts = null; WorkItemRearm? rearm = null; IPurgeableLedger? purgeable = null; System.Text.Json.Nodes.JsonObject? intakeLast = null;
         // cutover review: the sweep waits for the adoption of its term (AdoptionGate); registered below where the engine acts, set up here because the status block and the host's wiring close over `adoption`
         WolverineHostService? hostForPoke = null;
         // (the sweep asks for the term's first look of the adoption itself once the host runs: the recurring job's first look comes later, and the sweep waits for it)
@@ -120,7 +120,12 @@ static class GatewayWolverineExtensions
                             // (the first slot of a hotfix is for Development, there is no design step)
                             (labels, plan, ct) => capacityParts.Service.FreeSlots(workItems.Feature.SlotSettings.RuntimeFor(labels, plan == Fworker.Workflows.WorkItem.WorkPlans.Hotfix ? Fworker.Workflows.Capacity.CapacityPhases.Develop : Fworker.Workflows.Capacity.CapacityPhases.Design), ct));
                         if (docsIntake is not null)
-                            jobs.Add(RecurringJobSlots.DocsIntake, async ct => Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["docsIntake"] = await docsIntake.Run(ct) }.ToJsonString()));
+                            jobs.Add(RecurringJobSlots.DocsIntake, async ct =>
+                            {
+                                var outcome = await docsIntake.Run(ct);
+                                intakeLast = new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["outcome"] = outcome };
+                                Console.WriteLine(new System.Text.Json.Nodes.JsonObject { ["at"] = DateTime.UtcNow.ToString("o"), ["docsIntake"] = outcome }.ToJsonString());
+                            });
                     }
                     // W7.3: the watcher of CI alongside Functional Testing (every minute, on the leader), for the feature items; the checks are read through the rule script's own verbs, so its CI rule stays the script's
                     if (workItems.Docs.Settings.CarriesFeature)
@@ -276,7 +281,7 @@ static class GatewayWolverineExtensions
             {
                 _ = sp.GetRequiredService<WolverineHostService>();
                 var cs = WolverineHostService.WithConnectTimeout(healthConnection, sp.GetRequiredService<WolverineHostOptions>().ConnectTimeoutSeconds);
-                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => { var b = adoption?.Job.Block(); if (b is not null && c.Engine.V2Acts) b["sweep"] = adoptionGate.Block(); return b; });   // (sweep: whether v1's sweep still waits for this term's adoption, since when, and whether the wait is past its limit)
+                return new V2Health(new SqlV2HealthSource(() => new Microsoft.Data.SqlClient.SqlConnection(cs)), sp.GetRequiredService<FactorySchemaStatus>(), c.Engine, () => c.Engine.V2Acts && c.Instance.Home != null ? jobs : null, () => rearm, reconciler: () => c.BoardReconciler?.Meter.Block(), adoption: () => { var b = adoption?.Job.Block(); if (b is not null && c.Engine.V2Acts) b["sweep"] = adoptionGate.Block(); return b; }, intake: () => (System.Text.Json.Nodes.JsonObject?)intakeLast?.DeepClone());   // (sweep: whether v1's sweep still waits for this term's adoption, since when, and whether the wait is past its limit)
             });
         // W4.3: the scheduler of the recurring jobs (resolving it builds the host first, which fills the registry)
         if (c.Engine.V2Acts && c.Instance.Home != null)

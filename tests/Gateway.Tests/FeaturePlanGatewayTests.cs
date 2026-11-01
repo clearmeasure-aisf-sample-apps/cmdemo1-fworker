@@ -1033,7 +1033,7 @@ public sealed class FeatureIntakeTests
         var intake = new WorkItemIntake(store, settings, (m, _) => { started.Add(m); return Task.CompletedTask; });
         var docsSettings = DocsPlanSettingsReader.From(JsonNode.Parse($$$"""{"intake":{"v2Plans":[{{{string.Join(",", plans.Select(p => $"\"{p}\""))}}}]}}"""));
         var job = new DocsIntakeJob(new Boards(todo.Select(n => new BoardCard(Home, n, "Todo", true, "item " + n)).ToArray()), new Items(bodies), intake, () => new BoardRef("acme", 3), Home, docsSettings,
-            ["Technical Design", "Development", "Functional Testing"], () => 1, () => false, () => true, () => false);
+            ["Technical Design", "Development", "Functional Testing"], () => 1, () => false, () => true, () => false, null, (_, _, _) => Task.FromResult(1));   // (the runtime has room: a code item needs it)
         return (await job.Run(default), started);
     }
 

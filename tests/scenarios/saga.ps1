@@ -341,8 +341,9 @@ $SagaScenarios['saga: slots: three sessions against a day budget of three are st
         # the fourth item: the budget is spent, so the scheduler holds it, and no run is made
         $n4 = New-Item-Fake 'Slots session 4' "Change the code, as the criteria say.`n`n- criterion one" ($OctLabels) 'Todo'
         $items += $n4
-        Check "the intake pulls #$n4 from Todo (the item the budget holds)" (Slots-WaitFor 200 { (Saga-Col $n4) -eq 'Technical Design' }) "column $(Saga-Col $n4)"
-        Check "the scheduler holds #$n4 for the day budget (runtime-budget)" (Slots-WaitFor 60 { (Slots-Reasons $n4) -match 'runtime-budget' }) "decisions: $(Slots-Reasons $n4)"
+        # V1.2: the intake counts the runtime's free capacity, and the day budget is part of it: the item is not pulled, it waits in Todo (over two runs of the intake job) and the job's outcome says why
+        $pulled4 = Slots-WaitFor 130 { (Saga-Col $n4) -ne 'Todo' }
+        Check "the intake does not pull #$n4 from Todo while the day budget is spent" (-not $pulled4) "column $(Saga-Col $n4)"
         Start-Sleep -Seconds 5
         Check "no session is started for #${n4}: the day budget of $($script:SlotsBudget) is the limit" ((Slots-Runs $n4).Count -eq 0 -and (Slots-AllRuns).Count -eq $script:SlotsBudget) "runs: $((Slots-AllRuns).Count)"
     } finally {
