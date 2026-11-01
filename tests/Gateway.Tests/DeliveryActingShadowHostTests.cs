@@ -162,6 +162,19 @@ public sealed class DeliveryActingShadowHostTests
     }
 
     [Fact]
+    public async Task WhereTheTrainPromotes_ASignOffTheWatcherReports_ReachesTheTrain_AndItsAnswerReachesTheExecutor()
+    {
+        // V2.1: the Octopus watcher's SignOffRequested goes through the router to the train that asked for the deployment, which answers it
+        await using var rig = new Rig(shadowed: false);
+        await rig.Start();
+        await rig.ReleaseGoesThroughTdd();
+        Assert.True(await Until(() => Volatile.Read(ref rig.ExecutorCalls) >= 1), "the PromoteRelease did not reach the executor");
+        await rig.Bus.PublishAsync(new OctopusDeploymentChanged("D-2-Uat", "T-2-Uat", "R-2", "1.0.2", "Uat", OctopusDeploymentPhase.Started, Sha('a')));
+        await rig.Bus.PublishAsync(new SignOffRequested("I-2", "D-2-Uat", "T-2-Uat", "R-2", "1.0.2", "Uat", Sha('a')));
+        Assert.True(await Until(() => Volatile.Read(ref rig.ExecutorCalls) >= 2), $"the AnswerSignOff did not reach the executor; log: {string.Join(" // ", rig.Log.TakeLast(40))}");
+    }
+
+    [Fact]
     public async Task WhereTheTrainPromotes_TheCommandReachesTheExecutor_AndTheShadowRecordsNothing()
     {
         await using var rig = new Rig(shadowed: false);

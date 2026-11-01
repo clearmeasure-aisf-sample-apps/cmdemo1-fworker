@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Fworker.Contracts.Commands;
+using Fworker.Contracts.Ids;
 using Fworker.Contracts.Messaging;
 using Fworker.Contracts.Seams;
 using Fworker.Integrations.Commands;
@@ -19,7 +20,7 @@ using Wolverine.ErrorHandling;
 public sealed record DeliveryCommandFinished(string IdempotencyKey, string Name, bool Ok, string Error);
 
 /// <summary>The runs of the delivery commands: the handler of the command, the retry of a transient failure, the messages of the outcome.</summary>
-public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, AnswerSignOffHandler answer, PromotionStateWriter? recorder = null)
+public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, AnswerSignOffHandler answer, PromotionStateWriter? recorder = null, PromotionJournal? journal = null)
 {
     static RuntimeOutcome Settle<T>(T c, CommandResult r) where T : IntegrationCommand
     {
@@ -41,11 +42,19 @@ public sealed class DeliveryExecutorService(PromoteReleaseHandler promote, Answe
         // W9.10i: the deployment (made now, or found: either way the train's own request) is recorded on the state comments of the release's items, where v1's promotion reads that it is the gateway's. A fault here
         // is thrown, so the handler runs again: the ledger answers the command from its record and only the write is tried again, which is idempotent
         if (recorder is not null && result is { Ok: true, Execution.Length: > 0 }) await recorder.Promoted(c, result.Execution, DateTimeOffset.UtcNow, ct);
+        // V2.1: the journal lines v1's AutoPromoter writes on the items: "promoted" with the task, and the refusal of Octopus (a 403 names the permission the owner must grant) as a waiting reason
+        if (journal is not null && result is { Ok: true, Execution.Length: > 0 }) await journal.Promoted(c, result.Execution, ct);
+        else if (journal is not null && result is { Ok: false } && result.Error.Contains("(403", StringComparison.Ordinal)) await journal.PromoteRefused(c, result.Error, ct);
         return messages;
     }
 
-    internal Task<IReadOnlyList<object>> AnswerMessages(AnswerSignOff c, int attempts, CancellationToken ct) =>
-        RuntimeCommandService.Outcome(c, async () => Settle(c, await answer.Handle(c, ct)), e => Exhausted(c, e), attempts);
+    internal async Task<IReadOnlyList<object>> AnswerMessages(AnswerSignOff c, int attempts, CancellationToken ct)
+    {
+        CommandResult? result = null;
+        var messages = await RuntimeCommandService.Outcome(c, async () => Settle(c, result = await answer.Handle(c, ct)), e => Exhausted(c, e), attempts);
+        if (journal is not null && result is { Ok: false } && result.Error.Contains("(403", StringComparison.Ordinal)) await journal.AnswerRefused(c, result.Error, ct);
+        return messages;
+    }
 
     public async Task RunPromote(PromoteRelease c, IMessageBus bus, int attempts, CancellationToken ct) { foreach (var m in await PromoteMessages(c, attempts, ct)) await bus.PublishAsync(m); }
     public async Task RunAnswer(AnswerSignOff c, IMessageBus bus, int attempts, CancellationToken ct) { foreach (var m in await AnswerMessages(c, attempts, ct)) await bus.PublishAsync(m); }
@@ -92,6 +101,102 @@ public static class SignOffWaitHandler
     public static Task Handle(TrainDecided m, SignOffWaitRecorder recorder, CancellationToken ct) => recorder.Record(m, ct);
 }
 
+/// <summary>
+/// V2.1: the journal lines of Verbs.Promote.ps1 on the items of a release, written through the journal ledger where the train acts (v1 wrote them from the AutoPromoter): <c>promoted</c> (the executor made the deployment),
+/// <c>promotion-waiting</c> (once per release, environment and reason, per item; the gates name the item that holds the others, and each other item is told "#N, carried by this release, does not qualify"; the Sign-off that waits;
+/// the refusal of Octopus with the permission it names) and <c>promotion-signoff</c> (the Sign-off answered). The ledger keeps the key of every line, so a command or a decision that runs again writes nothing twice. A line that cannot
+/// be written is logged and dropped, as v1 does: the journal never stops a promotion. Only the trains that act write (a shadow train executes nothing and v1 still writes its own lines there).
+/// </summary>
+public sealed class PromotionJournal(Func<JournalLedger?> ledger, RepoId home, IDeliveryPolicies policies, ITrainStore trains, Action<string>? log = null)
+{
+    readonly Action<string> log = log ?? (m => Console.Error.WriteLine(m));
+
+    string EnvironmentName(string deployable, string environment) => policies.For(deployable, environment)?.NameOf(environment) ?? environment;
+
+    public Task Promoted(PromoteRelease c, string task, CancellationToken ct) =>
+        Write(c.Items, "promoted", _ => (new Dictionary<string, object?> { ["release"] = c.Version, ["environment"] = EnvironmentName(c.Deployable, c.Environment), ["task"] = task }, $"{c.Version}|{c.Environment}"), ct);
+
+    public Task PromoteRefused(PromoteRelease c, string error, CancellationToken ct) => Waiting(c.Items, c.Version, c.Deployable, c.Environment, error, ct);
+
+    /// <summary>The refusal to answer a Sign-off: the items are those of the release the train asked for (the command names only the interruption).</summary>
+    public async Task AnswerRefused(AnswerSignOff c, string error, CancellationToken ct)
+    {
+        foreach (var p in policies.All().Where(x => x.Acts && !x.Shadow && string.Equals(x.Deployable, c.Deployable, StringComparison.OrdinalIgnoreCase)))
+        {
+            var state = (await trains.Load(TrainKey.Of(p.Deployable, p.Environment), ct))?.State;
+            if (state?.SignOffs.FirstOrDefault(x => x.TaskId == c.TaskId) is { } so)
+            {
+                await Waiting(state.RequestItems.GetValueOrDefault(so.Version), so.Version, p.Deployable, p.Environment, error, ct);
+                return;
+            }
+        }
+    }
+
+    Task Waiting(IReadOnlyList<string>? items, string release, string deployable, string environment, string reason, CancellationToken ct) =>
+        Write(items, "promotion-waiting", _ => (new Dictionary<string, object?> { ["release"] = release, ["environment"] = EnvironmentName(deployable, environment), ["reason"] = reason }, $"{release}|{environment}|{reason}"), ct);
+
+    /// <summary>What the train decided: a release that waits (per item, with its own gaps), a Sign-off that waits, a Sign-off answered.</summary>
+    public async Task Decided(TrainDecided m, CancellationToken ct)
+    {
+        if (m.Items.Count == 0 || m.Replay) return;
+        var (deployable, environment) = TrainKey.Split(m.Key);
+        if (policies.For(deployable, environment) is not { Acts: true, Shadow: false }) return;
+        switch (m.Action)
+        {
+            case "waiting":
+                await Write(m.Items, "promotion-waiting", item => (new Dictionary<string, object?> { ["release"] = m.Release, ["environment"] = EnvironmentName(deployable, environment), ["reason"] = ReasonFor(item, m.Reasons) },
+                    $"{m.Release}|{environment}|{ReasonFor(item, m.Reasons)}"), ct);
+                break;
+            case "signoff-waiting":
+                await Write(m.Items, "promotion-waiting", _ => (new Dictionary<string, object?> { ["release"] = m.Release, ["environment"] = EnvironmentName(deployable, environment), ["reason"] = string.Join("; ", m.Reasons) },
+                    $"{m.Release}|{environment}|signoff-wait|{string.Join("; ", m.Reasons)}"), ct);
+                break;
+            case "signoff-proceed" or "signoff-abort":
+                var task = (await trains.Load(m.Key, ct))?.State.SignOffs.FirstOrDefault(x => x.Version == m.Release)?.TaskId ?? "";
+                var result = m.Action == "signoff-proceed" ? "Proceed" : "Abort";
+                await Write(m.Items, "promotion-signoff", _ => (new Dictionary<string, object?> { ["release"] = m.Release, ["environment"] = EnvironmentName(deployable, environment), ["task"] = task, ["result"] = result, ["reason"] = string.Join("; ", m.Reasons) },
+                    $"{m.Release}|{environment}|{task}|{result}"), ct);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// The reason a release waits, for one of its items (v1: the common reasons, the item's own gaps, and "#N, carried by this release, does not qualify" for each other item that has gaps). The train's gaps name their item
+    /// ("#N has no ..."), so the holder of the others is told in the line of every item.
+    /// </summary>
+    internal static string ReasonFor(string item, IReadOnlyList<string> reasons)
+    {
+        var number = ItemId.TryParse(item, out var id) ? id.Number : 0;
+        var own = new List<string>(); var common = new List<string>(); var others = new SortedSet<int>();
+        foreach (var r in reasons)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(r, @"^#(\d+) ");
+            if (!m.Success) { common.Add(r); continue; }
+            var n = int.Parse(m.Groups[1].Value);
+            if (n == number) own.Add(r); else others.Add(n);
+        }
+        return string.Join("; ", common.Concat(own).Concat(others.Select(n => $"#{n}, carried by this release, does not qualify")));
+    }
+
+    async Task Write(IReadOnlyList<string>? items, string ev, Func<string, (Dictionary<string, object?> Fields, string Key)> line, CancellationToken ct)
+    {
+        if (ledger() is not { } l) return;
+        foreach (var text in items ?? [])
+        {
+            if (!ItemId.TryParse(text, out var item) || item.Repository != home) continue;
+            try { var (fields, key) = line(text); await l.AppendPlant(item.Number, ev, fields, key, ct); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception e) { log($"the journal line {ev} is not written on {item}: {e.Message}"); }
+        }
+    }
+}
+
+/// <summary>The handler of the train's decisions for the item journal. Public because Wolverine's generated code refers to it.</summary>
+public static class PromotionJournalHandler
+{
+    public static Task Handle(TrainDecided m, PromotionJournal journal, CancellationToken ct) => journal.Decided(m, ct);
+}
+
 static class DeliveryActingWiring
 {
     /// <summary>
@@ -109,7 +214,10 @@ static class DeliveryActingWiring
         // the key that may create deployments and answer interruptions: the runbook service account's, else the reader key
         var settings = new OctopusPromoteSettings(octopus["space"]?.ToString() ?? "", names, () => env("OCTOPUS_RUNBOOK_API_KEY") is { Length: > 0 } k ? k : env("OCTOPUS_API_KEY"), mayAct);
         var promoter = new OctopusPromoter(http, settings);
-        var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter), promotions);
+        var trainStore = new SqlTrainStore(() => ItemMergedWiring.Open(parts.ConnectionString));
+        // V2.1: the journal lines of the promotion on the items (the home repository's), through the one journal ledger of the gateway
+        var journal = c.Instance.Home is { } homeRepo ? new PromotionJournal(() => c.JournalLedger, homeRepo, parts.Policies, trainStore) : null;
+        var service = new DeliveryExecutorService(new PromoteReleaseHandler(ledger, promoter), new AnswerSignOffHandler(ledger, promoter), promotions, journal);
         // W9.10p: the shadow of the environments v1's AutoPromoter still promotes (uat and prod until delivery.autoPromote.trainActs): the AutoPromoter's passes (AddGatewayBackground) and the status endpoints find it through the holder
         if (shadowHolder is not null) shadowHolder.Shadow = parts.Shadow;
         RollbackWiring.Attach(host, c, env, mayAct, ledger);   // W8.3: the executor of the train's incident rollback (RollbackRelease) and the migration probe it takes; the executor refuses every environment but tdd
@@ -117,7 +225,7 @@ static class DeliveryActingWiring
         host.RuntimeCommands = (services, w) =>
         {
             previous?.Invoke(services, w);
-            Configure(services, w, parts, new SqlTrainStore(() => ItemMergedWiring.Open(parts.ConnectionString)), service, promotions: promotions);
+            Configure(services, w, parts, trainStore, service, promotions: promotions, journal: journal);
         };
         return new ShadowOctopusPort(ev => DeliveryShadowWiring.Publish(host, ev), true);
     }
@@ -126,7 +234,7 @@ static class DeliveryActingWiring
     /// What the acting train adds to the Wolverine host: its services, its handlers, the executor of its commands and the recording of the train's shadow (<see cref="DeliveryActingShadowHandlers"/>: the decisions and
     /// the ShadowCommands of an environment v1 still promotes, which nothing executes). Apart from <see cref="Attach"/> so that a host test builds the same registration with a store of its own.
     /// </summary>
-    internal static void Configure(IServiceCollection services, WolverineOptions w, DeliveryShadowParts parts, ITrainStore store, DeliveryExecutorService service, bool durable = true, PromotionStateWriter? promotions = null)
+    internal static void Configure(IServiceCollection services, WolverineOptions w, DeliveryShadowParts parts, ITrainStore store, DeliveryExecutorService service, bool durable = true, PromotionStateWriter? promotions = null, PromotionJournal? journal = null)
     {
         services.AddSingleton(parts.Policies);
         services.AddSingleton(parts.Reads);
@@ -138,6 +246,7 @@ static class DeliveryActingWiring
         services.AddSingleton(service);
         // W9.10i: where there is a state comment to write, a Sign-off the train waits at is recorded for v1 (the deployments themselves are recorded by the executor)
         if (promotions is not null) { services.AddSingleton(new SignOffWaitRecorder(store, promotions)); w.Discovery.IncludeType(typeof(SignOffWaitHandler)); }
+        if (journal is not null) { services.AddSingleton(journal); w.Discovery.IncludeType(typeof(PromotionJournalHandler)); }
         w.Discovery.IncludeType(typeof(DeliveryTrainHandlers));
         w.Discovery.IncludeType(typeof(DeliveryTrainRouting));
         w.Discovery.IncludeType(typeof(DeliveryExecutorHandlers));

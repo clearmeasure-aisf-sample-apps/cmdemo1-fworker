@@ -210,6 +210,21 @@ public class DeliveryTrainTests
     }
 
     [Fact]
+    public async Task AReleaseThatWaitsForThePreviousEnvironment_NamesTheItemsOfItsCommit_SoTheirJournalsCanSayWhy()
+    {
+        // V2.1: v1 journals "waits for the automatic promotion" on every item of the release even while its deployment to tdd is Failed or missing; a wait with no item is a line no item shows
+        var f = new TrainFixture(); await f.Baseline();
+        await f.Merge(7, 'a'); await f.Merge(8, 'b');
+        await f.Release("1.0.2", 'a');
+        Assert.Equal(["it has no deployment to Tdd"], f.LastDecision!.Reasons);
+        Assert.Empty(f.LastDecision.Items);   // (a moment: Octopus's events end it in seconds, and v1, which reads Octopus whole, never says it)
+        await f.Deploy("1.0.2", "Tdd", "Started");
+        Assert.Empty(f.LastDecision!.Items);
+        await f.Deploy("1.0.2", "Tdd", "Failed");
+        Assert.Equal([new ItemId(Repo, 7).ToString()], f.LastDecision!.Items);   // (the item 8 merged as another commit: it is the item of another release)
+    }
+
+    [Fact]
     public async Task AReleaseNotYetSucceededInThePreviousEnvironment_WaitsWithV1sText()
     {
         var f = new TrainFixture(); await f.Baseline();

@@ -69,6 +69,8 @@ sealed record WolverineHostOptions
         TimeSpan T(string key, TimeSpan dflt)
         {
             var floor = Keys.First(k => k.Key == key).FloorSeconds;
+            // a test gateway (FACTORY_DB_CREATE, which nothing deployed sets) may poll for scheduled messages every 5 seconds: the delivery train looks again at its timers, and a suite of Tier 1 cannot wait a minute for each
+            if (key == "scheduledJobSeconds" && Environment.GetEnvironmentVariable("FACTORY_DB_CREATE") == "1") floor = Math.Min(floor, 5);
             try { return block[key] is JsonValue v && v.TryGetValue<int>(out var s) && s >= floor ? TimeSpan.FromSeconds(s) : dflt; }
             catch { return dflt; }
         }

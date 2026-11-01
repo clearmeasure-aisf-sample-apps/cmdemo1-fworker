@@ -12,25 +12,44 @@ function Pm-Base {
     if ((Get-Variable -Scope Script -Name PmBaseFor -ValueOnly -ErrorAction SilentlyContinue) -eq $script:Current) { return }
     $script:PmBaseFor = $script:Current
     $b = Pm-Sha
-    [void](Fake 'octo-release' @{ version = '3.0.0'; sha = $b; also = @('uat', 'prod') })
+    # (on v2 the train keeps its state across the scenarios of a gateway, and keys a release by its version: the base of each scenario has a version of its own)
+    $script:PmBaseSeq = 1 + $(if (Get-Variable -Scope Script -Name PmBaseSeq -ValueOnly -ErrorAction SilentlyContinue) { $script:PmBaseSeq } else { 0 })
+    [void](Fake 'octo-release' @{ version = $(if ($script:GoldenEngine -eq 'v2') { "3.0.$($script:PmBaseSeq)" } else { '3.0.0' }); sha = $b; also = @('uat', 'prod') })
     [void](Fake 'promote-history' @{ shas = @($b) })
 }
+# -Engine v2: the pull requests the scenario merges are numbered above every item (the fake numbers issues and pull requests apart, GitHub does not: the issue read of a number that is also a pull request answers the pull request,
+# and the deriver of ItemMerged takes it for "no item"). Once per scenario, as Pm-Base.
+function Pm-Numbers {
+    if ($script:GoldenEngine -ne 'v2') { return }
+    if ((Get-Variable -Scope Script -Name PmNumbersFor -ValueOnly -ErrorAction SilentlyContinue) -eq $script:Current) { return }
+    $script:PmNumbersFor = $script:Current
+    $script:WaitScale = 3   # the delivery train looks again at the scheduled-message poll of the Wolverine host (5 s at the least in a test gateway), where v1 passed every 3 s: every wait of the scenarios is three times longer
+    foreach ($i in 1..30) { [void](Fake 'merged-pr' @{ ref = "filler/$i"; title = "filler $i"; sha = (Pm-Sha); files = @('docs/filler.md') }) }
+}
 function Pm-Item([string]$Ver, [string[]]$Labels = $PromoteLabels, [string]$Tdd = 'Success', [switch]$NoPass, [switch]$NoRelease, [string]$Sha = '', [switch]$NoBase) {
+    Pm-Numbers
     if (-not $NoBase) { Pm-Base }
     $sha = if ($Sha) { $Sha } else { Pm-Sha }
     [void](Fake 'promote-history' @{ shas = @($sha) })
     if (-not $NoRelease) { [void](Fake 'octo-release' @{ version = $Ver; sha = $sha; tdd = $Tdd }) }
     $n = New-Item-Fake "Promote $Ver" 'x' $Labels 'Release Queue'
     $now = (Get-Date).ToUniversalTime().ToString('o')
-    $st = @{ schema = 1; item = $n; verdict = @{ passed = $true; pr = 7; processed = $true }; merge = @{ sha = $sha; pr = 7; merged_at = $now; green_at = $now; awaiting = 'release-queue'; release = $Ver; queued_at = $now } }
+    # V2.1 (-Engine v2, the delivery train acts): the item's pull request is a real merged one (the train derives ItemMerged from the merge webhook and reads the pull request). The state names a pull request that is none
+    # (7 on v1, 500 here, where 7 is a pull request of the scenario: the golden files call both "{#old}") for the verdict and the merge, which are equal and so a PASS merged by the gateway, as on v1: the golden writes of the scenarios are the same
+    $pr = 7
+    if ($script:GoldenEngine -eq 'v2') { $pr = 500; $prReal = [int](Fake 'merged-pr' @{ ref = "factory-worker/$n-promote"; title = "Promote $Ver"; sha = $sha; files = @('src/x.cs') }).number }
+    $st = @{ schema = 1; item = $n; verdict = @{ passed = $true; pr = $pr; processed = $true }; merge = @{ sha = $sha; pr = $pr; merged_at = $now; green_at = $now; awaiting = 'release-queue'; release = $Ver; queued_at = $now } }
     if ($NoPass) { $st.merge.by = 'person'; $st.verdict.passed = $false }
     $body = "<!-- factory-state:factory-worker v1 -->`nstate`n`n``````json`n$($st | ConvertTo-Json -Depth 8)`n```````n"
     [void](Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/issues/$n/comments" -Method POST -Headers @{ Authorization = 'Bearer fake-operator' } -Body (@{ body = $body } | ConvertTo-Json) -ContentType 'application/json')
+    # the merge webhook, after the state is there (the deriver reads the item): ItemMerged, a candidate of the train
+    if ($script:GoldenEngine -eq 'v2') { [void](Bu-MergeHook $prReal "factory-worker/$n-promote" $sha) }
     return @{ n = $n; sha = $sha }
 }
 # A factory item in Done whose pull request was merged as a commit before the next release (a docs-only keeper item goes there straight from
 # Functional Testing): its PR is merged as that commit, its state records the merge; -Awaiting leaves the merge unsettled
 function Pm-DoneItem([string]$Awaiting = '') {
+    Pm-Numbers
     Pm-Base
     $sha = Pm-Sha
     $n = New-Item-Fake 'Promote docs item' 'x' $PromoteLabels 'Done'

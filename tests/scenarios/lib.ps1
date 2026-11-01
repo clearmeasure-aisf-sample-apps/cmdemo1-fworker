@@ -142,8 +142,10 @@ function Wait-V2HostRunning([int]$Seconds = 60) {
 }
 function Stop-TestEnv { Stop-ClientHost; foreach ($p in $script:Procs) { try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch { } }; $script:Procs = @() }
 
+# $script:WaitScale lengthens every wait (default 1): the promote suite on v2 sets it, because the delivery train looks again at the scheduled-message poll of the Wolverine host (5 s at the least in a test gateway), where v1 passed every 3 s
+$script:WaitScale = 1
 function Wait-Until([scriptblock]$Cond, [int]$Seconds = 30, [string]$Message = 'condition') {
-    $end = (Get-Date).AddSeconds($Seconds)
+    $end = (Get-Date).AddSeconds($Seconds * $script:WaitScale)
     while ((Get-Date) -lt $end) { if (& $Cond) { return $true }; Start-Sleep -Milliseconds 400 }
     return $false
 }

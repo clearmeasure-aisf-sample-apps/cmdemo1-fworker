@@ -507,12 +507,13 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
             var failedHere = s.DeploymentOf(r.Version, env);
             if (failedHere is not null)
             {
-                Note(r.Version, [], [$"its deployment to {TargetName} ended {failedHere.Phase} ({failedHere.DeploymentId}); the operator deploys it again, or the item goes back to Development"]);
+                Note(r.Version, ItemsOf(r), [$"its deployment to {TargetName} ended {failedHere.Phase} ({failedHere.DeploymentId}); the operator deploys it again, or the item goes back to Development"]);
                 continue;
             }
             if (prev is not { Succeeded: true })
             {
-                Note(r.Version, [], [prev is null ? $"it has no deployment to {p.NameOf(pk)}" : $"its deployment to {p.NameOf(pk)} is {(prev.Completed ? prev.Phase : "still " + prev.Phase)} ({prev.DeploymentId})"]);
+                // (a deployment that has not begun or is running is a moment, which the events of Octopus end within seconds: v1 reads Octopus whole and never sees it, so it is no line of any item; one that ended is)
+                Note(r.Version, prev is { Completed: true } ? ItemsOf(r) : [], [prev is null ? $"it has no deployment to {p.NameOf(pk)}" : $"its deployment to {p.NameOf(pk)} is {(prev.Completed ? prev.Phase : "still " + prev.Phase)} ({prev.DeploymentId})"]);
                 continue;
             }
             if (stop && ++behind > MaxDescribedBehind) continue;
@@ -559,6 +560,13 @@ sealed partial class TrainRun(TrainState s, DeliveryPolicy p, ITrainReads reads,
 
         void Note(string version, IReadOnlyList<string> items, IReadOnlyList<string> reasons) => notes.Add((version, items, reasons.ToList()));
     }
+
+    /// <summary>
+    /// The items a release carries by its own commit (the candidates merged as that commit), for the waits that are decided before the release is judged and do not pass by themselves: v1 says why a release waits on every item of its
+    /// queue entry (the item journals "waits for the automatic promotion to uat: its deployment to tdd is Failed"), and a wait with no item is a line no item shows. The items between the commit running in the environment and this release need a read of GitHub
+    /// and are named when the release is judged.
+    /// </summary>
+    List<string> ItemsOf(TrainRelease r) => string.IsNullOrEmpty(r.Commit) ? [] : s.Candidates.Values.Where(c => string.Equals(c.Commit, r.Commit, StringComparison.OrdinalIgnoreCase)).Select(c => c.Item).Distinct().ToList();
 
     /// <summary>Whether a release with these items may be promoted under the hold: always when nothing holds the train, else only when it carries an item of the incident's hotfix.</summary>
     bool PassesHold(IReadOnlyList<string> items) => !s.Held || items.Any(i => s.HoldAllow.Contains(i.ToLowerInvariant()));

@@ -51,7 +51,9 @@ static class DeliveryShadowSettings
             var window = new HealthWindow(Num(o?["health"], "spacingMinutes", 5), Num(o?["health"], "settleMinutes", 10));
             // W8.3: delivery.rollback.migrationPaths, the path fragments that mark a file as a database migration (the rollback's precondition); absent: DbUp's scripts/Update
             var migrations = (cfg.Root?["delivery"]?["rollback"]?["migrationPaths"] as JsonArray)?.Select(m => m?.ToString() ?? "").Where(m => m != "").ToList();
-            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, shadowed, migrations);
+            return new DeliveryPolicySettings(project, Promoter.Gateway, environments, names, urls, S(o, "healthPath") is { Length: > 0 } hp ? hp : null, window, Num(ap, "signoffWaitHours", 2), engineActs && cfg.DependenciesDelivered, shadowed, migrations,
+                // V2.1: how often a train that waits for the clock or the app looks again, and the least gap between two health reads (v1 passes every 60 s and reads at once): 120 s and 30 s; a test shortens them
+                (int)Num(ap, "pollSeconds", 120), (int)Num(ap, "readGapSeconds", 30));
         }
         catch { return null; }
     }
@@ -158,12 +160,15 @@ static class DeliveryShadowWiring
         }
         app ??= new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
         var budget = c.GitHubBudget;
+        // V2.1: the health read is tried octopus.health.retries times, octopus.health.retrySeconds apart, as v1's Read-EnvHealth does
+        double Health(string name, double fallback) => c.Instance.Root?["octopus"]?["health"]?[name] is { } n && double.TryParse(n.ToString(), System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : fallback;
         void Observe(string resource, string? remaining, string? reset, string? limit) => budget.Observe(new JsonObject { [resource] = new JsonObject { ["remaining"] = remaining, ["reset"] = reset, ["limit"] = limit } });
         var gates = new ItemGateConfig(Str("autoMergeLabel", "Auto Merge"), Str("videoLabel", "video"), holds);
         var facts = new Fworker.Integrations.GitHub.HttpMergeFactsReader(github, new Fworker.Integrations.GitHub.ProviderCredentialSource(tokens), Str("name", "factory-worker"), gates.VideoLabel,
             (resource, remaining, reset, limit) => Observe(resource, remaining, reset, limit));
         var policies = new CatalogDeliveryPolicies(() => catalog.Current, DeliveryShadowSettings.For(c.Instance, () => catalog.Current, c.Engine.V2Acts));
-        var reads = new HttpTrainReads(github, app, Str("name", "factory-worker"), facts, gates, policies, Observe, null, () => budget.Low().Low);
+        var reads = new HttpTrainReads(github, app, Str("name", "factory-worker"), facts, gates, policies, Observe, null, () => budget.Low().Low,
+            Math.Max(1, (int)(Health("retries", 3))), TimeSpan.FromSeconds(Math.Max(0, Health("retrySeconds", 20))));
         var shadow = new DeliveryShadow(policies, new SqlShadowComparisonStore(() => ItemMergedWiring.Open(connectionString)));
         return new DeliveryShadowParts(shadow, policies, reads, new DeliveredToTable(() => ItemMergedWiring.Open(connectionString)), connectionString);
     }
@@ -219,6 +224,14 @@ sealed class ShadowOctopusPort(Func<object, Task<bool>> publish, bool enabled)
 {
     public bool Enabled => enabled;
     public Task<bool> Publish(object ev) => enabled ? publish(ev) : Task.FromResult(false);
+
+    /// <summary>
+    /// The port when the incident saga is attached. The port of the acting train, when there is one that is enabled, already carries every Octopus event to the host, and the incident saga takes the deployments from the same publish:
+    /// it is kept. (V2.1: the line that built the incident-only port replaced it unconditionally, and the releases, the replay markers and the Sign-offs of the watcher were dropped: a train that acts for an environment with a
+    /// Sign-off never answered one.) Without a train the port carries the deployments to the incident saga and nothing else.
+    /// </summary>
+    public static ShadowOctopusPort WithIncidents(ShadowOctopusPort? train, Func<object, Task<bool>> publishToHost)
+        => train is { Enabled: true } ? train : new ShadowOctopusPort(ev => ev is Fworker.Contracts.Seams.OctopusDeploymentChanged ? publishToHost(ev) : Task.FromResult(true), enabled: true);
 }
 
 /// <summary>The shadow run of the delivery train once the host has made it (null before, and where the train could not be built). Registered only in the shadow run.</summary>
