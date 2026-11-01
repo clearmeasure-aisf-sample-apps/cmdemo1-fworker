@@ -77,7 +77,7 @@ sealed class WriteRecorder
     }
 
     public static string SourceOf(string userAgent) =>
-        userAgent.StartsWith("factory-worker-gateway", StringComparison.Ordinal) ? "rule" : userAgent.Contains("PowerShell", StringComparison.Ordinal) ? "harness" : "gateway";
+        userAgent == "factory-worker-gateway" ? "rule" : userAgent.Contains("PowerShell", StringComparison.Ordinal) ? "harness" : "gateway";
 
     /// <summary>Whether a request's cause id is the open scenario's: its nonce, or the nonce followed by "." and the call's number.</summary>
     bool IsCaused(string cause) =>

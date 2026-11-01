@@ -29,7 +29,7 @@ public sealed class ServiceVerbParityTests : IClassFixture<ServiceVerbParityTest
         {
             var dll = new[] { "Release", "Debug" }.Select(c => Path.Combine(Root, "tests", "FakeGitHub", "bin", c, "net10.0", "FakeGitHub.dll")).FirstOrDefault(File.Exists);
             using (var probe = new TcpListener(System.Net.IPAddress.Loopback, 0)) { probe.Start(); Port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port; }
-            Http = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{Port}/") };
+            Http = new HttpClient(new Fworker.Integrations.GitHub.GitHubUserAgentHandler()) { BaseAddress = new Uri($"http://127.0.0.1:{Port}/") };
             if (dll is null || Pwsh is null) return;
             var psi = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true };
             psi.ArgumentList.Add(dll); psi.Environment["FAKE_PORT"] = Port.ToString();
@@ -106,7 +106,7 @@ public sealed class ServiceVerbParityTests : IClassFixture<ServiceVerbParityTest
         var before = (await Log()).Count;
         var env = Env(extraEnv);
         Func<string, string?> get = n => env.TryGetValue(n, out var v) ? v : null;
-        var gh = new ServiceGitHub(InstanceConfig.Load(Path.Combine(fake.Root, "config", "instance.json"), get), get, new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{fake.Port}/") }) { Pause = _ => Task.CompletedTask, Keyring = (_, _) => null };
+        var gh = new ServiceGitHub(InstanceConfig.Load(Path.Combine(fake.Root, "config", "instance.json"), get), get, new HttpClient(new Fworker.Integrations.GitHub.GitHubUserAgentHandler()) { BaseAddress = new Uri($"http://127.0.0.1:{fake.Port}/") }) { Pause = _ => Task.CompletedTask, Keyring = (_, _) => null };
         var answer = await new ServiceVerbs(gh, null).RunAsync(verb, stdin, TimeSpan.FromSeconds(60));
         return new Ran(answer.Code, JsonNode.Parse(answer.Output), (await Log()).Skip(before).ToList(), await Refs());
     }

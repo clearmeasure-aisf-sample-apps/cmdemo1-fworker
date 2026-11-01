@@ -65,7 +65,7 @@ public sealed class GitHubTokenProvider
         if (http is null)
         {
             var api = env("GITHUB_API_URL");
-            http = new HttpClient { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(30) };
+            http = new HttpClient(new GitHubUserAgentHandler()) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(30) };
         }
         return new GitHubTokenProvider(null, id!.Trim(), inst!.Trim(), key!.Replace("\\n", "\n"), env("FACTORY_APP_AUTHOR_SLUG"), http, now);
     }
@@ -133,11 +133,14 @@ public sealed class ProviderCredentialSource(GitHubTokenProvider tokens, string 
 }
 
 /// <summary>Sets the bearer of every request from the provider, for clients that keep one credential for their life.</summary>
-public sealed class GitHubAuthHandler(GitHubTokenProvider tokens, HttpMessageHandler? inner = null) : DelegatingHandler(inner ?? new HttpClientHandler())
+public sealed class GitHubAuthHandler(GitHubTokenProvider tokens, HttpMessageHandler? inner = null, string? userAgent = null) : DelegatingHandler(inner ?? new HttpClientHandler())
 {
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await tokens.Token(ct));
+        // (userAgent: a caller that writes as the rule scripts did sends their bare one)
+        if (userAgent is not null && request.Headers.UserAgent.Count == 0) request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+        GitHubUserAgent.Apply(request);
         return await base.SendAsync(request, ct);
     }
 }

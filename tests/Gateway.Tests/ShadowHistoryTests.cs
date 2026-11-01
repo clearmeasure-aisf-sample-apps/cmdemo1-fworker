@@ -194,7 +194,8 @@ public sealed class ShadowHistoryUnreachableTests(ShadowHistoryUnreachableFixtur
         // W9.10o: in shadow v1 acts and needs no table, so /ready does not wait for the schema (only where v2 acts); the schema shows in the status
         var ready = await gw.Host.SendAsync("GET", "/ready", GatewayEnvironment.ApiPort);
         Assert.Equal(200, ready.Status);
-        Assert.Equal("upgrading", (string?)a.Json?["schema"]?["state"]);
+        // (an unreachable database is "upgrading" while the start retries and "failed" once it gave up; how far a slow machine got is not what is tested)
+        Assert.Contains((string?)a.Json?["schema"]?["state"], new[] { "upgrading", "failed" });
         Assert.Equal(200, (await gw.Host.SendAsync("GET", "/health", GatewayEnvironment.ApiPort)).Status);
     }
 }

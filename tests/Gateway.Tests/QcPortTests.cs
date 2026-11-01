@@ -169,7 +169,7 @@ public sealed class QcPortTests
             Func<string, string?> env = n => envOverride?.Invoke(n) ?? n switch { "GH_TOKEN" => "fake", "FACTORY_PUBLIC_URL" => "https://gateway.example.test", "FACTORY_TOKEN_SECRET" => "gateway-" + new string('k', 24), "FACTORY_OWNER_MODE" => "1", _ => null };
             Cfg = QcConfig.From(JsonNode.Parse(Config), env);
             var tokens = GitHubTokenProvider.FromEnvironment(env)!;
-            var http = new HttpClient(new GitHubAuthHandler(tokens, new QcRequestHandler(Api))) { BaseAddress = new Uri("https://api.test/") };
+            var http = new HttpClient(new GitHubAuthHandler(tokens, new QcRequestHandler(Api), "factory-worker-gateway")) { BaseAddress = new Uri("https://api.test/") };
             Tokens = tokens; Http = http; Env = env;
             Qc = QcWiring.Build(Cfg, new RepoId("o", "r"), tokens, http, env, null, [], () => Router, Table, Index, () => Now);
             // an item in Functional Testing with a PASS verdict for its pull request, and the state comment that says so
@@ -284,7 +284,7 @@ public sealed class QcPortTests
         var r = new Rig();
         var router = new StubRouter((_, _) => new VerbAnswer(10, "{\"ok\":false,\"code\":\"no-pass-verdict\",\"reason\":\"no verdict\",\"exit\":10}"));
         var tokens = GitHubTokenProvider.FromEnvironment(n => n == "GH_TOKEN" ? "fake" : null)!;
-        var http = new HttpClient(new GitHubAuthHandler(tokens, new QcRequestHandler(r.Api))) { BaseAddress = new Uri("https://api.test/") };
+        var http = new HttpClient(new GitHubAuthHandler(tokens, new QcRequestHandler(r.Api), "factory-worker-gateway")) { BaseAddress = new Uri("https://api.test/") };
         var qc = QcWiring.Build(r.Cfg, new RepoId("o", "r"), tokens, http, _ => null, null, [], () => router, null, new InMemoryQcIndex());
         var a = await qc.Run("qc-request", "{\"item\":5,\"pr\":9}");
         Assert.Equal(10, a.Code);

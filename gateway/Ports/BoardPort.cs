@@ -40,7 +40,7 @@ static class BoardWiring
         if (S("owner").Length == 0 || S("repo").Length == 0 || c.Instance.Home is not { } home) return null;
         var tokens = GitHubTokenProvider.FromEnvironment(Environment.GetEnvironmentVariable);
         var api = Environment.GetEnvironmentVariable("GITHUB_API_URL");
-        var http = new HttpClient { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
+        var http = new HttpClient(new GitHubUserAgentHandler()) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(60) };
         var budget = c.GitHubBudget;
         var project = root?["project"] is JsonValue pv && pv.TryGetValue<int>(out var pn) ? pn : 0;
         var lookups = new HttpWebhookLookups(http, tokens, home, project,

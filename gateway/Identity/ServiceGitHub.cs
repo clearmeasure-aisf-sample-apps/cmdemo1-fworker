@@ -43,7 +43,7 @@ sealed class ServiceGitHub
     {
         this.instance = instance; this.env = env;
         var api = env("GITHUB_API_URL");
-        Http = http ?? new HttpClient { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(100) };
+        Http = http ?? new HttpClient(new GitHubUserAgentHandler()) { BaseAddress = new Uri((string.IsNullOrWhiteSpace(api) ? "https://api.github.com" : api.TrimEnd('/')) + "/"), Timeout = TimeSpan.FromSeconds(100) };
         // the identity of the rule scripts: the author App where FACTORY_AUTHOR_APP is 1 (GH_TOKEN is then not looked at), else GH_TOKEN alone (the App is then not looked at)
         tokens = FakeApps && AuthorApp ? null : GitHubTokenProvider.FromEnvironment(AuthorApp ? n => n == "GH_TOKEN" ? null : env(n) : n => n.StartsWith("FACTORY_APP_AUTHOR_", StringComparison.Ordinal) ? null : env(n));
     }
