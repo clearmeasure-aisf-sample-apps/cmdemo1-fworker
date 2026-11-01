@@ -22,7 +22,7 @@
   },
   "intake": {
     "enabled": true,
-    "v2Plans": ["docs", "feature"]
+    "v2Plans": ["docs", "feature", "hotfix", "redeliver"]
   },
   "scheduler": {
     "runtime": "octopus",

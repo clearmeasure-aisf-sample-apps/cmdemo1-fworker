@@ -48,6 +48,9 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
 
     public int Count => snapshot.Owned.Count;
 
+    /// <summary>V1.3: the worker a label pins an item to, from the labels of the reconciler's cards (set by the composition); null for none.</summary>
+    public Func<int, string?>? PinOf { get; set; }
+
     /// <summary>
     /// Cutover review: an ownership that is never loaded, for a gateway whose environment is configured for v2 and has no database (EngineOptions.NoDatabase). The sweep asks it and waits for ever, so v1 acts on no item;
     /// it reads nothing and logs nothing. Not registered as a service (the engine that owns the service does not act): only the sweeper holds it.
@@ -101,6 +104,8 @@ sealed class V2Ownership(IWorkItemStore store, RepoId home, Func<StepKind, strin
             if (!hasOwner(item) && (only is null || only.Contains(item)))
             {
                 var node = new JsonObject { ["item"] = item, ["column"] = column, ["reason"] = "handoff", ["v2"] = true };
+                // V1.3: a worker: label pins the item to that worker, as the sweep's pins do for v1's items (Plant.Plan reads it from the offers of an offer made outside a sweep, see PlanSagaOffers)
+                if (PinOf?.Invoke(item) is { Length: > 0 } pin) node["pin"] = pin;
                 // W9.10j: the slot the scheduler granted: the plant starts the session on its runtime, under the saga's arm, and the manager keeps the execution apart from its own counts
                 if (s.Slots.TryGetValue(item, out var slot)) { node["slot"] = slot.SlotId; node["runtime"] = slot.Runtime; node["arm"] = slot.ArmId; }
                 nodes.Add(node);
@@ -293,8 +298,8 @@ sealed record DocsPlanParts(DocsPlanSettings Settings, DocsMergePort Merge, Docs
     IProjectionVersions? Versions = null, ProjectionEcho? Echo = null, IItemIssueReader? Issues = null, SagaStateProjection? State = null, PromotionStateWriter? Promotions = null, CloseIssueHandler? Close = null)
 {
     /// <summary>The intake job; null when it cannot read the board and the items. The caller brings the plant's facts (free slots, whether a design waits) and the lease.</summary>
-    public DocsIntakeJob? IntakeJob(WorkItemIntake intake, RepoId home, IReadOnlyList<string> aiColumns, Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow) =>
-        Boards is null || Facts is null ? null : new DocsIntakeJob(Boards, Facts, intake, Board, home, Settings, aiColumns, freeSlots, designWaiting, mayAct, budgetLow, Issues);
+    public DocsIntakeJob? IntakeJob(WorkItemIntake intake, RepoId home, IReadOnlyList<string> aiColumns, Func<int> freeSlots, Func<bool> designWaiting, Func<bool> mayAct, Func<bool> budgetLow, Func<IReadOnlyList<string>, string?, CancellationToken, Task<int>>? capacitySlots = null) =>
+        Boards is null || Facts is null ? null : new DocsIntakeJob(Boards, Facts, intake, Board, home, Settings, aiColumns, freeSlots, designWaiting, mayAct, budgetLow, Issues, capacitySlots);
 }
 
 /// <summary>The settings of D4's docs-only test (Fworker.Domain.DocsOnly), read from the configuration the rule scripts read: docsOnlyPaths, docsOnlyMarker, timing.docsOnlyLegacyBefore, requiredBodySection, videoLabel, masterCodeChecks.</summary>
@@ -335,7 +340,8 @@ static class WorkItemWiring
         var merge = new MergeTrainParts(new MergeTrainService(new SqlMergeTrainStore(open), train), new MergeTrainHistory(open), train);
         var queue = new MergeQueueCount(store);
         var docsParts = MakeDocsPlan(c, settings, open, connectionString, boardRef ?? (() => null), env ?? Environment.GetEnvironmentVariable, http, queue, store, locks);
-        var slotSettings = SlotRequestSettings.From(root, CapacitySettings.From(root, c.Engine.Environment), settings.SlotRuntime);
+        var slotSettings = SlotRequestSettings.From(root, CapacitySettings.From(root, c.Engine.Environment), settings.SlotRuntime, c.Engine.Environment,
+            phase => phase.ToLowerInvariant() switch { CapacityPhases.Design => settings.ColumnOf(StepKind.Design), CapacityPhases.Develop => settings.ColumnOf(StepKind.Develop), CapacityPhases.Verify => settings.ColumnOf(StepKind.Verify), _ => null });
         var feature = new FeaturePlanParts(new SlotRequestPort(docsParts.Facts, slotSettings), new FeatureNotice(route ?? ((_, _) => false), settings.ColumnOf(StepKind.Develop) ?? "Development"), queue, slotSettings);
         return new WorkItemParts(service, new WorkItemHistory(open), store, ownership, IntakeSettings.From(root, Environment.GetEnvironmentVariable), docsParts, merge, feature);
     }

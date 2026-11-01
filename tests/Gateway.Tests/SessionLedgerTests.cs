@@ -181,6 +181,41 @@ public sealed class SessionLedgerTests
         Assert.NotEqual("", m.ExistingFor(7));
     }
 
+    // V1.3: a worker: pin that no connected session can honour (the bot re-pins items to the runtime worker that ran them; a worker that is gone or not connected) must not keep the slot waiting for ever
+    [Theory]
+    [InlineData("oct-1048-abc123", false)]   // a runtime worker that is not alive
+    [InlineData("alice", false)]             // a worker the plant does not know
+    [InlineData("oct-1048-abc123", true)]    // a runtime worker of another item that is connected: it takes only the item it was started for
+    public async Task APinThatNoConnectedSessionCanHonour_IsIgnored_AndTheSessionStartsOnTheSlot(string pin, bool registerRuntimeWorker)
+    {
+        var rt = new PlainRuntime(); var m = await Manager(rt);
+        var tickets = new List<RuntimeManager.Ticket>();
+        m.DispatchStart = t => { lock (tickets) tickets.Add(t); return Task.CompletedTask; };
+        var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30) { Cursor = m };
+        m.Plant = plant;
+        if (registerRuntimeWorker) plant.Register(pin, "claude", Array.Empty<string>(), 1, new[] { "owner" }, 0, runtime: "cursor-cloud");
+        var node = Offer(7, "s4", "cursor-cloud", "1.3"); node["pin"] = pin;
+        plant.PlanSagaOffers(new JsonArray(node), [7]);
+        await Until(() => { lock (tickets) return tickets.Count == 1; });
+        Assert.Equal((7, "s4"), (tickets[0].Item, tickets[0].Slot));
+    }
+
+    [Fact]
+    public async Task APinToAConnectedLocalSession_IsHonoured_NoRuntimeSessionIsStarted()
+    {
+        var rt = new PlainRuntime(); var m = await Manager(rt);
+        var started = 0;
+        m.DispatchStart = _ => { started++; return Task.CompletedTask; };
+        var plant = new Plant("secret", (_, _, _, _) => Task.CompletedTask, 30) { Cursor = m };
+        m.Plant = plant;
+        plant.Register("alice", "claude", Array.Empty<string>(), 1, new[] { "owner" }, 0);
+        var node = Offer(7, "s4", "cursor-cloud", "1.3"); node["pin"] = "alice";
+        plant.PlanSagaOffers(new JsonArray(node), [7]);
+        await Task.Delay(150);
+        Assert.Equal(0, started);
+        Assert.Equal("", m.ExistingFor(7));
+    }
+
     [Fact]
     public async Task AnOfferWithNoSlot_IsRoutedAsBefore_TheLedgerIsNotInvolved()
     {
@@ -279,6 +314,41 @@ public sealed class SessionLedgerTests
         var owned = new SessionStartPort(own.RefreshAsync, only => own.OfferNodes(_ => true, only), (nodes2, items2) => planned.Add((nodes2, items2)));
         Assert.Equal("no-offer", await owned.Run(new SessionStartRequested(item, 1, arm, "start|x|s1", "s1", "octopus", "host-a", "design"), default));
         Assert.Single(planned);
+    }
+
+    // V1.3: a worker: label pins the offer of the saga's item to that worker, in the offer the slot's grant makes outside a sweep
+    [Fact]
+    public async Task APinnedItem_IsOfferedToItsWorkerOnly_WhetherTheCardsLabelsOrTheIssueNameIt()
+    {
+        var store = new InMemoryWorkItemStore();
+        var svc = new WorkItemService(store, new WorkItemSaga(new DocsPort(), WorkItemPolicy.Default with { FeatureRules = new FeaturePlanRules(true) }));
+        var item = new ItemId(Home, 7);
+        await svc.Handle(new StartWorkItem(item, "intake"));
+        var arm = (await store.Load(item.ToString(), default))!.State.ArmId;
+        await svc.Handle(new SlotAssigned(item, 1, "slot|s1", "s1", "octopus", "host-a", "design", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddHours(4)));
+        var request = new SessionStartRequested(item, 1, arm, "start|x|s1", "s1", "octopus", "host-a", "design");
+
+        // the pin is in the labels of the card
+        var own = new V2Ownership(store, Home, Column) { PinOf = n => n == 7 ? "alice" : null };
+        var planned = new List<(JsonArray Nodes, IReadOnlyCollection<int> Items)>();
+        var port = new SessionStartPort(own.RefreshAsync, only => own.OfferNodes(_ => false, only), (nodes, items) => planned.Add((nodes, items)));
+        Assert.Equal("offered", await port.Run(request, default));
+        Assert.Equal("alice", Assert.IsType<JsonObject>(Assert.Single(planned).Nodes[0])["pin"]!.ToString());
+
+        // the card does not know it yet: the issue does
+        var plain = new V2Ownership(store, Home, Column);
+        var fromIssue = new List<(JsonArray Nodes, IReadOnlyCollection<int> Items)>();
+        var reads = 0;
+        var asIssue = new SessionStartPort(plain.RefreshAsync, only => plain.OfferNodes(_ => false, only), (nodes, items) => fromIssue.Add((nodes, items)), (i, _) => { reads++; return Task.FromResult<string?>("bob"); });
+        Assert.Equal("offered", await asIssue.Run(request, default));
+        Assert.Equal("bob", Assert.IsType<JsonObject>(Assert.Single(fromIssue).Nodes[0])["pin"]!.ToString());
+        Assert.Equal(1, reads);
+
+        // an unpinned item carries none, and a read of the issue that fails offers the item without the pin
+        var none = new List<(JsonArray Nodes, IReadOnlyCollection<int> Items)>();
+        var unpinned = new SessionStartPort(plain.RefreshAsync, only => plain.OfferNodes(_ => false, only), (nodes, items) => none.Add((nodes, items)), (_, _) => throw new HttpRequestException("GitHub does not answer"));
+        Assert.Equal("offered", await unpinned.Run(request, default));
+        Assert.Null(Assert.IsType<JsonObject>(Assert.Single(none).Nodes[0])["pin"]);
     }
 
     [Fact]

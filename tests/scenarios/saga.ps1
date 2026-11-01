@@ -341,8 +341,9 @@ $SagaScenarios['saga: slots: three sessions against a day budget of three are st
         # the fourth item: the budget is spent, so the scheduler holds it, and no run is made
         $n4 = New-Item-Fake 'Slots session 4' "Change the code, as the criteria say.`n`n- criterion one" ($OctLabels) 'Todo'
         $items += $n4
-        Check "the intake pulls #$n4 from Todo (the item the budget holds)" (Slots-WaitFor 200 { (Saga-Col $n4) -eq 'Technical Design' }) "column $(Saga-Col $n4)"
-        Check "the scheduler holds #$n4 for the day budget (runtime-budget)" (Slots-WaitFor 60 { (Slots-Reasons $n4) -match 'runtime-budget' }) "decisions: $(Slots-Reasons $n4)"
+        # V1.2: the intake counts the runtime's free capacity, and the day budget is part of it: the item is not pulled, it waits in Todo (over two runs of the intake job) and the job's outcome says why
+        $pulled4 = Slots-WaitFor 130 { (Saga-Col $n4) -ne 'Todo' }
+        Check "the intake does not pull #$n4 from Todo while the day budget is spent" (-not $pulled4) "column $(Saga-Col $n4)"
         Start-Sleep -Seconds 5
         Check "no session is started for #${n4}: the day budget of $($script:SlotsBudget) is the limit" ((Slots-Runs $n4).Count -eq 0 -and (Slots-AllRuns).Count -eq $script:SlotsBudget) "runs: $((Slots-AllRuns).Count)"
     } finally {
@@ -354,6 +355,101 @@ $SagaScenarios['saga: slots: three sessions against a day budget of three are st
         Restart-Gateway
         [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
         try { [void](Fake 'octo-reset') } catch { }
+    }
+}
+
+# ---- V1.2 and V1.3 (v2-only plan, #622): the intake's slots from the runtime's capacity, the runtime of an item from its labels, the pin of an offer, and the plan of a hotfix label (v2 only) ------------------------------
+# tdd has no owner session: the sessions are the Octopus runtime's, started by the plant per item and phase, so the plant's count of free owner slots is always 0 and the intake never pulled. The intake now adds the scheduler's
+# free capacity of the runtime (maxConcurrent less what runs and waits, the day budget, the hosts' room). These scenarios play it against the fake Octopus, as the slots scenario above does, and need no owner session.
+function Lbl-Enter([scriptblock]$Edit) {
+    $cfgPath = Join-Path $script:Work 'instance.test.json'; $orig = Get-Content -Raw $cfgPath
+    $envNames = 'OCTOPUS_RUNBOOK_API_KEY', 'FACTORY_OCTOPUS_HOST_TOKEN', 'FACTORY_TRANSCRIPT_SAVE_SECONDS', 'FACTORY_INTAKE_WIP'
+    $oldEnv = @{}; foreach ($e in $envNames) { $oldEnv[$e] = [Environment]::GetEnvironmentVariable($e) }
+    $cfg = $orig | ConvertFrom-Json -AsHashtable
+    $cfg.scheduler.featureSlots = $true
+    $cfg.messaging = @{ enabled = $true; allowedWorkers = @('*'); testHooks = $true }
+    $cfg.runtimes = @{ preferConnected = $true; routing = @(); octopus = @{ enabled = $true; serverUrl = "http://127.0.0.1:$($script:FakePort)"; spaceId = 'Spaces-355'; project = 'cmdemo1-fworker-runtime'; environment = 'tdd'; hostTag = 'fworker-host'
+        agent = 'codex'; perHostCapacity = 2; overflowRoles = @(); overflowMax = 0; maxConcurrent = 1; maxExecutionsPerDay = 20; maxFailuresPerPhase = 2; unhealthyAfterFailures = 100; ackSeconds = 600; listSeconds = 1; reportGraceSeconds = 2 } }
+    if ($Edit) { & $Edit $cfg }
+    $cfg | ConvertTo-Json -Depth 12 | Set-Content $cfgPath
+    $env:OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()); $env:FACTORY_OCTOPUS_HOST_TOKEN = [guid]::NewGuid().ToString('N'); $env:FACTORY_TRANSCRIPT_SAVE_SECONDS = '2'; $env:FACTORY_INTAKE_WIP = '10'
+    [void](Fake 'octo-reset'); Oct-Machines $OctDefaultMachines
+    # no owner session: the one of an earlier scenario goes
+    if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+    Restart-Gateway
+    [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    Slots-Report
+    return @{ path = $cfgPath; orig = $orig; env = $oldEnv }
+}
+function Lbl-Leave($Saved, [int[]]$Items, [string[]]$Clients) {
+    # the sagas of the scenario's items stay in the database for the scenarios after this one: parked, so that no session is offered them and none of them holds the intake back (an unowned offer in Technical Design does)
+    foreach ($n in $Items) { try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { } }
+    foreach ($n in $Items) { Rt-Close $n }
+    foreach ($c in $Clients) { if ($c -and $script:Workers.ContainsKey($c)) { Stop-OwnerClient $c } }
+    try { foreach ($r in @((Oct-State).runs | Where-Object { $_.state -eq 'Executing' })) { [void](Fake 'octo-task' @{ id = $r.task; state = 'Success' }) } } catch { }
+    Set-Content -Path $Saved.path -Value $Saved.orig -NoNewline
+    foreach ($e in $Saved.env.Keys) { [Environment]::SetEnvironmentVariable($e, $Saved.env[$e]) }
+    Restart-Gateway
+    [void](Wait-Until -Seconds 120 { (Get-V2State).state -eq 'running' })
+    try { [void](Fake 'octo-reset') } catch { }
+}
+
+$SagaScenarios['saga: intake: a Todo item is pulled with no owner session on the runtime''s free capacity (never past maxConcurrent), a runtime: label with no capacity passes the item over, a hotfix label starts the hotfix plan'] = {
+    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the scheduler''s capacity, the slot request and the plan of the saga are the v2 engine''s (v1''s intake counts owner sessions only)' $true; return }
+    Saga-NumbersAbove 100
+    $items = @(); $clients = @()
+    # the runtime runs two sessions at most; the plans of the intake name the hotfix plan too (as config/deploy.overrides.json does)
+    $saved = Lbl-Enter { param($cfg) $cfg.runtimes.octopus.maxConcurrent = 2; $cfg.intake.v2Plans = @('docs', 'feature', 'hotfix', 'redeliver') }
+    try {
+        Check 'no owner session is connected' (@((Get-Plant).plant.workers | Where-Object { $_.connected -and $_.roles -contains 'owner' }).Count -eq 0) ((Get-Plant).plant.workers | ConvertTo-Json -Compress -Depth 3)
+        # V1.2: the intake pulls with the runtime's capacity alone
+        $a = New-Item-Fake 'Intake on capacity' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Todo'
+        $items += $a
+        Check "the intake pulls #$a from Todo with the runtime's capacity alone" (Slots-WaitFor 200 { (Saga-Col $a) -eq 'Technical Design' }) "column $(Saga-Col $a); $(Slots-Reasons $a)"
+        Check "the scheduler's slot starts the session of #$a on the Octopus runtime (no label: the default runtime)" (Slots-WaitFor 90 { (Slots-Runs $a).Count -ge 1 }) "runs: $((Slots-Runs $a).Count); $(Slots-Reasons $a)"
+        if ((Slots-Runs $a).Count -lt 1) { return }
+        $clients += (Slots-Take $a (Slots-Runs $a)[0])
+        Check "#$a was not held for a runtime" ((Slots-Reasons $a) -notmatch 'runtime-off') (Slots-Reasons $a)
+        # V1.3: the label names copilot-cloud, which is off in this environment: the intake has no capacity for that runtime and passes the item over, while octopus has room (the hotfix below is pulled after it)
+        $b = New-Item-Fake 'Label routes to copilot' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'runtime:copilot-cloud') 'Todo'
+        $items += $b
+        # V1.3 (D3): a person's hotfix label starts the hotfix plan: no design step, and the card goes to Development
+        $h = New-Item-Fake 'Hotfix by a person' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'hotfix') 'Todo'
+        $items += $h
+        Check "the intake pulls #$h from Todo" (Slots-WaitFor 200 { $null -ne (Saga-View $h) }) "column $(Saga-Col $h)"
+        $v = Saga-View $h
+        Check "the saga of #$h is on the hotfix plan, in Develop (no design step)" ($null -ne $v -and "$($v.plan)" -eq 'hotfix' -and "$($v.step)" -eq 'Develop') ($v | ConvertTo-Json -Compress -Depth 4)
+        Check "the card follows the saga to Development" (Slots-WaitFor 60 { (Saga-Col $h) -eq 'Development' }) "column $(Saga-Col $h)"
+        Check "the session of the hotfix starts on the Octopus runtime" (Slots-WaitFor 90 { (Slots-Runs $h).Count -ge 1 }) "runs: $((Slots-Runs $h).Count); $(Slots-Reasons $h)"
+        # V1.2: the runtime runs its two sessions (maxConcurrent 2): the next Todo item stays in Todo, over two runs of the intake job
+        $d = New-Item-Fake 'Intake bound by capacity' "Change the code, as the criteria say.`n`n- criterion one" $OwnerLabels 'Todo'
+        $items += $d
+        $pulledD = Slots-WaitFor 75 { (Saga-Col $d) -ne 'Todo' }
+        Check "#$d stays in Todo while the runtime runs its two sessions (maxConcurrent 2)" (-not $pulledD) "column $(Saga-Col $d)"
+        Check "no third session is started" ((Slots-AllRuns).Count -eq 2) "runs: $((Slots-AllRuns).Count)"
+        Check "#$b, whose runtime has no capacity, was passed over all the time (still in Todo, no session)" ((Saga-Col $b) -eq 'Todo' -and (Slots-Runs $b).Count -eq 0) "column $(Saga-Col $b)"
+    } finally { Lbl-Leave $saved $items $clients }
+}
+
+$SagaScenarios['saga: intake: a worker: pin is honoured on the saga''s offer (only the pinned session is offered the item)'] = {
+    if ($script:GoldenEngine -ne 'v2') { Check 'v2 only: the offers of saga items are the v2 engine''s' $true; return }
+    Saga-NumbersAbove 160
+    if ($script:Workers.ContainsKey($script:SagaOwner)) { Stop-OwnerClient $script:SagaOwner }
+    Start-OwnerClient 'pn1' 'persistent-local' '--capacity 1 --no-auto-accept'
+    Start-OwnerClient 'pn2' 'persistent-local' '--capacity 1 --no-auto-accept'
+    $iso = { param($t) $t.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+    # the pinned card was put into Technical Design by a person (the intake does not pull a pinned item from Todo): the adoption makes its saga at the start
+    $n = New-Item-Fake 'Pinned to pn2' "Change the code, as the criteria say.`n`n- criterion one" ($OwnerLabels + 'worker:pn2') 'Technical Design'
+    try {
+        Adopt-State $n @{ design = @{ docs_only = $false } }
+        Restart-Gateway
+        Check 'both sessions are connected again' (Wait-Until -Seconds 60 { @((Get-Plant).plant.workers | Where-Object { $_.name -in 'pn1', 'pn2' -and $_.connected }).Count -eq 2 }) ((Get-Plant).plant.workers | ConvertTo-Json -Compress -Depth 3)
+        Check "#$n is the saga's, in Design" (Wait-Until -Seconds 150 { $v = Saga-View $n; $null -ne $v -and "$($v.step)" -eq 'Design' }) ((Saga-View $n) | ConvertTo-Json -Compress -Depth 4)
+        Check "the pinned session pn2 is offered #$n" (Wait-Until -Seconds 240 { (Get-Assigned 'pn2' $n).Count -gt 0 }) "events pn2: $(@(Get-WorkerEvents 'pn2' | ForEach-Object { $_.event }) -join ','); pn1: $(@(Get-WorkerEvents 'pn1' | ForEach-Object { $_.event }) -join ',')"
+        Check "the other session pn1 is not offered #$n" ((Get-Assigned 'pn1' $n).Count -eq 0) "events pn1: $(@(Get-WorkerEvents 'pn1' | ForEach-Object { $_.event }) -join ',')"
+    } finally {
+        try { [void](Invoke-RestMethod "$(Get-GatewayBase)/api/v1/verbs/park-item" -Method POST -Body (@{ item = $n; code = 'scenario-done' } | ConvertTo-Json -Compress) -ContentType 'application/json' -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 20) } catch { }
+        foreach ($c in 'pn1', 'pn2') { Stop-OwnerClient $c }
     }
 }
 
