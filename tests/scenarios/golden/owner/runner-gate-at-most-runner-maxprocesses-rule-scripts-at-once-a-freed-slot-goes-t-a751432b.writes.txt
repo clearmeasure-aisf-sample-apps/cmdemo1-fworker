@@ -1,5 +1,0 @@
-# suite: owner
-# scenario: runner gate: at most runner.maxProcesses rule scripts at once; a freed slot goes to the sweep first, the journal last; a verb that waits too long is runner-busy [full]
-# runs: 2
-~ rule POST /repos/{repo}/issues/{#2}/comments 201 {"body":"\uD83C\uDFED Plant manager: model tier raised to **gate-test** (scenario).\n\n<!-- plant event=tier key=gate -->"}
-~ rule STATE factory-worker v1 #{#2}

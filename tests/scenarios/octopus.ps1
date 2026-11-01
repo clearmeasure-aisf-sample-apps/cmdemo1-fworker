@@ -427,15 +427,7 @@ $OctopusScenarios = [ordered]@{
         Check 'no token: 401' ((Rt-Api GET "/api/v1/sessions/$na" $null '').status -eq 401)
         $html = Invoke-WebRequest -Uri $page -SkipHttpErrorCheck
         Check 'the page is served without data: it reads the API with the operator token (#token= or the dashboard''s tab)' ($html.StatusCode -eq 200 -and $html.Content -match '/api/v1/sessions/' -and $html.Content -match 'token=' -and $html.Content -notmatch 'line three')
-        $ref = "repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/matching-refs/factory/"
-        # v1 keeps the transcript as a sealed commit under a ref beside the plant snapshot; where v2 acts it is a row of factory.Transcripts (W9.8, golden/v2-differences.txt), and the restart below reads it back from there
-        if ($script:GoldenEngine -ne 'v2') {
-            Check 'the transcript is stored in GitHub beside the plant snapshot, encrypted' (Wait-Until -Seconds 45 { @((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/$ref") | Where-Object { "$($_.ref)" -match "/transcripts/\d{8}/$([regex]::Escape($na))$" }).Count -eq 1 })
-            $stored = @((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/$ref") | Where-Object { "$($_.ref)" -match "/transcripts/\d{8}/$([regex]::Escape($na))$" })[0].ref
-            $sha = (Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/ref/$($stored.Substring(5))").object.sha
-            $msg = "$((Invoke-RestMethod "http://127.0.0.1:$($script:FakePort)/repos/clearmeasure-aisf-sample-apps/cmdemo1-workorders/git/commits/$sha").message)"
-            Check 'the stored message is ciphertext: no line of the transcript in it' ($msg -like 'fwt1:*' -and $msg -notmatch 'line three|session starts')
-        }
+        # the transcript is a row of factory.Transcripts (W9.8, golden/v2-differences.txt), and the restart below reads it back from there
         # the lines are saved before the kill: the first save can hold the session without its lines, the next one carries them
         $saved = Wait-Until -Seconds 60 { $t = (Rt-Api GET '/api/v1/status').body.transcripts; $t.dirty -eq 0 -and $t.saving -eq 0 }
         Check 'before the restart every transcript line is saved (none dirty, no save running)' $saved ((Rt-Api GET '/api/v1/status').body.transcripts | ConvertTo-Json -Compress)

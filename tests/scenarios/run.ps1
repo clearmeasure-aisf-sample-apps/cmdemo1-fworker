@@ -7,19 +7,18 @@
 #   -ListScenarios  prints suite, scenario and tier, tab separated; with -Suite only what that suite would run (after -Tier and -Only), with -Groups n -Group g only that group's share
 #   -Groups n / -Group g  the scenarios of a suite split over n independent children (own fake, gateway, ports, HOME, TMPDIR), balanced by scenario-stats.json (owner: contiguous runs in suite order, cut only at its barriers, as its scenarios build on each other); the suites 'qc', 'messaging' and 'manager' default to 4 groups and 'owner' to 2, -Groups 1 runs one in one process; a child is started with -Group g (0-based); -GroupTimeoutMinutes (default 30) ends and fails groups that are still running
 #   -ListSuites  prints the suite names, one per line, in slot order (slot = line number, from 0)
-#   -Engine v2   the gateway under test runs the v2 engine (the tests.yml job "Tier 1 (v2)", for the suites and scenarios of v2-claims.txt; run-all.ps1 -Engine v2 starts these): FACTORY_ENVIRONMENT is the
-#                suite's own environment name where it sets one (tdd for copilot, promote and envscope, whose scenarios depend on it) and the CI-only name 'v2ci' for every other suite; the configuration's
-#                engine.v2Environments names it, and FACTORY_DB_CONNECTION is the SQL Server of FACTORY_TEST_SQL with a database of its own for this process (the gateway's DbUp creates it, FACTORY_DB_CREATE=1,
-#                tests only, and applies the scripts). FACTORY_TEST_SQL is required: without it the run exits 2. The default, v1, changes nothing.
-#   -V2Profile   (with -Engine v2) the test profile of the gateway: 'plain' (default: intake off, as every suite runs), 'saga-docs' (the intake is on and names the docs plan, so the docs items of the Todo column
-#                start a WorkItemSaga) or 'saga-feature' (docs and feature). The saga profiles also set the timers of the Wolverine host at their floor (see $V2Profiles below); 'plain' leaves them at the defaults. v1's own intake (the rule script's) is
-#                left on by the same switches and skips the plans of intake.v2Plans by itself (W9.10e), so only the engine pulls them. A claim of v2-claims.txt names its profile.
+#   The gateway under test runs the v2 engine (Wolverine), the only engine: FACTORY_ENVIRONMENT is the suite's own environment name where it sets one (tdd for copilot, promote and envscope, whose scenarios depend
+#                on it) and the CI-only name 'v2ci' for every other suite; the configuration's engine.v2Environments names it, and FACTORY_DB_CONNECTION is the SQL Server of FACTORY_TEST_SQL with a database of its own
+#                for this process (the gateway's DbUp creates it, FACTORY_DB_CREATE=1, tests only, and applies the scripts). FACTORY_TEST_SQL is required: without it a run exits 2.
+#   -V2Profile   the test profile of the gateway: 'plain' (default: intake off, as every suite runs), 'saga-docs' (the intake is on and names the docs plan, so the docs items of the Todo column
+#                start a WorkItemSaga) or 'saga-feature' (docs and feature). The saga profiles also set the timers of the Wolverine host at their floor (see $V2Profiles below); 'plain' leaves them at the defaults.
+#                The scenarios of the suite 'saga' each need one of the saga profiles: run-all.ps1 starts them (its $ProfiledSuites), run.ps1 -Suite saga alone runs them all on the profile given.
 #   Start guards (guard.ps1): refuses with exit 4 when another run.ps1 or run-all.ps1 is active on this machine, or when the temp filesystem has less than
 #   -MinFreeDiskMb (default 2048) free; with less than -MinAvailableMb (default 1500) of memory a suite runs in half its groups. -Force starts anyway.
-param([string] $Only = '', [switch] $NoBuild, [string] $Suite = '', [switch] $ListSuites, [switch] $ListScenarios, [string] $ResultFile = '', [ValidateSet('full', 'fast')][string] $Tier = 'full', [int] $Groups = 0, [int] $Group = -1, [double] $GroupTimeoutMinutes = 30, [switch] $Force, [int] $MinFreeDiskMb = 2048, [int] $MinAvailableMb = 1500, [ValidateSet('v1', 'v2')][string] $Engine = 'v1', [ValidateSet('plain', 'saga-docs', 'saga-feature')][string] $V2Profile = 'plain')
+param([string] $Only = '', [switch] $NoBuild, [string] $Suite = '', [switch] $ListSuites, [switch] $ListScenarios, [string] $ResultFile = '', [ValidateSet('full', 'fast')][string] $Tier = 'full', [int] $Groups = 0, [int] $Group = -1, [double] $GroupTimeoutMinutes = 30, [switch] $Force, [int] $MinFreeDiskMb = 2048, [int] $MinAvailableMb = 1500, [ValidateSet('plain', 'saga-docs', 'saga-feature')][string] $V2Profile = 'plain')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if ($Engine -eq 'v2' -and -not $ListSuites -and -not $ListScenarios -and -not "$env:FACTORY_TEST_SQL".Trim()) { Write-Host '-Engine v2 needs a SQL Server: FACTORY_TEST_SQL (a connection string without a database) is not set'; exit 2 }
+if (-not $ListSuites -and -not $ListScenarios -and -not "$env:FACTORY_TEST_SQL".Trim()) { Write-Host 'the suites need a SQL Server: FACTORY_TEST_SQL (a connection string without a database) is not set'; exit 2 }
 . (Join-Path $PSScriptRoot 'guard.ps1')
 $lowMemory = $false
 if (-not $ListSuites -and -not $ListScenarios) { $lowMemory = Assert-TestRunMayStart 'run.ps1' ([bool]$Force) $MinFreeDiskMb $MinAvailableMb; $env:FACTORY_TEST_RUN_HELD = "$PID" }
@@ -27,7 +26,6 @@ if (-not $NoBuild -and -not $ListSuites -and -not $ListScenarios) {
     foreach ($proj in 'tests/FakeGitHub', 'gateway') { Push-Location (Join-Path $root $proj); dotnet build -c Release -v q 2>&1 | Select-Object -Last 2 | ForEach-Object { Write-Host "  build $proj : $_" }; Pop-Location }
 }
 . (Join-Path $PSScriptRoot 'lib.ps1')
-$script:GoldenEngine = $Engine   # (lib.ps1: with v2 the writes are compared with the golden files with golden/v2-differences.txt applied; v1 reads the golden files as they are)
 . (Join-Path $PSScriptRoot 'scenarios.ps1')
 . (Join-Path $PSScriptRoot 'owner.ps1')
 . (Join-Path $PSScriptRoot 'author.ps1')
@@ -43,7 +41,7 @@ foreach ($k in $CiRuleOwnerScenarios.Keys) { $OwnerScenarios[$k] = $CiRuleOwnerS
 . (Join-Path $PSScriptRoot 'qc.ps1')
 . (Join-Path $PSScriptRoot 'qc-dashboard.ps1')
 . (Join-Path $PSScriptRoot 'qc-worker.ps1')   # S3: own gateway and workers, scenarios named "qc: worker ..."
-. (Join-Path $PSScriptRoot 'qc-gate.ps1')     # S4: merge gate, approval trigger, sweep teardown, the race; scenarios named "qc: gate ..."
+. (Join-Path $PSScriptRoot 'qc-gate.ps1')     # S4: sweep teardown, the race, the QC record; scenarios named "qc: gate ..."
 foreach ($k in $QcDashScenarios.Keys) { $QcScenarios[$k] = $QcDashScenarios[$k] }   # S2 scenarios run in the main QC suite, after the S1 ones
 foreach ($k in $QcGateAutoScenarios.Keys) { $QcScenarios[$k] = $QcGateAutoScenarios[$k] }   # S4: the auto policy is unchanged
 . (Join-Path $PSScriptRoot 'qc-pool.ps1')     # the rule-script worker pool; scenarios named "qc: runner pool ..."
@@ -80,19 +78,17 @@ $script:OwnerSecret = ('owner-test-secret-' + '0123456789abcdef')   # a fixture,
 $qcBase = @{ allowLoopbackForTests = $true; probeTimeoutSeconds = 2; maxEnvironments = 50 }
 # The qc suite runs its gateway with a pool of rule-script workers (runner.pool, gateway/RunnerPool.cs); the other suites, owner among them, keep one process per call, so both paths stay tested.
 $qcOpen = @{ qc = ($qcBase + @{ rateLimitPerIp = 100000; rateLimitPerPr = 100000 }); runner = @{ pool = $(if ($env:TEST_RUNNER_POOL) { [int]$env:TEST_RUNNER_POOL } else { 3 }) } }
-# S4: the merge gate needs mergePolicy peer-approved; the teardown timers each need their own short timing.* values (applied by Get-Cfg and the gateway from FACTORY_TIMING_*)
+# S4: the teardown timers each need their own short timing.* values (applied by Get-Cfg and the gateway from FACTORY_TIMING_*)
 $msgPool = @{ pool = $(if ($env:TEST_RUNNER_POOL) { [int]$env:TEST_RUNNER_POOL } else { 3 }) }
 $gateQc = @{ qc = ($qcBase + @{ rateLimitPerIp = 100000; rateLimitPerPr = 100000; minFreeMb = 1 }) }
 function New-Gate([hashtable]$Qc = @{}) { @{ qc = ($gateQc.qc + $Qc) } }
 $SuiteDefs = @(
     # auto and merge-queue test the session's own merge verb, so the gateway's merge after a PASS is off there (owner.ps1 tests that one)
     @{ Name = 'auto'; Policy = 'auto'; Set = $Scenarios; Extra = @{ gatewayMerge = $false } }
-    @{ Name = 'peer-approved'; Policy = 'peer-approved'; Set = $ApprovalScenarios }
     @{ Name = 'merge-queue'; Policy = 'auto'; Set = $QueueScenarios; Extra = @{ mergeQueueDepth = 1; gatewayMerge = $false } }
     @{ Name = 'owner'; Policy = 'auto'; Set = $OwnerScenarios; Extra = @{ ownerSessions = $true; baseUpdate = @{ mode = 'every-move'; autoUpdateDelaySeconds = 6; quietSeconds = 3; sweepCheckSeconds = 3 }; schedule = @{ hosts = @{ 'lab-1' = @{ owned = 1; builds = 1 } } } }; Env = 'owner'; Timing = @{ baseUpdateDebounceSeconds = 4; passMergeGraceSeconds = 8; staleItemMinutes = 600; continueMinutes = 0 } }
     @{ Name = 'qc'; Policy = 'auto'; Set = $QcScenarios; Extra = $qcOpen; Env = 'qc'; ClientHost = $true }   # ClientHost: F runs the client in one long-lived pwsh (lib.ps1)
     @{ Name = 'qc-worker'; Policy = 'auto'; Set = $QcWorkerScenarios; Extra = (New-Gate); Env = 'qc' }
-    @{ Name = 'qc-gate'; Policy = 'peer-approved'; Set = $QcGateScenarios; Extra = (New-Gate); Env = 'qc' }
     @{ Name = 'qc-gate-idle'; Policy = 'auto'; Set = $QcGateIdleScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcIdleMinutes = 0.1 } }
     @{ Name = 'qc-gate-lifetime'; Policy = 'auto'; Set = $QcGateLifetimeScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcLifetimeMinutes = 0.1 } }
     @{ Name = 'qc-gate-grace'; Policy = 'auto'; Set = $QcGateGraceScenarios; Extra = (New-Gate); Env = 'qc'; Timing = @{ qcGraceMinutes = 0.25 } }
@@ -181,14 +177,7 @@ $SuiteDefs = @(
 # ---- which scenarios run: Run-Suite runs them and -ListScenarios -Suite prints them, through the same functions, so the two cannot differ ----------
 function Get-OnlyNames($Set) { @($Set.Keys | Where-Object { -not $Only -or $_ -match $Only }) }
 function Get-TierNames([string[]]$Names, [string]$SuiteName = '') {
-    # -Engine v2: the scenarios that v2-claims.txt declares v1-only for this suite (`v1-only-scenarios <suite> | <regex> | <reason>`) are neither listed nor run on v2 (run-v2-claims.py checks the lines)
-    $v1only = @(Get-V2V1OnlyPatterns $SuiteName)
-    @(foreach ($n in @($Names)) { if ($n -and ($Tier -eq 'full' -or (Get-ScenarioTier $n) -eq 'fast') -and -not ($v1only | Where-Object { $n -match $_ })) { $n } })
-}
-function Get-V2V1OnlyPatterns([string]$SuiteName) {
-    if ($Engine -ne 'v2' -or -not $SuiteName) { return @() }
-    $f = Join-Path $PSScriptRoot 'v2-claims.txt'; if (-not (Test-Path -LiteralPath $f)) { return @() }
-    @([IO.File]::ReadAllLines($f) | ForEach-Object { $m = [regex]::Match($_.Trim(), '^v1-only-scenarios\s+(?<s>[a-z0-9-]+)\s*\|\s*(?<r>.+?)\s+\|\s+(?<why>.+)$'); if ($m.Success -and $m.Groups['s'].Value -eq $SuiteName) { $m.Groups['r'].Value } })
+    @(foreach ($n in @($Names)) { if ($n -and ($Tier -eq 'full' -or (Get-ScenarioTier $n) -eq 'fast')) { $n } })
 }
 # The share of group $Index (from 0) of $Count of a suite's scenarios, kept in suite order; every scenario is in exactly one group. Seconds per scenario
 # come from scenario-stats.json (run-all.ps1 -Tier full rewrites it); one it does not know counts as 30 s, about the mean seen in CI for the long
@@ -260,7 +249,7 @@ if ($Groups -gt 1 -and $Suite -and $Group -lt 0) {
             Remove-Item Env:TEST_FAKE_PORT, Env:TEST_API_PORT -ErrorAction SilentlyContinue
             foreach ($g in 0..($Groups - 1)) {
                 $a2 = @('-NoProfile', '-File', $PSCommandPath, '-NoBuild', '-Suite', $Suite, '-Tier', $Tier, '-Groups', $Groups, '-Group', $g, '-ResultFile', (Join-Path $gDir "g$g.json")); if ($Only) { $a2 += @('-Only', $(if ($Only -match '\s') { '"' + $Only + '"' } else { $Only })) }   # (Start-Process joins the arguments with spaces: one with a space needs its quotes)
-                if ($Engine -eq 'v2') { $a2 += @('-Engine', 'v2', '-V2Profile', $V2Profile) }
+                $a2 += @('-V2Profile', $V2Profile)
                 $env:TEST_PORT_BASE = "$($base0 + 100 * $g)"
                 $kids += ,@{ g = $g; log = (Join-Path $gDir "g$g.log"); err = (Join-Path $gDir "g$g.err"); json = (Join-Path $gDir "g$g.json"); timedOut = $false; proc = (Start-Process pwsh -ArgumentList $a2 -PassThru -RedirectStandardOutput (Join-Path $gDir "g$g.log") -RedirectStandardError (Join-Path $gDir "g$g.err")) }
             }
@@ -316,7 +305,7 @@ foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
         exit 3 } finally { if ($probeSock) { $probeSock.Stop() } }
 }
 
-# -Engine v2: the environment name and the database of this process. The CI-only name 'v2ci' is in no list of config/instance.json (Run-Suite adds the name in use to engine.v2Environments of the test
+# The environment name and the database of this process. The CI-only name 'v2ci' is in no list of config/instance.json (Run-Suite adds the name in use to engine.v2Environments of the test
 # configuration only), so no deployed gateway can run v2 because of it. A suite whose scenarios depend on its environment (copilot, promote, envscope: FACTORY_ENVIRONMENT tdd and the env: label scoping)
 # keeps its own name (Invoke-SuiteDef): in that run the test configuration is the only place that makes tdd a v2 environment. The database is new for every process (a suite, or one group of a suite): the
 # gateway's DbUp creates it (FACTORY_DB_CREATE, tests only) and applies the scripts of src/Fworker.Database, a run never meets the tables of another, and the CI job's SQL Server container goes with the job.
@@ -324,13 +313,13 @@ foreach ($port in $script:FakePort, $script:ApiPort, $script:HookPort) {
 $script:V2EnvName = 'v2ci'
 $V2DefaultEnvSuites = @('owner', 'messaging', 'cursor', 'cursor-deadline', 'runtime')   # (see Invoke-SuiteDef)
 $script:V2Connection = ''
-if ($Engine -eq 'v2' -and $env:FACTORY_TEST_SQL) {
+if ($env:FACTORY_TEST_SQL) {
     $v2Db = 'fworker_v2ci_' + ($label.ToLowerInvariant() -replace '[^a-z0-9]', '_') + '_' + [guid]::NewGuid().ToString('N').Substring(0, 8)
     $script:V2Connection = $env:FACTORY_TEST_SQL.Trim().TrimEnd(';') + ';Initial Catalog=' + $v2Db   # (a keyword given twice takes its last value)
-    Write-Host "engine v2: profile $V2Profile, database $v2Db on the server of FACTORY_TEST_SQL"
+    Write-Host "profile $V2Profile, database $v2Db on the server of FACTORY_TEST_SQL"
 }
 
-# The test profiles of the v2 engine (W9.10d), laid over the test configuration key by key (Start-TestEnv -Merge: a block of the profile is merged into the block of config/instance.json, not put in its place).
+# The test profiles of the gateway (W9.10d), laid over the test configuration key by key (Start-TestEnv -Merge: a block of the profile is merged into the block of config/instance.json, not put in its place).
 #  - every profile: the Wolverine host's timers at their floor (WolverineHostOptions: scheduledJobSeconds 60, first run 0), so that the scheduled messages of the sagas (leases, MergeRetryDue, CapacityWake, TrainWake)
 #    and the recovery of the inbox and outbox run inside a scenario and not after the source defaults (4 hours, the first run after 1); and the merge strategy of the deployed gateway, direct.
 #  - saga-docs: the intake is on and names the docs plan: a Todo item whose body carries the docs-only marker starts a WorkItemSaga (DocsIntakeJob: every minute on the leader, the first run 30 s after the start).
@@ -344,7 +333,7 @@ $script:V2Profiles = @{
     'saga-docs'    = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct'; intake = @{ enabled = $true; v2Plans = @('docs') }; scheduler = @{ featureSlots = $false } }
     'saga-feature' = @{ wolverine = @{ scheduledJobSeconds = 60; firstScheduledJobSeconds = 0 }; mergeStrategy = 'direct'; intake = @{ enabled = $true; v2Plans = @('docs', 'feature') }; scheduler = @{ featureSlots = $false } }
 }
-$script:IsSagaProfile = ($Engine -eq 'v2' -and $V2Profile -ne 'plain')
+$script:IsSagaProfile = ($V2Profile -ne 'plain')
 
 function Get-SuiteEnv([string]$Kind) {
     switch ($Kind) {
@@ -359,7 +348,7 @@ function Get-SuiteEnv([string]$Kind) {
         'copilot' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; COPILOT_TASKS_TOKEN = 'fake-copilot' } }
         # the promote suite: the key that creates deployments, composed here at run time
         'promote' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_LEADER_LEASE = '0'; OCTOPUS_RUNBOOK_API_KEY = ('API-' + [guid]::NewGuid().ToString('N').ToUpperInvariant()) } }
-        # the saga suite: the owner suite's environment, and v1's own intake on (a saga profile of -Engine v2 takes the switch from the configuration instead, where v1's intake leaves the plans of intake.v2Plans to the engine's), three items at most in the AI columns
+        # the saga suite: the owner suite's environment, and v1's own intake on (a saga profile of run.ps1 takes the switch from the configuration instead, where v1's intake leaves the plans of intake.v2Plans to the engine's), three items at most in the AI columns
         'saga' { return @{ FACTORY_OWNER_MODE = '1'; FACTORY_PLANT_SNAPSHOT = '0'; FACTORY_LEADER_LEASE = '0'; FACTORY_TOKEN_SECRET = $script:OwnerSecret; FACTORY_ASSIGN_ACK_SECONDS = '8'; FACTORY_INTAKE = '1'; FACTORY_INTAKE_WIP = '3' } }
         'envscope' { return @{ FACTORY_ENVIRONMENT = 'tdd'; FACTORY_ENV_SCOPE = '1'; FACTORY_LEADER_LEASE = '0' } }
         # the octopus suite: owner mode, the runbook key and the host token, both composed here at run time (no credential-like fixture in the repository)
@@ -377,7 +366,7 @@ function Get-SuiteEnv([string]$Kind) {
     return @{}
 }
 
-# -Engine v2: what /api/v1/status says of the engine and of the Wolverine host (its state is running once the migration has created the database and the node has started)
+# What /api/v1/status says of the engine and of the Wolverine host (its state is running once the migration has created the database and the node has started)
 function Get-V2State {
     try {
         $h = (Invoke-WebRequest "http://127.0.0.1:$($script:ApiPort)/api/v1/status" -Headers @{ Authorization = 'Bearer test-token' } -TimeoutSec 3 -UseBasicParsing).Content | ConvertFrom-Json -AsHashtable
@@ -402,19 +391,17 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
         return
     }
     $cfg = @{ mergePolicy = $Policy; humanApprovers = @('factory-worker-testperson[bot]') }; foreach ($k in $Extra.Keys) { $cfg[$k] = $Extra[$k] }
-    if ($Engine -eq 'v2') { $cfg['engine'] = @{ v2Environments = @($script:V2EnvName); shadowEnvironments = @() } }   # (no suite sets an engine block of its own)
+    $cfg['engine'] = @{ v2Environments = @($script:V2EnvName); shadowEnvironments = @() }   # (no suite sets an engine block of its own)
     # W9.10p: the promote suite names the gateway environment tdd for delivery.autoPromote; the engine run's environment is v2ci, and the AutoPromoter must run there (it promotes uat and prod where the engine acts)
-    if ($Engine -eq 'v2' -and $cfg.ContainsKey('delivery') -and $cfg['delivery'] -is [System.Collections.IDictionary] -and $cfg['delivery'].Contains('autoPromote') -and $cfg['delivery']['autoPromote'] -is [System.Collections.IDictionary]) { $cfg['delivery']['autoPromote']['gatewayEnvironment'] = $script:V2EnvName }
-    if ($Engine -eq 'v2') { Start-TestEnv $cfg -Merge $script:V2Profiles[$V2Profile] } else { Start-TestEnv $cfg }
-    if ($Engine -eq 'v2') {
-        # /ready does not wait for the database (the host starts in the background: the migration, which creates the database, then the node), and a journal line before the host is
-        # up is refused ("the Wolverine host is not up"); so no scenario starts before the status says the host runs, and that the engine is v2 (this fails, once, when it is not)
-        $script:Current = "$($script:SuiteName) engine v2"
-        $script:V2Seen = @{ mode = ''; state = ''; wolverine = '(not asked)' }
-        [void](Wait-Until -Seconds 120 -Message 'the Wolverine host' { $script:V2Seen = Get-V2State; $script:V2Seen.state -eq 'running' })
-        Check 'engine v2: the status names the engine v2 and the Wolverine host runs' ($script:V2Seen.mode -eq 'v2' -and $script:V2Seen.state -eq 'running') "(engine mode '$($script:V2Seen.mode)'; wolverine: $($script:V2Seen.wolverine))"
-        Initialize-V2Golden   # the declared differences of v2 (golden/v2-differences.txt) applied to the golden files, and checked against them
-    }
+    if ($cfg.ContainsKey('delivery') -and $cfg['delivery'] -is [System.Collections.IDictionary] -and $cfg['delivery'].Contains('autoPromote') -and $cfg['delivery']['autoPromote'] -is [System.Collections.IDictionary]) { $cfg['delivery']['autoPromote']['gatewayEnvironment'] = $script:V2EnvName }
+    Start-TestEnv $cfg -Merge $script:V2Profiles[$V2Profile]
+    # /ready does not wait for the database (the host starts in the background: the migration, which creates the database, then the node), and a journal line before the host is
+    # up is refused ("the Wolverine host is not up"); so no scenario starts before the status says the host runs, and that the engine is v2 (this fails, once, when it is not)
+    $script:Current = "$($script:SuiteName) engine v2"
+    $script:V2Seen = @{ mode = ''; state = ''; wolverine = '(not asked)' }
+    [void](Wait-Until -Seconds 120 -Message 'the Wolverine host' { $script:V2Seen = Get-V2State; $script:V2Seen.state -eq 'running' })
+    Check 'engine v2: the status names the engine v2 and the Wolverine host runs' ($script:V2Seen.mode -eq 'v2' -and $script:V2Seen.state -eq 'running') "(engine mode '$($script:V2Seen.mode)'; wolverine: $($script:V2Seen.wolverine))"
+    Initialize-V2Golden   # the declared differences of v2 (golden/v2-differences.txt) applied to the golden files, and checked against them
     try {
         Write-Host "scenarios (merge policy: $Policy, tier: $Tier)"
         foreach ($name in $runNames) { Run-Scenario $name $Set[$name] }
@@ -423,16 +410,15 @@ function Run-Suite([string]$Policy, $Set, [hashtable]$Extra = @{}) {
 function Invoke-SuiteDef($Def) {
     $script:SuiteName = $Def.Name
     $script:UseClientHost = $Def.ContainsKey('ClientHost') -and [bool]$Def.ClientHost
-    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind; if ($Engine -eq 'v2') {
-        # the suite's own environment name where it sets one (copilot, promote, envscope: tdd), else the CI-only name
-        # A suite in $V2DefaultEnvSuites runs as v1 runs it, with FACTORY_ENVIRONMENT unset, which the gateway reads as tdd (W9.9c prep, #361): its scenarios check the name (the dashboard, the agent names of Cursor, the scale-to-zero
-        # warning) or the baked runtime settings that apply in tdd, in a local gateway or with no name only (RuntimeSettings.Load: caeJob is off in any other environment, v2ci included)
-        $script:V2EnvName = $(if ($envs.ContainsKey('FACTORY_ENVIRONMENT') -and "$($envs['FACTORY_ENVIRONMENT'])".Trim()) { "$($envs['FACTORY_ENVIRONMENT'])".Trim() } elseif ($V2DefaultEnvSuites -contains $Def.Name) { 'tdd' } else { 'v2ci' })
-        if ($V2DefaultEnvSuites -notcontains $Def.Name -or $envs.ContainsKey('FACTORY_ENVIRONMENT')) { $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName }
-        $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection; $envs['FACTORY_DB_CREATE'] = '1'
-        # a saga profile: the intake is the config's (intake.enabled), not an environment switch that the rule script and the engine would both read
-        if ($script:IsSagaProfile) { $envs.Remove('FACTORY_INTAKE') }
-    }
+    $envKind = $(if ($Def.ContainsKey('Env')) { $Def.Env } else { '' }); $envs = Get-SuiteEnv $envKind
+    # the suite's own environment name where it sets one (copilot, promote, envscope: tdd), else the CI-only name
+    # A suite in $V2DefaultEnvSuites runs as v1 runs it, with FACTORY_ENVIRONMENT unset, which the gateway reads as tdd (W9.9c prep, #361): its scenarios check the name (the dashboard, the agent names of Cursor, the scale-to-zero
+    # warning) or the baked runtime settings that apply in tdd, in a local gateway or with no name only (RuntimeSettings.Load: caeJob is off in any other environment, v2ci included)
+    $script:V2EnvName = $(if ($envs.ContainsKey('FACTORY_ENVIRONMENT') -and "$($envs['FACTORY_ENVIRONMENT'])".Trim()) { "$($envs['FACTORY_ENVIRONMENT'])".Trim() } elseif ($V2DefaultEnvSuites -contains $Def.Name) { 'tdd' } else { 'v2ci' })
+    if ($V2DefaultEnvSuites -notcontains $Def.Name -or $envs.ContainsKey('FACTORY_ENVIRONMENT')) { $envs['FACTORY_ENVIRONMENT'] = $script:V2EnvName }
+    $envs['FACTORY_DB_CONNECTION'] = $script:V2Connection; $envs['FACTORY_DB_CREATE'] = '1'
+    # a saga profile: the intake is the config's (intake.enabled), not an environment switch that the rule script and the engine would both read
+    if ($script:IsSagaProfile) { $envs.Remove('FACTORY_INTAKE') }
     $script:DefaultEnvLabel = $(if ($Def.ContainsKey('DefaultEnvLabel')) { $Def.DefaultEnvLabel } else { '' }); $timing = if ($Def.ContainsKey('Timing')) { $Def.Timing } else { @{} }
     foreach ($k in $envs.Keys) { Set-Item "Env:$k" ([string]$envs[$k]) }
     foreach ($k in $timing.Keys) { Set-Item "Env:FACTORY_TIMING_$k" ([string]$timing[$k]) }

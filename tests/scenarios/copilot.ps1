@@ -184,13 +184,9 @@ $CopilotScenarios = [ordered]@{
         [void](Fake 'copilot-launch-failures' @{ count = 1 })
         $m = New-Item-Fake 'Copilot relaunch' 'x' $CopLabels
         Check 'after the failed create a new task is created' (Wait-Until -Seconds 40 { (Cop-Tasks $m).Count -ge 1 })
-        if ($script:GoldenEngine -eq 'v2') {
-            # the fake refuses the create with a 500: a transient answer, which the start command tries again (RuntimeCommandService.RetryPauses, 2 s) with the same worker, so nothing ended as start-failed and
-            # no failure is counted; a 4xx refusal is a failure at once (V1CommandPort: the suite 'cursor-deadline' has one)
-            Check 'status (v2): the refused create is tried again by the start command; it is no failure of the item and the retry is the item''s only task' (@((Cop-Status).failures | Where-Object { $_.item -eq $m }).Count -eq 0 -and (Cop-Tasks $m).Count -eq 1) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
-        } else {
-            Check 'status: the failure was counted against the item' (Wait-Until -Seconds 20 { @((Cop-Status).failures | Where-Object { $_.item -eq $m -and $_.count -ge 1 }).Count -eq 1 }) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
-        }
+        # the fake refuses the create with a 500: a transient answer, which the start command tries again (RuntimeCommandService.RetryPauses, 2 s) with the same worker, so nothing ended as start-failed and
+        # no failure is counted; a 4xx refusal is a failure at once (V1CommandPort: the suite 'cursor-deadline' has one)
+        Check 'status (v2): the refused create is tried again by the start command; it is no failure of the item and the retry is the item''s only task' (@((Cop-Status).failures | Where-Object { $_.item -eq $m }).Count -eq 0 -and (Cop-Tasks $m).Count -eq 1) (Cop-Status | ConvertTo-Json -Compress -Depth 5)
     } finally { Cop-Cleanup @($n, $m) }
 }
 
