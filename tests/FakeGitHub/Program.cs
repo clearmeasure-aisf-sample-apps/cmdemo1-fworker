@@ -413,6 +413,7 @@ sealed class World
     readonly Dictionary<string, (string Profile, double Delay)> branchProfile = new();
     readonly List<Fault> faults = new();
     readonly List<Rel> releases = new();
+    long releaseBase;   // the releases a reset removed: Octopus never gives an id twice, and a gateway that lives across scenarios keeps what it learned of a release id
     readonly List<string> log = new();
     readonly List<Artifact> artifacts = new();
     readonly List<string> masterHistory = new();   // the commits of the base branch, oldest first; the last one is masterSha
@@ -826,7 +827,7 @@ sealed class World
             foreach (var f in failedJobs) listOf.Add(new Check { Id = nextCheck++, Name = f.Name, RunId = rid, App = f.App, Started = now, Status = "in_progress", CompleteAt = now.AddSeconds(rerunSeconds), Conclusion = rerunConclusion });
             // a code change whose first attempt failed: the Release workflow that the re-run's completion starts makes the release (it appears then)
             if (rerunConclusion == "success" && pendingRelease.Remove(rid, out var relSha))
-                releases.Add(new Rel { Id = "Releases-" + (releases.Count + 1), Version = "2.4." + (100 + releases.Count), Notes = $"Build https://fake/run/{rid} of {relSha}", At = now.AddSeconds(rerunSeconds + 1), ProdDelay = prodDelay });
+                releases.Add(new Rel { Id = "Releases-" + (releaseBase + releases.Count + 1), Version = "2.4." + (100 + releases.Count), Notes = $"Build https://fake/run/{rid} of {relSha}", At = now.AddSeconds(rerunSeconds + 1), ProdDelay = prodDelay });
             return (201, null);
         }
         if ((m = Regex.Match(path, $"^{root}/releases/tags/(demo-\\d+)$")).Success && method == "GET")
@@ -964,7 +965,7 @@ sealed class World
         else if (releaseMode != "none")
         {
             mc.Add(new Check { Id = nextCheck++, Name = "release", RunId = buildRun });
-            releases.Add(new Rel { Id = "Releases-" + (releases.Count + 1), Version = "2.4." + (100 + releases.Count), Notes = $"Build https://fake/run/1 of {masterSha}", At = DateTime.UtcNow, ProdDelay = prodDelay });
+            releases.Add(new Rel { Id = "Releases-" + (releaseBase + releases.Count + 1), Version = "2.4." + (100 + releases.Count), Notes = $"Build https://fake/run/1 of {masterSha}", At = DateTime.UtcNow, ProdDelay = prodDelay });
         }
         checks[masterSha] = mc; masterFiles[masterSha] = pr.Files.ToList();
         return (200, J(("merged", true), ("sha", masterSha), ("message", "Pull Request successfully merged")));
@@ -1151,7 +1152,7 @@ sealed class World
             case "octo-release":   // { version, sha, tdd (Success) }: a manual release of cmdemo1-ui carrying sha, deployed to tdd with that state
             {
                 var ver = b?["version"]?.ToString() ?? ""; var rsha = b?["sha"]?.ToString() ?? "";
-                var r = new Rel { Id = "Releases-" + (releases.Count + 1), Version = ver, Notes = $"Build https://fake/run/1 of {rsha}", At = DateTime.UtcNow.AddSeconds(-1), Manual = true };
+                var r = new Rel { Id = "Releases-" + (releaseBase + releases.Count + 1), Version = ver, Notes = $"Build https://fake/run/1 of {rsha}", At = DateTime.UtcNow.AddSeconds(-1), Manual = true };
                 releases.Add(r);
                 var n = ++octoSeq;
                 octoDeps.Add(new OctoDep { Id = $"Deployments-P{n}", RelId = r.Id, Env = "E-tdd", TaskId = $"ServerTasks-P{n}", State = b?["tdd"]?.ToString() ?? "Success" });
@@ -1266,7 +1267,7 @@ sealed class World
             case "writes": return (200, Recorder == null ? J(("recording", false)) : Recorder.Open());
             case "reset":
                 latencyMs = 0; latencyMatch = null; refPage = 0; rerunJobs = 0; rates.Clear();
-                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); dispatches.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releases.Clear(); ghReleases.Clear(); octoDeps.Clear(); octoForbidCreate = ""; octoForbidInterruption = ""; octoSignOff = true; octoCreates = 0; appBuild = ""; promoteHistory.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();
+                artifacts.Clear(); masterHistory.Clear(); masterFiles.Clear(); issues.Clear(); prs.Clear(); checks.Clear(); dispatches.Clear(); refs.Clear(); refSha.Clear(); commits.Clear(); branches.Clear(); faults.Clear(); releaseBase += releases.Count; releases.Clear(); ghReleases.Clear(); octoDeps.Clear(); octoForbidCreate = ""; octoForbidInterruption = ""; octoSignOff = true; octoCreates = 0; appBuild = ""; promoteHistory.Clear(); log.Clear(); scopedMints.Clear(); deletedRefs.Clear();
                 masterSha = Sha("master0"); healthStatus = 200; masterRed = false; prodDelay = 0; releaseMode = "auto"; docsRelease = "skipped"; masterHold = false;
                 masterFlaky = false; flakyRunSeconds = 4; rerunSeconds = 3; rerunConclusion = "success"; runAttempts.Clear(); pendingRelease.Clear(); masterArchitecture = null; rerunRefusals = 0; reruns = 0; heldRuns.Clear(); heldReruns = 0; return (200, J(("ok", true)));
             case "issue":

@@ -11,10 +11,10 @@ function Pm-Sha { ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString(
 function Pm-Base {
     if ((Get-Variable -Scope Script -Name PmBaseFor -ValueOnly -ErrorAction SilentlyContinue) -eq $script:Current) { return }
     $script:PmBaseFor = $script:Current
+    # (on v2 the train keeps its state across the scenarios of a gateway, and keys a release by its version: the base of each scenario has a version of its own. A counter does not do: the scenarios of a run may each have a scope of their own
+    # for script variables, and the base of the second scenario was 3.0.1 again, the same release with another commit; the seconds since a fixed day are one per scenario, as the scenarios take longer than a second)
     $b = Pm-Sha
-    # (on v2 the train keeps its state across the scenarios of a gateway, and keys a release by its version: the base of each scenario has a version of its own)
-    $script:PmBaseSeq = 1 + $(if (Get-Variable -Scope Script -Name PmBaseSeq -ValueOnly -ErrorAction SilentlyContinue) { $script:PmBaseSeq } else { 0 })
-    [void](Fake 'octo-release' @{ version = $(if ($script:GoldenEngine -eq 'v2') { "3.0.$($script:PmBaseSeq)" } else { '3.0.0' }); sha = $b; also = @('uat', 'prod') })
+    [void](Fake 'octo-release' @{ version = $(if ($script:GoldenEngine -eq 'v2') { "3.0.$([int]((Get-Date).ToUniversalTime() - [datetime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)).TotalSeconds)" } else { '3.0.0' }); sha = $b; also = @('uat', 'prod') })
     [void](Fake 'promote-history' @{ shas = @($b) })
 }
 # -Engine v2: the pull requests the scenario merges are numbered above every item (the fake numbers issues and pull requests apart, GitHub does not: the issue read of a number that is also a pull request answers the pull request,
